@@ -72,3 +72,9 @@ words. Unsupported characters are rejected. Timing uses standard 1-unit dots,
 3-unit dashes, 1-unit element gaps, 3-unit character gaps, and 7-unit word gaps.
 Generated PCM has half-scale tone amplitude; transmitter processing follows it.
 The renderer exists, but transmission integration is still under development.
+
+File and synthesized audio preparation uses the `ffmpeg` executable to produce
+mono PCM at the selected playback rate. Preparation runs outside the audio loop;
+prepared samples are consumed at the radio hardware's cadence. A failed decode
+or conversion is a playback-source failure and must follow the ID fallback order.
+Preparation exists; connecting it to scheduled identification remains unfinished.
