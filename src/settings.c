@@ -3,6 +3,7 @@
  */
 #include "settings.h"
 #include <limits.h>
+#include <string.h>
 
 /** @brief Storage types used by the setting descriptors. */
 enum field_type { FIELD_STRING, FIELD_BOOLEAN, FIELD_NUMBER };
@@ -71,6 +72,21 @@ static bool assign(const struct field *field, const char *text, void *output) {
         *(uint64_t *)destination = value;
     }
     return true;
+}
+
+const char *ra_settings_validate(bool identifier, const char *key, const char *value) {
+    const struct field *fields = identifier ? identifier_fields : node_fields;
+    size_t count = identifier ? sizeof(identifier_fields) / sizeof(identifier_fields[0])
+                              : sizeof(node_fields) / sizeof(node_fields[0]);
+    struct ra_node_settings node;
+    struct ra_identifier_settings id;
+    void *destination = identifier ? (void *)&id : (void *)&node;
+    for (size_t i = 0; i < count; ++i) {
+        if (!strcmp(key, fields[i].name)) {
+            return assign(&fields[i], value, destination) ? NULL : "invalid option value";
+        }
+    }
+    return "unknown option";
 }
 
 /** @brief Apply inherited options to a temporary settings object.

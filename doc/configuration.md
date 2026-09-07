@@ -1,8 +1,8 @@
 # Configuration model
 
-The settings resolver, streaming syntax reader, and owned document builder are
-implemented. Node enumeration, whole-file schema validation, and the running
-module are still under development. These are the supported resolver settings.
+Configuration reading, storage, whole-file validation, node/ID discovery, and
+settings resolution are implemented. The running module is still under
+development. These are the supported settings.
 
 Semicolons introduce comments. Blank lines are ignored. Options require a
 preceding section. Whitespace around names and values is stripped; a final
@@ -16,6 +16,14 @@ Flat `[general]` settings provide node defaults. A named node section such as
 `[identifier 524950]` overrides them for that node, and
 `[identifier 524950 welcome]` overrides them for one set. File order does not
 change this precedence. Empty media paths or text clear inherited values.
+
+Node and ID-set names are case-sensitive and cannot contain whitespace or square
+brackets. Scoped headers use one space between components. `general` and
+`identifier` are reserved flat-section names. ID scopes must name an existing
+node, which may be declared later in the file. Repeated section headers merge
+options without creating duplicate nodes or ID sets. Unknown options and invalid
+values are rejected even if a later entry would override them. There is no fixed
+limit on the number of nodes or ID sets.
 
 ## Node settings
 
