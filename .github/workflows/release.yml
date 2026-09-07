@@ -1,0 +1,12 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  packages: write
+  pages: write
+  id-token: write
+jobs:
+  release:
+    uses: cpeter1207/rpt_advanced-workflows/.github/workflows/release.yml@main

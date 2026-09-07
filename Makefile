@@ -25,8 +25,11 @@ prefix ?= /usr/local
 multiarch := $(shell $(CC) -print-multiarch)
 asteriskmoddir ?= /usr/lib/$(multiarch)/asterisk/modules
 DESTDIR ?=
+VERSION := 0.1.0-dev
+DIST_NAME := rpt_advanced-$(VERSION)
+DIST_FILES := Makefile COPYING README.md QUALITY.md AGENTS.md Doxyfile .clang-format src module tests examples doc
 
-.PHONY: all quality lint static-analysis docs check coverage install install-check integration platform-verify ci clean
+.PHONY: all quality lint static-analysis docs check coverage install install-check integration dist distcheck platform-verify ci clean
 all: build/librpt_advanced.a build/app_rpt_advanced.so
 
 build:
@@ -180,13 +183,33 @@ install-check: all
 	cmp examples/rpt_advanced.conf build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf
 	cmp build/app_rpt_advanced.so build/stage$(asteriskmoddir)/app_rpt_advanced.so
 
+# Optional cross-project check links the actual adapter; it is never copied into production.
+ifneq ($(USBRADIOPLUS_SOURCE),)
+build/rpt_adapter.o: $(USBRADIOPLUS_SOURCE)/src/usbradioplus_rpt_advanced.c | build
+	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -I$(USBRADIOPLUS_SOURCE)/src -c $< -o $@
+
+build/chan_rpt_fixture.so: tests/radio_fixture.c build/rpt_adapter.o
+	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared -DRA_REAL_ADAPTER \
+		-I$(USBRADIOPLUS_SOURCE)/src $^ -pthread -o $@
+else
 build/chan_rpt_fixture.so: tests/radio_fixture.c | build
 	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared $< -pthread -o $@
+endif
 
 integration: install-check build/chan_rpt_fixture.so
 	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py
 
-platform-verify: all coverage install-check integration
+dist: | build
+	tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+		--exclude='__pycache__' --exclude='*.pyc' \
+		--transform='s,^,$(DIST_NAME)/,' -czf build/$(DIST_NAME).tar.gz $(DIST_FILES)
+
+distcheck: dist
+	+@set -e; stage=$$(mktemp -d build/dist-check.XXXXXX); \
+		tar -xzf build/$(DIST_NAME).tar.gz -C "$$stage"; \
+		$(MAKE) -C "$$stage/$(DIST_NAME)" all install-check
+
+platform-verify: all coverage install-check integration distcheck
 
 ci: quality platform-verify
 

@@ -87,10 +87,14 @@ radio or completed USBRadioPlus-to-rpt_advanced integration verification.
 ## Not yet implemented
 
 - End-to-end verification of running node audio with the separate USBRadioPlus adapter.
-- Published project-specific clean/installed test images and release packaging.
-  CI uses published rpt_advanced quality images for Debian 12/13 and amd64/arm64.
-  These add FFmpeg to the existing ASL3 quality tool environment; they are not
-  clean-install or installed-release artifacts.
+- Execution verification of the version-tag release workflow. Source archive
+  rebuilding is covered by the platform gate; no project release has been cut.
+
+Public clean ASL3 and installed-module test images are available for Debian
+12/13 and amd64/arm64; see [testing](testing.md). The initial publication passed
+the production quality gate and actual installed-module Asterisk audio tests
+on all four native platforms. The quality images remain separate development
+environments with compilers and analysis tools.
 
 Nothing has been installed on a radio node. No app_rpt implementation has been
 copied. USBRadioPlus changes are limited to its separate RadioPlusAdvanced adapter

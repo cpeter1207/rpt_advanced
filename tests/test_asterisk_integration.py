@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import wave
 from pathlib import Path
 
 
@@ -80,6 +81,43 @@ def audio_case(
         assert nonzero > 0 and keys > 0 and unkeys == keys, records
         assert (early > 0) == (name == "full"), records
     print(f"Asterisk audio {rate=} {codec=}: {records}")
+
+
+def media_case(configuration, radio_configuration, logfile, process) -> None:
+    """! @brief Verify real file preparation and carrier-triggered Morse output.
+    @param configuration Isolated Asterisk CLI configuration.
+    @param radio_configuration Controller configuration path.
+    @param logfile Fixture observations.
+    @param process Test-owned running Asterisk.
+    @return None; assertions require both prepared and fallback audio.
+    """
+    source = radio_configuration.parent / "identifier.wav"
+    with wave.open(str(source), "wb") as output:
+        output.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+        output.writeframes((2345).to_bytes(2, "little", signed=True) * 48000)
+    offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
+    radio_configuration.write_text(
+        "[media]\n[identifier media periodic]\ninterval_ms=50\n"
+        f"regardless_of_activity=yes\nsound_file={source}\nmorse_text=E\n",
+        encoding="utf-8",
+    )
+    cli(configuration, "module reload app_rpt_advanced.so")
+    deadline = time.monotonic() + 30
+    while (
+        "rpt_fixture ready RadioPlusAdvanced/media"
+        not in logfile.read_text(encoding="utf-8", errors="replace")[offset:]
+    ):
+        if process.poll() is not None or time.monotonic() >= deadline:
+            raise TimeoutError("prepared identifier exchange did not complete")
+        time.sleep(0.1)
+    radio_configuration.write_text("", encoding="utf-8")
+    cli(configuration, "module reload app_rpt_advanced.so")
+    records = re.findall(
+        r"rpt_fixture media file=(\d+) morse=(\d+)",
+        logfile.read_text(encoding="utf-8", errors="replace")[offset:],
+    )
+    assert len(records) == 1 and all(int(value) > 0 for value in records[0]), records
+    print(f"Asterisk prepared-file and receive Morse fallback: {records}")
 
 
 def main() -> None:
@@ -192,6 +230,7 @@ def main() -> None:
                         rate,
                         codec,
                     )
+                media_case(configuration, radio_configuration, logfile, process)
                 cli(configuration, "module unload chan_rpt_fixture.so")
                 assert "0 modules loaded" in cli(
                     configuration, "module show like chan_rpt_fixture"
