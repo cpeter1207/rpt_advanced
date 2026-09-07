@@ -5,6 +5,42 @@
 #include <ctype.h>
 #include <string.h>
 
+bool ra_config_unsigned(const char *text, uint64_t minimum, uint64_t maximum, uint64_t *result) {
+    uint64_t number = 0;
+    if (!*text) {
+        return false;
+    }
+    for (; *text; ++text) {
+        if (*text < '0' || *text > '9') {
+            return false;
+        }
+        unsigned int digit = (unsigned int)(*text - '0');
+        if (number > UINT64_MAX / 10 || (number == UINT64_MAX / 10 && digit > UINT64_MAX % 10)) {
+            return false;
+        }
+        number = number * 10 + digit;
+    }
+    if (number < minimum || number > maximum) {
+        return false;
+    }
+    *result = number;
+    return true;
+}
+
+bool ra_config_boolean(const char *text, bool *result) {
+    if (strlen(text) == 3 && (text[0] == 'y' || text[0] == 'Y') &&
+        (text[1] == 'e' || text[1] == 'E') && (text[2] == 's' || text[2] == 'S')) {
+        *result = true;
+        return true;
+    }
+    if (strlen(text) == 2 && (text[0] == 'n' || text[0] == 'N') &&
+        (text[1] == 'o' || text[1] == 'O')) {
+        *result = false;
+        return true;
+    }
+    return false;
+}
+
 /** @brief Strip surrounding whitespace in place.
  * @param text Writable null-terminated text.
  * @return First non-whitespace byte, possibly the terminating null.

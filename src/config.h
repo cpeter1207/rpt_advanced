@@ -4,7 +4,26 @@
 #ifndef RPT_ADVANCED_CONFIG_H
 #define RPT_ADVANCED_CONFIG_H
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+
+/** @brief Parse a bounded unsigned decimal configuration value.
+ * @param text Null-terminated value after whitespace trimming.
+ * @param minimum Inclusive lower bound.
+ * @param maximum Inclusive upper bound, no smaller than minimum.
+ * @param result Receives the value only on success.
+ * @return True for digits only within bounds; false leaves result unchanged.
+ * Reject signs, suffixes, and overflow instead of silently changing timing or rates.
+ */
+bool ra_config_unsigned(const char *text, uint64_t minimum, uint64_t maximum, uint64_t *result);
+
+/** @brief Parse an explicit yes/no switch, independent of the process locale.
+ * @param text Null-terminated trimmed configuration value.
+ * @param result Receives the switch only on success.
+ * @return True for yes or no, ignoring ASCII letter case; otherwise false.
+ */
+bool ra_config_boolean(const char *text, bool *result);
 
 /** @brief Result of parsing one configuration line. */
 enum ra_config_line_kind {
