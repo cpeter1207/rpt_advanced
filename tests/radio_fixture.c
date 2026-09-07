@@ -18,6 +18,9 @@
 #include <stdbool.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef RA_REAL_ADAPTER
+#include "usbradioplus_rpt_advanced.h"
+#endif
 
 /** @brief Test-device state, retained until the producer thread has joined. */
 struct fixture {
@@ -242,6 +245,15 @@ static struct ast_channel_tech technology = {.type = "RadioPlusAdvanced",
                                              .indicate = indicate,
                                              .hangup = hangup};
 
+#ifdef RA_REAL_ADAPTER
+/** @brief Synthetic hardware already uses native PCM; verify the adapter's callback.
+ * @param channel Exclusively reserved test channel.
+ */
+static void configure_native(struct ast_channel *channel) {
+    ast_log(LOG_NOTICE, "rpt_fixture native adapter %s\n", ast_channel_name(channel));
+}
+#endif
+
 /** @brief Register the test-only radio.
  * @return Module load status.
  */
@@ -255,7 +267,11 @@ static int load_module(void) {
         return AST_MODULE_LOAD_DECLINE;
     }
     technology.capabilities = capabilities;
+#ifdef RA_REAL_ADAPTER
+    if (usbradioplus_advanced_register(&technology, 48000, configure_native)) {
+#else
     if (ast_channel_register(&technology)) {
+#endif
         ao2_cleanup(capabilities);
         return AST_MODULE_LOAD_DECLINE;
     }
@@ -268,7 +284,11 @@ static int unload_module(void) {
     if (atomic_load(&active)) {
         return -1;
     }
+#ifdef RA_REAL_ADAPTER
+    usbradioplus_advanced_unregister();
+#else
     ast_channel_unregister(&technology);
+#endif
     ao2_cleanup(capabilities);
     return 0;
 }

@@ -183,8 +183,18 @@ install-check: all
 	cmp examples/rpt_advanced.conf build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf
 	cmp build/app_rpt_advanced.so build/stage$(asteriskmoddir)/app_rpt_advanced.so
 
+# Optional cross-project check links the actual adapter; it is never copied into production.
+ifneq ($(USBRADIOPLUS_SOURCE),)
+build/rpt_adapter.o: $(USBRADIOPLUS_SOURCE)/src/usbradioplus_rpt_advanced.c | build
+	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -I$(USBRADIOPLUS_SOURCE)/src -c $< -o $@
+
+build/chan_rpt_fixture.so: tests/radio_fixture.c build/rpt_adapter.o
+	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared -DRA_REAL_ADAPTER \
+		-I$(USBRADIOPLUS_SOURCE)/src $^ -pthread -o $@
+else
 build/chan_rpt_fixture.so: tests/radio_fixture.c | build
 	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared $< -pthread -o $@
+endif
 
 integration: install-check build/chan_rpt_fixture.so
 	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py

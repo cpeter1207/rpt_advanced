@@ -10,6 +10,15 @@ observes its recognizable PCM at the transmitter. The synthetic receiver then
 asserts carrier; negative Morse samples in the otherwise positive receive audio
 verify replacement of the prepared ID by its Morse fallback inside Asterisk.
 
+To exercise USBRadioPlus's actual adapter against the synthetic hardware backend,
+use a clean build directory and run
+`make integration USBRADIOPLUS_SOURCE=/absolute/path/to/USBRadioPlus`.
+The fixture links the adapter as a separate object from that checkout; it does
+not copy it into rpt_advanced or alter USBRadioPlus. Start from a clean build
+when switching fixture modes. This checks the real adapter's reservation and
+audio callbacks, but not the USB hardware backend. The cross-project mode passed
+on Debian 13 amd64 against USBRadioPlus commit `88f3472`.
+
 ## Prebuilt test images
 
 Public images are available for Debian 12 and 13, each containing native amd64
