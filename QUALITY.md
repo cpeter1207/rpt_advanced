@@ -69,4 +69,6 @@ directories are included in static analysis, Doxygen, and coverage.
 
 See [implementation status](doc/implementation-status.md) for the distinction
 between tested components and the remaining module, container, release, and
-documentation-publication work. There is no release workflow yet.
+documentation-publication work. Version-tag releases invoke the reusable release
+workflow, which requires the same production gate and four native installed-image
+checks before publishing the source archive and checksum.

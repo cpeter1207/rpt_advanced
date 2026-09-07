@@ -87,7 +87,8 @@ radio or completed USBRadioPlus-to-rpt_advanced integration verification.
 ## Not yet implemented
 
 - End-to-end verification of running node audio with the separate USBRadioPlus adapter.
-- Release packaging and automatic release-triggered image publication.
+- Execution verification of the version-tag release workflow. Source archive
+  rebuilding is covered by the platform gate; no project release has been cut.
 
 Public clean ASL3 and installed-module test images are available for Debian
 12/13 and amd64/arm64; see [testing](testing.md). The initial publication passed
