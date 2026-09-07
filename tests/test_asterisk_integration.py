@@ -45,7 +45,12 @@ def main() -> None:
             "[modules]\nautoload=no\nload=app_rpt_advanced.so\n", encoding="utf-8"
         )
         radio_configuration = directory / "rpt_advanced.conf"
-        radio_configuration.write_text("", encoding="utf-8")
+        radio_configuration.write_text(
+            Path(
+                "build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf"
+            ).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
         logfile = directory / "console.log"
         with logfile.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(

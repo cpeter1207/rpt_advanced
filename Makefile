@@ -88,6 +88,8 @@ install: all
 	install -d $(DESTDIR)$(prefix)/lib $(DESTDIR)$(prefix)/include/rpt_advanced
 	install -d $(DESTDIR)$(prefix)/share/doc/rpt_advanced
 	install -m 0644 COPYING $(DESTDIR)$(prefix)/share/doc/rpt_advanced/copyright
+	install -d $(DESTDIR)$(prefix)/share/doc/rpt_advanced/examples
+	install -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(prefix)/share/doc/rpt_advanced/examples/
 	install -m 0644 build/librpt_advanced.a $(DESTDIR)$(prefix)/lib/
 	install -m 0644 $(HEADERS) $(DESTDIR)$(prefix)/include/rpt_advanced/
 
@@ -102,6 +104,7 @@ install-check: all
 	cmp src/document.h build/stage/usr/include/rpt_advanced/document.h
 	cmp src/schema.h build/stage/usr/include/rpt_advanced/schema.h
 	cmp COPYING build/stage/usr/share/doc/rpt_advanced/copyright
+	cmp examples/rpt_advanced.conf build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf
 	cmp build/app_rpt_advanced.so build/stage/usr/lib/asterisk/modules/app_rpt_advanced.so
 
 integration: install-check
