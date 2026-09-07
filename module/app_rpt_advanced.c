@@ -54,11 +54,12 @@ struct digit_task {
  * @param remote Remote node name.
  * @param transmit Send program audio to the peer.
  * @param forward Relay peer audio to other links.
+ * @param permanent Reconnect automatically after an unexpected transport failure.
  * @param expected Required runtime revision, or zero for a fresh administrative command.
  * @return Zero on connection, minus one on failure or intervening reload.
  */
 static int connect_link(const char *local, const char *remote, bool transmit, bool forward,
-                        uint64_t expected) {
+                        bool permanent, uint64_t expected) {
     struct ra_link_dial dial = {0};
     ast_mutex_lock(&runtime_lock);
     uint64_t revision = atomic_load(&runtime_revision);
@@ -76,7 +77,7 @@ static int connect_link(const char *local, const char *remote, bool transmit, bo
     ast_mutex_lock(&runtime_lock);
     result =
         revision == atomic_load(&runtime_revision)
-            ? ra_runtime_attach_link(&runtime, local, remote, channel, transmit, forward, false)
+            ? ra_runtime_attach_link(&runtime, local, remote, channel, transmit, forward, permanent)
             : -1;
     ast_mutex_unlock(&runtime_lock);
     if (result) {
@@ -98,7 +99,13 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
     case RA_LINK_MONITOR:
     case RA_LINK_LOCAL_MONITOR:
         return connect_link(local, operation->remote, operation->action == RA_LINK_TRANSCEIVE,
-                            operation->action != RA_LINK_LOCAL_MONITOR, revision);
+                            operation->action != RA_LINK_LOCAL_MONITOR, false, revision);
+    case RA_LINK_PERMANENT_TRANSCEIVE:
+    case RA_LINK_PERMANENT_MONITOR:
+    case RA_LINK_PERMANENT_LOCAL_MONITOR:
+        return connect_link(local, operation->remote,
+                            operation->action == RA_LINK_PERMANENT_TRANSCEIVE,
+                            operation->action != RA_LINK_PERMANENT_LOCAL_MONITOR, true, revision);
     case RA_LINK_DISCONNECT: {
         ast_mutex_lock(&runtime_lock);
         int result = revision == atomic_load(&runtime_revision)
@@ -200,7 +207,8 @@ static char *link_cli(struct ast_cli_entry *entry, int command, struct ast_cli_a
         result = !ra_runtime_disconnect(&runtime, arguments->argv[3], arguments->argv[4]);
         ast_mutex_unlock(&runtime_lock);
     } else {
-        result = connect_link(arguments->argv[3], arguments->argv[4], transmit, !local_monitor, 0);
+        result = connect_link(arguments->argv[3], arguments->argv[4], transmit, !local_monitor,
+                              false, 0);
     }
     ast_cli(arguments->fd, "rpt_advanced: link %s %s\n", operation,
             result ? "failed" : "completed");
