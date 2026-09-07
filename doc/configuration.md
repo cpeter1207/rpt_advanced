@@ -4,6 +4,10 @@ Configuration reading, storage, whole-file validation, node/ID discovery, and
 settings resolution are implemented. The running module is still under
 development. These are the supported settings.
 
+The installed example is `share/doc/rpt_advanced/examples/rpt_advanced.conf`
+under the installation prefix. Its example node is disabled and its ID text is
+empty. Installation does not replace an active configuration or activate a node.
+
 Semicolons introduce comments. Blank lines are ignored. Options require a
 preceding section. Whitespace around names and values is stripped; a final
 newline is optional. Embedded null bytes and malformed section/option lines
