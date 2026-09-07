@@ -16,8 +16,10 @@
 - Typed node and ID settings with shared/node/set inheritance, documented in
   [configuration](configuration.md), and atomic rejection of invalid values.
 - Streaming file-syntax reader with physical-line diagnostics, unbounded line
-  lengths, embedded-null rejection, and builder-error propagation. The owned
-  configuration builder and node enumeration are not yet implemented.
+  lengths, embedded-null rejection, and builder-error propagation.
+- Owned configuration storage, including empty sections, with complete cleanup
+  on syntax/allocation failures and file-to-settings integration tests. Node
+  enumeration and whole-file schema validation are not yet implemented.
 - Strict formatting, compiler diagnostics, Cppcheck, Clang-Tidy, Doxygen, and
   per-platform line/branch coverage gates.
 - Doxygen publication to GitHub Pages after the main-branch quality gate passes.

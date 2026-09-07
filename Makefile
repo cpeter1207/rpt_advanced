@@ -8,6 +8,8 @@ SOURCES := $(wildcard src/*.c)
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
+COVERAGE_OBJECTS := $(patsubst src/%.c,build/coverage-objects/%.o,$(SOURCES))
+.SECONDARY: $(COVERAGE_OBJECTS)
 TEST_PROGRAMS := $(patsubst tests/%.c,build/%,$(TESTS))
 prefix ?= /usr/local
 DESTDIR ?=
@@ -36,11 +38,20 @@ static-analysis:
 docs: | build
 	doxygen Doxyfile
 
-build/test_%: tests/test_%.c $(SOURCES) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $(SOURCES) $< -o $@
+build/coverage-objects:
+	mkdir -p $@
+
+build/coverage-objects/%.o: src/%.c $(HEADERS) | build/coverage-objects
+	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage -c $< -o $@
+
+build/test_%: tests/test_%.c $(COVERAGE_OBJECTS) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -o $@
+
+build/test_document: tests/test_document.c $(COVERAGE_OBJECTS) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -Wl,--wrap=strdup,--wrap=reallocarray -o $@
 
 check: $(TEST_PROGRAMS)
-	find build -maxdepth 1 -name '*.gcda' -delete
+	find build -name '*.gcda' -delete
 	@set -e; for test in $(TEST_PROGRAMS); do ./$$test; done
 
 coverage: check
@@ -60,6 +71,7 @@ install-check: all
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
 	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
+	cmp src/document.h build/stage/usr/include/rpt_advanced/document.h
 
 platform-verify: all coverage install-check
 
