@@ -88,7 +88,6 @@ links the actual USBRadioPlus adapter to the synthetic hardware backend.
 
 - Physical identifier playback/interruption and the remaining hardware acceptance
   cases in [testing](testing.md). Clean full-duplex repeat and hang time are verified.
-- Cold-start verification of the driver-ordering fix; live replacement is verified.
 - Execution verification of the version-tag release workflow. Source archive
   rebuilding is covered by the platform gate; no project release has been cut.
 
@@ -110,12 +109,15 @@ receive-level calibration or absence of analog clipping.
 
 Configuration reload and controller unload/replacement/load succeeded with the
 same Asterisk PID. The temporary 15-second speech-ID test has been restored to
-the normal ten-minute activity-based interval. Its listening result is pending.
+the normal ten-minute activity-based interval. The owner confirmed that an
+incoming signal interrupted speech and switched playback to Morse.
 
 Normal unloading of the pre-existing app_rpt crashed Asterisk before the new
 modules were installed. Controlled recovery required a service restart. Startup
 also exposed driver ordering: PR27 adds an optional USBRadioPlus ordering
 dependency, passed all native gates, and was installed by live module replacement.
+After a controlled service restart, the controller loaded automatically and
+opened the native 48 kHz radio channel without transcoding, verifying the fix.
 The original modules and configuration are retained for rollback.
 
 No app_rpt implementation has been copied. USBRadioPlus changes are limited to its separate RadioPlusAdvanced adapter
