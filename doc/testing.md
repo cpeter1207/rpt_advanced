@@ -61,3 +61,48 @@ Piper 1.8.0 on Debian 13 amd64. The phrase “This is the KG0BP repeater.” pro
 Synthetic-radio results do not establish USB hardware performance, radio
 deviation, or on-air audio quality. Those require separately approved hardware
 testing. No test command here activates the module on a running radio node.
+
+## Hardware acceptance procedure
+
+Run this only with the station owner's approval. Save the installed modules and
+configuration first, use a dummy load, and follow [activation](install.md).
+Do not give app_rpt and rpt_advanced ownership of the same radio. Use a receiver
+or service monitor to observe transmitted audio and transmitter release.
+
+1. Begin with one node, automatic sample rate, full duplex, zero hang time, and
+   no ID sets. Confirm a `RadioPlusAdvanced` channel is open. With the receiver
+   quiet, verify no unintended PTT. Apply carrier and voice: verify local repeat
+   and prompt PTT release when carrier ends.
+2. Set a measurable hang time, reload, and measure transmitter release after
+   carrier ends. Switch to half duplex and reload. Confirm local receive audio
+   is not retransmitted and the transmitter remains off during reception.
+3. Configure a short test ID interval and recognizable file, speech, and Morse
+   text. During full-duplex idle, hear the file. Remove only its configured path
+   and reload to verify speech; use an unavailable model to verify Morse.
+   Restore the known-good media after each test. Do not change the legal station
+   ID to an unrelated callsign.
+4. Assert carrier during file and speech IDs. Confirm immediate replacement by
+   Morse and no resumption of the interrupted recording after carrier ends.
+   Hold carrier before an ID is due: full duplex must use Morse; half duplex
+   must wait until reception ends before transmitting its ID.
+5. Configure two distinguishable priorities with the same interval. Verify the
+   higher-priority ID satisfies the lower one. Verify activity-based IDs stop
+   during prolonged inactivity and unconditional IDs continue. For a
+   first-key-only welcome, wait a full inactive interval, then key: verify one
+   welcome and no periodic welcomes during conversation.
+6. Repeat transport checks with an explicitly supported converted rate and
+   codec. Compare receive and transmitted audio for continuity. Run a sustained
+   receive/repeat test, recording duration and USBRadioPlus queue/error counters
+   before and after. Inspect for underruns, overruns, gaps, and growing latency;
+   shared hardware pacing does not guarantee immunity to scheduling stalls.
+7. Reload invalid configuration while active and verify the old settings still
+   operate. Restore valid configuration and reload; allow for the documented
+   media-preparation pause. Unload normally and verify PTT drops and the radio
+   channel closes. Load again without restarting Asterisk and repeat reception.
+8. If multiple radios are available, configure independent nodes and scoped ID
+   overrides. Verify audio, PTT, and IDs stay on their assigned radios while
+   flat defaults still apply to settings not overridden.
+
+Record module revisions, OS/architecture, USB interface, radio wiring, selected
+codec/rate, configuration, measurements, and any failed step. These procedures
+are acceptance criteria, not a claim that physical testing has been performed.
