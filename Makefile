@@ -58,6 +58,7 @@ install-check: all
 	cmp src/identifier.h build/stage/usr/include/rpt_advanced/identifier.h
 	cmp src/duplex.h build/stage/usr/include/rpt_advanced/duplex.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
+	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
 
 platform-verify: all coverage install-check
 
