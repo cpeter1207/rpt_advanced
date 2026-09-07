@@ -74,9 +74,10 @@ static int connect_link(const char *local, const char *remote, bool transmit, bo
         return -1;
     }
     ast_mutex_lock(&runtime_lock);
-    result = revision == atomic_load(&runtime_revision)
-                 ? ra_runtime_attach_link(&runtime, local, remote, channel, transmit, forward)
-                 : -1;
+    result =
+        revision == atomic_load(&runtime_revision)
+            ? ra_runtime_attach_link(&runtime, local, remote, channel, transmit, forward, false)
+            : -1;
     ast_mutex_unlock(&runtime_lock);
     if (result) {
         ast_hangup(channel);

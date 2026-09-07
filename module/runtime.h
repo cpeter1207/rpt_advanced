@@ -96,10 +96,12 @@ struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *loca
  * @param channel Answered channel; ownership transfers on success only.
  * @param transmit Enable outbound audio; false selects monitor.
  * @param forward Forward received audio to other peers.
+ * @param permanent Redial after an unexpected transport failure.
  * @return Zero on attachment, minus one on unknown node or attachment failure.
  */
 int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                           struct ast_channel *channel, bool transmit, bool forward);
+                           struct ast_channel *channel, bool transmit, bool forward,
+                           bool permanent);
 
 /** @brief Disconnect an exact peer from a local node.
  * @param runtime Active runtime; caller serializes with reload and other commands.

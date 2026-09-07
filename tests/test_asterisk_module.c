@@ -437,7 +437,9 @@ struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *loca
 }
 
 int ra_runtime_attach_link(struct ra_runtime *state, const char *local, const char *remote,
-                           struct ast_channel *channel, bool transmit, bool forward) {
+                           struct ast_channel *channel, bool transmit, bool forward,
+                           bool permanent) {
+    (void)permanent;
     (void)state;
     (void)transmit;
     (void)forward;

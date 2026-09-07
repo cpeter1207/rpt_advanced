@@ -201,30 +201,39 @@ int ra_link_peer_send(struct ra_link_peer *peer, bool keyed, const int16_t *audi
     return failure == 3 ? -1 : 0;
 }
 
+static int reconnect_stub(void *context, const char *remote, bool transmit, bool forward) {
+    (void)context;
+    (void)remote;
+    (void)transmit;
+    (void)forward;
+    return 0;
+}
+
 /** @brief Cover failure cleanup, mix-minus, modes, saturation, and ended-peer collection.
  * @return Zero after assertions.
  */
 int main(void) {
     struct ra_link_hub hub = {0};
+    ra_link_hub_set_reconnector(&hub, reconnect_stub, NULL);
     struct ast_channel first = {.active = true, .input = 100};
     struct ast_channel second = {.active = true, .input = 200};
     for (failed_allocation = 1; failed_allocation <= 4; ++failed_allocation) {
         allocations = 0;
-        assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true) == -1);
+        assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false) == -1);
         ra_link_hub_close(&hub);
     }
     failed_allocation = 0;
     for (failure = 1; failure <= 2; ++failure) {
-        assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true) == -1);
+        assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false) == -1);
         ra_link_hub_close(&hub);
     }
     failure = 0;
-    assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true));
-    assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true) == -1);
+    assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false));
+    assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false) == -1);
     rate = 16000;
-    assert(ra_link_hub_attach(&hub, "2", &second, NULL, true, true) == -1);
+    assert(ra_link_hub_attach(&hub, "2", &second, NULL, true, true, false) == -1);
     rate = 8000;
-    assert(!ra_link_hub_attach(&hub, "2", &second, NULL, true, true));
+    assert(!ra_link_hub_attach(&hub, "2", &second, NULL, true, true, false));
     struct ra_controller controller = {.rate = 8000, .full_duplex = true};
     assert(ra_controller_start(&controller, 0));
     int16_t audio[8001] = {50};
@@ -245,7 +254,7 @@ int main(void) {
     assert(ra_link_hub_disconnect(&hub, "1") && first.stopped);
     first.input = 100;
     second.input = 200;
-    assert(!ra_link_hub_attach(&hub, "1", &first, NULL, false, false));
+    assert(!ra_link_hub_attach(&hub, "1", &first, NULL, false, false, false));
     assert(ra_link_hub_process(&hub, &controller, false, audio, 1, 80));
     assert(audio[0] == 300 && !first.keyed && !second.keyed && !second.output);
     first.active = second.active = false;
@@ -263,7 +272,7 @@ int main(void) {
     assert(!ra_link_hub_process(&hub, &controller, false, audio, 1, 140));
     assert(!ra_link_hub_process(&hub, &controller, false, NULL, 0, 141));
     failure = 0;
-    assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true));
+    assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false));
     ra_link_hub_close(&hub);
     ra_link_hub_close(&hub);
     return 0;

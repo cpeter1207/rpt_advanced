@@ -34,6 +34,39 @@ struct ra_runtime_node {
     bool running;                     /**< Worker creation succeeded; it must be joined. */
 };
 
+/** @brief Redial one permanent peer after its reader reports transport failure.
+ * @param context Runtime node that owns the failed peer.
+ * @param remote Decimal remote node identity.
+ * @param transmit Preserve outbound audio mode.
+ * @param forward Preserve forwarding mode.
+ * @return Zero when a replacement peer was attached.
+ */
+/* GCOVR_EXCL_START: transport recovery requires a live Asterisk IAX peer. */
+static int reconnect_node(void *context, const char *remote, bool transmit, bool forward) {
+    struct ra_runtime_node *node = context;
+    char *destination = ra_link_directory_lookup(remote, NULL, node->settings.link_directory_file);
+    if (!destination) {
+        return -1;
+    }
+    struct ast_format_cap *offer = ra_media_offer(node->connection.radio.linear);
+    if (!offer) {
+        ast_free(destination);
+        return -1;
+    }
+    struct ra_link_dial dial = {destination, offer};
+    struct ast_channel *channel = ra_link_dial_run(&dial, node->name);
+    if (!channel) {
+        return -1;
+    }
+    if (ra_link_hub_attach(&node->links, remote, channel, node->connection.radio.linear, transmit,
+                           forward, true)) {
+        ast_hangup(channel);
+        return -1;
+    }
+    return 0;
+}
+/* GCOVR_EXCL_STOP */
+
 void ra_runtime_stop(struct ra_runtime *runtime) {
     while (runtime->nodes) {
         struct ra_runtime_node *node = runtime->nodes;
@@ -131,6 +164,7 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     node->worker.controller = &node->controller;
     node->worker.links = &node->links;
     node->worker.name = name;
+    ra_link_hub_set_reconnector(&node->links, reconnect_node, node);
     if (ra_worker_start(&node->worker)) {
         return "cannot start radio worker";
     }
@@ -227,7 +261,7 @@ int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char 
                 return -1;
             }
             return ra_link_hub_attach(&node->links, remote, channel, node->connection.radio.linear,
-                                      true, true);
+                                      true, true, false);
         }
     }
     return -1;
@@ -270,11 +304,12 @@ struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *loca
 }
 
 int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                           struct ast_channel *channel, bool transmit, bool forward) {
+                           struct ast_channel *channel, bool transmit, bool forward,
+                           bool permanent) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
             return ra_link_hub_attach(&node->links, remote, channel, node->connection.radio.linear,
-                                      transmit, forward);
+                                      transmit, forward, permanent);
         }
     }
     return -1;

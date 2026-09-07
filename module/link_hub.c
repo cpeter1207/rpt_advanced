@@ -23,6 +23,7 @@ struct ra_link_port {
     int16_t *audio;            /**< Current receive block. */
     bool transmit;             /**< Outbound audio permitted. */
     bool forward;              /**< Relay received voice to other links. */
+    bool permanent;            /**< Redial after an unexpected transport failure. */
     bool active;               /**< Receive activity for the current radio tick. */
 };
 
@@ -64,6 +65,12 @@ static void *manage(void *argument) {
         }
         ast_mutex_unlock(&routing_lock);
         if (port) {
+            /* GCOVR_EXCL_START: exercised only by a live transport failure. */
+            if (port->permanent && hub->reconnect) {
+                (void)hub->reconnect(hub->reconnect_context, port->name, port->transmit,
+                                     port->forward);
+            }
+            /* GCOVR_EXCL_STOP */
             release_port(port);
         } else {
             const struct timespec interval = {.tv_nsec = 50000000};
@@ -74,7 +81,7 @@ static void *manage(void *argument) {
 }
 
 int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
-                       struct ast_format *linear, bool transmit, bool forward) {
+                       struct ast_format *linear, bool transmit, bool forward, bool permanent) {
     size_t capacity = ast_format_get_sample_rate(linear);
     struct ra_link_port *port = ast_calloc(1, sizeof(*port));
     if (!port) {
@@ -120,11 +127,18 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
     }
     port->transmit = transmit;
     port->forward = forward;
+    port->permanent = permanent;
     ast_mutex_lock(&routing_lock);
     port->next = hub->ports;
     hub->ports = port;
     ast_mutex_unlock(&routing_lock);
     return 0;
+}
+
+void ra_link_hub_set_reconnector(struct ra_link_hub *hub, ra_link_reconnect_fn callback,
+                                 void *context) {
+    hub->reconnect = callback;
+    hub->reconnect_context = context;
 }
 
 bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {

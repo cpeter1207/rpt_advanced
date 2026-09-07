@@ -119,11 +119,19 @@ void ast_hangup(struct ast_channel *channel) {
 }
 
 int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
-                       struct ast_format *linear, bool transmit, bool forward) {
+                       struct ast_format *linear, bool transmit, bool forward, bool permanent) {
+    (void)permanent;
     (void)linear;
     assert(hub && !strcmp(name, "123") && channel == (struct ast_channel *)&link_identity);
     assert(transmit && forward);
     return link_error == 5 ? -1 : 0;
+}
+
+void ra_link_hub_set_reconnector(struct ra_link_hub *hub, ra_link_reconnect_fn callback,
+                                 void *context) {
+    (void)callback;
+    (void)context;
+    assert(hub);
 }
 
 bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
@@ -267,7 +275,7 @@ static int connect_fixture(struct ra_runtime *runtime, const char *local) {
     if (!channel) {
         return -1;
     }
-    int result = ra_runtime_attach_link(runtime, local, "123", channel, true, true);
+    int result = ra_runtime_attach_link(runtime, local, "123", channel, true, true, false);
     if (result) {
         ast_hangup(channel);
     }
@@ -353,7 +361,7 @@ int main(void) {
     assert(!ra_runtime_disconnect(&runtime, "missing", "123"));
     assert(ra_runtime_disconnect(&runtime, "alpha", "123"));
     assert(connect_fixture(&runtime, "missing") == -1);
-    assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true) == -1);
+    assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true, false) == -1);
     for (link_error = 1; link_error <= 5; ++link_error) {
         assert(connect_fixture(&runtime, "alpha") == -1);
     }
