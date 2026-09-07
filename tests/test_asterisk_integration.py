@@ -76,7 +76,11 @@ def main() -> None:
                         )
                     except subprocess.CalledProcessError:
                         listing = ""
-                    if "app_rpt_advanced.so" in listing and "Running" in listing:
+                    if (
+                        "app_rpt_advanced.so" in listing
+                        and "Running" in listing
+                        and "Not Running" not in listing
+                    ):
                         break
                     if process.poll() is not None or time.monotonic() >= deadline:
                         raise RuntimeError(f"module did not start: {listing}")
@@ -86,13 +90,24 @@ def main() -> None:
                 )
                 cli(configuration, "module reload app_rpt_advanced.so")
                 listing = cli(configuration, "module show like app_rpt_advanced")
-                assert "Running" in listing, listing
+                assert "Running" in listing and "Not Running" not in listing, listing
+                # No driver is loaded: the rejected active node must not replace
+                # the original disabled configuration. Restore a valid reload
+                # before testing a fresh module load in this same process.
+                radio_configuration.write_text(
+                    "[usb]\nnode_enabled=no\nfull_duplex=yes\n", encoding="utf-8"
+                )
+                cli(configuration, "module reload app_rpt_advanced.so")
                 cli(configuration, "module unload app_rpt_advanced.so")
                 listing = cli(configuration, "module show like app_rpt_advanced")
                 assert "0 modules loaded" in listing, listing
                 cli(configuration, "module load app_rpt_advanced.so")
                 listing = cli(configuration, "module show like app_rpt_advanced")
-                assert "Running" in listing and process.poll() is None, listing
+                assert (
+                    "Running" in listing
+                    and "Not Running" not in listing
+                    and process.poll() is None
+                ), listing
             except BaseException:
                 print(logfile.read_text(encoding="utf-8", errors="replace"))
                 raise

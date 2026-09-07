@@ -13,17 +13,17 @@
 - Asterisk frame-exchange boundary that sends one transmit block per received
   voice block, including silence. Carrier events change state without advancing
   audio. API-fixture tests cover ownership, malformed frames, and output failures;
-  node workers and the separate hardware adapter are not yet connected.
+  module startup now connects this exchange to per-node workers.
 - Optional Asterisk codec conversion around linear controller processing, with
   buffered-conversion ownership tests. Native linear transport bypasses these
   converters.
 - Exclusive RadioPlusAdvanced reservation with negotiated read/write formats and
   converter ownership. Failure tests cover unavailable devices, unsupported media,
   converter allocation, and channel-format setup; cleanup releases every resource.
-  This helper does not call or key a radio. Module startup still needs to invoke it.
+  Module startup invokes this helper, calls the channel, and starts its worker.
 - Asterisk codec-registry selection with bidirectional translation checks and
   hardware-bounded automatic rate selection, tested with deterministic API fixtures.
-  The reservation helper uses this selector; module startup is not yet connected.
+  The module's reservation path uses this selector.
 - Piper process adapter with direct argument execution, file-backed text input,
   nonblocking completion polling, cancellation, and Asterisk child-reaper
   coordination. Synthesis output validation and playback remain unfinished.
@@ -36,12 +36,12 @@
 - Integrated node controller joining ID scheduling, prepared PCM/Morse playback,
   local repeat, and PTT/hang policy. Sequence tests cover half-duplex deferral,
   receive interruption, priority satisfaction, and first-key identification after
-  inactivity. It is not yet connected to a live channel worker.
+  inactivity. Module startup binds it to its channel worker.
 - Joinable channel worker driven by channel readiness, with monotonic ID timing,
   bounded shutdown checks, and unkey/hangup before releasing controller state.
   Tests cover injected failures and real threads driven by pipe-based hardware
   events, including stop and replacement with a different controller. Module
-  configuration loading does not yet start these workers.
+  configuration loading now starts these workers for every enabled node.
 - Shared, node, and ID-set configuration-value inheritance, including explicit
   empty overrides and scope independence from file order.
 - In-place configuration-line syntax parsing, including whitespace, semicolon
@@ -62,8 +62,11 @@
 - Doxygen publication to GitHub Pages after the main-branch quality gate passes.
 
 The build produces a static controller library and `app_rpt_advanced.so`. The
-module currently provides configuration loading, failure-atomic reload, and
-cleanup, not radio operation. Lifecycle tests use the real shared library and
+module starts named radio workers and initializes their inherited Morse IDs.
+File and speech preparation are not yet bound to these workers. Invalid configuration
+leaves running workers untouched; a valid reload stops and replaces them. Failed
+radio startup releases partial resources and attempts to reopen the previous
+configuration, reporting any restoration failure. Lifecycle tests use the real shared library and
 Asterisk's public ABI, including configuration-path allocation and input errors.
 An integration test loads, reloads, and unloads the installed module in an isolated
 Asterisk process with temporary configuration. Other tests include a combined
@@ -71,9 +74,8 @@ identifier/duplex state sequence. They do not claim live-radio verification.
 
 ## Not yet implemented
 
-- Radio-node lifecycle, runtime media capability discovery, and audio transport.
-- Connecting the separate USBRadioPlus adapter to module startup and negotiation.
-- Sound-file playback, Piper adapter, connecting Morse to transmission, and playback interruption.
+- End-to-end verification of running node audio with the separate USBRadioPlus adapter.
+- Connecting sound-file and Piper preparation to runtime identifier media.
 - Published project-specific clean/installed test images and release packaging.
   CI uses published rpt_advanced quality images for Debian 12/13 and amd64/arm64.
   These add FFmpeg to the existing ASL3 quality tool environment; they are not

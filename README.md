@@ -14,7 +14,8 @@ Supported platforms and development requirements are defined in
 The controller and its tests are under development.
 Run `make ci` in an ASL3 development environment with GCC, Clang tools, Cppcheck,
 Doxygen, gcovr, Python, and Ruff. The build produces a development Asterisk module
-with configuration load/reload support; radio operation is not implemented yet.
+with configuration load/reload support and hardware-clocked radio workers.
+Identifier file/speech preparation and end-to-end radio verification remain unfinished.
 Tests start a separate Asterisk process with temporary configuration and no radio
 connections. `make install` installs the module but does not activate it.
 

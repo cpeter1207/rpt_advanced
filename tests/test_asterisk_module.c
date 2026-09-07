@@ -4,6 +4,7 @@
  */
 #include <asterisk.h>
 
+#include "runtime.h"
 #include <assert.h>
 #include <asterisk/module.h>
 #include <dlfcn.h>
@@ -12,6 +13,21 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+/** @brief Number of runtime starts to reject in sequence. */
+static unsigned int runtime_failures;
+
+const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_document *document) {
+    (void)runtime;
+    (void)document;
+    if (runtime_failures) {
+        --runtime_failures;
+        return "fixture radio unavailable";
+    }
+    return NULL;
+}
+
+void ra_runtime_stop(struct ra_runtime *runtime) { (void)runtime; }
 
 /** @brief Asterisk configuration-directory symbol supplied by this test host. */
 const char *ast_config_AST_CONFIG_DIR;
@@ -131,9 +147,14 @@ int main(void) {
     assert(registered->load() == AST_MODULE_LOAD_SUCCESS);
     write_config(path, "[usb]\nunknown=yes\n");
     assert(registered->reload() == -1);
+    write_config(path, "[usb]\n");
+    runtime_failures = 1;
+    assert(registered->reload() == -1);
+    runtime_failures = 2;
+    assert(registered->reload() == -1);
     write_config(path, "");
     assert(registered->reload() == 0);
-    assert(errors == 6);
+    assert(errors == 9);
     assert(registered->unload() == 0);
     assert(dlclose(handle) == 0 && !registered);
     assert(unlink(path) == 0);
