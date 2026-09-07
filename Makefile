@@ -8,6 +8,7 @@ SOURCES := $(wildcard src/*.c)
 MODULE_SOURCE := module/app_rpt_advanced.c
 MEDIA_SOURCE := module/media.c
 SPEECH_SOURCE := module/speech.c
+RADIO_SOURCE := module/radio.c
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
@@ -40,14 +41,14 @@ build/librpt_advanced.a: $(OBJECTS)
 quality: lint static-analysis docs
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) module/media.h $(HEADERS) $(TESTS)
+	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) module/media.h module/radio.h $(HEADERS) $(TESTS)
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
 static-analysis:
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE)
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- -Isrc -std=c11
-	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
+	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
 
 docs: | build
 	doxygen Doxyfile
@@ -75,6 +76,12 @@ build/module-coverage/media.o: $(MEDIA_SOURCE) module/media.h | build/module-cov
 
 build/test_asterisk_media: tests/test_asterisk_media.c build/module-coverage/media.o module/media.h | build
 	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/media.o --coverage -o $@
+
+build/module-coverage/radio.o: $(RADIO_SOURCE) module/radio.h | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
+
+build/test_radio: tests/test_radio.c build/module-coverage/radio.o module/radio.h | build
+	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/radio.o --coverage -o $@
 
 build/module-coverage/speech.o: $(SPEECH_SOURCE) src/speech.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
