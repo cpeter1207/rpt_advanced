@@ -201,6 +201,13 @@ int ra_link_peer_send(struct ra_link_peer *peer, bool keyed, const int16_t *audi
     return failure == 3 ? -1 : 0;
 }
 
+/** @brief Accept a recovery callback without creating a transport.
+ * @param context Unused callback context.
+ * @param remote Unused peer identity.
+ * @param transmit Unused transmit mode.
+ * @param forward Unused forwarding mode.
+ * @return Zero.
+ */
 static int reconnect_stub(void *context, const char *remote, bool transmit, bool forward) {
     (void)context;
     (void)remote;
