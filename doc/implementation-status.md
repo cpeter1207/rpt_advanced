@@ -26,6 +26,10 @@
   process lifecycle handling with Piper. A real 22050-to-48000 Hz WAV conversion
   test checks sample count and level; malformed input is rejected.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
+- Integrated node controller joining ID scheduling, prepared PCM/Morse playback,
+  local repeat, and PTT/hang policy. Sequence tests cover half-duplex deferral,
+  receive interruption, priority satisfaction, and first-key identification after
+  inactivity. It is not yet connected to a live channel worker.
 - Shared, node, and ID-set configuration-value inheritance, including explicit
   empty overrides and scope independence from file order.
 - In-place configuration-line syntax parsing, including whitespace, semicolon
