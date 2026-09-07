@@ -1,8 +1,8 @@
 PROJECT_NAME = rpt_advanced
 OUTPUT_DIRECTORY = build/docs
-INPUT = src tests
+INPUT = src module tests
 RECURSIVE = YES
-FILE_PATTERNS = *.c *.h
+FILE_PATTERNS = *.c *.h *.py
 EXTRACT_ALL = NO
 EXTRACT_STATIC = YES
 WARNINGS = YES

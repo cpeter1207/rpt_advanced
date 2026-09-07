@@ -61,8 +61,11 @@ production workflow can be repaired without a circular gate dependency.
 The reusable quality workflow is active. Branch protection requires its quality
 gate, pull requests, linear history, and resolved review conversations, and
 prohibits force pushes and branch deletion. The gate runs applicable checks for
-the source types present; Ruff and ShellCheck become applicable when Python or
-shell source is introduced. The current foundation is C only.
+the source types present. Ruff checks the Python Asterisk integration runner;
+ShellCheck applies when shell source is introduced. Module-interface code uses
+GNU C as required by Asterisk's headers; the controller library uses strict C11.
+Clang analysis enables the block syntax present in Asterisk's headers. Both source
+directories are included in static analysis, Doxygen, and coverage.
 
 See [implementation status](doc/implementation-status.md) for the distinction
 between tested components and the remaining module, container, release, and
