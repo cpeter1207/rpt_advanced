@@ -40,6 +40,9 @@
   Tests exercise native linear, 16 kHz linear, and 8 kHz mu-law with actual Asterisk
   converters; verify half/full-duplex local repeat, Morse output, balanced PTT,
   and reload-driven channel cleanup. The fixture is not installed by the package.
+- Real Piper 1.8.0 synthesis using 524950's existing Amy-low model, tested locally
+  on Debian 13 amd64 through the module's preparation code. See
+  [testing](testing.md) for the optional real-model invocation and its scope.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
 - Integrated node controller joining ID scheduling, prepared PCM/Morse playback,
   local repeat, and PTT/hang policy. Sequence tests cover half-duplex deferral,
@@ -84,7 +87,6 @@ radio or completed USBRadioPlus-to-rpt_advanced integration verification.
 ## Not yet implemented
 
 - End-to-end verification of running node audio with the separate USBRadioPlus adapter.
-- Verification using a real Piper voice model, not only the synthesizer fixture.
 - Published project-specific clean/installed test images and release packaging.
   CI uses published rpt_advanced quality images for Debian 12/13 and amd64/arm64.
   These add FFmpeg to the existing ASL3 quality tool environment; they are not
