@@ -123,6 +123,8 @@ int main(int argc, char **argv) {
         return child(argv);
     }
     char directory[] = "/tmp/rpt-advanced-speech-XXXXXX";
+    char *original_path = strdup(getenv("PATH"));
+    assert(original_path);
     assert(mkdtemp(directory));
     char *executable = realpath("/proc/self/exe", NULL);
     char *program, *output_path;
@@ -204,6 +206,29 @@ int main(int argc, char **argv) {
     free(executable);
     free(program);
     free(output_path);
+    assert(!setenv("PATH", original_path, 1));
+    free(original_path);
+    const char *voice_model = getenv("RPT_TEST_PIPER_MODEL");
+    if (voice_model) {
+        settings.file = "";
+        settings.speech_model = voice_model;
+        settings.speech_speed_percent = 100;
+        settings.speech_text = "This is the KG0BP repeater.";
+        ra_identifier_prepare(&settings, 48000, &prepared, &prepared_count);
+        assert(prepared && prepared_count > 48000);
+        int peak = 0;
+        for (size_t index = 0; index < prepared_count; ++index) {
+            int magnitude = abs(prepared[index]);
+            if (magnitude > peak) {
+                peak = magnitude;
+            }
+        }
+        assert(peak > 0);
+        printf("real Piper voice: %zu samples at 48000 Hz, peak %d PCM codes\n", prepared_count,
+               peak);
+        free(prepared);
+        assert(!reaper);
+    }
     puts("real speech subprocess integration tests passed");
     return 0;
 }
