@@ -16,6 +16,7 @@ MODULE_HELPERS := $(filter-out $(MODULE_SOURCE),$(wildcard module/*.c))
 MODULE_OBJECTS := $(patsubst module/%.c,build/module/%.o,$(MODULE_HELPERS))
 MODULE_COVERAGE_OBJECTS := $(patsubst module/%.c,build/module-coverage/%.o,$(MODULE_HELPERS))
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
+SAMPLERATE_LIBS := -lsamplerate
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
@@ -49,7 +50,7 @@ build/module/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) | build/module
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -fPIC -c $< -o $@
 
 build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS) $(MODULE_OBJECTS)
-	$(CC) -shared $^ -pthread -lm -o $@
+	$(CC) -shared $^ -pthread -lm $(SAMPLERATE_LIBS) -o $@
 
 build/librpt_advanced.a: $(OBJECTS)
 	$(AR) rcs $@ $^
@@ -85,7 +86,7 @@ build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) | build/mo
 	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
 
 build/module-coverage/app_rpt_advanced.so: build/module-coverage/app_rpt_advanced.o $(COVERAGE_OBJECTS)
-	$(CC) --coverage -shared $^ -lm -o $@
+	$(CC) --coverage -shared $^ -lm $(SAMPLERATE_LIBS) -o $@
 
 build/test_asterisk_module: tests/test_asterisk_module.c build/module-coverage/app_rpt_advanced.so | build
 	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -DASTMM_LIBC=ASTMM_IGNORE $< -Wl,--export-dynamic -ldl -o $@
@@ -102,7 +103,7 @@ build/module-coverage/assets.o: module/assets.c module/assets.h src/speech.h src
 build/test_assets: tests/test_assets.c build/module-coverage/assets.o | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/assets.o --coverage \
 		-Wl,--wrap=fopen,--wrap=tmpfile,--wrap=mkstemp,--wrap=fseek,--wrap=ftell \
-		-Wl,--wrap=fputs,--wrap=fflush,--wrap=fread,--wrap=nanosleep -o $@
+		-Wl,--wrap=fputs,--wrap=fflush,--wrap=fread,--wrap=nanosleep -lm -o $@
 
 build/module-coverage/media.o: $(MEDIA_SOURCE) module/media.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
@@ -137,7 +138,7 @@ build/worker_routing_fixture.o: tests/worker_routing_fixture.c tests/worker_dtmf
 
 build/test_link_hub: tests/test_link_hub.c build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=nanosleep -o $@
+		$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=nanosleep -o $@
 
 build/test_link_directory: tests/test_link_directory.c build/module-coverage/link_directory.o | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -o $@
@@ -162,7 +163,7 @@ build/test_speech: tests/test_speech.c build/module-coverage/speech.o src/speech
 		-Wl,--wrap=posix_spawnp,--wrap=waitpid,--wrap=kill -o $@
 
 build/test_speech_process: tests/test_speech_process.c build/module-coverage/speech.o build/module-coverage/assets.o src/speech.h | build
-	$(CC) $(WARNINGS) -Isrc -Imodule $< build/module-coverage/speech.o build/module-coverage/assets.o --coverage -o $@
+	$(CC) $(WARNINGS) -Isrc -Imodule $< build/module-coverage/speech.o build/module-coverage/assets.o --coverage -lm -o $@
 
 build/test_%: tests/test_%.c $(COVERAGE_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -lm -o $@

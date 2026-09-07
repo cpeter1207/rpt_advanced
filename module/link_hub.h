@@ -21,16 +21,17 @@ typedef int (*ra_link_reconnect_fn)(void *context, const char *remote, bool tran
 
 /** @brief Node-owned routing state; zero initialization is sufficient. */
 struct ra_link_hub {
-    struct ra_link_port *ports;     /**< Owned peer list. */
-    int16_t *local;                 /**< Original local receive block. */
-    int16_t *remote;                /**< Summed incoming audio for the transmitter. */
-    int16_t *outgoing;              /**< Per-peer mix-minus scratch block. */
-    size_t capacity;                /**< Allocated samples per scratch block. */
-    pthread_t manager;              /**< Reaps disconnected peers outside the audio thread. */
-    atomic_bool stop;               /**< Requests manager shutdown. */
-    bool manager_started;           /**< Manager must be joined before releasing the hub. */
-    ra_link_reconnect_fn reconnect; /**< Runtime callback for permanent peers. */
-    void *reconnect_context;        /**< Borrowed runtime callback context. */
+    _Atomic(struct ra_link_port *) ports; /**< Atomically published immutable peer list. */
+    atomic_uint readers;                  /**< Audio traversals that may retain detached ports. */
+    int16_t *local;                       /**< Original local receive block. */
+    int16_t *remote;                      /**< Summed incoming audio for the transmitter. */
+    int16_t *outgoing;                    /**< Per-peer mix-minus scratch block. */
+    size_t capacity;                      /**< Allocated samples per scratch block. */
+    pthread_t manager;                    /**< Reaps disconnected peers outside the audio thread. */
+    atomic_bool stop;                     /**< Requests manager shutdown. */
+    bool manager_started;                 /**< Manager must be joined before releasing the hub. */
+    ra_link_reconnect_fn reconnect;       /**< Runtime callback for permanent peers. */
+    void *reconnect_context;              /**< Borrowed runtime callback context. */
 };
 
 /** @brief Attach an authenticated answered peer without changing a live list on failure.
@@ -72,6 +73,21 @@ size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub);
  * @return Number of attached peers.
  */
 size_t ra_link_hub_count(struct ra_link_hub *hub);
+
+/** @brief Queue a DTMF digit for one directly connected peer.
+ * @param hub Node-owned routing hub.
+ * @param name Exact connected peer identity.
+ * @param digit DTMF digit to forward.
+ * @return Zero when queued, minus one when that peer is absent or unavailable.
+ */
+int ra_link_hub_send_digit(struct ra_link_hub *hub, const char *name, char digit);
+
+/** @brief Check whether an exact peer is still directly attached.
+ * @param hub Node-owned routing hub.
+ * @param name Exact remote identity.
+ * @return True when the peer is attached and has not ended.
+ */
+bool ra_link_hub_connected(struct ra_link_hub *hub, const char *name);
 
 /** @brief Disconnect all peers and release routing buffers after the radio worker stops.
  * @param hub Owned hub, safe when empty.

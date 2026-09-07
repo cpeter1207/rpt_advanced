@@ -70,18 +70,35 @@ struct ast_format_cap *ra_media_offer(struct ast_format *radio) {
         return NULL;
     }
     int maximum = ast_codec_get_max();
+    if (!radio || !ast_format_get_sample_rate(radio)) {
+        ao2_cleanup(offer);
+        return NULL;
+    }
     for (int index = 0; index < maximum; ++index) {
         struct ast_codec *codec = ast_codec_get_by_id(index + 1);
         if (!codec) {
             continue;
         }
-        struct ast_format *format =
-            codec->type == AST_MEDIA_TYPE_AUDIO ? ast_format_cache_get_by_codec(codec) : NULL;
+        /* The registry also exposes an abstract zero-rate "slin" name.  It
+         * has no wire representation, so advertise concrete audio formats only. */
+        if (codec->type != AST_MEDIA_TYPE_AUDIO || codec->sample_rate == 0) {
+            ao2_cleanup(codec);
+            continue;
+        }
+        unsigned int rate = codec->sample_rate;
+        struct ast_format *format = ast_format_cache_get_by_codec(codec);
         ao2_cleanup(codec);
         if (!format) {
             continue;
         }
-        int error = bidirectional(format, radio) ? ast_format_cap_append(offer, format, 0) : 0;
+        if (ast_format_get_sample_rate(format) == 0) {
+            ao2_cleanup(format);
+            continue;
+        }
+        /* Asterisk supplies codec and SLIN-rate conversion before the native radio boundary. */
+        int error = ast_format_get_sample_rate(format) == rate && bidirectional(format, radio)
+                        ? ast_format_cap_append(offer, format, 0)
+                        : 0;
         ao2_cleanup(format);
         if (error) {
             ao2_cleanup(offer);

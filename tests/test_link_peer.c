@@ -14,12 +14,17 @@
 struct ast_format {
     unsigned int rate; /**< PCM rate. */
 };
+struct ast_trans_pvt {};
 /** @brief Captured reader. */
 static void *(*reader)(void *);
 /** @brief Active fixture peer. */
 static struct ra_link_peer *active;
 /** @brief Failure injection step. */
 static int failure;
+/** @brief One-based allocation call that must fail, or zero for no allocation failure. */
+static unsigned int allocation_failure;
+/** @brief Allocation calls made during the current start attempt. */
+static unsigned int allocation_calls;
 /** @brief Next input frame. */
 static struct ast_frame *input;
 /** @brief Readiness sequence. */
@@ -28,8 +33,16 @@ static int ready[4];
 static size_t next;
 /** @brief Lock ownership balance. */
 static int locked;
+/** @brief Number of initialized fixture mutexes. */
+static int mutex_inits;
 /** @brief Released channels. */
 static int hangups;
+/** @brief Number of remote-command digits delivered by the reader. */
+static unsigned int sent_digits;
+/** @brief Number of radio-key indications sent to the fixture channel. */
+static unsigned int key_indications;
+/** @brief Number of radio-unkey indications sent to the fixture channel. */
+static unsigned int unkey_indications;
 
 /** @brief Real allocator for non-failing calls.
  * @param count Element count.
@@ -43,7 +56,8 @@ void *__real_calloc(size_t count, size_t size);
  * @return Allocation or injected null.
  */
 void *__wrap_calloc(size_t count, size_t size) {
-    return failure == 1 ? NULL : __real_calloc(count, size);
+    ++allocation_calls;
+    return allocation_failure == allocation_calls ? NULL : __real_calloc(count, size);
 }
 /** @brief Route Asterisk allocation through the same failure fixture.
  * @param count Element count.
@@ -84,7 +98,7 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(
     *thread = pthread_self();
     reader = start;
     active = argument;
-    return failure == 6;
+    return failure == 5;
 }
 /** @brief Verify shutdown was requested before joining.
  * @param thread Unused fixture identity.
@@ -115,7 +129,8 @@ int __ast_pthread_mutex_init(int tracking, const char *file, int line, const cha
     (void)func;
     (void)name;
     (void)lock;
-    return failure == 2;
+    ++mutex_inits;
+    return failure == mutex_inits + 1;
 }
 /** @brief Model balanced mutex disposal.
  * @param file Unused call-site file.
@@ -176,6 +191,28 @@ int __ast_pthread_mutex_unlock(const char *file, int line, const char *func, con
  * @return PCM sample rate.
  */
 unsigned int ast_format_get_sample_rate(const struct ast_format *format) { return format->rate; }
+/** @brief Return a fixture label for diagnostic-only format logging.
+ * @param format Unused fixture format.
+ * @return Stable test label.
+ */
+const char *ast_format_get_name(const struct ast_format *format) {
+    (void)format;
+    return "fixture";
+}
+/** @brief Discard diagnostic logging emitted only by live conversion failures.
+ * @param level Unused Asterisk severity.
+ * @param file Unused source path.
+ * @param line Unused source line.
+ * @param function Unused function name.
+ * @param format Unused message format.
+ */
+void ast_log(int level, const char *file, int line, const char *function, const char *format, ...) {
+    (void)level;
+    (void)file;
+    (void)line;
+    (void)function;
+    (void)format;
+}
 /** @brief Compare fixture formats by identity.
  * @param left First format.
  * @param right Second format.
@@ -185,6 +222,34 @@ enum ast_format_cmp_res ast_format_cmp(const struct ast_format *left,
                                        const struct ast_format *right) {
     return left == right ? AST_FORMAT_CMP_EQUAL : AST_FORMAT_CMP_NOT_EQUAL;
 }
+/** @brief Fixture translator creation is unused by the signed-linear tests.
+ * @param destination Unused destination format.
+ * @param source Unused source format.
+ * @return Null.
+ */
+struct ast_trans_pvt *ast_translator_build_path(struct ast_format *destination,
+                                                struct ast_format *source) {
+    (void)destination;
+    (void)source;
+    return NULL;
+}
+/** @brief Release a fixture translator.
+ * @param translator Unused fixture translator.
+ */
+void ast_translator_free_path(struct ast_trans_pvt *translator) { (void)translator; }
+/** @brief Fixture translation is unavailable.
+ * @param translator Unused translator.
+ * @param frame Unused input frame.
+ * @param consume Unused ownership flag.
+ * @return Null.
+ */
+struct ast_frame *ast_translate(struct ast_trans_pvt *translator, struct ast_frame *frame,
+                                int consume) {
+    (void)translator;
+    (void)frame;
+    (void)consume;
+    return NULL;
+}
 /** @brief Inject read conversion failure.
  * @param channel Unused channel.
  * @param format Unused target format.
@@ -193,7 +258,7 @@ enum ast_format_cmp_res ast_format_cmp(const struct ast_format *left,
 int ast_set_read_format(struct ast_channel *channel, struct ast_format *format) {
     (void)channel;
     (void)format;
-    return failure == 3;
+    return failure == 2;
 }
 /** @brief Inject write conversion failure.
  * @param channel Unused channel.
@@ -203,7 +268,7 @@ int ast_set_read_format(struct ast_channel *channel, struct ast_format *format) 
 int ast_set_write_format(struct ast_channel *channel, struct ast_format *format) {
     (void)channel;
     (void)format;
-    return failure == 4;
+    return failure == 3;
 }
 /** @brief Verify explicit redundant-key handshake.
  * @param channel Unused channel.
@@ -213,7 +278,19 @@ int ast_set_write_format(struct ast_channel *channel, struct ast_format *format)
 int ast_sendtext(struct ast_channel *channel, const char *text) {
     (void)channel;
     assert(!strcmp(text, "!NEWKEY!"));
-    return failure == 5;
+    return failure == 4;
+}
+/** @brief Accept queued remote-command DTMF in the fixture transport.
+ * @param channel Unused channel fixture.
+ * @param digit Valid DTMF digit queued by the peer.
+ * @param duration Expected zero-duration IAX signal request.
+ * @return Injected send failure status.
+ */
+int ast_senddigit(struct ast_channel *channel, char digit, unsigned int duration) {
+    (void)channel;
+    assert(strchr("0123456789ABCD*#", digit) && !duration);
+    ++sent_digits;
+    return failure == 10;
 }
 /** @brief Supply timeout, ready, and transport failure events.
  * @param channel Unused channel.
@@ -222,7 +299,7 @@ int ast_sendtext(struct ast_channel *channel, const char *text) {
  */
 int ast_waitfor(struct ast_channel *channel, int milliseconds) {
     (void)channel;
-    assert(milliseconds == 100 && next < 4);
+    assert(milliseconds == 1 && next < 4);
     return ready[next++];
 }
 /** @brief Supply borrowed fixture frame or hangup.
@@ -245,8 +322,8 @@ void ast_frame_free(struct ast_frame *frame, int cache) { assert(frame == input 
  */
 int ast_write(struct ast_channel *channel, struct ast_frame *frame) {
     (void)channel;
-    assert(frame->frametype == AST_FRAME_VOICE && frame->samples == 2);
-    return failure == 8;
+    assert(frame->frametype == AST_FRAME_VOICE && frame->samples > 0);
+    return failure == 9;
 }
 /** @brief Verify key-only indications and inject failure.
  * @param channel Unused channel.
@@ -256,7 +333,12 @@ int ast_write(struct ast_channel *channel, struct ast_frame *frame) {
 int ast_indicate(struct ast_channel *channel, int condition) {
     (void)channel;
     assert(condition == AST_CONTROL_RADIO_KEY || condition == AST_CONTROL_RADIO_UNKEY);
-    return failure == 7;
+    if (condition == AST_CONTROL_RADIO_KEY) {
+        ++key_indications;
+    } else {
+        ++unkey_indications;
+    }
+    return failure == 8;
 }
 /** @brief Track transferred channel disposal.
  * @param channel Unused channel identity.
@@ -289,10 +371,19 @@ int main(void) {
     struct ast_format linear = {8000}, other = {8000}, invalid = {0};
     struct ra_link_peer peer = {0};
     assert(ra_link_peer_start(&peer, NULL, &invalid) == -1);
-    for (failure = 1; failure <= 6; ++failure) {
+    for (allocation_failure = 1; allocation_failure <= 3; ++allocation_failure) {
+        allocation_calls = 0;
+        assert(ra_link_peer_start(&peer, NULL, &linear) == -1);
+    }
+    allocation_failure = 0;
+    for (failure = 2; failure <= 5; ++failure) {
+        mutex_inits = 0;
+        allocation_calls = 0;
         assert(ra_link_peer_start(&peer, NULL, &linear) == -1);
     }
     failure = 0;
+    mutex_inits = 0;
+    allocation_calls = 0;
     assert(!ra_link_peer_start(&peer, NULL, &linear));
     int16_t samples[] = {123, -456}, output[2];
     struct ast_frame voice = {.frametype = AST_FRAME_VOICE,
@@ -304,6 +395,11 @@ int main(void) {
                                 .subclass.integer = AST_CONTROL_RADIO_KEY};
     struct ast_frame ignored = {.frametype = AST_FRAME_NULL};
     frame(&peer, &ignored);
+    atomic_store(&peer.sent_samples, 16000);
+    frame(&peer, &ignored);
+    assert(unkey_indications == 1);
+    atomic_store(&peer.sent_samples, 0);
+    peer.heartbeat_samples = 0;
     struct ast_frame text = {.frametype = AST_FRAME_TEXT};
     frame(&peer, &text);
     text.data.ptr = "!NEWKEY!x";
@@ -315,21 +411,22 @@ int main(void) {
     text.data.ptr = "!NEWKEY1!";
     text.datalen = 10;
     frame(&peer, &text);
-    assert(peer.voice_keying);
+    assert(atomic_load(&peer.voice_keying));
     frame(&peer, &voice);
     frame(&peer, &control);
     assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123);
     int16_t quiet[32000];
-    assert(!ra_link_peer_receive(&peer, quiet, 400));
+    bool expired_voice = ra_link_peer_receive(&peer, quiet, 400);
+    assert(peer.receive_age == 400 && !expired_voice);
     text.data.ptr = "!NEWKEY!";
     text.datalen = 8;
-    failure = 5;
+    failure = 4;
     frame(&peer, &text);
     failure = 0;
     peer.handshake_replied = false;
     frame(&peer, &text);
     frame(&peer, &text);
-    assert(!peer.voice_keying && peer.handshake_replied);
+    assert(!atomic_load(&peer.voice_keying) && peer.handshake_replied);
     control.subclass.integer = AST_CONTROL_RADIO_KEY;
     frame(&peer, &control);
     assert(ra_link_peer_receive(&peer, output, 2));
@@ -358,23 +455,48 @@ int main(void) {
     voice.samples = 2;
     voice.datalen = 3;
     frame(&peer, &voice);
+    voice.datalen = 0;
+    frame(&peer, &voice);
     voice.datalen = 4;
     voice.subclass.format = &other;
     frame(&peer, &voice);
     assert(!ra_link_peer_send(&peer, false, samples, 2));
-    failure = 7;
-    assert(ra_link_peer_send(&peer, true, samples, 2) == -1);
-    failure = 8;
-    assert(ra_link_peer_send(&peer, true, samples, 2) == -1);
     failure = 0;
     assert(!ra_link_peer_send(&peer, true, samples, 2));
     assert(!ra_link_peer_send(&peer, true, NULL, 0));
-    peer.heartbeat_samples = 16000;
     assert(!ra_link_peer_send(&peer, true, samples, 2));
     assert(!ra_link_peer_send(&peer, false, NULL, 0));
+    atomic_store(&peer.desired_key, true);
+    for (size_t index = 0; index < 100; ++index) {
+        assert(!ra_link_peer_send(&peer, true, samples, 2));
+    }
+    frame(&peer, &ignored);
+    peer.transmitting = false;
+    failure = 8;
+    frame(&peer, &ignored);
+    failure = 0;
+    assert(!ra_link_peer_send(&peer, true, samples, 2));
+    failure = 9;
+    frame(&peer, &ignored);
+    failure = 0;
+    assert(!ra_link_peer_send_digit(&peer, '1'));
+    assert(ra_link_peer_send_digit(&peer, 'x') == -1);
+    atomic_store(&peer.digit_tail, atomic_load(&peer.digit_head));
+    atomic_store(&peer.digit_head, sizeof(peer.digits));
+    atomic_store(&peer.digit_tail, 0);
+    assert(ra_link_peer_send_digit(&peer, '1') == -1);
+    atomic_store(&peer.digit_tail, atomic_load(&peer.digit_head));
+    assert(!ra_link_peer_send_digit(&peer, '2'));
+    frame(&peer, &ignored);
+    assert(sent_digits == 1);
+    assert(!ra_link_peer_send_digit(&peer, '3'));
+    failure = 10;
+    frame(&peer, &ignored);
+    failure = 0;
     atomic_store(&peer.ended, true);
+    assert(ra_link_peer_send_digit(&peer, '1') == -1);
     assert(ra_link_peer_send(&peer, false, NULL, 0) == -1);
-    peer.receiving = true;
+    atomic_store(&peer.receiving, true);
     assert(!ra_link_peer_receive(&peer, output, 2));
     ra_link_peer_stop(&peer);
     peer = (struct ra_link_peer){0};

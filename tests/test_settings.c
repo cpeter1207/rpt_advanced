@@ -21,7 +21,7 @@ static void defaults(void) {
     assert(!*id.file && !*id.speech_text && !*id.morse_text);
     assert(!strcmp(id.speech_model, "en_US-lessac-medium.onnx"));
     assert(id.speech_speed_percent == 100 && id.morse_speed_wpm == 20 &&
-           id.morse_frequency_hz == 800);
+           id.morse_frequency_hz == 800 && id.speech_level_db == 0 && id.morse_level_db == -6);
 }
 
 /** @brief Exercise every public option and scoped overrides independent of file order. */
@@ -45,11 +45,23 @@ static void configured(void) {
         {"identifier", "speech_text", "Welcome"},
         {"identifier", "speech_model", "/usr/lib/piper-tts/voices/en_US-amy-low.onnx"},
         {"identifier", "speech_speed_percent", "90"},
+        {"identifier", "speech_level_db", "-3"},
         {"identifier", "morse_text", "KG0BP"},
         {"identifier", "morse_speed_wpm", "18"},
         {"identifier", "morse_frequency_hz", "700"},
+        {"identifier", "morse_level_db", "-5"},
         {"identifier usb", "interval_ms", "200000"},
+        {"speech", "voice", "shared.onnx"},
+        {"speech usb", "voice", "node.onnx"},
+        {"speech usb", "speed_percent", "80"},
+        {"speech usb", "level_db", "-4"},
+        {"morse", "frequency_hz", "600"},
+        {"morse usb", "frequency_hz", "750"},
+        {"morse usb", "speed_wpm", "25"},
+        {"morse usb", "level_db", "-8"},
         {"identifier usb welcome", "speech_text", ""},
+        {"identifier usb welcome", "speech_level_db", "-2"},
+        {"identifier usb welcome", "morse_level_db", "-7"},
     };
     size_t count = sizeof(entries) / sizeof(entries[0]);
     struct ra_node_settings node;
@@ -58,14 +70,33 @@ static void configured(void) {
     assert(!node.enabled && !node.full_duplex && node.hang_ms == 500 && node.sample_rate == 48000);
     assert(!strcmp(node.channel, "radio") && !strcmp(node.codec, "slin48"));
     assert(!*node.link_allow_nodes && !strcmp(node.link_deny_nodes, "1234, 5678"));
-    assert(!ra_identifier_settings_resolve(entries, count, "identifier usb",
-                                           "identifier usb welcome", &id));
+    assert(!ra_identifier_settings_resolve(entries, count, "usb", "identifier usb welcome", &id));
     assert(id.interval_ms == 200000 && id.priority == 2 && id.first_key_only &&
            id.regardless_of_activity);
     assert(!strcmp(id.file, "/tmp/id.wav") && !*id.speech_text);
-    assert(!strcmp(id.speech_model, "/usr/lib/piper-tts/voices/en_US-amy-low.onnx"));
-    assert(id.speech_speed_percent == 90 && !strcmp(id.morse_text, "KG0BP"));
-    assert(id.morse_speed_wpm == 18 && id.morse_frequency_hz == 700);
+    assert(!strcmp(id.speech_model, "node.onnx"));
+    assert(id.speech_speed_percent == 80 && id.speech_level_db == -2 &&
+           !strcmp(id.morse_text, "KG0BP"));
+    assert(id.morse_speed_wpm == 25 && id.morse_frequency_hz == 750 && id.morse_level_db == -7);
+}
+
+/** @brief Ignore malformed near-matches when resolving flat and node-scoped defaults. */
+static void scoped_default_matching(void) {
+    const struct ra_config_entry entries[] = {
+        {"speech", "voice", "flat.onnx"},
+        {"speechx", "voice", "wrong-prefix.onnx"},
+        {"speech ", "voice", "missing-node.onnx"},
+        {"speech other", "voice", "wrong-node.onnx"},
+        {"speech usb extra", "voice", "trailing-name.onnx"},
+        {"speech usb", "voice", "node.onnx"},
+    };
+    struct ra_identifier_settings id;
+    assert(!ra_identifier_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), NULL,
+                                           NULL, &id));
+    assert(!strcmp(id.speech_model, "flat.onnx"));
+    assert(!ra_identifier_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                           NULL, &id));
+    assert(!strcmp(id.speech_model, "node.onnx"));
 }
 
 /** @brief Every typed setting rejects invalid text without committing earlier fields. */
@@ -73,8 +104,9 @@ static void invalid(void) {
     const char *node_keys[] = {"node_enabled",   "full_duplex",      "transmit_hang_ms",
                                "sample_rate_hz", "link_allow_nodes", "link_deny_nodes"};
     const char *id_keys[] = {
-        "interval_ms",          "priority",        "first_key_only",    "regardless_of_activity",
-        "speech_speed_percent", "morse_speed_wpm", "morse_frequency_hz"};
+        "interval_ms",          "priority",        "first_key_only",  "regardless_of_activity",
+        "speech_speed_percent", "speech_level_db", "morse_speed_wpm", "morse_frequency_hz",
+        "morse_level_db"};
     struct ra_node_settings node = {0};
     struct ra_identifier_settings id = {0};
     for (size_t i = 0; i < sizeof(node_keys) / sizeof(node_keys[0]); ++i) {
@@ -87,6 +119,12 @@ static void invalid(void) {
         assert(!strcmp(ra_identifier_settings_resolve(&entry, 1, NULL, NULL, &id), id_keys[i]));
         assert(id.interval_ms == 0 && !id.speech_model);
     }
+    struct ra_config_entry speech = {"speech usb", "level_db", "invalid"};
+    assert(!strcmp(ra_identifier_settings_resolve(&speech, 1, "usb", NULL, &id), "level_db"));
+    assert(id.interval_ms == 0 && !id.speech_model);
+    struct ra_config_entry morse = {"morse usb", "level_db", "invalid"};
+    assert(!strcmp(ra_identifier_settings_resolve(&morse, 1, "usb", NULL, &id), "level_db"));
+    assert(id.interval_ms == 0 && !id.speech_model);
 }
 
 /** @brief Every command prefix inherits, can be disabled, and rejects ambiguous mappings. */
@@ -127,6 +165,7 @@ static void command_settings(void) {
 int main(void) {
     defaults();
     configured();
+    scoped_default_matching();
     invalid();
     command_settings();
     puts("settings resolution tests passed");

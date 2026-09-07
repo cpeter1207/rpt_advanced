@@ -8,14 +8,21 @@
 #include <string.h>
 
 /** @brief Storage types used by the setting descriptors. */
-enum field_type { FIELD_STRING, FIELD_NODE_LIST, FIELD_PREFIX, FIELD_BOOLEAN, FIELD_NUMBER };
+enum field_type {
+    FIELD_STRING,
+    FIELD_NODE_LIST,
+    FIELD_PREFIX,
+    FIELD_BOOLEAN,
+    FIELD_NUMBER,
+    FIELD_SIGNED
+};
 
 /** @brief One schema entry mapping a public name to a typed settings member. */
 struct field {
-    const char *name;     /**< Configuration option. */
+    const char name[64];  /**< Configuration option. */
     enum field_type type; /**< Destination representation. */
     size_t offset;        /**< Offset within its settings structure. */
-    uint64_t minimum;     /**< Inclusive numeric minimum. */
+    uint64_t minimum;     /**< Inclusive unsigned minimum or signed magnitude. */
     uint64_t maximum;     /**< Inclusive numeric maximum. */
 };
 
@@ -77,11 +84,31 @@ static const struct field identifier_fields[] = {
     {"speech_model", FIELD_STRING, offsetof(struct ra_identifier_settings, speech_model), 0, 0},
     {"speech_speed_percent", FIELD_NUMBER,
      offsetof(struct ra_identifier_settings, speech_speed_percent), 1, 1000},
+    {"speech_level_db", FIELD_SIGNED, offsetof(struct ra_identifier_settings, speech_level_db), 60,
+     0},
     {"morse_text", FIELD_STRING, offsetof(struct ra_identifier_settings, morse_text), 0, 0},
     {"morse_speed_wpm", FIELD_NUMBER, offsetof(struct ra_identifier_settings, morse_speed_wpm), 1,
      100},
     {"morse_frequency_hz", FIELD_NUMBER,
      offsetof(struct ra_identifier_settings, morse_frequency_hz), 1, UINT_MAX},
+    {"morse_level_db", FIELD_SIGNED, offsetof(struct ra_identifier_settings, morse_level_db), 60,
+     0},
+};
+
+/** @brief Per-node offline speech defaults. */
+static const struct field speech_fields[] = {
+    {"voice", FIELD_STRING, offsetof(struct ra_identifier_settings, speech_model), 0, 0},
+    {"speed_percent", FIELD_NUMBER, offsetof(struct ra_identifier_settings, speech_speed_percent),
+     1, 1000},
+    {"level_db", FIELD_SIGNED, offsetof(struct ra_identifier_settings, speech_level_db), 60, 0},
+};
+
+/** @brief Per-node Morse defaults. */
+static const struct field morse_fields[] = {
+    {"frequency_hz", FIELD_NUMBER, offsetof(struct ra_identifier_settings, morse_frequency_hz), 1,
+     UINT_MAX},
+    {"speed_wpm", FIELD_NUMBER, offsetof(struct ra_identifier_settings, morse_speed_wpm), 1, 100},
+    {"level_db", FIELD_SIGNED, offsetof(struct ra_identifier_settings, morse_level_db), 60, 0},
 };
 
 /** @brief Assign a validated value at its schema-declared, naturally aligned member offset.
@@ -107,23 +134,50 @@ static bool assign(const struct field *field, const char *text, void *output) {
             return false;
         }
         *(bool *)destination = value;
-    } else {
+    } else if (field->type == FIELD_NUMBER) {
         uint64_t value;
         if (!ra_config_unsigned(text, field->minimum, field->maximum, &value)) {
             return false;
         }
         *(uint64_t *)destination = value;
+    } else {
+        int64_t value;
+        if (!ra_config_signed(text, -(int64_t)field->minimum, (int64_t)field->maximum, &value)) {
+            return false;
+        }
+        *(int64_t *)destination = value;
     }
     return true;
 }
 
 const char *ra_settings_validate(bool identifier, const char *key, const char *value) {
-    const struct field *fields = identifier ? identifier_fields : node_fields;
-    size_t count = identifier ? sizeof(identifier_fields) / sizeof(identifier_fields[0])
-                              : sizeof(node_fields) / sizeof(node_fields[0]);
+    return ra_settings_validate_kind(identifier ? RA_SETTINGS_IDENTIFIER : RA_SETTINGS_NODE, key,
+                                     value);
+}
+
+/** @brief Validate an option using its documented section schema.
+ * @param kind Section category selecting the valid options.
+ * @param key Option name.
+ * @param value Trimmed option value.
+ * @return Null when valid, otherwise a stable diagnostic.
+ */
+const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *key,
+                                      const char *value) {
+    const struct field *fields = node_fields;
+    size_t count = sizeof(node_fields) / sizeof(node_fields[0]);
+    if (kind == RA_SETTINGS_IDENTIFIER) {
+        fields = identifier_fields;
+        count = sizeof(identifier_fields) / sizeof(identifier_fields[0]);
+    } else if (kind == RA_SETTINGS_MORSE) {
+        fields = morse_fields;
+        count = sizeof(morse_fields) / sizeof(morse_fields[0]);
+    } else if (kind == RA_SETTINGS_SPEECH) {
+        fields = speech_fields;
+        count = sizeof(speech_fields) / sizeof(speech_fields[0]);
+    }
     struct ra_node_settings node;
     struct ra_identifier_settings id;
-    void *destination = identifier ? (void *)&id : (void *)&node;
+    void *destination = kind == RA_SETTINGS_NODE ? (void *)&node : (void *)&id;
     for (size_t i = 0; i < count; ++i) {
         if (!strcmp(key, fields[i].name)) {
             return assign(&fields[i], value, destination) ? NULL : "invalid option value";
@@ -147,6 +201,41 @@ static const char *resolve(const struct field *fields, size_t fields_count,
     for (size_t i = 0; i < fields_count; ++i) {
         const char *text =
             ra_config_lookup(entries, count, fields[i].name, scopes[0], scopes[1], scopes[2]);
+        if (text && !assign(&fields[i], text, output)) {
+            return fields[i].name;
+        }
+    }
+    return NULL;
+}
+
+/** @brief Apply one flat or node-qualified default section without allocation.
+ * @param fields Schema descriptors.
+ * @param fields_count Descriptor count.
+ * @param entries Parsed configuration.
+ * @param count Entry count.
+ * @param prefix Flat section name.
+ * @param node Optional node name.
+ * @param output Temporary typed settings.
+ * @return Invalid option name or null.
+ */
+static const char *resolve_prefixed(const struct field *fields, size_t fields_count,
+                                    const struct ra_config_entry *entries, size_t count,
+                                    const char *prefix, const char *node, void *output) {
+    size_t prefix_length = strlen(prefix);
+    size_t node_length = node ? strlen(node) : 0;
+    for (size_t i = 0; i < fields_count; ++i) {
+        const char *text = NULL;
+        for (size_t entry = 0; entry < count; ++entry) {
+            const char *section = entries[entry].section;
+            bool matches = !strcmp(section, prefix) ||
+                           (node && !strncmp(section, prefix, prefix_length) &&
+                            section[prefix_length] == ' ' &&
+                            !strncmp(section + prefix_length + 1, node, node_length) &&
+                            !section[prefix_length + node_length + 1]);
+            if (matches && !strcmp(entries[entry].key, fields[i].name)) {
+                text = entries[entry].value;
+            }
+        }
         if (text && !assign(&fields[i], text, output)) {
             return fields[i].name;
         }
@@ -180,11 +269,29 @@ const char *ra_identifier_settings_resolve(const struct ra_config_entry *entries
                                            const char *node, const char *set,
                                            struct ra_identifier_settings *result) {
     struct ra_identifier_settings temporary = {
-        600000, 0, false, false, "", "", "en_US-lessac-medium.onnx", 100, "", 20, 800};
-    const char *scopes[] = {"identifier", node, set};
+        600000, 0, false, false, "", "", "en_US-lessac-medium.onnx", 100, 0, "", 20, 800, -6};
+    const char *scopes[] = {"identifier", NULL, NULL};
     const char *error =
         resolve(identifier_fields, sizeof(identifier_fields) / sizeof(identifier_fields[0]),
                 entries, count, scopes, &temporary);
+    if (!error && node) {
+        error = resolve_prefixed(identifier_fields,
+                                 sizeof(identifier_fields) / sizeof(identifier_fields[0]), entries,
+                                 count, "identifier", node, &temporary);
+    }
+    if (!error) {
+        error = resolve_prefixed(speech_fields, sizeof(speech_fields) / sizeof(speech_fields[0]),
+                                 entries, count, "speech", node, &temporary);
+    }
+    if (!error) {
+        error = resolve_prefixed(morse_fields, sizeof(morse_fields) / sizeof(morse_fields[0]),
+                                 entries, count, "morse", node, &temporary);
+    }
+    if (!error && set) {
+        const char *set_scopes[] = {NULL, NULL, set};
+        error = resolve(identifier_fields, sizeof(identifier_fields) / sizeof(identifier_fields[0]),
+                        entries, count, set_scopes, &temporary);
+    }
     if (!error) {
         *result = temporary;
     }

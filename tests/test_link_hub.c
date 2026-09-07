@@ -7,6 +7,8 @@
 #include <assert.h>
 #include <asterisk.h>
 #include <asterisk/format.h>
+#include <asterisk/lock.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -20,6 +22,36 @@ struct ast_channel {
     bool stopped;              /**< Ownership was released. */
     struct ra_link_peer *peer; /**< Reader state retained by the routing hub. */
 };
+/** @brief Return no negotiated format for the transport fixture.
+ * @param channel Unused fixture channel.
+ * @return Null; the fixture uses the supplied local format.
+ */
+struct ast_format *ast_channel_readformat(struct ast_channel *channel) {
+    (void)channel;
+    return NULL;
+}
+/** @brief The fixture has no alternate cached linear formats.
+ * @param sample_rate Requested rate.
+ * @return Null.
+ */
+struct ast_format *ast_format_cache_get_slin_by_rate(unsigned int sample_rate) {
+    return sample_rate == 8000 ? (struct ast_format *)(uintptr_t)1 : NULL;
+}
+/** @brief Release an optional cached-format fixture reference.
+ * @param object Unused object.
+ * @param tag Unused allocation tag.
+ * @param file Unused source file.
+ * @param line Unused source line.
+ * @param function Unused source function.
+ */
+void __ao2_cleanup_debug(void *object, const char *tag, const char *file, int line,
+                         const char *function) {
+    (void)object;
+    (void)tag;
+    (void)file;
+    (void)line;
+    (void)function;
+}
 /** @brief Allocation sequence. */
 static unsigned int allocations;
 /** @brief Selected failed allocation. */
@@ -160,7 +192,12 @@ int __wrap_pthread_join(pthread_t thread, void **result) {
  * @return Zero.
  */
 int __wrap_nanosleep(const struct timespec *delay, struct timespec *remaining) {
-    assert(delay->tv_nsec == 50000000 && !remaining && !locked);
+    assert(!remaining && !locked);
+    if (delay->tv_nsec == 1000000) {
+        atomic_store(&managed->readers, 0);
+        return 0;
+    }
+    assert(delay->tv_nsec == 50000000);
     atomic_store(&managed->stop, true);
     return 0;
 }
@@ -187,7 +224,7 @@ void ra_link_peer_stop(struct ra_link_peer *peer) {
 }
 
 bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samples) {
-    assert(locked);
+    assert(!locked);
     for (size_t i = 0; i < samples; ++i) {
         audio[i] = peer->channel->active ? peer->channel->input : 0;
     }
@@ -195,11 +232,18 @@ bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samp
 }
 
 int ra_link_peer_send(struct ra_link_peer *peer, bool keyed, const int16_t *audio, size_t samples) {
-    assert(locked && samples);
+    assert(!locked && samples);
     peer->channel->keyed = keyed;
     peer->channel->output = audio[0];
     return failure == 3 ? -1 : 0;
 }
+
+/** @cond TEST_FIXTURE */
+int ra_link_peer_send_digit(struct ra_link_peer *peer, char digit) {
+    assert(locked && strchr("0123456789ABCD*#", digit));
+    return atomic_load(&peer->ended) ? -1 : 0;
+}
+/** @endcond */
 
 /** @brief Accept a recovery callback without creating a transport.
  * @param context Unused callback context.
@@ -225,7 +269,7 @@ int main(void) {
     assert(!ra_link_hub_disconnect_all(&hub));
     struct ast_channel first = {.active = true, .input = 100};
     struct ast_channel second = {.active = true, .input = 200};
-    for (failed_allocation = 1; failed_allocation <= 4; ++failed_allocation) {
+    for (failed_allocation = 1; failed_allocation <= 6; ++failed_allocation) {
         allocations = 0;
         assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false) == -1);
         ra_link_hub_close(&hub);
@@ -238,10 +282,11 @@ int main(void) {
     failure = 0;
     assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false));
     assert(ra_link_hub_count(&hub) == 1);
+    assert(ra_link_hub_connected(&hub, "1"));
+    assert(!ra_link_hub_send_digit(&hub, "1", '1'));
+    assert(ra_link_hub_send_digit(&hub, "missing", '1') == -1);
+    assert(!ra_link_hub_connected(&hub, "missing"));
     assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false) == -1);
-    rate = 16000;
-    assert(ra_link_hub_attach(&hub, "2", &second, NULL, true, true, false) == -1);
-    rate = 8000;
     assert(!ra_link_hub_attach(&hub, "2", &second, NULL, true, true, false));
     struct ra_controller controller = {.rate = 8000, .full_duplex = true};
     assert(ra_controller_start(&controller, 0));
@@ -260,6 +305,7 @@ int main(void) {
     assert(ra_link_hub_process(&hub, &controller, true, audio, 1, 60));
     assert(audio[0] == INT16_MIN && second.output == INT16_MIN);
     assert(!ra_link_hub_disconnect(&hub, "missing"));
+    atomic_store(&hub.readers, 1);
     assert(ra_link_hub_disconnect(&hub, "1") && first.stopped);
     first.input = 100;
     second.input = 200;

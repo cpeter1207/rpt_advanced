@@ -15,6 +15,16 @@
  */
 const char *ra_settings_validate(bool identifier, const char *key, const char *value);
 
+/** @brief Validate an option for a node, identifier, Morse, or speech section. */
+enum ra_settings_kind {
+    RA_SETTINGS_NODE,
+    RA_SETTINGS_IDENTIFIER,
+    RA_SETTINGS_MORSE,
+    RA_SETTINGS_SPEECH
+};
+const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *key,
+                                      const char *value);
+
 /** @brief One node's controller and media settings. Strings are borrowed. */
 struct ra_node_settings {
     bool enabled;         /**< Start this node's controller. */
@@ -40,9 +50,11 @@ struct ra_identifier_settings {
     const char *speech_text;     /**< Piper text; empty disables speech. */
     const char *speech_model;    /**< Local Piper model path. */
     uint64_t speech_speed_percent; /**< Playback speaking rate relative to the model default. */
+    int64_t speech_level_db;       /**< Gain applied only to synthesized speech. */
     const char *morse_text;        /**< Terminal fallback text; empty disables Morse. */
     uint64_t morse_speed_wpm;      /**< Morse speed in PARIS words per minute. */
     uint64_t morse_frequency_hz;   /**< Morse tone frequency; runtime also checks Nyquist. */
+    int64_t morse_level_db;        /**< Morse tone level relative to full-scale PCM. */
 };
 
 /** @brief Resolve node settings without modifying the output on failure.
@@ -58,7 +70,7 @@ const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size
 /** @brief Resolve ID settings from identifier, node defaults, then the ID set.
  * @param entries Parsed entries with non-null strings.
  * @param count Entry count; zero permits null entries.
- * @param node Scoped identifier-default section, or null.
+ * @param node Node name whose speech and Morse defaults apply, or null.
  * @param set Scoped identifier-set section, or null.
  * @param result Receives settings on success, borrowing entry strings.
  * @return Invalid option name, or null on success; failure leaves result unchanged.

@@ -161,6 +161,16 @@ void ra_runtime_reset_digits(struct ra_runtime *state) {
     ++digit_resets;
 }
 
+/** @cond TEST_FIXTURE */
+int ra_runtime_remote_command(struct ra_runtime *runtime, const char *local, const char *remote,
+                              char digit) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(local, "usb") && !strcmp(remote, "123"));
+    assert(!digit || strchr("0123456789ABCD*", digit));
+    return 0;
+}
+/** @endcond */
+
 /** @brief Track serialized runtime access.
  * @param file Caller file.
  * @param line Caller line.
@@ -688,6 +698,10 @@ int main(void) {
     digit_sink("usb", '1', 100);
     drain_tasks();
     digit_action = RA_LINK_STATUS;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    digit_action = RA_LINK_COMMAND;
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();

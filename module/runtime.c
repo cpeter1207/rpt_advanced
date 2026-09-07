@@ -28,6 +28,7 @@ struct ra_runtime_node {
     struct ra_link_hub links;           /**< Owned network peers and routing buffers. */
     struct ra_link_collector collector; /**< Local DTMF command state. */
     char last_node[64];                 /**< Destination used by the zero-node shorthand. */
+    char remote_node[64];               /**< Direct peer receiving remote-command DTMF. */
     const char *name;                   /**< Borrowed local node name. */
     struct ra_node_settings settings; /**< Borrowed resolved settings retained by configuration. */
     struct ra_controller_id *ids;     /**< Resolved identifier array. */
@@ -108,10 +109,9 @@ static const char *identifiers(struct ra_runtime_node *node, const struct ra_doc
     }
     node->controller.ids = node->ids;
     node->controller.count = count;
-    const char *defaults = ra_document_identifier_defaults(document, name);
     size_t usable = 0;
     for (size_t index = 0; index < count; ++index) {
-        (void)ra_identifier_settings_resolve(document->entries, document->count, defaults,
+        (void)ra_identifier_settings_resolve(document->entries, document->count, name,
                                              ra_document_identifier(document, name, index),
                                              &node->ids[usable].settings);
         int16_t *audio;
@@ -211,6 +211,18 @@ bool ra_runtime_digit(struct ra_runtime *runtime, const char *local, char digit,
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (strcmp(node->name, local)) {
             continue;
+        }
+        if (*node->remote_node) {
+            if (digit == '#') {
+                node->remote_node[0] = '\0';
+                return false;
+            }
+            if (digit && strchr("0123456789ABCD*", digit)) {
+                *operation = (struct ra_link_operation){.action = RA_LINK_COMMAND, .digit = digit};
+                ast_copy_string(operation->remote, node->remote_node, sizeof(operation->remote));
+                return true;
+            }
+            return false;
         }
         char completed[128];
         struct ra_link_command command;
@@ -340,6 +352,28 @@ size_t ra_runtime_link_count(struct ra_runtime *runtime, const char *local) {
         }
     }
     return 0;
+}
+
+int ra_runtime_remote_command(struct ra_runtime *runtime, const char *local, const char *remote,
+                              char digit) {
+    for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
+        if (strcmp(node->name, local)) {
+            continue;
+        }
+        if (!digit) {
+            if (ra_link_hub_connected(&node->links, remote)) {
+                ast_copy_string(node->remote_node, remote, sizeof(node->remote_node));
+                return 0;
+            }
+            return -1;
+        }
+        if (!ra_link_hub_send_digit(&node->links, remote, digit)) {
+            return 0;
+        }
+        node->remote_node[0] = '\0';
+        return -1;
+    }
+    return -1;
 }
 
 bool ra_runtime_authorize(struct ra_runtime *runtime, const char *local, const char *remote,

@@ -16,7 +16,7 @@
 static void duration(const char *text, unsigned int rate, unsigned int speed, size_t expected) {
     struct ra_morse state;
     int16_t output[4096];
-    assert(ra_morse_init(&state, text, rate, speed, 1));
+    assert(ra_morse_init(&state, text, rate, speed, 1, -6));
     size_t total = 0;
     size_t count;
     while ((count = ra_morse_render(&state, output, 4096))) {
@@ -30,13 +30,15 @@ static void duration(const char *text, unsigned int rate, unsigned int speed, si
  */
 int main(void) {
     struct ra_morse state = {.rate = 123};
-    assert(!ra_morse_init(&state, "E", 0, 20, 1));
-    assert(!ra_morse_init(&state, "E", 8000, 0, 1));
-    assert(!ra_morse_init(&state, "E", 8000, 101, 1));
-    assert(!ra_morse_init(&state, "E", 8000, 20, 0));
-    assert(!ra_morse_init(&state, "E", 8000, 20, 4000));
-    assert(!ra_morse_init(&state, "E*", 8000, 20, 1000));
-    assert(!ra_morse_init(&state, "{", 8000, 20, 1000));
+    assert(!ra_morse_init(&state, "E", 0, 20, 1, -6));
+    assert(!ra_morse_init(&state, "E", 8000, 0, 1, -6));
+    assert(!ra_morse_init(&state, "E", 8000, 101, 1, -6));
+    assert(!ra_morse_init(&state, "E", 8000, 20, 0, -6));
+    assert(!ra_morse_init(&state, "E", 8000, 20, 4000, -6));
+    assert(!ra_morse_init(&state, "E", 8000, 20, 1000, -61));
+    assert(!ra_morse_init(&state, "E", 8000, 20, 1000, 1));
+    assert(!ra_morse_init(&state, "E*", 8000, 20, 1000, -6));
+    assert(!ra_morse_init(&state, "{", 8000, 20, 1000, -6));
     assert(state.rate == 123);
     duration("", 8000, 20, 0);
     duration(" \t\r\n", 8000, 20, 0);
@@ -51,30 +53,30 @@ int main(void) {
     duration("E", 3, 100, 0);
     int16_t complete[32768], blocks[32768];
     char changed[] = "E";
-    assert(ra_morse_init(&state, changed, 8000, 20, 1000));
+    assert(ra_morse_init(&state, changed, 8000, 20, 1000, -6));
     changed[0] = '*';
     assert(ra_morse_render(&state, complete, 32768) == 0);
     assert(ra_morse_render(&state, complete, 32768) == 0);
-    assert(ra_morse_init(&state, "E T I", 8000, 20, 1000));
+    assert(ra_morse_init(&state, "E T I", 8000, 20, 1000, -6));
     assert(ra_morse_render(&state, NULL, 0) == 0);
     size_t length = ra_morse_render(&state, complete, 32768);
     assert(length == 10080);
     /* A 1 kHz tone at 8 kHz repeats every eight samples; gaps are exact zero. */
-    assert(complete[2] > 16380 && complete[6] < -16380);
+    assert(complete[2] > 16400 && complete[6] < -16400);
     for (size_t i = 0; i < 472; ++i) {
         assert(complete[i] == complete[i + 8]);
     }
     for (size_t i = 480; i < 3840; ++i) {
         assert(complete[i] == 0);
     }
-    assert(ra_morse_init(&state, "E T I", 8000, 20, 1000));
+    assert(ra_morse_init(&state, "E T I", 8000, 20, 1000, -6));
     size_t total = 0, count;
     while ((count = ra_morse_render(&state, blocks + total, 37))) {
         total += count;
     }
     assert(total == length && memcmp(complete, blocks, length * sizeof(*blocks)) == 0);
     assert(ra_morse_init(&state, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/.,?-=+@()'!\":;_$&", 8000,
-                         100, 1000));
+                         100, 1000, -6));
     while (ra_morse_render(&state, blocks, 32768)) {
     }
     puts("streaming Morse timing and PCM tests passed");

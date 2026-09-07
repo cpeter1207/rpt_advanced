@@ -19,7 +19,7 @@ verification remains unfinished. Do not use it for unattended operation.
 On Debian 12 or 13, with the ASL3 package repository configured:
 
 ```sh
-sudo apt-get install build-essential asl3-asterisk-dev ffmpeg
+sudo apt-get install build-essential asl3-asterisk-dev ffmpeg libsamplerate0-dev
 make -j2
 sudo make prefix=/usr install
 ```

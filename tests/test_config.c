@@ -32,6 +32,15 @@ static void test_values(void) {
     assert(ra_config_unsigned("0010", 10, 10, &value) && value == 10);
     assert(!ra_config_unsigned("9", 10, 20, &value) && value == 10);
     assert(!ra_config_unsigned("21", 10, 20, &value) && value == 10);
+    int64_t signed_value = 42;
+    assert(ra_config_signed("-60", -60, 0, &signed_value) && signed_value == -60);
+    assert(ra_config_signed("-9223372036854775808", INT64_MIN, INT64_MAX, &signed_value) &&
+           signed_value == INT64_MIN);
+    assert(ra_config_signed("0", -60, 0, &signed_value) && !signed_value);
+    assert(!ra_config_signed("-61", -60, 0, &signed_value) && !signed_value);
+    assert(!ra_config_signed("1", -60, 0, &signed_value) && !signed_value);
+    assert(!ra_config_signed("+1", -60, 0, &signed_value) && !signed_value);
+    assert(!ra_config_signed("", -60, 0, &signed_value) && !signed_value);
     const char *yes[] = {"yes", "Yes", "yEs", "yeS", "YES"};
     const char *no[] = {"no", "No", "nO", "NO"};
     const char *bad[] = {"", "1", "true", "xes", "yxs", "yex", "xo", "nx", "yes ", "no "};

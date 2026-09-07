@@ -20,6 +20,7 @@ typedef void (*ra_digit_handler)(const char *node, char digit, uint64_t now_ms);
 struct ra_link_operation {
     enum ra_link_action action; /**< Requested linking action. */
     char remote[64];            /**< Decimal destination, resolved from zero shorthand if needed. */
+    char digit;                 /**< Remote-mode digit, or zero when selecting the remote peer. */
 };
 /** @brief Owned call preparation, independent of runtime configuration lifetime. */
 struct ra_link_dial {
@@ -124,6 +125,16 @@ size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local);
  * @return Number of attached peers, or zero for an unknown node.
  */
 size_t ra_runtime_link_count(struct ra_runtime *runtime, const char *local);
+
+/** @brief Select or feed one directly connected remote-command peer.
+ * @param runtime Active runtime; caller serializes it with reload and control commands.
+ * @param local Local node name.
+ * @param remote Directly connected, already authorized remote node.
+ * @param digit Zero selects remote mode; otherwise queues one DTMF digit.
+ * @return Zero on success, minus one if the selected peer is unavailable.
+ */
+int ra_runtime_remote_command(struct ra_runtime *runtime, const char *local, const char *remote,
+                              char digit);
 
 /** @brief Verify the incoming address and apply the destination node's access lists.
  * @param runtime Active runtime; caller serializes with reload.

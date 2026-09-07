@@ -149,6 +149,18 @@ size_t ra_link_hub_count(struct ra_link_hub *hub) {
     return 0;
 }
 
+/** @cond TEST_FIXTURE */
+int ra_link_hub_send_digit(struct ra_link_hub *hub, const char *name, char digit) {
+    assert(hub && !strcmp(name, "123") && strchr("0123456789ABCD*", digit));
+    return link_error == 6 ? -1 : 0;
+}
+
+bool ra_link_hub_connected(struct ra_link_hub *hub, const char *name) {
+    assert(hub && !strcmp(name, "123"));
+    return link_error != 6;
+}
+/** @endcond */
+
 void ra_link_hub_close(struct ra_link_hub *hub) { assert(hub); }
 
 void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsigned int selected,
@@ -384,6 +396,27 @@ int main(void) {
     assert(!ra_runtime_authorize(&runtime, "alpha", "123", "127.0.0.1"));
     link_error = 0;
     assert(!connect_fixture(&runtime, "alpha"));
+    assert(digits_fixture(&runtime, "*4123#", &operation));
+    assert(operation.action == RA_LINK_COMMAND && !operation.digit &&
+           !strcmp(operation.remote, "123"));
+    assert(!ra_runtime_remote_command(&runtime, "alpha", operation.remote, operation.digit));
+    assert(ra_runtime_digit(&runtime, "alpha", '5', 200, &operation));
+    assert(operation.action == RA_LINK_COMMAND && operation.digit == '5');
+    assert(!ra_runtime_remote_command(&runtime, "alpha", operation.remote, operation.digit));
+    assert(!ra_runtime_digit(&runtime, "alpha", '#', 300, &operation));
+    assert(!ra_runtime_digit(&runtime, "alpha", '5', 400, &operation));
+    link_error = 6;
+    assert(ra_runtime_remote_command(&runtime, "alpha", "123", 0) == -1);
+    assert(ra_runtime_remote_command(&runtime, "alpha", "123", '1') == -1);
+    link_error = 0;
+    assert(!ra_runtime_remote_command(&runtime, "alpha", "123", 0));
+    assert(!ra_runtime_digit(&runtime, "alpha", 0, 500, &operation));
+    assert(!ra_runtime_digit(&runtime, "alpha", 'Z', 550, &operation));
+    link_error = 6;
+    assert(ra_runtime_digit(&runtime, "alpha", '1', 600, &operation));
+    assert(ra_runtime_remote_command(&runtime, "alpha", operation.remote, operation.digit) == -1);
+    link_error = 0;
+    assert(ra_runtime_remote_command(&runtime, "missing", "123", 0) == -1);
     ra_runtime_stop(&runtime);
     assert(!runtime.nodes && !workers && !channels);
     entries[1].value = "";

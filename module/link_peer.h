@@ -7,28 +7,39 @@
 #include <stdarg.h>
 
 #include "link_audio.h"
-#include <asterisk/lock.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 struct ast_channel;
 struct ast_format;
+struct ast_trans_pvt;
 
 /** @brief Peer ownership shared by its network reader and hardware-clocked consumer. */
 struct ra_link_peer {
-    struct ast_channel *channel;   /**< Owned after successful start. */
-    struct ast_format *linear;     /**< Borrowed Asterisk PCM cache format. */
-    pthread_t thread;              /**< Joined before resources are freed. */
-    ast_mutex_t lock;              /**< Protects receive PCM and radio-control state. */
-    atomic_bool stop;              /**< Reader shutdown request. */
-    atomic_bool ended;             /**< Reader observed hangup or a transport error. */
-    struct ra_link_audio received; /**< Bounded decoded network samples. */
-    bool receiving;                /**< Peer currently requests radio transmission. */
-    bool voice_keying;             /**< Voice frames determine carrier after NEWKEY1. */
-    bool handshake_replied;        /**< Respond to redundant-key negotiation only once. */
-    size_t receive_age;            /**< Radio samples since the last receive activity refresh. */
-    bool transmitting;             /**< Last successfully signaled outgoing key state. */
-    size_t heartbeat_samples;      /**< Radio samples since the last redundant key indication. */
+    struct ast_channel *channel;        /**< Owned after successful start. */
+    struct ast_format *linear;          /**< Borrowed Asterisk PCM cache format. */
+    pthread_t thread;                   /**< Joined before resources are freed. */
+    atomic_bool stop;                   /**< Reader shutdown request. */
+    atomic_bool ended;                  /**< Reader observed hangup or a transport error. */
+    struct ra_link_audio received;      /**< Reader-to-hardware PCM ring. */
+    struct ra_link_audio outgoing;      /**< Hardware-to-reader PCM ring. */
+    int16_t *outgoing_storage;          /**< Owned outbound ring storage. */
+    int16_t *send_buffer;               /**< Reader-owned outbound frame buffer. */
+    struct ast_trans_pvt *decode;       /**< Asterisk codec-to-linear translator. */
+    struct ast_format *decode_format;   /**< Format currently served by decode. */
+    atomic_bool receiving;              /**< Control-frame receive state. */
+    atomic_bool voice_keying;           /**< Voice frames determine carrier after NEWKEY1. */
+    atomic_uint_fast64_t receive_epoch; /**< Reader increments this for each voice frame. */
+    atomic_bool desired_key;            /**< Hardware worker's outbound key state. */
+    atomic_uint_fast64_t sent_samples;  /**< Hardware worker's outbound sample count. */
+    bool handshake_replied;             /**< Respond to redundant-key negotiation only once. */
+    uint64_t seen_epoch;                /**< Consumer's last observed inbound voice epoch. */
+    size_t receive_age;                 /**< Consumer samples since the last voice frame. */
+    bool transmitting;                  /**< Reader's last signaled outgoing key state. */
+    uint64_t heartbeat_samples;         /**< Reader's last outbound heartbeat position. */
+    char digits[64];                    /**< Control-thread-to-reader DTMF ring storage. */
+    atomic_uint digit_head;             /**< Next DTMF slot written by the control executor. */
+    atomic_uint digit_tail;             /**< Next DTMF slot read by the network reader. */
 };
 
 /** @brief Configure Asterisk conversions and start reading a connected peer.
@@ -56,6 +67,14 @@ bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samp
  * @return Zero on success; minus one on signaling/audio failure.
  */
 int ra_link_peer_send(struct ra_link_peer *peer, bool keyed, const int16_t *audio, size_t samples);
+
+/** @brief Queue one remote-command digit for IAX delivery by the peer reader.
+ * @param peer Started peer.
+ * @param digit DTMF character accepted by Asterisk's IAX sender.
+ * @return Zero when queued, minus one after hangup, for an invalid digit, or when full.
+ * The control executor is the sole producer and the network reader is the sole consumer.
+ */
+int ra_link_peer_send_digit(struct ra_link_peer *peer, char digit);
 
 /** @brief Join the reader, unkey, hang up, and release a successfully started peer.
  * @param peer Started peer, called once and with no concurrent sender/consumer.

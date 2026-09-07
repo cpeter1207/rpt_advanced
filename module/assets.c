@@ -6,6 +6,7 @@
 #include "speech.h"
 #include <asterisk.h>
 #include <asterisk/utils.h>
+#include <math.h>
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
@@ -59,6 +60,18 @@ static int16_t *read_pcm(const char *path, size_t *samples) {
     }
     fclose(stream);
     return audio;
+}
+
+/** @brief Apply the validated non-positive synthesis gain before real-time playback.
+ * @param audio Writable signed PCM samples.
+ * @param samples Number of samples.
+ * @param level_db Gain relative to full-scale PCM.
+ */
+static void scale(int16_t *audio, size_t samples, int64_t level_db) {
+    double gain = pow(10.0, level_db / 20.0);
+    for (size_t i = 0; i < samples; ++i) {
+        audio[i] = (int16_t)lround(audio[i] * gain);
+    }
 }
 
 /** @brief Convert an opened source using an exclusively created output file.
@@ -117,6 +130,9 @@ void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsign
             if (wave) {
                 *audio = convert(wave, rate, samples);
                 fclose(wave);
+                if (*audio) {
+                    scale(*audio, *samples, settings->speech_level_db);
+                }
             }
         }
         unlink(path);

@@ -246,12 +246,24 @@ int main(void) {
     allocation_error = true;
     assert(!ra_media_offer(&formats[4]));
     allocation_error = false;
+    assert(!ra_media_offer(NULL));
+    struct ast_format zero_rate_radio = {0};
+    assert(!ra_media_offer(&zero_rate_radio));
+    formats[3].rate = 0;
+    assert(ra_media_offer(&formats[4]) == &capability);
+    ao2_cleanup(&capability);
+    formats[3].rate = codecs[3].sample_rate;
+    formats[3].rate = 4000;
+    assert(ra_media_offer(&formats[4]) == &capability);
+    ao2_cleanup(&capability);
+    formats[3].rate = codecs[3].sample_rate;
     append_error = true;
     assert(!ra_media_offer(&formats[4]) && !capability.references);
     append_error = false;
+    /* Offer all concrete audio formats that have bidirectional native paths. */
     blocked_source = &formats[3];
     assert(ra_media_offer(&formats[4]) == &capability);
-    assert(capability.count > 0);
+    assert(capability.count == 5);
     ao2_cleanup(&capability);
     assert(!codec_references);
     for (size_t i = 0; i < sizeof(formats) / sizeof(*formats); ++i) {

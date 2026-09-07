@@ -38,8 +38,9 @@ static const char *pattern(char character) {
 }
 
 bool ra_morse_init(struct ra_morse *state, const char *text, unsigned int rate, unsigned int speed,
-                   unsigned int frequency) {
-    if (!rate || !speed || speed > 100 || !frequency || frequency >= rate / 2.0) {
+                   unsigned int frequency, int level_db) {
+    if (!rate || !speed || speed > 100 || !frequency || frequency >= rate / 2.0 || level_db < -60 ||
+        level_db > 0) {
         return false;
     }
     for (const char *cursor = text; *cursor; ++cursor) {
@@ -54,6 +55,7 @@ bool ra_morse_init(struct ra_morse *state, const char *text, unsigned int rate, 
                                .pattern = "",
                                .rate = rate,
                                .speed = speed,
+                               .amplitude = (int16_t)lround(32767.0 * pow(10.0, level_db / 20.0)),
                                .step = (double)frequency / rate};
     return true;
 }
@@ -112,7 +114,7 @@ size_t ra_morse_render(struct ra_morse *state, int16_t *output, size_t capacity)
             continue;
         }
         output[count++] =
-            state->tone ? (int16_t)(16383 * sin(6.283185307179586 * state->phase)) : 0;
+            state->tone ? (int16_t)(state->amplitude * sin(6.283185307179586 * state->phase)) : 0;
         state->phase += state->step;
         if (state->phase >= 1) {
             state->phase -= 1;

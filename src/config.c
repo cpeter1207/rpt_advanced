@@ -28,6 +28,25 @@ bool ra_config_unsigned(const char *text, uint64_t minimum, uint64_t maximum, ui
     return true;
 }
 
+bool ra_config_signed(const char *text, int64_t minimum, int64_t maximum, int64_t *result) {
+    bool negative = *text == '-';
+    uint64_t magnitude;
+    if (negative) {
+        ++text;
+    }
+    if (!ra_config_unsigned(text, 0, negative ? (uint64_t)INT64_MAX + 1 : INT64_MAX, &magnitude)) {
+        return false;
+    }
+    int64_t value = negative
+                        ? (magnitude == (uint64_t)INT64_MAX + 1 ? INT64_MIN : -(int64_t)magnitude)
+                        : (int64_t)magnitude;
+    if (value < minimum || value > maximum) {
+        return false;
+    }
+    *result = value;
+    return true;
+}
+
 bool ra_config_boolean(const char *text, bool *result) {
     if (strlen(text) == 3 && (text[0] == 'y' || text[0] == 'Y') &&
         (text[1] == 'e' || text[1] == 'E') && (text[2] == 's' || text[2] == 'S')) {

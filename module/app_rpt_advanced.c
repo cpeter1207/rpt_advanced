@@ -145,9 +145,15 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
     case RA_LINK_RECONNECT_ALL:
         /* Permanent peers reconnect themselves after transport failure. */
         return 0;
-    case RA_LINK_COMMAND:
-        ast_log(LOG_NOTICE, "rpt_advanced: remote command forwarding is not available\n");
-        return -1;
+    case RA_LINK_COMMAND: {
+        ast_mutex_lock(&runtime_lock);
+        int remote_result =
+            revision == atomic_load(&runtime_revision)
+                ? ra_runtime_remote_command(&runtime, local, operation->remote, operation->digit)
+                : -1;
+        ast_mutex_unlock(&runtime_lock);
+        return remote_result;
+    }
     default:
         return -1;
     }
