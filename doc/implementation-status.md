@@ -30,6 +30,11 @@
   local repeat, and PTT/hang policy. Sequence tests cover half-duplex deferral,
   receive interruption, priority satisfaction, and first-key identification after
   inactivity. It is not yet connected to a live channel worker.
+- Joinable channel worker driven by channel readiness, with monotonic ID timing,
+  bounded shutdown checks, and unkey/hangup before releasing controller state.
+  Tests cover injected failures and real threads driven by pipe-based hardware
+  events, including stop and replacement with a different controller. Module
+  configuration loading does not yet start these workers.
 - Shared, node, and ID-set configuration-value inheritance, including explicit
   empty overrides and scope independence from file order.
 - In-place configuration-line syntax parsing, including whitespace, semicolon
