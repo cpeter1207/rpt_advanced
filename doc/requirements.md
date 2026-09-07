@@ -50,6 +50,13 @@ Speech and Morse have configured text and speed; Morse also has a per-set tone
 frequency. Piper is the default offline speech engine behind a replaceable
 adapter. No other engine is implemented now.
 
+The default Piper voice is `en_US-lessac-medium`; its local model path is
+configurable. Testing on 524950 may use the already installed
+`/usr/lib/piper-tts/voices/en_US-amy-low.onnx` without installing another voice.
+Automatic sample-rate selection chooses the highest mutually supported rate up
+to the detected hardware-native rate. CM119 is the initial supported hardware.
+Explicit rates remain supported where Asterisk provides the required conversions.
+
 ## Reference material
 
 - [app_rpt configuration](https://allstarlink.github.io/config/rpt_conf/)

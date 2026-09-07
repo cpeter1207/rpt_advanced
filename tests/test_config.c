@@ -6,6 +6,38 @@
 #include <stdio.h>
 #include <string.h>
 
+/** @brief Check syntax, whitespace, comments, and empty overrides. */
+static void test_lines(void) {
+    const struct {
+        const char *text;
+        enum ra_config_line_kind kind;
+        const char *name;
+        const char *value;
+    } cases[] = {
+        {"", RA_CONFIG_EMPTY, NULL, NULL},
+        {" \t\r\n", RA_CONFIG_EMPTY, NULL, NULL},
+        {"; comment", RA_CONFIG_EMPTY, NULL, NULL},
+        {" [ identifier usb welcome ] ; test", RA_CONFIG_SECTION, "identifier usb welcome", NULL},
+        {"[node]", RA_CONFIG_SECTION, "node", NULL},
+        {"[missing", RA_CONFIG_INVALID, NULL, NULL},
+        {"[]", RA_CONFIG_INVALID, NULL, NULL},
+        {"[node] trailing", RA_CONFIG_INVALID, NULL, NULL},
+        {"option", RA_CONFIG_INVALID, NULL, NULL},
+        {" = value", RA_CONFIG_INVALID, NULL, NULL},
+        {" speech_text = Hello = world \r\n", RA_CONFIG_OPTION, "speech_text", "Hello = world"},
+        {"speech_text= ; clear", RA_CONFIG_OPTION, "speech_text", ""},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        char line[128];
+        strcpy(line, cases[i].text);
+        char *name;
+        char *value;
+        assert(ra_config_parse_line(line, &name, &value) == cases[i].kind);
+        assert(cases[i].name ? name && strcmp(name, cases[i].name) == 0 : name == NULL);
+        assert(cases[i].value ? value && strcmp(value, cases[i].value) == 0 : value == NULL);
+    }
+}
+
 /** @brief All permutations of shared, node, and set values retain specificity. */
 static void test_order(void) {
     const struct ra_config_entry definitions[] = {
@@ -54,6 +86,7 @@ static void test_clearing_and_missing(void) {
  * @return Zero if every assertion passes.
  */
 int main(void) {
+    test_lines();
     test_order();
     test_clearing_and_missing();
     puts("configuration inheritance tests passed");
