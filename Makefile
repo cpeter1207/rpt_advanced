@@ -7,6 +7,7 @@ WARNINGS := -std=c11 -Wall -Wextra -Wpedantic -Werror
 SOURCES := $(wildcard src/*.c)
 MODULE_SOURCE := module/app_rpt_advanced.c
 MEDIA_SOURCE := module/media.c
+SPEECH_SOURCE := module/speech.c
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
@@ -39,14 +40,14 @@ build/librpt_advanced.a: $(OBJECTS)
 quality: lint static-analysis docs
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) module/media.h $(HEADERS) $(TESTS)
+	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) module/media.h $(HEADERS) $(TESTS)
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
 static-analysis:
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE)
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- -Isrc -std=c11
-	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
+	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
 
 docs: | build
 	doxygen Doxyfile
@@ -74,6 +75,18 @@ build/module-coverage/media.o: $(MEDIA_SOURCE) module/media.h | build/module-cov
 
 build/test_asterisk_media: tests/test_asterisk_media.c build/module-coverage/media.o module/media.h | build
 	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/media.o --coverage -o $@
+
+build/module-coverage/speech.o: $(SPEECH_SOURCE) src/speech.h | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
+
+build/test_speech: tests/test_speech.c build/module-coverage/speech.o src/speech.h | build
+	$(CC) $(MODULE_FLAGS) -Isrc $< build/module-coverage/speech.o --coverage \
+		-Wl,--wrap=posix_spawn_file_actions_init,--wrap=posix_spawn_file_actions_adddup2 \
+		-Wl,--wrap=posix_spawn_file_actions_addclose,--wrap=posix_spawn_file_actions_destroy \
+		-Wl,--wrap=posix_spawnp,--wrap=waitpid,--wrap=kill -o $@
+
+build/test_speech_process: tests/test_speech_process.c build/module-coverage/speech.o src/speech.h | build
+	$(CC) $(WARNINGS) -Isrc $< build/module-coverage/speech.o --coverage -o $@
 
 build/test_%: tests/test_%.c $(COVERAGE_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -lm -o $@
@@ -111,6 +124,7 @@ install-check: all
 	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
 	cmp src/document.h build/stage/usr/include/rpt_advanced/document.h
 	cmp src/schema.h build/stage/usr/include/rpt_advanced/schema.h
+	cmp src/speech.h build/stage/usr/include/rpt_advanced/speech.h
 	cmp COPYING build/stage/usr/share/doc/rpt_advanced/copyright
 	cmp examples/rpt_advanced.conf build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf
 	cmp build/app_rpt_advanced.so build/stage/usr/lib/asterisk/modules/app_rpt_advanced.so

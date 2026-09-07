@@ -10,6 +10,11 @@
 - Asterisk codec-registry selection with bidirectional translation checks and
   hardware-bounded automatic rate selection, tested with deterministic API fixtures.
   This selector is not yet connected to radio startup.
+- Piper process adapter with direct argument execution, file-backed text input,
+  nonblocking completion polling, cancellation, and Asterisk child-reaper
+  coordination. Synthesis output validation and playback remain unfinished.
+  Tests cover injected failures and real subprocess execution with a fixture
+  executable; they do not claim verification of a real Piper voice model.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
 - Shared, node, and ID-set configuration-value inheritance, including explicit
   empty overrides and scope independence from file order.
