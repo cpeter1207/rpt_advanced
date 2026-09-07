@@ -119,6 +119,7 @@ install-check: all
 	cmp src/identifier.h build/stage/usr/include/rpt_advanced/identifier.h
 	cmp src/duplex.h build/stage/usr/include/rpt_advanced/duplex.h
 	cmp src/morse.h build/stage/usr/include/rpt_advanced/morse.h
+	cmp src/playback.h build/stage/usr/include/rpt_advanced/playback.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
 	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h

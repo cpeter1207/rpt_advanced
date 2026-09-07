@@ -7,6 +7,9 @@
 - File/speech/Morse preference policy, including Morse-only reception behavior.
 - Streaming signed-linear Morse renderer with configurable rate, speed, and tone
   frequency; fractional-sample timing and block-independent output tests.
+- Sample-driven prepared-PCM playback with immediate, irreversible Morse fallback
+  on reception. Completion remains terminal, and control events need not consume
+  audio samples. This playback state is not yet connected to radio transport.
 - Asterisk codec-registry selection with bidirectional translation checks and
   hardware-bounded automatic rate selection, tested with deterministic API fixtures.
   This selector is not yet connected to radio startup.
