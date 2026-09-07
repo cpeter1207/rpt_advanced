@@ -6,6 +6,46 @@
 #include <stdio.h>
 #include <string.h>
 
+/** @brief Numeric limits and invalid switches never partially update settings. */
+static void test_values(void) {
+    const char *invalid[] = {"",
+                             "-1",
+                             "+1",
+                             "/",
+                             ":",
+                             "1s",
+                             " 1",
+                             "1 ",
+                             "18446744073709551616",
+                             "99999999999999999999",
+                             "184467440737095516150"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        uint64_t value = 42;
+        assert(!ra_config_unsigned(invalid[i], 0, UINT64_MAX, &value));
+        assert(value == 42);
+    }
+    uint64_t value = 42;
+    assert(ra_config_unsigned("18446744073709551615", 0, UINT64_MAX, &value));
+    assert(value == UINT64_MAX);
+    assert(ra_config_unsigned("0", 0, 0, &value) && value == 0);
+    assert(ra_config_unsigned("0010", 10, 10, &value) && value == 10);
+    assert(!ra_config_unsigned("9", 10, 20, &value) && value == 10);
+    assert(!ra_config_unsigned("21", 10, 20, &value) && value == 10);
+    const char *yes[] = {"yes", "Yes", "yEs", "yeS", "YES"};
+    const char *no[] = {"no", "No", "nO", "NO"};
+    const char *bad[] = {"", "1", "true", "xes", "yxs", "yex", "xo", "nx", "yes ", "no "};
+    bool flag = false;
+    for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); ++i) {
+        assert(ra_config_boolean(yes[i], &flag) && flag);
+    }
+    for (size_t i = 0; i < sizeof(no) / sizeof(no[0]); ++i) {
+        assert(ra_config_boolean(no[i], &flag) && !flag);
+    }
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        assert(!ra_config_boolean(bad[i], &flag) && !flag);
+    }
+}
+
 /** @brief Check syntax, whitespace, comments, and empty overrides. */
 static void test_lines(void) {
     const struct {
@@ -86,6 +126,7 @@ static void test_clearing_and_missing(void) {
  * @return Zero if every assertion passes.
  */
 int main(void) {
+    test_values();
     test_lines();
     test_order();
     test_clearing_and_missing();

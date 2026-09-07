@@ -11,6 +11,8 @@
 - In-place configuration-line syntax parsing, including whitespace, semicolon
   comments, section names, and empty option values. File loading and schema
   validation remain separate work.
+- Bounded unsigned-decimal and explicit yes/no value validation. Invalid values
+  leave their destination unchanged; numeric overflow is rejected.
 - Strict formatting, compiler diagnostics, Cppcheck, Clang-Tidy, Doxygen, and
   per-platform line/branch coverage gates.
 - Doxygen publication to GitHub Pages after the main-branch quality gate passes.
