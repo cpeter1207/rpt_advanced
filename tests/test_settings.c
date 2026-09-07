@@ -1,0 +1,94 @@
+/** @file
+ * @brief Validate resolved defaults, complete schemas, inheritance, and atomic failure.
+ */
+#include "settings.h"
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+/** @brief Default settings require no identifier media or fixed hardware rate. */
+static void defaults(void) {
+    struct ra_node_settings node;
+    struct ra_identifier_settings id;
+    assert(!ra_node_settings_resolve(NULL, 0, "usb", &node));
+    assert(node.enabled && node.full_duplex && node.hang_ms == 0 && node.sample_rate == 0);
+    assert(!strcmp(node.channel, "usb") && !*node.codec);
+    assert(!ra_identifier_settings_resolve(NULL, 0, NULL, NULL, &id));
+    assert(id.interval_ms == 600000 && id.priority == 0);
+    assert(!id.first_key_only && !id.regardless_of_activity);
+    assert(!*id.file && !*id.speech_text && !*id.morse_text);
+    assert(!strcmp(id.speech_model, "en_US-lessac-medium.onnx"));
+    assert(id.speech_speed_percent == 100 && id.morse_speed_wpm == 20 &&
+           id.morse_frequency_hz == 800);
+}
+
+/** @brief Exercise every public option and scoped overrides independent of file order. */
+static void configured(void) {
+    const struct ra_config_entry entries[] = {
+        {"usb", "transmit_hang_ms", "500"},
+        {"general", "transmit_hang_ms", "100"},
+        {"general", "node_enabled", "no"},
+        {"general", "full_duplex", "no"},
+        {"usb", "sample_rate_hz", "48000"},
+        {"usb", "radio_channel", "radio"},
+        {"usb", "codec", "slin48"},
+        {"identifier", "interval_ms", "300000"},
+        {"identifier", "priority", "2"},
+        {"identifier", "first_key_only", "yes"},
+        {"identifier", "regardless_of_activity", "yes"},
+        {"identifier", "sound_file", "/tmp/id.wav"},
+        {"identifier", "speech_text", "Welcome"},
+        {"identifier", "speech_model", "/usr/lib/piper-tts/voices/en_US-amy-low.onnx"},
+        {"identifier", "speech_speed_percent", "90"},
+        {"identifier", "morse_text", "KG0BP"},
+        {"identifier", "morse_speed_wpm", "18"},
+        {"identifier", "morse_frequency_hz", "700"},
+        {"identifier usb", "interval_ms", "200000"},
+        {"identifier usb welcome", "speech_text", ""},
+    };
+    size_t count = sizeof(entries) / sizeof(entries[0]);
+    struct ra_node_settings node;
+    struct ra_identifier_settings id;
+    assert(!ra_node_settings_resolve(entries, count, "usb", &node));
+    assert(!node.enabled && !node.full_duplex && node.hang_ms == 500 && node.sample_rate == 48000);
+    assert(!strcmp(node.channel, "radio") && !strcmp(node.codec, "slin48"));
+    assert(!ra_identifier_settings_resolve(entries, count, "identifier usb",
+                                           "identifier usb welcome", &id));
+    assert(id.interval_ms == 200000 && id.priority == 2 && id.first_key_only &&
+           id.regardless_of_activity);
+    assert(!strcmp(id.file, "/tmp/id.wav") && !*id.speech_text);
+    assert(!strcmp(id.speech_model, "/usr/lib/piper-tts/voices/en_US-amy-low.onnx"));
+    assert(id.speech_speed_percent == 90 && !strcmp(id.morse_text, "KG0BP"));
+    assert(id.morse_speed_wpm == 18 && id.morse_frequency_hz == 700);
+}
+
+/** @brief Every typed setting rejects invalid text without committing earlier fields. */
+static void invalid(void) {
+    const char *node_keys[] = {"node_enabled", "full_duplex", "transmit_hang_ms", "sample_rate_hz"};
+    const char *id_keys[] = {
+        "interval_ms",          "priority",        "first_key_only",    "regardless_of_activity",
+        "speech_speed_percent", "morse_speed_wpm", "morse_frequency_hz"};
+    struct ra_node_settings node = {0};
+    struct ra_identifier_settings id = {0};
+    for (size_t i = 0; i < sizeof(node_keys) / sizeof(node_keys[0]); ++i) {
+        struct ra_config_entry entry = {"usb", node_keys[i], "invalid"};
+        assert(!strcmp(ra_node_settings_resolve(&entry, 1, "usb", &node), node_keys[i]));
+        assert(!node.enabled && !node.channel);
+    }
+    for (size_t i = 0; i < sizeof(id_keys) / sizeof(id_keys[0]); ++i) {
+        struct ra_config_entry entry = {"identifier", id_keys[i], "invalid"};
+        assert(!strcmp(ra_identifier_settings_resolve(&entry, 1, NULL, NULL, &id), id_keys[i]));
+        assert(id.interval_ms == 0 && !id.speech_model);
+    }
+}
+
+/** @brief Execute all settings tests.
+ * @return Zero after successful assertions.
+ */
+int main(void) {
+    defaults();
+    configured();
+    invalid();
+    puts("settings resolution tests passed");
+    return 0;
+}

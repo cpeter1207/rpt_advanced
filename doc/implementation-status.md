@@ -13,6 +13,8 @@
   validation remain separate work.
 - Bounded unsigned-decimal and explicit yes/no value validation. Invalid values
   leave their destination unchanged; numeric overflow is rejected.
+- Typed node and ID settings with shared/node/set inheritance, documented in
+  [configuration](configuration.md), and atomic rejection of invalid values.
 - Strict formatting, compiler diagnostics, Cppcheck, Clang-Tidy, Doxygen, and
   per-platform line/branch coverage gates.
 - Doxygen publication to GitHub Pages after the main-branch quality gate passes.
