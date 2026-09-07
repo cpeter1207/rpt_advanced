@@ -257,11 +257,13 @@ static char *link_cli(struct ast_cli_entry *entry, int command, struct ast_cli_a
  */
 static char *link_cli_compat(struct ast_cli_entry *entry, int command,
                              struct ast_cli_args *arguments) {
-    char *result = link_cli(entry, command, arguments);
     if (command == CLI_INIT) {
         entry->command = "rpt link";
+        entry->usage = "Usage: rpt link {connect|monitor|local-monitor|disconnect} "
+                       "<local-node> <remote-node>\n";
+        return NULL;
     }
-    return result;
+    return link_cli(entry, command, arguments);
 }
 
 /** @brief Administrative linking command; radio DTMF collection is a separate input path. */
