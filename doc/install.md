@@ -69,6 +69,9 @@ audio, identification, and transmitter release with appropriate test equipment.
 No dialplan application call is required: enabled nodes start when the module
 loads. For persistent loading, configure `modules.conf` to load USBRadioPlus
 before `app_rpt_advanced.so`; avoid a conflicting `noload` entry.
+The module declares USBRadioPlus as an optional ordering dependency so Asterisk
+starts the configured driver first. Enabled nodes still require the adapter;
+an entirely disabled configuration can load without a radio driver.
 
 ## Reload and rollback
 

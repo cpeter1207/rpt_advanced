@@ -133,6 +133,8 @@ int main(void) {
         fprintf(stderr, "%s\n", dlerror());
     }
     assert(handle && registered);
+    assert(registered->optional_modules &&
+           !strcmp(registered->optional_modules, "chan_usbradioplus"));
     assert(registered->load() == AST_MODULE_LOAD_DECLINE);
     fail_allocation = true;
     assert(registered->load() == AST_MODULE_LOAD_DECLINE);
