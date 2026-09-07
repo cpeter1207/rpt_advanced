@@ -3,6 +3,7 @@
  * @brief Exercise real POSIX process execution through the Piper adapter.
  */
 #define _GNU_SOURCE
+#include "assets.h"
 #include "speech.h"
 #include <assert.h>
 #include <errno.h>
@@ -15,6 +16,33 @@
 
 /** @brief Mock host coordination count; process operations themselves are real. */
 static int reaper;
+static void wave_fixture(FILE *file);
+
+/** @brief Supply Asterisk allocation for the standalone process fixture.
+ * @param size Bytes.
+ * @param file Caller file.
+ * @param line Caller line.
+ * @param function Caller function.
+ * @return Allocated memory.
+ */
+void *__ast_malloc(size_t size, const char *file, int line, const char *function) {
+    (void)file;
+    (void)line;
+    (void)function;
+    return malloc(size);
+}
+/** @brief Supply Asterisk deallocation for the standalone process fixture.
+ * @param pointer Memory.
+ * @param file Caller file.
+ * @param line Caller line.
+ * @param function Caller function.
+ */
+void __ast_free(void *pointer, const char *file, int line, const char *function) {
+    (void)file;
+    (void)line;
+    (void)function;
+    free(pointer);
+}
 /** @brief Enter host child ownership. */
 void ast_replace_sigchld(void) { ++reaper; }
 /** @brief Verify balanced exit from child ownership. */
@@ -61,7 +89,11 @@ static int child(char **arguments) {
     assert(strcmp(input, "Identifier; $(not a command)\n") == 0);
     FILE *output = fopen(arguments[4], "w");
     assert(output);
-    assert(fputs("test output", output) >= 0);
+    if (!strcmp(arguments[2], "wave")) {
+        wave_fixture(output);
+    } else {
+        assert(fputs("test output", output) >= 0);
+    }
     assert(fclose(output) == 0);
     return 0;
 }
@@ -142,6 +174,31 @@ int main(int argc, char **argv) {
     assert(ra_audio_prepare(&state, fileno(input), output_path, 48000) == 0);
     assert(finish(&state) == RA_SPEECH_FAILED);
     assert(fclose(input) == 0);
+    output = fopen(output_path, "wb");
+    assert(output);
+    wave_fixture(output);
+    assert(!fclose(output));
+    struct ra_identifier_settings settings = {
+        .file = output_path, .speech_text = "", .speech_model = "wave", .speech_speed_percent = 50};
+    int16_t *prepared;
+    size_t prepared_count;
+    ra_identifier_prepare(&settings, 16000, &prepared, &prepared_count);
+    assert(prepared && prepared_count == 1600 && prepared[800] >= 999 && prepared[800] <= 1001);
+    free(prepared);
+    assert(!symlink(executable, program));
+    char *search_path;
+    assert(asprintf(&search_path, "%s:/usr/bin:/bin", directory) > 0);
+    assert(!setenv("PATH", search_path, 1));
+    free(search_path);
+    settings.file = "/no/such/identifier.wav";
+    settings.speech_text = "Identifier; $(not a command)\n";
+    ra_identifier_prepare(&settings, 48000, &prepared, &prepared_count);
+    assert(prepared && prepared_count == 4800 && prepared[2400] >= 999 && prepared[2400] <= 1001);
+    free(prepared);
+    settings.speech_model = "fail";
+    ra_identifier_prepare(&settings, 48000, &prepared, &prepared_count);
+    assert(!prepared && !prepared_count && !reaper);
+    assert(!unlink(program));
     assert(unlink(output_path) == 0);
     assert(rmdir(directory) == 0);
     free(executable);

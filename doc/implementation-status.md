@@ -9,7 +9,7 @@
   frequency; fractional-sample timing and block-independent output tests.
 - Sample-driven prepared-PCM playback with immediate, irreversible Morse fallback
   on reception. Completion remains terminal, and control events need not consume
-  audio samples. This playback state is not yet connected to radio transport.
+  audio samples. This playback state is connected to radio transport.
 - Asterisk frame-exchange boundary that sends one transmit block per received
   voice block, including silence. Carrier events change state without advancing
   audio. API-fixture tests cover ownership, malformed frames, and output failures;
@@ -26,12 +26,16 @@
   The module's reservation path uses this selector.
 - Piper process adapter with direct argument execution, file-backed text input,
   nonblocking completion polling, cancellation, and Asterisk child-reaper
-  coordination. Synthesis output validation and playback remain unfinished.
+  coordination. Prepared output is validated and bound to scheduled playback.
   Tests cover injected failures and real subprocess execution with a fixture
   executable; they do not claim verification of a real Piper voice model.
 - File-backed FFmpeg preparation of mono playback PCM at the chosen rate, sharing
   process lifecycle handling with Piper. A real 22050-to-48000 Hz WAV conversion
   test checks sample count and level; malformed input is rejected.
+- Runtime file-to-speech-to-Morse preparation, checked PCM loading, bounded child
+  execution, and temporary-file cleanup. Unavailable sets without Morse do not
+  occupy a scheduling slot. Tests cover each I/O failure, allocation failure,
+  timeout cancellation, and actual FFmpeg conversion of a fixture synthesizer's WAV.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
 - Integrated node controller joining ID scheduling, prepared PCM/Morse playback,
   local repeat, and PTT/hang policy. Sequence tests cover half-duplex deferral,
@@ -62,8 +66,8 @@
 - Doxygen publication to GitHub Pages after the main-branch quality gate passes.
 
 The build produces a static controller library and `app_rpt_advanced.so`. The
-module starts named radio workers and initializes their inherited Morse IDs.
-File and speech preparation are not yet bound to these workers. Invalid configuration
+module starts named radio workers with inherited, prepared file/speech/Morse IDs.
+Invalid configuration
 leaves running workers untouched; a valid reload stops and replaces them. Failed
 radio startup releases partial resources and attempts to reopen the previous
 configuration, reporting any restoration failure. Lifecycle tests use the real shared library and
@@ -75,7 +79,7 @@ identifier/duplex state sequence. They do not claim live-radio verification.
 ## Not yet implemented
 
 - End-to-end verification of running node audio with the separate USBRadioPlus adapter.
-- Connecting sound-file and Piper preparation to runtime identifier media.
+- Verification using a real Piper voice model, not only the synthesizer fixture.
 - Published project-specific clean/installed test images and release packaging.
   CI uses published rpt_advanced quality images for Debian 12/13 and amd64/arm64.
   These add FFmpeg to the existing ASL3 quality tool environment; they are not
@@ -83,5 +87,5 @@ identifier/duplex state sequence. They do not claim live-radio verification.
 
 Nothing has been installed on a radio node. No app_rpt implementation has been
 copied. USBRadioPlus changes are limited to its separate RadioPlusAdvanced adapter
-and shared-engine integration. They passed the local quality/coverage/install gate
-and are undergoing the native platform checks in USBRadioPlus pull request 16.
+and shared-engine integration. They passed the local and four native-platform
+quality/coverage/install gates and were merged in USBRadioPlus pull request 16.

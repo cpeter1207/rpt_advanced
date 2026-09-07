@@ -2,6 +2,7 @@
 /** @file
  * @brief Node startup, ownership transfer, and complete partial-failure cleanup.
  */
+#include "assets.h"
 #include "connection.h"
 #include "runtime.h"
 #include "schema.h"
@@ -35,6 +36,17 @@ static unsigned int calls;
 static unsigned int starts;
 /** @brief Negotiated linear rate. */
 static unsigned int rate = 16000;
+/** @brief Provide prepared media even when no Morse fallback exists. */
+static bool prepared;
+/** @brief Count usable identifier sets bound to successful worker starts. */
+static size_t seen_ids;
+
+void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsigned int selected,
+                           int16_t **audio, size_t *samples) {
+    assert(settings->morse_text && selected == rate);
+    *audio = prepared ? malloc(sizeof(**audio)) : NULL;
+    *samples = prepared ? 1 : 0;
+}
 
 /** @brief Linker-provided allocation implementation.
  * @param count Element count.
@@ -128,6 +140,7 @@ int ra_worker_start(struct ra_worker *worker) {
         return -1;
     }
     ++workers;
+    seen_ids += worker->controller->count;
     return 0;
 }
 void ra_worker_stop(struct ra_worker *worker) {
@@ -188,6 +201,15 @@ int main(void) {
     assert(workers == 2 && channels == 2);
     ra_runtime_stop(&runtime);
     assert(!runtime.nodes && !workers && !channels);
+    entries[1].value = "";
+    seen_ids = 0;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(!seen_ids);
+    ra_runtime_stop(&runtime);
+    prepared = true;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(seen_ids == 1);
+    ra_runtime_stop(&runtime);
     ra_runtime_stop(&runtime);
     puts("configured node startup and joined resource cleanup passed");
     return 0;
