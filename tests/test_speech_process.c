@@ -6,6 +6,7 @@
 #include "speech.h"
 #include <assert.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,21 @@ static int child(char **arguments) {
     return 0;
 }
 
+/** @brief Write a 100 ms, 22050 Hz PCM WAV, outside Asterisk's WAV reader rates.
+ * @param file Empty temporary file positioned at its beginning.
+ */
+static void wave_fixture(FILE *file) {
+    static const unsigned char header[] = {
+        'R', 'I', 'F', 'F', 0x5e, 0x11, 0,   0,   'W', 'A',  'V',  'E',  'f', 'm',  't',
+        ' ', 16,  0,   0,   0,    1,    0,   1,   0,   0x22, 0x56, 0,    0,   0x44, 0xac,
+        0,   0,   2,   0,   16,   0,    'd', 'a', 't', 'a',  0x3a, 0x11, 0,   0};
+    assert(fwrite(header, 1, sizeof(header), file) == sizeof(header));
+    for (unsigned int sample = 0; sample < 2205; ++sample) {
+        assert(fwrite("\xe8\x03", 1, 2, file) == 2);
+    }
+    rewind(file);
+}
+
 /** @brief Test process startup, stdin, arguments, exit failure, cancellation, and missing Piper.
  * @param argc Argument count; seven identifies the child invocation.
  * @param argv Command-line arguments.
@@ -104,6 +120,27 @@ int main(int argc, char **argv) {
     assert(unlink(program) == 0);
     assert(ra_piper_engine.start(&state, fileno(input), "model", output_path, 50) == ENOENT);
     assert(!reaper && !state.pid);
+    assert(fclose(input) == 0);
+    assert(setenv("PATH", "/usr/bin:/bin", 1) == 0);
+    input = tmpfile();
+    assert(input);
+    wave_fixture(input);
+    assert(ra_audio_prepare(&state, fileno(input), output_path, 0) == EINVAL);
+    assert(ra_audio_prepare(&state, fileno(input), output_path, 48000) == 0);
+    assert(finish(&state) == RA_SPEECH_COMPLETE);
+    output = fopen(output_path, "rb");
+    assert(output);
+    int16_t samples[4801];
+    assert(fread(samples, sizeof(*samples), 4801, output) == 4800);
+    assert(samples[2400] >= 999 && samples[2400] <= 1001);
+    assert(fclose(output) == 0);
+    assert(fclose(input) == 0);
+    input = tmpfile();
+    assert(input);
+    assert(fputs("not an audio file", input) >= 0);
+    rewind(input);
+    assert(ra_audio_prepare(&state, fileno(input), output_path, 48000) == 0);
+    assert(finish(&state) == RA_SPEECH_FAILED);
     assert(fclose(input) == 0);
     assert(unlink(output_path) == 0);
     assert(rmdir(directory) == 0);

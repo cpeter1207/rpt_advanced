@@ -15,6 +15,9 @@
   coordination. Synthesis output validation and playback remain unfinished.
   Tests cover injected failures and real subprocess execution with a fixture
   executable; they do not claim verification of a real Piper voice model.
+- File-backed FFmpeg preparation of mono playback PCM at the chosen rate, sharing
+  process lifecycle handling with Piper. A real 22050-to-48000 Hz WAV conversion
+  test checks sample count and level; malformed input is rejected.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
 - Shared, node, and ID-set configuration-value inheritance, including explicit
   empty overrides and scope independence from file order.
@@ -49,8 +52,9 @@ identifier/duplex state sequence. They do not claim live-radio verification.
 - The USBRadioPlus compatibility adapter and sample-rate negotiation.
 - Sound-file playback, Piper adapter, connecting Morse to transmission, and playback interruption.
 - Published project-specific clean/installed test images and release packaging.
-  CI currently uses existing USBRadioPlus ASL3 quality
-  images as its tool environment, not as rpt_advanced release artifacts.
+  CI uses published rpt_advanced quality images for Debian 12/13 and amd64/arm64.
+  These add FFmpeg to the existing ASL3 quality tool environment; they are not
+  clean-install or installed-release artifacts.
 
 Nothing has been installed on a radio node. No app_rpt implementation has been
 copied. USBRadioPlus has not been modified.

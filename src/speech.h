@@ -37,6 +37,16 @@ struct ra_speech_engine {
 /** @brief Default Piper command-line engine, executed directly without a shell. */
 extern const struct ra_speech_engine ra_piper_engine;
 
+/** @brief Prepare an opened audio file as mono signed 16-bit little-endian PCM.
+ * @param state Child ownership record shared with speech synthesis.
+ * @param input Rewound audio-file descriptor greater than STDERR_FILENO.
+ * @param output Caller-owned temporary output path; existing content is replaced.
+ * @param rate Positive target samples per second selected for playback.
+ * @return Zero on start or a POSIX error number. Poll/cancel with the same lifecycle API.
+ * FFmpeg reads the supplied descriptor without reopening the configured input path.
+ */
+int ra_audio_prepare(struct ra_speech *state, int input, const char *output, unsigned int rate);
+
 /** @brief Poll and reap completed synthesis without waiting for a running child.
  * @param state Owned synthesis process.
  * @return Current status; failed synthesis selects the caller's Morse fallback.
