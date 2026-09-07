@@ -88,6 +88,14 @@ build/module-coverage/runtime.o: $(RUNTIME_SOURCE) $(wildcard module/*.h) $(HEAD
 build/test_runtime: tests/test_runtime.c build/module-coverage/runtime.o $(COVERAGE_OBJECTS) | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -lm -Wl,--wrap=calloc,--wrap=clock_gettime -o $@
 
+build/module-coverage/assets.o: module/assets.c module/assets.h src/speech.h src/settings.h | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
+
+build/test_assets: tests/test_assets.c build/module-coverage/assets.o | build
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/assets.o --coverage \
+		-Wl,--wrap=fopen,--wrap=tmpfile,--wrap=mkstemp,--wrap=fseek,--wrap=ftell \
+		-Wl,--wrap=fputs,--wrap=fflush,--wrap=fread,--wrap=nanosleep -o $@
+
 build/module-coverage/media.o: $(MEDIA_SOURCE) module/media.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
 
@@ -125,8 +133,8 @@ build/test_speech: tests/test_speech.c build/module-coverage/speech.o src/speech
 		-Wl,--wrap=posix_spawn_file_actions_addclose,--wrap=posix_spawn_file_actions_destroy \
 		-Wl,--wrap=posix_spawnp,--wrap=waitpid,--wrap=kill -o $@
 
-build/test_speech_process: tests/test_speech_process.c build/module-coverage/speech.o src/speech.h | build
-	$(CC) $(WARNINGS) -Isrc $< build/module-coverage/speech.o --coverage -o $@
+build/test_speech_process: tests/test_speech_process.c build/module-coverage/speech.o build/module-coverage/assets.o src/speech.h | build
+	$(CC) $(WARNINGS) -Isrc -Imodule $< build/module-coverage/speech.o build/module-coverage/assets.o --coverage -o $@
 
 build/test_%: tests/test_%.c $(COVERAGE_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -lm -o $@

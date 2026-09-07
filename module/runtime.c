@@ -3,6 +3,7 @@
  * @brief Bind named configuration, radio reservations, controllers, and workers.
  */
 #include "runtime.h"
+#include "assets.h"
 #include "connection.h"
 #include "schema.h"
 #include "worker.h"
@@ -30,6 +31,9 @@ void ra_runtime_stop(struct ra_runtime *runtime) {
             ra_worker_stop(&node->worker);
         }
         ra_connection_close(&node->connection);
+        for (size_t index = 0; index < node->controller.count; ++index) {
+            ast_free((void *)node->ids[index].audio);
+        }
         ast_free(node->controller.states);
         ast_free(node->controller.rules);
         ast_free(node->ids);
@@ -60,11 +64,21 @@ static const char *identifiers(struct ra_runtime_node *node, const struct ra_doc
     node->controller.ids = node->ids;
     node->controller.count = count;
     const char *defaults = ra_document_identifier_defaults(document, name);
+    size_t usable = 0;
     for (size_t index = 0; index < count; ++index) {
         (void)ra_identifier_settings_resolve(document->entries, document->count, defaults,
                                              ra_document_identifier(document, name, index),
-                                             &node->ids[index].settings);
+                                             &node->ids[usable].settings);
+        int16_t *audio;
+        ra_identifier_prepare(&node->ids[usable].settings, node->controller.rate, &audio,
+                              &node->ids[usable].samples);
+        node->ids[usable].audio = audio;
+        /* An unavailable set must not repeatedly win and starve playable IDs. */
+        if (audio || *node->ids[usable].settings.morse_text) {
+            ++usable;
+        }
     }
+    node->controller.count = usable;
     return NULL;
 }
 
@@ -82,6 +96,7 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     if (error) {
         return error;
     }
+    node->controller.rate = ast_format_get_sample_rate(node->connection.radio.linear);
     error = identifiers(node, document, name);
     if (error) {
         return error;
@@ -90,7 +105,6 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     if (clock_gettime(CLOCK_MONOTONIC, &now)) {
         return "cannot read monotonic clock";
     }
-    node->controller.rate = ast_format_get_sample_rate(node->connection.radio.linear);
     node->controller.full_duplex = settings->full_duplex;
     node->controller.hang_ms = settings->hang_ms;
     if (!ra_controller_start(&node->controller,
