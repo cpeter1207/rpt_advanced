@@ -1,8 +1,8 @@
 # Configuration model
 
-The settings resolver and streaming syntax reader are implemented; the owned
-configuration builder and running module are still under development. These
-are the supported settings for the resolver.
+The settings resolver, streaming syntax reader, and owned document builder are
+implemented. Node enumeration, whole-file schema validation, and the running
+module are still under development. These are the supported resolver settings.
 
 Semicolons introduce comments. Blank lines are ignored. Options require a
 preceding section. Whitespace around names and values is stripped; a final
