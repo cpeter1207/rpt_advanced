@@ -21,18 +21,21 @@
 
 /** @brief Test-device state, retained until the producer thread has joined. */
 struct fixture {
-    int pipe[2];            /**< Readiness events representing hardware intervals. */
-    pthread_t thread;       /**< Clock producer. */
-    atomic_bool stop;       /**< Stop producer before closing its descriptors. */
-    bool started;           /**< Thread was created successfully. */
-    bool carrier;           /**< Current synthetic receiver indication. */
-    unsigned int ticks;     /**< Voice frames consumed by Asterisk. */
-    unsigned int writes;    /**< Transmit blocks received. */
-    unsigned int nonzero;   /**< Blocks with nonzero output. */
-    unsigned int early;     /**< Nonzero output during initial local reception. */
-    unsigned int keys;      /**< PTT assertions. */
-    unsigned int unkeys;    /**< PTT releases. */
-    struct ast_frame frame; /**< Borrowed read result. */
+    int pipe[2];               /**< Readiness events representing hardware intervals. */
+    pthread_t thread;          /**< Clock producer. */
+    atomic_bool stop;          /**< Stop producer before closing its descriptors. */
+    bool started;              /**< Thread was created successfully. */
+    bool carrier;              /**< Current synthetic receiver indication. */
+    bool media;                /**< Delay reception so a prepared ID starts first. */
+    unsigned int file_blocks;  /**< Recognizable prepared-file blocks before reception. */
+    unsigned int morse_blocks; /**< Negative Morse samples mixed with positive receive PCM. */
+    unsigned int ticks;        /**< Voice frames consumed by Asterisk. */
+    unsigned int writes;       /**< Transmit blocks received. */
+    unsigned int nonzero;      /**< Blocks with nonzero output. */
+    unsigned int early;        /**< Nonzero output during initial local reception. */
+    unsigned int keys;         /**< PTT assertions. */
+    unsigned int unkeys;       /**< PTT releases. */
+    struct ast_frame frame;    /**< Borrowed read result. */
     int16_t audio[AST_FRIENDLY_OFFSET / 2 + 960]; /**< Native-rate PCM and headroom. */
 };
 /** @brief One native signed-linear capability. */
@@ -83,6 +86,7 @@ static struct ast_channel *request(const char *type, struct ast_format_cap *cap,
         return NULL;
     }
     atomic_init(&device->stop, false);
+    device->media = !strcmp(data, "media");
     struct ast_channel *channel = ast_channel_alloc(1, AST_STATE_DOWN, NULL, NULL, "", "", "", ids,
                                                     requestor, 0, "RadioPlusAdvanced/%s", data);
     if (!channel) {
@@ -125,7 +129,9 @@ static int call(struct ast_channel *channel, const char *destination, int timeou
 static struct ast_frame *read_frame(struct ast_channel *channel) {
     struct fixture *device = ast_channel_tech_pvt(channel);
     device->frame = (struct ast_frame){.src = "rpt-test-radio"};
-    if ((!device->ticks && !device->carrier) || (device->ticks == 10 && device->carrier)) {
+    unsigned int begin = device->media ? 10 : 0;
+    if ((device->ticks == begin && !device->carrier) ||
+        (device->ticks == begin + 10 && device->carrier)) {
         device->carrier = !device->carrier;
         device->frame.frametype = AST_FRAME_CONTROL;
         device->frame.subclass.integer =
@@ -167,6 +173,14 @@ static int write_frame(struct ast_channel *channel, struct ast_frame *frame) {
         ast_log(LOG_NOTICE, "rpt_fixture ready %s\n", ast_channel_name(channel));
     }
     const int16_t *samples = frame->data.ptr;
+    bool file = false;
+    bool morse = false;
+    for (int i = 0; i < frame->samples; ++i) {
+        file |= !device->carrier && samples[i] == 2345;
+        morse |= device->carrier && samples[i] < 0;
+    }
+    device->file_blocks += file;
+    device->morse_blocks += morse;
     for (int i = 0; i < frame->samples; ++i) {
         if (samples[i]) {
             ++device->nonzero;
@@ -206,6 +220,10 @@ static int hangup(struct ast_channel *channel) {
     ast_log(LOG_NOTICE, "rpt_fixture %s ticks=%u writes=%u nonzero=%u early=%u keys=%u unkeys=%u\n",
             ast_channel_name(channel), device->ticks, device->writes, device->nonzero,
             device->early, device->keys, device->unkeys);
+    if (device->media) {
+        ast_log(LOG_NOTICE, "rpt_fixture media file=%u morse=%u\n", device->file_blocks,
+                device->morse_blocks);
+    }
     close(device->pipe[0]);
     close(device->pipe[1]);
     ast_channel_tech_pvt_set(channel, NULL);

@@ -5,6 +5,10 @@ Doxygen, unit tests, line/branch coverage, staged installation, and an isolated
 Asterisk process. The test-only radio does not access USB devices and is not an
 installed artifact. It verifies two simultaneous nodes, half/full duplex, Morse
 output, PTT cleanup, and native 48 kHz, 16 kHz linear, and 8 kHz mu-law transport.
+An additional native-rate case prepares a WAV identifier through FFmpeg and
+observes its recognizable PCM at the transmitter. The synthetic receiver then
+asserts carrier; negative Morse samples in the otherwise positive receive audio
+verify replacement of the prepared ID by its Morse fallback inside Asterisk.
 
 ## Prebuilt test images
 
