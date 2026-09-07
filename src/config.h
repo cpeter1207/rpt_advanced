@@ -6,6 +6,25 @@
 
 #include <stddef.h>
 
+/** @brief Result of parsing one configuration line. */
+enum ra_config_line_kind {
+    RA_CONFIG_EMPTY,   /**< Blank line or comment. */
+    RA_CONFIG_SECTION, /**< Section name returned in name. */
+    RA_CONFIG_OPTION,  /**< Option name and value returned. */
+    RA_CONFIG_INVALID  /**< Malformed section or option. */
+};
+
+/** @brief Parse a writable line without allocation or fixed length limits.
+ * @param line Null-terminated line; modified in place.
+ * @param name Receives section or option name, otherwise null.
+ * @param value Receives option value, otherwise null.
+ * @return Line classification; caller supplies the file name and line number in errors.
+ * Semicolon starts a comment. Whitespace surrounding names and values is removed.
+ * Empty option values intentionally clear inherited values. This parses syntax,
+ * not section membership or option-specific ranges.
+ */
+enum ra_config_line_kind ra_config_parse_line(char *line, char **name, char **value);
+
 /** @brief Borrowed configuration entry; strings remain owned by the configuration loader. */
 struct ra_config_entry {
     const char *section; /**< Section name, including any node and ID-set scope. */
