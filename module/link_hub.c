@@ -7,6 +7,7 @@
 #include <asterisk.h>
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
+#include <asterisk/utils.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -164,18 +165,10 @@ size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
     while (hub->ports) {
         char name[32];
         ast_mutex_lock(&routing_lock);
-        struct ra_link_port *port = hub->ports;
-        /* GCOVR_EXCL_START: the manager cannot mutate this list while routing_lock is held. */
-        if (port) {
-            snprintf(name, sizeof(name), "%s", port->name);
-        }
-        /* GCOVR_EXCL_STOP */
+        const struct ra_link_port *port = hub->ports;
+        ast_copy_string(name, port->name, sizeof(name));
         ast_mutex_unlock(&routing_lock);
-        /* GCOVR_EXCL_START: a peer removed concurrently is impossible under the hub lock. */
-        if (!port || !ra_link_hub_disconnect(hub, name)) {
-            break;
-        }
-        /* GCOVR_EXCL_STOP */
+        (void)ra_link_hub_disconnect(hub, name);
         ++count;
     }
     return count;

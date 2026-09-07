@@ -249,8 +249,25 @@ static char *link_cli(struct ast_cli_entry *entry, int command, struct ast_cli_a
     return result ? CLI_FAILURE : CLI_SUCCESS;
 }
 
+/** @brief Compatibility spelling matching the established app_rpt CLI.
+ * @param entry CLI registration metadata.
+ * @param command Asterisk initialization, completion, or execution request.
+ * @param arguments Parsed CLI arguments.
+ * @return Asterisk CLI status.
+ */
+static char *link_cli_compat(struct ast_cli_entry *entry, int command,
+                             struct ast_cli_args *arguments) {
+    char *result = link_cli(entry, command, arguments);
+    if (command == CLI_INIT) {
+        entry->command = "rpt link";
+    }
+    return result;
+}
+
 /** @brief Administrative linking command; radio DTMF collection is a separate input path. */
-static struct ast_cli_entry commands[] = {AST_CLI_DEFINE(link_cli, "Control rpt_advanced links")};
+static struct ast_cli_entry commands[] = {
+    AST_CLI_DEFINE(link_cli, "Control rpt_advanced links"),
+    AST_CLI_DEFINE(link_cli_compat, "Control rpt_advanced links")};
 
 /** @brief Validate and transfer an incoming IAX channel out of its dialplan thread.
  * @param channel Incoming channel owned by the dialplan.
