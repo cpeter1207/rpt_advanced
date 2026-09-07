@@ -5,6 +5,14 @@
 #define RPT_ADVANCED_SETTINGS_H
 #include "config.h"
 
+/** @brief Validate one option against the same schema used for resolution.
+ * @param identifier True selects ID settings; false selects node settings.
+ * @param key Option name.
+ * @param value Trimmed option value.
+ * @return Null on success, or a stable diagnostic for unknown names or invalid values.
+ */
+const char *ra_settings_validate(bool identifier, const char *key, const char *value);
+
 /** @brief One node's controller and media settings. Strings are borrowed. */
 struct ra_node_settings {
     bool enabled;         /**< Start this node's controller. */

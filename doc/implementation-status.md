@@ -18,8 +18,9 @@
 - Streaming file-syntax reader with physical-line diagnostics, unbounded line
   lengths, embedded-null rejection, and builder-error propagation.
 - Owned configuration storage, including empty sections, with complete cleanup
-  on syntax/allocation failures and file-to-settings integration tests. Node
-  enumeration and whole-file schema validation are not yet implemented.
+  on syntax/allocation failures and file-to-settings integration tests.
+- Whole-file option and scope validation, exact node-reference checking, and
+  duplicate-free enumeration of named nodes and their identifier sets.
 - Strict formatting, compiler diagnostics, Cppcheck, Clang-Tidy, Doxygen, and
   per-platform line/branch coverage gates.
 - Doxygen publication to GitHub Pages after the main-branch quality gate passes.
@@ -30,7 +31,7 @@ identifier/duplex state sequence. They do not claim live-radio verification.
 
 ## Not yet implemented
 
-- Configuration file loading, schema validation, and node lifecycle.
+- Runtime node lifecycle and configuration activation/reload.
 - Asterisk module, runtime media capability discovery, and audio transport.
 - The USBRadioPlus compatibility adapter and sample-rate negotiation.
 - Sound-file playback, Piper adapter, Morse generation, and playback interruption.

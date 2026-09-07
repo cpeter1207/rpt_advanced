@@ -4,6 +4,7 @@
 /** @brief Enable memory-backed FILE streams for document tests. */
 #define _GNU_SOURCE
 #include "document.h"
+#include "schema.h"
 #include "settings.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -58,6 +59,13 @@ static void load_and_resolve(void) {
     assert(!ra_document_read(stream, &document, &line));
     size_t attempts = allocations;
     assert(line == 9 && document.section_count == 5 && document.count == 4);
+    const char *section;
+    const char *key;
+    assert(!ra_document_validate(&document, &section, &key));
+    assert(!strcmp(ra_document_node(&document, 0), "usb"));
+    assert(!strcmp(ra_document_node(&document, 1), "other"));
+    assert(!ra_document_node(&document, 2));
+    assert(!strcmp(ra_document_identifier(&document, "usb", 0), "identifier usb welcome"));
     assert(!strcmp(document.sections[2], "other"));
     struct ra_node_settings node;
     struct ra_identifier_settings id;

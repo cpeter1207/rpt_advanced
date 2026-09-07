@@ -72,6 +72,7 @@ install-check: all
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
 	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
 	cmp src/document.h build/stage/usr/include/rpt_advanced/document.h
+	cmp src/schema.h build/stage/usr/include/rpt_advanced/schema.h
 
 platform-verify: all coverage install-check
 
