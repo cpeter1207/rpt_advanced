@@ -6,24 +6,6 @@
 #include <assert.h>
 #include <stdio.h>
 
-/** @brief Exhaust the playback fallback truth table, including receiver interruption. */
-static void test_media(void) {
-    for (unsigned flags = 0; flags < 16; ++flags) {
-        bool rx = (flags & 8) != 0;
-        bool file = (flags & 4) != 0;
-        bool speech = (flags & 2) != 0;
-        bool morse = (flags & 1) != 0;
-        enum ra_id_media expected = morse ? RA_ID_MORSE : RA_ID_NONE;
-        if (!rx && speech) {
-            expected = RA_ID_SPEECH;
-        }
-        if (!rx && file) {
-            expected = RA_ID_FILE;
-        }
-        assert(ra_id_media_select(rx, file, speech, morse) == expected);
-    }
-}
-
 /** @brief Check empty configuration and harmless empty-array activity events. */
 static void test_empty(void) {
     ra_id_activity(NULL, 0);
@@ -95,7 +77,6 @@ static void test_welcome(void) {
  */
 int main(void) {
     test_empty();
-    test_media();
     test_periods();
     test_activity();
     test_welcome();

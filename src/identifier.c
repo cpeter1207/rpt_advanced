@@ -50,16 +50,3 @@ void ra_id_complete(const struct ra_id_rule *rules, struct ra_id_state *states, 
         }
     }
 }
-
-enum ra_id_media ra_id_media_select(bool receiver_active, bool file_available,
-                                    bool speech_available, bool morse_available) {
-    if (!receiver_active) {
-        if (file_available) {
-            return RA_ID_FILE;
-        }
-        if (speech_available) {
-            return RA_ID_SPEECH;
-        }
-    }
-    return morse_available ? RA_ID_MORSE : RA_ID_NONE;
-}

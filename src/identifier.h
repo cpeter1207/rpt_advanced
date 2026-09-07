@@ -24,14 +24,6 @@ struct ra_id_state {
     bool first_key_pending; /**< A qualifying first-key event awaits identification. */
 };
 
-/** @brief Available identifier playback choices, ordered by fallback preference. */
-enum ra_id_media {
-    RA_ID_NONE,   /**< No playable identifier; do not substitute an unrelated message. */
-    RA_ID_FILE,   /**< Configured file is available. */
-    RA_ID_SPEECH, /**< Configured offline speech can be produced. */
-    RA_ID_MORSE   /**< Configured Morse text; the terminal fallback. */
-};
-
 /** @brief Record conversation activity, excluding IDs and transmitter hang time.
  * @param states Node-owned array of identifier state.
  * @param count Number of states; zero permits a null array.
@@ -68,16 +60,5 @@ size_t ra_id_select(const struct ra_id_rule *rules, const struct ra_id_state *st
  */
 void ra_id_complete(const struct ra_id_rule *rules, struct ra_id_state *states, size_t count,
                     size_t selected, uint64_t now_ms);
-
-/** @brief Select playback or its next fallback from currently available sources.
- * @param receiver_active Whether reception requires Morse-only playback.
- * @param file_available Whether the configured sound file is usable.
- * @param speech_available Whether configured speech can be synthesized.
- * @param morse_available Whether Morse text is configured.
- * @return Preferred available medium, or RA_ID_NONE. Re-evaluate on receiver key
- * or playback failure, marking a failed source unavailable for that attempt.
- */
-enum ra_id_media ra_id_media_select(bool receiver_active, bool file_available,
-                                    bool speech_available, bool morse_available);
 
 #endif
