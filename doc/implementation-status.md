@@ -36,6 +36,10 @@
   execution, and temporary-file cleanup. Unavailable sets without Morse do not
   occupy a scheduling slot. Tests cover each I/O failure, allocation failure,
   timeout cancellation, and actual FFmpeg conversion of a fixture synthesizer's WAV.
+- Real-Asterisk two-node audio integration using a test-only 48 kHz radio driver.
+  Tests exercise native linear, 16 kHz linear, and 8 kHz mu-law with actual Asterisk
+  converters; verify half/full-duplex local repeat, Morse output, balanced PTT,
+  and reload-driven channel cleanup. The fixture is not installed by the package.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
 - Integrated node controller joining ID scheduling, prepared PCM/Morse playback,
   local repeat, and PTT/hang policy. Sequence tests cover half-duplex deferral,
@@ -73,8 +77,9 @@ radio startup releases partial resources and attempts to reopen the previous
 configuration, reporting any restoration failure. Lifecycle tests use the real shared library and
 Asterisk's public ABI, including configuration-path allocation and input errors.
 An integration test loads, reloads, and unloads the installed module in an isolated
-Asterisk process with temporary configuration. Other tests include a combined
-identifier/duplex state sequence. They do not claim live-radio verification.
+Asterisk process with temporary configuration and a synthetic radio. Other tests
+include a combined identifier/duplex state sequence. They do not claim physical
+radio or completed USBRadioPlus-to-rpt_advanced integration verification.
 
 ## Not yet implemented
 
