@@ -14,6 +14,7 @@ static void defaults(void) {
     assert(!ra_node_settings_resolve(NULL, 0, "usb", &node));
     assert(node.enabled && node.full_duplex && node.hang_ms == 0 && node.sample_rate == 0);
     assert(!strcmp(node.channel, "usb") && !*node.codec);
+    assert(!*node.link_allow_nodes && !*node.link_deny_nodes);
     assert(!ra_identifier_settings_resolve(NULL, 0, NULL, NULL, &id));
     assert(id.interval_ms == 600000 && id.priority == 0);
     assert(!id.first_key_only && !id.regardless_of_activity);
@@ -33,6 +34,9 @@ static void configured(void) {
         {"usb", "sample_rate_hz", "48000"},
         {"usb", "radio_channel", "radio"},
         {"usb", "codec", "slin48"},
+        {"general", "link_allow_nodes", "508422"},
+        {"usb", "link_allow_nodes", ""},
+        {"general", "link_deny_nodes", "1234, 5678"},
         {"identifier", "interval_ms", "300000"},
         {"identifier", "priority", "2"},
         {"identifier", "first_key_only", "yes"},
@@ -53,6 +57,7 @@ static void configured(void) {
     assert(!ra_node_settings_resolve(entries, count, "usb", &node));
     assert(!node.enabled && !node.full_duplex && node.hang_ms == 500 && node.sample_rate == 48000);
     assert(!strcmp(node.channel, "radio") && !strcmp(node.codec, "slin48"));
+    assert(!*node.link_allow_nodes && !strcmp(node.link_deny_nodes, "1234, 5678"));
     assert(!ra_identifier_settings_resolve(entries, count, "identifier usb",
                                            "identifier usb welcome", &id));
     assert(id.interval_ms == 200000 && id.priority == 2 && id.first_key_only &&
@@ -65,7 +70,8 @@ static void configured(void) {
 
 /** @brief Every typed setting rejects invalid text without committing earlier fields. */
 static void invalid(void) {
-    const char *node_keys[] = {"node_enabled", "full_duplex", "transmit_hang_ms", "sample_rate_hz"};
+    const char *node_keys[] = {"node_enabled",   "full_duplex",      "transmit_hang_ms",
+                               "sample_rate_hz", "link_allow_nodes", "link_deny_nodes"};
     const char *id_keys[] = {
         "interval_ms",          "priority",        "first_key_only",    "regardless_of_activity",
         "speech_speed_percent", "morse_speed_wpm", "morse_frequency_hz"};
@@ -83,6 +89,38 @@ static void invalid(void) {
     }
 }
 
+/** @brief Every command prefix inherits, can be disabled, and rejects ambiguous mappings. */
+static void command_settings(void) {
+    const char *keys[] = {"link_command_disconnect",
+                          "link_command_monitor",
+                          "link_command_transceive",
+                          "link_command_remote",
+                          "link_command_status",
+                          "link_command_disconnect_all",
+                          "link_command_last_keyed",
+                          "link_command_local_monitor",
+                          "link_command_disconnect_permanent",
+                          "link_command_permanent_monitor",
+                          "link_command_permanent_transceive",
+                          "link_command_full_status",
+                          "link_command_reconnect_all",
+                          "link_command_permanent_local_monitor"};
+    for (size_t i = 0; i < RA_LINK_ACTION_COUNT; ++i) {
+        struct ra_config_entry entries[] = {{"general", keys[i], "A"}, {"usb", keys[i], ""}};
+        struct ra_node_settings node;
+        assert(!ra_settings_validate(false, keys[i], "A"));
+        assert(ra_settings_validate(false, keys[i], "invalid"));
+        assert(!ra_node_settings_resolve(entries, 1, "usb", &node));
+        assert(!strcmp(node.link_commands[i].digits, "A"));
+        assert(!ra_node_settings_resolve(entries, 2, "usb", &node));
+        assert(!*node.link_commands[i].digits);
+    }
+    struct ra_config_entry overlap = {"usb", "link_command_disconnect", "3"};
+    struct ra_node_settings node = {0};
+    assert(ra_node_settings_resolve(&overlap, 1, "usb", &node));
+    assert(!node.enabled);
+}
+
 /** @brief Execute all settings tests.
  * @return Zero after successful assertions.
  */
@@ -90,6 +128,7 @@ int main(void) {
     defaults();
     configured();
     invalid();
+    command_settings();
     puts("settings resolution tests passed");
     return 0;
 }

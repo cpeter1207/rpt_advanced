@@ -13,6 +13,7 @@
 #include <asterisk/logger.h>
 #include <asterisk/module.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -24,21 +25,25 @@
 
 /** @brief Test-device state, retained until the producer thread has joined. */
 struct fixture {
-    int pipe[2];               /**< Readiness events representing hardware intervals. */
-    pthread_t thread;          /**< Clock producer. */
-    atomic_bool stop;          /**< Stop producer before closing its descriptors. */
-    bool started;              /**< Thread was created successfully. */
-    bool carrier;              /**< Current synthetic receiver indication. */
-    bool media;                /**< Delay reception so a prepared ID starts first. */
-    unsigned int file_blocks;  /**< Recognizable prepared-file blocks before reception. */
-    unsigned int morse_blocks; /**< Negative Morse samples mixed with positive receive PCM. */
-    unsigned int ticks;        /**< Voice frames consumed by Asterisk. */
-    unsigned int writes;       /**< Transmit blocks received. */
-    unsigned int nonzero;      /**< Blocks with nonzero output. */
-    unsigned int early;        /**< Nonzero output during initial local reception. */
-    unsigned int keys;         /**< PTT assertions. */
-    unsigned int unkeys;       /**< PTT releases. */
-    struct ast_frame frame;    /**< Borrowed read result. */
+    int pipe[2];        /**< Readiness events representing hardware intervals. */
+    pthread_t thread;   /**< Clock producer. */
+    atomic_bool stop;   /**< Stop producer before closing its descriptors. */
+    bool started;       /**< Thread was created successfully. */
+    bool carrier;       /**< Current synthetic receiver indication. */
+    bool media;         /**< Delay reception so a prepared ID starts first. */
+    bool network;       /**< Repeat phased receive bursts during network tests. */
+    bool dtmf;          /**< Generate an on-air connect command, then a disconnect command. */
+    unsigned int phase; /**< Receive phase in a 100-frame network test cycle. */
+    unsigned int remote_blocks; /**< Nonzero transmit blocks while local reception is inactive. */
+    unsigned int file_blocks;   /**< Recognizable prepared-file blocks before reception. */
+    unsigned int morse_blocks;  /**< Negative Morse samples mixed with positive receive PCM. */
+    unsigned int ticks;         /**< Voice frames consumed by Asterisk. */
+    unsigned int writes;        /**< Transmit blocks received. */
+    unsigned int nonzero;       /**< Blocks with nonzero output. */
+    unsigned int early;         /**< Nonzero output during initial local reception. */
+    unsigned int keys;          /**< PTT assertions. */
+    unsigned int unkeys;        /**< PTT releases. */
+    struct ast_frame frame;     /**< Borrowed read result. */
     int16_t audio[AST_FRIENDLY_OFFSET / 2 + 960]; /**< Native-rate PCM and headroom. */
 };
 /** @brief One native signed-linear capability. */
@@ -55,7 +60,8 @@ static struct ast_channel_tech technology;
 static void *clock_run(void *context) {
     struct fixture *device = context;
     const struct timespec interval = {.tv_nsec = 20000000};
-    for (unsigned int tick = 0; tick < 100 && !atomic_load(&device->stop); ++tick) {
+    for (unsigned int tick = 0;
+         tick < (device->network ? 2000U : 100U) && !atomic_load(&device->stop); ++tick) {
         if (write(device->pipe[1], "x", 1) != 1) {
             break;
         }
@@ -90,6 +96,9 @@ static struct ast_channel *request(const char *type, struct ast_format_cap *cap,
     }
     atomic_init(&device->stop, false);
     device->media = !strcmp(data, "media");
+    device->network = !strncmp(data, "network-", 8);
+    device->dtmf = !strcmp(data, "network-dtmf");
+    device->phase = !strcmp(data, "network-b") ? 50 : 0;
     struct ast_channel *channel = ast_channel_alloc(1, AST_STATE_DOWN, NULL, NULL, "", "", "", ids,
                                                     requestor, 0, "RadioPlusAdvanced/%s", data);
     if (!channel) {
@@ -133,8 +142,13 @@ static struct ast_frame *read_frame(struct ast_channel *channel) {
     struct fixture *device = ast_channel_tech_pvt(channel);
     device->frame = (struct ast_frame){.src = "rpt-test-radio"};
     unsigned int begin = device->media ? 10 : 0;
-    if ((device->ticks == begin && !device->carrier) ||
-        (device->ticks == begin + 10 && device->carrier)) {
+    bool carrier = device->network ? device->ticks % 100 >= device->phase &&
+                                         device->ticks % 100 < device->phase + 30
+                                   : device->ticks >= begin && device->ticks < begin + 10;
+    if (device->dtmf) {
+        carrier = true;
+    }
+    if (carrier != device->carrier) {
         device->carrier = !device->carrier;
         device->frame.frametype = AST_FRAME_CONTROL;
         device->frame.subclass.integer =
@@ -148,6 +162,22 @@ static struct ast_frame *read_frame(struct ast_channel *channel) {
         int16_t *audio = device->audio + AST_FRIENDLY_OFFSET / 2;
         for (size_t i = 0; i < 960; ++i) {
             audio[i] = device->carrier ? 1000 : 0;
+            if (device->dtmf) {
+                audio[i] = 0;
+                unsigned int start = device->ticks < 400 ? 100 : 400;
+                const char *sequence = device->ticks < 400 ? "*3508422#" : "*1508422";
+                unsigned int elapsed = device->ticks >= start ? device->ticks - start : 1000;
+                if (elapsed / 10 < strlen(sequence) && elapsed % 10 < 6) {
+                    const char *keypad = "123A456B789C*0#D";
+                    size_t key = (size_t)(strchr(keypad, sequence[elapsed / 10]) - keypad);
+                    const double rows[] = {697, 770, 852, 941};
+                    const double columns[] = {1209, 1336, 1477, 1633};
+                    double phase =
+                        2.0 * 3.14159265358979323846 * ((elapsed % 10) * 960 + i) / 48000;
+                    audio[i] = (int16_t)(4000 * (sin(phase * rows[key / 4]) +
+                                                 sin(phase * columns[key % 4])));
+                }
+            }
         }
         device->frame.frametype = AST_FRAME_VOICE;
         device->frame.subclass.format = ast_format_cache_get_slin_by_rate(48000);
@@ -188,6 +218,7 @@ static int write_frame(struct ast_channel *channel, struct ast_frame *frame) {
         if (samples[i]) {
             ++device->nonzero;
             device->early += device->carrier;
+            device->remote_blocks += !device->carrier;
             break;
         }
     }
@@ -226,6 +257,9 @@ static int hangup(struct ast_channel *channel) {
     if (device->media) {
         ast_log(LOG_NOTICE, "rpt_fixture media file=%u morse=%u\n", device->file_blocks,
                 device->morse_blocks);
+    }
+    if (device->network) {
+        ast_log(LOG_NOTICE, "rpt_fixture network remote=%u\n", device->remote_blocks);
     }
     close(device->pipe[0]);
     close(device->pipe[1]);

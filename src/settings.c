@@ -3,11 +3,12 @@
  * @brief Table-driven settings resolution outside the real-time audio path.
  */
 #include "settings.h"
+#include "link_access.h"
 #include <limits.h>
 #include <string.h>
 
 /** @brief Storage types used by the setting descriptors. */
-enum field_type { FIELD_STRING, FIELD_BOOLEAN, FIELD_NUMBER };
+enum field_type { FIELD_STRING, FIELD_NODE_LIST, FIELD_PREFIX, FIELD_BOOLEAN, FIELD_NUMBER };
 
 /** @brief One schema entry mapping a public name to a typed settings member. */
 struct field {
@@ -26,6 +27,40 @@ static const struct field node_fields[] = {
     {"sample_rate_hz", FIELD_NUMBER, offsetof(struct ra_node_settings, sample_rate), 0, UINT_MAX},
     {"radio_channel", FIELD_STRING, offsetof(struct ra_node_settings, channel), 0, 0},
     {"codec", FIELD_STRING, offsetof(struct ra_node_settings, codec), 0, 0},
+    {"link_allow_nodes", FIELD_NODE_LIST, offsetof(struct ra_node_settings, link_allow_nodes), 0,
+     0},
+    {"link_deny_nodes", FIELD_NODE_LIST, offsetof(struct ra_node_settings, link_deny_nodes), 0, 0},
+    {"link_directory_file", FIELD_STRING, offsetof(struct ra_node_settings, link_directory_file), 0,
+     0},
+    {"link_command_disconnect", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_DISCONNECT].digits), 0, 0},
+    {"link_command_monitor", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_MONITOR].digits), 0, 0},
+    {"link_command_transceive", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_TRANSCEIVE].digits), 0, 0},
+    {"link_command_remote", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_COMMAND].digits), 0, 0},
+    {"link_command_status", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_STATUS].digits), 0, 0},
+    {"link_command_disconnect_all", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_DISCONNECT_ALL].digits), 0, 0},
+    {"link_command_last_keyed", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_LAST_KEYED].digits), 0, 0},
+    {"link_command_local_monitor", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_LOCAL_MONITOR].digits), 0, 0},
+    {"link_command_disconnect_permanent", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_DISCONNECT_PERMANENT].digits), 0, 0},
+    {"link_command_permanent_monitor", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_PERMANENT_MONITOR].digits), 0, 0},
+    {"link_command_permanent_transceive", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_PERMANENT_TRANSCEIVE].digits), 0, 0},
+    {"link_command_full_status", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_FULL_STATUS].digits), 0, 0},
+    {"link_command_reconnect_all", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_RECONNECT_ALL].digits), 0, 0},
+    {"link_command_permanent_local_monitor", FIELD_PREFIX,
+     offsetof(struct ra_node_settings, link_commands[RA_LINK_PERMANENT_LOCAL_MONITOR].digits), 0,
+     0},
 };
 
 /** @brief Identifier schema; media availability is evaluated when preparing playback. */
@@ -57,7 +92,14 @@ static const struct field identifier_fields[] = {
  */
 static bool assign(const struct field *field, const char *text, void *output) {
     unsigned char *destination = (unsigned char *)output + field->offset;
-    if (field->type == FIELD_STRING) {
+    if (field->type <= FIELD_PREFIX) {
+        if (field->type == FIELD_NODE_LIST && !ra_link_access_list_valid(text)) {
+            return false;
+        }
+        struct ra_link_command_mapping mapping = {text, RA_LINK_DISCONNECT};
+        if (field->type == FIELD_PREFIX && ra_link_commands_validate(&mapping, 1)) {
+            return false;
+        }
         *(const char **)destination = text;
     } else if (field->type == FIELD_BOOLEAN) {
         bool value;
@@ -114,10 +156,20 @@ static const char *resolve(const struct field *fields, size_t fields_count,
 
 const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size_t count,
                                      const char *node, struct ra_node_settings *result) {
-    struct ra_node_settings temporary = {true, true, 0, 0, node, ""};
+    struct ra_node_settings temporary = {.enabled = true,
+                                         .full_duplex = true,
+                                         .channel = node,
+                                         .codec = "",
+                                         .link_allow_nodes = "",
+                                         .link_deny_nodes = "",
+                                         .link_directory_file = ""};
+    ra_link_commands_default(temporary.link_commands);
     const char *scopes[] = {"general", node, NULL};
     const char *error = resolve(node_fields, sizeof(node_fields) / sizeof(node_fields[0]), entries,
                                 count, scopes, &temporary);
+    if (!error) {
+        error = ra_link_commands_validate(temporary.link_commands, RA_LINK_ACTION_COUNT);
+    }
     if (!error) {
         *result = temporary;
     }

@@ -4,7 +4,9 @@
  */
 #include <asterisk.h>
 
+#include "link_hub.h"
 #include "worker.h"
+#include "worker_dtmf_fixture.h"
 #include <assert.h>
 #include <asterisk/channel.h>
 #include <errno.h>
@@ -33,6 +35,18 @@ static unsigned int hung_up;
 static unsigned int unkeyed;
 /** @brief Frame-exchange count, never increased by readiness timeouts. */
 static unsigned int exchanged;
+/** @brief Delivered digits and timeout markers. */
+static unsigned int delivered;
+
+/** @brief Verify digit delivery at the hardware event timestamp.
+ * @param node Configured node identity.
+ * @param digit Detected digit or timeout marker.
+ * @param now_ms Hardware event timestamp.
+ */
+static void deliver_digit(const char *node, char digit, uint64_t now_ms) {
+    assert(node && ((digit == '5' && now_ms == 5000) || (!digit && now_ms == 8000)));
+    ++delivered;
+}
 
 /** @brief Capture a joinable thread or inject creation failure.
  * @param thread Receives fixture identity.
@@ -168,8 +182,31 @@ int main(void) {
     next = 0;
     clock_error = 0;
     exchange_error = -1;
+    struct ra_link_hub hub = {0};
+    worker.links = &hub;
     execute();
     assert(worker.result == -1 && hung_up == 5 && exchanged == 2 && unkeyed == 2);
+    worker.name = "alpha";
+    worker.digit = deliver_digit;
+    ra_test_dtmf_fail = true;
+    assert(ra_worker_start(&worker) == ENOMEM);
+    ra_test_dtmf_fail = false;
+    create_error = EAGAIN;
+    assert(ra_worker_start(&worker) == EAGAIN && ra_test_dtmf_closed == 1);
+    create_error = 0;
+    assert(!ra_worker_start(&worker));
+    int16_t audio[160] = {0};
+    worker.now_ms = 5000;
+    ra_test_dtmf_digit = '5';
+    (void)worker.radio.render(&worker, true, audio, 160);
+    ra_test_dtmf_digit = 0;
+    worker.now_ms = 5100;
+    (void)worker.radio.render(&worker, true, audio, 160);
+    worker.now_ms = 8000;
+    (void)worker.radio.render(&worker, true, audio, 160);
+    (void)worker.radio.render(&worker, true, audio, 160);
+    ra_worker_stop(&worker);
+    assert(delivered == 2 && ra_test_dtmf_closed == 2);
     puts("joinable channel worker lifecycle tests passed");
     return 0;
 }

@@ -9,6 +9,7 @@
 #include <asterisk/codec.h>
 #include <asterisk/format.h>
 #include <asterisk/format_cache.h>
+#include <asterisk/format_cap.h>
 #include <asterisk/translate.h>
 #include <limits.h>
 #include <string.h>
@@ -61,4 +62,31 @@ struct ast_format *ra_media_select(struct ast_format *radio, unsigned int rate, 
         }
     }
     return selected;
+}
+
+struct ast_format_cap *ra_media_offer(struct ast_format *radio) {
+    struct ast_format_cap *offer = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT);
+    if (!offer) {
+        return NULL;
+    }
+    int maximum = ast_codec_get_max();
+    for (int index = 0; index < maximum; ++index) {
+        struct ast_codec *codec = ast_codec_get_by_id(index + 1);
+        if (!codec) {
+            continue;
+        }
+        struct ast_format *format =
+            codec->type == AST_MEDIA_TYPE_AUDIO ? ast_format_cache_get_by_codec(codec) : NULL;
+        ao2_cleanup(codec);
+        if (!format) {
+            continue;
+        }
+        int error = bidirectional(format, radio) ? ast_format_cap_append(offer, format, 0) : 0;
+        ao2_cleanup(format);
+        if (error) {
+            ao2_cleanup(offer);
+            return NULL;
+        }
+    }
+    return offer;
 }

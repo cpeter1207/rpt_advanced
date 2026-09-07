@@ -5,6 +5,7 @@
 #ifndef RPT_ADVANCED_SETTINGS_H
 #define RPT_ADVANCED_SETTINGS_H
 #include "config.h"
+#include "link_command.h"
 
 /** @brief Validate one option against the same schema used for resolution.
  * @param identifier True selects ID settings; false selects node settings.
@@ -22,6 +23,11 @@ struct ra_node_settings {
     uint64_t sample_rate; /**< Requested rate; zero selects hardware-bounded automatic mode. */
     const char *channel;  /**< USBRadioPlus channel identifier, without the technology prefix. */
     const char *codec;    /**< Asterisk codec name; empty selects signed linear automatically. */
+    const char *link_allow_nodes; /**< Incoming allowlist; empty accepts all verified nodes. */
+    const char *link_deny_nodes;  /**< Incoming denylist, overriding all access exemptions. */
+    const char
+        *link_directory_file; /**< Optional ASL-format static node directory, checked first. */
+    struct ra_link_command_mapping link_commands[RA_LINK_ACTION_COUNT]; /**< Inherited prefixes. */
 };
 
 /** @brief One ID set after all inheritance has been applied. Strings are borrowed. */

@@ -4,6 +4,9 @@
  */
 #include "assets.h"
 #include "connection.h"
+#include "link_directory.h"
+#include "link_hub.h"
+#include "media.h"
 #include "runtime.h"
 #include "schema.h"
 #include "worker.h"
@@ -12,6 +15,7 @@
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 /** @brief Allocation call selected for failure, zero disables injection. */
@@ -40,6 +44,94 @@ static unsigned int rate = 16000;
 static bool prepared;
 /** @brief Count usable identifier sets bound to successful worker starts. */
 static size_t seen_ids;
+/** @brief Selected link failure: lookup, offer, dial, answer, or attachment. */
+static unsigned int link_error;
+/** @brief Opaque channel and capability identity. */
+static int link_identity;
+/** @brief Number of link channels released after a failed attachment. */
+static unsigned int link_hangups;
+
+char *ra_link_directory_lookup(const char *node, const char *peer_ip, const char *directory_file) {
+    assert(!strcmp(node, "123") && !*directory_file);
+    assert(!peer_ip || !strcmp(peer_ip, "127.0.0.1"));
+    return link_error == 1 ? NULL : strdup("radio@127.0.0.1/123");
+}
+
+struct ast_format_cap *ra_media_offer(struct ast_format *radio) {
+    (void)radio;
+    return link_error == 2 ? NULL : (struct ast_format_cap *)&link_identity;
+}
+
+/** @brief Verify offer ownership is released after dialing.
+ * @param object Fixture capability.
+ * @param tag Debug tag.
+ * @param file Caller file.
+ * @param line Caller line.
+ * @param function Caller function.
+ */
+void __ao2_cleanup_debug(void *object, const char *tag, const char *file, int line,
+                         const char *function) {
+    (void)tag;
+    (void)file;
+    (void)line;
+    (void)function;
+    assert(object == &link_identity);
+}
+
+/** @brief Supply an outbound channel or inject a failed call.
+ * @param type IAX2 technology.
+ * @param cap Offered capability.
+ * @param assignedids Default channel identities.
+ * @param requestor No source channel.
+ * @param addr Resolved directory destination.
+ * @param timeout Bounded dialing timeout.
+ * @param reason Dial result storage.
+ * @param cid_num Local node number.
+ * @param cid_name Local node name.
+ * @return Borrowed fixture identity or null.
+ */
+struct ast_channel *ast_request_and_dial(const char *type, struct ast_format_cap *cap,
+                                         const struct ast_assigned_ids *assignedids,
+                                         const struct ast_channel *requestor, const char *addr,
+                                         int timeout, int *reason, const char *cid_num,
+                                         const char *cid_name) {
+    assert(!strcmp(type, "IAX2") && cap == (struct ast_format_cap *)&link_identity);
+    assert(!assignedids && !requestor && !strcmp(addr, "radio@127.0.0.1/123"));
+    assert(timeout == 20000 && reason && !strcmp(cid_num, "alpha") && !strcmp(cid_name, "alpha"));
+    return link_error == 3 ? NULL : (struct ast_channel *)&link_identity;
+}
+
+/** @brief Return answered or injected unanswered state.
+ * @param channel Fixture channel.
+ * @return Channel state.
+ */
+enum ast_channel_state ast_channel_state(const struct ast_channel *channel) {
+    assert(channel == (struct ast_channel *)&link_identity);
+    return link_error == 4 ? AST_STATE_DOWN : AST_STATE_UP;
+}
+
+/** @brief Count caller-owned channel cleanup.
+ * @param channel Fixture channel.
+ */
+void ast_hangup(struct ast_channel *channel) {
+    assert(channel == (struct ast_channel *)&link_identity);
+    ++link_hangups;
+}
+
+int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
+                       struct ast_format *linear, bool transmit, bool forward) {
+    (void)linear;
+    assert(hub && !strcmp(name, "123") && channel == (struct ast_channel *)&link_identity);
+    assert(transmit && forward);
+    return link_error == 5 ? -1 : 0;
+}
+
+bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
+    assert(hub && !strcmp(name, "123"));
+    return true;
+}
+
+void ra_link_hub_close(struct ra_link_hub *hub) { assert(hub); }
 
 void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsigned int selected,
                            int16_t **audio, size_t *samples) {
@@ -160,6 +252,43 @@ static void rejected(const struct ra_document *document) {
     ra_runtime_stop(&runtime);
 }
 
+/** @brief Exercise the call preparation, transport, and attachment boundaries.
+ * @param runtime Test runtime.
+ * @param local Selected local node.
+ * @return Zero on attachment, minus one on failure.
+ */
+static int connect_fixture(struct ra_runtime *runtime, const char *local) {
+    struct ra_link_dial dial = {0};
+    if (ra_runtime_prepare_link(runtime, local, "123", &dial)) {
+        return -1;
+    }
+    struct ast_channel *channel = ra_link_dial_run(&dial, local);
+    assert(!dial.destination && !dial.offer);
+    if (!channel) {
+        return -1;
+    }
+    int result = ra_runtime_attach_link(runtime, local, "123", channel, true, true);
+    if (result) {
+        ast_hangup(channel);
+    }
+    return result;
+}
+
+/** @brief Feed a DTMF string into a node's real collector.
+ * @param runtime Started runtime.
+ * @param digits Complete test sequence.
+ * @param operation Receives any completed operation.
+ * @return Result of the last digit.
+ */
+static bool digits_fixture(struct ra_runtime *runtime, const char *digits,
+                           struct ra_link_operation *operation) {
+    bool ready = false;
+    for (size_t i = 0; digits[i]; ++i) {
+        ready = ra_runtime_digit(runtime, "alpha", digits[i], 100, operation);
+    }
+    return ready;
+}
+
 /** @brief Exercise multiple nodes, disabled nodes, ID state, and each failure boundary.
  * @return Zero after assertions.
  */
@@ -199,6 +328,40 @@ int main(void) {
     fail_worker = 0;
     assert(!ra_runtime_start(&runtime, &document));
     assert(workers == 2 && channels == 2);
+    struct ra_link_operation operation;
+    assert(!ra_runtime_digit(&runtime, "missing", '*', 0, &operation));
+    assert(!digits_fixture(&runtime, "*30#", &operation));
+    assert(!digits_fixture(&runtime, "*99#", &operation));
+    assert(digits_fixture(&runtime, "*3123#", &operation));
+    assert(operation.action == RA_LINK_TRANSCEIVE && !strcmp(operation.remote, "123"));
+    assert(digits_fixture(&runtime, "*10#", &operation));
+    assert(operation.action == RA_LINK_DISCONNECT && !strcmp(operation.remote, "123"));
+    assert(digits_fixture(&runtime, "*70", &operation));
+    assert(operation.action == RA_LINK_STATUS && !*operation.remote);
+    assert(!digits_fixture(&runtime,
+                           "*31234567890123456789012345678901234567890123456789012345678901234#",
+                           &operation));
+    assert(!digits_fixture(&runtime, "*3", &operation));
+    ra_runtime_reset_digits(&runtime);
+    assert(!digits_fixture(&runtime, "123#", &operation));
+    assert(!ra_runtime_authorize(&runtime, "missing", "123", "127.0.0.1"));
+    assert(ra_runtime_authorize(&runtime, "alpha", "123", "127.0.0.1"));
+    assert(ra_runtime_accept(&runtime, "missing", "123", NULL, true, false) == -1);
+    assert(ra_runtime_accept(&runtime, "alpha", "123", NULL, false, false) == -1);
+    assert(!ra_runtime_accept(&runtime, "alpha", "123", (struct ast_channel *)&link_identity, true,
+                              false));
+    assert(!ra_runtime_disconnect(&runtime, "missing", "123"));
+    assert(ra_runtime_disconnect(&runtime, "alpha", "123"));
+    assert(connect_fixture(&runtime, "missing") == -1);
+    assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true) == -1);
+    for (link_error = 1; link_error <= 5; ++link_error) {
+        assert(connect_fixture(&runtime, "alpha") == -1);
+    }
+    assert(link_hangups == 2);
+    link_error = 1;
+    assert(!ra_runtime_authorize(&runtime, "alpha", "123", "127.0.0.1"));
+    link_error = 0;
+    assert(!connect_fixture(&runtime, "alpha"));
     ra_runtime_stop(&runtime);
     assert(!runtime.nodes && !workers && !channels);
     entries[1].value = "";

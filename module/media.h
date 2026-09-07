@@ -5,6 +5,7 @@
 #ifndef RPT_ADVANCED_MEDIA_H
 #define RPT_ADVANCED_MEDIA_H
 struct ast_format;
+struct ast_format_cap;
 
 /** @brief Find the highest usable rate without a compiled-in codec/rate list.
  * @param radio Detected hardware-native signed-linear format, borrowed.
@@ -15,4 +16,10 @@ struct ast_format;
  * signed-linear identifier generation must be convertible in both directions.
  */
 struct ast_format *ra_media_select(struct ast_format *radio, unsigned int rate, const char *name);
+/** @brief Offer registered audio formats with working conversions to and from local PCM.
+ * @param radio Local signed-linear format.
+ * @return Owned capability set or null on allocation/append failure.
+ * The channel technology further limits this set to its supported wire formats.
+ */
+struct ast_format_cap *ra_media_offer(struct ast_format *radio);
 #endif

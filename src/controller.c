@@ -32,7 +32,7 @@ bool ra_controller_start(struct ra_controller *state, uint64_t now_ms) {
 bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t *audio,
                            size_t samples, uint64_t now_ms) {
     uint64_t idle = now_ms - state->last_activity_ms;
-    if (receiving) {
+    if (receiving || state->link_active) {
         if (!state->receiving) {
             state->key_idle_ms = idle;
         }
@@ -47,8 +47,8 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
     size_t selected = ra_id_select(state->rules, state->states, state->count, now_ms, receiving,
                                    state->full_duplex);
     bool may_transmit = state->full_duplex || !receiving;
-    bool demand = (state->full_duplex && receiving) || state->playing != SIZE_MAX ||
-                  (samples && selected != SIZE_MAX);
+    bool demand = state->link_active || (state->full_duplex && receiving) ||
+                  state->playing != SIZE_MAX || (samples && selected != SIZE_MAX);
     if (may_transmit && demand && !state->duplex.keyed) {
         ra_id_first_key(state->rules, state->states, state->count,
                         state->key_idle_ms > idle ? state->key_idle_ms : idle);
@@ -77,6 +77,9 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
         }
         for (size_t i = 0; i < capacity; ++i) {
             int mixed = state->full_duplex && receiving ? audio[offset + i] : 0;
+            if (may_transmit && state->link_active && state->link_audio) {
+                mixed += state->link_audio[offset + i];
+            }
             if (i < made) {
                 mixed += identifier[i];
             }
@@ -95,6 +98,6 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
         state->playing = SIZE_MAX;
     }
     return ra_duplex_update(&state->duplex, state->full_duplex, receiving,
-                            identifier_audio || (state->playing != SIZE_MAX), now_ms,
-                            state->hang_ms);
+                            state->link_active || identifier_audio || (state->playing != SIZE_MAX),
+                            now_ms, state->hang_ms);
 }

@@ -9,7 +9,9 @@
 #include <asterisk/astobj2.h>
 #include <asterisk/codec.h>
 #include <asterisk/format.h>
+#include <asterisk/format_cap.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdio.h>
 
 /** @brief Minimal opaque format representation owned by this test host. */
@@ -39,6 +41,59 @@ static struct ast_format *blocked_destination;
 static struct ast_format *blocked_source;
 /** @brief Signed-linear identifier format for compressed-codec testing. */
 static struct ast_format linear = {.rate = 48000};
+/** @brief Opaque capability ownership fixture. */
+struct ast_format_cap {
+    int references;     /**< Outstanding ownership. */
+    unsigned int count; /**< Appended formats. */
+};
+/** @brief Single capability returned by the allocator fixture. */
+static struct ast_format_cap capability;
+/** @brief Inject capability allocation failure. */
+static bool allocation_error;
+/** @brief Inject capability append failure. */
+static bool append_error;
+
+/** @brief Allocate a tracked capability or inject failure.
+ * @param flags Expected default flags.
+ * @param tag Debug tag.
+ * @param file Caller file.
+ * @param line Caller line.
+ * @param func Caller function.
+ * @return Tracked capability or null.
+ */
+struct ast_format_cap *__ast_format_cap_alloc(enum ast_format_cap_flags flags, const char *tag,
+                                              const char *file, int line, const char *func) {
+    (void)tag;
+    (void)file;
+    (void)line;
+    (void)func;
+    assert(flags == AST_FORMAT_CAP_FLAG_DEFAULT && !capability.references);
+    capability.count = 0;
+    capability.references = !allocation_error;
+    return allocation_error ? NULL : &capability;
+}
+
+/** @brief Count offered formats without retaining fixture references.
+ * @param cap Tracked capability.
+ * @param format Borrowed format.
+ * @param framing Default framing.
+ * @param tag Debug tag.
+ * @param file Caller file.
+ * @param line Caller line.
+ * @param func Caller function.
+ * @return Injected append status.
+ */
+int __ast_format_cap_append(struct ast_format_cap *cap, struct ast_format *format,
+                            unsigned int framing, const char *tag, const char *file, int line,
+                            const char *func) {
+    (void)tag;
+    (void)file;
+    (void)line;
+    (void)func;
+    assert(cap == &capability && cap->references == 1 && format && !framing);
+    ++cap->count;
+    return append_error ? -1 : 0;
+}
 
 /** @brief Return the registry extent, including one vacant identifier.
  * @return Maximum identifier.
@@ -124,6 +179,11 @@ void __ao2_cleanup_debug(void *object, const char *tag, const char *file, int li
     if (!object) {
         return;
     }
+    if (object == &capability) {
+        assert(capability.references == 1);
+        --capability.references;
+        return;
+    }
     for (size_t i = 0; i < sizeof(codecs) / sizeof(*codecs); ++i) {
         if (object == &codecs[i]) {
             assert(codec_references > 0);
@@ -183,6 +243,20 @@ int main(void) {
     expect(16000, "other", NULL);
     blocked_destination = NULL;
     expect(16000, "other", &formats[1]);
+    allocation_error = true;
+    assert(!ra_media_offer(&formats[4]));
+    allocation_error = false;
+    append_error = true;
+    assert(!ra_media_offer(&formats[4]) && !capability.references);
+    append_error = false;
+    blocked_source = &formats[3];
+    assert(ra_media_offer(&formats[4]) == &capability);
+    assert(capability.count > 0);
+    ao2_cleanup(&capability);
+    assert(!codec_references);
+    for (size_t i = 0; i < sizeof(formats) / sizeof(*formats); ++i) {
+        assert(!formats[i].references);
+    }
     puts("Asterisk runtime media selection tests passed");
     return 0;
 }

@@ -4,8 +4,11 @@
  */
 #include <asterisk.h>
 
+#include "dtmf.h"
+#include "link_hub.h"
 #include "worker.h"
 #include <asterisk/channel.h>
+#include <errno.h>
 #include <time.h>
 
 /** @brief Render using the event timestamp captured by the channel worker.
@@ -17,6 +20,22 @@
  */
 static bool render(void *context, bool receiving, int16_t *audio, size_t samples) {
     struct ra_worker *worker = context;
+    if (worker->detector) {
+        char digit =
+            ra_dtmf_process(worker->detector, worker->radio.linear, receiving, audio, samples);
+        if (digit) {
+            worker->digit(worker->name, digit, worker->now_ms);
+            worker->last_digit_ms = worker->now_ms;
+            worker->digit_timeout = true;
+        } else if (worker->digit_timeout && worker->now_ms - worker->last_digit_ms >= 3000) {
+            worker->digit(worker->name, 0, worker->now_ms);
+            worker->digit_timeout = false;
+        }
+    }
+    if (worker->links) {
+        return ra_link_hub_process(worker->links, worker->controller, receiving, audio, samples,
+                                   worker->now_ms);
+    }
     return ra_controller_process(worker->controller, receiving, audio, samples, worker->now_ms);
 }
 
@@ -55,16 +74,32 @@ static void *run(void *context) {
 }
 
 int ra_worker_start(struct ra_worker *worker) {
+    if (worker->digit) {
+        worker->detector = ra_dtmf_open(worker->controller->rate);
+        if (!worker->detector) {
+            return ENOMEM;
+        }
+    }
     atomic_init(&worker->stop, false);
     worker->result = 0;
+    worker->digit_timeout = false;
     worker->radio.receiving = false;
     worker->radio.keyed = false;
     worker->radio.render = render;
     worker->radio.context = worker;
-    return pthread_create(&worker->thread, NULL, run, worker);
+    int result = pthread_create(&worker->thread, NULL, run, worker);
+    if (result && worker->detector) {
+        ra_dtmf_close(worker->detector);
+        worker->detector = NULL;
+    }
+    return result;
 }
 
 void ra_worker_stop(struct ra_worker *worker) {
     atomic_store(&worker->stop, true);
     (void)pthread_join(worker->thread, NULL);
+    if (worker->detector) {
+        ra_dtmf_close(worker->detector);
+        worker->detector = NULL;
+    }
 }

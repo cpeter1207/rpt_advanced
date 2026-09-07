@@ -23,6 +23,8 @@ struct ra_controller {
     size_t count;                       /**< Number of IDs; zero permits null arrays. */
     unsigned int rate;                  /**< Negotiated PCM sample rate. */
     bool full_duplex;                   /**< Whether local reception may transmit. */
+    bool link_active;                   /**< Current link receive activity, set by the router. */
+    const int16_t *link_audio;          /**< Borrowed link mix for the current block, or null. */
     uint64_t hang_ms;                   /**< Transmitter hang time. */
     struct ra_duplex_state duplex;      /**< Current PTT request and hang state. */
     struct ra_playback playback;        /**< Currently selected identifier playback. */

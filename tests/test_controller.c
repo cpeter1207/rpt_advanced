@@ -119,6 +119,29 @@ int main(void) {
     assert(ra_controller_start(&controller, 0));
     assert(ra_controller_process(&controller, true, audio, 960, 100));
     assert(states[0].satisfied_ms == 0 && controller.playing == SIZE_MAX);
+    /* Remote audio keys half duplex without repeating local receiver samples. */
+    controller.count = 0;
+    controller.full_duplex = false;
+    controller.hang_ms = 0;
+    assert(ra_controller_start(&controller, 0));
+    int16_t remote[] = {100, -100};
+    controller.link_active = true;
+    controller.link_audio = remote;
+    audio[0] = audio[1] = 1000;
+    assert(ra_controller_process(&controller, false, audio, 2, 100));
+    assert(audio[0] == 100 && audio[1] == -100 && controller.last_activity_ms == 100);
+    assert(!ra_controller_process(&controller, true, audio, 2, 120));
+    assert(!audio[0] && !audio[1]);
+    controller.full_duplex = true;
+    audio[0] = INT16_MAX;
+    audio[1] = INT16_MIN;
+    assert(ra_controller_process(&controller, true, audio, 2, 140));
+    assert(audio[0] == INT16_MAX && audio[1] == INT16_MIN);
+    controller.link_audio = NULL;
+    assert(ra_controller_process(&controller, false, audio, 2, 160));
+    assert(!audio[0] && !audio[1]);
+    controller.link_active = false;
+    assert(!ra_controller_process(&controller, false, audio, 2, 180));
     puts("node controller audio and identification sequences passed");
     return 0;
 }

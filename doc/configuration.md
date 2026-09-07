@@ -39,6 +39,16 @@ limit on the number of nodes or ID sets.
 | `sample_rate_hz` | 0 | Zero selects the highest mutually supported rate up to the hardware-native rate. An explicit rate requires a supported Asterisk conversion path. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
 | `codec` | empty | Empty selects signed linear automatically; otherwise select an available Asterisk codec. |
+| `link_allow_nodes` | empty | Incoming node allowlist; comma-separated decimal node numbers. Empty places no allowlist restriction on verified nodes. |
+| `link_deny_nodes` | empty | Incoming node denylist. Explicit denial overrides allowlist membership and same-server exemptions. |
+| `link_directory_file` | empty | Optional Asterisk-format node directory. Entries in `[extnodes]` use `number=radio@host:port/number,numeric-address`. Matching entries precede ASL DNS lookup; their numeric address verifies incoming callers. |
+
+Link access settings are validated and inherit from `[general]` to each node.
+An explicit empty node value clears its inherited list. Spaces around entries
+are allowed; empty entries and wildcard patterns are not. Entries match complete
+node identities, not prefixes. Identity verification is separate: listing a
+node never authenticates it. Network linking is still under development; these
+settings do not enable incoming connections in the current module.
 
 ## Identifier settings
 

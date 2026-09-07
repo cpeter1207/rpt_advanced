@@ -14,6 +14,7 @@ CONNECTION_SOURCE := module/connection.c
 RUNTIME_SOURCE := module/runtime.c
 MODULE_HELPERS := $(filter-out $(MODULE_SOURCE),$(wildcard module/*.c))
 MODULE_OBJECTS := $(patsubst module/%.c,build/module/%.o,$(MODULE_HELPERS))
+MODULE_COVERAGE_OBJECTS := $(patsubst module/%.c,build/module-coverage/%.o,$(MODULE_HELPERS))
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
@@ -56,7 +57,7 @@ build/librpt_advanced.a: $(OBJECTS)
 quality: lint static-analysis docs
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(TESTS) tests/radio_fixture.c
+	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(wildcard tests/*.c tests/*.h)
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -76,6 +77,9 @@ build/coverage-objects/%.o: src/%.c $(HEADERS) | build/coverage-objects
 
 build/module-coverage:
 	mkdir -p $@
+
+build/module-coverage/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
 
 build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) | build/module-coverage
 	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
@@ -112,6 +116,13 @@ build/module-coverage/radio.o: $(RADIO_SOURCE) module/radio.h | build/module-cov
 build/test_radio: tests/test_radio.c build/module-coverage/radio.o module/radio.h | build
 	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/radio.o --coverage -o $@
 
+build/module-coverage/link_peer.o: module/link_peer.c module/link_peer.h $(HEADERS) | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
+
+build/test_link_peer: tests/test_link_peer.c build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) | build
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
+		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=calloc -o $@
+
 build/module-coverage/connection.o: $(CONNECTION_SOURCE) module/connection.h module/media.h module/radio.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
 
@@ -121,12 +132,25 @@ build/test_connection: tests/test_connection.c build/module-coverage/connection.
 build/module-coverage/worker.o: $(WORKER_SOURCE) module/worker.h $(HEADERS) | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
 
-build/test_worker: tests/test_worker.c build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
+build/worker_routing_fixture.o: tests/worker_routing_fixture.c tests/worker_dtmf_fixture.h module/link_hub.h module/dtmf.h | build
+	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -c $< -o $@
+
+build/test_link_hub: tests/test_link_hub.c build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) | build
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
+		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=nanosleep -o $@
+
+build/test_link_directory: tests/test_link_directory.c build/module-coverage/link_directory.o | build
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -o $@
+
+build/test_dtmf: tests/test_dtmf.c build/module-coverage/dtmf.o | build
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -o $@
+
+build/test_worker: tests/test_worker.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
+	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
 		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=clock_gettime,--wrap=ra_radio_exchange -o $@
 
-build/test_worker_thread: tests/test_worker_thread.c build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=ra_radio_exchange -o $@
+build/test_worker_thread: tests/test_worker_thread.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
+	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=ra_radio_exchange -o $@
 
 build/module-coverage/speech.o: $(SPEECH_SOURCE) src/speech.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
@@ -150,7 +174,7 @@ check: $(TEST_PROGRAMS)
 	find build -name '*.gcda' -delete
 	@set -e; for test in $(TEST_PROGRAMS); do ./$$test; done
 
-coverage: check
+coverage: check $(MODULE_COVERAGE_OBJECTS)
 	mkdir -p build/coverage
 	gcovr --root . --filter 'src/|module/' --fail-under-line 100 --fail-under-branch 100 --xml-pretty -o build/coverage/coverage.xml --print-summary
 
@@ -175,6 +199,9 @@ install-check: all
 	cmp src/playback.h build/stage/usr/include/rpt_advanced/playback.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
+	cmp src/link_access.h build/stage/usr/include/rpt_advanced/link_access.h
+	cmp src/link_audio.h build/stage/usr/include/rpt_advanced/link_audio.h
+	cmp src/link_command.h build/stage/usr/include/rpt_advanced/link_command.h
 	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
 	cmp src/document.h build/stage/usr/include/rpt_advanced/document.h
 	cmp src/schema.h build/stage/usr/include/rpt_advanced/schema.h
@@ -190,14 +217,15 @@ build/rpt_adapter.o: $(USBRADIOPLUS_SOURCE)/src/usbradioplus_rpt_advanced.c | bu
 
 build/chan_rpt_fixture.so: tests/radio_fixture.c build/rpt_adapter.o
 	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared -DRA_REAL_ADAPTER \
-		-I$(USBRADIOPLUS_SOURCE)/src $^ -pthread -o $@
+		-I$(USBRADIOPLUS_SOURCE)/src $^ -pthread -lm -o $@
 else
 build/chan_rpt_fixture.so: tests/radio_fixture.c | build
-	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared $< -pthread -o $@
+	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared $< -pthread -lm -o $@
 endif
 
 integration: install-check build/chan_rpt_fixture.so
 	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py
+	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_link_integration.py
 
 dist: | build
 	tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
