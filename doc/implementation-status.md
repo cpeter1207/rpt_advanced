@@ -10,6 +10,10 @@
 - Sample-driven prepared-PCM playback with immediate, irreversible Morse fallback
   on reception. Completion remains terminal, and control events need not consume
   audio samples. This playback state is not yet connected to radio transport.
+- Asterisk frame-exchange boundary that sends one transmit block per received
+  voice block, including silence. Carrier events change state without advancing
+  audio. API-fixture tests cover ownership, malformed frames, and output failures;
+  node workers and the separate hardware adapter are not yet connected.
 - Asterisk codec-registry selection with bidirectional translation checks and
   hardware-bounded automatic rate selection, tested with deterministic API fixtures.
   This selector is not yet connected to radio startup.
