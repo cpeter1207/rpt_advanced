@@ -11,9 +11,12 @@ Supported platforms and development requirements are defined in
 [QUALITY.md](QUALITY.md). Contributor and coding-agent instructions are in
 [AGENTS.md](AGENTS.md).
 
-The initial controller-policy components and their tests are being implemented.
+The controller and its tests are under development.
 Run `make ci` in an ASL3 development environment with GCC, Clang tools, Cppcheck,
-Doxygen, and gcovr. This does not yet build a runnable Asterisk module.
+Doxygen, gcovr, Python, and Ruff. The build produces a development Asterisk module
+with configuration load/reload support; radio operation is not implemented yet.
+Tests start a separate Asterisk process with temporary configuration and no radio
+connections. `make install` installs the module but does not activate it.
 
 See [requirements](doc/requirements.md) and the precise
 [implementation status](doc/implementation-status.md). Do not install this

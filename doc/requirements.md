@@ -5,6 +5,12 @@ behavior and Asterisk interfaces, but no app_rpt implementation is copied.
 
 ## Nodes and radio operation
 
+Configuration reload and module unload/load must not require an Asterisk restart.
+Keep this requirement unless a concrete technical limitation makes it impractical
+and the user agrees to a change. Failed configuration reloads retain the active
+configuration. Module unload must release owned channels, workers, and resources
+so a replacement module can load into the same running Asterisk process.
+
 There is no configured-node count limit. Each named node has one receiver and
 one transmitter. Flat configuration sections supply shared defaults; scoped
 node sections override them. ID sets inherit from node ID defaults, which

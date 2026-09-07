@@ -25,14 +25,17 @@
   per-platform line/branch coverage gates.
 - Doxygen publication to GitHub Pages after the main-branch quality gate passes.
 
-The current build artifact is a static library of controller policy components,
-not an Asterisk module. Tests use deterministic inputs and include a combined
+The build produces a static controller library and `app_rpt_advanced.so`. The
+module currently provides configuration loading, failure-atomic reload, and
+cleanup, not radio operation. Lifecycle tests use the real shared library and
+Asterisk's public ABI, including configuration-path allocation and input errors.
+An integration test loads, reloads, and unloads the installed module in an isolated
+Asterisk process with temporary configuration. Other tests include a combined
 identifier/duplex state sequence. They do not claim live-radio verification.
 
 ## Not yet implemented
 
-- Runtime node lifecycle and configuration activation/reload.
-- Asterisk module, runtime media capability discovery, and audio transport.
+- Radio-node lifecycle, runtime media capability discovery, and audio transport.
 - The USBRadioPlus compatibility adapter and sample-rate negotiation.
 - Sound-file playback, Piper adapter, Morse generation, and playback interruption.
 - Published project-specific clean/installed test images and release packaging.
