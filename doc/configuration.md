@@ -65,3 +65,10 @@ are separate from numeric parsing.
 No media is configured by default. Zero ID sets is valid. For testing on 524950,
 set `speech_model` to `/usr/lib/piper-tts/voices/en_US-amy-low.onnx` to use the
 installed voice without downloading another model.
+
+The Morse renderer accepts ASCII letters (case-insensitive), digits, and
+`/ . , ? - = + @ ( ) ' ! " : ; _ $ &`. Spaces, tabs, and line breaks separate
+words. Unsupported characters are rejected. Timing uses standard 1-unit dots,
+3-unit dashes, 1-unit element gaps, 3-unit character gaps, and 7-unit word gaps.
+Generated PCM has half-scale tone amplitude; transmitter processing follows it.
+The renderer exists, but transmission integration is still under development.

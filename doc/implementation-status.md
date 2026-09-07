@@ -5,6 +5,11 @@
 - Original C identifier scheduling policy: intervals, priorities, activity-based
   and unconditional periods, first-key-only sets, and completion hierarchy.
 - File/speech/Morse preference policy, including Morse-only reception behavior.
+- Streaming signed-linear Morse renderer with configurable rate, speed, and tone
+  frequency; fractional-sample timing and block-independent output tests.
+- Asterisk codec-registry selection with bidirectional translation checks and
+  hardware-bounded automatic rate selection, tested with deterministic API fixtures.
+  This selector is not yet connected to radio startup.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
 - Shared, node, and ID-set configuration-value inheritance, including explicit
   empty overrides and scope independence from file order.
@@ -37,7 +42,7 @@ identifier/duplex state sequence. They do not claim live-radio verification.
 
 - Radio-node lifecycle, runtime media capability discovery, and audio transport.
 - The USBRadioPlus compatibility adapter and sample-rate negotiation.
-- Sound-file playback, Piper adapter, Morse generation, and playback interruption.
+- Sound-file playback, Piper adapter, connecting Morse to transmission, and playback interruption.
 - Published project-specific clean/installed test images and release packaging.
   CI currently uses existing USBRadioPlus ASL3 quality
   images as its tool environment, not as rpt_advanced release artifacts.

@@ -6,6 +6,7 @@ CFLAGS ?= -O2 -g
 WARNINGS := -std=c11 -Wall -Wextra -Wpedantic -Werror
 SOURCES := $(wildcard src/*.c)
 MODULE_SOURCE := module/app_rpt_advanced.c
+MEDIA_SOURCE := module/media.c
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
@@ -30,7 +31,7 @@ build/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -c $< -o $@
 
 build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS)
-	$(CC) -shared $^ -o $@
+	$(CC) -shared $^ -lm -o $@
 
 build/librpt_advanced.a: $(OBJECTS)
 	$(AR) rcs $@ $^
@@ -38,14 +39,14 @@ build/librpt_advanced.a: $(OBJECTS)
 quality: lint static-analysis docs
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(HEADERS) $(TESTS)
+	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) module/media.h $(HEADERS) $(TESTS)
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
 static-analysis:
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE)
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- -Isrc -std=c11
-	clang-tidy $(MODULE_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
+	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
 
 docs: | build
 	doxygen Doxyfile
@@ -63,16 +64,22 @@ build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) | build/mo
 	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
 
 build/module-coverage/app_rpt_advanced.so: build/module-coverage/app_rpt_advanced.o $(COVERAGE_OBJECTS)
-	$(CC) --coverage -shared $^ -o $@
+	$(CC) --coverage -shared $^ -lm -o $@
 
 build/test_asterisk_module: tests/test_asterisk_module.c build/module-coverage/app_rpt_advanced.so | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE $< -Wl,--export-dynamic -ldl -o $@
 
+build/module-coverage/media.o: $(MEDIA_SOURCE) module/media.h | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
+
+build/test_asterisk_media: tests/test_asterisk_media.c build/module-coverage/media.o module/media.h | build
+	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/media.o --coverage -o $@
+
 build/test_%: tests/test_%.c $(COVERAGE_OBJECTS) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -o $@
+	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -lm -o $@
 
 build/test_document: tests/test_document.c $(COVERAGE_OBJECTS) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -Wl,--wrap=strdup,--wrap=reallocarray -o $@
+	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -Wl,--wrap=strdup,--wrap=reallocarray -lm -o $@
 
 check: $(TEST_PROGRAMS)
 	find build -name '*.gcda' -delete
@@ -98,6 +105,7 @@ install-check: all
 	cmp build/librpt_advanced.a build/stage/usr/lib/librpt_advanced.a
 	cmp src/identifier.h build/stage/usr/include/rpt_advanced/identifier.h
 	cmp src/duplex.h build/stage/usr/include/rpt_advanced/duplex.h
+	cmp src/morse.h build/stage/usr/include/rpt_advanced/morse.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
 	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
