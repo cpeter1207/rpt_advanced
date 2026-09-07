@@ -16,10 +16,14 @@
   node workers and the separate hardware adapter are not yet connected.
 - Optional Asterisk codec conversion around linear controller processing, with
   buffered-conversion ownership tests. Native linear transport bypasses these
-  converters. Channel startup must still build the negotiated conversion paths.
+  converters.
+- Exclusive RadioPlusAdvanced reservation with negotiated read/write formats and
+  converter ownership. Failure tests cover unavailable devices, unsupported media,
+  converter allocation, and channel-format setup; cleanup releases every resource.
+  This helper does not call or key a radio. Module startup still needs to invoke it.
 - Asterisk codec-registry selection with bidirectional translation checks and
   hardware-bounded automatic rate selection, tested with deterministic API fixtures.
-  This selector is not yet connected to radio startup.
+  The reservation helper uses this selector; module startup is not yet connected.
 - Piper process adapter with direct argument execution, file-backed text input,
   nonblocking completion polling, cancellation, and Asterisk child-reaper
   coordination. Synthesis output validation and playback remain unfinished.

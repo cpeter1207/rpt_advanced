@@ -10,6 +10,7 @@ MEDIA_SOURCE := module/media.c
 SPEECH_SOURCE := module/speech.c
 RADIO_SOURCE := module/radio.c
 WORKER_SOURCE := module/worker.c
+CONNECTION_SOURCE := module/connection.c
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
@@ -42,14 +43,14 @@ build/librpt_advanced.a: $(OBJECTS)
 quality: lint static-analysis docs
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) module/media.h module/radio.h module/worker.h $(HEADERS) $(TESTS)
+	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) $(CONNECTION_SOURCE) module/connection.h module/media.h module/radio.h module/worker.h $(HEADERS) $(TESTS)
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
 static-analysis:
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE)
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) $(CONNECTION_SOURCE)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- -Isrc -std=c11
-	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
+	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) $(CONNECTION_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
 
 docs: | build
 	doxygen Doxyfile
@@ -83,6 +84,12 @@ build/module-coverage/radio.o: $(RADIO_SOURCE) module/radio.h | build/module-cov
 
 build/test_radio: tests/test_radio.c build/module-coverage/radio.o module/radio.h | build
 	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/radio.o --coverage -o $@
+
+build/module-coverage/connection.o: $(CONNECTION_SOURCE) module/connection.h module/media.h module/radio.h | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
+
+build/test_connection: tests/test_connection.c build/module-coverage/connection.o module/connection.h | build
+	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/connection.o --coverage -Wl,--wrap=ra_media_select -o $@
 
 build/module-coverage/worker.o: $(WORKER_SOURCE) module/worker.h $(HEADERS) | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
