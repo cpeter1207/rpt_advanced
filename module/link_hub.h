@@ -61,6 +61,18 @@ void ra_link_hub_set_reconnector(struct ra_link_hub *hub, ra_link_reconnect_fn c
  */
 bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name);
 
+/** @brief Disconnect every current peer without stopping the hub manager.
+ * @param hub Node-owned routing hub.
+ * @return Number of peers released.
+ */
+size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub);
+
+/** @brief Count currently attached peers.
+ * @param hub Node-owned routing hub.
+ * @return Number of attached peers.
+ */
+size_t ra_link_hub_count(struct ra_link_hub *hub);
+
 /** @brief Disconnect all peers and release routing buffers after the radio worker stops.
  * @param hub Owned hub, safe when empty.
  */

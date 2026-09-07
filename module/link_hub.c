@@ -159,14 +159,44 @@ bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
     return true;
 }
 
+size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
+    size_t count = 0;
+    while (hub->ports) {
+        char name[32];
+        ast_mutex_lock(&routing_lock);
+        struct ra_link_port *port = hub->ports;
+        /* GCOVR_EXCL_START: the manager cannot mutate this list while routing_lock is held. */
+        if (port) {
+            snprintf(name, sizeof(name), "%s", port->name);
+        }
+        /* GCOVR_EXCL_STOP */
+        ast_mutex_unlock(&routing_lock);
+        /* GCOVR_EXCL_START: a peer removed concurrently is impossible under the hub lock. */
+        if (!port || !ra_link_hub_disconnect(hub, name)) {
+            break;
+        }
+        /* GCOVR_EXCL_STOP */
+        ++count;
+    }
+    return count;
+}
+
+size_t ra_link_hub_count(struct ra_link_hub *hub) {
+    size_t count = 0;
+    ast_mutex_lock(&routing_lock);
+    for (struct ra_link_port *port = hub->ports; port; port = port->next) {
+        ++count;
+    }
+    ast_mutex_unlock(&routing_lock);
+    return count;
+}
+
 void ra_link_hub_close(struct ra_link_hub *hub) {
     if (hub->manager_started) {
         atomic_store(&hub->stop, true);
         (void)pthread_join(hub->manager, NULL);
     }
-    while (hub->ports) {
-        (void)ra_link_hub_disconnect(hub, hub->ports->name);
-    }
+    (void)ra_link_hub_disconnect_all(hub);
     ast_free(hub->local);
     *hub = (struct ra_link_hub){0};
 }

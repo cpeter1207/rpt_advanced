@@ -111,6 +111,20 @@ int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const 
  */
 bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const char *remote);
 
+/** @brief Disconnect every peer attached to a local node.
+ * @param runtime Active runtime.
+ * @param local Local node name.
+ * @return Number of peers released, or zero for an unknown node.
+ */
+size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local);
+
+/** @brief Count peers attached to a local node.
+ * @param runtime Active runtime.
+ * @param local Local node name.
+ * @return Number of attached peers, or zero for an unknown node.
+ */
+size_t ra_runtime_link_count(struct ra_runtime *runtime, const char *local);
+
 /** @brief Verify the incoming address and apply the destination node's access lists.
  * @param runtime Active runtime; caller serializes with reload.
  * @param local Destination node.

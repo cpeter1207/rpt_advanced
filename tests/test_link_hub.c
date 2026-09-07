@@ -222,6 +222,7 @@ static int reconnect_stub(void *context, const char *remote, bool transmit, bool
 int main(void) {
     struct ra_link_hub hub = {0};
     ra_link_hub_set_reconnector(&hub, reconnect_stub, NULL);
+    assert(!ra_link_hub_disconnect_all(&hub));
     struct ast_channel first = {.active = true, .input = 100};
     struct ast_channel second = {.active = true, .input = 200};
     for (failed_allocation = 1; failed_allocation <= 4; ++failed_allocation) {
@@ -236,6 +237,7 @@ int main(void) {
     }
     failure = 0;
     assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false));
+    assert(ra_link_hub_count(&hub) == 1);
     assert(ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false) == -1);
     rate = 16000;
     assert(ra_link_hub_attach(&hub, "2", &second, NULL, true, true, false) == -1);
@@ -280,6 +282,7 @@ int main(void) {
     assert(!ra_link_hub_process(&hub, &controller, false, NULL, 0, 141));
     failure = 0;
     assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false));
+    assert(ra_link_hub_disconnect_all(&hub) == 1);
     ra_link_hub_close(&hub);
     ra_link_hub_close(&hub);
     return 0;

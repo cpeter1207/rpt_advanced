@@ -139,6 +139,16 @@ bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
     return true;
 }
 
+size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
+    assert(hub);
+    return 0;
+}
+
+size_t ra_link_hub_count(struct ra_link_hub *hub) {
+    assert(hub);
+    return 0;
+}
+
 void ra_link_hub_close(struct ra_link_hub *hub) { assert(hub); }
 
 void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsigned int selected,
@@ -359,6 +369,10 @@ int main(void) {
     assert(!ra_runtime_accept(&runtime, "alpha", "123", (struct ast_channel *)&link_identity, true,
                               false));
     assert(!ra_runtime_disconnect(&runtime, "missing", "123"));
+    assert(!ra_runtime_disconnect_all(&runtime, "missing"));
+    assert(!ra_runtime_link_count(&runtime, "missing"));
+    assert(!ra_runtime_disconnect_all(&runtime, "alpha"));
+    assert(!ra_runtime_link_count(&runtime, "alpha"));
     assert(ra_runtime_disconnect(&runtime, "alpha", "123"));
     assert(connect_fixture(&runtime, "missing") == -1);
     assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true, false) == -1);

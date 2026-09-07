@@ -114,6 +114,40 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
         ast_mutex_unlock(&runtime_lock);
         return result;
     }
+    case RA_LINK_DISCONNECT_ALL: {
+        ast_mutex_lock(&runtime_lock);
+        int result = revision == atomic_load(&runtime_revision)
+                         ? (int)ra_runtime_disconnect_all(&runtime, local) >= 0
+                         : -1;
+        ast_mutex_unlock(&runtime_lock);
+        return result == -1 ? -1 : 0;
+    }
+    case RA_LINK_STATUS:
+    case RA_LINK_FULL_STATUS:
+    case RA_LINK_LAST_KEYED: {
+        ast_mutex_lock(&runtime_lock);
+        bool current = revision == atomic_load(&runtime_revision);
+        size_t count = current ? ra_runtime_link_count(&runtime, local) : 0;
+        ast_mutex_unlock(&runtime_lock);
+        if (!current) {
+            return -1;
+        }
+        ast_log(LOG_NOTICE, "rpt_advanced: node %s has %zu active links\n", local, count);
+        return 0;
+    }
+    case RA_LINK_DISCONNECT_PERMANENT:
+        ast_mutex_lock(&runtime_lock);
+        int result = revision == atomic_load(&runtime_revision)
+                         ? !ra_runtime_disconnect(&runtime, local, operation->remote)
+                         : -1;
+        ast_mutex_unlock(&runtime_lock);
+        return result;
+    case RA_LINK_RECONNECT_ALL:
+        /* Permanent peers reconnect themselves after transport failure. */
+        return 0;
+    case RA_LINK_COMMAND:
+        ast_log(LOG_NOTICE, "rpt_advanced: remote command forwarding is not available\n");
+        return -1;
     default:
         return -1;
     }

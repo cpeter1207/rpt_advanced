@@ -324,6 +324,24 @@ bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const 
     return false;
 }
 
+size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local) {
+    for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
+        if (!strcmp(node->name, local)) {
+            return ra_link_hub_disconnect_all(&node->links);
+        }
+    }
+    return 0;
+}
+
+size_t ra_runtime_link_count(struct ra_runtime *runtime, const char *local) {
+    for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
+        if (!strcmp(node->name, local)) {
+            return ra_link_hub_count(&node->links);
+        }
+    }
+    return 0;
+}
+
 bool ra_runtime_authorize(struct ra_runtime *runtime, const char *local, const char *remote,
                           const char *peer_ip) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {

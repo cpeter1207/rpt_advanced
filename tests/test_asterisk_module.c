@@ -453,6 +453,18 @@ bool ra_runtime_disconnect(struct ra_runtime *state, const char *local, const ch
     return !link_failure;
 }
 
+size_t ra_runtime_disconnect_all(struct ra_runtime *state, const char *local) {
+    (void)state;
+    assert(runtime_locked && local);
+    return 0;
+}
+
+size_t ra_runtime_link_count(struct ra_runtime *state, const char *local) {
+    (void)state;
+    assert(runtime_locked && local);
+    return 0;
+}
+
 /** @brief Supply Asterisk's allocating formatter and a deterministic failure case.
  * @param file Caller source file.
  * @param line Caller source line.
@@ -635,19 +647,45 @@ int main(void) {
     }
     assert(queued_count == 256);
     drain_tasks();
-    const enum ra_link_action actions[] = {RA_LINK_TRANSCEIVE, RA_LINK_MONITOR,
-                                           RA_LINK_LOCAL_MONITOR, RA_LINK_DISCONNECT,
-                                           RA_LINK_STATUS};
+    const enum ra_link_action actions[] = {RA_LINK_TRANSCEIVE,
+                                           RA_LINK_MONITOR,
+                                           RA_LINK_LOCAL_MONITOR,
+                                           RA_LINK_DISCONNECT,
+                                           RA_LINK_STATUS,
+                                           RA_LINK_DISCONNECT_ALL,
+                                           RA_LINK_LAST_KEYED,
+                                           RA_LINK_DISCONNECT_PERMANENT,
+                                           RA_LINK_PERMANENT_MONITOR,
+                                           RA_LINK_PERMANENT_TRANSCEIVE,
+                                           RA_LINK_FULL_STATUS,
+                                           RA_LINK_RECONNECT_ALL,
+                                           RA_LINK_PERMANENT_LOCAL_MONITOR,
+                                           RA_LINK_COMMAND};
     for (size_t i = 0; i < sizeof(actions) / sizeof(*actions); ++i) {
         digit_action = actions[i];
         digit_sink("usb", '1', 100);
         drain_tasks();
     }
+    digit_action = (enum ra_link_action)99;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    digit_action = RA_LINK_DISCONNECT_ALL;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    digit_action = RA_LINK_DISCONNECT_PERMANENT;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
     digit_action = RA_LINK_TRANSCEIVE;
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();
     digit_action = RA_LINK_DISCONNECT;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    digit_action = RA_LINK_STATUS;
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();
