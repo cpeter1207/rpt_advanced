@@ -30,7 +30,7 @@ lint:
 	clang-format --dry-run --Werror $(SOURCES) $(HEADERS) $(TESTS)
 
 static-analysis:
-	cppcheck --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES)
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- -Isrc -std=c11
 
 docs: | build
@@ -59,6 +59,7 @@ install-check: all
 	cmp src/duplex.h build/stage/usr/include/rpt_advanced/duplex.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
+	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
 
 platform-verify: all coverage install-check
 
