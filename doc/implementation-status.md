@@ -81,12 +81,14 @@ configuration, reporting any restoration failure. Lifecycle tests use the real s
 Asterisk's public ABI, including configuration-path allocation and input errors.
 An integration test loads, reloads, and unloads the installed module in an isolated
 Asterisk process with temporary configuration and a synthetic radio. Other tests
-include a combined identifier/duplex state sequence. They do not claim physical
-radio or completed USBRadioPlus-to-rpt_advanced integration verification.
+include a combined identifier/duplex state sequence. The native matrix also
+links the actual USBRadioPlus adapter to the synthetic hardware backend.
 
-## Not yet implemented
+## Remaining verification
 
-- End-to-end verification of running node audio with the separate USBRadioPlus adapter.
+- Physical identifier playback/interruption and the remaining hardware acceptance
+  cases in [testing](testing.md). Clean full-duplex repeat and hang time are verified.
+- Cold-start verification of the driver-ordering fix; live replacement is verified.
 - Execution verification of the version-tag release workflow. Source archive
   rebuilding is covered by the platform gate; no project release has been cut.
 
@@ -96,7 +98,26 @@ the production quality gate and actual installed-module Asterisk audio tests
 on all four native platforms. The quality images remain separate development
 environments with compilers and analysis tools.
 
-Nothing has been installed on a radio node. No app_rpt implementation has been
-copied. USBRadioPlus changes are limited to its separate RadioPlusAdvanced adapter
+## Physical test, 2026-09-07
+
+With the owner's approval, 524950 runs the controller on Debian 13 arm64 with
+ASL3 Asterisk 22.9.0 / ASL 3.9.3 and the actual CM119 interface. Asterisk reports
+`RadioPlusAdvanced`, `slin48` in both directions, and no transcoding. The owner
+confirmed clean repeat audio and approximately one second of configured hang time.
+At 39,967 native frames, counters showed zero FIFO underruns/overruns, SRC errors,
+or USB short/error writes. ADC rail counts were nonzero; this does not establish
+receive-level calibration or absence of analog clipping.
+
+Configuration reload and controller unload/replacement/load succeeded with the
+same Asterisk PID. The temporary 15-second speech-ID test has been restored to
+the normal ten-minute activity-based interval. Its listening result is pending.
+
+Normal unloading of the pre-existing app_rpt crashed Asterisk before the new
+modules were installed. Controlled recovery required a service restart. Startup
+also exposed driver ordering: PR27 adds an optional USBRadioPlus ordering
+dependency, passed all native gates, and was installed by live module replacement.
+The original modules and configuration are retained for rollback.
+
+No app_rpt implementation has been copied. USBRadioPlus changes are limited to its separate RadioPlusAdvanced adapter
 and shared-engine integration. They passed the local and four native-platform
 quality/coverage/install gates and were merged in USBRadioPlus pull request 16.
