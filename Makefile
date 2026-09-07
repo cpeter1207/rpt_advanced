@@ -125,6 +125,7 @@ install-check: all
 	cmp build/librpt_advanced.a build/stage/usr/lib/librpt_advanced.a
 	cmp src/identifier.h build/stage/usr/include/rpt_advanced/identifier.h
 	cmp src/duplex.h build/stage/usr/include/rpt_advanced/duplex.h
+	cmp src/controller.h build/stage/usr/include/rpt_advanced/controller.h
 	cmp src/morse.h build/stage/usr/include/rpt_advanced/morse.h
 	cmp src/playback.h build/stage/usr/include/rpt_advanced/playback.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
