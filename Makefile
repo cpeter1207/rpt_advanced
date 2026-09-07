@@ -22,7 +22,8 @@ COVERAGE_OBJECTS := $(patsubst src/%.c,build/coverage-objects/%.o,$(SOURCES))
 .SECONDARY: $(COVERAGE_OBJECTS)
 TEST_PROGRAMS := $(patsubst tests/%.c,build/%,$(TESTS))
 prefix ?= /usr/local
-asteriskmoddir ?= $(prefix)/lib/asterisk/modules
+multiarch := $(shell $(CC) -print-multiarch)
+asteriskmoddir ?= /usr/lib/$(multiarch)/asterisk/modules
 DESTDIR ?=
 
 .PHONY: all quality lint static-analysis docs check coverage install install-check integration platform-verify ci clean
@@ -177,13 +178,13 @@ install-check: all
 	cmp src/speech.h build/stage/usr/include/rpt_advanced/speech.h
 	cmp COPYING build/stage/usr/share/doc/rpt_advanced/copyright
 	cmp examples/rpt_advanced.conf build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf
-	cmp build/app_rpt_advanced.so build/stage/usr/lib/asterisk/modules/app_rpt_advanced.so
+	cmp build/app_rpt_advanced.so build/stage$(asteriskmoddir)/app_rpt_advanced.so
 
 build/chan_rpt_fixture.so: tests/radio_fixture.c | build
 	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared $< -pthread -o $@
 
 integration: install-check build/chan_rpt_fixture.so
-	python3 tests/test_asterisk_integration.py
+	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py
 
 platform-verify: all coverage install-check integration
 
