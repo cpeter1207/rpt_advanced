@@ -242,6 +242,8 @@ int __ast_cli_register_multiple(struct ast_cli_entry *entries, int count, struct
     assert(count == 2);
     command_entry = entries;
     assert(!entries->handler(entries, CLI_INIT, NULL));
+    assert(!entries[1].handler(&entries[1], CLI_INIT, NULL));
+    assert(!entries[1].handler(&entries[1], CLI_GENERATE, NULL));
     return link_failure == 9 ? -1 : 0;
 }
 
