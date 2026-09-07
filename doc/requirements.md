@@ -19,8 +19,19 @@ inherited value.
 
 Use USBRadioPlus through a thin compatibility adapter. Changes to USBRadioPlus
 are restricted to that adapter and the integration needed for it; its existing
-app_rpt behavior is preserved. Discover Asterisk's available audio formats and
-translation capabilities at runtime and specify the selected PCM sample rate
+app_rpt behavior is preserved.
+Use a separate rpt_advanced adapter with rate-aware shared code. The existing
+legacy and modern app_rpt adapters may retain their fixed 8 kHz interface.
+Keep the adapter limited to the current requirements.
+The separate adapter and controller share the audio hardware's clock. Deliver
+continuous hardware-paced audio frames, including silence while squelched, and
+produce transmit audio and identifier samples from that cadence rather than an
+independent periodic timer. Control events must not replace or consume audio
+clock ticks. Retain only bounded buffering needed for scheduling and conversion;
+do not apply independent-clock drift correction to this shared-clock path.
+Preserve app_rpt's existing independent-clock buffering behavior.
+Discover Asterisk's available audio formats and translation capabilities at
+runtime and specify the selected PCM sample rate
 to USBRadioPlus. Do not hard-code a list of codecs or sample rates.
 
 Full duplex permits simultaneous reception and transmission. Half duplex does
