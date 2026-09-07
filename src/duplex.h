@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Radio transmit ownership and hang-time policy.
  */

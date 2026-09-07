@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Deterministic unit and state-sequence tests for identifier scheduling.
  */

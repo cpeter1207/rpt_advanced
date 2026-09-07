@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Owned configuration storage for node discovery and settings resolution.
  */

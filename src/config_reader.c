@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Read configuration outside the audio thread and preserve useful error locations.
  */

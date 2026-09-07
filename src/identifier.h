@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Identifier scheduling policy, independent of audio playback and Asterisk.
  */

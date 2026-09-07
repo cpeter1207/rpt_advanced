@@ -60,6 +60,8 @@ coverage: check
 
 install: all
 	install -d $(DESTDIR)$(prefix)/lib $(DESTDIR)$(prefix)/include/rpt_advanced
+	install -d $(DESTDIR)$(prefix)/share/doc/rpt_advanced
+	install -m 0644 COPYING $(DESTDIR)$(prefix)/share/doc/rpt_advanced/copyright
 	install -m 0644 build/librpt_advanced.a $(DESTDIR)$(prefix)/lib/
 	install -m 0644 $(HEADERS) $(DESTDIR)$(prefix)/include/rpt_advanced/
 
@@ -73,6 +75,7 @@ install-check: all
 	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
 	cmp src/document.h build/stage/usr/include/rpt_advanced/document.h
 	cmp src/schema.h build/stage/usr/include/rpt_advanced/schema.h
+	cmp COPYING build/stage/usr/share/doc/rpt_advanced/copyright
 
 platform-verify: all coverage install-check
 

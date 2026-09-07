@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief File-level parser tests, including actual stream errors and long lines.
  */

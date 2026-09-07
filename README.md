@@ -2,6 +2,8 @@
 
 Production repository for rpt_advanced.
 
+Licensed under GNU GPL version 2 only (`GPL-2.0-only`); see [COPYING](COPYING).
+
 Workflow implementations belong in
 [rpt_advanced-workflows](https://github.com/cpeter1207/rpt_advanced-workflows).
 
