@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """! @brief Load, reload, and unload the built module in an isolated Asterisk process."""
 
+import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -21,6 +23,62 @@ def cli(configuration: Path, command: str) -> str:
         text=True,
         timeout=30,
     ).stdout
+
+
+def audio_case(
+    configuration: Path,
+    radio_configuration: Path,
+    logfile: Path,
+    process: subprocess.Popen,
+    rate: int,
+    codec: str,
+) -> None:
+    """! @brief Exchange two radios through actual Asterisk converters and reload.
+    @param configuration Isolated Asterisk configuration.
+    @param radio_configuration Controller configuration to replace.
+    @param logfile Test-owned diagnostic output.
+    @param process Running isolated Asterisk.
+    @param rate Explicit rate or zero for native auto selection.
+    @param codec Requested codec, empty for native linear.
+    @return None; assertions verify transport and duplex behavior.
+    """
+    offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
+    radio_configuration.write_text(
+        f"[general]\nsample_rate_hz={rate}\ncodec={codec}\n"
+        "[full]\nfull_duplex=yes\n"
+        "[half]\nfull_duplex=no\n"
+        "[identifier]\ninterval_ms=50\nmorse_text=E\n"
+        "[identifier full periodic]\n"
+        "[identifier half periodic]\n",
+        encoding="utf-8",
+    )
+    cli(configuration, "module reload app_rpt_advanced.so")
+    deadline = time.monotonic() + 30
+    while (
+        logfile.read_text(encoding="utf-8", errors="replace")[offset:].count(
+            "rpt_fixture ready "
+        )
+        < 2
+    ):
+        if process.poll() is not None or time.monotonic() >= deadline:
+            raise TimeoutError(f"radio exchange did not complete: {rate=} {codec=}")
+        time.sleep(0.1)
+    radio_configuration.write_text("", encoding="utf-8")
+    cli(configuration, "module reload app_rpt_advanced.so")
+    records = re.findall(
+        r"rpt_fixture RadioPlusAdvanced/(full|half) ticks=(\d+) "
+        r"writes=(\d+) nonzero=(\d+) early=(\d+) keys=(\d+) unkeys=(\d+)",
+        logfile.read_text(encoding="utf-8", errors="replace")[offset:],
+    )
+    assert len(records) == 2, records
+    for name, *values in records:
+        ticks, writes, nonzero, early, keys, unkeys = map(int, values)
+        assert writes >= 30 and ticks >= writes, records
+        if not rate:
+            assert ticks == writes, records
+        assert nonzero > 0 and keys > 0 and unkeys == keys, records
+        assert (early > 0) == (name == "full"), records
+    print(f"Asterisk audio {rate=} {codec=}: {records}")
 
 
 def main() -> None:
@@ -108,6 +166,36 @@ def main() -> None:
                     and "Not Running" not in listing
                     and process.poll() is None
                 ), listing
+                # The fixture is copied only into this test's staging tree; it is
+                # not an install artifact and cannot access USB hardware.
+                shutil.copyfile(
+                    "build/chan_rpt_fixture.so",
+                    "build/stage/usr/lib/asterisk/modules/chan_rpt_fixture.so",
+                )
+                cli(configuration, "module load chan_rpt_fixture.so")
+                for library in ("codec_resample.so", "codec_ulaw.so"):
+                    candidates = list(
+                        Path("/usr/lib").glob(f"*/asterisk/modules/{library}")
+                    )
+                    candidates += list(Path("/usr/lib/asterisk/modules").glob(library))
+                    assert candidates, f"ASL3 test image is missing {library}"
+                    shutil.copyfile(
+                        candidates[0], f"build/stage/usr/lib/asterisk/modules/{library}"
+                    )
+                    cli(configuration, f"module load {library}")
+                for rate, codec in ((0, ""), (16000, "slin"), (8000, "ulaw")):
+                    audio_case(
+                        configuration,
+                        radio_configuration,
+                        logfile,
+                        process,
+                        rate,
+                        codec,
+                    )
+                cli(configuration, "module unload chan_rpt_fixture.so")
+                assert "0 modules loaded" in cli(
+                    configuration, "module show like chan_rpt_fixture"
+                )
             except BaseException:
                 print(logfile.read_text(encoding="utf-8", errors="replace"))
                 raise

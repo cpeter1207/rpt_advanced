@@ -52,7 +52,7 @@ build/librpt_advanced.a: $(OBJECTS)
 quality: lint static-analysis docs
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(TESTS)
+	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(TESTS) tests/radio_fixture.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -179,7 +179,10 @@ install-check: all
 	cmp examples/rpt_advanced.conf build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf
 	cmp build/app_rpt_advanced.so build/stage/usr/lib/asterisk/modules/app_rpt_advanced.so
 
-integration: install-check
+build/chan_rpt_fixture.so: tests/radio_fixture.c | build
+	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared $< -pthread -o $@
+
+integration: install-check build/chan_rpt_fixture.so
 	python3 tests/test_asterisk_integration.py
 
 platform-verify: all coverage install-check integration
