@@ -1,7 +1,15 @@
 # Configuration model
 
-The settings resolver is implemented; file loading and the running module are
-still under development. These are the supported settings for that resolver.
+The settings resolver and streaming syntax reader are implemented; the owned
+configuration builder and running module are still under development. These
+are the supported settings for the resolver.
+
+Semicolons introduce comments. Blank lines are ignored. Options require a
+preceding section. Whitespace around names and values is stripped; a final
+newline is optional. Embedded null bytes and malformed section/option lines
+are errors. The reader reports the physical line number and imposes no fixed
+line-length limit. File read errors reject loading rather than accepting a
+partial file.
 
 Flat `[general]` settings provide node defaults. A named node section such as
 `[524950]` overrides them. Flat `[identifier]` settings provide ID defaults;
