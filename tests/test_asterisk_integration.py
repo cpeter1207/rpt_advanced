@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """! @brief Load, reload, and unload the built module in an isolated Asterisk process."""
 
+import os
 import re
 import shutil
 import subprocess
@@ -87,11 +88,12 @@ def main() -> None:
     """
     with tempfile.TemporaryDirectory(prefix="rpt-advanced-asterisk-") as temporary:
         directory = Path(temporary)
+        module_directory = Path(os.environ["RPT_TEST_MODULE_DIR"])
         configuration = directory / "asterisk.conf"
         configuration.write_text(
             "[directories]\n"
             f"astetcdir => {directory}\n"
-            f"astmoddir => {Path('build/stage/usr/lib/asterisk/modules').resolve()}\n"
+            f"astmoddir => {module_directory}\n"
             f"astrundir => {directory}\n"
             f"astlogdir => {directory}\n"
             f"astvarlibdir => {directory}\n"
@@ -170,7 +172,7 @@ def main() -> None:
                 # not an install artifact and cannot access USB hardware.
                 shutil.copyfile(
                     "build/chan_rpt_fixture.so",
-                    "build/stage/usr/lib/asterisk/modules/chan_rpt_fixture.so",
+                    module_directory / "chan_rpt_fixture.so",
                 )
                 cli(configuration, "module load chan_rpt_fixture.so")
                 for library in ("codec_resample.so", "codec_ulaw.so"):
@@ -179,9 +181,7 @@ def main() -> None:
                     )
                     candidates += list(Path("/usr/lib/asterisk/modules").glob(library))
                     assert candidates, f"ASL3 test image is missing {library}"
-                    shutil.copyfile(
-                        candidates[0], f"build/stage/usr/lib/asterisk/modules/{library}"
-                    )
+                    shutil.copyfile(candidates[0], module_directory / library)
                     cli(configuration, f"module load {library}")
                 for rate, codec in ((0, ""), (16000, "slin"), (8000, "ulaw")):
                     audio_case(

@@ -18,7 +18,9 @@ with configuration load/reload support and hardware-clocked radio workers.
 Identifier file/speech preparation is connected; end-to-end radio verification remains unfinished.
 Tests start a separate Asterisk process with temporary configuration and synthetic
 radio channels, without accessing radio hardware. `make install` installs the
-module but does not activate it.
+module but does not activate it. The module goes into ASL3's Debian multiarch
+directory (`/usr/lib/<architecture>/asterisk/modules`). Override `asteriskmoddir`
+when using an Asterisk installation with a different module directory.
 
 See [requirements](doc/requirements.md) and the precise
 [implementation status](doc/implementation-status.md). Do not install this

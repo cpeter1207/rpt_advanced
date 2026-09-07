@@ -1,0 +1,5 @@
+.git
+build
+*.gcda
+*.gcno
+__pycache__
