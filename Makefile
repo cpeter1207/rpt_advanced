@@ -11,6 +11,9 @@ SPEECH_SOURCE := module/speech.c
 RADIO_SOURCE := module/radio.c
 WORKER_SOURCE := module/worker.c
 CONNECTION_SOURCE := module/connection.c
+RUNTIME_SOURCE := module/runtime.c
+MODULE_HELPERS := $(filter-out $(MODULE_SOURCE),$(wildcard module/*.c))
+MODULE_OBJECTS := $(patsubst module/%.c,build/module/%.o,$(MODULE_HELPERS))
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
@@ -34,8 +37,14 @@ build/%.o: src/%.c $(HEADERS) | build
 build/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -c $< -o $@
 
-build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS)
-	$(CC) -shared $^ -lm -o $@
+build/module:
+	mkdir -p $@
+
+build/module/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) | build/module
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -fPIC -c $< -o $@
+
+build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS) $(MODULE_OBJECTS)
+	$(CC) -shared $^ -pthread -lm -o $@
 
 build/librpt_advanced.a: $(OBJECTS)
 	$(AR) rcs $@ $^
@@ -43,14 +52,14 @@ build/librpt_advanced.a: $(OBJECTS)
 quality: lint static-analysis docs
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) $(CONNECTION_SOURCE) module/connection.h module/media.h module/radio.h module/worker.h $(HEADERS) $(TESTS)
+	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(TESTS)
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
 static-analysis:
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) $(CONNECTION_SOURCE)
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- -Isrc -std=c11
-	clang-tidy $(MODULE_SOURCE) $(MEDIA_SOURCE) $(SPEECH_SOURCE) $(RADIO_SOURCE) $(WORKER_SOURCE) $(CONNECTION_SOURCE) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
+	clang-tidy $(MODULE_SOURCE) $(MODULE_HELPERS) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
 
 docs: | build
 	doxygen Doxyfile
@@ -71,7 +80,13 @@ build/module-coverage/app_rpt_advanced.so: build/module-coverage/app_rpt_advance
 	$(CC) --coverage -shared $^ -lm -o $@
 
 build/test_asterisk_module: tests/test_asterisk_module.c build/module-coverage/app_rpt_advanced.so | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE $< -Wl,--export-dynamic -ldl -o $@
+	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -DASTMM_LIBC=ASTMM_IGNORE $< -Wl,--export-dynamic -ldl -o $@
+
+build/module-coverage/runtime.o: $(RUNTIME_SOURCE) $(wildcard module/*.h) $(HEADERS) | build/module-coverage
+	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
+
+build/test_runtime: tests/test_runtime.c build/module-coverage/runtime.o $(COVERAGE_OBJECTS) | build
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -lm -Wl,--wrap=calloc,--wrap=clock_gettime -o $@
 
 build/module-coverage/media.o: $(MEDIA_SOURCE) module/media.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@

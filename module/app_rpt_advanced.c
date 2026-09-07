@@ -5,6 +5,7 @@
 #include <asterisk.h>
 
 #include "document.h"
+#include "runtime.h"
 #include "schema.h"
 #include <asterisk/buildopts.h>
 #include <asterisk/logger.h>
@@ -15,6 +16,8 @@
 
 /** @brief Configuration owned by the loaded module. */
 static struct ra_document configuration;
+/** @brief Radio resources whose strings belong to configuration. */
+static struct ra_runtime runtime;
 
 /** @brief Load a complete replacement without discarding working settings on failure.
  * @return Zero on success or minus one on file, syntax, or schema errors.
@@ -50,6 +53,17 @@ static int read_configuration(void) {
         return -1;
     }
     ast_free(path);
+    ra_runtime_stop(&runtime);
+    error = ra_runtime_start(&runtime, &replacement);
+    if (error) {
+        ast_log(LOG_ERROR, "rpt_advanced: %s\n", error);
+        ra_document_destroy(&replacement);
+        error = ra_runtime_start(&runtime, &configuration);
+        if (error) {
+            ast_log(LOG_ERROR, "rpt_advanced: restoring previous radios failed: %s\n", error);
+        }
+        return -1;
+    }
     ra_document_destroy(&configuration);
     configuration = replacement;
     return 0;
@@ -71,6 +85,7 @@ static int reload_module(void) { return read_configuration(); }
  * @return Zero after cleanup.
  */
 static int unload_module(void) {
+    ra_runtime_stop(&runtime);
     ra_document_destroy(&configuration);
     return 0;
 }
