@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Resolve inheritance without copying strings or limiting the number of nodes.
  */

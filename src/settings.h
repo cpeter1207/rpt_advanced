@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Resolved node and identifier settings with shared-default inheritance.
  */

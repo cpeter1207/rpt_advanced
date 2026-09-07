@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Duplex truth-table, hang-time boundaries, and identifier integration tests.
  */

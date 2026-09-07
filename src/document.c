@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Own parsed strings outside the real-time path, with failure-atomic loading.
  */

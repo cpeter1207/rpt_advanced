@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Whole-document validation and unlimited named-node/identifier discovery.
  */

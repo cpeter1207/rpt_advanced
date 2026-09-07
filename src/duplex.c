@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
  * @brief Half/full-duplex transmit policy without audio or hardware dependencies.
  */
