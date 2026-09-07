@@ -101,6 +101,8 @@ static struct ast_module_info descriptor = {
     .unload = unload_module,
     .reload = reload_module,
     .load_pri = AST_MODPRI_DEFAULT,
+    /* Order the configured driver first; disabled configurations need no radio. */
+    .optional_modules = "chan_usbradioplus",
     .support_level = AST_MODULE_SUPPORT_EXTENDED,
 };
 
