@@ -58,8 +58,12 @@ production workflow can be repaired without a circular gate dependency.
 
 ## Setup status
 
-There is no code, build system, test suite, workflow implementation, published
-documentation site, package, or container image yet. Branch protection requires
-pull requests, linear history, and resolved review conversations, and prohibits
-force pushes and branch deletion. Required status checks must be activated when
-the real workflows exist, before production-code development or releases.
+The reusable quality workflow is active. Branch protection requires its quality
+gate, pull requests, linear history, and resolved review conversations, and
+prohibits force pushes and branch deletion. The gate runs applicable checks for
+the source types present; Ruff and ShellCheck become applicable when Python or
+shell source is introduced. The current foundation is C only.
+
+See [implementation status](doc/implementation-status.md) for the distinction
+between tested components and the remaining module, container, release, and
+documentation-publication work. There is no release workflow yet.
