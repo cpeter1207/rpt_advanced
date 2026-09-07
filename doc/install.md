@@ -8,6 +8,13 @@ USBRadioPlus must provide the `RadioPlusAdvanced` channel technology; older
 releases without that adapter cannot serve this controller. No radio hardware
 is required for the automated synthetic-radio tests.
 
+Load Asterisk's `codec_resample.so` when selecting a PCM rate different from the
+radio's native rate, together with the requested codec's module for encoded
+formats. Installed but unloaded converters are not available to negotiation.
+Use `core show translation` to inspect available paths. Native signed-linear
+operation needs no converter; probing other rates may produce Asterisk
+translation warnings when their converters are absent.
+
 FFmpeg prepares sound files and synthesized speech before a radio worker starts.
 For speech, install an offline Piper executable named `piper` in Asterisk's
 service PATH and configure a local voice model. The service account must be able
