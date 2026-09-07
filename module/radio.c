@@ -8,6 +8,7 @@
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
 #include <asterisk/frame.h>
+#include <asterisk/translate.h>
 
 int ra_radio_exchange(struct ra_radio *state, struct ast_channel *channel) {
     struct ast_frame *frame = ast_read(channel);
@@ -16,6 +17,16 @@ int ra_radio_exchange(struct ra_radio *state, struct ast_channel *channel) {
     }
     int result = 0;
     bool audio = frame->frametype == AST_FRAME_VOICE;
+    if (audio && state->decode) {
+        if (ast_format_cmp(frame->subclass.format, state->codec) != AST_FORMAT_CMP_EQUAL) {
+            ast_frfree(frame);
+            return -1;
+        }
+        frame = ast_translate(state->decode, frame, 1);
+        if (!frame) {
+            return 0;
+        }
+    }
     bool carrier = frame->frametype == AST_FRAME_CONTROL &&
                    (frame->subclass.integer == AST_CONTROL_RADIO_KEY ||
                     frame->subclass.integer == AST_CONTROL_RADIO_UNKEY);
@@ -36,6 +47,12 @@ int ra_radio_exchange(struct ra_radio *state, struct ast_channel *channel) {
             }
         }
         if (!result && audio) {
+            if (state->encode) {
+                frame = ast_translate(state->encode, frame, 1);
+                if (!frame) {
+                    return 0;
+                }
+            }
             result = ast_write(channel, frame);
         }
     }

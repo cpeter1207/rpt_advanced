@@ -14,6 +14,9 @@
   voice block, including silence. Carrier events change state without advancing
   audio. API-fixture tests cover ownership, malformed frames, and output failures;
   node workers and the separate hardware adapter are not yet connected.
+- Optional Asterisk codec conversion around linear controller processing, with
+  buffered-conversion ownership tests. Native linear transport bypasses these
+  converters. Channel startup must still build the negotiated conversion paths.
 - Asterisk codec-registry selection with bidirectional translation checks and
   hardware-bounded automatic rate selection, tested with deterministic API fixtures.
   This selector is not yet connected to radio startup.
@@ -65,7 +68,7 @@ identifier/duplex state sequence. They do not claim live-radio verification.
 ## Not yet implemented
 
 - Radio-node lifecycle, runtime media capability discovery, and audio transport.
-- The USBRadioPlus compatibility adapter and sample-rate negotiation.
+- Connecting the separate USBRadioPlus adapter to module startup and negotiation.
 - Sound-file playback, Piper adapter, connecting Morse to transmission, and playback interruption.
 - Published project-specific clean/installed test images and release packaging.
   CI uses published rpt_advanced quality images for Debian 12/13 and amd64/arm64.
@@ -73,4 +76,6 @@ identifier/duplex state sequence. They do not claim live-radio verification.
   clean-install or installed-release artifacts.
 
 Nothing has been installed on a radio node. No app_rpt implementation has been
-copied. USBRadioPlus has not been modified.
+copied. USBRadioPlus changes are limited to its separate RadioPlusAdvanced adapter
+and shared-engine integration. They passed the local quality/coverage/install gate
+and are undergoing the native platform checks in USBRadioPlus pull request 16.

@@ -9,6 +9,7 @@
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
 #include <asterisk/frame.h>
+#include <asterisk/translate.h>
 #include <stdio.h>
 
 /** @brief Opaque format identity for the public-format comparison fixture. */
@@ -39,6 +40,34 @@ static bool request_key;
 static bool received;
 /** @brief Total audio samples, unaffected by control messages. */
 static size_t rendered;
+/** @brief Receive translation path fixture. */
+static struct ast_trans_pvt decoder;
+/** @brief Transmit translation path fixture. */
+static struct ast_trans_pvt encoder;
+/** @brief Hold decoded output until a complete conversion block is available. */
+static bool decode_buffered;
+/** @brief Hold encoded output until a complete codec packet is available. */
+static bool encode_buffered;
+/** @brief Number of codec conversion calls. */
+static unsigned int translated;
+
+/** @brief Model consuming translation with delayed or in-place output.
+ * @param path Receive or transmit converter.
+ * @param frame Owned input frame.
+ * @param consume Required ownership-transfer flag.
+ * @return Converted frame, or null while buffering.
+ */
+struct ast_frame *ast_translate(struct ast_trans_pvt *path, struct ast_frame *frame, int consume) {
+    assert(frame == incoming && consume == 1);
+    ++translated;
+    bool decode = path == &decoder;
+    if (decode ? decode_buffered : encode_buffered) {
+        ++freed;
+        return NULL;
+    }
+    frame->subclass.format = decode ? &linear : &other;
+    return frame;
+}
 
 /** @brief Supply the next test frame.
  * @param channel Unused opaque channel.
@@ -166,6 +195,24 @@ int main(void) {
     frame.subclass.format = &other;
     assert(ra_radio_exchange(&radio, NULL) == -1);
     assert(rendered == before && written == 3 && freed == 13);
+    radio.codec = &other;
+    radio.decode = &decoder;
+    radio.encode = &encoder;
+    frame = voice;
+    assert(ra_radio_exchange(&radio, NULL) == -1 && translated == 0);
+    frame.subclass.format = &other;
+    decode_buffered = true;
+    assert(ra_radio_exchange(&radio, NULL) == 0 && rendered == before && written == 3);
+    decode_buffered = false;
+    encode_buffered = true;
+    assert(ra_radio_exchange(&radio, NULL) == 0 && rendered == before + 960 && written == 3);
+    encode_buffered = false;
+    frame.subclass.format = &other;
+    assert(ra_radio_exchange(&radio, NULL) == 0 && written == 4);
+    assert(frame.subclass.format == &other && freed == 17 && translated == 5);
+    frame.frametype = AST_FRAME_CONTROL;
+    frame.subclass.integer = AST_CONTROL_RADIO_UNKEY;
+    assert(ra_radio_exchange(&radio, NULL) == 0 && translated == 5);
     puts("hardware-paced Asterisk frame exchange tests passed");
     return 0;
 }
