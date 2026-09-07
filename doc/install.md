@@ -31,6 +31,13 @@ Use `DESTDIR` for staging; it prefixes install destinations without changing
 runtime configuration paths. `make install` does not edit `modules.conf`,
 `rpt.conf`, or any active configuration.
 
+`make dist` creates a source tarball under `build/`. Extract it on a machine
+with the prerequisites above and run the same build/install commands there;
+the archive does not require Git or the Asterisk source tree. `make distcheck`
+builds and stages installation from the extracted archive. This packaging check
+is part of the required platform gate. No compiled module or voice model is
+included in the source archive.
+
 The current install also provides the controller static archive and headers
 under the selected prefix, the license under `share/doc/rpt_advanced/copyright`,
 and the disabled example under `share/doc/rpt_advanced/examples/`.
