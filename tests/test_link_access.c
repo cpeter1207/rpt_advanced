@@ -18,20 +18,19 @@ int main(void) {
     for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
         assert(!ra_link_access_list_valid(invalid[i]));
     }
-    for (unsigned int flags = 0; flags < 32; ++flags) {
+    for (unsigned int flags = 0; flags < 16; ++flags) {
         bool verified = (flags & 1) != 0;
-        bool same_server = (flags & 2) != 0;
-        bool denied = (flags & 4) != 0;
-        bool restricted = (flags & 8) != 0;
-        bool listed = (flags & 16) != 0;
+        bool denied = (flags & 2) != 0;
+        bool restricted = (flags & 4) != 0;
+        bool listed = (flags & 8) != 0;
         const char *allow = restricted ? (listed ? "508422, 524950" : "508422") : "";
         const char *deny = denied ? "524950" : "508422";
-        bool expected = verified && !denied && (same_server || !restricted || listed);
-        assert(ra_link_access_allowed(allow, deny, "524950", verified, same_server) == expected);
+        bool expected = verified && !denied && (!restricted || listed);
+        assert(ra_link_access_allowed(allow, deny, "524950", verified) == expected);
     }
-    assert(ra_link_access_allowed(" \t", "", "524950", true, false));
-    assert(!ra_link_access_allowed("5249500,52495, 508422 ", "", "524950", true, false));
-    assert(ra_link_access_allowed(" 524950 ", "508422, 52495 ", "524950", true, false));
+    assert(ra_link_access_allowed(" \t", "", "524950", true));
+    assert(!ra_link_access_allowed("5249500,52495, 508422 ", "", "524950", true));
+    assert(ra_link_access_allowed(" 524950 ", "508422, 52495 ", "524950", true));
     puts("deny-first link access tests passed");
     return 0;
 }

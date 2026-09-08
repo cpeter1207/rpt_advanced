@@ -12,7 +12,11 @@
 int main(void) {
     int16_t storage[3], output[5];
     const int16_t input[] = {10, 20, 30, 40, 50};
-    struct ra_link_audio queue = {.storage = storage, .capacity = 3};
+    struct ra_link_audio queue;
+    ra_link_audio_init(&queue, storage, sizeof(storage) / sizeof(*storage));
+    assert(queue.storage == storage && queue.capacity == sizeof(storage) / sizeof(*storage));
+    assert(!atomic_load(&queue.read) && !atomic_load(&queue.written) &&
+           !atomic_load(&queue.discarded) && !atomic_load(&queue.missing));
     ra_link_audio_write(&queue, NULL, 0);
     ra_link_audio_read(&queue, NULL, 0);
     ra_link_audio_write(&queue, input, 2);

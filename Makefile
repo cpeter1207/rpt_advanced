@@ -95,7 +95,7 @@ build/module-coverage/runtime.o: $(RUNTIME_SOURCE) $(wildcard module/*.h) $(HEAD
 	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
 
 build/test_runtime: tests/test_runtime.c build/module-coverage/runtime.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -lm -Wl,--wrap=calloc,--wrap=clock_gettime -o $@
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=calloc,--wrap=clock_gettime,--wrap=ra_controller_queue_status -o $@
 
 build/module-coverage/assets.o: module/assets.c module/assets.h src/speech.h src/settings.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
@@ -138,17 +138,19 @@ build/worker_routing_fixture.o: tests/worker_routing_fixture.c tests/worker_dtmf
 
 build/test_link_hub: tests/test_link_hub.c build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-		$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=nanosleep -o $@
+		$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=nanosleep,--wrap=clock_gettime \
+		-Wl,--wrap=src_new,--wrap=src_process -o $@
 
 build/test_link_directory: tests/test_link_directory.c build/module-coverage/link_directory.o | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -o $@
 
 build/test_dtmf: tests/test_dtmf.c build/module-coverage/dtmf.o | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -o $@
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -lm \
+		-Wl,--wrap=calloc -o $@
 
 build/test_worker: tests/test_worker.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
 	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=clock_gettime,--wrap=ra_radio_exchange -o $@
+		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=clock_gettime,--wrap=nanosleep,--wrap=ra_radio_exchange -o $@
 
 build/test_worker_thread: tests/test_worker_thread.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
 	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=ra_radio_exchange -o $@

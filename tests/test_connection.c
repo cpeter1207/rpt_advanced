@@ -25,8 +25,6 @@ static struct ast_format native = {.rate = 48000};
 static struct ast_format pcm = {.rate = 16000};
 /** @brief Selected compressed format. */
 static struct ast_format compressed = {.rate = 16000};
-/** @brief Number of automatic-rate probes received by the fixture. */
-static unsigned int automatic_attempts;
 /** @brief Native interface descriptor, whose public fields are borrowed. */
 static const struct ast_channel_tech technology = {.type = "RadioPlusAdvanced"};
 /** @brief Decode-path identity. */
@@ -73,11 +71,8 @@ struct ast_format *ast_format_cap_get_format(const struct ast_format_cap *cap, i
  */
 struct ast_format *__wrap_ra_media_select(struct ast_format *radio, unsigned int rate,
                                           const char *name) {
-    assert(radio == &native && (rate == 0 || rate == 8000 || rate == 16000));
+    assert(radio == &native && (rate == 0 || rate == 16000));
     (void)name;
-    if (rate == 8000 && automatic_attempts++ == 0) {
-        return NULL;
-    }
     if (failure == 3) {
         return NULL;
     }

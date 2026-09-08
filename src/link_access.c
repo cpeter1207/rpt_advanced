@@ -52,10 +52,9 @@ static bool contains(const char *list, const char *node) {
     return false;
 }
 
-bool ra_link_access_allowed(const char *allow, const char *deny, const char *node, bool verified,
-                            bool same_server) {
+bool ra_link_access_allowed(const char *allow, const char *deny, const char *node, bool verified) {
     if (!verified || contains(deny, node)) {
         return false;
     }
-    return same_server || !allow[strspn(allow, " \t")] || contains(allow, node);
+    return !allow[strspn(allow, " \t")] || contains(allow, node);
 }

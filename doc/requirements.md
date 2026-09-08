@@ -52,8 +52,8 @@ implementation or configuration syntax.
 Use Asterisk IAX2 and existing ASL registration. Validate incoming node identity
 against ASL node resolution, not caller ID alone. By default accept valid ASL
 nodes. Provide inherited per-node allow/deny lists. Explicit denial always wins,
-including when the node also appears on the allowlist or resides on the same
-server. This user-selected rule overrides ASL3's allowlist-first precedence.
+including when the node also appears on the allowlist. There are no access
+exemptions. This user-selected rule overrides ASL3's allowlist-first precedence.
 Identity validation remains required; access lists cannot make an invalid
 identity valid. Node lookup supports local overrides, DNS, and the
 ASL external directory, in the manual's order.
@@ -69,7 +69,8 @@ standard commands 1, 2, 3, 4, 70, and additional linking commands 806, 811, 813,
 and 816. Its IAX radio profile allows ulaw, adpcm, and gsm. Neither access list
 contains entries. Do not import its unrelated macros, schedules, or commands.
 
-Implementation and interoperability testing of this section are pending. See
+The local implementation of this section is present. Live interoperability
+testing, including classic `app_rpt` peers, remains pending; see
 [AllStarLink implementation status](allstarlink-status.md).
 
 ## Identification

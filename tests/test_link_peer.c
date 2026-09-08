@@ -15,6 +15,12 @@ struct ast_format {
     unsigned int rate; /**< PCM rate. */
 };
 struct ast_trans_pvt {};
+/** @brief Fixture result for a non-linear decoder request. */
+enum fixture_translation {
+    FIXTURE_TRANSLATOR_UNAVAILABLE, /**< No compatible decoder path exists. */
+    FIXTURE_TRANSLATOR_BUFFERED,    /**< Decoder consumes an incomplete packet. */
+    FIXTURE_TRANSLATOR_FRAME        /**< Decoder returns one signed-linear frame. */
+};
 /** @brief Captured reader. */
 static void *(*reader)(void *);
 /** @brief Active fixture peer. */
@@ -43,6 +49,52 @@ static unsigned int sent_digits;
 static unsigned int key_indications;
 /** @brief Number of radio-unkey indications sent to the fixture channel. */
 static unsigned int unkey_indications;
+/** @brief Number of queued topology advertisements delivered by the reader. */
+static unsigned int sent_topologies;
+/** @brief Most recent full IAX topology text sent by the channel owner. */
+static char sent_topology[RA_LINK_TOPOLOGY_ADVERTISEMENT_MAX + 3];
+/** @brief Number of echoed redundant-key IAX text messages. */
+static unsigned int sent_newkeys;
+/** @brief Number of echoed voice-keyed IAX text messages. */
+static unsigned int sent_newkey1s;
+/** @brief Number of IAX key-negotiation replies. */
+static unsigned int sent_iaxkeys;
+/** @brief Opaque identity required by the inbound-IAX DTMF callback fixture. */
+static int inbound_context;
+/** @brief Number of valid inbound IAX DTMF end events delivered by the reader. */
+static unsigned int inbound_digits;
+/** @brief Most recent valid inbound IAX DTMF character. */
+static char inbound_digit;
+/** @brief Selected result for the fixture's Asterisk translator. */
+static enum fixture_translation translation_mode;
+/** @brief Singleton translator returned for supported fixture conversions. */
+static struct ast_trans_pvt translator;
+/** @brief Required signed-linear destination format for fixture conversion requests. */
+static struct ast_format *translation_destination;
+/** @brief Format returned in the fixture translated frame. */
+static struct ast_format *translated_format;
+/** @brief PCM samples returned by the fixture translator. */
+static int16_t translated_samples[] = {789, -321};
+/** @brief Reusable translated frame. */
+static struct ast_frame translated;
+/** @brief Decoder paths requested by the peer. */
+static unsigned int translator_builds;
+/** @brief Decoder paths released by the peer. */
+static unsigned int translator_frees;
+/** @brief Input packets consumed by the fixture translator. */
+static unsigned int translated_inputs;
+/** @brief Signed-linear translated frames released by the peer. */
+static unsigned int translated_frees;
+
+/** @brief Capture one validated inbound IAX DTMF event outside the transport reader's locks.
+ * @param context Expected callback identity.
+ * @param digit Validated conventional DTMF character.
+ */
+static void receive_inbound_digit(void *context, char digit) {
+    assert(context == &inbound_context && !locked);
+    ++inbound_digits;
+    inbound_digit = digit;
+}
 
 /** @brief Real allocator for non-failing calls.
  * @param count Element count.
@@ -130,7 +182,7 @@ int __ast_pthread_mutex_init(int tracking, const char *file, int line, const cha
     (void)name;
     (void)lock;
     ++mutex_inits;
-    return failure == mutex_inits + 1;
+    return failure == 1;
 }
 /** @brief Model balanced mutex disposal.
  * @param file Unused call-site file.
@@ -222,33 +274,46 @@ enum ast_format_cmp_res ast_format_cmp(const struct ast_format *left,
                                        const struct ast_format *right) {
     return left == right ? AST_FORMAT_CMP_EQUAL : AST_FORMAT_CMP_NOT_EQUAL;
 }
-/** @brief Fixture translator creation is unused by the signed-linear tests.
- * @param destination Unused destination format.
- * @param source Unused source format.
- * @return Null.
+/** @brief Build or reject a requested fixture decoder path.
+ * @param destination Required signed-linear destination format.
+ * @param source Non-linear source format.
+ * @return A stable translator or null when conversion is unavailable.
  */
 struct ast_trans_pvt *ast_translator_build_path(struct ast_format *destination,
                                                 struct ast_format *source) {
-    (void)destination;
     (void)source;
-    return NULL;
+    assert(destination == translation_destination);
+    ++translator_builds;
+    return translation_mode == FIXTURE_TRANSLATOR_UNAVAILABLE ? NULL : &translator;
 }
 /** @brief Release a fixture translator.
- * @param translator Unused fixture translator.
+ * @param value Null or the stable fixture translator.
  */
-void ast_translator_free_path(struct ast_trans_pvt *translator) { (void)translator; }
-/** @brief Fixture translation is unavailable.
- * @param translator Unused translator.
- * @param frame Unused input frame.
- * @param consume Unused ownership flag.
- * @return Null.
+void ast_translator_free_path(struct ast_trans_pvt *value) {
+    assert(!value || value == &translator);
+    if (value) {
+        ++translator_frees;
+    }
+}
+/** @brief Consume one fixture packet and optionally return signed-linear PCM.
+ * @param value Stable fixture translator.
+ * @param frame Owned non-linear input frame.
+ * @param consume Required input-ownership transfer flag.
+ * @return Null for a buffered packet or a signed-linear fixture frame.
  */
-struct ast_frame *ast_translate(struct ast_trans_pvt *translator, struct ast_frame *frame,
-                                int consume) {
-    (void)translator;
-    (void)frame;
-    (void)consume;
-    return NULL;
+struct ast_frame *ast_translate(struct ast_trans_pvt *value, struct ast_frame *frame, int consume) {
+    assert(value == &translator && frame == input && consume == 1);
+    ++translated_inputs;
+    if (translation_mode == FIXTURE_TRANSLATOR_BUFFERED) {
+        return NULL;
+    }
+    assert(translation_mode == FIXTURE_TRANSLATOR_FRAME);
+    translated = (struct ast_frame){.frametype = AST_FRAME_VOICE,
+                                    .subclass.format = translated_format,
+                                    .data.ptr = translated_samples,
+                                    .samples = 2,
+                                    .datalen = sizeof(translated_samples)};
+    return &translated;
 }
 /** @brief Inject read conversion failure.
  * @param channel Unused channel.
@@ -270,15 +335,30 @@ int ast_set_write_format(struct ast_channel *channel, struct ast_format *format)
     (void)format;
     return failure == 3;
 }
-/** @brief Verify explicit redundant-key handshake.
+/** @brief Verify reader-owned IAX control replies and linked-node-list text.
  * @param channel Unused channel.
- * @param text Handshake text.
- * @return Injected text-write status.
+ * @param text IAX control reply or linked-node-list text.
+ * @return Injected text-write status for the selected message class.
  */
 int ast_sendtext(struct ast_channel *channel, const char *text) {
     (void)channel;
-    assert(!strcmp(text, "!NEWKEY!"));
-    return failure == 4;
+    if (!strcmp(text, "!NEWKEY!")) {
+        ++sent_newkeys;
+        return failure == 4;
+    }
+    if (!strcmp(text, "!NEWKEY1!")) {
+        ++sent_newkey1s;
+        return failure == 12;
+    }
+    if (!strcmp(text, "!IAXKEY! 1 1 0 0")) {
+        ++sent_iaxkeys;
+        return failure == 13;
+    }
+    assert(!strncmp(text, "L ", 2));
+    assert(strlen(text) <= RA_LINK_TOPOLOGY_TEXT_MAX);
+    memcpy(sent_topology, text, strlen(text) + 1);
+    ++sent_topologies;
+    return failure == 11;
 }
 /** @brief Accept queued remote-command DTMF in the fixture transport.
  * @param channel Unused channel fixture.
@@ -310,11 +390,18 @@ struct ast_frame *ast_read(struct ast_channel *channel) {
     (void)channel;
     return input;
 }
-/** @brief Verify exactly the supplied frame is released.
+/** @brief Verify exactly the supplied or translated frame is released.
  * @param frame Released input.
  * @param cache Expected cache flag.
  */
-void ast_frame_free(struct ast_frame *frame, int cache) { assert(frame == input && cache == 1); }
+void ast_frame_free(struct ast_frame *frame, int cache) {
+    assert(cache == 1);
+    if (frame == &translated) {
+        ++translated_frees;
+        return;
+    }
+    assert(frame == input);
+}
 /** @brief Verify voice output and inject failure.
  * @param channel Unused channel.
  * @param frame Outgoing PCM.
@@ -368,23 +455,42 @@ static void frame(struct ra_link_peer *peer, struct ast_frame *value) {
  * @return Zero after assertions.
  */
 int main(void) {
-    struct ast_format linear = {8000}, other = {8000}, invalid = {0};
+    struct ast_format linear = {8000}, other = {8000}, another = {8000}, invalid = {0};
+    translation_destination = &linear;
+    translated_format = &linear;
     struct ra_link_peer peer = {0};
-    assert(ra_link_peer_start(&peer, NULL, &invalid) == -1);
+    char topology[64] = "not-empty";
+    assert(!ra_link_peer_topology(&peer, topology, sizeof(topology)) && !topology[0]);
+    assert(!ra_link_peer_topology(&peer, topology, 0) && !topology[0]);
+    assert(ra_link_peer_queue_topology(&peer, "T1") == -1);
+    assert(ra_link_peer_start(&peer, NULL, &invalid, NULL, NULL) == -1);
     for (allocation_failure = 1; allocation_failure <= 3; ++allocation_failure) {
         allocation_calls = 0;
-        assert(ra_link_peer_start(&peer, NULL, &linear) == -1);
+        assert(ra_link_peer_start(&peer, NULL, &linear, NULL, NULL) == -1);
     }
     allocation_failure = 0;
-    for (failure = 2; failure <= 5; ++failure) {
+    for (failure = 1; failure <= 5; ++failure) {
         mutex_inits = 0;
         allocation_calls = 0;
-        assert(ra_link_peer_start(&peer, NULL, &linear) == -1);
+        assert(ra_link_peer_start(&peer, NULL, &linear, NULL, NULL) == -1);
     }
     failure = 0;
     mutex_inits = 0;
     allocation_calls = 0;
-    assert(!ra_link_peer_start(&peer, NULL, &linear));
+    sent_newkeys = sent_newkey1s = sent_iaxkeys = 0;
+    assert(!ra_link_peer_start(&peer, NULL, &linear, receive_inbound_digit, &inbound_context));
+    assert(sent_newkeys == 1);
+    atomic_uint generation;
+    atomic_init(&generation, 0);
+    peer.topology_generation = &generation;
+    assert(ra_link_peer_queue_topology(&peer, NULL) == -1);
+    assert(ra_link_peer_queue_topology(&peer, "X1") == -1);
+    char overlength[RA_LINK_TOPOLOGY_ADVERTISEMENT_MAX + 2];
+    memset(overlength, 'a', sizeof(overlength));
+    overlength[0] = 'T';
+    overlength[sizeof(overlength) - 1] = '\0';
+    assert(ra_link_peer_queue_topology(&peer, overlength) == -1);
+    assert(!ra_link_peer_queue_topology(&peer, ""));
     int16_t samples[] = {123, -456}, output[2];
     struct ast_frame voice = {.frametype = AST_FRAME_VOICE,
                               .subclass.format = &linear,
@@ -394,6 +500,54 @@ int main(void) {
     struct ast_frame control = {.frametype = AST_FRAME_CONTROL,
                                 .subclass.integer = AST_CONTROL_RADIO_KEY};
     struct ast_frame ignored = {.frametype = AST_FRAME_NULL};
+    struct ast_frame dtmf_begin = {.frametype = AST_FRAME_DTMF_BEGIN, .subclass.integer = '5'};
+    struct ast_frame dtmf_end = {.frametype = AST_FRAME_DTMF_END, .subclass.integer = '5'};
+    frame(&peer, &dtmf_begin);
+    assert(!inbound_digits);
+    frame(&peer, &dtmf_end);
+    assert(inbound_digits == 1 && inbound_digit == '5');
+    assert(peer.inbound_timeout_pending);
+    frame(&peer, &ignored);
+    assert(inbound_digits == 1 && peer.inbound_timeout_pending);
+    peer.inbound_timeout_deadline_ms = 1;
+    frame(&peer, &ignored);
+    assert(inbound_digits == 2 && !inbound_digit && !peer.inbound_timeout_pending);
+    dtmf_end.subclass.integer = '6';
+    frame(&peer, &dtmf_end);
+    assert(inbound_digits == 3 && inbound_digit == '6' && peer.inbound_timeout_pending);
+    dtmf_end.subclass.integer = '#';
+    frame(&peer, &dtmf_end);
+    assert(inbound_digits == 4 && inbound_digit == '#' && !peer.inbound_timeout_pending);
+    peer.inbound_timeout_deadline_ms = 1;
+    frame(&peer, &ignored);
+    assert(inbound_digits == 4);
+    dtmf_end.subclass.integer = 'x';
+    frame(&peer, &dtmf_end);
+    dtmf_end.subclass.integer = -1;
+    frame(&peer, &dtmf_end);
+    dtmf_end.subclass.integer = 256;
+    frame(&peer, &dtmf_end);
+    assert(inbound_digits == 4);
+    peer.inbound_digit = NULL;
+    dtmf_end.subclass.integer = '*';
+    frame(&peer, &dtmf_end);
+    assert(inbound_digits == 4 && !peer.inbound_timeout_pending);
+    peer.inbound_timeout_pending = true;
+    peer.inbound_timeout_deadline_ms = 1;
+    frame(&peer, &ignored);
+    assert(inbound_digits == 4 && !peer.inbound_timeout_pending);
+    peer.inbound_digit = receive_inbound_digit;
+    frame(&peer, &ignored);
+    assert(sent_topologies == 1 && !strcmp(sent_topology, "L "));
+    assert(!ra_link_peer_queue_topology(&peer, "T1"));
+    assert(!ra_link_peer_queue_topology(&peer, "R2"));
+    frame(&peer, &ignored);
+    assert(sent_topologies == 2 && !strcmp(sent_topology, "L R2"));
+    assert(!ra_link_peer_queue_topology(&peer, "T3"));
+    failure = 11;
+    frame(&peer, &ignored);
+    failure = 0;
+    assert(sent_topologies == 3 && !strcmp(sent_topology, "L T3"));
     frame(&peer, &ignored);
     atomic_store(&peer.sent_samples, 16000);
     frame(&peer, &ignored);
@@ -402,16 +556,129 @@ int main(void) {
     peer.heartbeat_samples = 0;
     struct ast_frame text = {.frametype = AST_FRAME_TEXT};
     frame(&peer, &text);
+    text.data.ptr = "";
+    text.datalen = -1;
+    frame(&peer, &text);
+    text.datalen = 0;
+    frame(&peer, &text);
+    text.data.ptr = "X ";
+    text.datalen = 2;
+    frame(&peer, &text);
+    text.data.ptr = "Lx";
+    text.datalen = 2;
+    frame(&peer, &text);
     text.data.ptr = "!NEWKEY!x";
     text.datalen = 9;
     frame(&peer, &text);
     text.data.ptr = "unknown";
     text.datalen = 7;
     frame(&peer, &text);
+    static const char advertised[] = "L T1,RWH6GJL-P,C3,L4";
+    text.data.ptr = (char *)advertised;
+    text.datalen = sizeof(advertised);
+    frame(&peer, &text);
+    assert(atomic_load(&generation) == 1);
+    frame(&peer, &text);
+    assert(atomic_load(&generation) == 1);
+    assert(ra_link_peer_topology(&peer, topology, sizeof(topology)) ==
+           strlen("T1,RWH6GJL-P,C3,L4"));
+    assert(!strcmp(topology, "T1,RWH6GJL-P,C3,L4"));
+    char truncated[5] = "xxx";
+    assert(ra_link_peer_topology(&peer, truncated, sizeof(truncated)) ==
+           strlen("T1,RWH6GJL-P,C3,L4"));
+    assert(!strcmp(truncated, "T1,R"));
+    assert(ra_link_peer_topology(&peer, NULL, 0) == strlen("T1,RWH6GJL-P,C3,L4"));
+    char no_capacity = 'x';
+    assert(ra_link_peer_topology(&peer, &no_capacity, 0) == strlen("T1,RWH6GJL-P,C3,L4"));
+    assert(no_capacity == 'x');
+    char one_byte[1] = {'x'};
+    assert(ra_link_peer_topology(&peer, one_byte, sizeof(one_byte)) ==
+           strlen("T1,RWH6GJL-P,C3,L4"));
+    assert(!one_byte[0]);
+    text.data.ptr = "L X1";
+    text.datalen = 4;
+    frame(&peer, &text);
+    text.data.ptr = "L T!";
+    text.datalen = 4;
+    frame(&peer, &text);
+    text.data.ptr = "L R";
+    text.datalen = 3;
+    frame(&peer, &text);
+    text.data.ptr = "L T1,";
+    text.datalen = 5;
+    frame(&peer, &text);
+    text.data.ptr = "L T1, R2";
+    text.datalen = 8;
+    frame(&peer, &text);
+    static const char embedded_nul[] = {'L', ' ', 'T', '1', '\0', 'R', '2'};
+    text.data.ptr = (char *)embedded_nul;
+    text.datalen = sizeof(embedded_nul);
+    frame(&peer, &text);
+    char oversized[RA_LINK_TOPOLOGY_TEXT_MAX + 3];
+    memset(oversized, 'a', sizeof(oversized));
+    oversized[0] = 'L';
+    oversized[1] = ' ';
+    oversized[2] = 'T';
+    text.data.ptr = oversized;
+    text.datalen = sizeof(oversized);
+    frame(&peer, &text);
+    assert(ra_link_peer_topology(&peer, topology, sizeof(topology)) ==
+           strlen("T1,RWH6GJL-P,C3,L4"));
+    assert(!strcmp(topology, "T1,RWH6GJL-P,C3,L4"));
+    text.data.ptr = "L";
+    text.datalen = 1;
+    frame(&peer, &text);
+    assert(!ra_link_peer_topology(&peer, topology, sizeof(topology)) && !topology[0]);
+    assert(atomic_load(&generation) == 2);
+    text.data.ptr = "L ";
+    text.datalen = 2;
+    frame(&peer, &text);
+    assert(!ra_link_peer_topology(&peer, topology, sizeof(topology)) && !topology[0]);
+    assert(atomic_load(&generation) == 2);
+    static const char bare_with_nul[] = {'L', '\0'};
+    text.data.ptr = (char *)bare_with_nul;
+    text.datalen = sizeof(bare_with_nul);
+    frame(&peer, &text);
+    assert(!ra_link_peer_topology(&peer, topology, sizeof(topology)) && !topology[0]);
+    assert(atomic_load(&generation) == 2);
+    peer.topology_generation = NULL;
+    text.data.ptr = "L T9";
+    text.datalen = 4;
+    frame(&peer, &text);
+    assert(ra_link_peer_topology(&peer, topology, sizeof(topology)) == 2 &&
+           !strcmp(topology, "T9"));
+    text.data.ptr = "L R8";
+    frame(&peer, &text);
+    assert(ra_link_peer_topology(&peer, topology, sizeof(topology)) == 2 &&
+           !strcmp(topology, "R8"));
+    text.data.ptr = "L\t";
+    text.datalen = 2;
+    frame(&peer, &text);
+    assert(ra_link_peer_topology(&peer, topology, sizeof(topology)) == 2 &&
+           !strcmp(topology, "R8"));
+    assert(atomic_load(&generation) == 2);
+    peer.topology_generation = &generation;
+    text.data.ptr = "L T10";
+    text.datalen = 5;
+    frame(&peer, &text);
+    assert(atomic_load(&generation) == 3);
     text.data.ptr = "!NEWKEY1!";
     text.datalen = 10;
+    failure = 12;
     frame(&peer, &text);
-    assert(atomic_load(&peer.voice_keying));
+    failure = 0;
+    frame(&peer, &text);
+    assert(atomic_load(&peer.voice_keying) && sent_newkey1s == 2);
+    text.datalen = 9;
+    frame(&peer, &text);
+    assert(sent_newkey1s == 3);
+    text.data.ptr = "!IAXKEY!";
+    text.datalen = 8;
+    failure = 13;
+    frame(&peer, &text);
+    failure = 0;
+    frame(&peer, &text);
+    assert(sent_iaxkeys == 2);
     frame(&peer, &voice);
     frame(&peer, &control);
     assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123);
@@ -423,14 +690,15 @@ int main(void) {
     failure = 4;
     frame(&peer, &text);
     failure = 0;
-    peer.handshake_replied = false;
     frame(&peer, &text);
     frame(&peer, &text);
-    assert(!atomic_load(&peer.voice_keying) && peer.handshake_replied);
+    assert(!atomic_load(&peer.voice_keying) && sent_newkeys == 4);
     control.subclass.integer = AST_CONTROL_RADIO_KEY;
     frame(&peer, &control);
     assert(ra_link_peer_receive(&peer, output, 2));
+    linear.rate = 16000;
     assert(!ra_link_peer_receive(&peer, quiet, 32000));
+    linear.rate = 8000;
     text.data.ptr = "!!DISCONNECT!!";
     text.datalen = 14;
     frame(&peer, &text);
@@ -459,7 +727,28 @@ int main(void) {
     frame(&peer, &voice);
     voice.datalen = 4;
     voice.subclass.format = &other;
+    translation_mode = FIXTURE_TRANSLATOR_UNAVAILABLE;
     frame(&peer, &voice);
+    assert(translator_builds == 1 && !translated_inputs && !translated_frees);
+    translation_mode = FIXTURE_TRANSLATOR_BUFFERED;
+    frame(&peer, &voice);
+    assert(translator_builds == 2 && translated_inputs == 1 && !translated_frees);
+    translation_mode = FIXTURE_TRANSLATOR_FRAME;
+    frame(&peer, &voice);
+    assert(translator_builds == 2 && translated_inputs == 2 && translated_frees == 1);
+    voice.subclass.format = &another;
+    frame(&peer, &voice);
+    assert(translator_builds == 3 && translator_frees == 1 && translated_inputs == 3 &&
+           translated_frees == 2);
+    translated_format = &invalid;
+    frame(&peer, &voice);
+    assert(translator_builds == 3 && translator_frees == 1 && translated_inputs == 4 &&
+           translated_frees == 3);
+    translated_format = &linear;
+    peer.decode_format = NULL;
+    frame(&peer, &voice);
+    assert(translator_builds == 4 && translator_frees == 2 && translated_inputs == 5 &&
+           translated_frees == 4);
     assert(!ra_link_peer_send(&peer, false, samples, 2));
     failure = 0;
     assert(!ra_link_peer_send(&peer, true, samples, 2));
@@ -495,12 +784,17 @@ int main(void) {
     failure = 0;
     atomic_store(&peer.ended, true);
     assert(ra_link_peer_send_digit(&peer, '1') == -1);
+    assert(ra_link_peer_queue_topology(&peer, "T1") == -1);
     assert(ra_link_peer_send(&peer, false, NULL, 0) == -1);
     atomic_store(&peer.receiving, true);
     assert(!ra_link_peer_receive(&peer, output, 2));
+    unsigned int inbound_before_no_handler = inbound_digits;
     ra_link_peer_stop(&peer);
     peer = (struct ra_link_peer){0};
-    assert(!ra_link_peer_start(&peer, NULL, &linear));
+    assert(!ra_link_peer_start(&peer, NULL, &linear, NULL, NULL));
+    dtmf_end.subclass.integer = '8';
+    frame(&peer, &dtmf_end);
+    assert(inbound_digits == inbound_before_no_handler);
     assert(!ra_link_peer_send(&peer, true, samples, 2));
     ra_link_peer_stop(&peer);
     assert(hangups == 2);

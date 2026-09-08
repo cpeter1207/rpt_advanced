@@ -10,9 +10,13 @@
 #include <asterisk/codec.h>
 #include <asterisk/format.h>
 #include <asterisk/format_cap.h>
-#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+/* The fixture implements Asterisk's allocation hooks with libc storage. */
+#undef calloc
+#undef free
 
 /** @brief Minimal opaque format representation owned by this test host. */
 struct ast_format {
@@ -30,6 +34,7 @@ static struct ast_codec codecs[] = {
     {.name = "slin", .type = AST_MEDIA_TYPE_AUDIO, .sample_rate = 96000},
     {.name = "slin", .type = AST_MEDIA_TYPE_AUDIO, .sample_rate = 44100},
     {.name = "slin", .type = AST_MEDIA_TYPE_AUDIO, .sample_rate = 24000},
+    {.name = "other", .type = AST_MEDIA_TYPE_AUDIO, .sample_rate = 16000},
 };
 /** @brief Cache objects parallel to the codec registry. */
 static struct ast_format formats[sizeof(codecs) / sizeof(*codecs)];
@@ -39,12 +44,22 @@ static int codec_references;
 static struct ast_format *blocked_destination;
 /** @brief Optional source whose translation path is unavailable. */
 static struct ast_format *blocked_source;
+/** @brief Make the final registry entry share the cached 16 kHz linear format. */
+static bool duplicate_linear;
 /** @brief Signed-linear identifier format for compressed-codec testing. */
 static struct ast_format linear = {.rate = 48000};
+/** @brief Simulate a missing same-rate signed-linear cache entry. */
+static bool missing_linear;
+/** @brief Requested rate whose cached linear result is explicitly overridden. */
+static unsigned int overridden_linear_rate;
+/** @brief Borrowed override result for overridden_linear_rate. */
+static struct ast_format *overridden_linear;
 /** @brief Opaque capability ownership fixture. */
 struct ast_format_cap {
     int references;     /**< Outstanding ownership. */
     unsigned int count; /**< Appended formats. */
+    bool offered_8000;  /**< Records the legacy narrowband offer. */
+    struct ast_format *formats[sizeof(codecs) / sizeof(*codecs)]; /**< Borrowed entries. */
 };
 /** @brief Single capability returned by the allocator fixture. */
 static struct ast_format_cap capability;
@@ -52,6 +67,12 @@ static struct ast_format_cap capability;
 static bool allocation_error;
 /** @brief Inject capability append failure. */
 static bool append_error;
+/** @brief Candidate-allocation call selected for failure, or zero when disabled. */
+static unsigned int failed_candidate_allocation;
+/** @brief Candidate-allocation calls observed by the allocator fixture. */
+static unsigned int candidate_allocations;
+/** @brief Optional replacement codec-registry extent. */
+static int codec_maximum;
 
 /** @brief Allocate a tracked capability or inject failure.
  * @param flags Expected default flags.
@@ -67,10 +88,45 @@ struct ast_format_cap *__ast_format_cap_alloc(enum ast_format_cap_flags flags, c
     (void)file;
     (void)line;
     (void)func;
-    assert(flags == AST_FORMAT_CAP_FLAG_DEFAULT && !capability.references);
-    capability.count = 0;
-    capability.references = !allocation_error;
-    return allocation_error ? NULL : &capability;
+    assert(flags == AST_FORMAT_CAP_FLAG_DEFAULT);
+    if (allocation_error) {
+        return NULL;
+    }
+    assert(!capability.references);
+    capability = (struct ast_format_cap){.references = 1};
+    return &capability;
+}
+
+/** @brief Allocate candidate storage or inject an allocation failure.
+ * @param count Number of elements.
+ * @param size Bytes per element.
+ * @param file Caller source file.
+ * @param line Caller source line.
+ * @param function Caller function name.
+ * @return Zeroed allocation or null.
+ */
+void *__ast_calloc(size_t count, size_t size, const char *file, int line, const char *function) {
+    (void)file;
+    (void)line;
+    (void)function;
+    ++candidate_allocations;
+    return allocation_error || (failed_candidate_allocation &&
+                                candidate_allocations == failed_candidate_allocation)
+               ? NULL
+               : calloc(count, size);
+}
+
+/** @brief Release candidate storage owned by the media implementation.
+ * @param pointer Allocation to release.
+ * @param file Caller source file.
+ * @param line Caller source line.
+ * @param function Caller function name.
+ */
+void __ast_free(void *pointer, const char *file, int line, const char *function) {
+    (void)file;
+    (void)line;
+    (void)function;
+    free(pointer);
 }
 
 /** @brief Count offered formats without retaining fixture references.
@@ -90,15 +146,28 @@ int __ast_format_cap_append(struct ast_format_cap *cap, struct ast_format *forma
     (void)file;
     (void)line;
     (void)func;
-    assert(cap == &capability && cap->references == 1 && format && !framing);
+    assert(cap && cap->references == 1 &&
+           cap->count < sizeof(cap->formats) / sizeof(*cap->formats) && format && !framing);
+    cap->formats[cap->count] = format;
     ++cap->count;
+    if (cap == &capability) {
+        capability.offered_8000 |= format == &formats[3];
+    }
     return append_error ? -1 : 0;
 }
+
+/** @brief Return the number of entries in one fixture capability.
+ * @param cap Fixture capability.
+ * @return Entry count, or zero for a null capability.
+ */
+size_t ast_format_cap_count(const struct ast_format_cap *cap) { return cap ? cap->count : 0; }
 
 /** @brief Return the registry extent, including one vacant identifier.
  * @return Maximum identifier.
  */
-int ast_codec_get_max(void) { return (int)(sizeof(codecs) / sizeof(*codecs)) + 1; }
+int ast_codec_get_max(void) {
+    return codec_maximum ? codec_maximum : (int)(sizeof(codecs) / sizeof(*codecs)) + 1;
+}
 
 /** @brief Return an owned registry entry or the intentional hole.
  * @param id One-based registry identifier.
@@ -120,7 +189,8 @@ struct ast_format *ast_format_cache_get_by_codec(const struct ast_codec *codec) 
     if (codec->sample_rate == 24000) {
         return NULL;
     }
-    struct ast_format *format = &formats[codec - codecs];
+    struct ast_format *format =
+        duplicate_linear && codec == &codecs[9] ? &formats[5] : &formats[codec - codecs];
     ++format->references;
     return format;
 }
@@ -130,6 +200,12 @@ struct ast_format *ast_format_cache_get_by_codec(const struct ast_codec *codec) 
  * @return Borrowed linear format.
  */
 struct ast_format *ast_format_cache_get_slin_by_rate(unsigned int rate) {
+    if (missing_linear) {
+        return NULL;
+    }
+    if (rate == overridden_linear_rate) {
+        return overridden_linear;
+    }
     for (size_t i = 3; i < sizeof(formats) / sizeof(*formats); ++i) {
         if (formats[i].rate == rate && rate != 44100) {
             return &formats[i];
@@ -214,6 +290,30 @@ static void expect(unsigned int rate, const char *name, struct ast_format *expec
     }
 }
 
+/** @brief Verify that candidate ownership has returned to the fixture. */
+static void assert_released(void) {
+    assert(!codec_references);
+    for (size_t index = 0; index < sizeof(formats) / sizeof(*formats); ++index) {
+        assert(!formats[index].references);
+    }
+}
+
+/** @brief Collect and verify the ordered candidates for the 48 kHz fixture radio.
+ * @param expected Ordered borrowed format expectations.
+ * @param expected_count Number of expected entries.
+ */
+static void expect_candidates(struct ast_format *const *expected, size_t expected_count) {
+    struct ast_format **result = NULL;
+    size_t count = 0;
+    assert(!ra_media_candidates_collect(&formats[4], &result, &count));
+    assert(count == expected_count);
+    for (size_t index = 0; index < count; ++index) {
+        assert(result[index] == expected[index]);
+    }
+    ra_media_candidates_release(result, count);
+    assert_released();
+}
+
 /** @brief Exercise rate policy, registry holes, cache gaps, and both path directions.
  * @return Zero after all checks.
  */
@@ -228,6 +328,9 @@ int main(void) {
     expect(24000, "slin", NULL);
     expect(12345, "slin", NULL);
     expect(0, "missing", NULL);
+    missing_linear = true;
+    expect(16000, "slin", NULL);
+    missing_linear = false;
     expect(0, "other", &formats[1]);
     blocked_destination = &formats[3];
     expect(8000, "slin", NULL);
@@ -243,32 +346,94 @@ int main(void) {
     expect(16000, "other", NULL);
     blocked_destination = NULL;
     expect(16000, "other", &formats[1]);
-    allocation_error = true;
-    assert(!ra_media_offer(&formats[4]));
-    allocation_error = false;
-    assert(!ra_media_offer(NULL));
-    struct ast_format zero_rate_radio = {0};
-    assert(!ra_media_offer(&zero_rate_radio));
+    /* Candidates prefer direct 48 kHz PCM and never exceed the local hardware rate. */
+    struct ast_format *expected[] = {&formats[4], &formats[5], &formats[1], &formats[9],
+                                     &formats[3]};
+    expect_candidates(expected, sizeof(expected) / sizeof(*expected));
+    /* Equal direct candidates retain their original registry order. */
+    duplicate_linear = true;
+    struct ast_format *with_duplicate_linear[] = {&formats[4], &formats[5], &formats[5],
+                                                  &formats[1], &formats[3]};
+    expect_candidates(with_duplicate_linear,
+                      sizeof(with_duplicate_linear) / sizeof(*with_duplicate_linear));
+    duplicate_linear = false;
+    /* Direct PCM must move ahead of an earlier compressed format at the same rate. */
+    enum ast_media_type saved_type = codecs[4].type;
+    codecs[4].type = AST_MEDIA_TYPE_VIDEO;
     formats[3].rate = 0;
-    assert(ra_media_offer(&formats[4]) == &capability);
-    ao2_cleanup(&capability);
+    struct ast_format *same_rate[] = {&formats[5], &formats[1], &formats[9]};
+    expect_candidates(same_rate, sizeof(same_rate) / sizeof(*same_rate));
     formats[3].rate = codecs[3].sample_rate;
+    codecs[4].type = saved_type;
+    struct ast_format *sentinel[] = {&linear};
+    struct ast_format **result = sentinel;
+    size_t count = 99;
+    assert(ra_media_candidates_collect(NULL, &result, &count) == -1 && result == sentinel &&
+           count == 99);
+    struct ast_format zero_rate_radio = {0};
+    assert(ra_media_candidates_collect(&zero_rate_radio, &result, &count) == -1 && !result &&
+           !count);
+    assert(ra_media_candidates_collect(&formats[4], NULL, &count) == -1);
+    assert(ra_media_candidates_collect(&formats[4], &result, NULL) == -1);
+    codec_maximum = -1;
+    assert(ra_media_candidates_collect(&formats[4], &result, &count) == -1 && !result && !count);
+    codec_maximum = 0;
+    allocation_error = true;
+    result = NULL;
+    count = 0;
+    assert(ra_media_candidates_collect(&formats[4], &result, &count) == -1 && !result && !count);
+    allocation_error = false;
+    candidate_allocations = 0;
+    failed_candidate_allocation = 2;
+    assert(ra_media_candidates_collect(&formats[4], &result, &count) == -1 && !result && !count);
+    failed_candidate_allocation = 0;
+    formats[3].rate = 0;
+    struct ast_format *without_8k[] = {&formats[4], &formats[5], &formats[1], &formats[9]};
+    expect_candidates(without_8k, sizeof(without_8k) / sizeof(*without_8k));
+    formats[3].rate = codecs[3].sample_rate;
+    struct ast_format matching_linear = {.rate = 8000};
+    overridden_linear_rate = 8000;
+    overridden_linear = &matching_linear;
     formats[3].rate = 4000;
-    assert(ra_media_offer(&formats[4]) == &capability);
-    ao2_cleanup(&capability);
+    expect_candidates(without_8k, sizeof(without_8k) / sizeof(*without_8k));
     formats[3].rate = codecs[3].sample_rate;
+    overridden_linear = NULL;
+    overridden_linear_rate = 0;
+    blocked_destination = &formats[5];
+    struct ast_format *without_compressed_16k[] = {&formats[4], &formats[5], &formats[3]};
+    expect_candidates(without_compressed_16k,
+                      sizeof(without_compressed_16k) / sizeof(*without_compressed_16k));
+    blocked_destination = NULL;
+    /* A cache result at the wrong rate is never accepted as wire PCM. */
+    overridden_linear_rate = 8000;
+    overridden_linear = &linear;
+    expect_candidates(without_8k, sizeof(without_8k) / sizeof(*without_8k));
+    overridden_linear = &matching_linear;
+    expect_candidates(expected, sizeof(expected) / sizeof(*expected));
+    overridden_linear = NULL;
+    overridden_linear_rate = 0;
+    /* Codec/radio conversion is deliberately irrelevant: link_hub resamples peer PCM. */
+    blocked_source = &formats[5];
+    struct ast_format *no_other[] = {&formats[4], &formats[5], &formats[3]};
+    expect_candidates(no_other, sizeof(no_other) / sizeof(*no_other));
+    blocked_source = NULL;
+    missing_linear = true;
+    result = NULL;
+    count = 0;
+    assert(ra_media_candidates_collect(&formats[4], &result, &count) == -1 && !result && !count);
+    missing_linear = false;
+    struct ast_format_cap *offer = ra_media_offer_create(&formats[4]);
+    assert(offer == &capability && capability.count == 1 && capability.formats[0] == &formats[4]);
+    ao2_cleanup(offer);
+    assert(!ra_media_offer_create(NULL));
+    allocation_error = true;
+    assert(!ra_media_offer_create(&formats[4]));
+    allocation_error = false;
     append_error = true;
-    assert(!ra_media_offer(&formats[4]) && !capability.references);
+    assert(!ra_media_offer_create(&formats[4]) && !capability.references);
     append_error = false;
-    /* Offer all concrete audio formats that have bidirectional native paths. */
-    blocked_source = &formats[3];
-    assert(ra_media_offer(&formats[4]) == &capability);
-    assert(capability.count == 5);
-    ao2_cleanup(&capability);
-    assert(!codec_references);
-    for (size_t i = 0; i < sizeof(formats) / sizeof(*formats); ++i) {
-        assert(!formats[i].references);
-    }
+    ra_media_candidates_release(NULL, 0);
+    assert_released();
     puts("Asterisk runtime media selection tests passed");
     return 0;
 }

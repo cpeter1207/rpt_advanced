@@ -17,9 +17,7 @@ bool ra_link_access_list_valid(const char *list);
  * @param deny Validated denylist; matching entries always deny access.
  * @param node Nonempty verified decimal node identity, compared exactly.
  * @param verified True only after directory/address authentication succeeds.
- * @param same_server True for an independently verified local node.
- * @return True if access is permitted. Same-server status never bypasses denial.
+ * @return True if access is permitted.
  */
-bool ra_link_access_allowed(const char *allow, const char *deny, const char *node, bool verified,
-                            bool same_server);
+bool ra_link_access_allowed(const char *allow, const char *deny, const char *node, bool verified);
 #endif

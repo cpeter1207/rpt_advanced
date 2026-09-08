@@ -5,6 +5,7 @@
 #include "controller.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 /** @brief Fill a hardware block with alternating positive and negative rails.
  * @param audio Destination with 960 samples.
@@ -23,12 +24,70 @@ int main(void) {
     const int16_t prepared[] = {100, -100, 200, -200};
     struct ra_controller controller = {.rate = 8000, .full_duplex = true};
     assert(ra_controller_start(&controller, 0));
+    assert(controller.status_speed_wpm == 20 && controller.status_frequency_hz == 800 &&
+           controller.status_level_db == -6);
     assert(!ra_controller_process(&controller, false, audio, 160, 0));
     assert(ra_controller_process(&controller, true, NULL, 0, 100));
     rails(audio);
     assert(ra_controller_process(&controller, true, audio, 960, 120));
     assert(audio[0] == INT16_MAX && audio[1] == INT16_MIN);
     assert(!ra_controller_process(&controller, false, NULL, 0, 140));
+
+    /* Status requests are Morse-prepared by control and deferred in half duplex. */
+    char oversized[RA_CONTROLLER_STATUS_TEXT_MAX + 1];
+    memset(oversized, 'E', sizeof(oversized));
+    oversized[RA_CONTROLLER_STATUS_TEXT_MAX] = '\0';
+    assert(!ra_controller_queue_status(&controller, NULL));
+    assert(!ra_controller_queue_status(&controller, ""));
+    assert(!ra_controller_queue_status(&controller, "E*"));
+    assert(!ra_controller_queue_status(&controller, oversized));
+    controller.full_duplex = false;
+    /* A sample-free tick keeps PTT keyed after control starts a pending status. */
+    assert(ra_controller_queue_status(&controller, "E"));
+    assert(ra_controller_process(&controller, false, NULL, 0, 145));
+    assert(controller.status_playing);
+    assert(ra_controller_start(&controller, 0));
+    for (size_t index = 0; index < RA_CONTROLLER_STATUS_QUEUE_DEPTH; ++index) {
+        assert(ra_controller_queue_status(&controller, "E"));
+    }
+    assert(!ra_controller_queue_status(&controller, "E"));
+    rails(audio);
+    assert(!ra_controller_process(&controller, true, audio, 960, 150));
+    assert(!audio[0] && !audio[959] && !atomic_load(&controller.status_read));
+    assert(ra_controller_process(&controller, false, audio, 960, 160));
+    assert(atomic_load(&controller.status_read) == 1 && !controller.status_playing);
+    controller.full_duplex = true;
+    for (size_t index = 1; index < RA_CONTROLLER_STATUS_QUEUE_DEPTH; ++index) {
+        assert(ra_controller_process(&controller, false, audio, 960, 170 + index));
+    }
+    assert(!ra_controller_process(&controller, false, audio, 160, 180));
+    assert(atomic_load(&controller.status_read) == RA_CONTROLLER_STATUS_QUEUE_DEPTH);
+    /* Partial status defaults are invalid rather than silently mixing defaults with caller input.
+     */
+    controller.status_speed_wpm = 0;
+    controller.status_frequency_hz = 800;
+    controller.status_level_db = 0;
+    assert(!ra_controller_start(&controller, 0));
+    controller.status_frequency_hz = 0;
+    controller.status_level_db = -6;
+    assert(!ra_controller_start(&controller, 0));
+    controller.status_speed_wpm = 25;
+    controller.status_frequency_hz = 4000;
+    controller.status_level_db = -12;
+    assert(!ra_controller_start(&controller, 0));
+    controller.status_frequency_hz = 1200;
+    assert(ra_controller_start(&controller, 0));
+    assert(ra_controller_queue_status(&controller, "E"));
+    assert(ra_controller_process(&controller, false, audio, 960, 190));
+    assert(controller.status_morse.speed == 25 && controller.status_morse.amplitude < 10000);
+    /* A pending second status does not restart the Morse renderer already in progress. */
+    assert(ra_controller_start(&controller, 0));
+    assert(ra_controller_queue_status(&controller, "EEEE"));
+    assert(ra_controller_queue_status(&controller, "EEEE"));
+    assert(ra_controller_process(&controller, false, audio, 1, 191));
+    assert(controller.status_playing);
+    assert(ra_controller_process(&controller, false, audio, 1, 192));
+    assert(controller.status_playing);
 
     struct ra_controller_id ids[2] = {{.settings = {.interval_ms = 100,
                                                     .priority = 5,
@@ -53,7 +112,19 @@ int main(void) {
     controller.rate = 1000;
     assert(!ra_controller_start(&controller, 0));
     controller.rate = 8000;
+    ids[0].settings.morse_frequency_hz = 4000;
+    assert(!ra_controller_start(&controller, 0));
+    ids[0].settings.morse_frequency_hz = 1000;
     controller.hang_ms = 20;
+    assert(ra_controller_start(&controller, 0));
+    /* A status reply preempts an ID but leaves that ID due for replay afterward. */
+    assert(ra_controller_process(&controller, false, audio, 2, 100));
+    assert(controller.playing == 0 && controller.playback.offset == 2);
+    assert(ra_controller_queue_status(&controller, "E"));
+    assert(ra_controller_process(&controller, false, audio, 960, 101));
+    assert(controller.playing == SIZE_MAX && states[0].satisfied_ms == 0);
+    assert(ra_controller_process(&controller, false, audio, 2, 102));
+    assert(controller.playing == 0 && audio[0] == 100 && audio[1] == -100);
     assert(ra_controller_start(&controller, 0));
     assert(ra_controller_process(&controller, false, audio, 960, 100));
     assert(audio[0] == 100 && audio[3] == -200 && audio[4] == 0);
@@ -73,6 +144,16 @@ int main(void) {
     assert(!controller.playback.prepared && controller.playback.offset == 2);
     assert(ra_controller_process(&controller, false, audio, 960, 102));
     assert(controller.playing == SIZE_MAX && states[0].satisfied_ms == 102);
+
+    /* Linked receive has the same irreversible prepared-ID-to-Morse interruption behavior. */
+    assert(ra_controller_start(&controller, 0));
+    assert(ra_controller_process(&controller, false, audio, 2, 100));
+    assert(controller.playing == 0 && controller.playback.prepared);
+    controller.link_active = true;
+    assert(ra_controller_process(&controller, false, audio, 960, 101));
+    assert(!controller.playback.prepared && controller.playing == SIZE_MAX &&
+           states[0].satisfied_ms == 101);
+    controller.link_active = false;
 
     /* Half duplex defers a due ID, then transmits it after reception ends. */
     controller.full_duplex = false;

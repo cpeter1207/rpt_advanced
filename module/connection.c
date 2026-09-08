@@ -38,16 +38,9 @@ const char *ra_connection_open(struct ra_connection *connection, const char *nam
         return "radio has no native audio format";
     }
     struct ra_connection candidate = {0};
-    /* Legacy AllStarLink peers advertise only 8 kHz codecs.  An unspecified
-     * rate therefore starts at the interoperable network rate; callers that
-     * explicitly request a rate retain the full negotiated-rate behavior. */
-    unsigned int automatic_rate = !rate && !*codec ? 8000 : rate;
-    candidate.radio.codec = ra_media_select(native, automatic_rate, codec);
-    /* GCOVR_EXCL_START: fallback is exercised by live codec registries. */
-    if (!candidate.radio.codec && !rate && !*codec) {
-        candidate.radio.codec = ra_media_select(native, 0, codec);
-    }
-    /* GCOVR_EXCL_STOP */
+    /* An omitted rate selects the highest registered signed-linear format the
+     * radio can use. Individual links adapt their negotiated wire rate later. */
+    candidate.radio.codec = ra_media_select(native, rate, codec);
     ao2_cleanup(native);
     if (!candidate.radio.codec) {
         return "requested codec/rate has no supported conversion path";

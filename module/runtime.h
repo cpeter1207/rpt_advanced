@@ -6,10 +6,13 @@
 #define RPT_ADVANCED_RUNTIME_H
 #include "document.h"
 #include "link_command.h"
+#include <stddef.h>
 
 struct ra_runtime_node;
 struct ast_channel;
+struct ast_format;
 struct ast_format_cap;
+struct ra_link_peer_status;
 /** @brief Nonblocking delivery of decoded digits to the module's control queue.
  * @param node Borrowed node name; copy before returning if retained.
  * @param digit Completed digit, or zero for the interdigit timeout.
@@ -24,8 +27,9 @@ struct ra_link_operation {
 };
 /** @brief Owned call preparation, independent of runtime configuration lifetime. */
 struct ra_link_dial {
-    char *destination;            /**< Owned resolved dial string. */
-    struct ast_format_cap *offer; /**< Owned codec offer. */
+    char *destination;              /**< Owned resolved dial string. */
+    struct ast_format **candidates; /**< Owned ordered wire-format references. */
+    size_t candidate_count;         /**< Number of entries in candidates. */
 };
 /** @brief Module-owned nodes; configuration strings must outlive this runtime. */
 struct ra_runtime {
@@ -39,6 +43,21 @@ struct ra_runtime {
  * @return Null on success or a diagnostic after releasing all partial resources.
  */
 const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_document *document);
+
+/** @brief Reconfigure a running runtime without replacing matching nodes' link hubs.
+ * @param runtime Active runtime whose caller serializes all lifecycle operations.
+ * @param current Valid configuration currently backing runtime-owned borrowed strings.
+ * @param replacement Valid candidate configuration retained by the caller on failure.
+ * @return Null after replacing enabled nodes and preserving their attached/retry link state, or a
+ * diagnostic after restoring the current runtime.
+ *
+ * Matching node objects keep their stable hub address, peer readers, manager, retry records, and
+ * rate-bound routing buffers. Removing or disabling a node ends its direct peers and cancels its
+ * retries; a candidate cannot change the local PCM rate of a hub that has allocated link routing
+ * state. The caller destroys `current` only after success and destroys `replacement` on failure.
+ */
+const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_document *current,
+                              const struct ra_document *replacement);
 
 /** @brief Stop, unkey, and join all workers before releasing their media state.
  * @param runtime Owned runtime, safe when empty.
@@ -67,11 +86,10 @@ void ra_runtime_reset_digits(struct ra_runtime *runtime);
  * @param remote Verified decimal calling node identity.
  * @param channel Answered channel; ownership transfers on success only.
  * @param verified Result of independent directory/address identity verification.
- * @param same_server Independently verified same-server origin.
  * @return Zero on successful ownership transfer; minus one on rejection or setup failure.
  */
 int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char *remote,
-                      struct ast_channel *channel, bool verified, bool same_server);
+                      struct ast_channel *channel, bool verified);
 
 /** @brief Prepare a directory-verified call while the runtime is protected.
  * @param runtime Active runtime; caller serializes with reload.
@@ -104,13 +122,37 @@ int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const 
                            struct ast_channel *channel, bool transmit, bool forward,
                            bool permanent);
 
-/** @brief Disconnect an exact peer from a local node.
+/** @brief Retain a permanent link request whose first dial or attachment did not succeed.
+ * @param runtime Active runtime; caller serializes with reload and other control commands.
+ * @param local Local node name.
+ * @param remote Remote node name.
+ * @param transmit Enable outbound audio after recovery.
+ * @param forward Forward recovered peer audio to other peers.
+ * @return True after the node records automatic retry intent; false for an unknown node, an
+ * existing route, unavailable recovery callback, or allocation/manager-start failure.
+ *
+ * This carries no channel ownership. It lets a permanent DTMF link request survive an initial
+ * transient dial or attachment failure and uses the same hub recovery policy as an ended peer.
+ */
+bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *local,
+                                      const char *remote, bool transmit, bool forward);
+
+/** @brief Disconnect an exact nonpermanent peer from a local node.
  * @param runtime Active runtime; caller serializes with reload and other commands.
  * @param local Local node name.
  * @param remote Remote node name.
- * @return True when an existing peer was disconnected.
+ * @return True when an existing nonpermanent peer was disconnected.
  */
 bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const char *remote);
+
+/** @brief Disconnect a permanent peer and prevent any retained retry from redialing it.
+ * @param runtime Active runtime; caller serializes with reload and other commands.
+ * @param local Local node name.
+ * @param remote Remote node name.
+ * @return True when an attached peer or pending permanent recovery was removed.
+ */
+bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *local,
+                                     const char *remote);
 
 /** @brief Disconnect every peer attached to a local node.
  * @param runtime Active runtime.
@@ -119,19 +161,50 @@ bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const 
  */
 size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local);
 
-/** @brief Count peers attached to a local node.
- * @param runtime Active runtime.
+/** @brief Resume every link retained by a prior disconnect-all for a local node.
+ * @param runtime Active runtime; caller serializes with reload and other commands.
  * @param local Local node name.
- * @return Number of attached peers, or zero for an unknown node.
+ * @return Number of retained links made immediately eligible, or zero when unknown.
  */
-size_t ra_runtime_link_count(struct ra_runtime *runtime, const char *local);
+size_t ra_runtime_reconnect_all(struct ra_runtime *runtime, const char *local);
+
+/** @brief Queue concise RF link status through a node's existing Morse controller.
+ * @param runtime Active runtime; caller serializes it with reload and other controls.
+ * @param local Local node name.
+ * @param last_keyed Select the remembered direct peer instead of current-link status.
+ * @return Zero when status is queued, minus one for an unknown node, invalid text, or a full queue.
+ */
+int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, bool last_keyed);
+
+/** @brief Snapshot directly attached peers for a complete control-plane status listing.
+ * @param runtime Active runtime; caller serializes it with reload and other controls.
+ * @param local Local node name.
+ * @param entries Caller-owned output entries, or null when only counting.
+ * @param capacity Number of output entries.
+ * @param count Receives the complete direct-peer count when non-null.
+ * @return True when the local node exists; false otherwise.
+ */
+bool ra_runtime_link_snapshot(struct ra_runtime *runtime, const char *local,
+                              struct ra_link_peer_status *entries, size_t capacity, size_t *count);
+
+/** @brief Return an owned app_rpt-style topology report for a local node.
+ * @param runtime Active runtime; caller serializes it with reload and other controls.
+ * @param local Local node name.
+ * @return Asterisk-allocated topology text, or null for an unknown node or allocation failure.
+ *
+ * The caller releases a non-null result with ast_free. This control-plane report may include
+ * direct peers and their validated remote topology advertisements; it is never used by audio.
+ */
+char *ra_runtime_link_topology(struct ra_runtime *runtime, const char *local);
 
 /** @brief Select or feed one directly connected remote-command peer.
  * @param runtime Active runtime; caller serializes it with reload and control commands.
  * @param local Local node name.
- * @param remote Directly connected, already authorized remote node.
+ * @param remote Directly connected remote node that must pass this node's current deny-first
+ * policy; selection additionally requires independent directory resolution.
  * @param digit Zero selects remote mode; otherwise queues one DTMF digit.
- * @return Zero on success, minus one if the selected peer is unavailable.
+ * @return Zero on success, minus one if policy, directory proof, or direct-peer availability
+ * rejects the request.
  */
 int ra_runtime_remote_command(struct ra_runtime *runtime, const char *local, const char *remote,
                               char digit);

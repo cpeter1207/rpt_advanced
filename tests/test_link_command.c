@@ -78,6 +78,8 @@ static void collection(void) {
     struct ra_link_command_mapping table[RA_LINK_ACTION_COUNT];
     ra_link_commands_default(table);
     assert(!ra_link_commands_validate(table, RA_LINK_ACTION_COUNT));
+    assert(!strcmp(table[RA_LINK_DISCONNECT_ALL].digits, "806"));
+    assert(!strcmp(table[RA_LINK_RECONNECT_ALL].digits, "816"));
     struct ra_link_collector collector = {0};
     char completed[128];
     assert(!ra_link_collect(&collector, table, RA_LINK_ACTION_COUNT, '3', 0, completed));
@@ -101,6 +103,18 @@ static void collection(void) {
     assert(!ra_link_collect(&collector, table, RA_LINK_ACTION_COUNT, '7', 5000, completed));
     assert(ra_link_collect(&collector, table, RA_LINK_ACTION_COUNT, '0', 5000, completed));
     assert(!strcmp(completed, "70"));
+    const char *defaults[] = {"*806", "*816"};
+    const enum ra_link_action default_actions[] = {RA_LINK_DISCONNECT_ALL, RA_LINK_RECONNECT_ALL};
+    for (size_t index = 0; index < sizeof(defaults) / sizeof(*defaults); ++index) {
+        for (size_t digit = 0; defaults[index][digit]; ++digit) {
+            bool complete = ra_link_collect(&collector, table, RA_LINK_ACTION_COUNT,
+                                            defaults[index][digit], 5500, completed);
+            assert(complete == (digit + 1 == strlen(defaults[index])));
+        }
+        struct ra_link_command command;
+        assert(ra_link_command_parse(table, RA_LINK_ACTION_COUNT, completed, &command));
+        assert(command.action == default_actions[index] && !*command.node);
+    }
     assert(!ra_link_collect(&collector, table, RA_LINK_ACTION_COUNT, '*', 6000, completed));
     assert(!ra_link_collect(&collector, table, RA_LINK_ACTION_COUNT, 'x', 6000, completed));
     assert(!collector.active);

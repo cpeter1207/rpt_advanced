@@ -7,7 +7,7 @@
 
 void ra_link_commands_default(struct ra_link_command_mapping *mappings) {
     static const char *const prefixes[RA_LINK_ACTION_COUNT] = {
-        "1", "2", "3", "4", "70", "71", "72", "75", "811", "812", "813", "73", "74", "818"};
+        "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818"};
     for (size_t i = 0; i < RA_LINK_ACTION_COUNT; ++i) {
         mappings[i] = (struct ra_link_command_mapping){prefixes[i], (enum ra_link_action)i};
     }

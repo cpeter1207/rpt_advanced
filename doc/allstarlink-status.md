@@ -1,88 +1,125 @@
 # AllStarLink implementation status
 
-This work is not deployment-ready. The running controller on 524950 has not
-been changed during this implementation phase.
+The AllStarLink implementation is present in the local source tree. It is not
+deployment-ready: it has not been installed or enabled on 524950 or any other
+live node, and it has not yet been proven interoperable with a classic
+`app_rpt` peer. This document describes the implemented behavior and the
+remaining validation; it is not authorization to activate a live link.
 
 ## Implemented locally
 
-The original linking-command parser accepts configured prefixes, validates
-ambiguous mappings, and distinguishes destination-taking commands from status
-and reconnect operations. An empty mapping disables that command. Destination
-zero remains a reference to the last operated node, to be resolved by the link
-controller. Parsing failures leave the caller's result unchanged.
+The controller accepts the configured linking-only DTMF operations: monitor,
+transceive, local-monitor, permanent variants, disconnect, disconnect-all,
+reconnect-all, status, last-keyed, full status, and direct-peer remote-command
+mode. Time, forced-ID, macro, autopatch, and other unrelated commands are not
+implemented. The normal default mappings are documented in
+[configuration](configuration.md); mappings are configurable, use a leading
+`*`, and destination-taking commands end with `#` or a three-second interdigit
+timeout. Destination `0` selects the last link destination.
 
-The deny-first access policy and inherited `link_allow_nodes` / `link_deny_nodes`
-configuration are implemented locally. Tests cover all combinations of verified
-identity, same-server status, denylist membership, allowlist restriction, and
-allowlist membership. An explicit empty per-node list clears the shared default.
-Malformed lists are rejected during configuration validation. The access policy
-is connected to incoming channel admission with directory/address validation.
+`*4<node>` selects only a directly attached peer whose identity resolves and
+passes the same allow/deny policy required for an incoming peer. That policy is
+rechecked for every forwarded digit. Subsequent DTMF is delivered only to that
+peer, and `#` always exits remote-command mode locally. No remote-command digit
+is interpreted as a local command while that mode is active.
 
-The parser is wired into the local worker and control queue. DTMF is normalized
-to an internal 8 kHz detector while link audio remains at its negotiated rate.
-The integration test exercises connect, disconnect, and timeout commands at
-8, 16, and 48 kHz.
+An attached direct peer's IAX `DTMF_END` events use the same serial control
+queue as locally decoded DTMF only while its identity passes the current
+deny-first policy, so a classic authorized peer can send linking commands to
+this node through remote-command mode. An explicitly outbound audio link may
+remain connected after a policy change, but its rejected IAX DTMF is ignored.
+Starts and malformed end events are ignored. The reader is joined before its
+hub and runtime callback are released; a reload discards any queued event from
+the retired runtime.
+Local in-band DTMF is decoded in the radio worker; when a digit completes, its
+current PCM frame is silenced before controller or link routing. No setting
+currently retains that completed local frame.
 
-On 2026-09-07, the Debian 13 amd64 quality container passed the complete
-`make ci` gate: compilation, formatting, Ruff, Cppcheck, Clang-Tidy, Doxygen,
-unit tests, staged installation, source-archive rebuilding, and the two-process
-IAX integration. Coverage is 100% for lines, functions, and branches. These
-results do not establish classic app_rpt interoperability or the native
-platform matrix. No deployment has occurred.
+Incoming calls enter through `RptAdvanced(node)`. The implementation checks an
+optional local static directory first, then uses the configured DNS/file
+selection; `both` uses ASL DNS before the optional ASL external directory. Every
+accepted source verifies the numeric IAX address. Valid nodes are accepted by
+default. Inherited `link_allow_nodes` and `link_deny_nodes` lists can restrict
+that policy; denial wins over allowlist membership and there are no access
+exemptions. A list never makes an unresolved or mismatched identity valid. A
+present malformed record or address mismatch fails closed rather than falling
+through to a later source.
 
-## Remaining
+Direct links are transceive, monitor, or local-monitor links. Routing provides
+mix-minus and prevents local-monitor links from being forwarded to other peers.
+The media boundary is rate-aware: Asterisk negotiates an available channel
+format, Asterisk translates the wire codec to peer PCM, and the controller uses
+libsamplerate when peer PCM differs from the radio rate. Ordinary 8 kHz ASL
+operation remains the primary compatibility case; broader codec/rate
+interoperability is still to be demonstrated against real peers.
+The selected local radio rate bounds the dynamically discovered IAX candidates.
+Asterisk's public IAX request path reduces a multi-format audio capability to
+one format before IAX negotiation, so rpt_advanced attempts one exact candidate
+at a time from the local native rate downward within one 20-second dial budget.
+That permits a compatible wideband peer to use direct PCM while a ULAW/SLIN8
+peer remains usable without Asterisk's `codec_resample`. After IAX chooses the
+wire format, the adapter resamples its matching-rate PCM as needed.
 
-- Complete permanent-link state and reconnect recovery.
-- Implement remote-command forwarding and linking status/last-keyed reporting.
-- Exercise every agreed linking-only command through the live controller.
-- Test ordinary app_rpt interoperability and higher-rate capable peers, including
-  multiple peers, denial, failures, hangup, and reload.
-- Run all four native platform gates and approved testing on 524950 using its
-  existing app_rpt linking settings.
+Permanent links retain their routing mode after an initial dial or attachment
+failure as well as after an unexpected transport failure. They retry
+immediately, then after one second with exponential backoff to a five-minute
+maximum. An explicit permanent disconnect cancels a queued retry.
+Disconnect-all retains both temporary and permanent links for reconnect-all;
+only permanent links retry automatically. Retained state is in memory only, so
+no link survives a local Asterisk restart.
 
-## Transport integration checkpoint
+The half-duplex policy prevents local receive audio from being repeated and
+holds transmit off while the local receiver is active. Linked audio remains
+eligible for transmit according to the configured link mode. Identifier and RF
+status playback defer until reception ends when half duplex prohibits a
+transmission.
 
-Two isolated Asterisk processes exchange bidirectional audio through real IAX
-channels using both ulaw (8 kHz) and slin16 (16 kHz). The implementation obtains
-available codecs from Asterisk and converts peer audio to the radio's PCM rate.
-Per-node routing provides mix-minus, monitor, and local-monitor modes. Incoming
-calls enter through `RptAdvanced(node)`; outgoing administrative operations use
-`rpt_advanced link`.
+The status, last-keyed, and full-status operations queue short Morse RF replies
+outside the audio callback. They preempt a scheduled identifier without
+satisfying it. `rpt_advanced link status <node>` and the compatible
+`rpt link status <node>` show direct peers, routing mode, permanence, and the
+current topology cache in the Asterisk CLI. Retained links appear as `retrying`
+or `paused`, so an operator can distinguish an active transport from a pending
+automatic or reconnect-all recovery. Full status logs that cache when its RF
+status reply was successfully queued.
 
-The Debian 13 amd64 integration test also verifies deny-over-allow rejection,
-explicit disconnect, automatic
-remote-hangup cleanup, reconnection initiated from the other end, and configuration
-reload with a connected peer. Disconnected readers are joined by a control thread,
-not the hardware-paced audio worker. Module compilation and staged installation
-pass for this checkpoint. The expanded Debian 13 amd64 unit/function tests reach
-1,419/1,419 lines and 1,102/1,102 branches. Doxygen, formatting, Ruff, Cppcheck,
-and Clang-Tidy pass; `platform-verify` also passes, including the original radio
-integration, staged install, source-archive rebuild, and two-process IAX tests.
-These results do not establish classic app_rpt interoperability or replace the
-remaining native platform matrix. No production deployment has occurred.
+Topology is deliberately best-effort rather than an authoritative network map.
+The implementation validates inbound app_rpt-style `L ` text advertisements and
+caches the last valid one for each direct peer. Each direct peer is sent a
+recipient-excluded outbound `L ` advertisement after topology changes and on a
+30-second refresh cadence. A terminal `R000000` route means the bounded
+advertisement was truncated. A peer that has not advertised yet, does not
+support `L `, or has changed topology since its last update can therefore make
+the reported topology incomplete or stale.
 
-The peer transport handles both redundant explicit keying (`!NEWKEY!`) and
-voice-presence keying (`!NEWKEY1!`). Explicit key state expires after four seconds
-without refresh; voice-presence state uses a 50 ms tail while queued audio drains.
-Tests cover bounded text parsing, negotiation, missing unkey, and disconnect text.
+Routing and audio exchange remain lock-free in hardware-paced callbacks. Link
+admission, dialing, retry, status, topology construction, and IAX text delivery
+run on control or peer-reader threads.
 
-Outbound calls are prepared under the runtime lock, dialed without it, and attached
-only if the runtime revision has not changed. Tests verify same-process IAX
-admission/disconnect and cancellation of an answered call after intervening reload.
-The command parser is consumed by the worker's DTMF execution path; permanent
-link recovery and remote/status command execution remain outstanding.
+## Verification still required
+
+The current source changes require a fresh full quality run before they may be
+merged or released. Focused unit and isolated-Asterisk integration tests cover
+the local behavior, but this document intentionally makes no current aggregate
+coverage or platform-matrix claim.
+
+Before a live deployment, complete the required Debian 12/13 amd64/arm64
+quality matrix and staged-install checks, then perform explicitly approved
+testing with the existing 524950 link settings. That testing must cover the
+linking commands, allow/deny behavior, connection failure and recovery,
+disconnect-all/reconnect-all, reload, half-duplex behavior, status, and both
+classic 8 kHz `app_rpt` peers and any higher-rate capable peer. No AllStarLink
+integration deployment has occurred.
 
 ## Reference checks
 
-The manual's [IAX text page](https://allstarlink.github.io/developers/iaxtext/)
-explicitly warns that it is incomplete and potentially incorrect. Behavioral
-inspection of app_rpt commit
-`6966503d14cefb49a5bd269edb8524e549de0a85` found that `!NEWKEY1!` selects
-voice-presence signaling, whereas `!NEWKEY!` selects redundant radio-control
-signaling. They must not be treated as equivalent handshake strings. No app_rpt
+The ASL3 [IAX text page](https://allstarlink.github.io/developers/iaxtext/)
+warns that it is incomplete and potentially incorrect. The local implementation
+uses the documented behavior together with observed app_rpt wire conventions,
+including `!NEWKEY!`, `!NEWKEY1!`, and `L ` topology advertisements. No app_rpt
 implementation is copied.
 
-Read-only checks on 524950 found an active RadioPlusAdvanced channel, an incoming
-dialplan still using `Rpt()` and `RPT_NODE()`, DNS-only lookup, and an IAX radio
-profile allowing ulaw, adpcm, and gsm. Test preparation must account for those
-interfaces before enabling incoming links or wider-rate negotiation.
+Read-only checks on 524950 found an active RadioPlusAdvanced channel, an
+incoming dialplan still using `Rpt()` and `RPT_NODE()`, DNS-only lookup, and an
+IAX radio profile allowing ulaw, adpcm, and gsm. Those settings are reference
+material for future approved testing; they have not been changed for this work.

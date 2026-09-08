@@ -8,6 +8,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** @brief Compile-time proof that the selected native fast-64 atomic has no library fallback. */
+#define RA_ATOMIC_UINT_FAST64_LOCK_FREE                                                            \
+    _Generic((uint_fast64_t){0},                                                                   \
+        unsigned char: ATOMIC_CHAR_LOCK_FREE == 2,                                                 \
+        unsigned short: ATOMIC_SHORT_LOCK_FREE == 2,                                               \
+        unsigned int: ATOMIC_INT_LOCK_FREE == 2,                                                   \
+        unsigned long: ATOMIC_LONG_LOCK_FREE == 2,                                                 \
+        unsigned long long: ATOMIC_LLONG_LOCK_FREE == 2,                                           \
+        default: 0)
+
 /** @brief Lock-free single-producer/single-consumer PCM ring at a negotiated rate. */
 struct ra_link_audio {
     int16_t *storage;               /**< Borrowed PCM storage. */
@@ -17,6 +27,9 @@ struct ra_link_audio {
     atomic_uint_fast64_t discarded; /**< Samples rejected because the ring was full. */
     atomic_uint_fast64_t missing;   /**< Samples unavailable to the consumer. */
 };
+
+/** @brief Initialize a preallocated single-producer/single-consumer PCM ring. */
+void ra_link_audio_init(struct ra_link_audio *queue, int16_t *storage, size_t capacity);
 
 /** @brief Append samples without waiting for the consumer.
  * @param queue Initialized single-producer queue.

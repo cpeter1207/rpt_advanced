@@ -12,6 +12,7 @@ enum field_type {
     FIELD_STRING,
     FIELD_NODE_LIST,
     FIELD_PREFIX,
+    FIELD_LOOKUP_METHOD,
     FIELD_BOOLEAN,
     FIELD_NUMBER,
     FIELD_SIGNED
@@ -37,8 +38,12 @@ static const struct field node_fields[] = {
     {"link_allow_nodes", FIELD_NODE_LIST, offsetof(struct ra_node_settings, link_allow_nodes), 0,
      0},
     {"link_deny_nodes", FIELD_NODE_LIST, offsetof(struct ra_node_settings, link_deny_nodes), 0, 0},
+    {"link_static_directory_file", FIELD_STRING,
+     offsetof(struct ra_node_settings, link_static_directory_file), 0, 0},
     {"link_directory_file", FIELD_STRING, offsetof(struct ra_node_settings, link_directory_file), 0,
      0},
+    {"link_lookup_method", FIELD_LOOKUP_METHOD,
+     offsetof(struct ra_node_settings, link_lookup_method), 0, 0},
     {"link_command_disconnect", FIELD_PREFIX,
      offsetof(struct ra_node_settings, link_commands[RA_LINK_DISCONNECT].digits), 0, 0},
     {"link_command_monitor", FIELD_PREFIX,
@@ -69,6 +74,24 @@ static const struct field node_fields[] = {
      offsetof(struct ra_node_settings, link_commands[RA_LINK_PERMANENT_LOCAL_MONITOR].digits), 0,
      0},
 };
+
+/** @brief Parse one documented post-static directory-source selection.
+ * @param text Borrowed configuration value.
+ * @param method Receives the corresponding enum value.
+ * @return True for `dns`, `file`, or `both`.
+ */
+static bool lookup_method(const char *text, enum ra_link_lookup_method *method) {
+    if (!strcmp(text, "both")) {
+        *method = RA_LINK_LOOKUP_BOTH;
+    } else if (!strcmp(text, "dns")) {
+        *method = RA_LINK_LOOKUP_DNS;
+    } else if (!strcmp(text, "file")) {
+        *method = RA_LINK_LOOKUP_FILE;
+    } else {
+        return false;
+    }
+    return true;
+}
 
 /** @brief Identifier schema; media availability is evaluated when preparing playback. */
 static const struct field identifier_fields[] = {
@@ -128,6 +151,12 @@ static bool assign(const struct field *field, const char *text, void *output) {
             return false;
         }
         *(const char **)destination = text;
+    } else if (field->type == FIELD_LOOKUP_METHOD) {
+        enum ra_link_lookup_method method;
+        if (!lookup_method(text, &method)) {
+            return false;
+        }
+        *(enum ra_link_lookup_method *)destination = method;
     } else if (field->type == FIELD_BOOLEAN) {
         bool value;
         if (!ra_config_boolean(text, &value)) {
@@ -208,7 +237,7 @@ static const char *resolve(const struct field *fields, size_t fields_count,
     return NULL;
 }
 
-/** @brief Apply one flat or node-qualified default section without allocation.
+/** @brief Apply flat defaults followed by an exact node-qualified override.
  * @param fields Schema descriptors.
  * @param fields_count Descriptor count.
  * @param entries Parsed configuration.
@@ -216,28 +245,33 @@ static const char *resolve(const struct field *fields, size_t fields_count,
  * @param prefix Flat section name.
  * @param node Optional node name.
  * @param output Temporary typed settings.
- * @return Invalid option name or null.
+ * @return Invalid option name or null. Node values take precedence regardless
+ *         of their position relative to flat values in the configuration.
  */
 static const char *resolve_prefixed(const struct field *fields, size_t fields_count,
                                     const struct ra_config_entry *entries, size_t count,
                                     const char *prefix, const char *node, void *output) {
     size_t prefix_length = strlen(prefix);
     size_t node_length = node ? strlen(node) : 0;
-    for (size_t i = 0; i < fields_count; ++i) {
-        const char *text = NULL;
-        for (size_t entry = 0; entry < count; ++entry) {
-            const char *section = entries[entry].section;
-            bool matches = !strcmp(section, prefix) ||
-                           (node && !strncmp(section, prefix, prefix_length) &&
-                            section[prefix_length] == ' ' &&
-                            !strncmp(section + prefix_length + 1, node, node_length) &&
-                            !section[prefix_length + node_length + 1]);
-            if (matches && !strcmp(entries[entry].key, fields[i].name)) {
-                text = entries[entry].value;
+    size_t scopes = node ? 2U : 1U;
+    for (size_t scope = 0; scope < scopes; ++scope) {
+        for (size_t i = 0; i < fields_count; ++i) {
+            const char *text = NULL;
+            for (size_t entry = 0; entry < count; ++entry) {
+                const char *section = entries[entry].section;
+                bool matches = scope == 0
+                                   ? !strcmp(section, prefix)
+                                   : !strncmp(section, prefix, prefix_length) &&
+                                         section[prefix_length] == ' ' &&
+                                         !strncmp(section + prefix_length + 1, node, node_length) &&
+                                         !section[prefix_length + node_length + 1];
+                if (matches && !strcmp(entries[entry].key, fields[i].name)) {
+                    text = entries[entry].value;
+                }
             }
-        }
-        if (text && !assign(&fields[i], text, output)) {
-            return fields[i].name;
+            if (text && !assign(&fields[i], text, output)) {
+                return fields[i].name;
+            }
         }
     }
     return NULL;
@@ -251,7 +285,9 @@ const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size
                                          .codec = "",
                                          .link_allow_nodes = "",
                                          .link_deny_nodes = "",
-                                         .link_directory_file = ""};
+                                         .link_static_directory_file = "",
+                                         .link_directory_file = "",
+                                         .link_lookup_method = RA_LINK_LOOKUP_BOTH};
     ra_link_commands_default(temporary.link_commands);
     const char *scopes[] = {"general", node, NULL};
     const char *error = resolve(node_fields, sizeof(node_fields) / sizeof(node_fields[0]), entries,
@@ -270,15 +306,9 @@ const char *ra_identifier_settings_resolve(const struct ra_config_entry *entries
                                            struct ra_identifier_settings *result) {
     struct ra_identifier_settings temporary = {
         600000, 0, false, false, "", "", "en_US-lessac-medium.onnx", 100, 0, "", 20, 800, -6};
-    const char *scopes[] = {"identifier", NULL, NULL};
-    const char *error =
-        resolve(identifier_fields, sizeof(identifier_fields) / sizeof(identifier_fields[0]),
-                entries, count, scopes, &temporary);
-    if (!error && node) {
-        error = resolve_prefixed(identifier_fields,
-                                 sizeof(identifier_fields) / sizeof(identifier_fields[0]), entries,
-                                 count, "identifier", node, &temporary);
-    }
+    const char *error = resolve_prefixed(identifier_fields,
+                                         sizeof(identifier_fields) / sizeof(identifier_fields[0]),
+                                         entries, count, "identifier", node, &temporary);
     if (!error) {
         error = resolve_prefixed(speech_fields, sizeof(speech_fields) / sizeof(speech_fields[0]),
                                  entries, count, "speech", node, &temporary);

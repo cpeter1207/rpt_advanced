@@ -25,7 +25,16 @@ def port():
 
 @contextlib.contextmanager
 def server(
-    directory, modules, node, peer, local_port, peer_port, codec, radio, sample_rate=0
+    directory,
+    modules,
+    node,
+    peer,
+    local_port,
+    peer_port,
+    codec,
+    radio,
+    sample_rate=0,
+    load_resample=True,
 ):
     """! @brief Own an isolated IAX/radio server and always terminate it.
     @param directory Test-owned configuration directory.
@@ -37,6 +46,7 @@ def server(
     @param codec Permitted IAX codec.
     @param radio Phased synthetic receiver name.
     @param sample_rate Requested local PCM rate; zero selects native rate.
+    @param load_resample Whether to load Asterisk's rate translator for a control case.
     @return Context yielding CLI configuration and output log paths.
     """
     directory.mkdir()
@@ -57,22 +67,21 @@ def server(
         + f"astmoddir => {modules}\n",
         encoding="utf-8",
     )
+    module_names = [
+        "res_crypto",
+        "res_timing_timerfd",
+        "codec_ulaw",
+        "func_channel",
+        "pbx_config",
+        "chan_iax2",
+        "chan_rpt_fixture",
+        "app_rpt_advanced",
+    ]
+    if load_resample:
+        module_names.insert(3, "codec_resample")
     (directory / "modules.conf").write_text(
         "[modules]\nautoload=no\n"
-        + "".join(
-            f"load={name}.so\n"
-            for name in (
-                "res_crypto",
-                "res_timing_timerfd",
-                "codec_ulaw",
-                "codec_resample",
-                "func_channel",
-                "pbx_config",
-                "chan_iax2",
-                "chan_rpt_fixture",
-                "app_rpt_advanced",
-            )
-        ),
+        + "".join(f"load={name}.so\n" for name in module_names),
         encoding="utf-8",
     )
     (directory / "iax.conf").write_text(
@@ -91,7 +100,7 @@ def server(
     )
     (directory / "rpt_advanced.conf").write_text(
         f"[{node}]\nradio_channel={radio}\nlink_directory_file={directory_file}\n"
-        f"sample_rate_hz={sample_rate}\n",
+        f"link_lookup_method=file\nsample_rate_hz={sample_rate}\n",
         encoding="utf-8",
     )
     logfile = directory / "console.log"
@@ -164,7 +173,8 @@ def same_server(modules):
             node_configuration = directory / "rpt_advanced.conf"
             node_configuration.write_text(
                 node_configuration.read_text(encoding="utf-8")
-                + f"[508422]\nradio_channel=network-b\nlink_directory_file={directory / 'nodes.conf'}\n",
+                + f"[508422]\nradio_channel=network-b\nlink_directory_file={directory / 'nodes.conf'}\n"
+                "link_lookup_method=file\n",
                 encoding="utf-8",
             )
             cli(configuration, "dialplan reload")
@@ -180,6 +190,103 @@ def same_server(modules):
                 assert time.monotonic() < deadline, "same-server peer was not released"
                 time.sleep(0.05)
             print("same-server IAX admission and disconnect passed")
+
+
+def assert_iax_native_codec(configuration, codec):
+    """! @brief Assert that every active IAX channel retained the negotiated wire codec.
+    @param configuration Isolated Asterisk configuration file.
+    @param codec Expected IAX native codec name.
+    @return None; assertions require at least one matching channel and exact native formats.
+    """
+    channels = [
+        line.partition("!")[0]
+        for line in cli(configuration, "core show channels concise").splitlines()
+        if line.startswith("IAX2/")
+    ]
+    assert channels, "no IAX channels were active"
+    for channel in channels:
+        detail = cli(configuration, f"core show channel {channel}")
+        native = next(
+            line
+            for line in detail.splitlines()
+            if line.strip().startswith("NativeFormats:")
+        )
+        assert codec in native, detail
+
+
+def rate_adapter(modules):
+    """! @brief Bridge legacy and wideband wire rates without codec_resample.
+    @param modules Staged installed module directory.
+    @return None; assertions require bidirectional peer audio at native local rate.
+    """
+    for codec in ("ulaw", "slin16"):
+        with tempfile.TemporaryDirectory(
+            prefix="rpt-advanced-rate-adapter-"
+        ) as temporary:
+            directory = Path(temporary)
+            first_port, second_port = port(), port()
+            with (
+                server(
+                    directory / "a",
+                    modules,
+                    "524950",
+                    "508422",
+                    first_port,
+                    second_port,
+                    codec,
+                    "network-a",
+                    load_resample=False,
+                ) as first,
+                server(
+                    directory / "b",
+                    modules,
+                    "508422",
+                    "524950",
+                    second_port,
+                    first_port,
+                    codec,
+                    "network-b",
+                    load_resample=False,
+                ) as second,
+            ):
+                result = cli(first[0], "rpt_advanced link connect 524950 508422")
+                assert "completed" in result, result
+                time.sleep(3)
+                for configuration, _ in (first, second):
+                    assert_iax_native_codec(configuration, codec)
+                result = cli(first[0], "rpt_advanced link disconnect 524950 508422")
+                assert "completed" in result, result
+                deadline = time.monotonic() + 5
+                while any(
+                    "IAX2/" in cli(configuration, "core show channels concise")
+                    for configuration, _ in (first, second)
+                ):
+                    assert time.monotonic() < deadline, (
+                        "peer was not released before reverse dial"
+                    )
+                    time.sleep(0.05)
+                result = cli(second[0], "rpt_advanced link connect 508422 524950")
+                assert "completed" in result, result
+                time.sleep(3)
+                for configuration, _ in (first, second):
+                    assert_iax_native_codec(configuration, codec)
+                for configuration, _ in (first, second):
+                    (configuration.parent / "rpt_advanced.conf").write_text(
+                        "", encoding="utf-8"
+                    )
+                    cli(configuration, "module reload app_rpt_advanced.so")
+                for configuration, logfile in (first, second):
+                    recorded = re.findall(
+                        r"rpt_fixture network remote=(\d+)",
+                        logfile.read_text(encoding="utf-8"),
+                    )
+                    assert recorded and int(recorded[-1]) > 0, logfile.read_text()
+                    assert "IAX2/" not in cli(
+                        configuration, "core show channels concise"
+                    )
+                print(
+                    f"native 48 kHz to {codec} peer-rate adapter passed without codec_resample"
+                )
 
 
 def dtmf_links(modules):
@@ -316,6 +423,7 @@ def main():
                     )
                 print(f"bidirectional IAX {codec} audio and connected reload passed")
     same_server(modules)
+    rate_adapter(modules)
     dtmf_links(modules)
 
 

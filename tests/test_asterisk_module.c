@@ -4,7 +4,9 @@
  */
 #include <asterisk.h>
 
+#include "link_hub.h"
 #include "runtime.h"
+#include "worker.h"
 #include <assert.h>
 #include <asterisk/channel.h>
 #include <asterisk/cli.h>
@@ -18,11 +20,25 @@
 #include <string.h>
 #include <unistd.h>
 
-/** @brief Number of runtime starts to reject in sequence. */
+/** @brief Number of runtime starts or replacements to reject in sequence. */
 static unsigned int runtime_failures;
 /** @brief Captured hardware digit delivery callback. */
 static ra_digit_handler digit_sink;
+/** @brief Inject a DTMF event while module reload deliberately suppresses producers. */
+static bool emit_digit_during_reload;
+/** @brief Number of complete runtime replacements requested by the module. */
+static unsigned int runtime_reloads;
+/** @brief Number of full runtime shutdowns requested by the module. */
+static unsigned int runtime_stops;
+/** @brief Whether the fixture still retains an active runtime after a failed replacement. */
+static bool runtime_active;
+/** @brief Runtime lock ownership. */
+static bool runtime_locked;
+/** @brief Number of current-runtime DTMF events parsed by the fixture. */
+static unsigned int runtime_digit_calls;
 
+/** @cond TEST_FIXTURE */
+/** @brief Start an initially empty runtime fixture. */
 const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_document *document) {
     digit_sink = runtime->digit;
     (void)document;
@@ -30,10 +46,36 @@ const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_documen
         --runtime_failures;
         return "fixture radio unavailable";
     }
+    runtime_active = true;
     return NULL;
 }
 
-void ra_runtime_stop(struct ra_runtime *runtime) { (void)runtime; }
+/** @brief Replace the fixture runtime while preserving it after an injected startup failure. */
+const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_document *current,
+                              const struct ra_document *replacement) {
+    (void)current;
+    (void)replacement;
+    assert(runtime_locked && runtime_active);
+    ++runtime_reloads;
+    if (emit_digit_during_reload) {
+        assert(digit_sink);
+        digit_sink("usb", '1', 100);
+    }
+    if (runtime_failures) {
+        --runtime_failures;
+        return "fixture radio unavailable";
+    }
+    digit_sink = runtime->digit;
+    return NULL;
+}
+
+/** @brief Release the fixture runtime only during module teardown. */
+void ra_runtime_stop(struct ra_runtime *runtime) {
+    (void)runtime;
+    ++runtime_stops;
+    runtime_active = false;
+}
+/** @endcond */
 
 /** @brief Asterisk configuration-directory symbol supplied by this test host. */
 const char *ast_config_AST_CONFIG_DIR;
@@ -45,6 +87,10 @@ static unsigned int errors;
 static bool fail_allocation;
 /** @brief Selected admission or registration failure. */
 static unsigned int link_failure;
+/** @brief Permanent dial or attachment failures retained for automatic recovery. */
+static unsigned int retained_permanent_links;
+/** @brief Reject recording a permanent retry intent in the fixture runtime. */
+static bool retain_permanent_failure;
 /** @brief Captured incoming application callback. */
 static int (*application)(struct ast_channel *, const char *);
 /** @brief Captured CLI command. */
@@ -59,8 +105,6 @@ static struct ast_channel_tech other_technology = {.type = "Local"};
 static bool wrong_technology;
 /** @brief Reported remote caller identity. */
 static struct ast_party_caller caller;
-/** @brief Runtime lock ownership. */
-static bool runtime_locked;
 /** @brief Inject control-queue acquisition, enqueue, or allocation failure. */
 static unsigned int queue_failure;
 /** @brief Cause a reload between collection and operation execution. */
@@ -69,6 +113,34 @@ static bool reload_on_unlock;
 static enum ra_link_action digit_action;
 /** @brief Number of partial-command resets requested after queue loss. */
 static unsigned int digit_resets;
+/** @brief Direct-peer records returned by the administrative status fixture. */
+static struct ra_link_peer_status cli_peers[2];
+/** @brief Current number of direct peers reported by the status fixture. */
+static size_t cli_peer_count;
+/** @brief Reject the selected local node from the status fixture. */
+static bool cli_node_unknown;
+/** @brief Add one peer between count and copy snapshots. */
+static bool cli_snapshot_grows;
+/** @brief Remove the selected node between count and copy snapshots. */
+static bool cli_snapshot_disappears;
+/** @brief Status request failure injection. */
+static bool status_queue_failure;
+/** @brief RF status requests received by the fixture runtime. */
+static unsigned int status_queue_calls;
+/** @brief Reconnect-all requests received by the fixture runtime. */
+static unsigned int reconnect_all_calls;
+/** @brief Topology text returned by the administrative status fixture. */
+static const char *cli_topology = "";
+/** @brief Reject topology allocation in the administrative status fixture. */
+static bool cli_topology_failure;
+/** @brief Topology snapshots requested by CLI or RF full status. */
+static unsigned int topology_calls;
+/** @brief RF full-status topology notices emitted by the module. */
+static unsigned int topology_notices;
+/** @brief Captured administrative output. */
+static char cli_output[1024];
+/** @brief Used length of captured administrative output. */
+static size_t cli_output_length;
 /** @brief Deferred control task. */
 struct queued_task {
     int (*execute)(void *); /**< Captured task callback. */
@@ -146,17 +218,19 @@ void *__ast_calloc(size_t count, size_t size, const char *file, int line, const 
     return queue_failure == 3 ? NULL : calloc(count, size);
 }
 
-bool ra_runtime_digit(struct ra_runtime *state, const char *local, char digit, uint64_t now_ms,
+bool ra_runtime_digit(struct ra_runtime *runtime, const char *local, char digit, uint64_t now_ms,
                       struct ra_link_operation *operation) {
-    (void)state;
+    (void)runtime;
     assert(runtime_locked && !strcmp(local, "usb") && now_ms == 100);
+    ++runtime_digit_calls;
     operation->action = digit_action;
     memcpy(operation->remote, "123", 4);
+    operation->digit = 0;
     return digit != '?';
 }
 
-void ra_runtime_reset_digits(struct ra_runtime *state) {
-    (void)state;
+void ra_runtime_reset_digits(struct ra_runtime *runtime) {
+    (void)runtime;
     assert(runtime_locked);
     ++digit_resets;
 }
@@ -268,14 +342,26 @@ int ast_cli_unregister_multiple(struct ast_cli_entry *entries, int count) {
     return 0;
 }
 
-/** @brief Discard CLI text; callback return values are asserted separately.
+/** @brief Capture CLI text for status-listing assertions.
  * @param fd CLI descriptor.
  * @param format Message format.
  * @param ... Message arguments.
  */
 void ast_cli(int fd, const char *format, ...) {
     (void)fd;
-    (void)format;
+    va_list arguments;
+    va_start(arguments, format);
+    int written = vsnprintf(cli_output + cli_output_length, sizeof(cli_output) - cli_output_length,
+                            format, arguments);
+    va_end(arguments);
+    assert(written >= 0 && (size_t)written < sizeof(cli_output) - cli_output_length);
+    cli_output_length += (size_t)written;
+}
+
+/** @brief Clear captured administrative output before one command assertion. */
+static void clear_cli_output(void) {
+    cli_output[0] = '\0';
+    cli_output_length = 0;
 }
 
 /** @brief Return fixture technology.
@@ -333,9 +419,9 @@ int ast_func_read(struct ast_channel *channel, const char *function, char *buffe
     return link_failure == 2 ? -1 : 0;
 }
 
-bool ra_runtime_authorize(struct ra_runtime *state, const char *local, const char *remote,
+bool ra_runtime_authorize(struct ra_runtime *runtime, const char *local, const char *remote,
                           const char *peer_ip) {
-    (void)state;
+    (void)runtime;
     assert(runtime_locked && local && remote && peer_ip);
     return link_failure != 3;
 }
@@ -425,16 +511,16 @@ void ast_hangup(struct ast_channel *channel) {
     assert(channel == (struct ast_channel *)&channel_identity);
 }
 
-int ra_runtime_accept(struct ra_runtime *state, const char *local, const char *remote,
-                      struct ast_channel *channel, bool verified, bool same_server) {
-    (void)state;
-    assert(runtime_locked && local && remote && channel && verified && !same_server);
+int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char *remote,
+                      struct ast_channel *channel, bool verified) {
+    (void)runtime;
+    assert(runtime_locked && local && remote && channel && verified);
     return link_failure == 7 ? -1 : 0;
 }
 
-int ra_runtime_prepare_link(struct ra_runtime *state, const char *local, const char *remote,
+int ra_runtime_prepare_link(struct ra_runtime *runtime, const char *local, const char *remote,
                             struct ra_link_dial *dial) {
-    (void)state;
+    (void)runtime;
     (void)dial;
     assert(runtime_locked && local && remote);
     return link_failure == 1 ? -1 : 0;
@@ -448,33 +534,136 @@ struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *loca
     return link_failure == 2 ? NULL : (struct ast_channel *)&channel_identity;
 }
 
-int ra_runtime_attach_link(struct ra_runtime *state, const char *local, const char *remote,
+int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const char *remote,
                            struct ast_channel *channel, bool transmit, bool forward,
                            bool permanent) {
     (void)permanent;
-    (void)state;
+    (void)runtime;
     (void)transmit;
     (void)forward;
     assert(runtime_locked && local && remote && channel);
     return link_failure == 3 ? -1 : 0;
 }
 
-bool ra_runtime_disconnect(struct ra_runtime *state, const char *local, const char *remote) {
-    (void)state;
+/** @cond TEST_FIXTURE */
+/** @brief Record a permanent initial-failure retry requested by the module.
+ * @param runtime Active fixture runtime.
+ * @param local Requested local node.
+ * @param remote Requested remote node.
+ * @param transmit Requested outbound-audio mode.
+ * @param forward Requested peer-forwarding mode.
+ * @return True unless retention is injected as unavailable.
+ */
+bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *local,
+                                      const char *remote, bool transmit, bool forward) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(local, "usb") && !strcmp(remote, "123"));
+    ++retained_permanent_links;
+    return !retain_permanent_failure && transmit && forward;
+}
+/** @endcond */
+
+bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const char *remote) {
+    (void)runtime;
     assert(runtime_locked && local && remote);
     return !link_failure;
 }
 
-size_t ra_runtime_disconnect_all(struct ra_runtime *state, const char *local) {
-    (void)state;
+/* Observe a permanent-link disconnect that also cancels pending recovery.
+ * @param runtime Active fixture runtime.
+ * @param local Local node name.
+ * @param remote Remote node name.
+ * @return True unless the fixture injects a command failure.
+ */
+bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *local,
+                                     const char *remote) {
+    (void)runtime;
+    assert(runtime_locked && local && remote);
+    return !link_failure;
+}
+
+size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local) {
+    (void)runtime;
     assert(runtime_locked && local);
     return 0;
 }
 
-size_t ra_runtime_link_count(struct ra_runtime *state, const char *local) {
-    (void)state;
-    assert(runtime_locked && local);
+/* Queue a local RF link-status response in the fixture runtime.
+ * @param state Fixture runtime.
+ * @param local Selected local node.
+ * @param last_keyed Select last-keyed instead of current-status wording.
+ * @return Zero or an injected failure.
+ */
+int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, bool last_keyed) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(local, "usb"));
+    (void)last_keyed;
+    ++status_queue_calls;
+    return status_queue_failure ? -1 : 0;
+}
+
+/* Snapshot direct peers for the administrative status fixture.
+ * @param state Fixture runtime.
+ * @param local Selected local node.
+ * @param entries Caller output records, or null when only counting.
+ * @param capacity Output record capacity.
+ * @param count Receives the full fixture peer count.
+ * @return True unless the selected node is injected as unknown.
+ */
+bool ra_runtime_link_snapshot(struct ra_runtime *runtime, const char *local,
+                              struct ra_link_peer_status *entries, size_t capacity, size_t *count) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(local, "usb"));
+    if (cli_node_unknown) {
+        return false;
+    }
+    if (entries && cli_snapshot_disappears) {
+        cli_snapshot_disappears = false;
+        cli_node_unknown = true;
+        return false;
+    }
+    if (entries && cli_snapshot_grows) {
+        cli_snapshot_grows = false;
+        ++cli_peer_count;
+    }
+    size_t copied = cli_peer_count;
+    if (copied > sizeof(cli_peers) / sizeof(cli_peers[0])) {
+        copied = sizeof(cli_peers) / sizeof(cli_peers[0]);
+    }
+    if (copied > capacity) {
+        copied = capacity;
+    }
+    for (size_t index = 0; entries && index < copied; ++index) {
+        entries[index] = cli_peers[index];
+    }
+    if (count) {
+        *count = cli_peer_count;
+    }
+    return true;
+}
+
+/* Observe reconnect-all dispatch in the fixture runtime.
+ * @param state Fixture runtime.
+ * @param local Selected local node.
+ * @return Number of retry records resumed.
+ */
+size_t ra_runtime_reconnect_all(struct ra_runtime *runtime, const char *local) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(local, "usb"));
+    ++reconnect_all_calls;
     return 0;
+}
+
+/* Return an owned topology snapshot for CLI and RF full-status tests.
+ * @param state Fixture runtime.
+ * @param local Selected local node.
+ * @return Owned fixture topology, or null when injected unavailable.
+ */
+char *ra_runtime_link_topology(struct ra_runtime *runtime, const char *local) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(local, "usb"));
+    ++topology_calls;
+    return cli_topology_failure ? NULL : strdup(cli_topology);
 }
 
 /** @brief Supply Asterisk's allocating formatter and a deterministic failure case.
@@ -543,7 +732,9 @@ void ast_log(int level, const char *file, int line, const char *function, const 
     (void)file;
     (void)line;
     (void)function;
-    (void)format;
+    if (!strcmp(format, "rpt_advanced: node %s network topology %s\n")) {
+        ++topology_notices;
+    }
     ++errors;
 }
 
@@ -622,6 +813,86 @@ int main(void) {
         assert(command_entry->handler(command_entry, CLI_HANDLER, &arguments) == CLI_FAILURE);
         link_failure = 0;
     }
+    const char *status_argv[] = {"rpt_advanced", "link", "status", "usb"};
+    struct ast_cli_args status_arguments = {.argc = 4, .argv = status_argv};
+    const char *short_argv[] = {"rpt_advanced", "link", "connect", "usb"};
+    struct ast_cli_args short_arguments = {.argc = 4, .argv = short_argv};
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &short_arguments) == CLI_SHOWUSAGE);
+    cli_node_unknown = true;
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: unknown node usb\n"));
+    cli_node_unknown = false;
+    cli_peer_count = 0;
+    cli_topology = "T123";
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
+    assert(!strcmp(cli_output, "rpt_advanced: usb has no active links\n  topology: T123\n"));
+    cli_topology = "";
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
+    assert(!strcmp(cli_output, "rpt_advanced: usb has no active links\n  topology: none\n"));
+    cli_topology_failure = true;
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: unable to list topology\n"));
+    cli_topology_failure = false;
+    cli_peers[0] = (struct ra_link_peer_status){
+        .name = "123", .transmit = true, .forward = true, .permanent = true};
+    cli_peer_count = 1;
+    cli_topology = "T123,R456";
+    queue_failure = 3;
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: unable to list links\n"));
+    queue_failure = 0;
+    cli_snapshot_disappears = true;
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: unknown node usb\n"));
+    cli_node_unknown = false;
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
+    assert(!strcmp(cli_output, "rpt_advanced: usb has 1 link\n"
+                               "  123: transceive (permanent)\n"
+                               "  topology: T123,R456\n"));
+    cli_topology = "";
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
+    assert(!strcmp(cli_output, "rpt_advanced: usb has 1 link\n"
+                               "  123: transceive (permanent)\n"
+                               "  topology: none\n"));
+    cli_topology = "T123,R456";
+    cli_topology_failure = true;
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: unable to list topology\n"));
+    cli_topology_failure = false;
+    cli_peers[0] = (struct ra_link_peer_status){.name = "234", .forward = true};
+    cli_peers[1] = (struct ra_link_peer_status){.name = "345"};
+    cli_peer_count = 1;
+    cli_snapshot_grows = true;
+    cli_topology = "R234,R345";
+    const char *compat_status_argv[] = {"rpt", "link", "status", "usb"};
+    struct ast_cli_args compat_status_arguments = {.argc = 4, .argv = compat_status_argv};
+    clear_cli_output();
+    assert(command_entry[1].handler(&command_entry[1], CLI_HANDLER, &compat_status_arguments) ==
+           CLI_SUCCESS);
+    assert(!strcmp(cli_output, "rpt_advanced: usb has 2 links\n"
+                               "  234: monitor\n"
+                               "  345: local-monitor\n"
+                               "  topology: R234,R345\n"));
+    cli_peers[0] = (struct ra_link_peer_status){
+        .name = "456", .forward = true, .permanent = true, .retrying = true};
+    cli_peers[1] = (struct ra_link_peer_status){.name = "567", .retrying = true, .paused = true};
+    cli_peer_count = 2;
+    cli_topology = "";
+    clear_cli_output();
+    assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
+    assert(!strcmp(cli_output, "rpt_advanced: usb has 2 links\n"
+                               "  456: monitor (permanent) (retrying)\n"
+                               "  567: local-monitor (paused)\n"
+                               "  topology: none\n"));
     argv[2] = "connect";
     const unsigned int outgoing_failures[] = {2, 3, 10};
     for (size_t i = 0; i < sizeof(outgoing_failures) / sizeof(*outgoing_failures); ++i) {
@@ -629,17 +900,32 @@ int main(void) {
         assert(command_entry->handler(command_entry, CLI_HANDLER, &arguments) == CLI_FAILURE);
     }
     link_failure = 0;
+    unsigned int reloads_before = runtime_reloads;
+    unsigned int stops_before = runtime_stops;
     write_config(path, "[usb]\nunknown=yes\n");
     assert(registered->reload() == -1);
+    assert(runtime_reloads == reloads_before && runtime_stops == stops_before && runtime_active);
     write_config(path, "[usb]\n");
     runtime_failures = 1;
     assert(registered->reload() == -1);
-    runtime_failures = 2;
+    assert(runtime_reloads == reloads_before + 1 && runtime_stops == stops_before &&
+           runtime_active);
+    runtime_failures = 1;
     assert(registered->reload() == -1);
-    write_config(path, "");
+    assert(runtime_reloads == reloads_before + 2 && runtime_stops == stops_before &&
+           runtime_active);
+    write_config(path, "[usb]\n");
     assert(registered->reload() == 0);
-    assert(errors == 9);
+    assert(runtime_reloads == reloads_before + 3 && runtime_stops == stops_before &&
+           runtime_active);
+    assert(errors == 8);
     assert(digit_sink);
+    unsigned int parsed_before_stop = runtime_digit_calls;
+    emit_digit_during_reload = true;
+    assert(!registered->reload());
+    emit_digit_during_reload = false;
+    assert(queued_count == 0 && runtime_stops == stops_before && runtime_active);
+    assert(runtime_digit_calls == parsed_before_stop);
     digit_sink("usb", '1', 100);
     assert(!registered->reload());
     drain_tasks();
@@ -651,6 +937,10 @@ int main(void) {
     digit_sink("usb", '?', 100);
     drain_tasks();
     assert(digit_resets == 1);
+    digit_sink("usb", RA_WORKER_DIGIT_DROPPED, 0);
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    assert(digit_resets == 2);
     queue_failure = 3;
     digit_sink("usb", '1', 100);
     queue_failure = 0;
@@ -673,11 +963,64 @@ int main(void) {
                                            RA_LINK_RECONNECT_ALL,
                                            RA_LINK_PERMANENT_LOCAL_MONITOR,
                                            RA_LINK_COMMAND};
+    unsigned int queued_before = status_queue_calls;
+    unsigned int topology_before = topology_calls;
+    unsigned int reconnect_before = reconnect_all_calls;
     for (size_t i = 0; i < sizeof(actions) / sizeof(*actions); ++i) {
         digit_action = actions[i];
         digit_sink("usb", '1', 100);
         drain_tasks();
     }
+    assert(status_queue_calls == queued_before + 3);
+    assert(topology_calls == topology_before + 1);
+    assert(reconnect_all_calls == reconnect_before + 1);
+    unsigned int retained_before = retained_permanent_links;
+    digit_action = RA_LINK_PERMANENT_TRANSCEIVE;
+    link_failure = 2;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    link_failure = 3;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    retain_permanent_failure = true;
+    link_failure = 2;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    retain_permanent_failure = false;
+    link_failure = 10;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    link_failure = 0;
+    assert(retained_permanent_links == retained_before + 3);
+    status_queue_failure = true;
+    digit_action = RA_LINK_STATUS;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    assert(status_queue_calls == queued_before + 4);
+    status_queue_failure = false;
+    cli_topology_failure = true;
+    digit_action = RA_LINK_FULL_STATUS;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    assert(topology_calls == topology_before + 2);
+    assert(status_queue_calls == queued_before + 4);
+    cli_topology_failure = false;
+    cli_topology = "T123,R456";
+    status_queue_failure = true;
+    digit_action = RA_LINK_FULL_STATUS;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    status_queue_failure = false;
+    unsigned int notices_before = topology_notices;
+    digit_action = RA_LINK_FULL_STATUS;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    assert(topology_notices == notices_before + 1);
+    cli_topology = "";
+    digit_action = RA_LINK_FULL_STATUS;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    cli_topology = "R234,R345";
     digit_action = (enum ra_link_action)99;
     digit_sink("usb", '1', 100);
     drain_tasks();
@@ -701,12 +1044,24 @@ int main(void) {
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();
+    assert(status_queue_calls == queued_before + 7);
+    digit_action = RA_LINK_FULL_STATUS;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    assert(topology_calls == topology_before + 5);
+    digit_action = RA_LINK_RECONNECT_ALL;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    assert(reconnect_all_calls == reconnect_before + 1);
     digit_action = RA_LINK_COMMAND;
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();
     digit_sink("usb", '1', 100);
     assert(registered->unload() == 0);
+    assert(runtime_stops == stops_before + 1 && !runtime_active);
     assert(dlclose(handle) == 0 && !registered);
     assert(unlink(path) == 0);
     assert(rmdir(directory) == 0);

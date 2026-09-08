@@ -128,10 +128,6 @@ const char *ra_document_identifier(const struct ra_document *document, const cha
     return select_section(document, ID_SET, node, index);
 }
 
-const char *ra_document_identifier_defaults(const struct ra_document *document, const char *node) {
-    return select_section(document, ID_NODE, node, 0);
-}
-
 const char *ra_document_validate(const struct ra_document *document, const char **section,
                                  const char **key) {
     *section = NULL;

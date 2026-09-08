@@ -1,176 +1,264 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Detector ownership, rate selection, squelch gating, and event-frame lifetime.
+ * @brief Native DTMF timing, qualification, muting, and fixed-allocation tests.
  */
 #include "dtmf.h"
 #include <assert.h>
-#include <asterisk.h>
-#include <asterisk/dsp.h>
-#include <asterisk/frame.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
-struct ast_format {
-    unsigned int rate; /**< Samples per second. */
-};
+/** @brief Reference DTMF analysis-frame size at 8 kHz. */
+#define TEST_INTERVAL 102U
+/** @brief Sample rate used by the primary detector behavior checks. */
+#define TEST_RATE 8000U
+/** @brief Maximum frame used to exercise two completed digits in one callback. */
+#define TEST_MAX_SAMPLES 1020U
+/** @brief Native-rate interval used by the rate-scaling test. */
+#define TEST_NATIVE_INTERVAL 612U
+/** @brief Audible test-tone amplitude that remains below signed-linear clipping. */
+#define TEST_AMPLITUDE 1000.0
+/** @brief Circle constant used only to synthesize deterministic fixture audio. */
+#define TEST_PI 3.14159265358979323846
 
-/** @brief Borrowed 8 kHz format returned by the fixture cache. */
-static struct ast_format pcm8 = {.rate = 8000};
-/** @brief Source-rate format used to exercise reduction. */
-static struct ast_format pcm48 = {.rate = 48000};
-/** @brief Inject detector allocation failure. */
+/** @brief Inject allocation failure while retaining normal C allocation for all other cases. */
 static bool allocation_failure;
+/** @brief Standard DTMF character layout used to synthesize every supported key. */
+static const char test_positions[] = "123A456B789C*0#D";
+/** @brief Standard low-group DTMF frequencies. */
+static const double test_rows[] = {697.0, 770.0, 852.0, 941.0};
+/** @brief Standard high-group DTMF frequencies. */
+static const double test_columns[] = {1209.0, 1336.0, 1477.0, 1633.0};
 
-/** @brief Provide Asterisk allocation ABI for the isolated detector fixture.
- * @param count Number of elements.
- * @param size Element size.
- * @param file Source file supplied by the allocator macro.
- * @param line Source line supplied by the allocator macro.
- * @param function Calling function supplied by the allocator macro.
- * @return Zeroed allocation.
+/** @brief Declare the linker-provided unwrapped allocator.
+ * @param count Requested allocation element count.
+ * @param size Requested element size.
+ * @return System allocation result.
  */
-void *__ast_calloc(size_t count, size_t size, const char *file, int line, const char *function) {
-    (void)file;
-    (void)line;
-    (void)function;
-    if (allocation_failure) {
-        return NULL;
+void *__real_calloc(size_t count, size_t size);
+
+/** @brief Intercept detector construction allocation.
+ * @param count Requested allocation element count.
+ * @param size Requested element size.
+ * @return Null for the injected failure, otherwise the system allocation.
+ */
+void *__wrap_calloc(size_t count, size_t size) {
+    return allocation_failure ? NULL : __real_calloc(count, size);
+}
+
+/** @brief Map the selected test digit to its low- and high-group frequencies.
+ * @param digit Supported test digit.
+ * @param row Receives its low-group frequency.
+ * @param column Receives its high-group frequency.
+ */
+static void frequencies(char digit, double *row, double *column) {
+    const char *position = strchr(test_positions, digit);
+    assert(position);
+    size_t index = (size_t)(position - test_positions);
+    *row = test_rows[index / 4U];
+    *column = test_columns[index % 4U];
+}
+
+/** @brief Synthesize one deterministic dual-tone interval.
+ * @param audio Destination signed-linear samples.
+ * @param samples Number of destination samples.
+ * @param rate Sample rate in samples per second.
+ * @param first Absolute first-sample offset for continuous phase.
+ * @param row Low-group frequency in hertz.
+ * @param row_amplitude Low-group peak amplitude.
+ * @param column High-group frequency in hertz.
+ * @param column_amplitude High-group peak amplitude.
+ */
+static void dual_tone(int16_t *audio, size_t samples, unsigned int rate, size_t first, double row,
+                      double row_amplitude, double column, double column_amplitude) {
+    for (size_t index = 0; index < samples; ++index) {
+        double phase = (double)(first + index) / rate;
+        audio[index] = (int16_t)(row_amplitude * sin(2.0 * TEST_PI * row * phase) +
+                                 column_amplitude * sin(2.0 * TEST_PI * column * phase));
     }
-    return calloc(count, size);
 }
 
-/** @brief Provide Asterisk deallocation ABI for the isolated detector fixture.
- * @param pointer Allocation to release.
- * @param file Source file supplied by the allocator macro.
- * @param line Source line supplied by the allocator macro.
- * @param function Calling function supplied by the allocator macro.
+/** @brief Fill one ordinary non-DTMF audio interval whose muting is observable.
+ * @param audio Destination signed-linear samples.
+ * @param samples Number of destination samples.
+ * @param rate Sample rate in samples per second.
+ * @param first Absolute first-sample offset for continuous phase.
  */
-void __ast_free(void *pointer, const char *file, int line, const char *function) {
-    (void)file;
-    (void)line;
-    (void)function;
-    free(pointer);
+static void voice_like(int16_t *audio, size_t samples, unsigned int rate, size_t first) {
+    dual_tone(audio, samples, rate, first, 440.0, TEST_AMPLITUDE, 0.0, 0.0);
 }
 
-/** @brief Return the fixture's only detector-rate format.
- * @param rate Requested rate.
- * @return Borrowed 8 kHz signed-linear format.
+/** @brief Verify every sample in a frame has been muted.
+ * @param audio PCM frame to inspect.
+ * @param samples Number of samples in @p audio.
  */
-struct ast_format *ast_format_cache_get_slin_by_rate(unsigned int rate) {
-    assert(rate == 8000);
-    return &pcm8;
-}
-
-/** @brief Read a fixture format's sample rate.
- * @param format Format object.
- * @return Samples per second.
- */
-unsigned int ast_format_get_sample_rate(const struct ast_format *format) { return format->rate; }
-
-/** @brief Opaque DSP fixture. */
-static int identity;
-/** @brief Allocation or mode-selection failure. */
-static unsigned int failure;
-/** @brief Selected detector output: null, original, begin, or end. */
-static unsigned int output;
-/** @brief Count detector releases. */
-static unsigned int released;
-/** @brief Independent digit-event frame. */
-static struct ast_frame event;
-
-/** @brief Verify non-8-kHz detector creation.
- * @param rate Actual local PCM rate.
- * @return Fixture or injected allocation failure.
- */
-struct ast_dsp *ast_dsp_new_with_rate(unsigned int rate) {
-    assert(rate == 8000);
-    return failure == 1 ? NULL : (struct ast_dsp *)&identity;
-}
-
-/** @brief Verify only digit detection is enabled.
- * @param detector Fixture.
- * @param features DTMF-only feature selection.
- */
-void ast_dsp_set_features(struct ast_dsp *detector, int features) {
-    assert(detector == (struct ast_dsp *)&identity && features == DSP_FEATURE_DIGIT_DETECT);
-}
-
-/** @brief Verify standard DTMF detection and inject mode rejection.
- * @param detector Fixture.
- * @param mode Standard DTMF mode.
- * @return Injected status.
- */
-int ast_dsp_set_digitmode(struct ast_dsp *detector, int mode) {
-    assert(detector == (struct ast_dsp *)&identity && mode == DSP_DIGITMODE_DTMF);
-    return failure == 2;
-}
-
-/** @brief Track detector disposal.
- * @param detector Fixture.
- */
-void ast_dsp_free(struct ast_dsp *detector) {
-    assert(detector == (struct ast_dsp *)&identity);
-    ++released;
-}
-
-/** @brief Return selected DSP event and emulate in-place tone muting.
- * @param channel Null prevents audio from being queued back into a hardware channel.
- * @param detector Fixture.
- * @param input Borrowed stack frame with no ownership flags.
- * @return Selected DSP output.
- */
-struct ast_frame *ast_dsp_process(struct ast_channel *channel, struct ast_dsp *detector,
-                                  struct ast_frame *input) {
-    assert(!channel && detector == (struct ast_dsp *)&identity);
-    assert(!input->mallocd && input->frametype == AST_FRAME_VOICE &&
-           (input->samples == 1 || input->samples == 2));
-    assert((size_t)input->datalen == input->samples * sizeof(int16_t));
-    ((int16_t *)input->data.ptr)[0] = 0;
-    if (!output) {
-        return NULL;
+static void assert_muted(const int16_t *audio, size_t samples) {
+    for (size_t index = 0; index < samples; ++index) {
+        assert(!audio[index]);
     }
-    if (output == 1) {
-        return input;
-    }
-    event.frametype = output == 2 ? AST_FRAME_DTMF_BEGIN : AST_FRAME_DTMF_END;
-    event.subclass.integer = '5';
-    return &event;
 }
 
-/** @brief Only independently returned DSP events are released.
- * @param frame Event frame.
- * @param cache Asterisk default cache policy.
+/** @brief Feed enough intervals to qualify the selected DTMF digit.
+ * @param detector Native detector under test.
+ * @param digit DTMF digit to synthesize.
+ * @param audio Reusable interval buffer.
+ * @param samples Exact detector interval length.
+ * @param rate Detector sample rate.
+ * @param first Receives and advances the absolute source-sample offset.
  */
-void ast_frame_free(struct ast_frame *frame, int cache) { assert(frame == &event && cache == 1); }
+static void begin_digit(struct ra_dtmf_detector *detector, char digit, int16_t *audio,
+                        size_t samples, unsigned int rate, size_t *first) {
+    double row;
+    double column;
+    frequencies(digit, &row, &column);
+    for (unsigned int interval = 0; interval < 2; ++interval) {
+        dual_tone(audio, samples, rate, *first, row, TEST_AMPLITUDE, column, TEST_AMPLITUDE);
+        *first += samples;
+        assert(!ra_dtmf_process(detector, true, audio, samples));
+    }
+}
 
-/** @brief Exercise failures and every returned-frame ownership case.
- * @return Zero after assertions.
+/** @brief Finish a qualified digit and verify same-frame output muting.
+ * @param detector Native detector under test.
+ * @param expected Previously qualified digit.
+ * @param audio Reusable interval buffer.
+ * @param samples Exact detector interval length.
+ * @param rate Detector sample rate.
+ * @param first Receives and advances the absolute source-sample offset.
+ */
+static void end_digit(struct ra_dtmf_detector *detector, char expected, int16_t *audio,
+                      size_t samples, unsigned int rate, size_t *first) {
+    for (unsigned int interval = 0; interval < 3; ++interval) {
+        voice_like(audio, samples, rate, *first);
+        *first += samples;
+        char digit = ra_dtmf_process(detector, true, audio, samples);
+        assert(digit == (interval == 2 ? expected : 0));
+        if (digit) {
+            assert_muted(audio, samples);
+        }
+    }
+}
+
+/** @brief Exercise allocation, invalid-rate, null-input, and standard digit handling.
+ * @return Zero after all assertions.
  */
 int main(void) {
     allocation_failure = true;
-    assert(!ra_dtmf_open(48000));
+    assert(!ra_dtmf_open(TEST_RATE));
     allocation_failure = false;
-    failure = 1;
-    assert(!ra_dtmf_open(48000));
-    failure = 2;
-    assert(!ra_dtmf_open(48000) && released == 1);
-    failure = 0;
-    struct ra_dtmf_detector *detector = ra_dtmf_open(48000);
-    int16_t audio[2] = {100, 200};
-    assert(!ra_dtmf_process(detector, NULL, true, NULL, 0));
-    for (output = 0; output <= 3; ++output) {
-        assert(ra_dtmf_process(detector, NULL, true, audio, 2) == (output == 3 ? '5' : 0));
-    }
-    output = 0;
-    int16_t single = 100;
-    assert(!ra_dtmf_process(detector, &pcm48, true, &single, 1));
-    int16_t pair[2] = {100, 200};
-    assert(!ra_dtmf_process(detector, &pcm48, true, pair, 2));
-    struct ast_format zero_rate = {.rate = 0};
-    assert(!ra_dtmf_process(detector, &zero_rate, true, &single, 1));
-    output = 3;
-    assert(ra_dtmf_process(detector, NULL, false, audio, 2) == '5' && !audio[1]);
+    assert(!ra_dtmf_open(0));
+    assert(!ra_dtmf_open(3999));
+    struct ra_dtmf_detector *detector = ra_dtmf_open(TEST_RATE);
+    assert(detector);
+    int16_t audio[TEST_MAX_SAMPLES] = {0};
+    assert(!ra_dtmf_process(NULL, true, audio, 1));
+    assert(!ra_dtmf_process(detector, true, NULL, 1));
+    assert(!ra_dtmf_process(detector, true, audio, 0));
+
+    size_t first = 0;
+    begin_digit(detector, '5', audio, TEST_INTERVAL, TEST_RATE, &first);
+    dual_tone(audio, TEST_INTERVAL, TEST_RATE, first, 770.0, TEST_AMPLITUDE, 1336.0,
+              TEST_AMPLITUDE);
+    first += TEST_INTERVAL;
+    assert(!ra_dtmf_process(detector, true, audio, TEST_INTERVAL));
+    end_digit(detector, '5', audio, TEST_INTERVAL, TEST_RATE, &first);
+
+    begin_digit(detector, 'D', audio, TEST_INTERVAL, TEST_RATE, &first);
+    memset(audio, 1, TEST_INTERVAL * sizeof(*audio));
+    assert(!ra_dtmf_process(detector, false, audio, TEST_INTERVAL));
+    assert_muted(audio, TEST_INTERVAL);
+    memset(audio, 1, TEST_INTERVAL * sizeof(*audio));
+    assert(!ra_dtmf_process(detector, false, audio, TEST_INTERVAL));
+    memset(audio, 1, TEST_INTERVAL * sizeof(*audio));
+    assert(ra_dtmf_process(detector, false, audio, TEST_INTERVAL) == 'D');
+    assert_muted(audio, TEST_INTERVAL);
     ra_dtmf_close(detector);
+
+    detector = ra_dtmf_open(TEST_RATE);
+    assert(detector);
+    first = 0;
+    for (unsigned int interval = 0; interval < 2; ++interval) {
+        dual_tone(audio, TEST_INTERVAL, TEST_RATE, first, 770.0, TEST_AMPLITUDE, 0.0, 0.0);
+        first += TEST_INTERVAL;
+        assert(!ra_dtmf_process(detector, true, audio, TEST_INTERVAL));
+    }
+    for (unsigned int interval = 0; interval < 2; ++interval) {
+        dual_tone(audio, TEST_INTERVAL, TEST_RATE, first, 770.0, 5000.0, 1336.0, 1500.0);
+        first += TEST_INTERVAL;
+        assert(!ra_dtmf_process(detector, true, audio, TEST_INTERVAL));
+    }
+    for (unsigned int interval = 0; interval < 2; ++interval) {
+        dual_tone(audio, TEST_INTERVAL, TEST_RATE, first, 770.0, 1000.0, 1336.0, 4000.0);
+        first += TEST_INTERVAL;
+        assert(!ra_dtmf_process(detector, true, audio, TEST_INTERVAL));
+    }
+    ra_dtmf_close(detector);
+
+    detector = ra_dtmf_open(TEST_RATE);
+    assert(detector);
+    first = 0;
+    begin_digit(detector, '5', audio, TEST_INTERVAL, TEST_RATE, &first);
+    double row;
+    double column;
+    frequencies('6', &row, &column);
+    dual_tone(audio, TEST_INTERVAL, TEST_RATE, first, row, TEST_AMPLITUDE, column, TEST_AMPLITUDE);
+    first += TEST_INTERVAL;
+    assert(!ra_dtmf_process(detector, true, audio, TEST_INTERVAL));
+    dual_tone(audio, TEST_INTERVAL, TEST_RATE, first, row, TEST_AMPLITUDE, column, TEST_AMPLITUDE);
+    first += TEST_INTERVAL;
+    assert(ra_dtmf_process(detector, true, audio, TEST_INTERVAL) == '5');
+    assert_muted(audio, TEST_INTERVAL);
+    end_digit(detector, '6', audio, TEST_INTERVAL, TEST_RATE, &first);
+    ra_dtmf_close(detector);
+
+    detector = ra_dtmf_open(TEST_RATE);
+    assert(detector);
+    first = 0;
+    begin_digit(detector, '5', audio, TEST_INTERVAL, TEST_RATE, &first);
+    for (size_t interval = 0; interval < 8; ++interval) {
+        int16_t *block = audio + interval * TEST_INTERVAL;
+        if (interval == 3 || interval == 4) {
+            dual_tone(block, TEST_INTERVAL, TEST_RATE, first, 770.0, TEST_AMPLITUDE, 1477.0,
+                      TEST_AMPLITUDE);
+        } else {
+            voice_like(block, TEST_INTERVAL, TEST_RATE, first);
+        }
+        first += TEST_INTERVAL;
+    }
+    assert(ra_dtmf_process(detector, true, audio, 8 * TEST_INTERVAL) == '5');
+    assert_muted(audio, 8 * TEST_INTERVAL);
+    ra_dtmf_close(detector);
+
+    detector = ra_dtmf_open(TEST_RATE);
+    assert(detector);
+    first = 0;
+    begin_digit(detector, '5', audio, TEST_INTERVAL, TEST_RATE, &first);
+    voice_like(audio, 160, TEST_RATE, first);
+    first += 160;
+    assert(!ra_dtmf_process(detector, true, audio, 160));
+    voice_like(audio, 160, TEST_RATE, first);
+    assert(ra_dtmf_process(detector, true, audio, 160) == '5');
+    assert_muted(audio, 160);
+    ra_dtmf_close(detector);
+
+    detector = ra_dtmf_open(48000);
+    assert(detector);
+    first = 0;
+    begin_digit(detector, 'D', audio, TEST_NATIVE_INTERVAL, 48000, &first);
+    end_digit(detector, 'D', audio, TEST_NATIVE_INTERVAL, 48000, &first);
+    ra_dtmf_close(detector);
+
+    for (size_t index = 0; test_positions[index]; ++index) {
+        detector = ra_dtmf_open(TEST_RATE);
+        assert(detector);
+        first = 0;
+        begin_digit(detector, test_positions[index], audio, TEST_INTERVAL, TEST_RATE, &first);
+        end_digit(detector, test_positions[index], audio, TEST_INTERVAL, TEST_RATE, &first);
+        ra_dtmf_close(detector);
+    }
     ra_dtmf_close(NULL);
-    assert(released == 2);
     return 0;
 }

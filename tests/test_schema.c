@@ -49,8 +49,6 @@ static void valid(void) {
     assert(!ra_document_identifier(&document, "usb", 2));
     assert(!strcmp(ra_document_identifier(&document, "usb1", 0), "identifier usb1 welcome"));
     assert(!ra_document_identifier(&document, "abc", 0));
-    assert(!strcmp(ra_document_identifier_defaults(&document, "usb"), "identifier usb"));
-    assert(!ra_document_identifier_defaults(&document, "abc"));
     struct ra_document empty = {0};
     assert(!ra_document_validate(&empty, &section, &key) && !section && !key);
     assert(!ra_document_node(&empty, 0));

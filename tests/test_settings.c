@@ -15,6 +15,8 @@ static void defaults(void) {
     assert(node.enabled && node.full_duplex && node.hang_ms == 0 && node.sample_rate == 0);
     assert(!strcmp(node.channel, "usb") && !*node.codec);
     assert(!*node.link_allow_nodes && !*node.link_deny_nodes);
+    assert(!*node.link_static_directory_file && !*node.link_directory_file &&
+           node.link_lookup_method == RA_LINK_LOOKUP_BOTH);
     assert(!ra_identifier_settings_resolve(NULL, 0, NULL, NULL, &id));
     assert(id.interval_ms == 600000 && id.priority == 0);
     assert(!id.first_key_only && !id.regardless_of_activity);
@@ -37,6 +39,10 @@ static void configured(void) {
         {"general", "link_allow_nodes", "508422"},
         {"usb", "link_allow_nodes", ""},
         {"general", "link_deny_nodes", "1234, 5678"},
+        {"general", "link_static_directory_file", "static.conf"},
+        {"general", "link_directory_file", "external.conf"},
+        {"usb", "link_directory_file", "node.conf"},
+        {"usb", "link_lookup_method", "file"},
         {"identifier", "interval_ms", "300000"},
         {"identifier", "priority", "2"},
         {"identifier", "first_key_only", "yes"},
@@ -70,6 +76,9 @@ static void configured(void) {
     assert(!node.enabled && !node.full_duplex && node.hang_ms == 500 && node.sample_rate == 48000);
     assert(!strcmp(node.channel, "radio") && !strcmp(node.codec, "slin48"));
     assert(!*node.link_allow_nodes && !strcmp(node.link_deny_nodes, "1234, 5678"));
+    assert(!strcmp(node.link_static_directory_file, "static.conf") &&
+           !strcmp(node.link_directory_file, "node.conf") &&
+           node.link_lookup_method == RA_LINK_LOOKUP_FILE);
     assert(!ra_identifier_settings_resolve(entries, count, "usb", "identifier usb welcome", &id));
     assert(id.interval_ms == 200000 && id.priority == 2 && id.first_key_only &&
            id.regardless_of_activity);
@@ -77,6 +86,35 @@ static void configured(void) {
     assert(!strcmp(id.speech_model, "node.onnx"));
     assert(id.speech_speed_percent == 80 && id.speech_level_db == -2 &&
            !strcmp(id.morse_text, "KG0BP"));
+    assert(id.morse_speed_wpm == 25 && id.morse_frequency_hz == 750 && id.morse_level_db == -7);
+}
+
+/** @brief Resolve flat, node, and set defaults by scope rather than file order. */
+static void scoped_default_precedence(void) {
+    const struct ra_config_entry entries[] = {
+        {"identifier usb welcome", "interval_ms", "100000"},
+        {"identifier usb welcome", "speech_level_db", "-2"},
+        {"identifier usb welcome", "morse_level_db", "-7"},
+        {"identifier usb", "interval_ms", "200000"},
+        {"identifier usb", "speech_speed_percent", "80"},
+        {"identifier usb", "morse_speed_wpm", "25"},
+        {"speech usb", "voice", "node.onnx"},
+        {"speech usb", "level_db", "-4"},
+        {"morse usb", "frequency_hz", "750"},
+        {"morse usb", "level_db", "-8"},
+        {"identifier", "interval_ms", "300000"},
+        {"identifier", "speech_speed_percent", "90"},
+        {"identifier", "morse_speed_wpm", "18"},
+        {"speech", "voice", "flat.onnx"},
+        {"speech", "level_db", "-3"},
+        {"morse", "frequency_hz", "600"},
+        {"morse", "level_db", "-5"},
+    };
+    struct ra_identifier_settings id;
+    assert(!ra_identifier_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                           "identifier usb welcome", &id));
+    assert(id.interval_ms == 100000 && !strcmp(id.speech_model, "node.onnx"));
+    assert(id.speech_speed_percent == 80 && id.speech_level_db == -2);
     assert(id.morse_speed_wpm == 25 && id.morse_frequency_hz == 750 && id.morse_level_db == -7);
 }
 
@@ -101,8 +139,9 @@ static void scoped_default_matching(void) {
 
 /** @brief Every typed setting rejects invalid text without committing earlier fields. */
 static void invalid(void) {
-    const char *node_keys[] = {"node_enabled",   "full_duplex",      "transmit_hang_ms",
-                               "sample_rate_hz", "link_allow_nodes", "link_deny_nodes"};
+    const char *node_keys[] = {"node_enabled",      "full_duplex",      "transmit_hang_ms",
+                               "sample_rate_hz",    "link_allow_nodes", "link_deny_nodes",
+                               "link_lookup_method"};
     const char *id_keys[] = {
         "interval_ms",          "priority",        "first_key_only",  "regardless_of_activity",
         "speech_speed_percent", "speech_level_db", "morse_speed_wpm", "morse_frequency_hz",
@@ -125,6 +164,20 @@ static void invalid(void) {
     struct ra_config_entry morse = {"morse usb", "level_db", "invalid"};
     assert(!strcmp(ra_identifier_settings_resolve(&morse, 1, "usb", NULL, &id), "level_db"));
     assert(id.interval_ms == 0 && !id.speech_model);
+}
+
+/** @brief Parse every documented post-static directory lookup selection. */
+static void directory_settings(void) {
+    const char *methods[] = {"both", "dns", "file"};
+    const enum ra_link_lookup_method expected[] = {RA_LINK_LOOKUP_BOTH, RA_LINK_LOOKUP_DNS,
+                                                   RA_LINK_LOOKUP_FILE};
+    for (size_t index = 0; index < sizeof(methods) / sizeof(*methods); ++index) {
+        struct ra_config_entry entry = {"usb", "link_lookup_method", methods[index]};
+        struct ra_node_settings node;
+        assert(!ra_settings_validate(false, entry.key, entry.value));
+        assert(!ra_node_settings_resolve(&entry, 1, "usb", &node));
+        assert(node.link_lookup_method == expected[index]);
+    }
 }
 
 /** @brief Every command prefix inherits, can be disabled, and rejects ambiguous mappings. */
@@ -165,8 +218,10 @@ static void command_settings(void) {
 int main(void) {
     defaults();
     configured();
+    scoped_default_precedence();
     scoped_default_matching();
     invalid();
+    directory_settings();
     command_settings();
     puts("settings resolution tests passed");
     return 0;

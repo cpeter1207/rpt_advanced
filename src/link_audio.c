@@ -4,6 +4,24 @@
  */
 #include "link_audio.h"
 
+_Static_assert(RA_ATOMIC_UINT_FAST64_LOCK_FREE, "link audio counters must not call libatomic");
+
+/** @brief Initialize a preallocated PCM ring and its atomic positions.
+ * @param queue Caller-owned ring storage.
+ * @param storage Preallocated PCM sample storage.
+ * @param capacity Nonzero storage capacity in samples.
+ *
+ * This explicitly initializes every atomic cursor before either endpoint can access the queue.
+ */
+void ra_link_audio_init(struct ra_link_audio *queue, int16_t *storage, size_t capacity) {
+    queue->storage = storage;
+    queue->capacity = capacity;
+    atomic_init(&queue->read, 0);
+    atomic_init(&queue->written, 0);
+    atomic_init(&queue->discarded, 0);
+    atomic_init(&queue->missing, 0);
+}
+
 void ra_link_audio_write(struct ra_link_audio *queue, const int16_t *audio, size_t samples) {
     uint64_t written = atomic_load_explicit(&queue->written, memory_order_relaxed);
     uint64_t read = atomic_load_explicit(&queue->read, memory_order_acquire);

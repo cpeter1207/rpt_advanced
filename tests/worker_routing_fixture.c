@@ -21,9 +21,8 @@ struct ra_dtmf_detector *ra_dtmf_open(unsigned int rate) {
 }
 
 /** @brief Return the fixture's configured digit without processing audio. */
-char ra_dtmf_process(struct ra_dtmf_detector *detector, struct ast_format *linear, bool receiving,
-                     int16_t *audio, size_t samples) {
-    (void)linear;
+char ra_dtmf_process(struct ra_dtmf_detector *detector, bool receiving, int16_t *audio,
+                     size_t samples) {
     (void)receiving;
     (void)audio;
     (void)samples;

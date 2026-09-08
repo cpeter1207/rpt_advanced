@@ -22,6 +22,13 @@ enum ra_settings_kind {
     RA_SETTINGS_MORSE,
     RA_SETTINGS_SPEECH
 };
+
+/** @brief Select the network directory sources checked after a local static override. */
+enum ra_link_lookup_method {
+    RA_LINK_LOOKUP_BOTH, /**< Check ASL DNS first, then the configured external file. */
+    RA_LINK_LOOKUP_DNS,  /**< Check ASL DNS only. */
+    RA_LINK_LOOKUP_FILE  /**< Check the configured external file only. */
+};
 const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *key,
                                       const char *value);
 
@@ -34,9 +41,10 @@ struct ra_node_settings {
     const char *channel;  /**< USBRadioPlus channel identifier, without the technology prefix. */
     const char *codec;    /**< Asterisk codec name; empty selects signed linear automatically. */
     const char *link_allow_nodes; /**< Incoming allowlist; empty accepts all verified nodes. */
-    const char *link_deny_nodes;  /**< Incoming denylist, overriding all access exemptions. */
-    const char
-        *link_directory_file; /**< Optional ASL-format static node directory, checked first. */
+    const char *link_deny_nodes;  /**< Incoming denylist, overriding allowlist membership. */
+    const char *link_static_directory_file; /**< Optional local-priority static node directory. */
+    const char *link_directory_file;        /**< Optional ASL external-node directory. */
+    enum ra_link_lookup_method link_lookup_method; /**< DNS/file selection after static lookup. */
     struct ra_link_command_mapping link_commands[RA_LINK_ACTION_COUNT]; /**< Inherited prefixes. */
 };
 

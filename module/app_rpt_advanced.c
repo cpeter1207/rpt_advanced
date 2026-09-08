@@ -5,9 +5,12 @@
 #include <asterisk.h>
 
 #include "document.h"
+#include "link_audio.h"
 #include "link_directory.h"
+#include "link_hub.h"
 #include "runtime.h"
 #include "schema.h"
+#include "worker.h"
 #include <asterisk/buildopts.h>
 #include <asterisk/channel.h>
 #include <asterisk/cli.h>
@@ -19,6 +22,11 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+
+/** @brief Require module-owned cross-thread counters to avoid libatomic fallback calls. */
+_Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && ATOMIC_INT_LOCK_FREE == 2 &&
+                   RA_ATOMIC_UINT_FAST64_LOCK_FREE,
+               "module control counters must be lock-free");
 
 /** @brief Configuration owned by the loaded module. */
 static struct ra_document configuration;
@@ -32,6 +40,8 @@ AST_MUTEX_DEFINE_STATIC(runtime_lock);
 static struct ast_module_info descriptor;
 /** @brief Invalidates calls prepared before runtime replacement. Protected by runtime_lock. */
 static atomic_uint_fast64_t runtime_revision;
+/** @brief Drop producer events while retained node resources are being replaced. */
+static atomic_bool runtime_reloading;
 /** @brief Serial control executor, retained until radio workers stop and tasks drain. */
 static struct ast_taskprocessor *control_queue;
 /** @brief Bounded number of submitted digit tasks. */
@@ -49,14 +59,38 @@ struct digit_task {
     char node[];       /**< Owned local node name. */
 };
 
-/** @brief Dial without preventing same-server incoming admission or configuration reload.
+/** @brief Keep a failed permanent request eligible for the hub's normal recovery manager.
+ * @param local Local node name.
+ * @param remote Requested remote node name.
+ * @param transmit Requested outbound-audio mode.
+ * @param forward Requested peer-forwarding mode.
+ * @param revision Runtime revision that prepared the failed attempt.
+ * @return Zero when the current runtime retained the retry intent, minus one otherwise.
+ *
+ * Dialing deliberately runs without `runtime_lock`. Rechecking the revision here prevents a
+ * stale task from adding retry state to a replacement configuration after its old dial unwinds.
+ */
+static int retain_failed_permanent_link(const char *local, const char *remote, bool transmit,
+                                        bool forward, uint64_t revision) {
+    ast_mutex_lock(&runtime_lock);
+    int result =
+        revision == atomic_load(&runtime_revision) &&
+                ra_runtime_retain_permanent_link(&runtime, local, remote, transmit, forward)
+            ? 0
+            : -1;
+    ast_mutex_unlock(&runtime_lock);
+    return result;
+}
+
+/** @brief Dial without preventing incoming admission or configuration reload.
  * @param local Local node name.
  * @param remote Remote node name.
  * @param transmit Send program audio to the peer.
  * @param forward Relay peer audio to other links.
  * @param permanent Reconnect automatically after an unexpected transport failure.
  * @param expected Required runtime revision, or zero for a fresh administrative command.
- * @return Zero on connection, minus one on failure or intervening reload.
+ * @return Zero on connection or retained permanent-retry intent, minus one on failure or an
+ * intervening reload.
  */
 static int connect_link(const char *local, const char *remote, bool transmit, bool forward,
                         bool permanent, uint64_t expected) {
@@ -72,7 +106,8 @@ static int connect_link(const char *local, const char *remote, bool transmit, bo
     }
     struct ast_channel *channel = ra_link_dial_run(&dial, local);
     if (!channel) {
-        return -1;
+        return permanent ? retain_failed_permanent_link(local, remote, transmit, forward, revision)
+                         : -1;
     }
     ast_mutex_lock(&runtime_lock);
     result =
@@ -82,8 +117,10 @@ static int connect_link(const char *local, const char *remote, bool transmit, bo
     ast_mutex_unlock(&runtime_lock);
     if (result) {
         ast_hangup(channel);
+        return permanent ? retain_failed_permanent_link(local, remote, transmit, forward, revision)
+                         : -1;
     }
-    return result;
+    return 0;
 }
 
 /** @brief Execute a collected operation outside the hardware worker.
@@ -123,28 +160,52 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
         return result == -1 ? -1 : 0;
     }
     case RA_LINK_STATUS:
-    case RA_LINK_FULL_STATUS:
     case RA_LINK_LAST_KEYED: {
         ast_mutex_lock(&runtime_lock);
-        bool current = revision == atomic_load(&runtime_revision);
-        size_t count = current ? ra_runtime_link_count(&runtime, local) : 0;
+        int result = revision == atomic_load(&runtime_revision)
+                         ? ra_runtime_queue_link_status(&runtime, local,
+                                                        operation->action == RA_LINK_LAST_KEYED)
+                         : -1;
         ast_mutex_unlock(&runtime_lock);
-        if (!current) {
-            return -1;
+        return result;
+    }
+    case RA_LINK_FULL_STATUS: {
+        char *topology = NULL;
+        ast_mutex_lock(&runtime_lock);
+        bool current = revision == atomic_load(&runtime_revision);
+        int result = -1;
+        if (current) {
+            topology = ra_runtime_link_topology(&runtime, local);
+            if (topology && !ra_runtime_queue_link_status(&runtime, local, false)) {
+                result = 0;
+            }
         }
-        ast_log(LOG_NOTICE, "rpt_advanced: node %s has %zu active links\n", local, count);
-        return 0;
+        ast_mutex_unlock(&runtime_lock);
+        if (topology) {
+            if (!result) {
+                ast_log(LOG_NOTICE, "rpt_advanced: node %s network topology %s\n", local,
+                        *topology ? topology : "(none)");
+            }
+            ast_free(topology);
+        }
+        return result;
     }
     case RA_LINK_DISCONNECT_PERMANENT:
         ast_mutex_lock(&runtime_lock);
         int result = revision == atomic_load(&runtime_revision)
-                         ? !ra_runtime_disconnect(&runtime, local, operation->remote)
+                         ? !ra_runtime_disconnect_permanent(&runtime, local, operation->remote)
                          : -1;
         ast_mutex_unlock(&runtime_lock);
         return result;
-    case RA_LINK_RECONNECT_ALL:
-        /* Permanent peers reconnect themselves after transport failure. */
-        return 0;
+    case RA_LINK_RECONNECT_ALL: {
+        ast_mutex_lock(&runtime_lock);
+        bool current = revision == atomic_load(&runtime_revision);
+        if (current) {
+            (void)ra_runtime_reconnect_all(&runtime, local);
+        }
+        ast_mutex_unlock(&runtime_lock);
+        return current ? 0 : -1;
+    }
     case RA_LINK_COMMAND: {
         ast_mutex_lock(&runtime_lock);
         int remote_result =
@@ -187,12 +248,22 @@ static int process_digit(void *argument) {
     return 0;
 }
 
-/** @brief Enqueue a decoded event without performing any network or command work.
+/** @brief Queue a dispatcher-delivered DTMF event without doing radio-thread work.
  * @param node Borrowed node name.
- * @param digit Completed digit or timeout marker.
+ * @param digit Completed digit, timeout marker, or internal drop notification.
  * @param now_ms Detection time.
  */
 static void submit_digit(const char *node, char digit, uint64_t now_ms) {
+    if (atomic_load_explicit(&runtime_reloading, memory_order_acquire)) {
+        /* A partial command must not span the old and replacement radio configurations. */
+        atomic_fetch_add(&lost_digits, 1);
+        return;
+    }
+    if (digit == RA_WORKER_DIGIT_DROPPED) {
+        atomic_fetch_add(&lost_digits, 1);
+        ast_log(LOG_WARNING, "rpt_advanced: dropped DTMF event; partial commands invalidated\n");
+        return;
+    }
     unsigned int pending = atomic_fetch_add(&pending_digits, 1);
     struct digit_task *task =
         pending < 256 ? ast_calloc(1, sizeof(*task) + strlen(node) + 1) : NULL;
@@ -215,6 +286,104 @@ static void submit_digit(const char *node, char digit, uint64_t now_ms) {
     ast_log(LOG_WARNING, "rpt_advanced: dropped DTMF event; partial commands invalidated\n");
 }
 
+/** @brief Name one direct peer's configured audio-routing mode for the CLI.
+ * @param peer Caller-owned direct-peer status snapshot.
+ * @return Static operator-facing mode name.
+ */
+static const char *link_cli_mode(const struct ra_link_peer_status *peer) {
+    if (peer->transmit) {
+        return "transceive";
+    }
+    return peer->forward ? "monitor" : "local-monitor";
+}
+
+/** @brief Name a retained peer's recovery state for complete CLI reporting.
+ * @param peer Caller-owned direct-peer status snapshot.
+ * @return Empty text for an attached peer, otherwise a static retry-state suffix.
+ */
+static const char *link_cli_retry_state(const struct ra_link_peer_status *peer) {
+    if (!peer->retrying) {
+        return "";
+    }
+    return peer->paused ? " (paused)" : " (retrying)";
+}
+
+/** @brief Take an owned system-topology snapshot while serializing runtime replacement.
+ * @param local Selected local node.
+ * @return Asterisk-allocated topology text, or null when it cannot be produced.
+ */
+static char *link_cli_topology(const char *local) {
+    ast_mutex_lock(&runtime_lock);
+    char *topology = ra_runtime_link_topology(&runtime, local);
+    ast_mutex_unlock(&runtime_lock);
+    return topology;
+}
+
+/** @brief Print a complete snapshot of attached and retained peers without touching radio audio.
+ * @param arguments CLI command arguments containing the selected local node at index three.
+ * @return CLI success or failure.
+ */
+static char *link_status_cli(struct ast_cli_args *arguments) {
+    const char *local = arguments->argv[3];
+    struct ra_link_peer_status *peers = NULL;
+    size_t count = 0;
+    for (;;) {
+        ast_mutex_lock(&runtime_lock);
+        bool found = ra_runtime_link_snapshot(&runtime, local, NULL, 0, &count);
+        ast_mutex_unlock(&runtime_lock);
+        if (!found) {
+            ast_cli(arguments->fd, "rpt_advanced: unknown node %s\n", local);
+            return CLI_FAILURE;
+        }
+        if (!count) {
+            char *topology = link_cli_topology(local);
+            if (!topology) {
+                ast_cli(arguments->fd, "rpt_advanced: unable to list topology\n");
+                return CLI_FAILURE;
+            }
+            ast_cli(arguments->fd, "rpt_advanced: %s has no active links\n", local);
+            ast_cli(arguments->fd, "  topology: %s\n", *topology ? topology : "none");
+            ast_free(topology);
+            return CLI_SUCCESS;
+        }
+        peers = ast_calloc(count, sizeof(*peers));
+        if (!peers) {
+            ast_cli(arguments->fd, "rpt_advanced: unable to list links\n");
+            return CLI_FAILURE;
+        }
+        size_t capacity = count;
+        ast_mutex_lock(&runtime_lock);
+        found = ra_runtime_link_snapshot(&runtime, local, peers, capacity, &count);
+        ast_mutex_unlock(&runtime_lock);
+        if (!found) {
+            ast_free(peers);
+            ast_cli(arguments->fd, "rpt_advanced: unknown node %s\n", local);
+            return CLI_FAILURE;
+        }
+        if (count <= capacity) {
+            break;
+        }
+        ast_free(peers);
+        peers = NULL;
+    }
+    char *topology = link_cli_topology(local);
+    if (!topology) {
+        ast_free(peers);
+        ast_cli(arguments->fd, "rpt_advanced: unable to list topology\n");
+        return CLI_FAILURE;
+    }
+    ast_cli(arguments->fd, "rpt_advanced: %s has %zu %s\n", local, count,
+            count == 1 ? "link" : "links");
+    for (size_t index = 0; index < count; ++index) {
+        ast_cli(arguments->fd, "  %s: %s%s%s\n", peers[index].name, link_cli_mode(&peers[index]),
+                peers[index].permanent ? " (permanent)" : "", link_cli_retry_state(&peers[index]));
+    }
+    ast_cli(arguments->fd, "  topology: %s\n", *topology ? topology : "none");
+    ast_free(topology);
+    ast_free(peers);
+    return CLI_SUCCESS;
+}
+
 /** @brief Control peer connections from Asterisk's CLI without blocking the audio worker.
  * @param entry CLI registration metadata.
  * @param command Asterisk initialization, completion, or execution request.
@@ -225,11 +394,15 @@ static char *link_cli(struct ast_cli_entry *entry, int command, struct ast_cli_a
     if (command == CLI_INIT) {
         entry->command = "rpt_advanced link";
         entry->usage = "Usage: rpt_advanced link {connect|monitor|local-monitor|disconnect} "
-                       "<local-node> <remote-node>\n";
+                       "<local-node> <remote-node>\n"
+                       "       rpt_advanced link status <local-node>\n";
         return NULL;
     }
     if (command == CLI_GENERATE) {
         return NULL;
+    }
+    if (arguments->argc == 4 && !strcmp(arguments->argv[2], "status")) {
+        return link_status_cli(arguments);
     }
     if (arguments->argc != 5) {
         return CLI_SHOWUSAGE;
@@ -266,7 +439,8 @@ static char *link_cli_compat(struct ast_cli_entry *entry, int command,
     if (command == CLI_INIT) {
         entry->command = "rpt link";
         entry->usage = "Usage: rpt link {connect|monitor|local-monitor|disconnect} "
-                       "<local-node> <remote-node>\n";
+                       "<local-node> <remote-node>\n"
+                       "       rpt link status <local-node>\n";
         return NULL;
     }
     return link_cli(entry, command, arguments);
@@ -320,7 +494,7 @@ static int incoming_link(struct ast_channel *channel, const char *data) {
         result = ast_answer(owned);
     }
     if (!result) {
-        result = ra_runtime_accept(&runtime, data, remote, owned, true, false);
+        result = ra_runtime_accept(&runtime, data, remote, owned, true);
     }
     if (result) {
         ast_hangup(owned);
@@ -365,16 +539,17 @@ static int read_configuration(void) {
     }
     ast_free(path);
     ast_mutex_lock(&runtime_lock);
+    /* Retained peer readers wait at each node's callback gate while resources are exchanged.
+     * Dropping producer events here prevents a DTMF command from spanning the replacement.
+     */
+    atomic_store_explicit(&runtime_reloading, true, memory_order_release);
+    error = configuration.sections ? ra_runtime_reload(&runtime, &configuration, &replacement)
+                                   : ra_runtime_start(&runtime, &replacement);
     atomic_fetch_add(&runtime_revision, 1);
-    ra_runtime_stop(&runtime);
-    error = ra_runtime_start(&runtime, &replacement);
+    atomic_store_explicit(&runtime_reloading, false, memory_order_release);
     if (error) {
         ast_log(LOG_ERROR, "rpt_advanced: %s\n", error);
         ra_document_destroy(&replacement);
-        error = ra_runtime_start(&runtime, &configuration);
-        if (error) {
-            ast_log(LOG_ERROR, "rpt_advanced: restoring previous radios failed: %s\n", error);
-        }
         ast_mutex_unlock(&runtime_lock);
         return -1;
     }
@@ -387,8 +562,8 @@ static int read_configuration(void) {
 /** @brief Stop producers before draining the control queue, without joining under its lock. */
 static void stop_runtime(void) {
     ast_mutex_lock(&runtime_lock);
-    atomic_fetch_add(&runtime_revision, 1);
     ra_runtime_stop(&runtime);
+    atomic_fetch_add(&runtime_revision, 1);
     ra_document_destroy(&configuration);
     ast_mutex_unlock(&runtime_lock);
     control_queue = ast_taskprocessor_unreference(control_queue);
