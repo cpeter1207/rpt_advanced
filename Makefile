@@ -248,8 +248,10 @@ build/chan_rpt_fixture.so: tests/radio_fixture.c | build
 endif
 
 integration: install-check build/chan_rpt_fixture.so
-	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py
-	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_link_integration.py
+	LD_LIBRARY_PATH="$(RPCR_PREFIX)/lib:$$LD_LIBRARY_PATH" \
+		RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py
+	LD_LIBRARY_PATH="$(RPCR_PREFIX)/lib:$$LD_LIBRARY_PATH" \
+		RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_link_integration.py
 
 dist: | build
 	tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
