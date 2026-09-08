@@ -44,15 +44,9 @@ struct ra_link_peer {
     int16_t *send_buffer;             /**< Reader-owned outbound frame buffer. */
     struct ast_trans_pvt *decode;     /**< Asterisk codec-to-linear translator. */
     struct ast_format *decode_format; /**< Format currently served by decode. */
-    atomic_bool receiving;            /**< Control-frame receive state. */
-    atomic_bool voice_keying;         /**< Voice frames determine carrier after NEWKEY1. */
     atomic_uint_fast64_t receive_epoch;  /**< Reader increments this for each voice frame. */
-    atomic_bool desired_key;             /**< Hardware worker's outbound key state. */
-    atomic_uint_fast64_t sent_samples;   /**< Hardware worker's outbound sample count. */
     uint64_t seen_epoch;                 /**< Consumer's last observed inbound voice epoch. */
     size_t receive_age;                  /**< Consumer samples since the last voice frame. */
-    bool transmitting;                   /**< Reader's last signaled outgoing key state. */
-    uint64_t heartbeat_samples;          /**< Reader's last outbound heartbeat position. */
     char digits[64];                     /**< Control-thread-to-reader DTMF ring storage. */
     atomic_uint digit_head;              /**< Next DTMF slot written by the control executor. */
     atomic_uint digit_tail;              /**< Next DTMF slot read by the network reader. */

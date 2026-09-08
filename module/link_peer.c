@@ -193,10 +193,12 @@ static int accept_frame(struct ra_link_peer *peer, struct ast_frame *frame) {
             result = -1;
         }
         if (text_is(frame, "!NEWKEY!")) {
-            atomic_store(&peer->voice_keying, false);
-            result = ast_sendtext(peer->channel, "!NEWKEY!") ? -1 : 0;
+            /* NEWKEY is a legacy compatibility probe.  This endpoint starts
+             * with NEWKEY1, where ordinary voice frames carry carrier state;
+             * replying would make an otherwise modern peer switch away from
+             * that mode and discard its unaccompanied voice frames. */
         } else if (text_is(frame, "!NEWKEY1!")) {
-            atomic_store(&peer->voice_keying, true);
+            /* The selected transport already uses voice-frame keying. */
         } else if (text_is(frame, "!IAXKEY!")) {
             result = ast_sendtext(peer->channel, "!IAXKEY! 1 1 0 0") ? -1 : 0;
         } else {
@@ -205,13 +207,6 @@ static int accept_frame(struct ra_link_peer *peer, struct ast_frame *frame) {
     } else if (frame->frametype == AST_FRAME_CONTROL) {
         if (frame->subclass.integer == AST_CONTROL_HANGUP) {
             result = -1;
-        }
-        if (frame->subclass.integer == AST_CONTROL_RADIO_KEY ||
-            frame->subclass.integer == AST_CONTROL_RADIO_UNKEY) {
-            if (!atomic_load(&peer->voice_keying)) {
-                atomic_store(&peer->receiving, frame->subclass.integer == AST_CONTROL_RADIO_KEY);
-                atomic_fetch_add(&peer->receive_epoch, 1);
-            }
         }
     } else if (frame->frametype == AST_FRAME_DTMF_END) {
         char digit;
@@ -268,12 +263,8 @@ static int accept_frame(struct ra_link_peer *peer, struct ast_frame *frame) {
             result = -1;
             goto done;
         }
-        if (atomic_load(&peer->voice_keying)) {
-            atomic_fetch_add(&peer->receive_epoch, 1);
-        }
-        if (atomic_load(&peer->voice_keying) || atomic_load(&peer->receiving)) {
-            ra_link_audio_write(&peer->received, audio->data.ptr, audio->samples);
-        }
+        atomic_fetch_add(&peer->receive_epoch, 1);
+        ra_link_audio_write(&peer->received, audio->data.ptr, audio->samples);
     done:
         ast_frfree(audio);
         return result;
@@ -343,24 +334,12 @@ static void *read_peer(void *context) {
         if (send_topology(peer)) {
             break;
         }
-        bool voice_keying = atomic_load(&peer->voice_keying);
-        bool keyed = atomic_load(&peer->desired_key);
-        uint64_t sent = atomic_load(&peer->sent_samples);
-        if (!voice_keying && (keyed != peer->transmitting ||
-                              sent - peer->heartbeat_samples >= (uint64_t)peer->linear_rate * 2)) {
-            if (ast_indicate(peer->channel,
-                             keyed ? AST_CONTROL_RADIO_KEY : AST_CONTROL_RADIO_UNKEY)) {
-                break;
-            }
-            peer->transmitting = keyed;
-            peer->heartbeat_samples = sent;
-        }
         size_t count = ra_link_audio_available(&peer->outgoing);
         size_t block = peer->linear_rate / 50;
         if (count > block) {
             count = block;
         }
-        if (keyed && count) {
+        if (count) {
             ra_link_audio_read(&peer->outgoing, peer->send_buffer, count);
             struct ast_frame output = {.frametype = AST_FRAME_VOICE,
                                        .subclass.format = peer->linear,
@@ -449,13 +428,7 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     peer->inbound_digit_context = inbound_digit_context;
     atomic_init(&peer->stop, false);
     atomic_init(&peer->ended, false);
-    atomic_init(&peer->receiving, false);
-    /* app_rpt's current IAX convention derives carrier from ordinary voice frames.
-     * The legacy !NEWKEY! reply below explicitly opts a peer into RADIO_KEY instead. */
-    atomic_init(&peer->voice_keying, true);
     atomic_init(&peer->receive_epoch, 0);
-    atomic_init(&peer->desired_key, false);
-    atomic_init(&peer->sent_samples, 0);
     atomic_init(&peer->digit_head, 0);
     atomic_init(&peer->digit_tail, 0);
     if (pthread_create(&peer->thread, NULL, read_peer, peer)) {
@@ -470,22 +443,16 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
 }
 
 bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samples) {
-    bool voice_keying = atomic_load(&peer->voice_keying);
     uint64_t epoch = atomic_load(&peer->receive_epoch);
     if (epoch != peer->seen_epoch) {
         peer->seen_epoch = epoch;
         peer->receive_age = 0;
-    } else if (voice_keying || atomic_load(&peer->receiving)) {
+    } else {
         peer->receive_age += samples;
     }
-    bool signaled = voice_keying ? peer->receive_age < peer->linear_rate / 20
-                                 : atomic_load(&peer->receiving) &&
-                                       peer->receive_age < (size_t)peer->linear_rate * 4;
-    if (!voice_keying && !signaled) {
-        atomic_store(&peer->receiving, false);
-    }
     bool receiving =
-        (signaled || ra_link_audio_available(&peer->received)) && !atomic_load(&peer->ended);
+        (peer->receive_age < peer->linear_rate / 20 || ra_link_audio_available(&peer->received)) &&
+        !atomic_load(&peer->ended);
     if (receiving) {
         ra_link_audio_read(&peer->received, audio, samples);
     } else {
@@ -500,8 +467,6 @@ int ra_link_peer_send(struct ra_link_peer *peer, bool keyed, const int16_t *audi
     if (atomic_load(&peer->ended)) {
         return -1;
     }
-    atomic_store(&peer->desired_key, keyed);
-    atomic_fetch_add(&peer->sent_samples, samples);
     if (!keyed || !samples) {
         return 0;
     }

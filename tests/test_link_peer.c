@@ -45,16 +45,10 @@ static int mutex_inits;
 static int hangups;
 /** @brief Number of remote-command digits delivered by the reader. */
 static unsigned int sent_digits;
-/** @brief Number of radio-key indications sent to the fixture channel. */
-static unsigned int key_indications;
-/** @brief Number of PTT-release indications sent to the fixture channel. */
-static unsigned int ptt_release_indications;
 /** @brief Number of queued topology advertisements delivered by the reader. */
 static unsigned int sent_topologies;
 /** @brief Most recent full IAX topology text sent by the channel owner. */
 static char sent_topology[RA_LINK_TOPOLOGY_ADVERTISEMENT_MAX + 3];
-/** @brief Number of echoed redundant-key IAX text messages. */
-static unsigned int sent_newkeys;
 /** @brief Number of initial voice-keyed IAX negotiation messages. */
 static unsigned int sent_newkey1s;
 /** @brief Number of IAX key-negotiation replies. */
@@ -342,10 +336,6 @@ int ast_set_write_format(struct ast_channel *channel, struct ast_format *format)
  */
 int ast_sendtext(struct ast_channel *channel, const char *text) {
     (void)channel;
-    if (!strcmp(text, "!NEWKEY!")) {
-        ++sent_newkeys;
-        return failure == 4;
-    }
     if (!strcmp(text, "!NEWKEY1!")) {
         ++sent_newkey1s;
         return failure == 4;
@@ -412,20 +402,15 @@ int ast_write(struct ast_channel *channel, struct ast_frame *frame) {
     assert(frame->frametype == AST_FRAME_VOICE && frame->samples > 0);
     return failure == 9;
 }
-/** @brief Verify key-only indications and inject failure.
+/** @brief Accept the teardown's explicit unkey indication.
  * @param channel Unused channel.
- * @param condition Radio key state.
- * @return Injected signaling status.
+ * @param condition Radio control indication.
+ * @return Always succeeds for this fixture.
  */
 int ast_indicate(struct ast_channel *channel, int condition) {
     (void)channel;
-    assert(condition == AST_CONTROL_RADIO_KEY || condition == AST_CONTROL_RADIO_UNKEY);
-    if (condition == AST_CONTROL_RADIO_KEY) {
-        ++key_indications;
-    } else {
-        ++ptt_release_indications;
-    }
-    return failure == 8;
+    assert(condition == AST_CONTROL_RADIO_UNKEY);
+    return 0;
 }
 /** @brief Track transferred channel disposal.
  * @param channel Unused channel identity.
@@ -477,9 +462,9 @@ int main(void) {
     failure = 0;
     mutex_inits = 0;
     allocation_calls = 0;
-    sent_newkeys = sent_newkey1s = sent_iaxkeys = 0;
+    sent_newkey1s = sent_iaxkeys = 0;
     assert(!ra_link_peer_start(&peer, NULL, &linear, receive_inbound_digit, &inbound_context));
-    assert(!sent_newkeys && sent_newkey1s == 1 && atomic_load(&peer.voice_keying));
+    assert(sent_newkey1s == 1);
     atomic_uint generation;
     atomic_init(&generation, 0);
     peer.topology_generation = &generation;
@@ -549,11 +534,6 @@ int main(void) {
     failure = 0;
     assert(sent_topologies == 3 && !strcmp(sent_topology, "L T3"));
     frame(&peer, &ignored);
-    atomic_store(&peer.sent_samples, 16000);
-    frame(&peer, &ignored);
-    assert(!ptt_release_indications);
-    atomic_store(&peer.sent_samples, 0);
-    peer.heartbeat_samples = 0;
     struct ast_frame text = {.frametype = AST_FRAME_TEXT};
     frame(&peer, &text);
     text.data.ptr = "";
@@ -666,7 +646,7 @@ int main(void) {
     text.datalen = 10;
     frame(&peer, &text);
     frame(&peer, &text);
-    assert(atomic_load(&peer.voice_keying) && sent_newkey1s == 1);
+    assert(sent_newkey1s == 1);
     text.datalen = 9;
     frame(&peer, &text);
     assert(sent_newkey1s == 1);
@@ -683,29 +663,17 @@ int main(void) {
     int16_t quiet[32000];
     bool expired_voice = ra_link_peer_receive(&peer, quiet, 400);
     assert(peer.receive_age == 400 && !expired_voice);
+    ra_link_audio_write(&peer.received, samples, 2);
+    peer.receive_age = linear.rate / 20;
+    assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123 && output[1] == -456);
     text.data.ptr = "!NEWKEY!";
     text.datalen = 8;
-    failure = 4;
-    frame(&peer, &text);
-    failure = 0;
     frame(&peer, &text);
     frame(&peer, &text);
-    assert(!atomic_load(&peer.voice_keying) && sent_newkeys == 3);
-    /* The legacy negotiation restores only the explicit RADIO_KEY transport. */
-    frame(&peer, &ignored);
-    assert(!key_indications && !ptt_release_indications);
-    atomic_store(&peer.sent_samples, 16000);
-    frame(&peer, &ignored);
-    assert(ptt_release_indications == 1);
-    atomic_store(&peer.sent_samples, 0);
-    atomic_store(&peer.desired_key, true);
-    frame(&peer, &ignored);
-    assert(key_indications == 1);
-    atomic_store(&peer.desired_key, false);
-    frame(&peer, &ignored);
-    assert(ptt_release_indications == 2);
+    assert(sent_newkey1s == 1);
     control.subclass.integer = AST_CONTROL_RADIO_KEY;
     frame(&peer, &control);
+    frame(&peer, &voice);
     assert(ra_link_peer_receive(&peer, output, 2));
     linear.rate = 16000;
     assert(!ra_link_peer_receive(&peer, quiet, 32000));
@@ -715,13 +683,15 @@ int main(void) {
     frame(&peer, &text);
     frame(&peer, NULL);
     frame(&peer, &voice);
+    atomic_store(&peer.ended, true);
     assert(!ra_link_peer_receive(&peer, output, 2) && output[0] == 0);
+    atomic_store(&peer.ended, false);
     frame(&peer, &control);
     frame(&peer, &voice);
     control.subclass.integer = AST_CONTROL_RADIO_UNKEY;
     frame(&peer, &control);
     assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123 && output[1] == -456);
-    assert(!ra_link_peer_receive(&peer, output, 2));
+    assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123 && output[1] == -456);
     control.subclass.integer = AST_CONTROL_ANSWER;
     frame(&peer, &control);
     control.subclass.integer = AST_CONTROL_HANGUP;
@@ -766,15 +736,10 @@ int main(void) {
     assert(!ra_link_peer_send(&peer, true, NULL, 0));
     assert(!ra_link_peer_send(&peer, true, samples, 2));
     assert(!ra_link_peer_send(&peer, false, NULL, 0));
-    atomic_store(&peer.desired_key, true);
     for (size_t index = 0; index < 100; ++index) {
         assert(!ra_link_peer_send(&peer, true, samples, 2));
     }
     frame(&peer, &ignored);
-    peer.transmitting = false;
-    failure = 8;
-    frame(&peer, &ignored);
-    failure = 0;
     assert(!ra_link_peer_send(&peer, true, samples, 2));
     failure = 9;
     frame(&peer, &ignored);
@@ -797,7 +762,6 @@ int main(void) {
     assert(ra_link_peer_send_digit(&peer, '1') == -1);
     assert(ra_link_peer_queue_topology(&peer, "T1") == -1);
     assert(ra_link_peer_send(&peer, false, NULL, 0) == -1);
-    atomic_store(&peer.receiving, true);
     assert(!ra_link_peer_receive(&peer, output, 2));
     unsigned int inbound_before_no_handler = inbound_digits;
     ra_link_peer_stop(&peer);
