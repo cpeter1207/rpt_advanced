@@ -9,6 +9,7 @@
 #include "link_audio.h"
 #include <asterisk/lock.h>
 #include <pthread.h>
+#include <rate_adjusting_pcm_ring.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -16,7 +17,6 @@
 struct ast_channel;
 struct ast_format;
 struct ast_trans_pvt;
-struct SRC_STATE_tag;
 
 /** @brief Maximum cached route-payload bytes accepted from an app_rpt IAX `L` message. */
 #define RA_LINK_TOPOLOGY_TEXT_MAX 10000
@@ -35,25 +35,18 @@ typedef void (*ra_link_peer_digit_fn)(void *context, char digit);
 
 /** @brief Peer ownership shared by its network reader and hardware-clocked consumer. */
 struct ra_link_peer {
-    struct ast_channel *channel;       /**< Owned after successful start. */
-    struct ast_format *linear;         /**< Borrowed Asterisk PCM cache format. */
-    unsigned int linear_rate;          /**< Immutable negotiated PCM rate for hardware callbacks. */
-    pthread_t thread;                  /**< Joined before resources are freed. */
-    atomic_bool stop;                  /**< Reader shutdown request. */
-    atomic_bool ended;                 /**< Reader observed hangup or a transport error. */
-    struct ra_link_audio received;     /**< Reader-to-hardware PCM ring. */
-    struct ra_link_audio outgoing;     /**< Hardware-to-reader PCM ring. */
-    int16_t *outgoing_storage;         /**< Owned outbound ring storage. */
-    int16_t *send_buffer;              /**< Reader-owned outbound frame buffer. */
-    struct SRC_STATE_tag *elastic_src; /**< Consumer-owned persistent playout converter. */
-    float *elastic_input;              /**< Consumer-owned resampler input workspace. */
-    float *elastic_output;             /**< Consumer-owned resampler output workspace. */
-    size_t elastic_capacity;           /**< Preallocated elastic workspace samples. */
-    uint64_t occupancy_milli;          /**< Consumer-owned filtered ring occupancy. */
-    double playout_ratio;              /**< Consumer-owned slowly varying output/input ratio. */
-    bool elastic_primed;               /**< Initial safe playout reserve has accumulated. */
-    struct ast_trans_pvt *decode;      /**< Asterisk codec-to-linear translator. */
-    struct ast_format *decode_format;  /**< Format currently served by decode. */
+    struct ast_channel *channel;      /**< Owned after successful start. */
+    struct ast_format *linear;        /**< Borrowed Asterisk PCM cache format. */
+    unsigned int linear_rate;         /**< Immutable negotiated PCM rate for hardware callbacks. */
+    pthread_t thread;                 /**< Joined before resources are freed. */
+    atomic_bool stop;                 /**< Reader shutdown request. */
+    atomic_bool ended;                /**< Reader observed hangup or a transport error. */
+    struct rpcr_ring received;        /**< Reader-to-hardware elastic PCM ring. */
+    struct ra_link_audio outgoing;    /**< Hardware-to-reader PCM ring. */
+    int16_t *outgoing_storage;        /**< Owned outbound ring storage. */
+    int16_t *send_buffer;             /**< Reader-owned outbound frame buffer. */
+    struct ast_trans_pvt *decode;     /**< Asterisk codec-to-linear translator. */
+    struct ast_format *decode_format; /**< Format currently served by decode. */
     atomic_uint_fast64_t receive_epoch;  /**< Reader increments this for each voice frame. */
     uint64_t seen_epoch;                 /**< Consumer's last observed inbound voice epoch. */
     size_t receive_age;                  /**< Consumer samples since the last voice frame. */

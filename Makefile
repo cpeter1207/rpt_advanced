@@ -2,6 +2,12 @@
 CC ?= cc
 AR ?= ar
 CPPFLAGS += -Isrc
+RPCR_SOURCE ?= ../rate_adjusting_pcm_ring
+RPCR_STAGE ?= $(CURDIR)/build/rpcr-stage
+RPCR_PREFIX ?= $(RPCR_STAGE)/usr
+RPCR_LIBRARY := $(RPCR_PREFIX)/lib/librate_adjusting_pcm_ring.so
+RPCR_HEADER := $(RPCR_PREFIX)/include/rate_adjusting_pcm_ring/rate_adjusting_pcm_ring.h
+CPPFLAGS += -I$(RPCR_PREFIX)/include/rate_adjusting_pcm_ring
 CFLAGS ?= -O2 -g
 WARNINGS := -std=c11 -Wall -Wextra -Wpedantic -Werror
 SOURCES := $(wildcard src/*.c)
@@ -16,13 +22,15 @@ MODULE_HELPERS := $(filter-out $(MODULE_SOURCE),$(wildcard module/*.c))
 MODULE_OBJECTS := $(patsubst module/%.c,build/module/%.o,$(MODULE_HELPERS))
 MODULE_COVERAGE_OBJECTS := $(patsubst module/%.c,build/module-coverage/%.o,$(MODULE_HELPERS))
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
-SAMPLERATE_LIBS := -lsamplerate
+SAMPLERATE_LIBS := -lsamplerate -L$(RPCR_PREFIX)/lib -lrate_adjusting_pcm_ring
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
 COVERAGE_OBJECTS := $(patsubst src/%.c,build/coverage-objects/%.o,$(SOURCES))
 .SECONDARY: $(COVERAGE_OBJECTS)
 TEST_PROGRAMS := $(patsubst tests/%.c,build/%,$(TESTS))
+
+$(MODULE_OBJECTS) $(MODULE_COVERAGE_OBJECTS) build/app_rpt_advanced.o build/module-coverage/app_rpt_advanced.o: $(RPCR_HEADER)
 prefix ?= /usr/local
 multiarch := $(shell $(CC) -print-multiarch)
 asteriskmoddir ?= /usr/lib/$(multiarch)/asterisk/modules
@@ -32,21 +40,24 @@ DIST_NAME := rpt_advanced-$(VERSION)
 DIST_FILES := Makefile COPYING README.md QUALITY.md AGENTS.md Doxyfile .clang-format src module tests examples doc
 
 .PHONY: all quality lint static-analysis docs check coverage install install-check integration dist distcheck platform-verify ci clean
-all: build/librpt_advanced.a build/app_rpt_advanced.so
+all: $(RPCR_LIBRARY) build/librpt_advanced.a build/app_rpt_advanced.so
 
 build:
 	mkdir -p $@
 
-build/%.o: src/%.c $(HEADERS) | build
+$(RPCR_LIBRARY):
+	$(MAKE) -C $(RPCR_SOURCE) DESTDIR=$(RPCR_STAGE) prefix=/usr install
+$(RPCR_HEADER): $(RPCR_LIBRARY)
+build/%.o: src/%.c $(HEADERS) $(RPCR_HEADER) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC -c $< -o $@
 
-build/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) | build
+build/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) $(RPCR_HEADER) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -c $< -o $@
 
 build/module:
 	mkdir -p $@
 
-build/module/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) | build/module
+build/module/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) $(RPCR_HEADER) | build/module
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -fPIC -c $< -o $@
 
 build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS) $(MODULE_OBJECTS)
@@ -55,7 +66,7 @@ build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS) $(MODULE_OBJECTS)
 build/librpt_advanced.a: $(OBJECTS)
 	$(AR) rcs $@ $^
 
-quality: lint static-analysis docs
+quality: $(RPCR_HEADER) lint static-analysis docs
 
 lint:
 	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(wildcard tests/*.c tests/*.h)
@@ -63,26 +74,26 @@ lint:
 	ruff format --check tests/*.py
 
 static-analysis:
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 -Isrc $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS)
-	clang-tidy $(SOURCES) --warnings-as-errors='*' -- -Isrc -std=c11
-	clang-tidy $(MODULE_SOURCE) $(MODULE_HELPERS) --warnings-as-errors='*' -- -Isrc $(MODULE_FLAGS) -fblocks
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS)
+	clang-tidy $(SOURCES) --warnings-as-errors='*' -- $(CPPFLAGS) -std=c11
+	clang-tidy $(MODULE_SOURCE) $(MODULE_HELPERS) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
 
-docs: | build
+docs: $(RPCR_HEADER) | build
 	doxygen Doxyfile
 
 build/coverage-objects:
 	mkdir -p $@
 
-build/coverage-objects/%.o: src/%.c $(HEADERS) | build/coverage-objects
+build/coverage-objects/%.o: src/%.c $(HEADERS) $(RPCR_HEADER) | build/coverage-objects
 	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage -fPIC -c $< -o $@
 
 build/module-coverage:
 	mkdir -p $@
 
-build/module-coverage/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
+build/module-coverage/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) $(RPCR_HEADER) | build/module-coverage
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
 
-build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) | build/module-coverage
+build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) $(RPCR_HEADER) | build/module-coverage
 	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
 
 build/module-coverage/app_rpt_advanced.so: build/module-coverage/app_rpt_advanced.o $(COVERAGE_OBJECTS)
@@ -118,11 +129,11 @@ build/test_radio: tests/test_radio.c build/module-coverage/radio.o module/radio.
 	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/radio.o --coverage -o $@
 
 build/module-coverage/link_peer.o: module/link_peer.c module/link_peer.h $(HEADERS) | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
 
 build/test_link_peer: tests/test_link_peer.c build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-	$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=calloc,--wrap=src_new,--wrap=src_process -o $@
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
+	$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=calloc,--wrap=rpcr_init -o $@
 
 build/module-coverage/connection.o: $(CONNECTION_SOURCE) module/connection.h module/media.h module/radio.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
@@ -137,7 +148,7 @@ build/worker_routing_fixture.o: tests/worker_routing_fixture.c tests/worker_dtmf
 	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -c $< -o $@
 
 build/test_link_hub: tests/test_link_hub.c build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
 		$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=nanosleep,--wrap=clock_gettime \
 		-Wl,--wrap=src_new,--wrap=src_process -o $@
 
@@ -173,9 +184,9 @@ build/test_%: tests/test_%.c $(COVERAGE_OBJECTS) $(HEADERS) | build
 build/test_document: tests/test_document.c $(COVERAGE_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -Wl,--wrap=strdup,--wrap=reallocarray -lm -o $@
 
-check: $(TEST_PROGRAMS)
+check: $(RPCR_LIBRARY) $(TEST_PROGRAMS)
 	find build -name '*.gcda' -delete
-	@set -e; for test in $(TEST_PROGRAMS); do ./$$test; done
+	@set -e; export LD_LIBRARY_PATH=$(RPCR_PREFIX)/lib:$$LD_LIBRARY_PATH; for test in $(TEST_PROGRAMS); do ./$$test; done
 
 coverage: check $(MODULE_COVERAGE_OBJECTS)
 	mkdir -p build/coverage
