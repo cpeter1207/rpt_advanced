@@ -52,6 +52,13 @@ typedef int (*ra_link_reconnect_fn)(void *context, const char *remote, bool tran
 typedef void (*ra_link_hub_digit_fn)(void *context, const char *remote, char digit,
                                      uint64_t now_ms);
 
+/** @brief Report a direct-link lifecycle event outside audio routing.
+ * @param context Borrowed runtime-owned callback context.
+ * @param remote Stable direct-peer identity.
+ * @param connected True after attach, false after detach.
+ */
+typedef void (*ra_link_hub_event_fn)(void *context, const char *remote, bool connected);
+
 /** @brief Opaque retained-link recovery record owned by a routing hub. */
 struct ra_link_retry;
 /** @brief Node-owned routing state initialized with ra_link_hub_init(). */
@@ -70,6 +77,8 @@ struct ra_link_hub {
     void *reconnect_context;              /**< Borrowed runtime callback context. */
     ra_link_hub_digit_fn digit;           /**< Runtime callback for peer-identified IAX DTMF. */
     void *digit_context;                  /**< Borrowed context paired with digit. */
+    ra_link_hub_event_fn event;           /**< Runtime callback for direct-link lifecycle events. */
+    void *event_context;                  /**< Borrowed context paired with lifecycle events. */
     struct ra_link_retry *retries;        /**< Manager-owned retained recovery records. */
     atomic_uint topology_generation; /**< Control-plane topology changes pending advertisement. */
     atomic_uint last_keyed_sequence; /**< Lock-free coherent-copy generation for last_keyed. */
@@ -125,6 +134,17 @@ bool ra_link_hub_retain_permanent(struct ra_link_hub *hub, const char *name, boo
  * the callback receives the stable identity of the emitting attached peer.
  */
 void ra_link_hub_set_digit_handler(struct ra_link_hub *hub, ra_link_hub_digit_fn callback,
+                                   void *context);
+
+/** @brief Set the control-plane recipient for direct peer connect/disconnect events.
+ * @param hub Initialized routing hub.
+ * @param callback Borrowed callback, or null to suppress lifecycle reporting.
+ * @param context Borrowed callback context.
+ *
+ * The hub calls this only after the lifecycle lock has been released and never from the
+ * hardware-paced routing callback.
+ */
+void ra_link_hub_set_event_handler(struct ra_link_hub *hub, ra_link_hub_event_fn callback,
                                    void *context);
 
 /** @brief Disconnect one nonpermanent peer after removing it from the hardware-visible list.

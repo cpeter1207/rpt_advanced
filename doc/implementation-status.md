@@ -70,7 +70,7 @@
   duplicate-free enumeration of named nodes and their identifier sets.
 - Local AllStarLink link control: verified inbound admission, direct IAX peer
   routing, linking-only DTMF, permanent-link recovery, direct-peer remote
-  command mode, lock-free RF status playback, and best-effort `L ` topology
+  command mode, lock-free prepared-speech RF status playback with Morse fallback, and best-effort `L ` topology
   exchange. See [AllStarLink status](allstarlink-status.md) for validation
   limits.
 - The quality policy requires strict formatting, compiler diagnostics, Cppcheck,

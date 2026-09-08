@@ -34,9 +34,17 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
 
 /** @brief One node's controller and media settings. Strings are borrowed. */
 struct ra_node_settings {
-    bool enabled;         /**< Start this node's controller. */
-    bool full_duplex;     /**< Permit simultaneous receive and transmit. */
-    uint64_t hang_ms;     /**< Transmit hang time in milliseconds. */
+    bool enabled;               /**< Start this node's controller. */
+    bool full_duplex;           /**< Permit simultaneous receive and transmit. */
+    uint64_t hang_ms;           /**< Transmit hang time in milliseconds. */
+    int64_t telemetry_duck_db;  /**< Receive-active identifier and telemetry attenuation in dB. */
+    uint64_t courtesy_delay_ms; /**< Receiver/link unkey-to-courtesy delay. */
+    const char *receiver_courtesy_sound_file;  /**< Local-receiver courtesy sound file. */
+    const char *receiver_courtesy_speech_text; /**< Local-receiver courtesy speech. */
+    const char *receiver_courtesy_morse_text;  /**< Local-receiver courtesy Morse fallback. */
+    const char *link_courtesy_sound_file;      /**< Linked-receiver courtesy sound file. */
+    const char *link_courtesy_speech_text;     /**< Linked-receiver courtesy speech. */
+    const char *link_courtesy_morse_text;      /**< Linked-receiver courtesy Morse fallback. */
     uint64_t sample_rate; /**< Requested rate; zero selects hardware-bounded automatic mode. */
     const char *channel;  /**< USBRadioPlus channel identifier, without the technology prefix. */
     const char *codec;    /**< Asterisk codec name; empty selects signed linear automatically. */

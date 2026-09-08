@@ -19,6 +19,12 @@ struct ra_link_peer_status;
  * @param now_ms Monotonic detection time.
  */
 typedef void (*ra_digit_handler)(const char *node, char digit, uint64_t now_ms);
+/** @brief Nonblocking delivery of a direct-link lifecycle event to module control.
+ * @param local Local endpoint that observed the event.
+ * @param remote Direct peer endpoint.
+ * @param connected True after attach, false after detach.
+ */
+typedef void (*ra_link_event_handler)(const char *local, const char *remote, bool connected);
 /** @brief Complete operation copied out of node-owned command state. */
 struct ra_link_operation {
     enum ra_link_action action; /**< Requested linking action. */
@@ -35,6 +41,7 @@ struct ra_link_dial {
 struct ra_runtime {
     struct ra_runtime_node *nodes; /**< Private list, initially null. */
     ra_digit_handler digit;        /**< Control-queue submission callback retained across reload. */
+    ra_link_event_handler event;   /**< Control-queue submission callback for link lifecycle. */
 };
 
 /** @brief Start all enabled nodes from an already validated configuration.
@@ -168,13 +175,23 @@ size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local);
  */
 size_t ra_runtime_reconnect_all(struct ra_runtime *runtime, const char *local);
 
-/** @brief Queue concise RF link status through a node's existing Morse controller.
+/** @brief Queue concise spoken RF link status with a Morse fallback.
  * @param runtime Active runtime; caller serializes it with reload and other controls.
  * @param local Local node name.
  * @param last_keyed Select the remembered direct peer instead of current-link status.
  * @return Zero when status is queued, minus one for an unknown node, invalid text, or a full queue.
  */
 int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, bool last_keyed);
+
+/** @brief Queue a spoken connect or disconnect report for every configured local node.
+ * @param runtime Active runtime whose caller serializes configuration ownership.
+ * @param first One endpoint of the changed direct link.
+ * @param second Other endpoint of the changed direct link.
+ * @param connected True for connection, false for disconnection.
+ * @return Zero when every node accepted the bounded telemetry report, minus one otherwise.
+ */
+int ra_runtime_queue_link_event(struct ra_runtime *runtime, const char *first, const char *second,
+                                bool connected);
 
 /** @brief Snapshot directly attached peers for a complete control-plane status listing.
  * @param runtime Active runtime; caller serializes it with reload and other controls.

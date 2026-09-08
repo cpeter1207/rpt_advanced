@@ -41,6 +41,8 @@ void ra_link_hub_init(struct ra_link_hub *hub) {
     hub->reconnect_context = NULL;
     hub->digit = NULL;
     hub->digit_context = NULL;
+    hub->event = NULL;
+    hub->event_context = NULL;
     hub->retries = NULL;
     atomic_init(&hub->ports, NULL);
     atomic_init(&hub->readers, 0);
@@ -187,6 +189,17 @@ static void receive_digit(void *context, char digit) {
     struct ra_link_hub *hub = port->hub;
     if (hub->digit) {
         hub->digit(hub->digit_context, port->name, digit, monotonic_ms());
+    }
+}
+
+/** @brief Hand one direct peer lifecycle change to the non-audio control plane.
+ * @param hub Hub whose configured callback receives the event.
+ * @param remote Stable peer identity retained until this call returns.
+ * @param connected True for an attached port, false for a detached port.
+ */
+static void report_event(struct ra_link_hub *hub, const char *remote, bool connected) {
+    if (hub->event) {
+        hub->event(hub->event_context, remote, connected);
     }
 }
 
@@ -541,6 +554,7 @@ static void *manage(void *argument) {
         ast_mutex_unlock(&routing_lock);
         if (port) {
             wait_readers(hub);
+            report_event(hub, port->name, false);
             release_port(port);
         } else if (retry) {
             int result = hub->reconnect
@@ -669,6 +683,7 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
     atomic_store_explicit(&hub->ports, port, memory_order_seq_cst);
     topology_changed(hub);
     ast_mutex_unlock(&routing_lock);
+    report_event(hub, port->name, true);
     return 0;
 }
 
@@ -760,6 +775,12 @@ void ra_link_hub_set_digit_handler(struct ra_link_hub *hub, ra_link_hub_digit_fn
     hub->digit_context = context;
 }
 
+void ra_link_hub_set_event_handler(struct ra_link_hub *hub, ra_link_hub_event_fn callback,
+                                   void *context) {
+    hub->event = callback;
+    hub->event_context = context;
+}
+
 bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
     ast_mutex_lock(&routing_lock);
     struct ra_link_port *port = detach_locked(hub, name, 0);
@@ -771,6 +792,7 @@ bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
         return false;
     }
     wait_readers(hub);
+    report_event(hub, port->name, false);
     release_port(port);
     return true;
 }
@@ -785,6 +807,7 @@ bool ra_link_hub_disconnect_permanent(struct ra_link_hub *hub, const char *name)
     ast_mutex_unlock(&routing_lock);
     if (port) {
         wait_readers(hub);
+        report_event(hub, port->name, false);
         release_port(port);
     }
     return port || cancelled;
@@ -801,6 +824,7 @@ bool ra_link_hub_detach_reconnect(struct ra_link_hub *hub, const char *name, boo
         return false;
     }
     wait_readers(hub);
+    report_event(hub, port->name, false);
     release_port(port);
     return true;
 }
@@ -826,6 +850,7 @@ size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
             return count;
         }
         wait_readers(hub);
+        report_event(hub, port->name, false);
         release_port(port);
         ++count;
     }
@@ -951,6 +976,9 @@ bool ra_link_hub_connected(struct ra_link_hub *hub, const char *name) {
 }
 
 void ra_link_hub_close(struct ra_link_hub *hub) {
+    /* Teardown has no live radio controller to report to. */
+    hub->event = NULL;
+    hub->event_context = NULL;
     if (hub->manager_started) {
         atomic_store_explicit(&hub->stop, true, memory_order_seq_cst);
         (void)pthread_join(hub->manager, NULL);

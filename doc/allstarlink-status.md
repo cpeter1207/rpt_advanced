@@ -74,8 +74,10 @@ eligible for transmit according to the configured link mode. Identifier and RF
 status playback defer until reception ends when half duplex prohibits a
 transmission.
 
-The status, last-keyed, and full-status operations queue short Morse RF replies
-outside the audio callback. They preempt a scheduled identifier without
+The status, last-keyed, and full-status operations queue short spoken RF replies
+outside the audio callback. Speech preparation falls back to Morse when Piper
+is unavailable or when reception interrupts it; playback starts no sooner than
+250 ms after local receiver unkey. They preempt a scheduled identifier without
 satisfying it. `rpt_advanced link status <node>` and the compatible
 `rpt link status <node>` show direct peers, routing mode, permanence, and the
 current topology cache in the Asterisk CLI. Retained links appear as `retrying`

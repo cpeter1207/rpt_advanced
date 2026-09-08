@@ -16,6 +16,7 @@
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
 #include <asterisk/lock.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -35,8 +36,11 @@ struct ra_runtime_node {
     char last_node[64];                 /**< Destination used by the zero-node shorthand. */
     char remote_node[64];               /**< Direct peer receiving remote-command DTMF. */
     const char *name;                   /**< Borrowed local node name. */
+    struct ra_runtime *owner;           /**< Runtime retaining this stable node. */
     struct ra_node_settings settings; /**< Borrowed resolved settings retained by configuration. */
-    struct ra_controller_id *ids;     /**< Resolved identifier array. */
+    struct ra_identifier_settings
+        status_settings;          /**< Resolved speech and Morse defaults for RF telemetry. */
+    struct ra_controller_id *ids; /**< Resolved identifier array. */
     const char *reload_name; /**< Previous document-owned name while a replacement is pending. */
     struct ra_node_settings
         reload_settings;      /**< Previous resolved settings while a replacement is pending. */
@@ -139,6 +143,18 @@ static void receive_link_digit(void *context, const char *remote, char digit, ui
     ast_mutex_unlock(&node->callback_lock);
 }
 
+/** @brief Forward a hub lifecycle event to the module's nonblocking control handoff.
+ * @param context Stable runtime node that owns the direct hub.
+ * @param remote Stable direct-peer identity.
+ * @param connected True after attachment, false after detachment.
+ */
+static void receive_link_event(void *context, const char *remote, bool connected) {
+    struct ra_runtime_node *node = context;
+    if (node->owner->event) {
+        node->owner->event(node->name, remote, connected);
+    }
+}
+
 /** @brief Redial one permanent peer after its reader reports transport failure.
  * @param context Runtime node that owns the failed peer.
  * @param remote Decimal remote node identity.
@@ -219,6 +235,12 @@ static void stop_node_resources(struct ra_runtime_node *node) {
     for (size_t index = 0; index < node->controller.count; ++index) {
         ast_free((void *)node->ids[index].audio);
     }
+    for (size_t index = 0; index < RA_CONTROLLER_COURTESY_QUEUE_DEPTH; ++index) {
+        ast_free((void *)node->controller.courtesy[index].audio);
+    }
+    for (size_t index = 0; index < RA_CONTROLLER_STATUS_QUEUE_DEPTH; ++index) {
+        ast_free(node->controller.status_queue[index].audio);
+    }
     ast_free(node->controller.states);
     ast_free(node->controller.rules);
     ast_free(node->ids);
@@ -257,13 +279,14 @@ static void initialize_node_links(struct ra_runtime_node *node) {
     ra_link_hub_init(&node->links);
     ra_link_hub_set_reconnector(&node->links, reconnect_node, node);
     ra_link_hub_set_digit_handler(&node->links, receive_link_digit, node);
+    ra_link_hub_set_event_handler(&node->links, receive_link_event, node);
 }
 
 /** @brief Allocate stable callback and routing ownership for one new node.
- * @param digit Module control-queue handler inherited by the new worker.
+ * @param runtime Owning runtime and its module control callbacks.
  * @return Initialized node, or null on allocation or lock initialization failure.
  */
-static struct ra_runtime_node *new_node(ra_digit_handler digit) {
+static struct ra_runtime_node *new_node(struct ra_runtime *runtime) {
     struct ra_runtime_node *node = ast_calloc(1, sizeof(*node));
     if (!node) {
         return NULL;
@@ -272,7 +295,8 @@ static struct ra_runtime_node *new_node(ra_digit_handler digit) {
         ast_free(node);
         return NULL;
     }
-    node->worker.digit = digit;
+    node->owner = runtime;
+    node->worker.digit = runtime->digit;
     initialize_node_links(node);
     return node;
 }
@@ -348,12 +372,30 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
         ra_link_hub_close(&node->links);
         initialize_node_links(node);
     }
-    struct ra_identifier_settings status_style;
     (void)ra_identifier_settings_resolve(document->entries, document->count, name, NULL,
-                                         &status_style);
-    node->controller.status_speed_wpm = (unsigned int)status_style.morse_speed_wpm;
-    node->controller.status_frequency_hz = (unsigned int)status_style.morse_frequency_hz;
-    node->controller.status_level_db = (int)status_style.morse_level_db;
+                                         &node->status_settings);
+    node->controller.status_speed_wpm = (unsigned int)node->status_settings.morse_speed_wpm;
+    node->controller.status_frequency_hz = (unsigned int)node->status_settings.morse_frequency_hz;
+    node->controller.status_level_db = (int)node->status_settings.morse_level_db;
+    node->controller.courtesy_delay_ms = settings->courtesy_delay_ms;
+    struct ra_identifier_settings *receiver =
+        &node->controller.courtesy[RA_COURTESY_RECEIVER].settings;
+    *receiver = node->status_settings;
+    receiver->file = settings->receiver_courtesy_sound_file;
+    receiver->speech_text = settings->receiver_courtesy_speech_text;
+    receiver->morse_text = settings->receiver_courtesy_morse_text;
+    int16_t *courtesy_audio;
+    ra_identifier_prepare(receiver, node->controller.rate, &courtesy_audio,
+                          &node->controller.courtesy[RA_COURTESY_RECEIVER].samples);
+    node->controller.courtesy[RA_COURTESY_RECEIVER].audio = courtesy_audio;
+    struct ra_identifier_settings *link = &node->controller.courtesy[RA_COURTESY_LINK].settings;
+    *link = node->status_settings;
+    link->file = settings->link_courtesy_sound_file;
+    link->speech_text = settings->link_courtesy_speech_text;
+    link->morse_text = settings->link_courtesy_morse_text;
+    ra_identifier_prepare(link, node->controller.rate, &courtesy_audio,
+                          &node->controller.courtesy[RA_COURTESY_LINK].samples);
+    node->controller.courtesy[RA_COURTESY_LINK].audio = courtesy_audio;
     error = identifiers(node, document, name);
     if (error) {
         return error;
@@ -364,6 +406,7 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     }
     node->controller.full_duplex = settings->full_duplex;
     node->controller.hang_ms = settings->hang_ms;
+    node->controller.telemetry_duck_db = (int)settings->telemetry_duck_db;
     if (!ra_controller_start(&node->controller,
                              (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000)) {
         return "identifier cannot render at negotiated sample rate";
@@ -385,7 +428,7 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
 }
 
 const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_document *document) {
-    struct ra_runtime replacement = {.digit = runtime->digit};
+    struct ra_runtime replacement = {.digit = runtime->digit, .event = runtime->event};
     const char *error = NULL;
     const char *name;
     for (size_t index = 0; (name = ra_document_node(document, index)); ++index) {
@@ -394,7 +437,7 @@ const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_documen
         if (!settings.enabled) {
             continue;
         }
-        struct ra_runtime_node *node = new_node(runtime->digit);
+        struct ra_runtime_node *node = new_node(runtime);
         if (!node) {
             error = "cannot allocate radio state";
             break;
@@ -577,7 +620,7 @@ const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_docume
         if (!settings.enabled || runtime_node(runtime, name)) {
             continue;
         }
-        struct ra_runtime_node *node = new_node(runtime->digit);
+        struct ra_runtime_node *node = new_node(runtime);
         if (!node) {
             const char *restoration = rollback_reload(runtime, current);
             return restoration ? restoration : "cannot allocate radio state";
@@ -795,7 +838,7 @@ static const char *peer_mode(const struct ra_link_peer_status *peer) {
     if (peer->transmit) {
         return "TRANSCEIVE";
     }
-    /* RF status must remain brief enough for the controller's bounded Morse queue. */
+    /* RF status must remain brief enough for the controller's bounded telemetry queue. */
     return peer->forward ? "MONITOR" : "LOCAL";
 }
 
@@ -907,6 +950,43 @@ static bool node_link_status_text(struct ra_runtime_node *node, bool last_keyed,
     return true;
 }
 
+/** @brief Release status speech PCM after the radio worker has completed its slot.
+ * @param node Runtime node whose serial control executor owns status-PCM destruction.
+ *
+ * The controller publishes completed slots with release/acquire ordering. This control-plane
+ * reaper deliberately performs all deallocation outside the hardware-paced audio callback.
+ */
+static void reclaim_status_audio(struct ra_runtime_node *node) {
+    int16_t *audio[RA_CONTROLLER_STATUS_QUEUE_DEPTH];
+    size_t count =
+        ra_controller_reclaim_status(&node->controller, audio, RA_CONTROLLER_STATUS_QUEUE_DEPTH);
+    for (size_t index = 0; index < count; ++index) {
+        ast_free(audio[index]);
+    }
+}
+
+/** @brief Prepare and queue one spoken RF telemetry reply with its Morse fallback.
+ * @param node Running node whose inherited speech and Morse settings apply.
+ * @param text Bounded ASCII telemetry text.
+ * @return Zero when the reply is queued, minus one if its bounded queue is full or invalid.
+ */
+static int queue_status_speech(struct ra_runtime_node *node, const char *text) {
+    reclaim_status_audio(node);
+    struct ra_identifier_settings settings = node->status_settings;
+    settings.file = "";
+    settings.speech_text = text;
+    settings.morse_text = text;
+    int16_t *audio = NULL;
+    size_t samples = 0;
+    /* The serial control executor may wait for Piper; the real-time worker only reads PCM. */
+    ra_identifier_prepare(&settings, node->controller.rate, &audio, &samples);
+    if (!ra_controller_queue_status(&node->controller, text, audio, samples)) {
+        ast_free(audio);
+        return -1;
+    }
+    return 0;
+}
+
 int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, bool last_keyed) {
     char text[RA_CONTROLLER_STATUS_TEXT_MAX];
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
@@ -914,10 +994,79 @@ int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, 
             if (!node_link_status_text(node, last_keyed, text)) {
                 return -1;
             }
-            return ra_controller_queue_status(&node->controller, text) ? 0 : -1;
+            return queue_status_speech(node, text);
         }
     }
     return -1;
+}
+
+/** @brief Append one complete word to a bounded telemetry report.
+ * @param text Existing null-terminated report with fixed maximum capacity.
+ * @param word Null-terminated word that must fit completely.
+ * @return True when the complete word was copied without truncation.
+ */
+static bool status_text_append(char text[RA_CONTROLLER_STATUS_TEXT_MAX], const char *word) {
+    size_t used = strlen(text);
+    size_t available = RA_CONTROLLER_STATUS_TEXT_MAX - used;
+    if (strnlen(word, available) == available) {
+        return false;
+    }
+    ast_copy_string(text + used, word, available);
+    return true;
+}
+
+/** @brief Build bounded link-lifecycle speech from one to three known-safe words.
+ * @param text Empty bounded destination.
+ * @param first First word to append.
+ * @param second Second word to append.
+ * @param third Optional final word, or null for a two-word report.
+ * @return True only when every word fits with a separating space.
+ */
+static bool status_text_words(char text[RA_CONTROLLER_STATUS_TEXT_MAX], const char *first,
+                              const char *second, const char *third) {
+    const char *const words[] = {first, second, third};
+    text[0] = '\0';
+    for (size_t index = 0; index < sizeof(words) / sizeof(*words) && words[index]; ++index) {
+        if (index && !status_text_append(text, " ")) {
+            return false;
+        }
+        if (!status_text_append(text, words[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** @brief Format one node's perspective on a changed direct link.
+ * @param local Configured local node identity.
+ * @param first One changed-link endpoint.
+ * @param second Other changed-link endpoint.
+ * @param connected True selects the connected wording, false disconnected wording.
+ * @param text Bounded destination for the speech and Morse-safe report.
+ * @return True only when the complete report fits.
+ */
+static bool link_event_text(const char *local, const char *first, const char *second,
+                            bool connected, char text[RA_CONTROLLER_STATUS_TEXT_MAX]) {
+    const char *verb = connected ? "CONNECTED" : "DISCONNECTED";
+    if (!strcmp(local, first)) {
+        return status_text_words(text, second, verb, NULL);
+    } else if (!strcmp(local, second)) {
+        return status_text_words(text, first, verb, NULL);
+    }
+    return status_text_words(text, first, verb, second);
+}
+
+int ra_runtime_queue_link_event(struct ra_runtime *runtime, const char *first, const char *second,
+                                bool connected) {
+    int result = 0;
+    for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
+        char text[RA_CONTROLLER_STATUS_TEXT_MAX];
+        if (!link_event_text(node->name, first, second, connected, text) ||
+            queue_status_speech(node, text)) {
+            result = -1;
+        }
+    }
+    return result;
 }
 
 bool ra_runtime_link_snapshot(struct ra_runtime *runtime, const char *local,

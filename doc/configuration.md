@@ -44,6 +44,14 @@ the number of nodes or ID sets.
 | `node_enabled` | yes | Start the configured node. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after audio ends. |
+| `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, and Morse identifiers and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
+| `courtesy_delay_ms` | 250 | Delay after local-receiver or linked-audio unkey before a courtesy announcement starts. PTT remains asserted until the announcement completes. |
+| `receiver_courtesy_sound_file` | empty | Local-receiver courtesy sound-file path. |
+| `receiver_courtesy_speech_text` | empty | Local-receiver courtesy speech text, used when its file is absent or unusable. |
+| `receiver_courtesy_morse_text` | empty | Local-receiver terminal Morse courtesy text. Set `R` for an R courtesy tone. |
+| `link_courtesy_sound_file` | empty | Linked-receiver courtesy sound-file path. |
+| `link_courtesy_speech_text` | empty | Linked-receiver courtesy speech text, used when its file is absent or unusable. |
+| `link_courtesy_morse_text` | empty | Linked-receiver terminal Morse courtesy text. Set `L` for an L courtesy tone. |
 | `sample_rate_hz` | 0 | Zero selects the highest usable local signed-linear rate no greater than the hardware-native rate. An explicit rate selects the local channel rate and requires a supported bidirectional Asterisk conversion path. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
 | `codec` | empty | Empty selects signed linear for the local radio channel; otherwise select an available local Asterisk codec subject to `sample_rate_hz`. It does not otherwise restrict IAX link candidates. |
@@ -146,10 +154,13 @@ that become due during local reception wait until reception ends.
 ## Link status
 
 The status, last-keyed, and full-status command mappings in the table above
-queue concise Morse replies on RF. They use the selected node's resolved
-`[morse]` settings, preempt a scheduled identifier without satisfying it, and
-wait for reception to end when half duplex prevents transmission. They do not
-start speech synthesis or perform topology work in the radio callback.
+queue concise spoken RF replies. They use the selected node's resolved
+`[speech]` settings and fall back to the selected node's `[morse]` settings
+only when speech cannot be prepared or reception interrupts it. They do not
+key or begin playback until 250 ms after the local receiver unkeys, preempt a
+scheduled identifier without satisfying it, and wait for reception to end when
+half duplex prevents transmission. Speech preparation and topology work remain
+outside the radio callback.
 
 When its RF status reply is queued, full status writes a best-effort
 app_rpt-style route list to the Asterisk operator log. The administrative

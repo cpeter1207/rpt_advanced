@@ -95,7 +95,7 @@ build/module-coverage/runtime.o: $(RUNTIME_SOURCE) $(wildcard module/*.h) $(HEAD
 	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
 
 build/test_runtime: tests/test_runtime.c build/module-coverage/runtime.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=calloc,--wrap=clock_gettime,--wrap=ra_controller_queue_status -o $@
+	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=calloc,--wrap=clock_gettime,--wrap=ra_controller_queue_status,--wrap=ra_controller_reclaim_status -o $@
 
 build/module-coverage/assets.o: module/assets.c module/assets.h src/speech.h src/settings.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@

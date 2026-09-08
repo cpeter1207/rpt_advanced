@@ -179,6 +179,12 @@ static char inbound_digit;
 static char inbound_remote[RA_LINK_PEER_NAME_MAX];
 /** @brief Most recently delivered reader timestamp. */
 static uint64_t inbound_now_ms;
+/** @brief Number of direct-link lifecycle reports received by the control fixture. */
+static unsigned int lifecycle_events;
+/** @brief Most recently reported lifecycle remote identity. */
+static char lifecycle_remote[RA_LINK_PEER_NAME_MAX];
+/** @brief Whether the most recent lifecycle report was an attachment. */
+static bool lifecycle_connected;
 /** @brief Peer whose hardware-paced receive call is deliberately held for reclamation testing. */
 static struct ra_link_peer *blocked_receive_peer;
 /** @brief The held audio traversal reached its borrowed peer pointer. */
@@ -222,6 +228,19 @@ static void receive_inbound_digit(void *context, const char *remote, char digit,
     assert(strlen(remote) < sizeof(inbound_remote));
     memcpy(inbound_remote, remote, strlen(remote) + 1);
     inbound_now_ms = now_ms;
+}
+
+/** @brief Capture one hub event after it leaves routing lifecycle ownership.
+ * @param context Expected control-plane callback identity.
+ * @param remote Attached or detached direct-peer identity.
+ * @param connected True after attach, false after detach.
+ */
+static void receive_lifecycle_event(void *context, const char *remote, bool connected) {
+    assert(context == &inbound_context && remote && !locked);
+    assert(strlen(remote) < sizeof(lifecycle_remote));
+    ++lifecycle_events;
+    memcpy(lifecycle_remote, remote, strlen(remote) + 1);
+    lifecycle_connected = connected;
 }
 
 /** @brief Invoke the real libsamplerate state allocator behind a fixture wrapper.
@@ -1401,6 +1420,18 @@ int main(void) {
     assert(ra_link_hub_detach_reconnect(&detached_reconnect, "reconnect", true));
     assert(reconnect_peer.stopped);
     ra_link_hub_close(&detached_reconnect);
+
+    /* Lifecycle reports leave the routing lock and identify both attach and detach. */
+    RA_TEST_HUB(lifecycle);
+    struct ast_channel lifecycle_peer = {0};
+    lifecycle_events = 0;
+    ra_link_hub_set_event_handler(&lifecycle, receive_lifecycle_event, &inbound_context);
+    assert(!ra_link_hub_attach(&lifecycle, "events", &lifecycle_peer, &format_8000, true, true,
+                               false));
+    assert(lifecycle_events == 1 && !strcmp(lifecycle_remote, "events") && lifecycle_connected);
+    assert(ra_link_hub_disconnect(&lifecycle, "events"));
+    assert(lifecycle_events == 2 && !lifecycle_connected);
+    ra_link_hub_close(&lifecycle);
 
     /* A hub without a configured runtime control recipient must safely discard peer DTMF. */
     RA_TEST_HUB(no_digit);

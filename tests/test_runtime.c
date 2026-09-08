@@ -92,6 +92,8 @@ static char queued_status[RA_CONTROLLER_STATUS_TEXT_MAX];
 static size_t queued_status_count;
 /** @brief Maximum status requests accepted before the fixture reports a full controller queue. */
 static size_t queued_status_limit = SIZE_MAX;
+/** @brief Make the next control-plane status reaper return one owned PCM buffer. */
+static bool release_status_audio;
 /** @brief Stages at which the recovery fixture changes a callback-owned cancellation flag. */
 enum reconnect_race_point {
     RECONNECT_RACE_NONE,
@@ -128,6 +130,12 @@ static void *inbound_callback_contexts[2];
 static struct ra_link_hub *inbound_callback_hubs[2];
 /** @brief Number of inbound handlers captured after the current runtime start. */
 static size_t inbound_callback_count;
+/** @brief Reader-to-runtime lifecycle handlers installed by each active node hub. */
+static ra_link_hub_event_fn inbound_event_callbacks[2];
+/** @brief Contexts paired with the captured lifecycle handlers. */
+static void *inbound_event_contexts[2];
+/** @brief Number of lifecycle handlers captured after the current runtime start. */
+static size_t inbound_event_callback_count;
 /** @brief Invoke the closing hub's reader callback after the runtime marks its worker stopped. */
 static bool invoke_closed_digit;
 /** @brief Number of IAX DTMF events delivered through the runtime bridge. */
@@ -138,6 +146,14 @@ static char inbound_node[64];
 static char inbound_digit;
 /** @brief Most recent bridge-delivered IAX DTMF timestamp. */
 static uint64_t inbound_now_ms;
+/** @brief Link lifecycle reports forwarded through the runtime bridge. */
+static unsigned int inbound_events;
+/** @brief Local endpoint from the most recent lifecycle report. */
+static char inbound_event_local[64];
+/** @brief Remote endpoint from the most recent lifecycle report. */
+static char inbound_event_remote[64];
+/** @brief True for the most recent attach report. */
+static bool inbound_event_connected;
 
 /** @cond TEST_FIXTURE */
 /** @brief Initialize one runtime callback mutex with deterministic failure injection. */
@@ -198,6 +214,20 @@ static void receive_inbound_digit(const char *node, char digit, uint64_t now_ms)
     memcpy(inbound_node, node, length + 1);
     inbound_digit = digit;
     inbound_now_ms = now_ms;
+}
+
+/** @brief Capture the module control-queue submission requested by a hub lifecycle event.
+ * @param local Runtime node selected by the hub.
+ * @param remote Direct peer whose lifecycle changed.
+ * @param connected True for attachment, false for detachment.
+ */
+static void receive_inbound_event(const char *local, const char *remote, bool connected) {
+    assert(strlen(local) < sizeof(inbound_event_local));
+    assert(strlen(remote) < sizeof(inbound_event_remote));
+    ++inbound_events;
+    strcpy(inbound_event_local, local);
+    strcpy(inbound_event_remote, remote);
+    inbound_event_connected = connected;
 }
 
 /** @brief Apply a configured recovery race after one owned control-plane operation.
@@ -383,6 +413,24 @@ void ra_link_hub_set_digit_handler(struct ra_link_hub *hub, ra_link_hub_digit_fn
     }
 }
 
+/** @cond TEST_FIXTURE */
+/** @brief Capture the node-specific lifecycle handoff installed before a peer can attach.
+ * @param hub Node-owned routing hub.
+ * @param callback Runtime bridge for lifecycle events.
+ * @param context Runtime node paired with callback.
+ */
+void ra_link_hub_set_event_handler(struct ra_link_hub *hub, ra_link_hub_event_fn callback,
+                                   void *context) {
+    assert(hub && callback && context);
+    if (inbound_event_callback_count <
+        sizeof(inbound_event_callbacks) / sizeof(inbound_event_callbacks[0])) {
+        inbound_event_callbacks[inbound_event_callback_count] = callback;
+        inbound_event_contexts[inbound_event_callback_count] = context;
+        ++inbound_event_callback_count;
+    }
+}
+/** @endcond */
+
 bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
     assert(hub && !strcmp(name, "123"));
     return link_error != 7;
@@ -558,13 +606,17 @@ void __ast_free(void *pointer, const char *file, int line, const char *function)
     free(pointer);
 }
 
-/** @brief Capture status text submitted through the retained controller queue API.
+/** @brief Capture prepared RF status submitted through the retained controller queue API.
  * @param controller Started node controller selected by the runtime.
- * @param text Complete Morse-safe status text.
+ * @param text Complete speech and Morse-safe status text.
+ * @param audio Owned prepared status PCM, if speech was available.
+ * @param samples Prepared status PCM sample count.
  * @return True until the configured fixture queue limit is reached.
  */
-bool __wrap_ra_controller_queue_status(struct ra_controller *controller, const char *text) {
+bool __wrap_ra_controller_queue_status(struct ra_controller *controller, const char *text,
+                                       int16_t *audio, size_t samples) {
     assert(controller && text);
+    assert((audio == NULL) == (samples == 0));
     if (queued_status_count >= queued_status_limit) {
         return false;
     }
@@ -572,7 +624,26 @@ bool __wrap_ra_controller_queue_status(struct ra_controller *controller, const c
     assert(length < sizeof(queued_status));
     memcpy(queued_status, text, length + 1);
     ++queued_status_count;
+    free(audio);
     return true;
+}
+
+/** @brief Return one control-owned speech buffer to exercise runtime reaping.
+ * @param controller Controller passed through the runtime reaper.
+ * @param audio Destination for at most capacity owned buffers.
+ * @param capacity Available audio-pointer slots.
+ * @return One when the fixture requests a release, otherwise zero.
+ */
+size_t __wrap_ra_controller_reclaim_status(struct ra_controller *controller, int16_t **audio,
+                                           size_t capacity) {
+    assert(controller && audio && capacity);
+    if (!release_status_audio) {
+        return 0;
+    }
+    release_status_audio = false;
+    audio[0] = malloc(sizeof(*audio[0]));
+    assert(audio[0]);
+    return 1;
 }
 /** @brief Deterministic startup clock.
  * @param clock Requested clock identifier.
@@ -727,7 +798,7 @@ int main(void) {
     };
     struct ra_document document = {
         .sections = sections, .section_count = 4, .entries = entries, .count = 3};
-    struct ra_runtime runtime = {.digit = receive_inbound_digit};
+    struct ra_runtime runtime = {.digit = receive_inbound_digit, .event = receive_inbound_event};
     struct ra_document empty = {0};
     const char *section;
     const char *key;
@@ -965,17 +1036,20 @@ int main(void) {
 
     /* A node without a module DTMF sink safely discards authenticated reader events. */
     struct ra_runtime no_digit_runtime = {0};
-    inbound_callback_count = inbound_digits = 0;
+    inbound_callback_count = inbound_event_callback_count = inbound_digits = 0;
     assert(!ra_runtime_start(&no_digit_runtime, &document));
     assert(inbound_callback_count == 2);
+    assert(inbound_event_callback_count == 2);
     inbound_callbacks[0](inbound_callback_contexts[0], "123", '4', 1200);
+    inbound_event_callbacks[0](inbound_event_contexts[0], "123", true);
     assert(!inbound_digits);
     ra_runtime_stop(&no_digit_runtime);
 
-    inbound_callback_count = 0;
+    inbound_callback_count = inbound_event_callback_count = inbound_events = 0;
     assert(!ra_runtime_start(&runtime, &document));
     assert(workers == 2 && channels == 2);
     assert(inbound_callback_count == 2);
+    assert(inbound_event_callback_count == 2);
     assert(inbound_callbacks[0] && inbound_callback_contexts[0]);
     inbound_callbacks[0](inbound_callback_contexts[0], "123", '5', 1234);
     assert(inbound_digits == 1 && !strcmp(inbound_node, "alpha") && inbound_digit == '5' &&
@@ -983,6 +1057,10 @@ int main(void) {
     /* A denied outbound audio peer cannot inject local link-control DTMF. */
     inbound_callbacks[1](inbound_callback_contexts[1], "123", '6', 1235);
     assert(inbound_digits == 1);
+    inbound_event_callbacks[0](inbound_event_contexts[0], "123", true);
+    assert(inbound_events == 1);
+    assert(!strcmp(inbound_event_remote, "123"));
+    assert(inbound_event_connected);
 
     /* Exercise recovery through the hub-registered callback at every ownership boundary. */
     atomic_bool cancelled;
@@ -1075,8 +1153,32 @@ int main(void) {
     assert(!listed_count);
     queued_status_count = 0;
     queued_status_limit = SIZE_MAX;
+    release_status_audio = true;
     assert(!ra_runtime_queue_link_status(&runtime, "alpha", false));
     assert(!strcmp(queued_status, "NO LINKS"));
+    queued_status_count = 0;
+    assert(!ra_runtime_queue_link_event(&runtime, "alpha", "123", true));
+    assert(queued_status_count == 2 && !strcmp(queued_status, "123 CONNECTED"));
+    assert(!ra_runtime_queue_link_event(&runtime, "alpha", "beta", false));
+    assert(!strcmp(queued_status, "beta DISCONNECTED"));
+    char oversized_event[RA_CONTROLLER_STATUS_TEXT_MAX + 1];
+    memset(oversized_event, '1', sizeof(oversized_event) - 1);
+    oversized_event[sizeof(oversized_event) - 1] = '\0';
+    assert(ra_runtime_queue_link_event(&runtime, oversized_event, "123", true) == -1);
+    assert(ra_runtime_queue_link_event(&runtime, "alpha", oversized_event, true) == -1);
+    char nearly_full_event[RA_CONTROLLER_STATUS_TEXT_MAX];
+    memset(nearly_full_event, '1', sizeof(nearly_full_event) - 1);
+    nearly_full_event[sizeof(nearly_full_event) - 1] = '\0';
+    size_t event_status_count = queued_status_count;
+    assert(ra_runtime_queue_link_event(&runtime, nearly_full_event, "123", true) == -1);
+    assert(queued_status_count == event_status_count);
+    assert(ra_runtime_queue_link_event(&runtime, nearly_full_event, "foreign", true) == -1);
+    assert(queued_status_count == event_status_count);
+    assert(ra_runtime_queue_link_event(&runtime, "foreign", nearly_full_event, true) == -1);
+    assert(queued_status_count == event_status_count);
+    queued_status_limit = 0;
+    assert(ra_runtime_queue_link_event(&runtime, "alpha", "123", true) == -1);
+    queued_status_limit = SIZE_MAX;
     assert(!ra_runtime_queue_link_status(&runtime, "alpha", true));
     assert(!strcmp(queued_status, "NO LAST KEYED"));
     status_peers[0] = (struct ra_link_peer_status){

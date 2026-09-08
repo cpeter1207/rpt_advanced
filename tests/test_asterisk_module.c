@@ -24,8 +24,12 @@
 static unsigned int runtime_failures;
 /** @brief Captured hardware digit delivery callback. */
 static ra_digit_handler digit_sink;
+/** @brief Captured direct-link lifecycle callback supplied by the module runtime. */
+static ra_link_event_handler event_sink;
 /** @brief Inject a DTMF event while module reload deliberately suppresses producers. */
 static bool emit_digit_during_reload;
+/** @brief Inject one lifecycle report while reload temporarily rejects new producer events. */
+static bool emit_event_during_reload;
 /** @brief Number of complete runtime replacements requested by the module. */
 static unsigned int runtime_reloads;
 /** @brief Number of full runtime shutdowns requested by the module. */
@@ -36,11 +40,14 @@ static bool runtime_active;
 static bool runtime_locked;
 /** @brief Number of current-runtime DTMF events parsed by the fixture. */
 static unsigned int runtime_digit_calls;
+/** @brief Lifecycle reports queued through the module's serialized control path. */
+static unsigned int runtime_link_event_calls;
 
 /** @cond TEST_FIXTURE */
 /** @brief Start an initially empty runtime fixture. */
 const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_document *document) {
     digit_sink = runtime->digit;
+    event_sink = runtime->event;
     (void)document;
     if (runtime_failures) {
         --runtime_failures;
@@ -60,6 +67,10 @@ const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_docume
     if (emit_digit_during_reload) {
         assert(digit_sink);
         digit_sink("usb", '1', 100);
+    }
+    if (emit_event_during_reload) {
+        assert(event_sink);
+        event_sink("usb", "123", true);
     }
     if (runtime_failures) {
         --runtime_failures;
@@ -602,6 +613,14 @@ int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, 
     return status_queue_failure ? -1 : 0;
 }
 
+int ra_runtime_queue_link_event(struct ra_runtime *runtime, const char *first, const char *second,
+                                bool connected) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(first, "usb") && !strcmp(second, "123") && connected);
+    ++runtime_link_event_calls;
+    return 0;
+}
+
 /* Snapshot direct peers for the administrative status fixture.
  * @param state Fixture runtime.
  * @param local Selected local node.
@@ -786,6 +805,21 @@ int main(void) {
     link_failure = 0;
     assert(registered->load() == AST_MODULE_LOAD_SUCCESS);
     assert(application && command_entry);
+    assert(event_sink);
+    event_sink("usb", "123", true);
+    drain_tasks();
+    assert(runtime_link_event_calls == 1);
+    queue_failure = 2;
+    event_sink("usb", "123", true);
+    queue_failure = 3;
+    event_sink("usb", "123", true);
+    queue_failure = 0;
+    char oversized_endpoint[RA_LINK_PEER_NAME_MAX + 1];
+    memset(oversized_endpoint, '1', sizeof(oversized_endpoint) - 1);
+    oversized_endpoint[sizeof(oversized_endpoint) - 1] = '\0';
+    event_sink(oversized_endpoint, "123", true);
+    event_sink("usb", oversized_endpoint, true);
+    assert(!queued_count);
     assert(application(NULL, NULL) == -1);
     wrong_technology = true;
     assert(application(NULL, "usb") == -1);
@@ -926,6 +960,13 @@ int main(void) {
     emit_digit_during_reload = false;
     assert(queued_count == 0 && runtime_stops == stops_before && runtime_active);
     assert(runtime_digit_calls == parsed_before_stop);
+    unsigned int event_before_stale_reload = runtime_link_event_calls;
+    event_sink("usb", "123", true);
+    emit_event_during_reload = true;
+    assert(!registered->reload());
+    emit_event_during_reload = false;
+    drain_tasks();
+    assert(runtime_link_event_calls == event_before_stale_reload);
     digit_sink("usb", '1', 100);
     assert(!registered->reload());
     drain_tasks();

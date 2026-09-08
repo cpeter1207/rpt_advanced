@@ -32,8 +32,9 @@ _Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && ATOMIC_INT_LOCK_FREE == 2 &&
 static struct ra_document configuration;
 /** @brief Radio resources whose strings belong to configuration. */
 static void submit_digit(const char *node, char digit, uint64_t now_ms);
+static void submit_link_event(const char *local, const char *remote, bool connected);
 /** @brief Radio runtime delivers only decoded events to the control queue. */
-static struct ra_runtime runtime = {.digit = submit_digit};
+static struct ra_runtime runtime = {.digit = submit_digit, .event = submit_link_event};
 /** @brief Serialize admission and runtime replacement; never acquired by audio workers. */
 AST_MUTEX_DEFINE_STATIC(runtime_lock);
 /** @brief Descriptor is populated by Asterisk before application registration. */
@@ -57,6 +58,14 @@ struct digit_task {
     uint64_t now_ms;   /**< Monotonic detection timestamp. */
     char digit;        /**< Decoded digit, or zero for timeout. */
     char node[];       /**< Owned local node name. */
+};
+
+/** @brief One bounded direct-link event copied for serial telemetry preparation. */
+struct link_event_task {
+    uint64_t revision;                  /**< Runtime instance that observed the event. */
+    bool connected;                     /**< True for attach, false for detach. */
+    char local[RA_LINK_PEER_NAME_MAX];  /**< Stable local endpoint copy. */
+    char remote[RA_LINK_PEER_NAME_MAX]; /**< Stable remote endpoint copy. */
 };
 
 /** @brief Keep a failed permanent request eligible for the hub's normal recovery manager.
@@ -246,6 +255,52 @@ static int process_digit(void *argument) {
     ast_free(task);
     atomic_fetch_sub(&pending_digits, 1);
     return 0;
+}
+
+/** @brief Prepare one direct-link event only while its originating runtime is current.
+ * @param argument Owned event task.
+ * @return Zero after releasing task storage.
+ */
+static int process_link_event(void *argument) {
+    struct link_event_task *task = argument;
+    ast_mutex_lock(&runtime_lock);
+    if (task->revision == atomic_load(&runtime_revision)) {
+        (void)ra_runtime_queue_link_event(&runtime, task->local, task->remote, task->connected);
+    }
+    ast_mutex_unlock(&runtime_lock);
+    ast_free(task);
+    return 0;
+}
+
+/** @brief Copy a hub lifecycle event to the module's serial telemetry queue.
+ * @param local Stable local endpoint retained until this callback returns.
+ * @param remote Stable direct-peer endpoint retained until this callback returns.
+ * @param connected True after attach, false after detach.
+ *
+ * Hub-manager and admission threads use this handoff so speech preparation never overlaps the
+ * radio callback or publishes concurrently to the controller's SPSC status queue.
+ */
+static void submit_link_event(const char *local, const char *remote, bool connected) {
+    if (atomic_load_explicit(&runtime_reloading, memory_order_acquire)) {
+        return;
+    }
+    size_t local_length = strnlen(local, RA_LINK_PEER_NAME_MAX);
+    size_t remote_length = strnlen(remote, RA_LINK_PEER_NAME_MAX);
+    if (local_length == RA_LINK_PEER_NAME_MAX || remote_length == RA_LINK_PEER_NAME_MAX) {
+        return;
+    }
+    struct link_event_task *task = ast_calloc(1, sizeof(*task));
+    if (!task) {
+        return;
+    }
+    task->revision = atomic_load(&runtime_revision);
+    task->connected = connected;
+    ast_copy_string(task->local, local, sizeof(task->local));
+    ast_copy_string(task->remote, remote, sizeof(task->remote));
+    if (!ast_taskprocessor_push(control_queue, process_link_event, task)) {
+        return;
+    }
+    ast_free(task);
 }
 
 /** @brief Queue a dispatcher-delivered DTMF event without doing radio-thread work.
