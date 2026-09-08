@@ -55,7 +55,7 @@ static unsigned int sent_topologies;
 static char sent_topology[RA_LINK_TOPOLOGY_ADVERTISEMENT_MAX + 3];
 /** @brief Number of echoed redundant-key IAX text messages. */
 static unsigned int sent_newkeys;
-/** @brief Number of echoed voice-keyed IAX text messages. */
+/** @brief Number of initial voice-keyed IAX negotiation messages. */
 static unsigned int sent_newkey1s;
 /** @brief Number of IAX key-negotiation replies. */
 static unsigned int sent_iaxkeys;
@@ -348,7 +348,7 @@ int ast_sendtext(struct ast_channel *channel, const char *text) {
     }
     if (!strcmp(text, "!NEWKEY1!")) {
         ++sent_newkey1s;
-        return failure == 12;
+        return failure == 4;
     }
     if (!strcmp(text, "!IAXKEY! 1 1 0 0")) {
         ++sent_iaxkeys;
@@ -479,7 +479,7 @@ int main(void) {
     allocation_calls = 0;
     sent_newkeys = sent_newkey1s = sent_iaxkeys = 0;
     assert(!ra_link_peer_start(&peer, NULL, &linear, receive_inbound_digit, &inbound_context));
-    assert(sent_newkeys == 1);
+    assert(!sent_newkeys && sent_newkey1s == 1 && atomic_load(&peer.voice_keying));
     atomic_uint generation;
     atomic_init(&generation, 0);
     peer.topology_generation = &generation;
@@ -551,7 +551,7 @@ int main(void) {
     frame(&peer, &ignored);
     atomic_store(&peer.sent_samples, 16000);
     frame(&peer, &ignored);
-    assert(ptt_release_indications == 1);
+    assert(!ptt_release_indications);
     atomic_store(&peer.sent_samples, 0);
     peer.heartbeat_samples = 0;
     struct ast_frame text = {.frametype = AST_FRAME_TEXT};
@@ -664,14 +664,12 @@ int main(void) {
     assert(atomic_load(&generation) == 3);
     text.data.ptr = "!NEWKEY1!";
     text.datalen = 10;
-    failure = 12;
     frame(&peer, &text);
-    failure = 0;
     frame(&peer, &text);
-    assert(atomic_load(&peer.voice_keying) && sent_newkey1s == 2);
+    assert(atomic_load(&peer.voice_keying) && sent_newkey1s == 1);
     text.datalen = 9;
     frame(&peer, &text);
-    assert(sent_newkey1s == 3);
+    assert(sent_newkey1s == 1);
     text.data.ptr = "!IAXKEY!";
     text.datalen = 8;
     failure = 13;
@@ -692,7 +690,20 @@ int main(void) {
     failure = 0;
     frame(&peer, &text);
     frame(&peer, &text);
-    assert(!atomic_load(&peer.voice_keying) && sent_newkeys == 4);
+    assert(!atomic_load(&peer.voice_keying) && sent_newkeys == 3);
+    /* The legacy negotiation restores only the explicit RADIO_KEY transport. */
+    frame(&peer, &ignored);
+    assert(!key_indications && !ptt_release_indications);
+    atomic_store(&peer.sent_samples, 16000);
+    frame(&peer, &ignored);
+    assert(ptt_release_indications == 1);
+    atomic_store(&peer.sent_samples, 0);
+    atomic_store(&peer.desired_key, true);
+    frame(&peer, &ignored);
+    assert(key_indications == 1);
+    atomic_store(&peer.desired_key, false);
+    frame(&peer, &ignored);
+    assert(ptt_release_indications == 2);
     control.subclass.integer = AST_CONTROL_RADIO_KEY;
     frame(&peer, &control);
     assert(ra_link_peer_receive(&peer, output, 2));

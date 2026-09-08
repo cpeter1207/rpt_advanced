@@ -197,7 +197,6 @@ static int accept_frame(struct ra_link_peer *peer, struct ast_frame *frame) {
             result = ast_sendtext(peer->channel, "!NEWKEY!") ? -1 : 0;
         } else if (text_is(frame, "!NEWKEY1!")) {
             atomic_store(&peer->voice_keying, true);
-            result = ast_sendtext(peer->channel, "!NEWKEY1!") ? -1 : 0;
         } else if (text_is(frame, "!IAXKEY!")) {
             result = ast_sendtext(peer->channel, "!IAXKEY! 1 1 0 0") ? -1 : 0;
         } else {
@@ -344,10 +343,11 @@ static void *read_peer(void *context) {
         if (send_topology(peer)) {
             break;
         }
+        bool voice_keying = atomic_load(&peer->voice_keying);
         bool keyed = atomic_load(&peer->desired_key);
         uint64_t sent = atomic_load(&peer->sent_samples);
-        if (keyed != peer->transmitting ||
-            sent - peer->heartbeat_samples >= (uint64_t)peer->linear_rate * 2) {
+        if (!voice_keying && (keyed != peer->transmitting ||
+                              sent - peer->heartbeat_samples >= (uint64_t)peer->linear_rate * 2)) {
             if (ast_indicate(peer->channel,
                              keyed ? AST_CONTROL_RADIO_KEY : AST_CONTROL_RADIO_UNKEY)) {
                 break;
@@ -431,7 +431,7 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     peer->advertised_pending = false;
     peer->advertised[0] = '\0';
     if (ast_set_read_format(channel, linear) || ast_set_write_format(channel, linear) ||
-        ast_sendtext(channel, "!NEWKEY!")) {
+        ast_sendtext(channel, "!NEWKEY1!")) {
         close_topology(peer);
         ast_free(send_buffer);
         ast_free(outgoing);
@@ -450,7 +450,9 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     atomic_init(&peer->stop, false);
     atomic_init(&peer->ended, false);
     atomic_init(&peer->receiving, false);
-    atomic_init(&peer->voice_keying, false);
+    /* app_rpt's current IAX convention derives carrier from ordinary voice frames.
+     * The legacy !NEWKEY! reply below explicitly opts a peer into RADIO_KEY instead. */
+    atomic_init(&peer->voice_keying, true);
     atomic_init(&peer->receive_epoch, 0);
     atomic_init(&peer->desired_key, false);
     atomic_init(&peer->sent_samples, 0);
