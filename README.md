@@ -18,6 +18,11 @@ locally but has not been installed or enabled on a live node; interoperability
 with classic `app_rpt` and remaining physical verification are unfinished. Do
 not use it for unattended operation.
 
+Install the matching `rate_adjusting_pcm_ring` shared-library release before
+building or installing rpt_advanced. It supplies the lock-free playout ring
+used for rate recovery. The release archive installs the shared object, public
+header, and pkg-config metadata.
+
 On Debian 12 or 13, with the ASL3 package repository configured:
 
 ```sh
