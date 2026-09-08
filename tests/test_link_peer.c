@@ -47,8 +47,8 @@ static int hangups;
 static unsigned int sent_digits;
 /** @brief Number of radio-key indications sent to the fixture channel. */
 static unsigned int key_indications;
-/** @brief Number of radio-unkey indications sent to the fixture channel. */
-static unsigned int unkey_indications;
+/** @brief Number of PTT-release indications sent to the fixture channel. */
+static unsigned int ptt_release_indications;
 /** @brief Number of queued topology advertisements delivered by the reader. */
 static unsigned int sent_topologies;
 /** @brief Most recent full IAX topology text sent by the channel owner. */
@@ -423,7 +423,7 @@ int ast_indicate(struct ast_channel *channel, int condition) {
     if (condition == AST_CONTROL_RADIO_KEY) {
         ++key_indications;
     } else {
-        ++unkey_indications;
+        ++ptt_release_indications;
     }
     return failure == 8;
 }
@@ -551,7 +551,7 @@ int main(void) {
     frame(&peer, &ignored);
     atomic_store(&peer.sent_samples, 16000);
     frame(&peer, &ignored);
-    assert(unkey_indications == 1);
+    assert(ptt_release_indications == 1);
     atomic_store(&peer.sent_samples, 0);
     peer.heartbeat_samples = 0;
     struct ast_frame text = {.frametype = AST_FRAME_TEXT};
