@@ -384,6 +384,9 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     receiver->file = settings->receiver_courtesy_sound_file;
     receiver->speech_text = settings->receiver_courtesy_speech_text;
     receiver->morse_text = settings->receiver_courtesy_morse_text;
+    if (settings->receiver_courtesy_morse_frequency_hz) {
+        receiver->morse_frequency_hz = settings->receiver_courtesy_morse_frequency_hz;
+    }
     int16_t *courtesy_audio;
     ra_identifier_prepare(receiver, node->controller.rate, &courtesy_audio,
                           &node->controller.courtesy[RA_COURTESY_RECEIVER].samples);
@@ -393,6 +396,9 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     link->file = settings->link_courtesy_sound_file;
     link->speech_text = settings->link_courtesy_speech_text;
     link->morse_text = settings->link_courtesy_morse_text;
+    if (settings->link_courtesy_morse_frequency_hz) {
+        link->morse_frequency_hz = settings->link_courtesy_morse_frequency_hz;
+    }
     ra_identifier_prepare(link, node->controller.rate, &courtesy_audio,
                           &node->controller.courtesy[RA_COURTESY_LINK].samples);
     node->controller.courtesy[RA_COURTESY_LINK].audio = courtesy_audio;

@@ -706,6 +706,13 @@ int ast_call(struct ast_channel *channel, const char *address, int timeout) {
 }
 int ra_worker_start(struct ra_worker *worker) {
     assert(worker->channel && worker->controller->rate == rate);
+    if (!strcmp(worker->controller->courtesy[RA_COURTESY_RECEIVER].settings.morse_text, "R")) {
+        assert(worker->controller->courtesy[RA_COURTESY_RECEIVER].settings.morse_frequency_hz ==
+               500);
+    }
+    if (!strcmp(worker->controller->courtesy[RA_COURTESY_LINK].settings.morse_text, "L")) {
+        assert(worker->controller->courtesy[RA_COURTESY_LINK].settings.morse_frequency_hz == 1000);
+    }
     ++starts;
     if (fail_worker_count && starts >= fail_worker_from) {
         --fail_worker_count;
@@ -794,10 +801,16 @@ int main(void) {
     struct ra_config_entry entries[] = {
         {"disabled", "node_enabled", "no"},
         {"beta", "link_deny_nodes", "123"},
+        {"general", "receiver_courtesy_morse_text", "R"},
+        {"general", "receiver_courtesy_morse_frequency_hz", "500"},
+        {"general", "link_courtesy_morse_text", "L"},
+        {"general", "link_courtesy_morse_frequency_hz", "1000"},
         {"identifier alpha periodic", "morse_text", "TEST"},
     };
-    struct ra_document document = {
-        .sections = sections, .section_count = 4, .entries = entries, .count = 3};
+    struct ra_document document = {.sections = sections,
+                                   .section_count = 4,
+                                   .entries = entries,
+                                   .count = sizeof(entries) / sizeof(*entries)};
     struct ra_runtime runtime = {.digit = receive_inbound_digit, .event = receive_inbound_event};
     struct ra_document empty = {0};
     const char *section;
@@ -1358,7 +1371,7 @@ int main(void) {
     assert(ra_runtime_remote_command(&runtime, "missing", "123", 0) == -1);
     ra_runtime_stop(&runtime);
     assert(!runtime.nodes && !workers && !channels);
-    entries[2].value = "";
+    entries[6].value = "";
     seen_ids = 0;
     assert(!ra_runtime_start(&runtime, &document));
     assert(!seen_ids);

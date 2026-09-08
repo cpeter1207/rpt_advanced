@@ -49,9 +49,11 @@ the number of nodes or ID sets.
 | `receiver_courtesy_sound_file` | empty | Local-receiver courtesy sound-file path. |
 | `receiver_courtesy_speech_text` | empty | Local-receiver courtesy speech text, used when its file is absent or unusable. |
 | `receiver_courtesy_morse_text` | empty | Local-receiver terminal Morse courtesy text. Set `R` for an R courtesy tone. |
+| `receiver_courtesy_morse_frequency_hz` | inherited | Local-receiver courtesy Morse frequency. When omitted, it uses the resolved `[morse]` frequency for this node. |
 | `link_courtesy_sound_file` | empty | Linked-receiver courtesy sound-file path. |
 | `link_courtesy_speech_text` | empty | Linked-receiver courtesy speech text, used when its file is absent or unusable. |
 | `link_courtesy_morse_text` | empty | Linked-receiver terminal Morse courtesy text. Set `L` for an L courtesy tone. |
+| `link_courtesy_morse_frequency_hz` | inherited | Linked-receiver courtesy Morse frequency. When omitted, it uses the resolved `[morse]` frequency for this node. |
 | `sample_rate_hz` | 0 | Zero selects the highest usable local signed-linear rate no greater than the hardware-native rate. An explicit rate selects the local channel rate and requires a supported bidirectional Asterisk conversion path. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
 | `codec` | empty | Empty selects signed linear for the local radio channel; otherwise select an available local Asterisk codec subject to `sample_rate_hz`. It does not otherwise restrict IAX link candidates. |

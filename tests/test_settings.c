@@ -17,7 +17,8 @@ static void defaults(void) {
     assert(node.courtesy_delay_ms == 250 && !*node.receiver_courtesy_sound_file &&
            !*node.receiver_courtesy_speech_text && !*node.receiver_courtesy_morse_text &&
            !*node.link_courtesy_sound_file && !*node.link_courtesy_speech_text &&
-           !*node.link_courtesy_morse_text);
+           !*node.link_courtesy_morse_text && !node.receiver_courtesy_morse_frequency_hz &&
+           !node.link_courtesy_morse_frequency_hz);
     assert(!strcmp(node.channel, "usb") && !*node.codec);
     assert(!*node.link_allow_nodes && !*node.link_deny_nodes);
     assert(!*node.link_static_directory_file && !*node.link_directory_file &&
@@ -41,7 +42,9 @@ static void configured(void) {
         {"general", "telemetry_duck_db", "-18"},
         {"general", "courtesy_delay_ms", "300"},
         {"general", "receiver_courtesy_morse_text", "R"},
+        {"general", "receiver_courtesy_morse_frequency_hz", "500"},
         {"usb", "link_courtesy_morse_text", "L"},
+        {"usb", "link_courtesy_morse_frequency_hz", "1000"},
         {"usb", "sample_rate_hz", "48000"},
         {"usb", "radio_channel", "radio"},
         {"usb", "codec", "slin48"},
@@ -85,7 +88,9 @@ static void configured(void) {
     assert(!node.enabled && !node.full_duplex && node.hang_ms == 500 &&
            node.telemetry_duck_db == -18 && node.sample_rate == 48000);
     assert(node.courtesy_delay_ms == 300 && !strcmp(node.receiver_courtesy_morse_text, "R") &&
-           !strcmp(node.link_courtesy_morse_text, "L"));
+           !strcmp(node.link_courtesy_morse_text, "L") &&
+           node.receiver_courtesy_morse_frequency_hz == 500 &&
+           node.link_courtesy_morse_frequency_hz == 1000);
     assert(!strcmp(node.channel, "radio") && !strcmp(node.codec, "slin48"));
     assert(!*node.link_allow_nodes && !strcmp(node.link_deny_nodes, "1234, 5678"));
     assert(!strcmp(node.link_static_directory_file, "static.conf") &&
@@ -151,9 +156,17 @@ static void scoped_default_matching(void) {
 
 /** @brief Every typed setting rejects invalid text without committing earlier fields. */
 static void invalid(void) {
-    const char *node_keys[] = {"node_enabled",      "full_duplex",       "transmit_hang_ms",
-                               "telemetry_duck_db", "courtesy_delay_ms", "sample_rate_hz",
-                               "link_allow_nodes",  "link_deny_nodes",   "link_lookup_method"};
+    const char *node_keys[] = {"node_enabled",
+                               "full_duplex",
+                               "transmit_hang_ms",
+                               "telemetry_duck_db",
+                               "courtesy_delay_ms",
+                               "receiver_courtesy_morse_frequency_hz",
+                               "link_courtesy_morse_frequency_hz",
+                               "sample_rate_hz",
+                               "link_allow_nodes",
+                               "link_deny_nodes",
+                               "link_lookup_method"};
     const char *id_keys[] = {
         "interval_ms",          "priority",        "first_key_only",  "regardless_of_activity",
         "speech_speed_percent", "speech_level_db", "morse_speed_wpm", "morse_frequency_hz",
