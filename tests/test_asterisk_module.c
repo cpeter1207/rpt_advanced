@@ -599,6 +599,13 @@ size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local) 
     return 0;
 }
 
+/** @brief Accept nonpermanent disconnect-all requests in the module fixture. */
+size_t ra_runtime_disconnect_nonpermanent_all(struct ra_runtime *runtime, const char *local) {
+    (void)runtime;
+    assert(runtime_locked && local);
+    return 0;
+}
+
 /* Queue a local RF link-status response in the fixture runtime.
  * @param state Fixture runtime.
  * @param local Selected local node.
@@ -609,6 +616,18 @@ int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, 
     (void)runtime;
     assert(runtime_locked && !strcmp(local, "usb"));
     (void)last_keyed;
+    ++status_queue_calls;
+    return status_queue_failure ? -1 : 0;
+}
+
+/** @brief Observe local-time telemetry dispatch in the fixture runtime.
+ * @param runtime Fixture runtime.
+ * @param local Selected local node.
+ * @return Zero or the selected telemetry-queue failure.
+ */
+int ra_runtime_queue_time(struct ra_runtime *runtime, const char *local) {
+    (void)runtime;
+    assert(runtime_locked && !strcmp(local, "usb"));
     ++status_queue_calls;
     return status_queue_failure ? -1 : 0;
 }
@@ -1018,6 +1037,8 @@ int main(void) {
                                            RA_LINK_FULL_STATUS,
                                            RA_LINK_RECONNECT_ALL,
                                            RA_LINK_PERMANENT_LOCAL_MONITOR,
+                                           RA_LINK_DISCONNECT_NONPERMANENT_ALL,
+                                           RA_LINK_TIME,
                                            RA_LINK_COMMAND};
     unsigned int queued_before = status_queue_calls;
     unsigned int topology_before = topology_calls;
@@ -1027,7 +1048,7 @@ int main(void) {
         digit_sink("usb", '1', 100);
         drain_tasks();
     }
-    assert(status_queue_calls == queued_before + 3);
+    assert(status_queue_calls == queued_before + 4);
     assert(topology_calls == topology_before + 1);
     assert(reconnect_all_calls == reconnect_before + 1);
     unsigned int retained_before = retained_permanent_links;
@@ -1052,14 +1073,14 @@ int main(void) {
     digit_action = RA_LINK_STATUS;
     digit_sink("usb", '1', 100);
     drain_tasks();
-    assert(status_queue_calls == queued_before + 4);
+    assert(status_queue_calls == queued_before + 5);
     status_queue_failure = false;
     cli_topology_failure = true;
     digit_action = RA_LINK_FULL_STATUS;
     digit_sink("usb", '1', 100);
     drain_tasks();
     assert(topology_calls == topology_before + 2);
-    assert(status_queue_calls == queued_before + 4);
+    assert(status_queue_calls == queued_before + 5);
     cli_topology_failure = false;
     cli_topology = "T123,R456";
     status_queue_failure = true;
@@ -1084,6 +1105,10 @@ int main(void) {
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();
+    digit_action = RA_LINK_DISCONNECT_NONPERMANENT_ALL;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
     digit_action = RA_LINK_DISCONNECT_PERMANENT;
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
@@ -1100,7 +1125,12 @@ int main(void) {
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();
-    assert(status_queue_calls == queued_before + 7);
+    assert(status_queue_calls == queued_before + 8);
+    digit_action = RA_LINK_TIME;
+    reload_on_unlock = true;
+    digit_sink("usb", '1', 100);
+    drain_tasks();
+    assert(status_queue_calls == queued_before + 8);
     digit_action = RA_LINK_FULL_STATUS;
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);

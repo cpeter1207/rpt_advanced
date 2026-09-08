@@ -1438,6 +1438,75 @@ int main(void) {
     assert(lifecycle_events == 2 && !lifecycle_connected);
     ra_link_hub_close(&lifecycle);
 
+    /* A peer that advertises a route back to this node is a topology loop, not a retryable loss. */
+    RA_TEST_HUB(loop);
+    struct ast_channel loop_peer = {.topology = "Tlocal,R123"};
+    loop.local_name = "local";
+    ra_link_hub_set_reconnector(&loop, reconnect_stub, NULL);
+    reconnect_calls = 0;
+    assert(!ra_link_hub_attach(&loop, "123", &loop_peer, &format_8000, true, true, true));
+    manager_idle_polls = 0;
+    manager_idle_limit = 1;
+    atomic_store(&loop.stop, false);
+    assert(!manager(managed));
+    assert(loop_peer.stopped && !ra_link_hub_snapshot(&loop, NULL, 0) && !reconnect_calls);
+    ra_link_hub_close(&loop);
+
+    /* A complete but unrelated route list leaves the direct peer attached. */
+    RA_TEST_HUB(nonloop);
+    struct ast_channel nonloop_peer = {.topology = "Tother,Rremote"};
+    nonloop.local_name = "local";
+    assert(!ra_link_hub_attach(&nonloop, "456", &nonloop_peer, &format_8000, true, true,
+                               false));
+    manager_idle_polls = 0;
+    manager_idle_limit = 1;
+    atomic_store(&nonloop.stop, false);
+    assert(!manager(managed));
+    assert(!nonloop_peer.stopped && ra_link_hub_connected(&nonloop, "456"));
+    ra_link_hub_close(&nonloop);
+
+    /* An empty local identity disables topology loop matching. */
+    RA_TEST_HUB(empty_loop_name);
+    struct ast_channel empty_loop_peer = {.topology = "Tlocal"};
+    empty_loop_name.local_name = "";
+    assert(!ra_link_hub_attach(&empty_loop_name, "457", &empty_loop_peer, &format_8000, true,
+                               true, false));
+    manager_idle_polls = 0;
+    manager_idle_limit = 1;
+    atomic_store(&empty_loop_name.stop, false);
+    assert(!manager(managed));
+    assert(!empty_loop_peer.stopped);
+    ra_link_hub_close(&empty_loop_name);
+
+    /* Oversized cached text cannot be used to make a topology-loop decision. */
+    RA_TEST_HUB(truncated_loop);
+    char oversized_loop[RA_LINK_TOPOLOGY_TEXT_MAX + 2];
+    memset(oversized_loop, 'T', sizeof(oversized_loop) - 1);
+    oversized_loop[sizeof(oversized_loop) - 1] = '\0';
+    struct ast_channel truncated_loop_peer = {.topology = oversized_loop};
+    truncated_loop.local_name = "local";
+    assert(!ra_link_hub_attach(&truncated_loop, "458", &truncated_loop_peer, &format_8000, true,
+                               true, false));
+    manager_idle_polls = 0;
+    manager_idle_limit = 1;
+    atomic_store(&truncated_loop.stop, false);
+    assert(!manager(managed));
+    assert(!truncated_loop_peer.stopped);
+    ra_link_hub_close(&truncated_loop);
+
+    /* *10 removes current temporary ports only; permanent routing remains attached. */
+    RA_TEST_HUB(temporary);
+    struct ast_channel temporary_peer = {0};
+    struct ast_channel permanent_peer = {0};
+    assert(!ra_link_hub_attach(&temporary, "temporary", &temporary_peer, &format_8000, true,
+                               true, false));
+    assert(!ra_link_hub_attach(&temporary, "permanent", &permanent_peer, &format_8000, true,
+                               true, true));
+    assert(ra_link_hub_disconnect_nonpermanent_all(&temporary) == 1 && temporary_peer.stopped &&
+           !permanent_peer.stopped && ra_link_hub_connected(&temporary, "permanent"));
+    assert(!ra_link_hub_disconnect_nonpermanent_all(&temporary));
+    ra_link_hub_close(&temporary);
+
     /* A hub without a configured runtime control recipient must safely discard peer DTMF. */
     RA_TEST_HUB(no_digit);
     struct ast_channel no_digit_peer = {0};

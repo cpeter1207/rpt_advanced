@@ -154,6 +154,7 @@ int main(void) {
     struct ra_dtmf_detector *detector = ra_dtmf_open(TEST_RATE);
     assert(detector);
     int16_t audio[TEST_MAX_SAMPLES] = {0};
+    ra_dtmf_set_muting(NULL, false);
     assert(!ra_dtmf_process(NULL, true, audio, 1));
     assert(!ra_dtmf_process(detector, true, NULL, 1));
     assert(!ra_dtmf_process(detector, true, audio, 0));
@@ -169,12 +170,29 @@ int main(void) {
     begin_digit(detector, 'D', audio, TEST_INTERVAL, TEST_RATE, &first);
     memset(audio, 1, TEST_INTERVAL * sizeof(*audio));
     assert(!ra_dtmf_process(detector, false, audio, TEST_INTERVAL));
-    assert_muted(audio, TEST_INTERVAL);
+    assert(audio[0]);
     memset(audio, 1, TEST_INTERVAL * sizeof(*audio));
     assert(!ra_dtmf_process(detector, false, audio, TEST_INTERVAL));
+    assert(audio[0]);
     memset(audio, 1, TEST_INTERVAL * sizeof(*audio));
     assert(ra_dtmf_process(detector, false, audio, TEST_INTERVAL) == 'D');
     assert_muted(audio, TEST_INTERVAL);
+    ra_dtmf_close(detector);
+
+    detector = ra_dtmf_open(TEST_RATE);
+    assert(detector);
+    ra_dtmf_set_muting(detector, false);
+    first = 0;
+    begin_digit(detector, '5', audio, TEST_INTERVAL, TEST_RATE, &first);
+    for (unsigned int interval = 0; interval < 3; ++interval) {
+        voice_like(audio, TEST_INTERVAL, TEST_RATE, first);
+        first += TEST_INTERVAL;
+        char digit = ra_dtmf_process(detector, true, audio, TEST_INTERVAL);
+        assert(digit == (interval == 2 ? '5' : 0));
+        if (digit) {
+            assert(audio[0]);
+        }
+    }
     ra_dtmf_close(detector);
 
     detector = ra_dtmf_open(TEST_RATE);

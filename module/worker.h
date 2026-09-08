@@ -30,9 +30,11 @@ struct ra_worker {
     struct ra_link_hub *links;        /**< Optional network router retained until stop returns. */
     const char *name;                 /**< Borrowed configured node name. */
     ra_digit_handler digit; /**< Control-delivery callback, never called by the radio callback. */
+    bool dtmf_muting;       /**< Configuration-selected muting of completed local DTMF frames. */
     struct ra_dtmf_detector *detector; /**< Worker-owned normalized DTMF detector. */
     uint64_t last_digit_ms;            /**< Last emitted digit time. */
     bool digit_timeout;                /**< Interdigit timeout still needs to be emitted. */
+    bool was_receiving; /**< Prior receiver state used to end a local command on unkey. */
     struct ra_worker_digit_event
         digit_events[RA_WORKER_DIGIT_QUEUE_DEPTH]; /**< Radio-to-control SPSC event ring. */
     atomic_uint digit_write;   /**< Next ring slot published by the radio worker. */

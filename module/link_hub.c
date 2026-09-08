@@ -37,6 +37,7 @@ void ra_link_hub_init(struct ra_link_hub *hub) {
     hub->capacity = 0;
     hub->rate = 0;
     hub->manager_started = false;
+    hub->local_name = NULL;
     hub->reconnect = NULL;
     hub->reconnect_context = NULL;
     hub->digit = NULL;
@@ -488,6 +489,55 @@ static void topology_advertise_locked(struct ra_link_hub *hub) {
     }
 }
 
+/** @brief Check whether a validated remote route list reaches this local node.
+ * @param topology Comma-separated app_rpt route payload.
+ * @param local_name Local node identity to find.
+ * @return True when an advertised route names the local node.
+ *
+ * Both inputs are nonempty validated strings supplied by `detach_topology_loop_locked`. A remote
+ * `L` list containing this node proves that retaining the direct peer would close an RF/IP
+ * topology loop. Route mode is irrelevant: any reachable copy of the local node loops.
+ */
+static bool topology_contains_local(const char *topology, const char *local_name) {
+    size_t local_length = strlen(local_name);
+    for (size_t start = 0; topology[start];) {
+        size_t end = start;
+        while (topology[end] && topology[end] != ',') {
+            ++end;
+        }
+        if (end - start - 1 == local_length && !memcmp(topology + start + 1, local_name,
+                                                        local_length)) {
+            return true;
+        }
+        start = topology[end] ? end + 1 : end;
+    }
+    return false;
+}
+
+/** @brief Detach one peer whose advertised route graph has looped back to this node.
+ * @param hub Hub whose control-plane peer list is locked.
+ * @return Detached loop-forming peer, or null.
+ */
+static struct ra_link_port *detach_topology_loop_locked(struct ra_link_hub *hub) {
+    if (!hub->local_name || !*hub->local_name) {
+        return NULL;
+    }
+    _Atomic(struct ra_link_port *) *cursor = &hub->ports;
+    struct ra_link_port *port = atomic_load_explicit(cursor, memory_order_seq_cst);
+    while (port) {
+        char topology[RA_LINK_TOPOLOGY_TEXT_MAX + 1];
+        size_t length = ra_link_peer_topology(&port->peer, topology, sizeof(topology));
+        if (length < sizeof(topology) && topology_contains_local(topology, hub->local_name)) {
+            atomic_store_explicit(cursor, atomic_load_explicit(&port->next, memory_order_seq_cst),
+                                  memory_order_seq_cst);
+            return port;
+        }
+        cursor = &port->next;
+        port = atomic_load_explicit(cursor, memory_order_seq_cst);
+    }
+    return NULL;
+}
+
 /** @brief Wait outside real-time processing for readers of a detached port.
  * @param hub Hub whose published list changed.
  *
@@ -512,8 +562,9 @@ static struct ra_link_port *detach_locked(struct ra_link_hub *hub, const char *n
                                           int permanent) {
     _Atomic(struct ra_link_port *) *cursor = &hub->ports;
     struct ra_link_port *port = atomic_load_explicit(cursor, memory_order_seq_cst);
-    while (port && (name ? strcmp(port->name, name) || port->permanent != permanent
-                         : !atomic_load(&port->peer.ended))) {
+    while (port && (name             ? strcmp(port->name, name) || port->permanent != permanent
+                    : permanent >= 0 ? port->permanent != permanent
+                                     : !atomic_load(&port->peer.ended))) {
         cursor = &port->next;
         port = atomic_load_explicit(cursor, memory_order_seq_cst);
     }
@@ -536,7 +587,12 @@ static void *manage(void *argument) {
         uint64_t now_ms = monotonic_ms();
         ast_mutex_lock(&routing_lock);
         struct ra_link_port *port = detach_locked(hub, NULL, -1);
-        if (port && port->permanent && hub->reconnect) {
+        bool topology_loop = false;
+        if (!port) {
+            port = detach_topology_loop_locked(hub);
+            topology_loop = port != NULL;
+        }
+        if (port && !topology_loop && port->permanent && hub->reconnect) {
             (void)schedule_retry_locked(hub, port->name, port->transmit, port->forward, now_ms,
                                         true, false);
         }
@@ -843,6 +899,25 @@ size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
                                   memory_order_seq_cst);
             (void)schedule_retry_locked(hub, port->name, port->transmit, port->forward,
                                         monotonic_ms(), port->permanent, true);
+            topology_changed(hub);
+        }
+        ast_mutex_unlock(&routing_lock);
+        if (!port) {
+            return count;
+        }
+        wait_readers(hub);
+        report_event(hub, port->name, false);
+        release_port(port);
+        ++count;
+    }
+}
+
+size_t ra_link_hub_disconnect_nonpermanent_all(struct ra_link_hub *hub) {
+    size_t count = 0;
+    for (;;) {
+        ast_mutex_lock(&routing_lock);
+        struct ra_link_port *port = detach_locked(hub, NULL, 0);
+        if (port) {
             topology_changed(hub);
         }
         ast_mutex_unlock(&routing_lock);

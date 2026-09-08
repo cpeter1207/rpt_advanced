@@ -10,11 +10,13 @@
 #include "link_hub.h"
 #include "media.h"
 #include "schema.h"
+#include "time_announcement.h"
 #include "worker.h"
 #include <asterisk.h>
 #include <asterisk/astobj2.h>
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
+#include <asterisk/localtime.h>
 #include <asterisk/lock.h>
 #include <ctype.h>
 #include <math.h>
@@ -53,8 +55,9 @@ struct ra_runtime_node {
     struct ra_runtime *owner;           /**< Runtime retaining this stable node. */
     struct ra_node_settings settings; /**< Borrowed resolved settings retained by configuration. */
     struct ra_identifier_settings
-        status_settings;          /**< Resolved speech and Morse defaults for RF telemetry. */
-    struct ra_controller_id *ids; /**< Resolved identifier array. */
+        status_settings; /**< Resolved speech and Morse defaults for RF telemetry. */
+    struct ra_time_settings time_settings; /**< Resolved local clock-announcement format. */
+    struct ra_controller_id *ids;          /**< Resolved identifier array. */
     const char *reload_name; /**< Previous document-owned name while a replacement is pending. */
     struct ra_node_settings
         reload_settings;      /**< Previous resolved settings while a replacement is pending. */
@@ -386,8 +389,10 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
         ra_link_hub_close(&node->links);
         initialize_node_links(node);
     }
+    node->links.local_name = name;
     (void)ra_identifier_settings_resolve(document->entries, document->count, name, NULL,
                                          &node->status_settings);
+    (void)ra_time_settings_resolve(document->entries, document->count, name, &node->time_settings);
     node->controller.status_speed_wpm = (unsigned int)node->status_settings.morse_speed_wpm;
     node->controller.status_frequency_hz = (unsigned int)node->status_settings.morse_frequency_hz;
     node->controller.status_level_db = (int)node->status_settings.morse_level_db;
@@ -447,6 +452,7 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     node->worker.controller = &node->controller;
     node->worker.links = &node->links;
     node->worker.name = name;
+    node->worker.dtmf_muting = settings->dtmf_muting;
     if (ra_worker_start(&node->worker)) {
         return "cannot start radio worker";
     }
@@ -730,6 +736,9 @@ int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char 
                       struct ast_channel *channel, bool verified) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
+            if (!strcmp(local, remote)) {
+                return -1;
+            }
             if (!ra_link_access_allowed(node->settings.link_allow_nodes,
                                         node->settings.link_deny_nodes, remote, verified)) {
                 return -1;
@@ -746,6 +755,9 @@ int ra_runtime_prepare_link(struct ra_runtime *runtime, const char *local, const
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (strcmp(node->name, local)) {
             continue;
+        }
+        if (!strcmp(local, remote)) {
+            return -1;
         }
         char *destination = resolve_link_node(node, remote, NULL);
         if (!destination) {
@@ -794,6 +806,9 @@ int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const 
                            bool permanent) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
+            if (!strcmp(local, remote)) {
+                return -1;
+            }
             return ra_link_hub_attach(&node->links, remote, channel, node->connection.radio.linear,
                                       transmit, forward, permanent);
         }
@@ -805,6 +820,9 @@ bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *lo
                                       const char *remote, bool transmit, bool forward) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
+            if (!strcmp(local, remote)) {
+                return false;
+            }
             return ra_link_hub_retain_permanent(&node->links, remote, transmit, forward);
         }
     }
@@ -842,6 +860,17 @@ size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local) 
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
             size_t count = ra_link_hub_disconnect_all(&node->links);
+            node->remote_node[0] = '\0';
+            return count;
+        }
+    }
+    return 0;
+}
+
+size_t ra_runtime_disconnect_nonpermanent_all(struct ra_runtime *runtime, const char *local) {
+    for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
+        if (!strcmp(node->name, local)) {
+            size_t count = ra_link_hub_disconnect_nonpermanent_all(&node->links);
             node->remote_node[0] = '\0';
             return count;
         }
@@ -1043,31 +1072,70 @@ bool ra_runtime_telemetry_speech_text(const char *source, const char *node_one,
     return true;
 }
 
-/** @brief Prepare and queue one spoken RF telemetry reply with its Morse fallback.
+/** @brief Prepare and queue one RF telemetry reply with its Morse fallback.
  * @param node Running node whose inherited speech and Morse settings apply.
- * @param text Bounded ASCII telemetry text.
- * @param node_one First known numeric node identity, if any.
- * @param node_two Second known numeric node identity, if any.
+ * @param speech Prepared speech text.
+ * @param morse Morse-safe fallback text.
  * @return Zero when the reply is queued, minus one if its bounded queue is full or invalid.
  */
-static int queue_status_speech(struct ra_runtime_node *node, const char *text, const char *node_one,
-                               const char *node_two) {
+static int queue_status(struct ra_runtime_node *node, const char *speech, const char *morse) {
     reclaim_status_audio(node);
-    char speech[RA_CONTROLLER_STATUS_TEXT_MAX * 2];
-    (void)ra_runtime_telemetry_speech_text(text, node_one, node_two, speech, sizeof(speech));
     struct ra_identifier_settings settings = node->status_settings;
     settings.file = "";
     settings.speech_text = speech;
-    settings.morse_text = text;
+    settings.morse_text = morse;
     int16_t *audio = NULL;
     size_t samples = 0;
     /* The serial control executor may wait for Piper; the real-time worker only reads PCM. */
     ra_identifier_prepare(&settings, node->controller.rate, &audio, &samples);
-    if (!ra_controller_queue_status(&node->controller, text, audio, samples)) {
+    if (!ra_controller_queue_status(&node->controller, morse, audio, samples)) {
         ast_free(audio);
         return -1;
     }
     return 0;
+}
+
+/** @brief Prepare a normal RF-status reply from its Morse-safe text.
+ * @param node Running node whose inherited speech and Morse settings apply.
+ * @param text Bounded Morse-safe status text.
+ * @param node_one First known numeric node identity, if any.
+ * @param node_two Second known numeric node identity, if any.
+ * @return Zero when queued, otherwise minus one.
+ */
+static int queue_status_speech(struct ra_runtime_node *node, const char *text, const char *node_one,
+                               const char *node_two) {
+    char speech[RA_CONTROLLER_STATUS_TEXT_MAX * 2];
+    (void)ra_runtime_telemetry_speech_text(text, node_one, node_two, speech, sizeof(speech));
+    return queue_status(node, speech, text);
+}
+
+/** @brief Queue the selected node's local clock announcement.
+ * @param runtime Active node runtime.
+ * @param local Exact local node name.
+ * @return Zero when the announcement was queued, otherwise minus one.
+ */
+int ra_runtime_queue_time(struct ra_runtime *runtime, const char *local) {
+    time_t now = time(NULL);
+    struct timeval when;
+    struct ast_tm ast_time;
+    struct tm local_time;
+    char speech[RA_CONTROLLER_STATUS_TEXT_MAX];
+    char morse[RA_CONTROLLER_STATUS_TEXT_MAX];
+    when = (struct timeval){.tv_sec = now, .tv_usec = 0};
+    if (now == (time_t)-1 || !ast_localtime(&when, &ast_time, NULL)) {
+        return -1;
+    }
+    local_time = (struct tm){.tm_hour = ast_time.tm_hour, .tm_min = ast_time.tm_min};
+    for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
+        if (!strcmp(node->name, local)) {
+            if (!ra_time_announcement_format(&local_time, node->time_settings.format, speech,
+                                             sizeof(speech), morse, sizeof(morse))) {
+                return -1;
+            }
+            return queue_status(node, speech, morse);
+        }
+    }
+    return -1;
 }
 
 int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, bool last_keyed) {

@@ -121,6 +121,12 @@ static bool render(void *context, bool receiving, int16_t *audio, size_t samples
             queue_digit(worker, 0, worker->now_ms);
             worker->digit_timeout = false;
         }
+        if (worker->was_receiving && !receiving && worker->digit_timeout) {
+            /* The receiver transition is an unambiguous local end-of-command marker. */
+            queue_digit(worker, '#', worker->now_ms);
+            worker->digit_timeout = false;
+        }
+        worker->was_receiving = receiving;
     }
     if (worker->links) {
         return ra_link_hub_process(worker->links, worker->controller, receiving, audio, samples,
@@ -169,6 +175,7 @@ int ra_worker_start(struct ra_worker *worker) {
         if (!worker->detector) {
             return ENOMEM;
         }
+        ra_dtmf_set_muting(worker->detector, worker->dtmf_muting);
     }
     atomic_init(&worker->stop, false);
     atomic_init(&worker->digit_write, 0);
@@ -178,6 +185,7 @@ int ra_worker_start(struct ra_worker *worker) {
     worker->digit_thread_started = false;
     worker->result = 0;
     worker->digit_timeout = false;
+    worker->was_receiving = false;
     worker->radio.receiving = false;
     worker->radio.keyed = false;
     worker->radio.render = render;

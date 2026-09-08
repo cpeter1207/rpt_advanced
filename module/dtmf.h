@@ -18,15 +18,24 @@ struct ra_dtmf_detector;
  */
 struct ra_dtmf_detector *ra_dtmf_open(unsigned int rate);
 
-/** @brief Detect one hardware block and mute a completed digit in that same frame.
+/** @brief Select whether completed DTMF frames are silenced before audio routing.
+ * @param detector Owned detector.
+ * @param enabled True to silence a frame containing a completed digit.
+ *
+ * Detection and DTMF command delivery continue when muting is disabled. This is set before the
+ * hardware-paced worker starts, so no synchronization is required in the audio callback.
+ */
+void ra_dtmf_set_muting(struct ra_dtmf_detector *detector, bool enabled);
+
+/** @brief Detect one hardware block and optionally mute a completed digit in that same frame.
  * @param detector Owned detector.
  * @param receiving Qualified carrier; otherwise feed silence to finish a pending digit.
  * @param audio Mutable signed-linear PCM block.
  * @param samples Block length bounded by the originating Asterisk frame.
  * @return Completed DTMF character, or zero when no digit completed.
  *
- * The detector retains only fixed recurrence state. It zeroes the complete input block exactly
- * when it returns a completed digit, matching the previous callback-visible muting behavior.
+ * The detector retains only fixed recurrence state. When enabled with @ref ra_dtmf_set_muting,
+ * it zeroes the complete input block exactly when it returns a completed digit.
  */
 char ra_dtmf_process(struct ra_dtmf_detector *detector, bool receiving, int16_t *audio,
                      size_t samples);

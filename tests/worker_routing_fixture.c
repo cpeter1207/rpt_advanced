@@ -20,6 +20,12 @@ struct ra_dtmf_detector *ra_dtmf_open(unsigned int rate) {
     return ra_test_dtmf_fail ? NULL : (struct ra_dtmf_detector *)&detector_identity;
 }
 
+/** @copydoc ra_dtmf_set_muting */
+void ra_dtmf_set_muting(struct ra_dtmf_detector *detector, bool enabled) {
+    assert(detector == (struct ra_dtmf_detector *)&detector_identity);
+    (void)enabled;
+}
+
 /** @brief Return the fixture's configured digit without processing audio. */
 char ra_dtmf_process(struct ra_dtmf_detector *detector, bool receiving, int16_t *audio,
                      size_t samples) {

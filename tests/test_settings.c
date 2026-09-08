@@ -11,9 +11,10 @@
 static void defaults(void) {
     struct ra_node_settings node;
     struct ra_identifier_settings id;
+    struct ra_time_settings time;
     assert(!ra_node_settings_resolve(NULL, 0, "usb", &node));
-    assert(node.enabled && node.full_duplex && node.hang_ms == 0 && node.telemetry_duck_db == -20 &&
-           node.sample_rate == 0);
+    assert(node.enabled && node.full_duplex && node.dtmf_muting && node.hang_ms == 0 &&
+           node.telemetry_duck_db == -20 && node.sample_rate == 0);
     assert(node.courtesy_delay_ms == 250 && !*node.receiver_courtesy_sound_file &&
            !*node.receiver_courtesy_speech_text && !*node.receiver_courtesy_morse_text &&
            !*node.link_courtesy_sound_file && !*node.link_courtesy_speech_text &&
@@ -31,6 +32,7 @@ static void defaults(void) {
     assert(!strcmp(id.speech_model, "en_US-lessac-medium.onnx"));
     assert(id.speech_speed_percent == 100 && id.morse_speed_wpm == 20 &&
            id.morse_frequency_hz == 800 && id.speech_level_db == 0 && id.morse_level_db == -6);
+    assert(!ra_time_settings_resolve(NULL, 0, "usb", &time) && time.format == 12);
 }
 
 /** @brief Exercise every public option and scoped overrides independent of file order. */
@@ -40,6 +42,8 @@ static void configured(void) {
         {"general", "transmit_hang_ms", "100"},
         {"general", "node_enabled", "no"},
         {"general", "full_duplex", "no"},
+        {"general", "dtmf_muting", "no"},
+        {"usb", "dtmf_muting", "yes"},
         {"general", "telemetry_duck_db", "-18"},
         {"general", "courtesy_delay_ms", "300"},
         {"general", "receiver_courtesy_morse_text", "R"},
@@ -80,6 +84,8 @@ static void configured(void) {
         {"morse usb", "frequency_hz", "750"},
         {"morse usb", "speed_wpm", "25"},
         {"morse usb", "level_db", "-8"},
+        {"time", "format", "24"},
+        {"time usb", "format", "12"},
         {"identifier usb welcome", "speech_text", ""},
         {"identifier usb welcome", "speech_level_db", "-2"},
         {"identifier usb welcome", "morse_level_db", "-7"},
@@ -87,8 +93,9 @@ static void configured(void) {
     size_t count = sizeof(entries) / sizeof(entries[0]);
     struct ra_node_settings node;
     struct ra_identifier_settings id;
+    struct ra_time_settings time;
     assert(!ra_node_settings_resolve(entries, count, "usb", &node));
-    assert(!node.enabled && !node.full_duplex && node.hang_ms == 500 &&
+    assert(!node.enabled && !node.full_duplex && node.dtmf_muting && node.hang_ms == 500 &&
            node.telemetry_duck_db == -18 && node.sample_rate == 48000);
     assert(node.courtesy_delay_ms == 300 && !strcmp(node.receiver_courtesy_morse_text, "R") &&
            !strcmp(node.link_courtesy_morse_text, "L") &&
@@ -108,6 +115,7 @@ static void configured(void) {
     assert(id.speech_speed_percent == 80 && id.speech_level_db == -2 &&
            !strcmp(id.morse_text, "KG0BP"));
     assert(id.morse_speed_wpm == 25 && id.morse_frequency_hz == 750 && id.morse_level_db == -7);
+    assert(!ra_time_settings_resolve(entries, count, "usb", &time) && time.format == 12);
 }
 
 /** @brief Resolve flat, node, and set defaults by scope rather than file order. */
@@ -158,10 +166,38 @@ static void scoped_default_matching(void) {
     assert(!strcmp(id.speech_model, "node.onnx"));
 }
 
+/** @brief Verify node DTMF muting inherits the global value and permits an override. */
+static void dtmf_muting_inherits(void) {
+    const struct ra_config_entry shared[] = {{"general", "dtmf_muting", "no"}};
+    const struct ra_config_entry overridden[] = {{"general", "dtmf_muting", "no"},
+                                                 {"usb", "dtmf_muting", "yes"}};
+    struct ra_node_settings node;
+    assert(!ra_node_settings_resolve(shared, sizeof(shared) / sizeof(shared[0]), "usb", &node));
+    assert(!node.dtmf_muting);
+    assert(!ra_node_settings_resolve(overridden, sizeof(overridden) / sizeof(overridden[0]), "usb",
+                                     &node));
+    assert(node.dtmf_muting);
+}
+
+/** @brief Time-format defaults inherit from the flat section and accept only 12 or 24 hours. */
+static void time_settings(void) {
+    const struct ra_config_entry inherited[] = {{"time", "format", "24"}};
+    const struct ra_config_entry overridden[] = {{"time", "format", "24"},
+                                                 {"time usb", "format", "12"}};
+    struct ra_time_settings time;
+    assert(!ra_time_settings_resolve(inherited, 1, "usb", &time) && time.format == 24);
+    assert(!ra_time_settings_resolve(overridden, 2, "usb", &time) && time.format == 12);
+    struct ra_config_entry invalid = {"time usb", "format", "13"};
+    assert(!strcmp(ra_time_settings_resolve(&invalid, 1, "usb", &time), "format"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_TIME, "format", "12"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_TIME, "format", "13"));
+}
+
 /** @brief Every typed setting rejects invalid text without committing earlier fields. */
 static void invalid(void) {
     const char *node_keys[] = {"node_enabled",
                                "full_duplex",
+                               "dtmf_muting",
                                "transmit_hang_ms",
                                "telemetry_duck_db",
                                "courtesy_delay_ms",
@@ -227,7 +263,7 @@ static void command_settings(void) {
                           "link_command_full_status",
                           "link_command_reconnect_all",
                           "link_command_permanent_local_monitor"};
-    for (size_t i = 0; i < RA_LINK_ACTION_COUNT; ++i) {
+    for (size_t i = 0; i < sizeof(keys) / sizeof(*keys); ++i) {
         struct ra_config_entry entries[] = {{"general", keys[i], "A"}, {"usb", keys[i], ""}};
         struct ra_node_settings node;
         assert(!ra_settings_validate(false, keys[i], "A"));
@@ -251,6 +287,8 @@ int main(void) {
     configured();
     scoped_default_precedence();
     scoped_default_matching();
+    dtmf_muting_inherits();
+    time_settings();
     invalid();
     directory_settings();
     command_settings();

@@ -284,6 +284,28 @@ int main(void) {
     assert(delivered_count == 2 && delivered[0].digit == '5' && delivered[0].now_ms == 5000 &&
            !delivered[1].digit && delivered[1].now_ms == 8000 && ra_test_dtmf_closed == 3);
 
+    delivered_count = 0;
+    assert(!ra_worker_start(&worker));
+    worker.now_ms = 8100;
+    ra_test_dtmf_digit = '5';
+    (void)worker.radio.render(&worker, true, audio, 160);
+    ra_test_dtmf_digit = 0;
+    worker.now_ms = 8200;
+    (void)worker.radio.render(&worker, false, NULL, 0);
+    ra_worker_stop(&worker);
+    assert(delivered_count == 2 && delivered[0].digit == '5' && delivered[0].now_ms == 8100 &&
+           delivered[1].digit == '#' && delivered[1].now_ms == 8200 && ra_test_dtmf_closed == 4);
+
+    /* Receiver unkey without a collected digit does not synthesize a terminator. */
+    delivered_count = 0;
+    assert(!ra_worker_start(&worker));
+    worker.now_ms = 8300;
+    (void)worker.radio.render(&worker, true, audio, 160);
+    worker.now_ms = 8400;
+    (void)worker.radio.render(&worker, false, NULL, 0);
+    ra_worker_stop(&worker);
+    assert(!delivered_count && ra_test_dtmf_closed == 5);
+
     assert(!ra_worker_start(&worker));
     stop_dispatch_on_sleep = true;
     struct captured_thread *dispatcher = captured(worker.digit_thread);
@@ -291,7 +313,7 @@ int main(void) {
     dispatcher->ran = true;
     stop_dispatch_on_sleep = false;
     ra_worker_stop(&worker);
-    assert(ra_test_dtmf_closed == 4);
+    assert(ra_test_dtmf_closed == 6);
 
     delivered_count = 0;
     assert(!ra_worker_start(&worker));
@@ -311,7 +333,7 @@ int main(void) {
     ra_worker_stop(&worker);
     assert(delivered_count == 2 && delivered[0].digit == RA_WORKER_DIGIT_DROPPED &&
            !delivered[0].now_ms && delivered[1].digit == '6' && delivered[1].now_ms == 10000);
-    assert(ra_test_dtmf_closed == 5);
+    assert(ra_test_dtmf_closed == 7);
     puts("joinable channel worker lifecycle tests passed");
     return 0;
 }

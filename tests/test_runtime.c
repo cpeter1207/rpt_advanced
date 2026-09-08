@@ -14,6 +14,7 @@
 #include <asterisk.h>
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
+#include <asterisk/localtime.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -138,6 +139,40 @@ static ra_link_hub_event_fn inbound_event_callbacks[2];
 static void *inbound_event_contexts[2];
 /** @brief Number of lifecycle handlers captured after the current runtime start. */
 static size_t inbound_event_callback_count;
+/** @brief Force the next local civil-time conversion to fail. */
+static bool fail_localtime;
+/** @brief Force the next wall-clock read to fail. */
+static bool fail_wall_clock;
+/** @brief Return an invalid civil hour to exercise announcement validation. */
+static bool invalid_localtime;
+
+/** @brief Provide a deterministic wall clock or its documented failure value.
+ * @param output Optional destination for the selected epoch.
+ * @return Fixed valid epoch, or minus one when failure is injected.
+ */
+time_t __wrap_time(time_t *output) {
+    time_t value = fail_wall_clock ? (time_t)-1 : (time_t)0;
+    if (output) {
+        *output = value;
+    }
+    return value;
+}
+
+/** @brief Supply a fixed valid local civil time for local-time telemetry tests.
+ * @param when Current wall-clock input.
+ * @param output Local civil-time destination.
+ * @param zone Unused system-timezone selector.
+ * @return @p output after filling a deterministic afternoon time.
+ */
+struct ast_tm *ast_localtime(const struct timeval *when, struct ast_tm *output, const char *zone) {
+    assert(when && output && !zone);
+    if (fail_localtime) {
+        return NULL;
+    }
+    output->tm_hour = invalid_localtime ? 24 : 13;
+    output->tm_min = 7;
+    return output;
+}
 /** @brief Invoke the closing hub's reader callback after the runtime marks its worker stopped. */
 static bool invoke_closed_digit;
 /** @brief Number of IAX DTMF events delivered through the runtime bridge. */
@@ -466,6 +501,12 @@ size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
     return 0;
 }
 
+/** @brief Accept nonpermanent disconnect-all requests in the runtime fixture. */
+size_t ra_link_hub_disconnect_nonpermanent_all(struct ra_link_hub *hub) {
+    assert(hub);
+    return 0;
+}
+
 /* Fixture stub: accept retained-recovery resumption in the runtime fixture.
  * @param hub Routing hub owned by the fixture runtime.
  * @return Zero; the fixture has no retained peers.
@@ -713,6 +754,7 @@ int ast_call(struct ast_channel *channel, const char *address, int timeout) {
 }
 int ra_worker_start(struct ra_worker *worker) {
     assert(worker->channel && worker->controller->rate == rate);
+    assert(worker->dtmf_muting);
     if (!strcmp(worker->controller->courtesy[RA_COURTESY_RECEIVER].settings.morse_text, "R")) {
         assert(worker->controller->courtesy[RA_COURTESY_RECEIVER].settings.morse_frequency_hz ==
                500);
@@ -1195,6 +1237,19 @@ int main(void) {
     release_status_audio = true;
     assert(!ra_runtime_queue_link_status(&runtime, "alpha", false));
     assert(!strcmp(queued_status, "NO LINKS"));
+    assert(!ra_runtime_queue_time(&runtime, "alpha"));
+    assert(!strcmp(queued_status, "1:07 PM"));
+    assert(!strcmp(prepared_speech, "Good Afternoon. The time is 1:07 PM."));
+    assert(ra_runtime_queue_time(&runtime, "missing") == -1);
+    fail_wall_clock = true;
+    assert(ra_runtime_queue_time(&runtime, "alpha") == -1);
+    fail_wall_clock = false;
+    fail_localtime = true;
+    assert(ra_runtime_queue_time(&runtime, "alpha") == -1);
+    fail_localtime = false;
+    invalid_localtime = true;
+    assert(ra_runtime_queue_time(&runtime, "alpha") == -1);
+    invalid_localtime = false;
     queued_status_count = 0;
     assert(!ra_runtime_queue_link_event(&runtime, "alpha", "123", true));
     assert(queued_status_count == 2 && !strcmp(queued_status, "123 CONNECTED"));
@@ -1270,14 +1325,22 @@ int main(void) {
     queued_status_limit = SIZE_MAX;
     assert(ra_runtime_queue_link_status(&runtime, "missing", false) == -1);
     assert(!ra_runtime_digit(&runtime, "missing", '*', 0, &operation));
+    struct ra_runtime no_last_runtime = {0};
+    assert(!ra_runtime_start(&no_last_runtime, &document));
+    assert(!digits_fixture(&no_last_runtime, "*30#", &operation));
+    ra_runtime_stop(&no_last_runtime);
     assert(!digits_fixture(&runtime, "*30#", &operation));
     assert(!digits_fixture(&runtime, "*99#", &operation));
     assert(digits_fixture(&runtime, "*3123#", &operation));
     assert(operation.action == RA_LINK_TRANSCEIVE && !strcmp(operation.remote, "123"));
-    assert(digits_fixture(&runtime, "*10#", &operation));
-    assert(operation.action == RA_LINK_DISCONNECT && !strcmp(operation.remote, "123"));
+    assert(digits_fixture(&runtime, "*30#", &operation));
+    assert(operation.action == RA_LINK_TRANSCEIVE && !strcmp(operation.remote, "123"));
     assert(digits_fixture(&runtime, "*70", &operation));
     assert(operation.action == RA_LINK_STATUS && !*operation.remote);
+    assert(digits_fixture(&runtime, "*10", &operation));
+    assert(operation.action == RA_LINK_DISCONNECT_NONPERMANENT_ALL && !*operation.remote);
+    assert(digits_fixture(&runtime, "*722", &operation));
+    assert(operation.action == RA_LINK_TIME && !*operation.remote);
     assert(!digits_fixture(&runtime,
                            "*31234567890123456789012345678901234567890123456789012345678901234#",
                            &operation));
@@ -1287,19 +1350,23 @@ int main(void) {
     assert(!ra_runtime_authorize(&runtime, "missing", "123", "127.0.0.1"));
     assert(ra_runtime_authorize(&runtime, "alpha", "123", "127.0.0.1"));
     assert(ra_runtime_accept(&runtime, "missing", "123", NULL, true) == -1);
+    assert(ra_runtime_accept(&runtime, "alpha", "alpha", NULL, true) == -1);
     assert(ra_runtime_accept(&runtime, "alpha", "123", NULL, false) == -1);
     assert(
         !ra_runtime_accept(&runtime, "alpha", "123", (struct ast_channel *)&link_identity, true));
     assert(!ra_runtime_disconnect(&runtime, "missing", "123"));
     assert(!ra_runtime_disconnect_all(&runtime, "missing"));
+    assert(!ra_runtime_disconnect_nonpermanent_all(&runtime, "missing"));
     assert(!ra_runtime_reconnect_all(&runtime, "missing"));
     assert(!ra_runtime_retain_permanent_link(&runtime, "missing", "123", true, true));
+    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "alpha", true, true));
     link_error = 10;
     assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true));
     link_error = 0;
     assert(ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true));
     assert(retained_permanent_links == 2);
     assert(!ra_runtime_disconnect_all(&runtime, "alpha"));
+    assert(!ra_runtime_disconnect_nonpermanent_all(&runtime, "alpha"));
     assert(!ra_runtime_reconnect_all(&runtime, "alpha"));
     link_error = 7;
     assert(!ra_runtime_disconnect(&runtime, "alpha", "123"));
@@ -1310,7 +1377,9 @@ int main(void) {
     assert(ra_runtime_disconnect_permanent(&runtime, "alpha", "123"));
     assert(connect_fixture(&runtime, "missing") == -1);
     assert(ra_runtime_prepare_link(&runtime, "alpha", "123", NULL) == -1);
+    assert(ra_runtime_prepare_link(&runtime, "alpha", "alpha", NULL) == -1);
     assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true, false) == -1);
+    assert(ra_runtime_attach_link(&runtime, "alpha", "alpha", NULL, true, true, false) == -1);
     link_dials = 0;
     assert(!connect_fixture(&runtime, "alpha"));
     assert(link_dials == 1);

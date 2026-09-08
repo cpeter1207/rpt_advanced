@@ -24,7 +24,9 @@ enum ra_link_action {
     RA_LINK_FULL_STATUS,             /**< Report the connected network's topology. */
     RA_LINK_RECONNECT_ALL,           /**< Restore links saved by disconnect-all. */
     RA_LINK_PERMANENT_LOCAL_MONITOR, /**< Maintain a local-monitor connection. */
-    RA_LINK_ACTION_COUNT             /**< Number of configurable linking actions. */
+    RA_LINK_DISCONNECT_NONPERMANENT_ALL, /**< Disconnect every active nonpermanent link. */
+    RA_LINK_TIME,                        /**< Announce this node's local clock. */
+    RA_LINK_ACTION_COUNT                 /**< Number of configurable linking actions. */
 };
 
 /** @brief One configured command prefix, excluding its initiating asterisk. */

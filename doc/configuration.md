@@ -30,8 +30,8 @@ section win. Empty media paths or text clear inherited values.
 
 Node and ID-set names are case-sensitive and cannot contain whitespace or square
 brackets. Scoped headers use one space between components. `general` and
-`identifier`, `speech`, and `morse` are reserved flat-section names. Scoped
-identifier, speech, and Morse headers must name an existing node, which may be
+`identifier`, `speech`, `morse`, and `time` are reserved flat-section names. Scoped
+identifier, speech, Morse, and time headers must name an existing node, which may be
 declared later in the file. Repeated section headers merge options without
 creating duplicate nodes or ID sets. Unknown options and invalid values are
 rejected even if a later entry would override them. There is no fixed limit on
@@ -43,6 +43,7 @@ the number of nodes or ID sets.
 | --- | --- | --- |
 | `node_enabled` | yes | Start the configured node. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
+| `dtmf_muting` | yes | Silence a local received PCM frame when an in-band DTMF digit completes decoding, before it reaches the local controller or link router. DTMF command decoding remains active when disabled. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after audio ends. |
 | `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, and Morse identifiers and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
 | `courtesy_delay_ms` | 250 | Delay after local-receiver or linked-audio unkey before a courtesy announcement starts. Resumed local or linked receive before the delay ends cancels the pending tone. PTT remains asserted until a started announcement completes. |
@@ -68,9 +69,9 @@ the number of nodes or ID sets.
 Link access and directory settings are validated and inherit from `[general]` to each node. They
 apply to incoming calls and to selecting a direct peer for remote-command mode; explicit denial
 always wins. There are no access exemptions. These are rpt_advanced configuration lists, not ASL
-AstDB lists, so a successful module reload applies an edit.
-An explicit empty node value clears its inherited list. Spaces around entries
-are allowed; empty entries and wildcard patterns are not. Entries match complete
+AstDB lists, so a successful module reload applies an edit. An explicit empty node value clears
+its inherited list. Spaces around entries are allowed; empty entries and wildcard patterns are
+not. Entries match complete
 node identities, not prefixes. Identity verification is separate: listing a
 node never authenticates it. A local static record is checked first. If it is
 absent, `link_lookup_method` selects DNS, the external file, or DNS followed by
@@ -96,10 +97,13 @@ Each `link_command_*` value is the DTMF prefix after the initiating `*`. Empty
 values disable that operation. Prefixes cannot overlap. The defaults use the
 standard app_rpt link-function assignments, including the `806` and `816`
 forms used by its reference configuration; an operator may instead map
-disconnect-all and reconnect-all to `71` and `74`. Node-free commands execute
-when their complete prefix is received. A command that takes a destination ends
-with `#` or after a three-second interdigit timeout. Prefixes contain up to 63
-DTMF digits from `0` through `9` and uppercase `A` through `D`.
+disconnect-all and reconnect-all to `71` and `74`. A node-free command executes
+when its complete prefix is received unless it prefixes a longer node-free
+command; in that case the longer command has priority, while `#`, receiver
+unkey, or the three-second timeout selects the shorter command. A
+destination-taking command ends with `#`, receiver unkey, or after a
+three-second interdigit timeout. Prefixes contain up to 63 DTMF digits from
+`0` through `9` and uppercase `A` through `D`.
 
 | Option | Default | Operation |
 | --- | --- | --- |
@@ -122,19 +126,37 @@ Destination-taking operations accept node number `0` as the last node used by a
 previous linking operation. Remote-command mode may select only an attached peer
 whose node identity independently resolves and passes the same per-node
 allow/deny policy as an incoming peer. The policy is rechecked before each
-forwarded digit. It forwards subsequent DTMF digits only to that peer; it does
-not invoke the local command decoder while active. `#` always exits
-remote-command mode locally. An attached peer's IAX DTMF end events enter the
-same control queue only while its identity passes the current per-node
-allow/deny policy. An explicitly outbound audio link may remain connected after
-a policy change, but its rejected peer DTMF is ignored. DTMF starts and
-malformed end events are ignored.
+forwarded digit. It forwards subsequent DTMF digits only to that peer;
+it does not invoke the local command decoder while active. `#` and local
+receiver unkey always exit remote-command mode locally. An attached peer's IAX
+DTMF end events enter the same control queue only while its identity passes the
+current per-node allow/deny policy. An explicitly outbound audio link may
+remain connected after a policy change, but its rejected peer DTMF is ignored.
+DTMF starts and malformed end events are ignored.
 
-Local in-band DTMF is decoded in the radio worker. When a digit completes, the
-current local PCM frame is silenced before it reaches the local controller or
-link router. There is no configuration switch to retain that completed frame.
-This does not apply to IAX DTMF control events, which contain no program-audio
-frame.
+Local in-band DTMF is decoded in the radio worker. With `dtmf_muting = yes`, a
+frame containing a completed digit is silenced before it reaches the local
+controller or link router. Each node inherits this setting from `[general]` and
+can override it in its own section. This does not apply to IAX DTMF control
+events, which contain no program-audio frame. Local receiver unkey terminates
+an active DTMF command exactly as `#` does.
+
+`*722` announces the local system time. It uses speech with the selected node's
+`[speech]` defaults and falls back to Morse with its `[morse]` defaults if speech
+cannot be prepared. Speech says the appropriate greeting followed by the time;
+Morse sends only the time.
+
+`*10` disconnects every currently connected nonpermanent direct peer. It does
+not disconnect permanent peers or create reconnect-all state.
+
+## Time settings
+
+`[time]` supplies clock-announcement defaults and `[time node-name]` overrides them
+for one node.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `format` | `12` | Clock format for `*722`: `12` sends an AM/PM time; `24` sends a 24-hour time. The local system timezone is used. |
 
 ## Link lifetime, recovery, and duplex
 
@@ -182,6 +204,8 @@ after topology changes and on a periodic refresh with a 30-second cadence. If a
 route list cannot fit the bounded advertisement, its terminal `R000000` entry
 means that the list was truncated. These advertisements and cached inbound `L `
 messages are control-plane data and never run in the hardware-paced audio path.
+An inbound topology that already reaches the local node is a loop: the direct
+peer is disconnected without retry. Direct self-links are rejected.
 
 ## Identifier settings
 
@@ -218,7 +242,8 @@ Identifier-set overrides are `speech_model`, `speech_speed_percent`, and
 that node. The `morse_frequency_hz`, `morse_speed_wpm`, and `morse_level_db`
 names are valid in `[identifier]`, `[identifier node]`, and an identifier-set
 section. A matching `[morse]` or `[morse node]` value overrides an
-identifier-default value; an identifier-set value overrides every default.
+identifier-default value;
+an identifier-set value overrides every default.
 
 | Option | Default | Meaning |
 | --- | --- | --- |

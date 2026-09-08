@@ -13,6 +13,7 @@ static void valid(void) {
                         "identifier",
                         "morse",
                         "speech",
+                        "time",
                         "abc",
                         "usb",
                         "usb1",
@@ -20,6 +21,7 @@ static void valid(void) {
                         "identifier usb",
                         "morse usb",
                         "speech usb",
+                        "time usb",
                         "identifier usb welcome",
                         "identifier usb regular",
                         "identifier usb welcome",
@@ -33,6 +35,7 @@ static void valid(void) {
         {"morse usb", "frequency_hz", "800"},
         {"speech", "voice", "shared.onnx"},
         {"speech usb", "speed_percent", "100"},
+        {"time usb", "format", "24"},
         {"identifier usb welcome", "first_key_only", "yes"},
     };
     struct ra_document document = {entries, sizeof(entries) / sizeof(entries[0]), sections,
@@ -67,7 +70,9 @@ static void sections_invalid(void) {
                    "morse  usb",
                    "morse usb extra",
                    "speech usb ",
-                   "speech usb extra"};
+                   "speech usb extra",
+                   "time usb ",
+                   "time usb extra"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
         struct ra_document document = {.sections = &bad[i], .section_count = 1};
         const char *section;
@@ -76,7 +81,7 @@ static void sections_invalid(void) {
         assert(section == bad[i] && !key);
     }
     char *unknown[] = {"identifier missing", "identifier missing welcome", "morse missing",
-                       "speech missing"};
+                       "speech missing", "time missing"};
     for (size_t i = 0; i < sizeof(unknown) / sizeof(unknown[0]); ++i) {
         struct ra_document document = {.sections = &unknown[i], .section_count = 1};
         const char *section;
@@ -89,7 +94,7 @@ static void sections_invalid(void) {
 
 /** @brief Unknown and invalid options are rejected even when later overridden. */
 static void options_invalid(void) {
-    char *sections[] = {"usb", "identifier", "morse", "speech"};
+    char *sections[] = {"usb", "identifier", "morse", "speech", "time"};
     struct ra_config_entry entry = {"usb", "bogus", "yes"};
     struct ra_document document = {&entry, 1, sections, 2};
     const char *section;
@@ -117,6 +122,10 @@ static void options_invalid(void) {
     entry.key = "level_db";
     entry.value = "-3";
     assert(!ra_document_validate(&document, &section, &key));
+    entry.section = "time";
+    entry.key = "format";
+    entry.value = "13";
+    assert(!strcmp(ra_document_validate(&document, &section, &key), "invalid option value"));
 }
 
 /** @brief Execute all schema and enumeration tests.

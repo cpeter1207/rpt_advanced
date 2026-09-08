@@ -15,7 +15,8 @@ enum field_type {
     FIELD_LOOKUP_METHOD,
     FIELD_BOOLEAN,
     FIELD_NUMBER,
-    FIELD_SIGNED
+    FIELD_SIGNED,
+    FIELD_TIME_FORMAT
 };
 
 /** @brief One schema entry mapping a public name to a typed settings member. */
@@ -31,6 +32,7 @@ struct field {
 static const struct field node_fields[] = {
     {"node_enabled", FIELD_BOOLEAN, offsetof(struct ra_node_settings, enabled), 0, 0},
     {"full_duplex", FIELD_BOOLEAN, offsetof(struct ra_node_settings, full_duplex), 0, 0},
+    {"dtmf_muting", FIELD_BOOLEAN, offsetof(struct ra_node_settings, dtmf_muting), 0, 0},
     {"transmit_hang_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, hang_ms), 0, UINT64_MAX},
     {"telemetry_duck_db", FIELD_SIGNED, offsetof(struct ra_node_settings, telemetry_duck_db), 60,
      0},
@@ -158,6 +160,11 @@ static const struct field morse_fields[] = {
     {"level_db", FIELD_SIGNED, offsetof(struct ra_identifier_settings, morse_level_db), 60, 0},
 };
 
+/** @brief Per-node clock-announcement settings. */
+static const struct field time_fields[] = {
+    {"format", FIELD_TIME_FORMAT, offsetof(struct ra_time_settings, format), 0, 0},
+};
+
 /** @brief Assign a validated value at its schema-declared, naturally aligned member offset.
  * @param field Schema descriptor.
  * @param text Borrowed configuration value.
@@ -187,9 +194,11 @@ static bool assign(const struct field *field, const char *text, void *output) {
             return false;
         }
         *(bool *)destination = value;
-    } else if (field->type == FIELD_NUMBER) {
+    } else if (field->type == FIELD_NUMBER || field->type == FIELD_TIME_FORMAT) {
         uint64_t value;
-        if (!ra_config_unsigned(text, field->minimum, field->maximum, &value)) {
+        if (!ra_config_unsigned(text, field->type == FIELD_TIME_FORMAT ? 12 : field->minimum,
+                                field->type == FIELD_TIME_FORMAT ? 24 : field->maximum, &value) ||
+            (field->type == FIELD_TIME_FORMAT && value != 12 && value != 24)) {
             return false;
         }
         *(uint64_t *)destination = value;
@@ -227,10 +236,16 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
     } else if (kind == RA_SETTINGS_SPEECH) {
         fields = speech_fields;
         count = sizeof(speech_fields) / sizeof(speech_fields[0]);
+    } else if (kind == RA_SETTINGS_TIME) {
+        fields = time_fields;
+        count = sizeof(time_fields) / sizeof(time_fields[0]);
     }
     struct ra_node_settings node;
     struct ra_identifier_settings id;
-    void *destination = kind == RA_SETTINGS_NODE ? (void *)&node : (void *)&id;
+    struct ra_time_settings time;
+    void *destination = kind == RA_SETTINGS_NODE   ? (void *)&node
+                        : kind == RA_SETTINGS_TIME ? (void *)&time
+                                                   : (void *)&id;
     for (size_t i = 0; i < count; ++i) {
         if (!strcmp(key, fields[i].name)) {
             return assign(&fields[i], value, destination) ? NULL : "invalid option value";
@@ -305,6 +320,7 @@ const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size
                                      const char *node, struct ra_node_settings *result) {
     struct ra_node_settings temporary = {.enabled = true,
                                          .full_duplex = true,
+                                         .dtmf_muting = true,
                                          .telemetry_duck_db = -20,
                                          .courtesy_delay_ms = 250,
                                          .receiver_courtesy_sound_file = "",
@@ -356,6 +372,17 @@ const char *ra_identifier_settings_resolve(const struct ra_config_entry *entries
         error = resolve(identifier_fields, sizeof(identifier_fields) / sizeof(identifier_fields[0]),
                         entries, count, set_scopes, &temporary);
     }
+    if (!error) {
+        *result = temporary;
+    }
+    return error;
+}
+
+const char *ra_time_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                     const char *node, struct ra_time_settings *result) {
+    struct ra_time_settings temporary = {.format = 12};
+    const char *error = resolve_prefixed(time_fields, sizeof(time_fields) / sizeof(time_fields[0]),
+                                         entries, count, "time", node, &temporary);
     if (!error) {
         *result = temporary;
     }

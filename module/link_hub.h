@@ -77,6 +77,7 @@ struct ra_link_hub {
     pthread_t manager;                    /**< Reaps disconnected peers outside the audio thread. */
     atomic_bool stop;                     /**< Requests manager shutdown. */
     bool manager_started;                 /**< Manager must be joined before releasing the hub. */
+    const char *local_name;               /**< Borrowed local node name used for loop prevention. */
     ra_link_reconnect_fn reconnect;       /**< Runtime callback for retained peers. */
     void *reconnect_context;              /**< Borrowed runtime callback context. */
     ra_link_hub_digit_fn digit;           /**< Runtime callback for peer-identified IAX DTMF. */
@@ -178,6 +179,12 @@ bool ra_link_hub_detach_reconnect(struct ra_link_hub *hub, const char *name, boo
  * @return Number of peers released. Their routing modes remain paused until reconnect-all.
  */
 size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub);
+
+/** @brief Disconnect every attached nonpermanent peer without retaining it for reconnect-all.
+ * @param hub Node-owned routing hub.
+ * @return Number of detached temporary peers.
+ */
+size_t ra_link_hub_disconnect_nonpermanent_all(struct ra_link_hub *hub);
 
 /** @brief Immediately retry every link retained by disconnect-all or a failed permanent dial.
  * @param hub Node-owned routing hub.

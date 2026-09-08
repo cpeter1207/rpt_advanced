@@ -56,6 +56,7 @@ struct ra_dtmf_detector {
     char last_hit;       /**< Candidate found in the preceding analysis interval. */
     unsigned int hits;   /**< Consecutive candidate intervals. */
     unsigned int misses; /**< Consecutive intervals unlike @ref active. */
+    bool muting;         /**< Silence a frame that completes a detected digit. */
 };
 
 /** @brief Standard DTMF low-group frequencies. */
@@ -207,7 +208,14 @@ struct ra_dtmf_detector *ra_dtmf_open(unsigned int rate) {
         detector->filters[RA_DTMF_ROWS + index].coefficient =
             2.0 * cos(2.0 * RA_DTMF_PI * ra_dtmf_columns[index] / rate);
     }
+    detector->muting = true;
     return detector;
+}
+
+void ra_dtmf_set_muting(struct ra_dtmf_detector *detector, bool enabled) {
+    if (detector) {
+        detector->muting = enabled;
+    }
 }
 
 char ra_dtmf_process(struct ra_dtmf_detector *detector, bool receiving, int16_t *audio,
@@ -215,12 +223,10 @@ char ra_dtmf_process(struct ra_dtmf_detector *detector, bool receiving, int16_t 
     if (!detector || !audio || !samples) {
         return 0;
     }
-    if (!receiving) {
-        mute_frame(audio, samples);
-    }
     char completed = 0;
     for (size_t index = 0; index < samples; ++index) {
-        add_sample(detector, audio[index]);
+        /* Carrier loss completes a pending digit with silence without rewriting program audio. */
+        add_sample(detector, receiving ? audio[index] : 0);
         if (detector->samples == detector->interval_samples) {
             char digit = finish_interval(detector);
             if (!completed) {
@@ -228,7 +234,7 @@ char ra_dtmf_process(struct ra_dtmf_detector *detector, bool receiving, int16_t 
             }
         }
     }
-    if (completed) {
+    if (completed && detector->muting) {
         mute_frame(audio, samples);
     }
     return completed;

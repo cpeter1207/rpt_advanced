@@ -20,7 +20,8 @@ enum ra_settings_kind {
     RA_SETTINGS_NODE,
     RA_SETTINGS_IDENTIFIER,
     RA_SETTINGS_MORSE,
-    RA_SETTINGS_SPEECH
+    RA_SETTINGS_SPEECH,
+    RA_SETTINGS_TIME
 };
 
 /** @brief Select the network directory sources checked after a local static override. */
@@ -36,6 +37,7 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
 struct ra_node_settings {
     bool enabled;               /**< Start this node's controller. */
     bool full_duplex;           /**< Permit simultaneous receive and transmit. */
+    bool dtmf_muting;           /**< Silence completed local DTMF frames before routing. */
     uint64_t hang_ms;           /**< Transmit hang time in milliseconds. */
     int64_t telemetry_duck_db;  /**< Receive-active identifier and telemetry attenuation in dB. */
     uint64_t courtesy_delay_ms; /**< Receiver/link unkey-to-courtesy delay. */
@@ -78,6 +80,11 @@ struct ra_identifier_settings {
     int64_t morse_level_db;        /**< Morse tone level relative to full-scale PCM. */
 };
 
+/** @brief One node's local clock-announcement format. */
+struct ra_time_settings {
+    uint64_t format; /**< Clock format: 12 or 24 hours. */
+};
+
 /** @brief Resolve node settings without modifying the output on failure.
  * @param entries Parsed entries with non-null strings.
  * @param count Entry count; zero permits null entries.
@@ -99,4 +106,14 @@ const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size
 const char *ra_identifier_settings_resolve(const struct ra_config_entry *entries, size_t count,
                                            const char *node, const char *set,
                                            struct ra_identifier_settings *result);
+
+/** @brief Resolve flat and node-scoped time settings without altering output on failure.
+ * @param entries Parsed configuration entries, or null when @p count is zero.
+ * @param count Entry count.
+ * @param node Node name whose time section applies, or null for flat defaults only.
+ * @param result Receives the resolved settings on success.
+ * @return Invalid option name, or null on success.
+ */
+const char *ra_time_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                     const char *node, struct ra_time_settings *result);
 #endif

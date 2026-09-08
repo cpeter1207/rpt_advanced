@@ -9,13 +9,13 @@ remaining validation; it is not authorization to activate a live link.
 ## Implemented locally
 
 The controller accepts the configured linking-only DTMF operations: monitor,
-transceive, local-monitor, permanent variants, disconnect, disconnect-all,
-reconnect-all, status, last-keyed, full status, and direct-peer remote-command
-mode. Time, forced-ID, macro, autopatch, and other unrelated commands are not
-implemented. The normal default mappings are documented in
+transceive, local-monitor, permanent variants, disconnect, `*10` temporary-link
+disconnect, disconnect-all, reconnect-all, status, last-keyed, full status, direct-peer remote-command
+mode, and the fixed `*722` local-time announcement. Forced-ID, macro, autopatch,
+and other unrelated commands are not implemented. The normal default mappings are documented in
 [configuration](configuration.md); mappings are configurable, use a leading
-`*`, and destination-taking commands end with `#` or a three-second interdigit
-timeout. Destination `0` selects the last link destination.
+`*`, and destination-taking commands end with `#`, local receiver unkey, or a
+three-second interdigit timeout. Destination `0` selects the last link destination.
 
 `*4<node>` selects only a directly attached peer whose identity resolves and
 passes the same allow/deny policy required for an incoming peer. That policy is
@@ -32,8 +32,9 @@ Starts and malformed end events are ignored. The reader is joined before its
 hub and runtime callback are released; a reload discards any queued event from
 the retired runtime.
 Local in-band DTMF is decoded in the radio worker; when a digit completes, its
-current PCM frame is silenced before controller or link routing. No setting
-currently retains that completed local frame.
+current PCM frame is silenced before controller or link routing when
+`dtmf_muting` is enabled. Local receiver unkey queues the same command
+terminator as `#`, so an unfinished command cannot survive a transmission.
 
 Incoming calls enter through `RptAdvanced(node)`. The implementation checks an
 optional local static directory first, then uses the configured DNS/file
@@ -93,6 +94,8 @@ recipient-excluded outbound `L ` advertisement after topology changes and on a
 advertisement was truncated. A peer that has not advertised yet, does not
 support `L `, or has changed topology since its last update can therefore make
 the reported topology incomplete or stale.
+An advertised route containing the local node is treated as a topology loop;
+the direct peer is disconnected without retry. Direct self-links are rejected.
 
 Routing and audio exchange remain lock-free in hardware-paced callbacks. Link
 admission, dialing, retry, status, topology construction, and IAX text delivery

@@ -183,6 +183,9 @@ bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *loc
  */
 size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local);
 
+/** @brief Disconnect every active nonpermanent direct peer for one local node. */
+size_t ra_runtime_disconnect_nonpermanent_all(struct ra_runtime *runtime, const char *local);
+
 /** @brief Resume every link retained by a prior disconnect-all for a local node.
  * @param runtime Active runtime; caller serializes with reload and other commands.
  * @param local Local node name.
@@ -197,6 +200,14 @@ size_t ra_runtime_reconnect_all(struct ra_runtime *runtime, const char *local);
  * @return Zero when status is queued, minus one for an unknown node, invalid text, or a full queue.
  */
 int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, bool last_keyed);
+
+/** @brief Queue a local-time greeting with prepared speech and a Morse time fallback.
+ * @param runtime Active runtime whose caller serializes it with reload and other controls.
+ * @param local Local node requesting the announcement.
+ * @return Zero when the announcement is queued, minus one for an unavailable clock, unknown node,
+ *         invalid configured format, or a full telemetry queue.
+ */
+int ra_runtime_queue_time(struct ra_runtime *runtime, const char *local);
 
 /** @brief Queue a spoken connect or disconnect report for every configured local node.
  * @param runtime Active runtime whose caller serializes configuration ownership.

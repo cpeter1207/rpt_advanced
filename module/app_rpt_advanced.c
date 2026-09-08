@@ -169,12 +169,28 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
         ast_mutex_unlock(&runtime_lock);
         return result == -1 ? -1 : 0;
     }
+    case RA_LINK_DISCONNECT_NONPERMANENT_ALL: {
+        ast_mutex_lock(&runtime_lock);
+        int result = revision == atomic_load(&runtime_revision)
+                         ? (int)ra_runtime_disconnect_nonpermanent_all(&runtime, local) >= 0
+                         : -1;
+        ast_mutex_unlock(&runtime_lock);
+        return result == -1 ? -1 : 0;
+    }
     case RA_LINK_STATUS:
     case RA_LINK_LAST_KEYED: {
         ast_mutex_lock(&runtime_lock);
         int result = revision == atomic_load(&runtime_revision)
                          ? ra_runtime_queue_link_status(&runtime, local,
                                                         operation->action == RA_LINK_LAST_KEYED)
+                         : -1;
+        ast_mutex_unlock(&runtime_lock);
+        return result;
+    }
+    case RA_LINK_TIME: {
+        ast_mutex_lock(&runtime_lock);
+        int result = revision == atomic_load(&runtime_revision)
+                         ? ra_runtime_queue_time(&runtime, local)
                          : -1;
         ast_mutex_unlock(&runtime_lock);
         return result;

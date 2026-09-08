@@ -17,7 +17,9 @@ enum scope_kind {
     MORSE_DEFAULT,
     MORSE_NODE,
     SPEECH_DEFAULT,
-    SPEECH_NODE
+    SPEECH_NODE,
+    TIME_DEFAULT,
+    TIME_NODE
 };
 /** @brief Borrowed section interpretation; node may be a substring. */
 struct scope {
@@ -43,6 +45,9 @@ static struct scope parse(const char *name) {
     if (!strcmp(name, "speech")) {
         return (struct scope){SPEECH_DEFAULT, NULL, 0};
     }
+    if (!strcmp(name, "time")) {
+        return (struct scope){TIME_DEFAULT, NULL, 0};
+    }
     if (!strncmp(name, "identifier ", 11)) {
         const char *node = name + 11;
         size_t length = strcspn(node, " \t\r\n[]");
@@ -58,8 +63,8 @@ static struct scope parse(const char *name) {
         }
         return (struct scope){INVALID, NULL, 0};
     }
-    const char *prefixes[] = {"morse ", "speech "};
-    const enum scope_kind kinds[] = {MORSE_NODE, SPEECH_NODE};
+    const char *prefixes[] = {"morse ", "speech ", "time "};
+    const enum scope_kind kinds[] = {MORSE_NODE, SPEECH_NODE, TIME_NODE};
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
         size_t prefix_length = strlen(prefixes[i]);
         if (!strncmp(name, prefixes[i], prefix_length)) {
@@ -139,7 +144,7 @@ const char *ra_document_validate(const struct ra_document *document, const char 
             return "invalid section name";
         }
         if (scope.kind == ID_NODE || scope.kind == ID_SET || scope.kind == MORSE_NODE ||
-            scope.kind == SPEECH_NODE) {
+            scope.kind == SPEECH_NODE || scope.kind == TIME_NODE) {
             bool found = false;
             for (size_t j = 0; j < document->section_count; ++j) {
                 if (parse(document->sections[j]).kind == NODE &&
@@ -163,6 +168,8 @@ const char *ra_document_validate(const struct ra_document *document, const char 
             settings_kind = RA_SETTINGS_MORSE;
         } else if (kind == SPEECH_DEFAULT || kind == SPEECH_NODE) {
             settings_kind = RA_SETTINGS_SPEECH;
+        } else if (kind == TIME_DEFAULT || kind == TIME_NODE) {
+            settings_kind = RA_SETTINGS_TIME;
         }
         const char *error = ra_settings_validate_kind(settings_kind, entry->key, entry->value);
         if (error) {
