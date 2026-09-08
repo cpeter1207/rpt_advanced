@@ -517,6 +517,12 @@ int main(void) {
      * consuming a partial network callback. */
     assert(!ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)) && !output[0] &&
            !output[1]);
+    /* A fresh voice indication keeps one short received fragment active until
+     * its next hardware callback, even though the normal reserve is not full. */
+    rpcr_write(&peer.received, samples, 1);
+    peer.received.primed = true;
+    assert(ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)));
+    peer.received.primed = false;
     frame(&peer, &dtmf_begin);
     assert(!inbound_digits);
     frame(&peer, &dtmf_end);
