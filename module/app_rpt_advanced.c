@@ -19,6 +19,7 @@
 #include <asterisk/paths.h>
 #include <asterisk/pbx.h>
 #include <asterisk/taskprocessor.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -430,8 +431,13 @@ static char *link_status_cli(struct ast_cli_args *arguments) {
     ast_cli(arguments->fd, "rpt_advanced: %s has %zu %s\n", local, count,
             count == 1 ? "link" : "links");
     for (size_t index = 0; index < count; ++index) {
-        ast_cli(arguments->fd, "  %s: %s%s%s\n", peers[index].name, link_cli_mode(&peers[index]),
-                peers[index].permanent ? " (permanent)" : "", link_cli_retry_state(&peers[index]));
+        ast_cli(arguments->fd,
+                "  %s: %s%s%s rx-missing=%" PRIu64 " current-underrun-samples=%" PRIu64
+                " 10s-underrun-samples=%.3f reserve=%ums\n",
+                peers[index].name, link_cli_mode(&peers[index]),
+                peers[index].permanent ? " (permanent)" : "", link_cli_retry_state(&peers[index]),
+                peers[index].receive_missing, peers[index].consecutive_underruns,
+                peers[index].underrun_average_milli / 1000.0, peers[index].receive_reserve_ms);
     }
     ast_cli(arguments->fd, "  topology: %s\n", *topology ? topology : "none");
     ast_free(topology);

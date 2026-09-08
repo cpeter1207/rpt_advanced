@@ -40,6 +40,17 @@ static bool courtesy_available(const struct ra_controller_id *courtesy) {
     return courtesy->audio || (courtesy->settings.morse_text && *courtesy->settings.morse_text);
 }
 
+/** @brief Discard courtesy tones made obsolete by resumed receive activity.
+ * @param state Started controller that owns the pending courtesy queue.
+ *
+ * A short RF flutter or network packet-loss gap must not announce an end of
+ * transmission while the same source has already resumed. Active media is
+ * retained and ducked; only tones that have not started are discarded.
+ */
+static void courtesy_cancel_pending(struct ra_controller *state) {
+    state->courtesy_pending_count = 0;
+}
+
 /** @brief Schedule one source-specific courtesy announcement.
  * @param state Started controller that owns the bounded pending queue.
  * @param source Receiver or link unkey source.
@@ -242,6 +253,9 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
     if (link_unkeyed) {
         courtesy_schedule(state, RA_COURTESY_LINK, now_ms);
     }
+    if (interrupting_receive) {
+        courtesy_cancel_pending(state);
+    }
     if (interrupting_receive && state->playing != SIZE_MAX) {
         /* Carrier events interrupt prepared audio even without a sample tick. */
         (void)ra_playback_render(&state->playback, true, NULL, 0);
@@ -249,16 +263,23 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
     size_t selected = ra_id_select(state->rules, state->states, state->count, now_ms, receiving,
                                    state->full_duplex);
     bool may_transmit = state->full_duplex || !receiving;
-    bool status_ready = !receiving &&
+    bool telemetry_idle = !interrupting_receive;
+    bool status_ready = telemetry_idle &&
                         now_ms - state->receiver_unkey_ms >= RA_CONTROLLER_STATUS_UNKEY_DELAY_MS &&
                         status_pending(state);
-    bool courtesy_ready =
-        state->courtesy_pending_count && !receiving && now_ms >= state->courtesy_due_ms;
-    if (may_transmit && courtesy_ready && !state->courtesy_playing && !state->status_playing) {
+    unsigned int courtesy_ready =
+        (state->courtesy_pending_count != 0) & telemetry_idle & (now_ms >= state->courtesy_due_ms);
+    unsigned int courtesy_start_ready =
+        (unsigned int)may_transmit & courtesy_ready & (unsigned int)!state->courtesy_playing &
+        (unsigned int)!state->status_playing & (unsigned int)(state->playing == SIZE_MAX);
+    unsigned int status_start_ready = (unsigned int)may_transmit & (unsigned int)status_ready &
+                                      (unsigned int)!state->status_playing &
+                                      (unsigned int)!state->courtesy_playing &
+                                      (unsigned int)(state->playing == SIZE_MAX);
+    if (courtesy_start_ready) {
         courtesy_start(state);
-    } else if (may_transmit && status_ready && !state->status_playing && !state->courtesy_playing) {
-        /* Status is operator feedback, so it preempts but never satisfies an identifier. */
-        state->playing = SIZE_MAX;
+    } else if (status_start_ready) {
+        /* Telemetry uses one renderer so announcements never overlap on RF. */
         status_start(state);
     }
     bool demand = state->link_active;
@@ -276,7 +297,8 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
         selected = ra_id_select(state->rules, state->states, state->count, now_ms, receiving,
                                 state->full_duplex);
     }
-    if (samples && !state->status_playing && state->playing == SIZE_MAX && selected != SIZE_MAX) {
+    if (samples && !state->status_playing && !state->courtesy_playing &&
+        state->playing == SIZE_MAX && selected != SIZE_MAX) {
         const struct ra_controller_id *id = &state->ids[selected];
         /* Startup validated this immutable media and configuration at this rate. */
         (void)ra_playback_init(&state->playback, id->audio, id->samples, &id->settings, state->rate,

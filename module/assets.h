@@ -18,4 +18,5 @@
  */
 void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsigned int rate,
                            int16_t **audio, size_t *samples);
+
 #endif

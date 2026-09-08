@@ -7,6 +7,7 @@
 #include <asterisk.h>
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
+#include <samplerate.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -79,6 +80,54 @@ static unsigned int translator_frees;
 static unsigned int translated_inputs;
 /** @brief Signed-linear translated frames released by the peer. */
 static unsigned int translated_frees;
+/** @brief Inject one persistent resampler failure from the playout callback. */
+static bool src_process_failure;
+/** @brief Select a persistent-resampler allocation failure. */
+static bool src_new_failure;
+/** @brief Select a persistent-resampler allocation status error. */
+static bool src_new_error;
+
+/** @brief Call libsamplerate's real state allocator behind the test wrapper.
+ * @param converter_type Requested libsamplerate algorithm.
+ * @param channels PCM channel count.
+ * @param error Receives the real allocator status.
+ * @return Newly allocated converter state or null.
+ */
+SRC_STATE *__real_src_new(int converter_type, int channels, int *error);
+
+/** @brief Exercise both persistent-resampler startup failure outcomes.
+ * @param converter_type Requested libsamplerate algorithm.
+ * @param channels PCM channel count.
+ * @param error Receives the injected or real allocator status.
+ * @return Newly allocated converter state or null for the selected failure.
+ */
+SRC_STATE *__wrap_src_new(int converter_type, int channels, int *error) {
+    if (src_new_failure) {
+        *error = 1;
+        return NULL;
+    }
+    SRC_STATE *state = __real_src_new(converter_type, channels, error);
+    if (state && src_new_error) {
+        *error = 1;
+    }
+    return state;
+}
+
+/** @brief Call the real libsamplerate process operation behind the test wrapper.
+ * @param state Persistent converter state.
+ * @param data Input/output PCM conversion description.
+ * @return Libsamplerate status.
+ */
+int __real_src_process(SRC_STATE *state, SRC_DATA *data);
+
+/** @brief Inject a converter failure without allocating or blocking the audio callback.
+ * @param state Persistent converter state.
+ * @param data Input/output PCM conversion description.
+ * @return Injected failure or the real libsamplerate status.
+ */
+int __wrap_src_process(SRC_STATE *state, SRC_DATA *data) {
+    return src_process_failure ? 1 : __real_src_process(state, data);
+}
 
 /** @brief Capture one validated inbound IAX DTMF event outside the transport reader's locks.
  * @param context Expected callback identity.
@@ -449,11 +498,18 @@ int main(void) {
     assert(!ra_link_peer_topology(&peer, topology, 0) && !topology[0]);
     assert(ra_link_peer_queue_topology(&peer, "T1") == -1);
     assert(ra_link_peer_start(&peer, NULL, &invalid, NULL, NULL) == -1);
-    for (allocation_failure = 1; allocation_failure <= 3; ++allocation_failure) {
+    for (allocation_failure = 1; allocation_failure <= 5; ++allocation_failure) {
         allocation_calls = 0;
         assert(ra_link_peer_start(&peer, NULL, &linear, NULL, NULL) == -1);
     }
     allocation_failure = 0;
+    struct ra_link_peer converter_failure = {0};
+    src_new_failure = true;
+    assert(ra_link_peer_start(&converter_failure, NULL, &linear, NULL, NULL) == -1);
+    src_new_failure = false;
+    src_new_error = true;
+    assert(ra_link_peer_start(&converter_failure, NULL, &linear, NULL, NULL) == -1);
+    src_new_error = false;
     for (failure = 1; failure <= 5; ++failure) {
         mutex_inits = 0;
         allocation_calls = 0;
@@ -476,17 +532,24 @@ int main(void) {
     overlength[sizeof(overlength) - 1] = '\0';
     assert(ra_link_peer_queue_topology(&peer, overlength) == -1);
     assert(!ra_link_peer_queue_topology(&peer, ""));
-    int16_t samples[] = {123, -456}, output[2];
+    int16_t samples[1600], output[2];
+    for (size_t index = 0; index < sizeof(samples) / sizeof(*samples); ++index) {
+        samples[index] = index % 2 ? -456 : 123;
+    }
     struct ast_frame voice = {.frametype = AST_FRAME_VOICE,
                               .subclass.format = &linear,
                               .data.ptr = samples,
-                              .samples = 2,
-                              .datalen = 4};
+                              .samples = (int)(sizeof(samples) / sizeof(*samples)),
+                              .datalen = (int)sizeof(samples)};
     struct ast_frame control = {.frametype = AST_FRAME_CONTROL,
                                 .subclass.integer = AST_CONTROL_RADIO_KEY};
     struct ast_frame ignored = {.frametype = AST_FRAME_NULL};
     struct ast_frame dtmf_begin = {.frametype = AST_FRAME_DTMF_BEGIN, .subclass.integer = '5'};
     struct ast_frame dtmf_end = {.frametype = AST_FRAME_DTMF_END, .subclass.integer = '5'};
+    /* Before the protected reserve fills, playout remains silent without
+     * consuming a partial network callback. */
+    assert(!ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)) && !output[0] &&
+           !output[1]);
     frame(&peer, &dtmf_begin);
     assert(!inbound_digits);
     frame(&peer, &dtmf_end);
@@ -659,13 +722,51 @@ int main(void) {
     assert(sent_iaxkeys == 2);
     frame(&peer, &voice);
     frame(&peer, &control);
-    assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123);
+    /* The persistent sinc converter needs history after the protected reserve.
+     * It may initially render silence, but must reach steady playout without
+     * advancing the producer-owned receive cursor beyond available PCM. */
+    bool rendered = false;
+    for (size_t callback = 0; callback < 8; ++callback) {
+        assert(ra_link_peer_receive(&peer, output, 2));
+        rendered = rendered || output[0] || output[1];
+    }
+    assert(rendered);
+    uint64_t read_before_failure = atomic_load(&peer.received.read);
+    src_process_failure = true;
+    assert(ra_link_peer_receive(&peer, output, 2) && !output[0] && !output[1]);
+    assert(atomic_load(&peer.received.read) == read_before_failure &&
+           atomic_load(&peer.received.consecutive_underruns) == 2);
+    src_process_failure = false;
+    /* A deliberately smaller workspace proves copy clamping and both extreme
+     * occupancy corrections without allocating in the receive callback. */
+    peer.elastic_capacity = 1;
+    peer.occupancy_milli = (uint64_t)peer.received.capacity * 3000U;
+    assert(ra_link_peer_receive(&peer, output, 2));
+    assert(peer.playout_ratio < 1.0);
+    peer.elastic_capacity = peer.received.capacity;
+    /* A callback larger than the reserve target must still use only the
+     * preallocated converter workspace and retain one safe playout block. */
+    int16_t wide[1000] = {0};
+    assert(ra_link_peer_receive(&peer, wide, sizeof(wide) / sizeof(*wide)));
+    assert(atomic_load(&peer.received.reserve_samples) ==
+           peer.received.capacity - sizeof(wide) / sizeof(*wide));
+    while (ra_link_peer_receive(&peer, output, 2)) {
+    }
     int16_t quiet[32000];
+    peer.receive_age = 0;
+    peer.seen_epoch = atomic_load(&peer.receive_epoch);
     bool expired_voice = ra_link_peer_receive(&peer, quiet, 400);
     assert(peer.receive_age == 400 && !expired_voice);
     ra_link_audio_write(&peer.received, samples, 2);
     peer.receive_age = linear.rate / 20;
-    assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123 && output[1] == -456);
+    bool restored = false;
+    for (size_t callback = 0; callback < 8; ++callback) {
+        if (!ra_link_peer_receive(&peer, output, 2)) {
+            break;
+        }
+        restored = restored || output[0] || output[1];
+    }
+    assert(restored);
     text.data.ptr = "!NEWKEY!";
     text.datalen = 8;
     frame(&peer, &text);
@@ -676,7 +777,7 @@ int main(void) {
     frame(&peer, &voice);
     assert(ra_link_peer_receive(&peer, output, 2));
     linear.rate = 16000;
-    assert(!ra_link_peer_receive(&peer, quiet, 32000));
+    assert(ra_link_peer_receive(&peer, quiet, 32000));
     linear.rate = 8000;
     text.data.ptr = "!!DISCONNECT!!";
     text.datalen = 14;
@@ -690,8 +791,7 @@ int main(void) {
     frame(&peer, &voice);
     control.subclass.integer = AST_CONTROL_RADIO_UNKEY;
     frame(&peer, &control);
-    assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123 && output[1] == -456);
-    assert(ra_link_peer_receive(&peer, output, 2) && output[0] == 123 && output[1] == -456);
+    assert(ra_link_peer_receive(&peer, output, 2));
     control.subclass.integer = AST_CONTROL_ANSWER;
     frame(&peer, &control);
     control.subclass.integer = AST_CONTROL_HANGUP;
@@ -701,12 +801,12 @@ int main(void) {
     voice.data.ptr = samples;
     voice.samples = 0;
     frame(&peer, &voice);
-    voice.samples = 2;
+    voice.samples = 4;
     voice.datalen = 3;
     frame(&peer, &voice);
     voice.datalen = 0;
     frame(&peer, &voice);
-    voice.datalen = 4;
+    voice.datalen = 8;
     voice.subclass.format = &other;
     translation_mode = FIXTURE_TRANSLATOR_UNAVAILABLE;
     frame(&peer, &voice);

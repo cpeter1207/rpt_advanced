@@ -10,6 +10,7 @@
 #include <asterisk/logger.h>
 #include <asterisk/translate.h>
 #include <limits.h>
+#include <samplerate.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -17,6 +18,19 @@
 /** @brief Require hardware-facing peer state to use native lock-free atomics. */
 _Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && RA_ATOMIC_UINT_FAST64_LOCK_FREE,
                "peer audio state must not call libatomic");
+
+/** @brief Release preallocated state used by the hardware-paced elastic converter.
+ * @param peer Peer owning the converter workspaces.
+ */
+static void release_elastic(struct ra_link_peer *peer) {
+    src_delete(peer->elastic_src);
+    peer->elastic_src = NULL;
+    ast_free(peer->elastic_input);
+    peer->elastic_input = NULL;
+    ast_free(peer->elastic_output);
+    peer->elastic_output = NULL;
+    peer->elastic_capacity = 0;
+}
 
 /** @brief Match bounded IAX text with or without its optional terminating NUL.
  * @param frame Borrowed text frame.
@@ -391,13 +405,21 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     int16_t *storage = ast_calloc(capacity, sizeof(*storage));
     int16_t *outgoing = ast_calloc(capacity, sizeof(*outgoing));
     int16_t *send_buffer = ast_calloc(capacity / 10, sizeof(*send_buffer));
-    if (!storage || !outgoing || !send_buffer) {
+    peer->elastic_input = ast_calloc(capacity, sizeof(*peer->elastic_input));
+    peer->elastic_output = ast_calloc(capacity, sizeof(*peer->elastic_output));
+    int error = 0;
+    peer->elastic_src = src_new(SRC_SINC_FASTEST, 1, &error);
+    peer->elastic_capacity = capacity;
+    if (!storage || !outgoing || !send_buffer || !peer->elastic_input || !peer->elastic_output ||
+        !peer->elastic_src || error) {
+        release_elastic(peer);
         ast_free(send_buffer);
         ast_free(outgoing);
         ast_free(storage);
         return -1;
     }
     if (ast_mutex_init(&peer->topology_lock)) {
+        release_elastic(peer);
         ast_free(send_buffer);
         ast_free(outgoing);
         ast_free(storage);
@@ -412,6 +434,7 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     if (ast_set_read_format(channel, linear) || ast_set_write_format(channel, linear) ||
         ast_sendtext(channel, "!NEWKEY1!")) {
         close_topology(peer);
+        release_elastic(peer);
         ast_free(send_buffer);
         ast_free(outgoing);
         ast_free(storage);
@@ -433,6 +456,7 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     atomic_init(&peer->digit_tail, 0);
     if (pthread_create(&peer->thread, NULL, read_peer, peer)) {
         close_topology(peer);
+        release_elastic(peer);
         ast_free(send_buffer);
         ast_free(outgoing);
         ast_free(storage);
@@ -440,6 +464,57 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
         return -1;
     }
     return 0;
+}
+
+/** @brief Copy bounded unread PCM into the persistent converter's floating-point input.
+ * @param peer Consumer-owned connected peer.
+ * @param reserve PCM samples that must remain in the ring.
+ * @param read Receives the ring position paired with the copied audio.
+ * @return Input samples offered to libsamplerate.
+ */
+static size_t copy_elastic_input(struct ra_link_peer *peer, size_t reserve, uint64_t *read) {
+    *read = atomic_load_explicit(&peer->received.read, memory_order_relaxed);
+    uint64_t written = atomic_load_explicit(&peer->received.written, memory_order_acquire);
+    size_t available = written - *read < peer->received.capacity ? (size_t)(written - *read)
+                                                                 : peer->received.capacity;
+    size_t count = available > reserve ? available - reserve : 0;
+    if (count > peer->elastic_capacity) {
+        count = peer->elastic_capacity;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        peer->elastic_input[index] =
+            (float)peer->received.storage[(*read + index) % peer->received.capacity] / 32768.0F;
+    }
+    return count;
+}
+
+/** @brief Apply a slow occupancy controller to the playout sample-rate ratio.
+ * @param peer Consumer-owned peer state.
+ * @param available Current incoming ring occupancy in samples.
+ * @param target Desired occupancy in samples.
+ * @return Output-to-input resampling ratio, limited to one thousand parts per million.
+ *
+ * Queue occupancy already has a multi-second filter. The ratio itself has a second, much slower
+ * filter so normal callback-to-callback queue movement cannot frequency-modulate program audio.
+ */
+static double elastic_ratio(struct ra_link_peer *peer, size_t available, size_t target) {
+    uint64_t occupancy = (uint64_t)available * 1000U;
+    if (!peer->occupancy_milli) {
+        peer->occupancy_milli = occupancy;
+    } else {
+        peer->occupancy_milli += ((int64_t)occupancy - (int64_t)peer->occupancy_milli) / 128;
+    }
+    double error = (double)((int64_t)peer->occupancy_milli - (int64_t)target * 1000) /
+                   ((double)target * 1000.0);
+    if (error > 1.0) {
+        error = 1.0;
+    }
+    double desired = 1.0 - error * 0.001;
+    if (!peer->playout_ratio) {
+        peer->playout_ratio = 1.0;
+    }
+    peer->playout_ratio += (desired - peer->playout_ratio) / 512.0;
+    return peer->playout_ratio;
 }
 
 bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samples) {
@@ -450,17 +525,51 @@ bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samp
     } else {
         peer->receive_age += samples;
     }
-    bool receiving =
-        (peer->receive_age < peer->linear_rate / 20 || ra_link_audio_available(&peer->received)) &&
-        !atomic_load(&peer->ended);
-    if (receiving) {
-        ra_link_audio_read(&peer->received, audio, samples);
-    } else {
+    size_t reserve = samples * RA_LINK_RECEIVE_RESERVE_BLOCKS;
+    if (samples >= peer->received.capacity) {
+        reserve = 0;
+    } else if (reserve > peer->received.capacity - samples) {
+        reserve = peer->received.capacity - samples;
+    }
+    atomic_store_explicit(&peer->received.reserve_samples, reserve, memory_order_relaxed);
+    size_t available = ra_link_audio_available(&peer->received);
+    size_t target = peer->received.capacity > samples * 2U ? peer->received.capacity - samples * 2U
+                                                           : reserve + samples;
+    if (!peer->elastic_primed && available >= target) {
+        peer->elastic_primed = true;
+    }
+    bool fresh = peer->receive_age < reserve;
+    size_t protected_reserve = fresh ? reserve : 0;
+    bool receiving = peer->elastic_primed &&
+                     (available > protected_reserve || (fresh && available)) &&
+                     !atomic_load(&peer->ended);
+    if (!receiving) {
         for (size_t i = 0; i < samples; ++i) {
             audio[i] = 0;
         }
+        return false;
     }
-    return receiving;
+    uint64_t read = 0;
+    size_t input = copy_elastic_input(peer, protected_reserve, &read);
+    size_t output_capacity = samples < peer->elastic_capacity ? samples : peer->elastic_capacity;
+    SRC_DATA data = {.data_in = peer->elastic_input,
+                     .data_out = peer->elastic_output,
+                     .input_frames = (long)input,
+                     .output_frames = (long)output_capacity,
+                     .src_ratio = elastic_ratio(peer, available, target)};
+    if (src_process(peer->elastic_src, &data)) {
+        data.output_frames_gen = 0;
+        data.input_frames_used = 0;
+    }
+    atomic_store_explicit(&peer->received.read, read + (uint64_t)data.input_frames_used,
+                          memory_order_release);
+    src_float_to_short_array(peer->elastic_output, audio, (int)data.output_frames_gen);
+    for (size_t index = (size_t)data.output_frames_gen; index < samples; ++index) {
+        audio[index] = 0;
+    }
+    ra_link_audio_record_shortfall(&peer->received, samples - (size_t)data.output_frames_gen,
+                                   samples, peer->linear_rate);
+    return true;
 }
 
 int ra_link_peer_send(struct ra_link_peer *peer, bool keyed, const int16_t *audio, size_t samples) {
@@ -535,6 +644,7 @@ void ra_link_peer_stop(struct ra_link_peer *peer) {
     ast_free(peer->received.storage);
     ast_free(peer->outgoing_storage);
     ast_free(peer->send_buffer);
+    release_elastic(peer);
     ast_translator_free_path(peer->decode);
     peer->channel = NULL;
     close_topology(peer);

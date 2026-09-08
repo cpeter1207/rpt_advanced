@@ -16,10 +16,24 @@
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
 #include <asterisk/lock.h>
+#include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/** @brief Apply a configured courtesy level before the real-time worker sees PCM.
+ * @param audio Writable prepared sound-file or speech PCM.
+ * @param samples PCM sample count.
+ * @param level_db Configured non-positive level relative to full scale.
+ */
+static void apply_courtesy_gain(int16_t *audio, size_t samples, int64_t level_db) {
+    double gain = pow(10.0, level_db / 20.0);
+    for (size_t index = 0; index < samples; ++index) {
+        audio[index] = (int16_t)lround(audio[index] * gain);
+    }
+}
 
 /** @brief Total outbound IAX dialing budget shared by ordered codec attempts. */
 #define RA_LINK_DIAL_TIMEOUT_MS 20000
@@ -387,10 +401,14 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     if (settings->receiver_courtesy_morse_frequency_hz) {
         receiver->morse_frequency_hz = settings->receiver_courtesy_morse_frequency_hz;
     }
+    receiver->speech_level_db = 0;
+    receiver->morse_level_db = settings->receiver_courtesy_level_db;
     int16_t *courtesy_audio;
     ra_identifier_prepare(receiver, node->controller.rate, &courtesy_audio,
                           &node->controller.courtesy[RA_COURTESY_RECEIVER].samples);
     node->controller.courtesy[RA_COURTESY_RECEIVER].audio = courtesy_audio;
+    apply_courtesy_gain(courtesy_audio, node->controller.courtesy[RA_COURTESY_RECEIVER].samples,
+                        settings->receiver_courtesy_level_db);
     struct ra_identifier_settings *link = &node->controller.courtesy[RA_COURTESY_LINK].settings;
     *link = node->status_settings;
     link->file = settings->link_courtesy_sound_file;
@@ -399,9 +417,13 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     if (settings->link_courtesy_morse_frequency_hz) {
         link->morse_frequency_hz = settings->link_courtesy_morse_frequency_hz;
     }
+    link->speech_level_db = 0;
+    link->morse_level_db = settings->link_courtesy_level_db;
     ra_identifier_prepare(link, node->controller.rate, &courtesy_audio,
                           &node->controller.courtesy[RA_COURTESY_LINK].samples);
     node->controller.courtesy[RA_COURTESY_LINK].audio = courtesy_audio;
+    apply_courtesy_gain(courtesy_audio, node->controller.courtesy[RA_COURTESY_LINK].samples,
+                        settings->link_courtesy_level_db);
     error = identifiers(node, document, name);
     if (error) {
         return error;
@@ -917,10 +939,13 @@ static void status_append_count(char *text, size_t *length, size_t value) {
  * @param node Resolved runtime node.
  * @param last_keyed Select the remembered direct peer instead of current-link status.
  * @param text Output status text.
+ * @param identity Output peer identity for speech formatting.
  * @return True when a complete status was written.
  */
-static bool node_link_status_text(struct ra_runtime_node *node, bool last_keyed, char *text) {
+static bool node_link_status_text(struct ra_runtime_node *node, bool last_keyed, char *text,
+                                  char identity[RA_LINK_PEER_NAME_MAX]) {
     text[0] = '\0';
+    identity[0] = '\0';
     size_t length = 0;
     if (last_keyed) {
         char name[RA_LINK_PEER_NAME_MAX];
@@ -928,6 +953,7 @@ static bool node_link_status_text(struct ra_runtime_node *node, bool last_keyed,
             status_append(text, &length, "NO LAST KEYED");
             return true;
         }
+        ast_copy_string(identity, name, RA_LINK_PEER_NAME_MAX);
         status_append(text, &length, "LAST KEYED ");
         return status_append_peer_name(text, &length, name);
     }
@@ -938,6 +964,7 @@ static bool node_link_status_text(struct ra_runtime_node *node, bool last_keyed,
         return true;
     }
     if (count == 1) {
+        ast_copy_string(identity, peer.name, RA_LINK_PEER_NAME_MAX);
         status_append(text, &length, "LINK ");
         if (!status_append_peer_name(text, &length, peer.name)) {
             return false;
@@ -946,6 +973,7 @@ static bool node_link_status_text(struct ra_runtime_node *node, bool last_keyed,
         status_append(text, &length, peer_mode(&peer));
         return true;
     }
+    ast_copy_string(identity, peer.name, RA_LINK_PEER_NAME_MAX);
     status_append_count(text, &length, count);
     status_append(text, &length, " LINKS ");
     if (!status_append_peer_name(text, &length, peer.name)) {
@@ -971,16 +999,65 @@ static void reclaim_status_audio(struct ra_runtime_node *node) {
     }
 }
 
+bool ra_runtime_telemetry_speech_text(const char *source, const char *node_one,
+                                      const char *node_two, char *speech, size_t capacity) {
+    size_t used = 0;
+    while (*source) {
+        while (*source == ' ') {
+            if (used + 1 >= capacity)
+                return false;
+            speech[used++] = *source++;
+        }
+        const char *word = source;
+        bool letters = false, has_digit = false;
+        size_t length = 0;
+        while (source[length] && source[length] != ' ') {
+            char c = source[length++];
+            letters |= isalpha((unsigned char)c) != 0;
+            has_digit |= isdigit((unsigned char)c) != 0;
+        }
+        bool node = (node_one && strlen(node_one) == length && !strncmp(word, node_one, length)) ||
+                    (node_two && strlen(node_two) == length && !strncmp(word, node_two, length));
+        bool callsign = !node && letters && has_digit;
+        if (node) {
+            static const char prefix[] = "node,";
+            if (used + sizeof(prefix) - 1 >= capacity)
+                return false;
+            for (size_t index = 0; index < sizeof(prefix) - 1; ++index)
+                speech[used++] = prefix[index];
+        }
+        for (size_t index = 0; index < length; ++index) {
+            if (used + 1 + (node || callsign ? 1 : 0) >= capacity)
+                return false;
+            speech[used++] = word[index];
+            if (node || callsign)
+                speech[used++] = ',';
+        }
+        if (node || callsign)
+            --used;
+        source += length;
+    }
+    if (used >= capacity)
+        return false;
+    speech[used] = '\0';
+    return true;
+}
+
 /** @brief Prepare and queue one spoken RF telemetry reply with its Morse fallback.
  * @param node Running node whose inherited speech and Morse settings apply.
  * @param text Bounded ASCII telemetry text.
+ * @param node_one First known numeric node identity, if any.
+ * @param node_two Second known numeric node identity, if any.
  * @return Zero when the reply is queued, minus one if its bounded queue is full or invalid.
  */
-static int queue_status_speech(struct ra_runtime_node *node, const char *text) {
+static int queue_status_speech(struct ra_runtime_node *node, const char *text, const char *node_one,
+                               const char *node_two) {
     reclaim_status_audio(node);
+    char speech[RA_CONTROLLER_STATUS_TEXT_MAX * 2];
+    (void)ra_runtime_telemetry_speech_text(text, node_one, node_two, speech, sizeof(speech));
     struct ra_identifier_settings settings = node->status_settings;
     settings.file = "";
-    settings.speech_text = text;
+    settings.speech_text = speech;
     settings.morse_text = text;
     int16_t *audio = NULL;
     size_t samples = 0;
@@ -995,12 +1072,13 @@ static int queue_status_speech(struct ra_runtime_node *node, const char *text) {
 
 int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, bool last_keyed) {
     char text[RA_CONTROLLER_STATUS_TEXT_MAX];
+    char identity[RA_LINK_PEER_NAME_MAX];
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
-            if (!node_link_status_text(node, last_keyed, text)) {
+            if (!node_link_status_text(node, last_keyed, text, identity)) {
                 return -1;
             }
-            return queue_status_speech(node, text);
+            return queue_status_speech(node, text, identity, NULL);
         }
     }
     return -1;
@@ -1068,7 +1146,7 @@ int ra_runtime_queue_link_event(struct ra_runtime *runtime, const char *first, c
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         char text[RA_CONTROLLER_STATUS_TEXT_MAX];
         if (!link_event_text(node->name, first, second, connected, text) ||
-            queue_status_speech(node, text)) {
+            queue_status_speech(node, text, first, second)) {
             result = -1;
         }
     }

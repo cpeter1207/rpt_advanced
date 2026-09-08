@@ -45,15 +45,17 @@ the number of nodes or ID sets.
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after audio ends. |
 | `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, and Morse identifiers and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
-| `courtesy_delay_ms` | 250 | Delay after local-receiver or linked-audio unkey before a courtesy announcement starts. PTT remains asserted until the announcement completes. |
+| `courtesy_delay_ms` | 250 | Delay after local-receiver or linked-audio unkey before a courtesy announcement starts. Resumed local or linked receive before the delay ends cancels the pending tone. PTT remains asserted until a started announcement completes. |
 | `receiver_courtesy_sound_file` | empty | Local-receiver courtesy sound-file path. |
 | `receiver_courtesy_speech_text` | empty | Local-receiver courtesy speech text, used when its file is absent or unusable. |
 | `receiver_courtesy_morse_text` | empty | Local-receiver terminal Morse courtesy text. Set `R` for an R courtesy tone. |
 | `receiver_courtesy_morse_frequency_hz` | inherited | Local-receiver courtesy Morse frequency. When omitted, it uses the resolved `[morse]` frequency for this node. |
+| `receiver_courtesy_level_db` | -20 | Local-receiver courtesy sound, speech, and Morse level, from -60 through 0 dB. |
 | `link_courtesy_sound_file` | empty | Linked-receiver courtesy sound-file path. |
 | `link_courtesy_speech_text` | empty | Linked-receiver courtesy speech text, used when its file is absent or unusable. |
 | `link_courtesy_morse_text` | empty | Linked-receiver terminal Morse courtesy text. Set `L` for an L courtesy tone. |
 | `link_courtesy_morse_frequency_hz` | inherited | Linked-receiver courtesy Morse frequency. When omitted, it uses the resolved `[morse]` frequency for this node. |
+| `link_courtesy_level_db` | -20 | Linked-receiver courtesy sound, speech, and Morse level, from -60 through 0 dB. |
 | `sample_rate_hz` | 0 | Zero selects the highest usable local signed-linear rate no greater than the hardware-native rate. An explicit rate selects the local channel rate and requires a supported bidirectional Asterisk conversion path. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
 | `codec` | empty | Empty selects signed linear for the local radio channel; otherwise select an available local Asterisk codec subject to `sample_rate_hz`. It does not otherwise restrict IAX link candidates. |

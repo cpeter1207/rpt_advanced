@@ -122,7 +122,7 @@ build/module-coverage/link_peer.o: module/link_peer.c module/link_peer.h $(HEADE
 
 build/test_link_peer: tests/test_link_peer.c build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) | build
 	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=calloc -o $@
+	$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=calloc,--wrap=src_new,--wrap=src_process -o $@
 
 build/module-coverage/connection.o: $(CONNECTION_SOURCE) module/connection.h module/media.h module/radio.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@

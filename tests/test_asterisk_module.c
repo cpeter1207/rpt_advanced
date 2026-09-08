@@ -871,8 +871,14 @@ int main(void) {
     assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_FAILURE);
     assert(!strcmp(cli_output, "rpt_advanced: unable to list topology\n"));
     cli_topology_failure = false;
-    cli_peers[0] = (struct ra_link_peer_status){
-        .name = "123", .transmit = true, .forward = true, .permanent = true};
+    cli_peers[0] = (struct ra_link_peer_status){.name = "123",
+                                                .transmit = true,
+                                                .forward = true,
+                                                .permanent = true,
+                                                .receive_missing = 160,
+                                                .consecutive_underruns = 2,
+                                                .underrun_average_milli = 1250,
+                                                .receive_reserve_ms = 40};
     cli_peer_count = 1;
     cli_topology = "T123,R456";
     queue_failure = 3;
@@ -887,15 +893,19 @@ int main(void) {
     cli_node_unknown = false;
     clear_cli_output();
     assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
-    assert(!strcmp(cli_output, "rpt_advanced: usb has 1 link\n"
-                               "  123: transceive (permanent)\n"
-                               "  topology: T123,R456\n"));
+    assert(!strcmp(cli_output,
+                   "rpt_advanced: usb has 1 link\n"
+                   "  123: transceive (permanent) rx-missing=160 "
+                   "current-underrun-samples=2 10s-underrun-samples=1.250 reserve=40ms\n"
+                   "  topology: T123,R456\n"));
     cli_topology = "";
     clear_cli_output();
     assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
-    assert(!strcmp(cli_output, "rpt_advanced: usb has 1 link\n"
-                               "  123: transceive (permanent)\n"
-                               "  topology: none\n"));
+    assert(!strcmp(cli_output,
+                   "rpt_advanced: usb has 1 link\n"
+                   "  123: transceive (permanent) rx-missing=160 "
+                   "current-underrun-samples=2 10s-underrun-samples=1.250 reserve=40ms\n"
+                   "  topology: none\n"));
     cli_topology = "T123,R456";
     cli_topology_failure = true;
     clear_cli_output();
@@ -913,8 +923,10 @@ int main(void) {
     assert(command_entry[1].handler(&command_entry[1], CLI_HANDLER, &compat_status_arguments) ==
            CLI_SUCCESS);
     assert(!strcmp(cli_output, "rpt_advanced: usb has 2 links\n"
-                               "  234: monitor\n"
-                               "  345: local-monitor\n"
+                               "  234: monitor rx-missing=0 current-underrun-samples=0 "
+                               "10s-underrun-samples=0.000 reserve=0ms\n"
+                               "  345: local-monitor rx-missing=0 current-underrun-samples=0 "
+                               "10s-underrun-samples=0.000 reserve=0ms\n"
                                "  topology: R234,R345\n"));
     cli_peers[0] = (struct ra_link_peer_status){
         .name = "456", .forward = true, .permanent = true, .retrying = true};
@@ -923,10 +935,13 @@ int main(void) {
     cli_topology = "";
     clear_cli_output();
     assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
-    assert(!strcmp(cli_output, "rpt_advanced: usb has 2 links\n"
-                               "  456: monitor (permanent) (retrying)\n"
-                               "  567: local-monitor (paused)\n"
-                               "  topology: none\n"));
+    assert(!strcmp(cli_output,
+                   "rpt_advanced: usb has 2 links\n"
+                   "  456: monitor (permanent) (retrying) rx-missing=0 "
+                   "current-underrun-samples=0 10s-underrun-samples=0.000 reserve=0ms\n"
+                   "  567: local-monitor (paused) rx-missing=0 current-underrun-samples=0 "
+                   "10s-underrun-samples=0.000 reserve=0ms\n"
+                   "  topology: none\n"));
     argv[2] = "connect";
     const unsigned int outgoing_failures[] = {2, 3, 10};
     for (size_t i = 0; i < sizeof(outgoing_failures) / sizeof(*outgoing_failures); ++i) {

@@ -30,6 +30,14 @@ int main(void) {
     ra_link_audio_write(&queue, input, 5);
     ra_link_audio_read(&queue, output, 3);
     assert(output[0] == 10 && output[2] == 30 && atomic_load(&queue.discarded) == 3);
+    ra_link_audio_record_shortfall(&queue, 3, 10, 1000);
+    assert(atomic_load(&queue.missing) == 5 && atomic_load(&queue.consecutive_underruns) == 3 &&
+           atomic_load(&queue.underrun_average_milli));
+    ra_link_audio_record_shortfall(&queue, 0, 10, 1000);
+    assert(!atomic_load(&queue.consecutive_underruns));
+    ra_link_audio_record_shortfall(&queue, 1, 20000, 1000);
+    assert(atomic_load(&queue.underrun_average_milli));
+    ra_link_audio_record_shortfall(&queue, 0, 1, 0);
     puts("bounded network PCM queue tests passed");
     return 0;
 }

@@ -896,6 +896,15 @@ size_t ra_link_hub_snapshot(struct ra_link_hub *hub, struct ra_link_peer_status 
             entry->permanent = port->permanent;
             entry->retrying = false;
             entry->paused = false;
+            entry->receive_missing = atomic_load(&port->peer.received.missing);
+            entry->consecutive_underruns = atomic_load(&port->peer.received.consecutive_underruns);
+            entry->underrun_average_milli =
+                atomic_load(&port->peer.received.underrun_average_milli);
+            uint64_t reserve_samples = atomic_load(&port->peer.received.reserve_samples);
+            entry->receive_reserve_ms =
+                port->peer.linear_rate
+                    ? (unsigned int)(reserve_samples * 1000U / port->peer.linear_rate)
+                    : 0;
         }
         ++count;
     }

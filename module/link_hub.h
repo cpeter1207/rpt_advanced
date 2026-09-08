@@ -25,6 +25,10 @@ struct ra_link_peer_status {
     bool permanent;                   /**< Unexpected loss is eligible for recovery. */
     bool retrying; /**< Link is retained while its transport is absent or reconnecting. */
     bool paused;   /**< Reconnect awaits the operator's reconnect-all command. */
+    uint64_t receive_missing;        /**< Cumulative missing incoming PCM samples. */
+    uint64_t consecutive_underruns;  /**< Current consecutive incoming missing PCM samples. */
+    uint64_t underrun_average_milli; /**< Ten-second EWMA of missing samples, in millisamples. */
+    unsigned int receive_reserve_ms; /**< Current elastic incoming PCM reserve in milliseconds. */
 };
 /** @brief Redial callback invoked by the hub manager for a retained peer.
  * @param context Runtime-owned callback context.

@@ -135,6 +135,9 @@ int main(void) {
     (void)ra_controller_process(&controller, true, NULL, 0, 601);
     (void)ra_controller_process(&controller, false, NULL, 0, 602);
     assert(controller.courtesy_pending_count == 1);
+    /* Flutter before a courtesy tone starts cancels that stale announcement. */
+    (void)ra_controller_process(&controller, true, NULL, 0, 603);
+    assert(!controller.courtesy_pending_count);
     assert(ra_controller_start(&controller, 0));
     controller.link_active = true;
     assert(ra_controller_process(&controller, false, NULL, 0, 100));
@@ -166,24 +169,19 @@ int main(void) {
                                       .samples = 1};
     }
     assert(ra_controller_start(&courtesy_controller, 0));
-    assert(ra_controller_process(&courtesy_controller, true, NULL, 0, 1));
-    assert(!ra_controller_process(&courtesy_controller, false, NULL, 0, 2));
     courtesy_controller.link_active = true;
-    assert(ra_controller_process(&courtesy_controller, false, NULL, 0, 3));
+    assert(ra_controller_process(&courtesy_controller, true, NULL, 0, 1));
     courtesy_controller.link_active = false;
+    assert(!ra_controller_process(&courtesy_controller, false, NULL, 0, 2));
+    assert(courtesy_controller.courtesy_pending_count == 2);
+    assert(ra_controller_process(&courtesy_controller, true, NULL, 0, 3));
+    assert(!courtesy_controller.courtesy_pending_count);
     assert(!ra_controller_process(&courtesy_controller, false, NULL, 0, 4));
-    assert(courtesy_controller.courtesy_pending_count == 2);
-    assert(ra_controller_process(&courtesy_controller, true, NULL, 0, 5));
-    assert(!ra_controller_process(&courtesy_controller, false, NULL, 0, 6));
-    assert(courtesy_controller.courtesy_pending_count == 2);
-    assert(ra_controller_process(&courtesy_controller, false, audio, 1, 102));
-    assert(courtesy_controller.courtesy_playing && courtesy_controller.courtesy_pending_count == 1);
-    assert(ra_controller_process(&courtesy_controller, false, audio, 1, 103));
-    assert(!courtesy_controller.courtesy_playing &&
-           courtesy_controller.courtesy_pending_count == 1);
+    assert(courtesy_controller.courtesy_pending_count == 1);
     assert(ra_controller_process(&courtesy_controller, false, audio, 1, 104));
     assert(courtesy_controller.courtesy_playing && !courtesy_controller.courtesy_pending_count);
     assert(!ra_controller_process(&courtesy_controller, false, audio, 1, 105));
+    assert(!courtesy_controller.courtesy_playing && !courtesy_controller.courtesy_pending_count);
     struct ra_controller invalid_courtesy = {.rate = 8000};
     invalid_courtesy.courtesy[RA_COURTESY_RECEIVER].settings = (struct ra_identifier_settings){
         .morse_text = "E", .morse_speed_wpm = 20, .morse_frequency_hz = 4000, .morse_level_db = -6};
@@ -197,12 +195,47 @@ int main(void) {
                                                .morse_level_db = -6},
                                   .audio = courtesy_tick,
                                   .samples = 1};
+    link_courtesy.courtesy[RA_COURTESY_LINK] = link_courtesy.courtesy[RA_COURTESY_RECEIVER];
     assert(ra_controller_start(&link_courtesy, 0));
     assert(ra_controller_process(&link_courtesy, true, NULL, 0, 1));
     assert(!ra_controller_process(&link_courtesy, false, NULL, 0, 2));
     link_courtesy.link_active = true;
     assert(ra_controller_process(&link_courtesy, false, audio, 1, 12));
-    assert(link_courtesy.courtesy_playing && !link_courtesy.courtesy_playback.prepared);
+    assert(!link_courtesy.courtesy_playing && !link_courtesy.courtesy_pending_count);
+    link_courtesy.link_active = false;
+    assert(!ra_controller_process(&link_courtesy, false, NULL, 0, 13));
+    assert(ra_controller_process(&link_courtesy, false, audio, 1, 24));
+    assert(link_courtesy.courtesy_playing && link_courtesy.courtesy_playback.prepared);
+
+    /* Multiple pending courtesy sources play in order without stale queueing. */
+    struct ra_controller ordered_courtesy = {
+        .rate = 8000, .full_duplex = true, .courtesy_delay_ms = 1};
+    ordered_courtesy.courtesy[RA_COURTESY_RECEIVER] =
+        (struct ra_controller_id){.settings = {.morse_text = "E",
+                                               .morse_speed_wpm = 20,
+                                               .morse_frequency_hz = 800,
+                                               .morse_level_db = -6},
+                                  .audio = courtesy_tick,
+                                  .samples = 1};
+    ordered_courtesy.courtesy[RA_COURTESY_LINK] = ordered_courtesy.courtesy[RA_COURTESY_RECEIVER];
+    assert(ra_controller_start(&ordered_courtesy, 0));
+    ordered_courtesy.courtesy_pending[0] = RA_COURTESY_RECEIVER;
+    ordered_courtesy.courtesy_pending[1] = RA_COURTESY_LINK;
+    ordered_courtesy.courtesy_pending_count = RA_CONTROLLER_COURTESY_QUEUE_DEPTH;
+    ordered_courtesy.courtesy_due_ms = 0;
+    assert(ra_controller_process(&ordered_courtesy, false, audio, 1, 1));
+    assert(ordered_courtesy.courtesy_playing && ordered_courtesy.courtesy_pending_count == 1);
+    assert(ra_controller_process(&ordered_courtesy, false, audio, 1, 2));
+    assert(!ordered_courtesy.courtesy_playing && ordered_courtesy.courtesy_pending_count == 1 &&
+           ordered_courtesy.courtesy_due_ms == 2);
+    assert(ra_controller_start(&ordered_courtesy, 0));
+    ordered_courtesy.courtesy_pending_count = RA_CONTROLLER_COURTESY_QUEUE_DEPTH;
+    ordered_courtesy.receiving = true;
+    (void)ra_controller_process(&ordered_courtesy, false, NULL, 0, 4);
+    struct ra_controller unavailable_courtesy = {.rate = 8000, .full_duplex = true};
+    assert(ra_controller_start(&unavailable_courtesy, 0));
+    (void)ra_controller_process(&unavailable_courtesy, true, NULL, 0, 1);
+    (void)ra_controller_process(&unavailable_courtesy, false, NULL, 0, 2);
 
     /* Status and courtesy arbitration keeps the active announcement intact. */
     struct ra_controller arbitration = {.rate = 8000,
@@ -226,26 +259,25 @@ int main(void) {
     arbitration.courtesy_playing = false;
     assert(!ra_controller_process(&arbitration, true, NULL, 0, 251));
 
-    /* Link activity selects the Morse fallback and smoothly ducks its output. */
+    /* RF status waits until both local and linked receive are idle. */
     int16_t ducked_status[80];
     for (size_t index = 0; index < sizeof(ducked_status) / sizeof(*ducked_status); ++index) {
         ducked_status[index] = 10000;
     }
     controller.telemetry_duck_db = -20;
+    controller.courtesy[RA_COURTESY_LINK].settings.morse_text = "";
     assert(ra_controller_start(&controller, 0));
     controller.link_active = true;
     assert(ra_controller_queue_status(&controller, "E", ducked_status,
                                       sizeof(ducked_status) / sizeof(*ducked_status)));
     assert(ra_controller_process(&controller, false, audio,
                                  sizeof(ducked_status) / sizeof(*ducked_status), 250));
-    int peak = 0;
-    for (size_t index = 0; index < sizeof(ducked_status) / sizeof(*ducked_status); ++index) {
-        int value = audio[index] < 0 ? -audio[index] : audio[index];
-        peak = value > peak ? value : peak;
-    }
-    assert(peak >= 7000 && peak <= 8000 && controller.telemetry_gain > 0.099 &&
-           controller.telemetry_gain < 0.101);
+    assert(!controller.status_playing && !audio[0]);
     controller.link_active = false;
+    assert(ra_controller_process(&controller, false, audio,
+                                 sizeof(ducked_status) / sizeof(*ducked_status), 251));
+    assert(controller.status_playing && audio[0] > 0 && audio[0] < ducked_status[0] &&
+           controller.telemetry_gain < 1.0);
 
     struct ra_controller_id ids[2] = {{.settings = {.interval_ms = 100,
                                                     .priority = 5,
@@ -275,14 +307,15 @@ int main(void) {
     ids[0].settings.morse_frequency_hz = 1000;
     controller.hang_ms = 20;
     assert(ra_controller_start(&controller, 0));
-    /* A status reply preempts an ID but leaves that ID due for replay afterward. */
+    /* A queued status waits until the current identifier finishes. */
     assert(ra_controller_process(&controller, false, audio, 2, 100));
     assert(controller.playing == 0 && controller.playback.offset == 2);
     assert(ra_controller_queue_status(&controller, "E", NULL, 0));
     assert(ra_controller_process(&controller, false, audio, 960, 250));
-    assert(controller.playing == SIZE_MAX && states[0].satisfied_ms == 0);
+    assert(controller.playing == SIZE_MAX && states[0].satisfied_ms == 250 &&
+           !controller.status_playing);
     assert(ra_controller_process(&controller, false, audio, 2, 251));
-    assert(controller.playing == 0 && audio[0] == 100 && audio[1] == -100);
+    assert(controller.status_playing && controller.playing == SIZE_MAX);
     assert(ra_controller_start(&controller, 0));
     assert(ra_controller_process(&controller, false, audio, 960, 100));
     assert(audio[0] == 100 && audio[3] == -200 && audio[4] == 0);

@@ -44,6 +44,21 @@ struct ra_runtime {
     ra_link_event_handler event;   /**< Control-queue submission callback for link lifecycle. */
 };
 
+/** @brief Format known node identities and amateur callsigns for speech synthesis.
+ * @param source Morse-safe telemetry text.
+ * @param node_one First known numeric node identity, if any.
+ * @param node_two Second known numeric node identity, if any.
+ * @param speech Bounded speech-synthesizer text destination.
+ * @param capacity Bytes available in @p speech.
+ * @return True when the complete formatted text fits.
+ *
+ * Only supplied identities are rendered digit-by-digit with a node prefix.
+ * Mixed alphanumeric words are rendered character-by-character as callsigns;
+ * unrelated numbers remain ordinary speech.
+ */
+bool ra_runtime_telemetry_speech_text(const char *source, const char *node_one,
+                                      const char *node_two, char *speech, size_t capacity);
+
 /** @brief Start all enabled nodes from an already validated configuration.
  * @param runtime Empty destination; unchanged on failure.
  * @param document Immutable configuration retained until stop completes.

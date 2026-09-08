@@ -727,6 +727,11 @@ int main(void) {
     assert(ra_link_hub_snapshot(&hub, peers, 1) == 2 && !strcmp(peers[0].name, "2") &&
            peers[0].transmit && peers[0].forward && !peers[0].permanent);
     assert(ra_link_hub_snapshot(&hub, peers, 2) == 2 && !strcmp(peers[1].name, "1"));
+    /* A disconnected/unfinished peer has no rate basis for a reserve duration. */
+    atomic_store(&first.peer->received.reserve_samples, 160);
+    first.peer->linear_rate = 0;
+    assert(ra_link_hub_snapshot(&hub, peers, 2) == 2 && !peers[1].receive_reserve_ms);
+    first.peer->linear_rate = 8000;
     atomic_store(&second.peer->ended, true);
     assert(ra_link_hub_snapshot(&hub, peers, 2) == 1 && !strcmp(peers[0].name, "1"));
     topology = ra_link_hub_topology(&hub);

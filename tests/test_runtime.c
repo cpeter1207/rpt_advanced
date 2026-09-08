@@ -88,6 +88,8 @@ static const char *status_topology = "";
 static bool status_topology_failure;
 /** @brief Most recent status text submitted through the live controller interface. */
 static char queued_status[RA_CONTROLLER_STATUS_TEXT_MAX];
+/** @brief Most recent Piper text prepared by the runtime fixture. */
+static char prepared_speech[RA_CONTROLLER_STATUS_TEXT_MAX * 2];
 /** @brief Number of status requests accepted by the controller fixture. */
 static size_t queued_status_count;
 /** @brief Maximum status requests accepted before the fixture reports a full controller queue. */
@@ -561,8 +563,13 @@ void ra_link_hub_close(struct ra_link_hub *hub) {
 void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsigned int selected,
                            int16_t **audio, size_t *samples) {
     assert(settings->morse_text && selected == rate);
+    assert(settings->speech_text);
+    ast_copy_string(prepared_speech, settings->speech_text, sizeof(prepared_speech));
     *audio = prepared ? malloc(sizeof(**audio)) : NULL;
     *samples = prepared ? 1 : 0;
+    if (*audio) {
+        **audio = 1000;
+    }
 }
 
 /** @brief Linker-provided allocation implementation.
@@ -797,6 +804,25 @@ static bool digits_fixture(struct ra_runtime *runtime, const char *digits,
  * @return Zero after assertions.
  */
 int main(void) {
+    char speech_text[64];
+    assert(ra_runtime_telemetry_speech_text("temperature 75", NULL, NULL, speech_text,
+                                            sizeof(speech_text)));
+    assert(!strcmp(speech_text, "temperature 75"));
+    assert(ra_runtime_telemetry_speech_text("123 N0CALL", "123", NULL, speech_text,
+                                            sizeof(speech_text)));
+    assert(!strcmp(speech_text, "node,1,2,3 N,0,C,A,L,L"));
+    assert(
+        ra_runtime_telemetry_speech_text("  123", "123", "456", speech_text, sizeof(speech_text)));
+    assert(!strcmp(speech_text, "  node,1,2,3"));
+    assert(ra_runtime_telemetry_speech_text("456 abc", "123", "456", speech_text,
+                                            sizeof(speech_text)));
+    assert(!strcmp(speech_text, "node,4,5,6 abc"));
+    assert(ra_runtime_telemetry_speech_text("abc", "xyz", "456", speech_text, sizeof(speech_text)));
+    assert(!strcmp(speech_text, "abc"));
+    assert(!ra_runtime_telemetry_speech_text(" ", NULL, NULL, speech_text, 1));
+    assert(!ra_runtime_telemetry_speech_text("123", "123", NULL, speech_text, 5));
+    assert(!ra_runtime_telemetry_speech_text("A", NULL, NULL, speech_text, 1));
+    assert(!ra_runtime_telemetry_speech_text("", NULL, NULL, speech_text, 0));
     char *sections[] = {"alpha", "disabled", "beta", "identifier alpha periodic"};
     struct ra_config_entry entries[] = {
         {"disabled", "node_enabled", "no"},
@@ -1172,6 +1198,7 @@ int main(void) {
     queued_status_count = 0;
     assert(!ra_runtime_queue_link_event(&runtime, "alpha", "123", true));
     assert(queued_status_count == 2 && !strcmp(queued_status, "123 CONNECTED"));
+    assert(!strcmp(prepared_speech, "node,1,2,3 CONNECTED"));
     assert(!ra_runtime_queue_link_event(&runtime, "alpha", "beta", false));
     assert(!strcmp(queued_status, "beta DISCONNECTED"));
     char oversized_event[RA_CONTROLLER_STATUS_TEXT_MAX + 1];
