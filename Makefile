@@ -31,6 +31,9 @@ MODULE_OBJECTS := $(patsubst module/%.c,build/module/%.o,$(MODULE_HELPERS))
 MODULE_COVERAGE_OBJECTS := $(patsubst module/%.c,build/module-coverage/%.o,$(MODULE_HELPERS))
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
 SAMPLERATE_LIBS := -lsamplerate $(RPCR_LIBS)
+# The released shared playout ring installs under /usr/lib.  ASL3's module
+# loader does not add that non-multiarch directory to its runtime search path.
+RPCR_RPATH := -Wl,-rpath,/usr/lib
 HEADERS := $(wildcard src/*.h)
 TESTS := $(wildcard tests/test_*.c)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
@@ -71,7 +74,7 @@ build/module/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) $(RPCR_BUILD_DEP)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -fPIC -c $< -o $@
 
 build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS) $(MODULE_OBJECTS)
-	$(CC) -shared $^ -pthread -lm $(SAMPLERATE_LIBS) -o $@
+	$(CC) -shared $^ -pthread -lm $(SAMPLERATE_LIBS) $(RPCR_RPATH) -o $@
 
 build/librpt_advanced.a: $(OBJECTS)
 	$(AR) rcs $@ $^
