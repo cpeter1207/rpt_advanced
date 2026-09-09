@@ -505,8 +505,8 @@ static bool topology_contains_local(const char *topology, const char *local_name
         while (topology[end] && topology[end] != ',') {
             ++end;
         }
-        if (end - start - 1 == local_length && !memcmp(topology + start + 1, local_name,
-                                                        local_length)) {
+        if (end - start - 1 == local_length &&
+            !memcmp(topology + start + 1, local_name, local_length)) {
             return true;
         }
         start = topology[end] ? end + 1 : end;
@@ -975,11 +975,22 @@ size_t ra_link_hub_snapshot(struct ra_link_hub *hub, struct ra_link_peer_status 
             entry->consecutive_underruns = atomic_load(&port->peer.received.consecutive_underruns);
             entry->underrun_average_milli =
                 atomic_load(&port->peer.received.underrun_average_milli);
-            uint64_t reserve_samples = atomic_load(&port->peer.received.reserve_samples);
-            entry->receive_reserve_ms =
-                port->peer.linear_rate
-                    ? (unsigned int)(reserve_samples * 1000U / port->peer.linear_rate)
-                    : 0;
+            struct rpcr_observation observation;
+            rpcr_observe(&port->peer.received, &observation);
+            if (port->peer.linear_rate) {
+                entry->receive_reserve_ms =
+                    (unsigned int)(observation.reserve_samples * 1000U / port->peer.linear_rate);
+                entry->receive_capacity_ms =
+                    (unsigned int)(observation.capacity_samples * 1000U / port->peer.linear_rate);
+                entry->receive_occupancy_ms =
+                    (unsigned int)(observation.available_samples * 1000U / port->peer.linear_rate);
+                entry->receive_filtered_occupancy_ms =
+                    (unsigned int)(observation.filtered_occupancy_samples * 1000U /
+                                   port->peer.linear_rate);
+                entry->receive_target_ms =
+                    (unsigned int)(observation.target_samples * 1000U / port->peer.linear_rate);
+            }
+            entry->receive_ratio_correction_ppm = observation.ratio_correction_ppm;
         }
         ++count;
     }

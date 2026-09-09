@@ -17,7 +17,9 @@ static bool append(char *output, size_t capacity, size_t *length, const char *te
     if (count >= capacity - *length) {
         return false;
     }
-    memcpy(output + *length, text, count + 1);
+    for (size_t index = 0; index <= count; ++index) {
+        output[*length + index] = text[index];
+    }
     *length += count;
     return true;
 }
@@ -44,7 +46,7 @@ static const char *greeting(int hour) {
  * @return True when the complete number fits.
  */
 static bool append_two_digits(char *output, size_t capacity, size_t *length, int value) {
-    char digits[] = {(char)('0' + value / 10), (char)('0' + value % 10), '\0'};
+    const char digits[] = {(char)('0' + value / 10), (char)('0' + value % 10), '\0'};
     return append(output, capacity, length, digits);
 }
 
@@ -68,7 +70,7 @@ static bool append_time(char *output, size_t capacity, size_t *length, int hour,
             return false;
         }
         if (twelve_hour < 10) {
-            char digit[] = {(char)('0' + twelve_hour), '\0'};
+            const char digit[] = {(char)('0' + twelve_hour), '\0'};
             if (!append(output, capacity, length, digit)) {
                 return false;
             }

@@ -599,7 +599,7 @@ size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local) 
     return 0;
 }
 
-/** @brief Accept nonpermanent disconnect-all requests in the module fixture. */
+/* Accept nonpermanent disconnect-all requests in the module fixture. */
 size_t ra_runtime_disconnect_nonpermanent_all(struct ra_runtime *runtime, const char *local) {
     (void)runtime;
     assert(runtime_locked && local);
@@ -620,11 +620,7 @@ int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, 
     return status_queue_failure ? -1 : 0;
 }
 
-/** @brief Observe local-time telemetry dispatch in the fixture runtime.
- * @param runtime Fixture runtime.
- * @param local Selected local node.
- * @return Zero or the selected telemetry-queue failure.
- */
+/* Fixture implementation for the public time-telemetry operation. */
 int ra_runtime_queue_time(struct ra_runtime *runtime, const char *local) {
     (void)runtime;
     assert(runtime_locked && !strcmp(local, "usb"));
@@ -897,7 +893,12 @@ int main(void) {
                                                 .receive_missing = 160,
                                                 .consecutive_underruns = 2,
                                                 .underrun_average_milli = 1250,
-                                                .receive_reserve_ms = 40};
+                                                .receive_reserve_ms = 40,
+                                                .receive_capacity_ms = 120,
+                                                .receive_occupancy_ms = 80,
+                                                .receive_filtered_occupancy_ms = 75,
+                                                .receive_target_ms = 80,
+                                                .receive_ratio_correction_ppm = -25};
     cli_peer_count = 1;
     cli_topology = "T123,R456";
     queue_failure = 3;
@@ -912,19 +913,19 @@ int main(void) {
     cli_node_unknown = false;
     clear_cli_output();
     assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
-    assert(!strcmp(cli_output,
-                   "rpt_advanced: usb has 1 link\n"
-                   "  123: transceive (permanent) rx-missing=160 "
-                   "current-underrun-samples=2 10s-underrun-samples=1.250 reserve=40ms\n"
-                   "  topology: T123,R456\n"));
+    assert(!strcmp(cli_output, "rpt_advanced: usb has 1 link\n"
+                               "  123: transceive (permanent) rx-missing=160 "
+                               "current-underrun-samples=2 10s-underrun-samples=1.250 reserve=40ms "
+                               "occupancy=80/120ms filtered=75ms target=80ms ratio=-25ppm\n"
+                               "  topology: T123,R456\n"));
     cli_topology = "";
     clear_cli_output();
     assert(command_entry->handler(command_entry, CLI_HANDLER, &status_arguments) == CLI_SUCCESS);
-    assert(!strcmp(cli_output,
-                   "rpt_advanced: usb has 1 link\n"
-                   "  123: transceive (permanent) rx-missing=160 "
-                   "current-underrun-samples=2 10s-underrun-samples=1.250 reserve=40ms\n"
-                   "  topology: none\n"));
+    assert(!strcmp(cli_output, "rpt_advanced: usb has 1 link\n"
+                               "  123: transceive (permanent) rx-missing=160 "
+                               "current-underrun-samples=2 10s-underrun-samples=1.250 reserve=40ms "
+                               "occupancy=80/120ms filtered=75ms target=80ms ratio=-25ppm\n"
+                               "  topology: none\n"));
     cli_topology = "T123,R456";
     cli_topology_failure = true;
     clear_cli_output();
@@ -943,9 +944,11 @@ int main(void) {
            CLI_SUCCESS);
     assert(!strcmp(cli_output, "rpt_advanced: usb has 2 links\n"
                                "  234: monitor rx-missing=0 current-underrun-samples=0 "
-                               "10s-underrun-samples=0.000 reserve=0ms\n"
+                               "10s-underrun-samples=0.000 reserve=0ms occupancy=0/0ms "
+                               "filtered=0ms target=0ms ratio=+0ppm\n"
                                "  345: local-monitor rx-missing=0 current-underrun-samples=0 "
-                               "10s-underrun-samples=0.000 reserve=0ms\n"
+                               "10s-underrun-samples=0.000 reserve=0ms occupancy=0/0ms "
+                               "filtered=0ms target=0ms ratio=+0ppm\n"
                                "  topology: R234,R345\n"));
     cli_peers[0] = (struct ra_link_peer_status){
         .name = "456", .forward = true, .permanent = true, .retrying = true};
@@ -957,9 +960,11 @@ int main(void) {
     assert(!strcmp(cli_output,
                    "rpt_advanced: usb has 2 links\n"
                    "  456: monitor (permanent) (retrying) rx-missing=0 "
-                   "current-underrun-samples=0 10s-underrun-samples=0.000 reserve=0ms\n"
+                   "current-underrun-samples=0 10s-underrun-samples=0.000 reserve=0ms "
+                   "occupancy=0/0ms filtered=0ms target=0ms ratio=+0ppm\n"
                    "  567: local-monitor (paused) rx-missing=0 current-underrun-samples=0 "
-                   "10s-underrun-samples=0.000 reserve=0ms\n"
+                   "10s-underrun-samples=0.000 reserve=0ms occupancy=0/0ms "
+                   "filtered=0ms target=0ms ratio=+0ppm\n"
                    "  topology: none\n"));
     argv[2] = "connect";
     const unsigned int outgoing_failures[] = {2, 3, 10};

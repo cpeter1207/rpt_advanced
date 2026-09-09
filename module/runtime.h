@@ -183,7 +183,11 @@ bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *loc
  */
 size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local);
 
-/** @brief Disconnect every active nonpermanent direct peer for one local node. */
+/** @brief Disconnect every active nonpermanent direct peer for one local node.
+ * @param runtime Active runtime.
+ * @param local Local node name.
+ * @return Number of nonpermanent peers released, or zero for an unknown node.
+ */
 size_t ra_runtime_disconnect_nonpermanent_all(struct ra_runtime *runtime, const char *local);
 
 /** @brief Resume every link retained by a prior disconnect-all for a local node.

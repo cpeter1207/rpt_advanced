@@ -33,6 +33,8 @@ static unsigned int allocation_failure;
 static unsigned int allocation_calls;
 /** @brief Select the shared playout-ring initialization failure path. */
 static bool rpcr_init_failure;
+/** @brief Select the shared playout-ring sample-rate setup failure path. */
+static bool rpcr_sample_rate_failure;
 /** @brief Next input frame. */
 static struct ast_frame *input;
 /** @brief Readiness sequence. */
@@ -90,6 +92,21 @@ int __real_rpcr_init(struct rpcr_ring *ring, size_t capacity, enum rpcr_quality 
  */
 int __wrap_rpcr_init(struct rpcr_ring *ring, size_t capacity, enum rpcr_quality quality) {
     return rpcr_init_failure ? -1 : __real_rpcr_init(ring, capacity, quality);
+}
+/** @brief Call the real shared-ring sample-rate setup behind the test wrapper.
+ * @param ring Initialized ring.
+ * @param sample_rate PCM sample rate in hertz.
+ * @return Zero when the rate is accepted.
+ */
+int __real_rpcr_set_sample_rate(struct rpcr_ring *ring, unsigned int sample_rate);
+
+/** @brief Inject a sample-rate setup failure at the consumer boundary.
+ * @param ring Initialized ring.
+ * @param sample_rate PCM sample rate in hertz.
+ * @return A selected failure or the shared library result.
+ */
+int __wrap_rpcr_set_sample_rate(struct rpcr_ring *ring, unsigned int sample_rate) {
+    return rpcr_sample_rate_failure ? -1 : __real_rpcr_set_sample_rate(ring, sample_rate);
 }
 /** @brief Decoder paths requested by the peer. */
 static unsigned int translator_builds;
@@ -477,6 +494,9 @@ int main(void) {
     rpcr_init_failure = true;
     assert(ra_link_peer_start(&ring_failure, NULL, &linear, NULL, NULL) == -1);
     rpcr_init_failure = false;
+    rpcr_sample_rate_failure = true;
+    assert(ra_link_peer_start(&ring_failure, NULL, &linear, NULL, NULL) == -1);
+    rpcr_sample_rate_failure = false;
     for (failure = 1; failure <= 5; ++failure) {
         mutex_inits = 0;
         allocation_calls = 0;
@@ -488,6 +508,7 @@ int main(void) {
     sent_newkey1s = sent_iaxkeys = 0;
     assert(!ra_link_peer_start(&peer, NULL, &linear, receive_inbound_digit, &inbound_context));
     assert(sent_newkey1s == 1);
+    assert(peer.received.capacity == (size_t)linear.rate * RA_LINK_RECEIVE_CAPACITY_MS / 1000U);
     atomic_uint generation;
     atomic_init(&generation, 0);
     peer.topology_generation = &generation;
@@ -499,7 +520,7 @@ int main(void) {
     overlength[sizeof(overlength) - 1] = '\0';
     assert(ra_link_peer_queue_topology(&peer, overlength) == -1);
     assert(!ra_link_peer_queue_topology(&peer, ""));
-    int16_t samples[1600], output[2];
+    int16_t samples[4000], output[2];
     for (size_t index = 0; index < sizeof(samples) / sizeof(*samples); ++index) {
         samples[index] = index % 2 ? -456 : 123;
     }
@@ -522,6 +543,19 @@ int main(void) {
     rpcr_write(&peer.received, samples, 1);
     peer.received.primed = true;
     assert(ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)));
+    /* A short empty interval after a valid source block stays active long
+     * enough for the shared ring to synthesize its bounded PCM concealment. */
+    for (size_t index = 0; index < peer.received.capacity; ++index) {
+        peer.received.history[index] = (int16_t)((index % 80) * 300 - 12000);
+    }
+    peer.received.history_length = peer.received.capacity;
+    peer.received.history_next = 0;
+    peer.received.plc_period = peer.received.plc_samples = 0;
+    atomic_store(&peer.received.read, atomic_load(&peer.received.written));
+    peer.receive_age = 0;
+    peer.seen_epoch = atomic_load(&peer.receive_epoch);
+    assert(ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)));
+    assert(output[0] || output[1]);
     peer.received.primed = false;
     frame(&peer, &dtmf_begin);
     assert(!inbound_digits);
@@ -706,7 +740,8 @@ int main(void) {
     assert(rendered);
     /* A callback larger than the reserve target must still use only the
      * preallocated converter workspace and retain one safe playout block. */
-    int16_t wide[1000] = {0};
+    int16_t wide[2200] = {0};
+    atomic_fetch_add(&peer.receive_epoch, 1);
     assert(ra_link_peer_receive(&peer, wide, sizeof(wide) / sizeof(*wide)));
     assert(atomic_load(&peer.received.reserve_samples) ==
            peer.received.capacity - sizeof(wide) / sizeof(*wide));
@@ -716,7 +751,10 @@ int main(void) {
     peer.receive_age = 0;
     peer.seen_epoch = atomic_load(&peer.receive_epoch);
     bool expired_voice = ra_link_peer_receive(&peer, quiet, 400);
-    assert(peer.receive_age == 400 && !expired_voice);
+    /* A recent source epoch keeps this short gap active so the shared ring
+     * can conceal it.  Only a gap longer than the protected reserve ends
+     * receive playout. */
+    assert(peer.receive_age == 400 && expired_voice);
     rpcr_write(&peer.received, samples, 2);
     peer.receive_age = linear.rate / 20;
     bool restored = false;

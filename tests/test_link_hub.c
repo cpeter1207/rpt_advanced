@@ -1456,8 +1456,7 @@ int main(void) {
     RA_TEST_HUB(nonloop);
     struct ast_channel nonloop_peer = {.topology = "Tother,Rremote"};
     nonloop.local_name = "local";
-    assert(!ra_link_hub_attach(&nonloop, "456", &nonloop_peer, &format_8000, true, true,
-                               false));
+    assert(!ra_link_hub_attach(&nonloop, "456", &nonloop_peer, &format_8000, true, true, false));
     manager_idle_polls = 0;
     manager_idle_limit = 1;
     atomic_store(&nonloop.stop, false);
@@ -1469,8 +1468,8 @@ int main(void) {
     RA_TEST_HUB(empty_loop_name);
     struct ast_channel empty_loop_peer = {.topology = "Tlocal"};
     empty_loop_name.local_name = "";
-    assert(!ra_link_hub_attach(&empty_loop_name, "457", &empty_loop_peer, &format_8000, true,
-                               true, false));
+    assert(!ra_link_hub_attach(&empty_loop_name, "457", &empty_loop_peer, &format_8000, true, true,
+                               false));
     manager_idle_polls = 0;
     manager_idle_limit = 1;
     atomic_store(&empty_loop_name.stop, false);
@@ -1498,10 +1497,10 @@ int main(void) {
     RA_TEST_HUB(temporary);
     struct ast_channel temporary_peer = {0};
     struct ast_channel permanent_peer = {0};
-    assert(!ra_link_hub_attach(&temporary, "temporary", &temporary_peer, &format_8000, true,
-                               true, false));
-    assert(!ra_link_hub_attach(&temporary, "permanent", &permanent_peer, &format_8000, true,
-                               true, true));
+    assert(!ra_link_hub_attach(&temporary, "temporary", &temporary_peer, &format_8000, true, true,
+                               false));
+    assert(!ra_link_hub_attach(&temporary, "permanent", &permanent_peer, &format_8000, true, true,
+                               true));
     assert(ra_link_hub_disconnect_nonpermanent_all(&temporary) == 1 && temporary_peer.stopped &&
            !permanent_peer.stopped && ra_link_hub_connected(&temporary, "permanent"));
     assert(!ra_link_hub_disconnect_nonpermanent_all(&temporary));

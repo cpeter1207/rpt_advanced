@@ -449,11 +449,15 @@ static char *link_status_cli(struct ast_cli_args *arguments) {
     for (size_t index = 0; index < count; ++index) {
         ast_cli(arguments->fd,
                 "  %s: %s%s%s rx-missing=%" PRIu64 " current-underrun-samples=%" PRIu64
-                " 10s-underrun-samples=%.3f reserve=%ums\n",
+                " 10s-underrun-samples=%.3f reserve=%ums occupancy=%u/%ums filtered=%ums"
+                " target=%ums ratio=%+dppm\n",
                 peers[index].name, link_cli_mode(&peers[index]),
                 peers[index].permanent ? " (permanent)" : "", link_cli_retry_state(&peers[index]),
                 peers[index].receive_missing, peers[index].consecutive_underruns,
-                peers[index].underrun_average_milli / 1000.0, peers[index].receive_reserve_ms);
+                peers[index].underrun_average_milli / 1000.0, peers[index].receive_reserve_ms,
+                peers[index].receive_occupancy_ms, peers[index].receive_capacity_ms,
+                peers[index].receive_filtered_occupancy_ms, peers[index].receive_target_ms,
+                peers[index].receive_ratio_correction_ppm);
     }
     ast_cli(arguments->fd, "  topology: %s\n", *topology ? topology : "none");
     ast_free(topology);

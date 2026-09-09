@@ -501,7 +501,7 @@ size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
     return 0;
 }
 
-/** @brief Accept nonpermanent disconnect-all requests in the runtime fixture. */
+/* Accept nonpermanent disconnect-all requests in the runtime fixture. */
 size_t ra_link_hub_disconnect_nonpermanent_all(struct ra_link_hub *hub) {
     assert(hub);
     return 0;

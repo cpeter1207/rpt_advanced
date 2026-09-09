@@ -24,8 +24,12 @@ struct ast_trans_pvt;
 #define RA_LINK_TOPOLOGY_ADVERTISEMENT_MAX (RA_LINK_TOPOLOGY_TEXT_MAX - 2)
 /** @brief Interdigit interval after which the peer reader emits one command terminator. */
 #define RA_LINK_PEER_DTMF_TIMEOUT_MS 3000U
-/** @brief Incoming PCM retained after each playout callback. */
-#define RA_LINK_RECEIVE_RESERVE_BLOCKS 3U
+/** @brief Minimum incoming PCM retained during a brief IAX media shortage. */
+#define RA_LINK_RECEIVE_RESERVE_MS 60U
+/** @brief Total incoming PCM capacity retained for jitter and rate correction. */
+#define RA_LINK_RECEIVE_CAPACITY_MS 300U
+/** @brief Clock-recovery occupancy target, independent of the protected reserve. */
+#define RA_LINK_RECEIVE_TARGET_MS 260U
 
 /** @brief Deliver one validated remote IAX DTMF end event outside audio processing.
  * @param context Borrowed control-plane callback context.

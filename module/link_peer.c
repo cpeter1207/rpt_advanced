@@ -389,13 +389,16 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
                        struct ast_format *linear, ra_link_peer_digit_fn inbound_digit,
                        void *inbound_digit_context) {
     unsigned int linear_rate = ast_format_get_sample_rate(linear);
-    size_t capacity = linear_rate / 5;
+    /* The protected reserve needs enough PCM above it for sinc conversion and
+     * slow clock recovery.  Keep a fixed time budget across negotiated rates. */
+    size_t capacity = (size_t)linear_rate * RA_LINK_RECEIVE_CAPACITY_MS / 1000U;
     if (!capacity) {
         return -1;
     }
     int16_t *outgoing = ast_calloc(capacity, sizeof(*outgoing));
     int16_t *send_buffer = ast_calloc(capacity / 10, sizeof(*send_buffer));
-    if (!outgoing || !send_buffer || rpcr_init(&peer->received, capacity, RPCR_SINC_BEST)) {
+    if (!outgoing || !send_buffer || rpcr_init(&peer->received, capacity, RPCR_SINC_BEST) ||
+        rpcr_set_sample_rate(&peer->received, linear_rate)) {
         release_elastic(peer);
         ast_free(send_buffer);
         ast_free(outgoing);
@@ -453,7 +456,7 @@ bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samp
     } else {
         peer->receive_age += samples;
     }
-    size_t reserve = samples * RA_LINK_RECEIVE_RESERVE_BLOCKS;
+    size_t reserve = (size_t)peer->linear_rate * RA_LINK_RECEIVE_RESERVE_MS / 1000U;
     if (samples >= peer->received.capacity) {
         reserve = 0;
     } else if (reserve > peer->received.capacity - samples) {
@@ -461,15 +464,21 @@ bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samp
     }
     atomic_store_explicit(&peer->received.reserve_samples, reserve, memory_order_relaxed);
     size_t available = rpcr_available(&peer->received);
-    size_t target = peer->received.capacity > samples * 2U ? peer->received.capacity - samples * 2U
-                                                           : reserve + samples;
+    size_t target = (size_t)peer->linear_rate * RA_LINK_RECEIVE_TARGET_MS / 1000U;
+    size_t maximum_target =
+        samples < peer->received.capacity ? peer->received.capacity - samples : 0;
+    if (target > maximum_target) {
+        target = maximum_target;
+    }
     if (!peer->received.primed && available >= target) {
         peer->received.primed = true;
     }
     bool fresh = peer->receive_age < reserve;
     size_t protected_reserve = fresh ? reserve : 0;
-    bool receiving = peer->received.primed &&
-                     (available > protected_reserve || (fresh && available)) &&
+    /* Keep the source active through one protected-reserve interval so the
+     * shared PCM ring can conceal a brief network shortage. A real end of
+     * stream still wins immediately and never synthesizes media. */
+    bool receiving = peer->received.primed && (available > protected_reserve || fresh) &&
                      !atomic_load(&peer->ended);
     if (!receiving) {
         for (size_t i = 0; i < samples; ++i) {

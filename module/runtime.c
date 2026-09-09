@@ -1109,11 +1109,7 @@ static int queue_status_speech(struct ra_runtime_node *node, const char *text, c
     return queue_status(node, speech, text);
 }
 
-/** @brief Queue the selected node's local clock announcement.
- * @param runtime Active node runtime.
- * @param local Exact local node name.
- * @return Zero when the announcement was queued, otherwise minus one.
- */
+/* The public declaration documents this control-plane operation. */
 int ra_runtime_queue_time(struct ra_runtime *runtime, const char *local) {
     time_t now = time(NULL);
     struct timeval when;

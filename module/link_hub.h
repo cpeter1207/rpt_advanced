@@ -25,10 +25,15 @@ struct ra_link_peer_status {
     bool permanent;                   /**< Unexpected loss is eligible for recovery. */
     bool retrying; /**< Link is retained while its transport is absent or reconnecting. */
     bool paused;   /**< Reconnect awaits the operator's reconnect-all command. */
-    uint64_t receive_missing;        /**< Cumulative missing incoming PCM samples. */
-    uint64_t consecutive_underruns;  /**< Current consecutive incoming missing PCM samples. */
-    uint64_t underrun_average_milli; /**< Ten-second EWMA of missing samples, in millisamples. */
-    unsigned int receive_reserve_ms; /**< Current elastic incoming PCM reserve in milliseconds. */
+    uint64_t receive_missing;          /**< Cumulative missing incoming PCM samples. */
+    uint64_t consecutive_underruns;    /**< Current consecutive incoming missing PCM samples. */
+    uint64_t underrun_average_milli;   /**< Ten-second EWMA of missing samples, in millisamples. */
+    unsigned int receive_reserve_ms;   /**< Current elastic incoming PCM reserve in milliseconds. */
+    unsigned int receive_capacity_ms;  /**< Fixed incoming PCM ring capacity in milliseconds. */
+    unsigned int receive_occupancy_ms; /**< Instantaneous readable incoming PCM in milliseconds. */
+    unsigned int receive_filtered_occupancy_ms; /**< Filtered occupancy used by rate recovery. */
+    unsigned int receive_target_ms;   /**< Rate-recovery occupancy target in milliseconds. */
+    int receive_ratio_correction_ppm; /**< Applied source-rate correction in parts per million. */
 };
 /** @brief Redial callback invoked by the hub manager for a retained peer.
  * @param context Runtime-owned callback context.
@@ -181,7 +186,7 @@ bool ra_link_hub_detach_reconnect(struct ra_link_hub *hub, const char *name, boo
 size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub);
 
 /** @brief Disconnect every attached nonpermanent peer without retaining it for reconnect-all.
- * @param hub Node-owned routing hub.
+ * @param[in] hub Node-owned routing hub.
  * @return Number of detached temporary peers.
  */
 size_t ra_link_hub_disconnect_nonpermanent_all(struct ra_link_hub *hub);
