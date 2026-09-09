@@ -38,6 +38,8 @@ const char *ra_connection_open(struct ra_connection *connection, const char *nam
         return "radio has no native audio format";
     }
     struct ra_connection candidate = {0};
+    /* An omitted rate selects the highest registered signed-linear format the
+     * radio can use. Individual links adapt their negotiated wire rate later. */
     candidate.radio.codec = ra_media_select(native, rate, codec);
     ao2_cleanup(native);
     if (!candidate.radio.codec) {

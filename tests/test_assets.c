@@ -290,6 +290,14 @@ int main(void) {
     settings.file = "/no/such/rpt-advanced-source";
     check(&settings, true);
     assert(speeches == 1);
+    settings.speech_level_db = -6;
+    int16_t *audio;
+    size_t samples;
+    ra_identifier_prepare(&settings, 16000, &audio, &samples);
+    assert(audio && samples == 2 && audio[0] >= 16420 && audio[0] <= 16422 && audio[1] <= -16421 &&
+           audio[1] >= -16423);
+    free(audio);
+    settings.speech_level_db = 0;
     settings.file = "";
     check(&settings, true);
     for (failure = TEMP; failure <= READ_SHORT; ++failure) {

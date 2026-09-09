@@ -11,7 +11,7 @@ bool ra_playback_init(struct ra_playback *state, const int16_t *audio, size_t sa
         .audio = audio, .samples = samples, .prepared = samples > 0 && !receiving};
     if (!ra_morse_init(&replacement.morse, settings->morse_text, rate,
                        (unsigned int)settings->morse_speed_wpm,
-                       (unsigned int)settings->morse_frequency_hz)) {
+                       (unsigned int)settings->morse_frequency_hz, (int)settings->morse_level_db)) {
         return false;
     }
     *state = replacement;

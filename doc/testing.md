@@ -9,6 +9,11 @@ An additional native-rate case prepares a WAV identifier through FFmpeg and
 observes its recognizable PCM at the transmitter. The synthetic receiver then
 asserts carrier; negative Morse samples in the otherwise positive receive audio
 verify replacement of the prepared ID by its Morse fallback inside Asterisk.
+The `integration` portion also starts isolated Asterisk processes and exercises
+the local IAX link implementation. It is a controlled source-level test: it
+does not prove interoperability with a classic `app_rpt` node, authorize live
+link activation, or establish radio hardware behavior. The current AllStarLink
+changes require a fresh complete quality run before a merge or release.
 
 To exercise USBRadioPlus's actual adapter against the synthetic hardware backend,
 use a clean build directory and run
@@ -16,8 +21,9 @@ use a clean build directory and run
 The fixture links the adapter as a separate object from that checkout; it does
 not copy it into rpt_advanced or alter USBRadioPlus. Start from a clean build
 when switching fixture modes. This checks the real adapter's reservation and
-audio callbacks, but not the USB hardware backend. The cross-project mode passed
-on Debian 13 amd64 against USBRadioPlus commit `88f3472`.
+audio callbacks, but not the USB hardware backend. Run the same required quality
+gate after changing either project; a historical fixture result is not evidence
+for the current source revision.
 
 ## Prebuilt test images
 
@@ -111,6 +117,15 @@ or service monitor to observe transmitted audio and transmitter release.
 8. If multiple radios are available, configure independent nodes and scoped ID
    overrides. Verify audio, PTT, and IDs stay on their assigned radios while
    flat defaults still apply to settings not overridden.
+9. Pending explicit approval and completion of the full platform quality gate,
+   use an isolated test peer before a public node. Verify transceive, monitor,
+   local-monitor, permanent-link recovery, disconnect-all/reconnect-all, remote
+   `*4<node>` command mode with local `#` exit, allow/deny rejection, and the
+   `*70`, `*72`, and `*73` status replies. Confirm that an Asterisk restart
+   removes every link. Treat the CLI/log topology as best-effort: it can be
+   incomplete or stale, and `R000000` means a bounded `L ` advertisement was
+   truncated. Do not perform this test against 524950 or another live node
+   without separate approval.
 
 Record module revisions, OS/architecture, USB interface, radio wiring, selected
 codec/rate, configuration, measurements, and any failed step. These procedures

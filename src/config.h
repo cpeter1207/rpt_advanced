@@ -19,6 +19,15 @@
  */
 bool ra_config_unsigned(const char *text, uint64_t minimum, uint64_t maximum, uint64_t *result);
 
+/** @brief Parse a bounded signed decimal configuration value.
+ * @param text Null-terminated value after whitespace trimming.
+ * @param minimum Inclusive lower bound.
+ * @param maximum Inclusive upper bound, no smaller than minimum.
+ * @param result Receives the value only on success.
+ * @return True for a decimal value within bounds; false leaves result unchanged.
+ */
+bool ra_config_signed(const char *text, int64_t minimum, int64_t maximum, int64_t *result);
+
 /** @brief Parse an explicit yes/no switch, independent of the process locale.
  * @param text Null-terminated trimmed configuration value.
  * @param result Receives the switch only on success.

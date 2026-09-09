@@ -68,9 +68,14 @@
   on syntax/allocation failures and file-to-settings integration tests.
 - Whole-file option and scope validation, exact node-reference checking, and
   duplicate-free enumeration of named nodes and their identifier sets.
-- Strict formatting, compiler diagnostics, Cppcheck, Clang-Tidy, Doxygen, and
-  per-platform line/branch coverage gates.
-- Doxygen publication to GitHub Pages after the main-branch quality gate passes.
+- Local AllStarLink link control: verified inbound admission, direct IAX peer
+  routing, linking-only DTMF, permanent-link recovery, direct-peer remote
+  command mode, `*722` local-time speech with Morse fallback, lock-free prepared-speech RF status playback, and best-effort `L ` topology
+  exchange. See [AllStarLink status](allstarlink-status.md) for validation
+  limits.
+- The quality policy requires strict formatting, compiler diagnostics, Cppcheck,
+  Clang-Tidy, Doxygen, and per-platform line/branch coverage gates. Doxygen is
+  published to GitHub Pages after the main-branch quality gate passes.
 
 The build produces a static controller library and `app_rpt_advanced.so`. The
 module starts named radio workers with inherited, prepared file/speech/Morse IDs.
@@ -87,17 +92,24 @@ links the actual USBRadioPlus adapter to the synthetic hardware backend.
 ## Remaining verification
 
 - Physical identifier playback/interruption and the remaining hardware acceptance
-  cases in [testing](testing.md). Clean full-duplex repeat and hang time are verified.
+  cases in [testing](testing.md).
+- A fresh complete quality gate and Debian 12/13 amd64/arm64 matrix for the
+  current AllStarLink source changes.
+- Explicitly approved live interoperability testing with classic `app_rpt` and
+  higher-rate capable peers. The AllStarLink integration has not been deployed
+  on 524950 or any other live node.
 - Execution verification of the version-tag release workflow. Source archive
   rebuilding is covered by the platform gate; no project release has been cut.
 
-Public clean ASL3 and installed-module test images are available for Debian
-12/13 and amd64/arm64; see [testing](testing.md). The initial publication passed
-the production quality gate and actual installed-module Asterisk audio tests
-on all four native platforms. The quality images remain separate development
-environments with compilers and analysis tools.
+The project provides clean ASL3 and installed-module test images for Debian
+12/13 and amd64/arm64; see [testing](testing.md). The quality images remain
+separate development environments with compilers and analysis tools. Their
+existence is not a quality result for the current working tree.
 
-## Physical test, 2026-09-07
+## Historical local-radio test, 2026-09-07
+
+The following radio-only observation predates the AllStarLink implementation.
+It neither installed nor enabled the current link controller.
 
 With the owner's approval, 524950 runs the controller on Debian 13 arm64 with
 ASL3 Asterisk 22.9.0 / ASL 3.9.3 and the actual CM119 interface. Asterisk reports
@@ -114,12 +126,12 @@ incoming signal interrupted speech and switched playback to Morse.
 
 Normal unloading of the pre-existing app_rpt crashed Asterisk before the new
 modules were installed. Controlled recovery required a service restart. Startup
-also exposed driver ordering: PR27 adds an optional USBRadioPlus ordering
-dependency, passed all native gates, and was installed by live module replacement.
-After a controlled service restart, the controller loaded automatically and
-opened the native 48 kHz radio channel without transcoding, verifying the fix.
-The original modules and configuration are retained for rollback.
+also exposed driver ordering: USBRadioPlus provides an optional ordering
+dependency so the controller can start after its radio driver. After a controlled
+service restart, the controller opened the native 48 kHz radio channel without
+transcoding. The original modules and configuration are retained for rollback.
 
-No app_rpt implementation has been copied. USBRadioPlus changes are limited to its separate RadioPlusAdvanced adapter
-and shared-engine integration. They passed the local and four native-platform
-quality/coverage/install gates and were merged in USBRadioPlus pull request 16.
+No app_rpt implementation has been copied. USBRadioPlus changes are limited to
+its separate RadioPlusAdvanced adapter and shared-engine integration. The
+current working tree still requires its fresh quality and interoperability
+verification before release or deployment.

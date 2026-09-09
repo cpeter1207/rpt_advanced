@@ -73,12 +73,29 @@ sudo asterisk -rx 'core show channels'
 Inspect Asterisk's log for configuration or radio-start failures. A loaded module
 alone does not prove that a radio is working. Verify receive indication, PTT,
 audio, identification, and transmitter release with appropriate test equipment.
-No dialplan application call is required: enabled nodes start when the module
-loads. For persistent loading, configure `modules.conf` to load USBRadioPlus
-before `app_rpt_advanced.so`; avoid a conflicting `noload` entry.
+No dialplan application call is required for the local radio: enabled nodes
+start when the module loads. For persistent loading, configure `modules.conf`
+to load USBRadioPlus before `app_rpt_advanced.so`; avoid a conflicting `noload`
+entry.
 The module declares USBRadioPlus as an optional ordering dependency so Asterisk
 starts the configured driver first. Enabled nodes still require the adapter;
 an entirely disabled configuration can load without a radio driver.
+
+## AllStarLink linking
+
+The local radio and AllStarLink link paths have different activation needs.
+Incoming IAX links require an Asterisk dialplan route to
+`RptAdvanced(<local-node>)` and normal ASL IAX registration/peer configuration;
+the module verifies the claimed caller through the configured node directory or
+ASL lookup before it accepts the channel. See
+[configuration](configuration.md) for the access lists, DTMF mappings, link
+lifetime, status, and topology behavior.
+
+Do not add that dialplan route or enable live linking from the current source
+without explicit approval. The AllStarLink integration has not yet undergone
+live interoperability testing with classic `app_rpt` and has not been deployed
+to 524950. Use the isolated tests in [testing](testing.md) and the limitations
+in [AllStarLink status](allstarlink-status.md) before any approved staging.
 
 ## Reload and rollback
 

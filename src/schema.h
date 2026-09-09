@@ -31,10 +31,4 @@ const char *ra_document_node(const struct ra_document *document, size_t index);
 const char *ra_document_identifier(const struct ra_document *document, const char *node,
                                    size_t index);
 
-/** @brief Find a node's optional identifier-default section.
- * @param document Validated document.
- * @param node Node name.
- * @return Borrowed complete section name or null when only flat defaults apply.
- */
-const char *ra_document_identifier_defaults(const struct ra_document *document, const char *node);
 #endif

@@ -71,7 +71,8 @@ struct ast_format *ast_format_cap_get_format(const struct ast_format_cap *cap, i
  */
 struct ast_format *__wrap_ra_media_select(struct ast_format *radio, unsigned int rate,
                                           const char *name) {
-    assert(radio == &native && rate == 0 && !strcmp(name, "requested"));
+    assert(radio == &native && (rate == 0 || rate == 16000));
+    (void)name;
     if (failure == 3) {
         return NULL;
     }
@@ -214,6 +215,12 @@ int main(void) {
     assert(!ra_connection_open(&connection, "usb", 0, "requested"));
     assert(paths == 2 && channels == 1 && compressed.references == 1);
     assert(connection.radio.linear == &pcm && connection.radio.codec == &compressed);
+    ra_connection_close(&connection);
+    assert(!ra_connection_open(&connection, "usb", 0, ""));
+    ra_connection_close(&connection);
+    assert(!ra_connection_open(&connection, "usb", 0, ""));
+    ra_connection_close(&connection);
+    assert(!ra_connection_open(&connection, "usb", 16000, ""));
     ra_connection_close(&connection);
     assert(!paths && !channels && !compressed.references);
     use_codec = false;

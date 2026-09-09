@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Hardware-paced prepared-audio playback with receive-triggered Morse fallback.
+ * @brief Hardware-paced prepared-audio playback with signal-triggered Morse fallback.
  */
 #ifndef RPT_ADVANCED_PLAYBACK_H
 #define RPT_ADVANCED_PLAYBACK_H
@@ -17,7 +17,7 @@ struct ra_playback {
     bool finished;         /**< Completion is terminal, including subsequent receive changes. */
 };
 
-/** @brief Initialize one ID, choosing Morse immediately during reception.
+/** @brief Initialize one ID, choosing Morse immediately during local or linked reception.
  * @param state Receives playback state on success only.
  * @param audio Borrowed prepared PCM, or null when file/speech preparation failed.
  * @param samples Prepared sample count; zero permits null audio.
@@ -32,7 +32,7 @@ bool ra_playback_init(struct ra_playback *state, const int16_t *audio, size_t sa
 
 /** @brief Consume one hardware tick's sample capacity without I/O or a separate clock.
  * @param state Initialized playback state.
- * @param receiving True interrupts prepared audio and permanently selects Morse.
+ * @param receiving True for local or linked reception; interrupts prepared audio and selects Morse.
  * @param output Sample destination, nullable only for zero capacity.
  * @param capacity Sample slots available in this hardware tick.
  * @return Samples produced; a short final block is not padded here.
