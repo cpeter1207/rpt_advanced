@@ -14,7 +14,7 @@ enum ra_speech_status {
     RA_SPEECH_COMPLETE = 2 /**< Child exited successfully; caller must validate its output. */
 };
 
-/** @brief Child process owned exclusively by one identifier worker. */
+/** @brief Child process owned exclusively by one scheduled-media preparation worker. */
 struct ra_speech {
     pid_t pid;                    /**< Positive child PID, or zero when no child is owned. */
     enum ra_speech_status status; /**< Most recent lifecycle status. */
@@ -55,7 +55,7 @@ enum ra_speech_status ra_speech_poll(struct ra_speech *state);
 
 /** @brief Kill and reap owned synthesis during interruption or module cleanup.
  * @param state Owned synthesis process; idle/completed states are unchanged.
- * Call from the identifier worker, not the hardware audio callback.
+ * Call from the scheduled-media preparation worker, not the hardware audio callback.
  */
 void ra_speech_cancel(struct ra_speech *state);
 #endif

@@ -6,7 +6,7 @@
 #include <math.h>
 #include <string.h>
 
-/** @brief Characters accepted in identifier text, in pattern-table order. */
+/** @brief Characters accepted in scheduled Morse text, in pattern-table order. */
 static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/.,?-=+@()'!\":;_$&";
 /** @brief International Morse representations corresponding to alphabet. */
 static const char *const patterns[] = {

@@ -167,6 +167,8 @@ static struct ast_channel *topology_update_peer;
 static const char *topology_update_value;
 /** @brief Optional peer whose reader ends after the first idle pass. */
 static struct ast_channel *ended_after_first_idle;
+/** @brief Optional peer that ends while another peer's inbound topology is read. */
+static struct ast_channel *ended_during_topology_read;
 /** @brief Optional peer that ends while the manager posts one outbound topology. */
 static struct ast_channel *ended_during_advertisement;
 /** @brief Opaque identity required by the inbound-IAX DTMF handler fixture. */
@@ -199,6 +201,14 @@ static atomic_bool reclamation_finished;
 static bool real_threads;
 /** @brief Preserve the real reader count instead of the fixture's legacy wait shortcut. */
 static bool preserve_reader_wait;
+/** @brief Hub that receives one nested attachment during another peer's start window. */
+static struct ra_link_hub *publish_race_hub;
+/** @brief Direct peer name published by the nested attachment. */
+static const char *publish_race_name;
+/** @brief Channel paired with the nested attachment. */
+static struct ast_channel *publish_race_channel;
+/** @brief Outer channel whose start opens the publication race window. */
+static struct ast_channel *publish_race_outer;
 
 /** @brief Initialize a fresh hub fixture and verify its audio publication state.
  * @param hub Caller-owned hub storage.
@@ -482,6 +492,16 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     if (failure == 2) {
         return -1;
     }
+    if (publish_race_hub && channel == publish_race_outer) {
+        struct ra_link_hub *hub = publish_race_hub;
+        const char *name = publish_race_name;
+        struct ast_channel *racing_channel = publish_race_channel;
+        publish_race_hub = NULL;
+        publish_race_name = NULL;
+        publish_race_channel = NULL;
+        publish_race_outer = NULL;
+        assert(!ra_link_hub_attach(hub, name, racing_channel, linear, true, true, false));
+    }
     peer->channel = channel;
     peer->linear = linear;
     channel->peer = peer;
@@ -513,6 +533,10 @@ size_t ra_link_peer_topology(struct ra_link_peer *peer, char *output, size_t cap
         size_t copied = length < capacity - 1 ? length : capacity - 1;
         memcpy(output, source, copied);
         output[copied] = '\0';
+    }
+    if (ended_during_topology_read) {
+        atomic_store(&ended_during_topology_read->peer->ended, true);
+        ended_during_topology_read = NULL;
     }
     return length;
 }
@@ -668,6 +692,56 @@ static void *advance_last_keyed_generation(void *argument) {
  * @return Zero after assertions.
  */
 int main(void) {
+    /* Each direct peer reports its own falling/rising edges, so permanent peer
+     * overrides remain distinct even while another linked input is active. */
+    RA_TEST_HUB(courtesy_hub);
+    struct ast_channel courtesy_temporary = {.active = true, .input = 100};
+    struct ast_channel courtesy_north = {.active = true, .input = 200};
+    const int16_t generic_courtesy_audio[] = {111};
+    const int16_t north_courtesy_audio[] = {222};
+    struct ra_controller_id generic_courtesy = {
+        .settings = {.morse_text = "L", .morse_speed_wpm = 20, .morse_frequency_hz = 800},
+        .audio = generic_courtesy_audio,
+        .samples = 1};
+    struct ra_controller_id north_courtesy = {
+        .settings = {.morse_text = "N", .morse_speed_wpm = 20, .morse_frequency_hz = 800},
+        .audio = north_courtesy_audio,
+        .samples = 1};
+    const struct ra_controller_peer_courtesy courtesy_overrides[] = {{"north", &north_courtesy}};
+    struct ra_controller courtesy_controller = {.link_courtesy = &generic_courtesy,
+                                                .peer_courtesies = courtesy_overrides,
+                                                .peer_courtesy_count = 1,
+                                                .rate = 8000,
+                                                .full_duplex = true};
+    int16_t courtesy_audio[] = {0};
+    assert(ra_controller_start(&courtesy_controller, 0));
+    assert(!ra_link_hub_attach(&courtesy_hub, "temporary", &courtesy_temporary, &format_8000, true,
+                               true, false));
+    assert(!ra_link_hub_attach(&courtesy_hub, "north", &courtesy_north, &format_8000, true, true,
+                               true));
+    assert(ra_link_hub_process(&courtesy_hub, &courtesy_controller, false, courtesy_audio, 1, 1));
+    courtesy_temporary.active = false;
+    courtesy_north.active = false;
+    assert(ra_link_hub_process(&courtesy_hub, &courtesy_controller, false, courtesy_audio, 1, 2));
+    assert(courtesy_audio[0] == north_courtesy_audio[0] &&
+           courtesy_controller.courtesy_pending_count == 1);
+    assert(ra_controller_start(&courtesy_controller, 10));
+    courtesy_temporary.active = true;
+    courtesy_north.active = true;
+    assert(ra_link_hub_process(&courtesy_hub, &courtesy_controller, false, courtesy_audio, 1, 11));
+    courtesy_temporary.active = false;
+    courtesy_north.active = false;
+    assert(ra_link_hub_process(&courtesy_hub, &courtesy_controller, false, courtesy_audio, 1, 12));
+    assert(courtesy_controller.courtesy_pending_count == 1);
+    courtesy_north.active = true;
+    assert(ra_link_hub_process(&courtesy_hub, &courtesy_controller, false, courtesy_audio, 1, 13));
+    assert(courtesy_controller.courtesy_pending_count == 1 &&
+           !strcmp(courtesy_controller.courtesy_pending[0].remote, "temporary"));
+    courtesy_north.active = false;
+    assert(ra_link_hub_process(&courtesy_hub, &courtesy_controller, false, courtesy_audio, 1, 14));
+    assert(courtesy_audio[0] == generic_courtesy_audio[0]);
+    ra_link_hub_close(&courtesy_hub);
+
     RA_TEST_HUB(hub);
     assert(!ra_link_hub_has_retained_state(&hub));
     ra_link_hub_set_reconnector(&hub, reconnect_stub, NULL);
@@ -701,6 +775,16 @@ int main(void) {
     assert(!ra_link_hub_attach(&hub, "2", &second, NULL, true, true, false));
     first.topology = "T10,R11,C12";
     second.topology = "T20";
+    assert(ra_link_hub_reaches(&hub, "1"));
+    assert(ra_link_hub_reaches(&hub, "10"));
+    assert(ra_link_hub_reaches(&hub, "20"));
+    struct ast_channel transitive = {.active = true, .input = 300};
+    /* Direct attachment also checks current topology, covering races and reconnect callbacks. */
+    assert(ra_link_hub_attach(&hub, "10", &transitive, NULL, true, true, false) == -1);
+    assert(!ra_link_hub_reaches(&hub, "21"));
+    assert(!ra_link_hub_reaches(&hub, ""));
+    assert(!ra_link_hub_reaches(&hub, NULL));
+    assert(!ra_link_hub_reaches(NULL, "1"));
     allocations = 0;
     failed_allocation = 1;
     assert(!ra_link_hub_topology(&hub));
@@ -717,6 +801,7 @@ int main(void) {
     memset(oversized_topology, 'T', sizeof(oversized_topology) - 1);
     oversized_topology[sizeof(oversized_topology) - 1] = '\0';
     first.topology = oversized_topology;
+    assert(!ra_link_hub_reaches(&hub, "10"));
     topology = ra_link_hub_topology(&hub);
     assert(topology && !strcmp(topology, "T2,T1"));
     ast_free(topology);
@@ -734,6 +819,9 @@ int main(void) {
     first.peer->linear_rate = 8000;
     atomic_store(&second.peer->ended, true);
     assert(ra_link_hub_snapshot(&hub, peers, 2) == 1 && !strcmp(peers[0].name, "1"));
+    /* A just-ended port still reserves its direct identity, but not its stale transit topology. */
+    assert(ra_link_hub_reaches(&hub, "2"));
+    assert(!ra_link_hub_reaches(&hub, "20"));
     topology = ra_link_hub_topology(&hub);
     assert(topology && !strcmp(topology, "T1,T10,R11,C12"));
     ast_free(topology);
@@ -813,6 +901,20 @@ int main(void) {
     assert(!ra_link_hub_has_retained_state(&hub));
     ra_link_hub_close(&hub);
 
+    /* A route learned while a peer starts is checked again before that peer is published. */
+    RA_TEST_HUB(publish_recheck);
+    struct ast_channel publish_target = {0};
+    struct ast_channel publish_blocker = {.topology = "Ttarget"};
+    publish_race_hub = &publish_recheck;
+    publish_race_name = "blocker";
+    publish_race_channel = &publish_blocker;
+    publish_race_outer = &publish_target;
+    assert(ra_link_hub_attach(&publish_recheck, "target", &publish_target, NULL, true, true,
+                              false) == -1);
+    assert(publish_target.stopped && ra_link_hub_connected(&publish_recheck, "blocker") &&
+           !ra_link_hub_connected(&publish_recheck, "target"));
+    ra_link_hub_close(&publish_recheck);
+
     RA_TEST_HUB(monitor);
     struct ast_channel monitor_peer = {.topology = "T30,R31,C32"};
     assert(!ra_link_hub_attach(&monitor, "3", &monitor_peer, NULL, false, true, false));
@@ -881,6 +983,45 @@ int main(void) {
     topology_update_value = NULL;
     manager_idle_limit = 1;
     ra_link_hub_close(&updated);
+
+    /* A newly advertised route to another direct peer proves a loop even when that peer is
+     * legacy and never sends its own topology. */
+    RA_TEST_HUB(cross_peer_loop);
+    struct ast_channel legacy_peer = {0};
+    struct ast_channel advertising_peer = {0};
+    cross_peer_loop.local_name = "local";
+    assert(!ra_link_hub_attach(&cross_peer_loop, "legacy", &legacy_peer, NULL, true, true, false));
+    assert(!ra_link_hub_attach(&cross_peer_loop, "advertiser", &advertising_peer, NULL, true, true,
+                               false));
+    manager_idle_polls = 0;
+    manager_idle_limit = 2;
+    topology_update_peer = &advertising_peer;
+    topology_update_value = "Tlegacy";
+    atomic_store(&cross_peer_loop.stop, false);
+    assert(!manager(managed));
+    assert(advertising_peer.stopped && !legacy_peer.stopped &&
+           ra_link_hub_connected(&cross_peer_loop, "legacy") &&
+           !ra_link_hub_connected(&cross_peer_loop, "advertiser"));
+    topology_update_value = NULL;
+    manager_idle_limit = 1;
+    ra_link_hub_close(&cross_peer_loop);
+
+    /* A peer that ends while another topology is read no longer proves a live transit route. */
+    RA_TEST_HUB(ended_cross_peer);
+    struct ast_channel ended_legacy_peer = {0};
+    struct ast_channel ended_advertising_peer = {.topology = "Tlegacy"};
+    ended_cross_peer.local_name = "local";
+    assert(!ra_link_hub_attach(&ended_cross_peer, "legacy", &ended_legacy_peer, NULL, true, true,
+                               false));
+    assert(!ra_link_hub_attach(&ended_cross_peer, "advertiser", &ended_advertising_peer, NULL, true,
+                               true, false));
+    ended_during_topology_read = &ended_legacy_peer;
+    manager_idle_polls = 0;
+    atomic_store(&ended_cross_peer.stop, false);
+    assert(!manager(managed));
+    assert(atomic_load(&ended_legacy_peer.peer->ended) && !ended_advertising_peer.stopped &&
+           ra_link_hub_connected(&ended_cross_peer, "advertiser"));
+    ra_link_hub_close(&ended_cross_peer);
 
     RA_TEST_HUB(detached);
     char detached_second_advertisement[RA_LINK_TOPOLOGY_ADVERTISEMENT_MAX + 1] = "";
@@ -1057,6 +1198,7 @@ int main(void) {
     attach_reconnect_ended = false;
     clock_ms = 1000;
     assert(ra_link_hub_retain_permanent(&initial_retry, "3", true, true));
+    assert(ra_link_hub_reaches(&initial_retry, "3"));
     assert(!ra_link_hub_retain_permanent(&initial_retry, "3", true, true));
     assert(ra_link_hub_snapshot(&initial_retry, &initial_status, 1) == 1 &&
            !strcmp(initial_status.name, "3") && initial_status.transmit && initial_status.forward &&
@@ -1074,6 +1216,14 @@ int main(void) {
     clock_after_first_idle = 0;
     manager_idle_limit = 1;
     ra_link_hub_close(&initial_retry);
+
+    /* A retry search continues past a different retained identity before finding its target. */
+    RA_TEST_HUB(multiple_retries);
+    ra_link_hub_set_reconnector(&multiple_retries, reconnect_stub, NULL);
+    assert(ra_link_hub_retain_permanent(&multiple_retries, "3", true, true));
+    assert(ra_link_hub_retain_permanent(&multiple_retries, "4", true, true));
+    assert(ra_link_hub_reaches(&multiple_retries, "3"));
+    ra_link_hub_close(&multiple_retries);
 
     /* A control-plane callback may be removed after a retry is retained. The manager must
      * consume that request safely instead of dereferencing a stale callback. */

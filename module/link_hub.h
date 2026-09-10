@@ -106,7 +106,8 @@ void ra_link_hub_init(struct ra_link_hub *hub);
  * @param transmit Send audio to this peer; false selects monitor mode.
  * @param forward Forward received audio to other peers; false selects local-monitor mode.
  * @param permanent Redial after an unexpected transport failure.
- * @return Zero on success, minus one on allocation, duplicate, or transport failure.
+ * @return Zero on success, minus one on allocation, duplicate, topology-loop, or transport
+ * failure.
  */
 int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
                        struct ast_format *linear, bool transmit, bool forward, bool permanent);
@@ -206,6 +207,13 @@ size_t ra_link_hub_reconnect_all(struct ra_link_hub *hub);
  * from closing buffers, peer readers, or delayed reconnect intent that remain live.
  */
 bool ra_link_hub_has_retained_state(struct ra_link_hub *hub);
+
+/** @brief Check whether a remote node is already directly or transitively reachable.
+ * @param hub Node-owned routing hub.
+ * @param name Exact remote node identity.
+ * @return True when an attached peer, retained retry, or validated topology names it.
+ */
+bool ra_link_hub_reaches(const struct ra_link_hub *hub, const char *name);
 
 /** @brief Copy attached and retained peer identities and routing modes for a control-plane report.
  * @param hub Node-owned routing hub.

@@ -527,10 +527,84 @@ static char *link_cli_compat(struct ast_cli_entry *entry, int command,
     return link_cli(entry, command, arguments);
 }
 
-/** @brief Administrative linking command; radio DTMF collection is a separate input path. */
+/** @brief Process one CLI-entered DTMF digit through the ordinary runtime collector.
+ * @param local Selected local node.
+ * @param digit DTMF digit or end-of-command marker.
+ * @param now_ms Monotonic input time.
+ * @return One after executing a completed command, zero while collecting, or minus one on error.
+ *
+ * The CLI shares the runtime collector with the receiver so configured command mappings and
+ * remote-command authorization remain identical for both sources. Collection is serialized by
+ * the control-plane lock, never an audio-path lock.
+ */
+static int command_digit(const char *local, char digit, uint64_t now_ms) {
+    struct ra_link_operation operation;
+    ast_mutex_lock(&runtime_lock);
+    uint64_t revision = atomic_load(&runtime_revision);
+    bool ready = ra_runtime_digit(&runtime, local, digit, now_ms, &operation);
+    ast_mutex_unlock(&runtime_lock);
+    if (!ready) {
+        return 0;
+    }
+    return execute_link(local, &operation, revision) ? -1 : 1;
+}
+
+/** @brief Inject a complete DTMF command from the Asterisk CLI.
+ * @param entry CLI registration metadata.
+ * @param command Asterisk initialization, completion, or execution request.
+ * @param arguments Parsed CLI arguments.
+ * @return Asterisk CLI status.
+ */
+static char *command_cli(struct ast_cli_entry *entry, int command, struct ast_cli_args *arguments) {
+    if (command == CLI_INIT) {
+        entry->command = "rpt_advanced command";
+        entry->usage = "Usage: rpt_advanced command <local-node> <DTMF>\n";
+        return NULL;
+    }
+    if (command == CLI_GENERATE) {
+        return NULL;
+    }
+    if (arguments->argc != 4 || !*arguments->argv[2] || !*arguments->argv[3]) {
+        return CLI_SHOWUSAGE;
+    }
+    const char *local = arguments->argv[2];
+    const char *digits = arguments->argv[3];
+    for (size_t index = 0; digits[index]; ++index) {
+        if (!strchr("0123456789ABCD*#", digits[index])) {
+            ast_cli(arguments->fd, "rpt_advanced: invalid DTMF digit %c\n", digits[index]);
+            return CLI_FAILURE;
+        }
+    }
+    unsigned int completed = 0;
+    for (size_t index = 0; digits[index]; ++index) {
+        int result = command_digit(local, digits[index], 0);
+        if (result < 0) {
+            ast_cli(arguments->fd, "rpt_advanced: DTMF command failed\n");
+            return CLI_FAILURE;
+        }
+        completed += (unsigned int)result;
+    }
+    if (digits[strlen(digits) - 1] != '#') {
+        int result = command_digit(local, '#', 0);
+        if (result < 0) {
+            ast_cli(arguments->fd, "rpt_advanced: DTMF command failed\n");
+            return CLI_FAILURE;
+        }
+        completed += (unsigned int)result;
+    }
+    if (!completed) {
+        ast_cli(arguments->fd, "rpt_advanced: incomplete or unknown DTMF command\n");
+        return CLI_FAILURE;
+    }
+    ast_cli(arguments->fd, "rpt_advanced: DTMF command completed\n");
+    return CLI_SUCCESS;
+}
+
+/** @brief Administrative link and DTMF commands; radio DTMF is a separate input path. */
 static struct ast_cli_entry commands[] = {
     AST_CLI_DEFINE(link_cli, "Control rpt_advanced links"),
-    AST_CLI_DEFINE(link_cli_compat, "Control rpt_advanced links")};
+    AST_CLI_DEFINE(link_cli_compat, "Control rpt_advanced links"),
+    AST_CLI_DEFINE(command_cli, "Inject an rpt_advanced DTMF command")};
 
 /** @brief Validate and transfer an incoming IAX channel out of its dialplan thread.
  * @param channel Incoming channel owned by the dialplan.

@@ -9,6 +9,14 @@ An additional native-rate case prepares a WAV identifier through FFmpeg and
 observes its recognizable PCM at the transmitter. The synthetic receiver then
 asserts carrier; negative Morse samples in the otherwise positive receive audio
 verify replacement of the prepared ID by its Morse fallback inside Asterisk.
+Controller sequence tests also cover polite-ID deferral, every-release and
+positive-interval announcements, identifier priority, idle announcement keying,
+and receive-active announcement ducking. The Asterisk integration additionally
+verifies that a periodic announcement waits through synthetic half-duplex
+receive and emits from the hardware-paced idle silent frames after it clears.
+Courtesy tests cover named receiver, generic-link, and permanent-peer routing;
+source-specific rekey cancellation; generic fallback; and pre-rendered mono,
+dual-tone, silence, level, syntax, duration, Nyquist, and bounded-length cases.
 The `integration` portion also starts isolated Asterisk processes and exercises
 the local IAX link implementation. It is a controlled source-level test: it
 does not prove interoperability with a classic `app_rpt` node, authorize live
@@ -105,27 +113,44 @@ or service monitor to observe transmitted audio and transmitter release.
    during prolonged inactivity and unconditional IDs continue. For a
    first-key-only welcome, wait a full inactive interval, then key: verify one
    welcome and no periodic welcomes during conversation.
-6. Repeat transport checks with an explicitly supported converted rate and
+6. Enable a polite ID with a bounded wait while receiving or while status and
+   courtesy telemetry is queued. Confirm it waits for the clear channel when
+   possible, then becomes eligible at its configured limit. Configure distinct
+   every-release and positive-interval announcements. Confirm they play after
+   ordinary hang and any due ID, do not self-repeat, duck during renewed local or
+   linked receive, and that a positive interval keys from idle before releasing
+   with the short natural tail.
+7. Configure named courtesy tones for `input = receiver`, generic `input = link`,
+   and one permanent direct peer. Use a single-tone receiver sequence and a
+   link sequence containing a dual tone, pause, and quieter final segment. On a
+   service monitor, verify frequency, duration, and relative level. Verify an
+   unmatched or temporary link uses the generic link tone, while the permanent
+   peer uses its override. Rekey each source before its delay expires and verify
+   that only its own pending courtesy tone is cancelled; rekey during a started
+   tone should duck, not interrupt, that playback.
+8. Repeat transport checks with an explicitly supported converted rate and
    codec. Compare receive and transmitted audio for continuity. Run a sustained
    receive/repeat test, recording duration and USBRadioPlus queue/error counters
    before and after. Inspect for underruns, overruns, gaps, and growing latency;
    shared hardware pacing does not guarantee immunity to scheduling stalls.
-7. Reload invalid configuration while active and verify the old settings still
+9. Reload invalid configuration while active and verify the old settings still
    operate. Restore valid configuration and reload; allow for the documented
    media-preparation pause. Unload normally and verify PTT drops and the radio
    channel closes. Load again without restarting Asterisk and repeat reception.
-8. If multiple radios are available, configure independent nodes and scoped ID
-   overrides. Verify audio, PTT, and IDs stay on their assigned radios while
-   flat defaults still apply to settings not overridden.
-9. Pending explicit approval and completion of the full platform quality gate,
+10. If multiple radios are available, configure independent nodes and scoped ID
+   and announcement overrides. Verify audio, PTT, IDs, and announcements stay on
+   their assigned radios while flat defaults still apply to settings not overridden.
+11. Pending explicit approval and completion of the full platform quality gate,
    use an isolated test peer before a public node. Verify transceive, monitor,
    local-monitor, permanent-link recovery, disconnect-all/reconnect-all, remote
    `*4<node>` command mode with local `#` exit, allow/deny rejection, and the
    `*70`, `*72`, and `*73` status replies. Confirm that an Asterisk restart
    removes every link. Treat the CLI/log topology as best-effort: it can be
    incomplete or stale, and `R000000` means a bounded `L ` advertisement was
-   truncated. Do not perform this test against 524950 or another live node
-   without separate approval.
+   truncated. Confirm self-links, duplicate direct links, retained permanent
+   retries, and targets advertised by an attached peer are rejected with the RF
+   loop-rejection telemetry. Do not perform this test against 524950 or another
+   live node without separate approval.
 
 Record module revisions, OS/architecture, USB interface, radio wiring, selected
 codec/rate, configuration, measurements, and any failed step. These procedures

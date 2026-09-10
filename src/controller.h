@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief One node's identifier, audio, and transmit-ownership integration.
+ * @brief One node's scheduled media, audio, and transmit-ownership integration.
  */
 #ifndef RPT_ADVANCED_CONTROLLER_H
 #define RPT_ADVANCED_CONTROLLER_H
@@ -15,20 +15,43 @@
 #define RA_CONTROLLER_STATUS_QUEUE_DEPTH 4
 /** @brief Silence required after local receiver unkey before RF status playback begins. */
 #define RA_CONTROLLER_STATUS_UNKEY_DELAY_MS 250U
-/** @brief Maximum receiver and link courtesy announcements awaiting playback. */
-#define RA_CONTROLLER_COURTESY_QUEUE_DEPTH 2
-
-/** @brief Source that caused a pending courtesy announcement. */
-enum ra_courtesy_source {
-    RA_COURTESY_RECEIVER, /**< Local receiver unkeyed. */
-    RA_COURTESY_LINK      /**< Linked receiver unkeyed. */
-};
+/** @brief Maximum source-specific courtesy announcements serialized after near-simultaneous unkeys.
+ */
+#define RA_CONTROLLER_COURTESY_QUEUE_DEPTH 16
+/** @brief Maximum direct-peer identity copied with a pending courtesy announcement. */
+#define RA_CONTROLLER_COURTESY_REMOTE_MAX 64
 
 /** @brief Prepared identifier media and its resolved configuration. */
 struct ra_controller_id {
     struct ra_identifier_settings settings; /**< Borrowed immutable configuration strings. */
     const int16_t *audio;                   /**< Borrowed file/speech PCM, or null. */
     size_t samples;                         /**< Prepared samples at the controller rate. */
+};
+
+/** @brief Immutable courtesy-media override for one permanent direct peer. */
+struct ra_controller_peer_courtesy {
+    const char *remote;                   /**< Borrowed exact direct-peer identity. */
+    const struct ra_controller_id *media; /**< Borrowed prepared media for this direct peer. */
+};
+
+/** @brief One scheduled courtesy item and the receive source that owns it. */
+struct ra_controller_courtesy_pending {
+    const struct ra_controller_id *media; /**< Borrowed selected media retained through playback. */
+    bool receiver;   /**< True for local receiver, false for one direct linked peer. */
+    uint64_t due_ms; /**< Earliest playback time measured from this source's unkey event. */
+    char remote[RA_CONTROLLER_COURTESY_REMOTE_MAX]; /**< Copied direct-peer identity when linked. */
+};
+
+/** @brief Prepared announcement media and its successful-playback interval. */
+struct ra_controller_announcement {
+    struct ra_controller_id media; /**< Borrowed prepared sound, speech, and Morse fallback. */
+    uint64_t interval_ms; /**< Zero schedules one playback after every ordinary transmission. */
+};
+
+/** @brief Per-announcement scheduling state owned by the controller worker. */
+struct ra_controller_announcement_state {
+    uint64_t satisfied_ms; /**< Completion time for a positive-interval announcement. */
+    bool release_pending;  /**< A zero-interval announcement awaits the current release. */
 };
 
 /** @brief One control-prepared RF status announcement. */
@@ -44,8 +67,13 @@ struct ra_controller {
     struct ra_id_rule *rules;           /**< Writable scheduling rules, parallel to ids. */
     struct ra_id_state *states;         /**< Writable scheduling state, parallel to ids. */
     size_t count;                       /**< Number of IDs; zero permits null arrays. */
-    unsigned int rate;                  /**< Negotiated PCM sample rate. */
-    bool full_duplex;                   /**< Whether local reception may transmit. */
+    const struct ra_controller_announcement
+        *announcements; /**< Prepared immutable announcements. */
+    struct ra_controller_announcement_state
+        *announcement_states;  /**< Writable state parallel to announcements. */
+    size_t announcement_count; /**< Number of announcements; zero permits null arrays. */
+    unsigned int rate;         /**< Negotiated PCM sample rate. */
+    bool full_duplex;          /**< Whether local reception may transmit. */
     bool link_active; /**< Current linked-receiver activity; it interrupts prepared identifiers. */
     const int16_t *link_audio;  /**< Borrowed link mix for the current block, or null. */
     uint64_t hang_ms;           /**< Transmitter hang time. */
@@ -70,19 +98,30 @@ struct ra_controller {
         status_playback;        /**< Worker-owned prepared-speech/Morse-fallback playback. */
     bool status_playing;        /**< A queued status is currently rendering. */
     uint64_t receiver_unkey_ms; /**< Local receiver's most recent falling-edge timestamp. */
-    struct ra_controller_id
-        courtesy[RA_CONTROLLER_COURTESY_QUEUE_DEPTH]; /**< Prepared courtesy media. */
-    struct ra_playback courtesy_playback;             /**< Worker-owned active courtesy playback. */
-    enum ra_courtesy_source courtesy_pending[RA_CONTROLLER_COURTESY_QUEUE_DEPTH]; /**< Due order. */
+    const struct ra_controller_id
+        *receiver_courtesy; /**< Borrowed local-receiver courtesy media. */
+    const struct ra_controller_id
+        *link_courtesy; /**< Borrowed fallback linked-receiver courtesy media. */
+    const struct ra_controller_peer_courtesy
+        *peer_courtesies;       /**< Borrowed immutable permanent-peer courtesy overrides. */
+    size_t peer_courtesy_count; /**< Number of immutable permanent-peer courtesy overrides. */
+    struct ra_playback courtesy_playback; /**< Worker-owned active courtesy playback. */
+    struct ra_controller_courtesy_pending
+        courtesy_pending[RA_CONTROLLER_COURTESY_QUEUE_DEPTH]; /**< Per-source delayed media in FIFO
+                                                                 order. */
     size_t courtesy_pending_count; /**< Pending courtesy announcements. */
     bool courtesy_playing;         /**< A courtesy announcement is currently rendering. */
-    uint64_t courtesy_due_ms;      /**< Earliest allowed courtesy playback time. */
     uint64_t courtesy_delay_ms;    /**< Configured unkey-to-courtesy delay. */
-    bool link_was_active;          /**< Previous linked-receiver activity. */
+    bool link_was_active; /**< Previous aggregate linked-receiver activity for rising edges. */
+    struct ra_playback announcement_playback; /**< Worker-owned active announcement playback. */
+    size_t announcement_playing;              /**< Active announcement index, or SIZE_MAX. */
+    bool announcement_release_pending; /**< Tail sequence is waiting for IDs and announcements. */
 };
 
 /** @brief Validate media and initialize a controller whose array bindings are set.
- * @param state Controller with ids, rules, states, count, rate, duplex and hang configured.
+ * @param state Controller with IDs, rules, states, rate, duplex, and hang configured. A nonzero
+ *        ID count requires parallel ID arrays; a nonzero announcement count requires parallel
+ *        immutable announcement and writable announcement-state arrays.
  * @param now_ms Monotonic startup time.
  * @return False for an unrenderable Morse configuration; no state changes on failure.
  */
@@ -101,6 +140,29 @@ bool ra_controller_start(struct ra_controller *state, uint64_t now_ms);
  */
 bool ra_controller_queue_status(struct ra_controller *state, const char *text, int16_t *audio,
                                 size_t samples);
+
+/** @brief Queue the appropriate courtesy media when one direct peer unkeys.
+ * @param state Started controller owned by the same hardware-paced radio worker.
+ * @param remote Exact direct-peer identity from the routing hub.
+ * @param permanent True only for a configured permanent direct link.
+ * @param now_ms Monotonic unkey time.
+ *
+ * A permanent exact peer override wins when it has renderable media. All other
+ * links use the configured generic link courtesy media. This function only
+ * changes worker-owned state and must not be called from a control or peer-reader
+ * thread.
+ */
+void ra_controller_link_unkeyed(struct ra_controller *state, const char *remote, bool permanent,
+                                uint64_t now_ms);
+
+/** @brief Cancel one direct peer's pending courtesy media when that peer keys again.
+ * @param state Started controller owned by the same hardware-paced radio worker.
+ * @param remote Exact direct-peer identity from the routing hub.
+ *
+ * This preserves courtesy media due from other inputs. It does not interrupt
+ * already rendering media, which continues with receive-active ducking.
+ */
+void ra_controller_link_keyed(struct ra_controller *state, const char *remote);
 
 /** @brief Return finished prepared-status PCM to the control executor for release.
  * @param state Started controller with its single control producer.

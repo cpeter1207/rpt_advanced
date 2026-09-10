@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Resolve flat, node, and identifier-set configuration defaults.
+ * @brief Resolve flat, node, identifier-set, and announcement-set configuration defaults.
  */
 #ifndef RPT_ADVANCED_CONFIG_H
 #define RPT_ADVANCED_CONFIG_H
@@ -56,9 +56,10 @@ enum ra_config_line_kind ra_config_parse_line(char *line, char **name, char **va
 
 /** @brief Borrowed configuration entry; strings remain owned by the configuration loader. */
 struct ra_config_entry {
-    const char *section; /**< Section name, including any node and ID-set scope. */
-    const char *key;     /**< Option name. */
-    const char *value;   /**< Explicit value; an empty string clears an inherited value. */
+    const char
+        *section;      /**< Section name, including any node, identifier, or announcement scope. */
+    const char *key;   /**< Option name. */
+    const char *value; /**< Explicit value; an empty string clears an inherited value. */
 };
 
 /** @brief Find an option using shared defaults, node defaults, then set overrides.
@@ -67,7 +68,7 @@ struct ra_config_entry {
  * @param key Option name to resolve.
  * @param shared Flat default section, such as identifier.
  * @param node Scoped node-default section, or null if not applicable.
- * @param set Scoped ID-set section, or null if not applicable.
+ * @param set Scoped identifier- or announcement-set section, or null when not applicable.
  * @return Borrowed value, including an explicitly empty string, or null if absent.
  * Later entries win within one section; scoped values always win over defaults
  * regardless of file order. Validation of names and values belongs to the loader.

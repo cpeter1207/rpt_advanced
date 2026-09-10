@@ -11,27 +11,32 @@
 static void defaults(void) {
     struct ra_node_settings node;
     struct ra_identifier_settings id;
+    struct ra_announcement_settings announcement;
     struct ra_time_settings time;
     assert(!ra_node_settings_resolve(NULL, 0, "usb", &node));
     assert(node.enabled && node.full_duplex && node.dtmf_muting && node.hang_ms == 0 &&
            node.telemetry_duck_db == -20 && node.sample_rate == 0);
-    assert(node.courtesy_delay_ms == 250 && !*node.receiver_courtesy_sound_file &&
-           !*node.receiver_courtesy_speech_text && !*node.receiver_courtesy_morse_text &&
-           !*node.link_courtesy_sound_file && !*node.link_courtesy_speech_text &&
-           !*node.link_courtesy_morse_text && !node.receiver_courtesy_morse_frequency_hz &&
-           !node.link_courtesy_morse_frequency_hz && node.receiver_courtesy_level_db == -20 &&
-           node.link_courtesy_level_db == -20);
+    assert(node.courtesy_delay_ms == 250);
     assert(!strcmp(node.channel, "usb") && !*node.codec);
     assert(!*node.link_allow_nodes && !*node.link_deny_nodes);
     assert(!*node.link_static_directory_file && !*node.link_directory_file &&
            node.link_lookup_method == RA_LINK_LOOKUP_BOTH);
     assert(!ra_identifier_settings_resolve(NULL, 0, NULL, NULL, &id));
     assert(id.interval_ms == 600000 && id.priority == 0);
-    assert(!id.first_key_only && !id.regardless_of_activity);
+    assert(!id.first_key_only && !id.regardless_of_activity && !id.polite &&
+           id.polite_maximum_wait_ms == 60000);
     assert(!*id.file && !*id.speech_text && !*id.morse_text);
     assert(!strcmp(id.speech_model, "en_US-lessac-medium.onnx"));
     assert(id.speech_speed_percent == 100 && id.morse_speed_wpm == 20 &&
            id.morse_frequency_hz == 800 && id.speech_level_db == 0 && id.morse_level_db == -6);
+    assert(!ra_announcement_settings_resolve(NULL, 0, NULL, NULL, &announcement));
+    assert(!announcement.interval_ms && !*announcement.media.file &&
+           !*announcement.media.speech_text && !*announcement.media.morse_text &&
+           !strcmp(announcement.media.speech_model, "en_US-lessac-medium.onnx") &&
+           announcement.media.speech_speed_percent == 100 &&
+           announcement.media.morse_speed_wpm == 20 &&
+           announcement.media.morse_frequency_hz == 800 && !announcement.media.speech_level_db &&
+           announcement.media.morse_level_db == -6);
     assert(!ra_time_settings_resolve(NULL, 0, "usb", &time) && time.format == 12);
 }
 
@@ -46,12 +51,6 @@ static void configured(void) {
         {"usb", "dtmf_muting", "yes"},
         {"general", "telemetry_duck_db", "-18"},
         {"general", "courtesy_delay_ms", "300"},
-        {"general", "receiver_courtesy_morse_text", "R"},
-        {"general", "receiver_courtesy_morse_frequency_hz", "500"},
-        {"general", "receiver_courtesy_level_db", "-10"},
-        {"usb", "link_courtesy_morse_text", "L"},
-        {"usb", "link_courtesy_morse_frequency_hz", "1000"},
-        {"usb", "link_courtesy_level_db", "-12"},
         {"usb", "sample_rate_hz", "48000"},
         {"usb", "radio_channel", "radio"},
         {"usb", "codec", "slin48"},
@@ -66,6 +65,8 @@ static void configured(void) {
         {"identifier", "priority", "2"},
         {"identifier", "first_key_only", "yes"},
         {"identifier", "regardless_of_activity", "yes"},
+        {"identifier", "polite", "yes"},
+        {"identifier", "polite_maximum_wait_ms", "70000"},
         {"identifier", "sound_file", "/tmp/id.wav"},
         {"identifier", "speech_text", "Welcome"},
         {"identifier", "speech_model", "/usr/lib/piper-tts/voices/en_US-amy-low.onnx"},
@@ -76,6 +77,7 @@ static void configured(void) {
         {"identifier", "morse_frequency_hz", "700"},
         {"identifier", "morse_level_db", "-5"},
         {"identifier usb", "interval_ms", "200000"},
+        {"identifier usb", "polite_maximum_wait_ms", "60000"},
         {"speech", "voice", "shared.onnx"},
         {"speech usb", "voice", "node.onnx"},
         {"speech usb", "speed_percent", "80"},
@@ -87,6 +89,7 @@ static void configured(void) {
         {"time", "format", "24"},
         {"time usb", "format", "12"},
         {"identifier usb welcome", "speech_text", ""},
+        {"identifier usb welcome", "polite", "no"},
         {"identifier usb welcome", "speech_level_db", "-2"},
         {"identifier usb welcome", "morse_level_db", "-7"},
     };
@@ -97,11 +100,7 @@ static void configured(void) {
     assert(!ra_node_settings_resolve(entries, count, "usb", &node));
     assert(!node.enabled && !node.full_duplex && node.dtmf_muting && node.hang_ms == 500 &&
            node.telemetry_duck_db == -18 && node.sample_rate == 48000);
-    assert(node.courtesy_delay_ms == 300 && !strcmp(node.receiver_courtesy_morse_text, "R") &&
-           !strcmp(node.link_courtesy_morse_text, "L") &&
-           node.receiver_courtesy_morse_frequency_hz == 500 &&
-           node.link_courtesy_morse_frequency_hz == 1000 &&
-           node.receiver_courtesy_level_db == -10 && node.link_courtesy_level_db == -12);
+    assert(node.courtesy_delay_ms == 300);
     assert(!strcmp(node.channel, "radio") && !strcmp(node.codec, "slin48"));
     assert(!*node.link_allow_nodes && !strcmp(node.link_deny_nodes, "1234, 5678"));
     assert(!strcmp(node.link_static_directory_file, "static.conf") &&
@@ -109,13 +108,124 @@ static void configured(void) {
            node.link_lookup_method == RA_LINK_LOOKUP_FILE);
     assert(!ra_identifier_settings_resolve(entries, count, "usb", "identifier usb welcome", &id));
     assert(id.interval_ms == 200000 && id.priority == 2 && id.first_key_only &&
-           id.regardless_of_activity);
+           id.regardless_of_activity && !id.polite && id.polite_maximum_wait_ms == 60000);
     assert(!strcmp(id.file, "/tmp/id.wav") && !*id.speech_text);
     assert(!strcmp(id.speech_model, "node.onnx"));
     assert(id.speech_speed_percent == 80 && id.speech_level_db == -2 &&
            !strcmp(id.morse_text, "KG0BP"));
     assert(id.morse_speed_wpm == 25 && id.morse_frequency_hz == 750 && id.morse_level_db == -7);
     assert(!ra_time_settings_resolve(entries, count, "usb", &time) && time.format == 12);
+}
+
+/** @brief Courtesy media inherits its own defaults and node media defaults before its assignment.
+ */
+static void courtesy_settings(void) {
+    const struct ra_config_entry entries[] = {
+        {"courtesy", "sound_file", "/tmp/shared.wav"},
+        {"courtesy", "speech_text", "Shared courtesy"},
+        {"courtesy", "morse_text", "C"},
+        {"courtesy", "tone_sequence", "700+900@-12/80, 0/40, 500/80"},
+        {"courtesy", "level_db", "-18"},
+        {"courtesy usb", "morse_text", "NODE"},
+        {"courtesy usb", "level_db", "-20"},
+        {"speech", "voice", "shared.onnx"},
+        {"speech usb", "voice", "node.onnx"},
+        {"speech usb", "speed_percent", "85"},
+        {"morse", "frequency_hz", "600"},
+        {"morse usb", "frequency_hz", "750"},
+        {"morse usb", "speed_wpm", "25"},
+        {"courtesy usb receiver", "input", "receiver"},
+        {"courtesy usb receiver", "sound_file", ""},
+        {"courtesy usb receiver", "speech_text", ""},
+        {"courtesy usb receiver", "morse_text", "R"},
+        {"courtesy usb receiver", "level_db", "-16"},
+        {"courtesy usb north", "input", "link"},
+        {"courtesy usb north", "remote_node", "123456"},
+        {"courtesy usb north", "tone_sequence", "1200+1500/75,0/25,800/100"},
+    };
+    struct ra_courtesy_settings receiver;
+    struct ra_courtesy_settings north;
+    assert(!ra_courtesy_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                         "courtesy usb receiver", &receiver));
+    assert(receiver.input == RA_COURTESY_INPUT_RECEIVER && !*receiver.remote_node &&
+           !*receiver.media.file && !*receiver.media.speech_text &&
+           !strcmp(receiver.media.morse_text, "R") &&
+           !strcmp(receiver.tone_sequence, "700+900@-12/80, 0/40, 500/80") &&
+           receiver.level_db == -16 && !strcmp(receiver.media.speech_model, "node.onnx") &&
+           receiver.media.speech_speed_percent == 85 && receiver.media.speech_level_db == 0 &&
+           receiver.media.morse_speed_wpm == 25 && receiver.media.morse_frequency_hz == 750 &&
+           receiver.media.morse_level_db == -16);
+    assert(!ra_courtesy_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                         "courtesy usb north", &north));
+    assert(north.input == RA_COURTESY_INPUT_LINK && !strcmp(north.remote_node, "123456") &&
+           !strcmp(north.media.file, "/tmp/shared.wav") &&
+           !strcmp(north.media.speech_text, "Shared courtesy") &&
+           !strcmp(north.media.morse_text, "NODE") &&
+           !strcmp(north.tone_sequence, "1200+1500/75,0/25,800/100") && north.level_db == -20 &&
+           north.media.morse_level_db == -20);
+    struct ra_config_entry missing_input = {"courtesy usb missing", "morse_text", "M"};
+    struct ra_courtesy_settings unchanged = {.level_db = 7};
+    assert(!strcmp(
+        ra_courtesy_settings_resolve(&missing_input, 1, "usb", "courtesy usb missing", &unchanged),
+        "courtesy input is required"));
+    assert(unchanged.level_db == 7);
+    struct ra_config_entry receiver_remote[] = {
+        {"courtesy usb bad", "input", "receiver"},
+        {"courtesy usb bad", "remote_node", "123"},
+    };
+    assert(!strcmp(ra_courtesy_settings_resolve(
+                       receiver_remote, sizeof(receiver_remote) / sizeof(receiver_remote[0]), "usb",
+                       "courtesy usb bad", &unchanged),
+                   "courtesy remote node requires link input"));
+    assert(!strcmp(ra_courtesy_settings_resolve(NULL, 0, "usb", NULL, &unchanged),
+                   "courtesy set is required"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_COURTESY, "tone_sequence", "800/50"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_COURTESY_SET, "input", "link"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_COURTESY_SET, "input", "wrong"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_COURTESY_SET, "remote_node", "12x"));
+
+    const struct ra_config_entry empty_remote_entries[] = {
+        {"courtesy usb link", "input", "link"},
+        {"courtesy usb link", "remote_node", ""},
+    };
+    assert(!ra_courtesy_settings_resolve(
+        empty_remote_entries, sizeof(empty_remote_entries) / sizeof(empty_remote_entries[0]), "usb",
+        "courtesy usb link", &unchanged));
+    assert(!*unchanged.remote_node);
+}
+
+/** @brief Courtesy resolution preserves inherited-scope errors and caller output. */
+static void courtesy_default_errors(void) {
+    struct ra_courtesy_settings unchanged = {.level_db = 7};
+    const struct ra_config_entry courtesy_entries[] = {
+        {"courtesy", "level_db", "invalid"},
+        {"courtesy usb receiver", "input", "receiver"},
+    };
+    assert(!strcmp(ra_courtesy_settings_resolve(
+                       courtesy_entries, sizeof(courtesy_entries) / sizeof(courtesy_entries[0]),
+                       "usb", "courtesy usb receiver", &unchanged),
+                   "level_db"));
+    assert(unchanged.level_db == 7);
+
+    const struct ra_config_entry speech_entries[] = {
+        {"speech", "speed_percent", "invalid"},
+        {"courtesy usb receiver", "input", "receiver"},
+    };
+    assert(!strcmp(ra_courtesy_settings_resolve(speech_entries,
+                                                sizeof(speech_entries) / sizeof(speech_entries[0]),
+                                                "usb", "courtesy usb receiver", &unchanged),
+                   "speed_percent"));
+    assert(unchanged.level_db == 7);
+
+    const struct ra_config_entry morse_entries[] = {
+        {"morse", "frequency_hz", "0"},
+        {"courtesy usb receiver", "input", "receiver"},
+    };
+    assert(!strcmp(ra_courtesy_settings_resolve(morse_entries,
+                                                sizeof(morse_entries) / sizeof(morse_entries[0]),
+                                                "usb", "courtesy usb receiver", &unchanged),
+                   "frequency_hz"));
+    assert(unchanged.level_db == 7);
 }
 
 /** @brief Resolve flat, node, and set defaults by scope rather than file order. */
@@ -166,6 +276,54 @@ static void scoped_default_matching(void) {
     assert(!strcmp(id.speech_model, "node.onnx"));
 }
 
+/** @brief Announcements inherit media defaults but permit an every-release zero interval. */
+static void announcement_settings(void) {
+    const struct ra_config_entry entries[] = {
+        {"announcement", "interval_ms", "1800000"},
+        {"announcement", "sound_file", "/tmp/shared.wav"},
+        {"announcement", "speech_text", "Shared announcement"},
+        {"announcement", "morse_text", "DE SHARED"},
+        {"announcement usb", "morse_text", "DE USB"},
+        {"speech", "voice", "shared.onnx"},
+        {"speech usb", "voice", "node.onnx"},
+        {"speech usb", "level_db", "-4"},
+        {"morse", "frequency_hz", "600"},
+        {"morse usb", "frequency_hz", "750"},
+        {"morse usb", "speed_wpm", "25"},
+        {"announcement usb release", "interval_ms", "0"},
+        {"announcement usb release", "sound_file", ""},
+        {"announcement usb release", "speech_text", "Release announcement"},
+        {"announcement usb release", "morse_level_db", "-20"},
+    };
+    struct ra_announcement_settings announcement;
+    assert(!ra_announcement_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                             "announcement usb release", &announcement));
+    assert(!announcement.interval_ms && !*announcement.media.file &&
+           !strcmp(announcement.media.speech_text, "Release announcement") &&
+           !strcmp(announcement.media.morse_text, "DE USB") &&
+           !strcmp(announcement.media.speech_model, "node.onnx") &&
+           announcement.media.speech_level_db == -4 && announcement.media.morse_speed_wpm == 25 &&
+           announcement.media.morse_frequency_hz == 750 &&
+           announcement.media.morse_level_db == -20);
+    assert(!ra_announcement_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                             NULL, &announcement));
+    assert(announcement.interval_ms == 1800000 &&
+           !strcmp(announcement.media.file, "/tmp/shared.wav") &&
+           !strcmp(announcement.media.speech_text, "Shared announcement"));
+    struct ra_config_entry invalid = {"announcement usb release", "interval_ms", "invalid"};
+    struct ra_announcement_settings unchanged = {.interval_ms = 7};
+    assert(!strcmp(ra_announcement_settings_resolve(&invalid, 1, "usb", "announcement usb release",
+                                                    &unchanged),
+                   "interval_ms"));
+    assert(unchanged.interval_ms == 7);
+    invalid = (struct ra_config_entry){"announcement", "interval_ms", "invalid"};
+    assert(!strcmp(ra_announcement_settings_resolve(&invalid, 1, "usb", NULL, &unchanged),
+                   "interval_ms"));
+    assert(unchanged.interval_ms == 7);
+    assert(!ra_settings_validate_kind(RA_SETTINGS_ANNOUNCEMENT, "interval_ms", "0"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_ANNOUNCEMENT, "priority", "1"));
+}
+
 /** @brief Verify node DTMF muting inherits the global value and permits an override. */
 static void dtmf_muting_inherits(void) {
     const struct ra_config_entry shared[] = {{"general", "dtmf_muting", "no"}};
@@ -195,24 +353,21 @@ static void time_settings(void) {
 
 /** @brief Every typed setting rejects invalid text without committing earlier fields. */
 static void invalid(void) {
-    const char *node_keys[] = {"node_enabled",
-                               "full_duplex",
-                               "dtmf_muting",
-                               "transmit_hang_ms",
-                               "telemetry_duck_db",
-                               "courtesy_delay_ms",
-                               "receiver_courtesy_morse_frequency_hz",
-                               "receiver_courtesy_level_db",
-                               "link_courtesy_morse_frequency_hz",
-                               "link_courtesy_level_db",
-                               "sample_rate_hz",
-                               "link_allow_nodes",
-                               "link_deny_nodes",
+    const char *node_keys[] = {"node_enabled",      "full_duplex",       "dtmf_muting",
+                               "transmit_hang_ms",  "telemetry_duck_db", "courtesy_delay_ms",
+                               "sample_rate_hz",    "link_allow_nodes",  "link_deny_nodes",
                                "link_lookup_method"};
-    const char *id_keys[] = {
-        "interval_ms",          "priority",        "first_key_only",  "regardless_of_activity",
-        "speech_speed_percent", "speech_level_db", "morse_speed_wpm", "morse_frequency_hz",
-        "morse_level_db"};
+    const char *id_keys[] = {"interval_ms",
+                             "priority",
+                             "first_key_only",
+                             "regardless_of_activity",
+                             "polite",
+                             "polite_maximum_wait_ms",
+                             "speech_speed_percent",
+                             "speech_level_db",
+                             "morse_speed_wpm",
+                             "morse_frequency_hz",
+                             "morse_level_db"};
     struct ra_node_settings node = {0};
     struct ra_identifier_settings id = {0};
     for (size_t i = 0; i < sizeof(node_keys) / sizeof(node_keys[0]); ++i) {
@@ -231,6 +386,16 @@ static void invalid(void) {
     struct ra_config_entry morse = {"morse usb", "level_db", "invalid"};
     assert(!strcmp(ra_identifier_settings_resolve(&morse, 1, "usb", NULL, &id), "level_db"));
     assert(id.interval_ms == 0 && !id.speech_model);
+    struct ra_config_entry courtesy = {"courtesy usb receiver", "level_db", "invalid"};
+    struct ra_courtesy_settings courtesy_result = {0};
+    assert(!strcmp(ra_courtesy_settings_resolve(&courtesy, 1, "usb", "courtesy usb receiver",
+                                                &courtesy_result),
+                   "level_db"));
+    assert(!courtesy_result.media.speech_model);
+    courtesy = (struct ra_config_entry){"courtesy usb receiver", "remote_node", "invalid"};
+    assert(!strcmp(ra_courtesy_settings_resolve(&courtesy, 1, "usb", "courtesy usb receiver",
+                                                &courtesy_result),
+                   "remote_node"));
 }
 
 /** @brief Parse every documented post-static directory lookup selection. */
@@ -287,6 +452,9 @@ int main(void) {
     configured();
     scoped_default_precedence();
     scoped_default_matching();
+    announcement_settings();
+    courtesy_settings();
+    courtesy_default_errors();
     dtmf_muting_inherits();
     time_settings();
     invalid();

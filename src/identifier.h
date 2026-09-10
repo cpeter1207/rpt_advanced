@@ -15,6 +15,8 @@ struct ra_id_rule {
     int priority;         /**< Larger values take precedence; ties retain configuration order. */
     bool first_key_only;  /**< Eligible only following a sufficiently long idle period. */
     bool regardless_of_activity; /**< Periodic identification also occurs during inactivity. */
+    bool polite; /**< Defer while reception or telemetry is active until a bounded deadline. */
+    uint64_t polite_maximum_wait_ms; /**< Maximum elapsed polite delay after the ID becomes due. */
 };
 
 /** @brief Per-set runtime state owned by the node's single control thread. */
@@ -22,6 +24,7 @@ struct ra_id_state {
     uint64_t satisfied_ms;  /**< Time this set was last satisfied, initially node startup. */
     bool activity;          /**< Conversation activity has occurred since this set was satisfied. */
     bool first_key_pending; /**< A qualifying first-key event awaits identification. */
+    uint64_t polite_due_ms; /**< First-key due time; periodic IDs derive it from satisfied time. */
 };
 
 /** @brief Record conversation activity, excluding IDs and transmitter hang time.
@@ -35,9 +38,10 @@ void ra_id_activity(struct ra_id_state *states, size_t count);
  * @param states Node-owned runtime states.
  * @param count Number of sets; zero permits null arrays.
  * @param idle_ms Inactivity immediately preceding the activity that led to this key.
+ * @param now_ms Monotonic time of the qualifying key event.
  */
 void ra_id_first_key(const struct ra_id_rule *rules, struct ra_id_state *states, size_t count,
-                     uint64_t idle_ms);
+                     uint64_t idle_ms, uint64_t now_ms);
 
 /** @brief Choose the highest-priority due set, without marking it played.
  * @param rules Resolved definitions with positive intervals.

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Streaming Morse identifier generation at the negotiated PCM rate.
+ * @brief Streaming Morse scheduled-media generation at the negotiated PCM rate.
  */
 #ifndef RPT_ADVANCED_MORSE_H
 #define RPT_ADVANCED_MORSE_H

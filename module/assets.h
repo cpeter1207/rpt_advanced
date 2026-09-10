@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Prepare immutable identifier PCM outside the real-time audio worker.
+ * @brief Prepare immutable scheduled-media PCM outside the real-time audio worker.
  */
 #ifndef RPT_ADVANCED_ASSETS_H
 #define RPT_ADVANCED_ASSETS_H
@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 /** @brief Try configured file, then offline speech, leaving Morse as terminal fallback.
- * @param settings Resolved identifier configuration.
+ * @param settings Resolved identifier or announcement configuration.
  * @param rate Negotiated PCM sample rate.
  * @param audio Receives owned PCM or null; release with ast_free after worker join.
  * @param samples Receives PCM length or zero.

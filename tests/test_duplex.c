@@ -37,7 +37,7 @@ static void test_hang(void) {
 /** @brief Run an ID deadline through half-duplex deferral, playback, and PTT release. */
 static void test_identifier_sequence(void) {
     struct ra_duplex_state radio = {0};
-    const struct ra_id_rule rule = {100, 0, false, false};
+    const struct ra_id_rule rule = {.interval_ms = 100};
     struct ra_id_state id = {0};
     ra_id_activity(&id, 1);
     assert(ra_id_select(&rule, &id, 1, 100, true, false) == SIZE_MAX);

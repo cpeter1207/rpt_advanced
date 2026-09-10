@@ -223,6 +223,7 @@ install-check: all
 	cmp src/duplex.h build/stage/usr/include/rpt_advanced/duplex.h
 	cmp src/controller.h build/stage/usr/include/rpt_advanced/controller.h
 	cmp src/morse.h build/stage/usr/include/rpt_advanced/morse.h
+	cmp src/tone_sequence.h build/stage/usr/include/rpt_advanced/tone_sequence.h
 	cmp src/playback.h build/stage/usr/include/rpt_advanced/playback.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
@@ -271,4 +272,5 @@ platform-verify: all coverage install-check integration distcheck
 ci: quality platform-verify
 
 clean:
+	rm -f *.gcov
 	rm -rf build

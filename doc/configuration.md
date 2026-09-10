@@ -1,6 +1,6 @@
 # Configuration model
 
-Configuration reading, storage, whole-file validation, node/ID discovery, and
+Configuration reading, storage, whole-file validation, node/media-set discovery, and
 settings resolution are implemented. The AllStarLink link controller is also
 implemented locally, but it has not been enabled on a live node and classic
 `app_rpt` interoperability remains to be verified. These are the supported
@@ -19,23 +19,29 @@ partial file.
 
 Flat `[general]` settings provide node defaults. A named node section such as
 `[524950]` overrides them. Identifier resolution starts with `[identifier]`,
-then `[identifier 524950]`. The `speech_*` and `morse_*` names are valid in
-both of those identifier-default sections as well as in an identifier set.
-After the identifier-default sections, `[speech]` then `[speech 524950]` apply
+then `[identifier 524950]`; announcement resolution likewise starts with
+`[announcement]`, then `[announcement 524950]`; courtesy resolution starts
+with `[courtesy]`, then `[courtesy 524950]`. The `speech_*` and `morse_*`
+names are valid in either kind of media-default section and in its named set,
+except `speech_level_db` and `morse_level_db`: courtesy uses its single
+`level_db` control for every media type.
+After those media-default sections, `[speech]` then `[speech 524950]` apply
 their matching speech values, and `[morse]` then `[morse 524950]` apply their
-matching Morse values. Finally, `[identifier 524950 welcome]` overrides every
-matching identifier, speech, and Morse value for that one set. File order does
-not change this scope precedence; later occurrences of the same option in one
-section win. Empty media paths or text clear inherited values.
+matching Morse values. Finally, `[identifier 524950 welcome]` or
+`[announcement 524950 release]` overrides every matching setting for that one
+set. File order does not change this scope precedence; later occurrences of
+the same option in one section win. Empty media paths or text clear inherited
+values.
 
-Node and ID-set names are case-sensitive and cannot contain whitespace or square
-brackets. Scoped headers use one space between components. `general` and
-`identifier`, `speech`, `morse`, and `time` are reserved flat-section names. Scoped
-identifier, speech, Morse, and time headers must name an existing node, which may be
-declared later in the file. Repeated section headers merge options without
-creating duplicate nodes or ID sets. Unknown options and invalid values are
-rejected even if a later entry would override them. There is no fixed limit on
-the number of nodes or ID sets.
+Node and media-set names are case-sensitive and cannot contain whitespace or
+square brackets. Scoped headers use one space between components. `general`,
+`identifier`, `announcement`, `courtesy`, `speech`, `morse`, and `time` are reserved
+flat-section names. Scoped identifier, announcement, courtesy, speech, Morse, and time
+headers must name an existing node, which may be declared later in the file. Repeated
+section headers merge options without creating duplicate nodes or media sets. Unknown
+options and invalid values are rejected even if a later entry would override them.
+There is no fixed limit on the number of nodes, identifiers, announcements, or courtesy
+tones.
 
 ## Node settings
 
@@ -44,19 +50,9 @@ the number of nodes or ID sets.
 | `node_enabled` | yes | Start the configured node. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `dtmf_muting` | yes | Silence a local received PCM frame when an in-band DTMF digit completes decoding, before it reaches the local controller or link router. DTMF command decoding remains active when disabled. |
-| `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after audio ends. |
-| `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, and Morse identifiers and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
-| `courtesy_delay_ms` | 250 | Delay after local-receiver or linked-audio unkey before a courtesy announcement starts. Resumed local or linked receive before the delay ends cancels the pending tone. PTT remains asserted until a started announcement completes. |
-| `receiver_courtesy_sound_file` | empty | Local-receiver courtesy sound-file path. |
-| `receiver_courtesy_speech_text` | empty | Local-receiver courtesy speech text, used when its file is absent or unusable. |
-| `receiver_courtesy_morse_text` | empty | Local-receiver terminal Morse courtesy text. Set `R` for an R courtesy tone. |
-| `receiver_courtesy_morse_frequency_hz` | inherited | Local-receiver courtesy Morse frequency. When omitted, it uses the resolved `[morse]` frequency for this node. |
-| `receiver_courtesy_level_db` | -20 | Local-receiver courtesy sound, speech, and Morse level, from -60 through 0 dB. |
-| `link_courtesy_sound_file` | empty | Linked-receiver courtesy sound-file path. |
-| `link_courtesy_speech_text` | empty | Linked-receiver courtesy speech text, used when its file is absent or unusable. |
-| `link_courtesy_morse_text` | empty | Linked-receiver terminal Morse courtesy text. Set `L` for an L courtesy tone. |
-| `link_courtesy_morse_frequency_hz` | inherited | Linked-receiver courtesy Morse frequency. When omitted, it uses the resolved `[morse]` frequency for this node. |
-| `link_courtesy_level_db` | -20 | Linked-receiver courtesy sound, speech, and Morse level, from -60 through 0 dB. |
+| `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
+| `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, Morse, and generated-tone identifiers, announcements, courtesy tones, and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
+| `courtesy_delay_ms` | 250 | Delay after a receiver or link source unkeys before its assigned courtesy tone starts. Each source retains its own delay when several tones are queued. A rekey by that same source before the delay ends cancels only that pending tone. PTT remains asserted from unkey through the queued tone's completion. |
 | `sample_rate_hz` | 0 | Zero selects the highest usable local signed-linear rate no greater than the hardware-native rate. An explicit rate selects the local channel rate and requires a supported bidirectional Asterisk conversion path. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
 | `codec` | empty | Empty selects signed linear for the local radio channel; otherwise select an available local Asterisk codec subject to `sample_rate_hz`. It does not otherwise restrict IAX link candidates. |
@@ -90,6 +86,110 @@ capability to one format before IAX sees it. Each connected peer uses its
 negotiated PCM rate, and the link adapter resamples between it and the local
 radio rate. A peer can therefore negotiate a rate at or below the local radio
 rate without requiring `codec_resample` for the peer-to-radio conversion.
+
+## Courtesy tones
+
+Courtesy tones are named media sets. `[courtesy]` supplies global media
+defaults, `[courtesy node]` overrides those defaults for one node, and
+`[courtesy node label]` defines one assigned tone. The label is an arbitrary
+set name. Default sections provide inherited media settings only; every named
+tone must set `input` to assign itself. For a named tone, `[speech]` and
+`[speech node]`, then `[morse]` and `[morse node]`, supply their matching
+media defaults after the courtesy defaults; the named tone overrides all of
+them.
+
+```ini
+[courtesy]
+level_db = -20
+
+[courtesy 524950 receiver]
+input = receiver
+morse_text = R
+tone_sequence = 500Hz / 80ms
+
+[courtesy 524950 link]
+input = link
+morse_text = L
+tone_sequence = 1000Hz / 80ms
+
+[courtesy 524950 north]
+input = link
+remote_node = 12345
+morse_text = N
+tone_sequence = 800Hz / 80ms
+```
+
+There may be one named `input = receiver` tone and one generic
+`input = link` tone per local node. The generic link tone has no
+`remote_node` and is the fallback for every direct linked peer that has no
+playable matching override. A named `input = link` tone may set `remote_node` to the
+exact decimal identity of a **permanent direct peer**. It then overrides the
+generic link tone only for that peer. A temporary peer never uses a
+permanent-peer override. An override without playable media therefore falls
+back to the generic link tone. `remote_node` is invalid for receiver input. If
+no assignment matches a receiver or link source, the result is silence.
+
+When a source rekeys before its courtesy delay expires, only that source's
+pending courtesy tone is cancelled: a local-receiver rekey does not cancel a
+link tone, and a rekey from one peer does not cancel a pending tone from
+another peer. A tone that has already begun uses the normal receive-active
+telemetry ducking behavior.
+
+| Option | Applies to | Default | Meaning |
+| --- | --- | --- | --- |
+| `input` | Named tone | required | Source assignment: `receiver` or `link`. |
+| `remote_node` | Named link tone | empty | Exact permanent direct-peer node identity for an override. Omit it for the generic link fallback. |
+| `sound_file` | Defaults and named tone | empty | Courtesy sound-file path. An absent or unusable file falls through to speech. |
+| `speech_text` | Defaults and named tone | empty | Courtesy speech text. Empty or unavailable speech falls through to the tone sequence. |
+| `tone_sequence` | Defaults and named tone | empty | Generated-tone sequence used after file and speech fail or are absent. An absent sequence falls through to Morse. |
+| `morse_text` | Defaults and named tone | empty | Terminal Morse fallback. Empty leaves that assignment silent when no earlier source is playable. |
+| `level_db` | Defaults and named tone | -20 | Courtesy output control from -60 through 0 dB. It applies that relative gain to file and speech PCM, sets the Morse peak, and supplies the generated-tone peak when a segment omits its own level. |
+| `speech_model`, `speech_speed_percent` | Defaults and named tone | inherited | Piper model and speed used by courtesy speech. |
+| `morse_frequency_hz`, `morse_speed_wpm` | Defaults and named tone | inherited | Frequency and speed used by the terminal Morse fallback. |
+
+Courtesy media is tried in this order: sound file, speech, generated
+`tone_sequence`, then Morse. Each unavailable or unusable source falls through
+to the next one. A configured tone sequence is syntax-checked while its enabled
+node reloads even if a file or speech source is usable. Tone sequences are
+configured only in this file: they require no controller-specific DTMF
+programming. The module pre-renders them during reload, so parsing and allocation
+never occur in the real-time audio path.
+
+`tone_sequence` is a comma-separated list of segments:
+
+```text
+frequency1Hz[+frequency2Hz] / duration_ms [ / level_dB ], ...
+```
+
+Each frequency may be a decimal value; one or two frequencies generate one or
+two simultaneous sine waves. Use `silence / duration_ms` or `0 / duration_ms`
+for a silent segment. The `Hz`, `ms`, and `dB` or `dBFS` suffixes are optional,
+whitespace is ignored, and each duration is from 1 through 60,000 ms. A segment's
+optional tone peak is from -60 through 0 dBFS and overrides the inherited `level_db`;
+otherwise the inherited level is used. The compact equivalent
+`frequency@level / duration` is also accepted, but the three-field form is
+clearer in configuration files. For example:
+
+```ini
+tone_sequence = 500Hz / 80ms, silence / 40ms, 1000Hz+1500Hz / 120ms / -20dB
+```
+
+Every non-silent frequency must be below the selected playback rate's Nyquist
+limit. A sequence may contain up to 256 segments and 5,760,000 rendered PCM
+samples in total (120 seconds at 48 kHz). Two-frequency segments divide their
+configured level between the two components to avoid intentional clipping.
+Oscillator phase is continuous between adjacent non-silent segments.
+
+This covers the familiar controller patterns without their controller-specific
+programming syntax: write a single beep as one segment, a two-tone as one
+dual-frequency segment, a delay as `silence`, and longer source-identifying
+patterns as additional comma-separated segments. A leading `silence` segment
+adds a per-tone delay after the shared `courtesy_delay_ms`; later silent segments
+are inter-segment delays. There is no fixed four-segment controller limit.
+
+Queued source events play in unkey order, with each retaining its own delay. Up
+to 16 near-simultaneous source unkeys are retained; an event beyond that fixed
+real-time queue is ignored rather than allocating in the radio worker.
 
 ## Link command mappings
 
@@ -188,6 +288,10 @@ scheduled identifier without satisfying it, and wait for reception to end when
 half duplex prevents transmission. Speech preparation and topology work remain
 outside the radio callback.
 
+Link lifecycle telemetry names only the remote endpoint when this node is a
+link endpoint, such as `123 CONNECTED`. For an event between two other nodes,
+it says `node 1 CONNECTED TO node 2` or `node 1 DISCONNECTED FROM node 2`.
+
 When its RF status reply is queued, full status writes a best-effort
 app_rpt-style route list to the Asterisk operator log. The administrative
 commands `rpt_advanced link status <node>`
@@ -199,13 +303,24 @@ network view: a peer may not advertise a list yet, and its cached list can be
 stale. An empty topology is reported as `none`; local-monitor peers do not
 appear in the route list.
 
+`rpt_advanced command <node> <DTMF>` injects an administrative DTMF sequence
+through the selected node's normal command collector. It uses the configured
+mapping and authorization rules and treats a missing trailing `#` as receiver
+unkey, so `rpt_advanced command 524950 *722` requests the configured time
+announcement.
+
 Each direct IAX peer receives a recipient-excluded `L ` topology advertisement
 after topology changes and on a periodic refresh with a 30-second cadence. If a
 route list cannot fit the bounded advertisement, its terminal `R000000` entry
 means that the list was truncated. These advertisements and cached inbound `L `
 messages are control-plane data and never run in the hardware-paced audio path.
 An inbound topology that already reaches the local node is a loop: the direct
-peer is disconnected without retry. Direct self-links are rejected.
+peer is disconnected without retry. A route that names another direct peer also
+proves a loop, so it is disconnected even when that other peer does not advertise
+topology. Direct self-links, duplicate direct links (including permanent links
+and retained retries), and a requested target already named by an attached
+peer's topology are rejected. A local rejection queues the spoken status `LINK
+REJECTED TOPOLOGY LOOP`, with its normal Morse fallback.
 
 ## Identifier settings
 
@@ -215,17 +330,42 @@ peer is disconnected without retry. Direct self-links are rejected.
 | `priority` | 0 | Nonnegative priority through 2147483647; higher wins. |
 | `first_key_only` | no | Identify only on first key after at least one interval of inactivity. |
 | `regardless_of_activity` | no | Continue periodic IDs during inactivity; not used by first-key-only sets. |
+| `polite` | no | Hold a due ID while local or linked receive is active and until queued RF telemetry has played. |
+| `polite_maximum_wait_ms` | 60000 | Maximum polite hold after the ID becomes due. After this interval the ID becomes eligible even if reception continues; half-duplex operation still cannot transmit during local receive. A status or courtesy announcement that has already started finishes first. |
 | `sound_file` | empty | File path; missing or unusable files fall back to speech. |
 | `speech_text` | empty | Speech text; empty disables speech. |
 | `morse_text` | empty | Morse text; empty disables the terminal fallback. |
+
+## Announcement settings
+
+`[announcement]` supplies global defaults, `[announcement node]` overrides them
+for one node, and `[announcement node set]` defines a named playable
+announcement. A flat or node-default section alone does not schedule playback.
+Announcements use the same sound-file, speech, and Morse fallback sequence as
+identifiers: sound file, then speech, then Morse.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `interval_ms` | 0 | Zero plays after every completed transmission. A positive value limits the set to one successful playback per interval, measured from the prior successful playback. |
+| `sound_file` | empty | File path; missing or unusable files fall back to speech. |
+| `speech_text` | empty | Speech text; empty disables speech. |
+| `morse_text` | empty | Morse text; empty disables the terminal fallback. |
+
+Due announcements play one at a time in configuration-section order, after the
+ordinary transmit hang and any due identifier, but before PTT is released. If a
+positive interval elapses while the transmitter is idle, the controller keys
+PTT, plays any due identifier first, then the announcement, and releases PTT
+with the short natural tail. An announcement that becomes due during a
+transmission waits for that transmission to finish. No announcement is
+configured by default.
 
 ## Speech defaults
 
 `[speech]` supplies defaults for every node. `[speech node]` overrides it for
 that node. The `speech_model`, `speech_speed_percent`, and `speech_level_db`
-names are valid in `[identifier]`, `[identifier node]`, and an identifier-set
-section. A matching `[speech]` or `[speech node]` value overrides an
-identifier-default value; an identifier-set value overrides every default.
+names are valid in identifier and announcement default and set sections. A
+matching `[speech]` or `[speech node]` value overrides a media-default value;
+a named-set value overrides every default.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -233,17 +373,16 @@ identifier-default value; an identifier-set value overrides every default.
 | `speed_percent` | 100 | Speaking rate relative to the model default, from 1 through 1000 percent. |
 | `level_db` | 0 | Synthesized-speech gain from -60 through 0 dBFS. It does not change sound-file or Morse level. |
 
-Identifier-set overrides are `speech_model`, `speech_speed_percent`, and
-`speech_level_db`.
+Named identifier and announcement sets override these with `speech_model`,
+`speech_speed_percent`, and `speech_level_db`.
 
 ## Morse defaults
 
 `[morse]` supplies defaults for every node. `[morse node]` overrides it for
 that node. The `morse_frequency_hz`, `morse_speed_wpm`, and `morse_level_db`
-names are valid in `[identifier]`, `[identifier node]`, and an identifier-set
-section. A matching `[morse]` or `[morse node]` value overrides an
-identifier-default value;
-an identifier-set value overrides every default.
+names are valid in identifier and announcement default and set sections. A
+matching `[morse]` or `[morse node]` value overrides a media-default value; a
+named-set value overrides every default.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -251,8 +390,8 @@ an identifier-set value overrides every default.
 | `speed_wpm` | 20 | PARIS words per minute, from 1 through 100. |
 | `level_db` | -6 | Morse-tone level from -60 through 0 dBFS. -6 dB is approximately the historical half-scale tone. |
 
-Identifier-set overrides are `morse_frequency_hz`, `morse_speed_wpm`, and
-`morse_level_db`.
+Named identifier and announcement sets override these with `morse_frequency_hz`,
+`morse_speed_wpm`, and `morse_level_db`.
 
 Switches accept `yes` or `no`, ignoring case. Unsigned numeric values use
 decimal digits without signs or suffixes. Audio levels accept signed decimal
@@ -261,8 +400,8 @@ integers in their documented range. Sample rate and Morse frequency fit unsigned
 values do not partially update a resolved settings object. Runtime capability
 checks are separate from numeric parsing.
 
-No media is configured by default. Zero ID sets is valid. For testing on 524950,
-set `voice` in `[speech 524950]` to
+No media is configured by default. Zero identifier or announcement sets is
+valid. For testing on 524950, set `voice` in `[speech 524950]` to
 `/usr/lib/piper-tts/voices/en_US-amy-low.onnx` to use the installed voice
 without downloading another model.
 

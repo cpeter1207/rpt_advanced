@@ -11,10 +11,11 @@ void ra_id_activity(struct ra_id_state *states, size_t count) {
 }
 
 void ra_id_first_key(const struct ra_id_rule *rules, struct ra_id_state *states, size_t count,
-                     uint64_t idle_ms) {
+                     uint64_t idle_ms, uint64_t now_ms) {
     for (size_t i = 0; i < count; ++i) {
         if (rules[i].first_key_only && idle_ms >= rules[i].interval_ms) {
             states[i].first_key_pending = true;
+            states[i].polite_due_ms = now_ms;
         }
     }
 }
@@ -47,6 +48,7 @@ void ra_id_complete(const struct ra_id_rule *rules, struct ra_id_state *states, 
             states[i].satisfied_ms = now_ms;
             states[i].activity = false;
             states[i].first_key_pending = false;
+            states[i].polite_due_ms = 0;
         }
     }
 }

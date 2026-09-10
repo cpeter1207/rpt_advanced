@@ -3,7 +3,17 @@
 ## Implemented and tested
 
 - Original C identifier scheduling policy: intervals, priorities, activity-based
-  and unconditional periods, first-key-only sets, and completion hierarchy.
+  and unconditional periods, first-key-only sets, bounded polite deferral while
+  receiver/link activity or queued telemetry is present, and completion hierarchy.
+- Named announcements with inherited file/speech/Morse media: zero-interval
+  every-release playback, positive rate-limited playback, configuration-order
+  serialization after ordinary hang and due IDs, idle PTT initiation, and smooth
+  receive-active ducking.
+- Named courtesy-tone inputs with shared and per-node media defaults: receiver,
+  generic-link, and permanent-direct-peer routing; file/speech/generated-tone/Morse
+  fallback; source-specific pending cancellation; and receive-active ducking.
+  Generated sequences are pre-rendered on reload and support bounded mono-tone,
+  dual-tone, silence, duration, and per-segment-level patterns.
 - File/speech/Morse preference policy, including Morse-only reception behavior.
 - Streaming signed-linear Morse renderer with configurable rate, speed, and tone
   frequency; fractional-sample timing and block-independent output tests.
@@ -44,41 +54,46 @@
   on Debian 13 amd64 through the module's preparation code. See
   [testing](testing.md) for the optional real-model invocation and its scope.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
-- Integrated node controller joining ID scheduling, prepared PCM/Morse playback,
-  local repeat, and PTT/hang policy. Sequence tests cover half-duplex deferral,
-  receive interruption, priority satisfaction, and first-key identification after
-  inactivity. Module startup binds it to its channel worker.
+- Integrated node controller joining ID and announcement scheduling, prepared
+  PCM/Morse playback, local repeat, and PTT/hang policy. Sequence tests cover
+  half-duplex deferral, receive interruption, priority satisfaction, polite
+  deferral, first-key identification after inactivity, and announcement ordering,
+  release, idle-keying, and ducking. Module startup binds it to its channel worker.
 - Joinable channel worker driven by channel readiness, with monotonic ID timing,
   bounded shutdown checks, and unkey/hangup before releasing controller state.
   Tests cover injected failures and real threads driven by pipe-based hardware
   events, including stop and replacement with a different controller. Module
   configuration loading now starts these workers for every enabled node.
-- Shared, node, and ID-set configuration-value inheritance, including explicit
-  empty overrides and scope independence from file order.
+- Shared, node, and ID/announcement/courtesy-set configuration-value inheritance,
+  including explicit empty overrides and scope independence from file order.
 - In-place configuration-line syntax parsing, including whitespace, semicolon
   comments, section names, and empty option values. File loading and schema
   validation remain separate work.
 - Bounded unsigned-decimal and explicit yes/no value validation. Invalid values
   leave their destination unchanged; numeric overflow is rejected.
-- Typed node and ID settings with shared/node/set inheritance, documented in
-  [configuration](configuration.md), and atomic rejection of invalid values.
+- Typed node, ID, announcement, and courtesy settings with shared/node/set
+  inheritance, documented in [configuration](configuration.md), and atomic
+  rejection of invalid values.
 - Streaming file-syntax reader with physical-line diagnostics, unbounded line
   lengths, embedded-null rejection, and builder-error propagation.
 - Owned configuration storage, including empty sections, with complete cleanup
   on syntax/allocation failures and file-to-settings integration tests.
 - Whole-file option and scope validation, exact node-reference checking, and
-  duplicate-free enumeration of named nodes and their identifier sets.
-- Local AllStarLink link control: verified inbound admission, direct IAX peer
-  routing, linking-only DTMF, permanent-link recovery, direct-peer remote
-  command mode, `*722` local-time speech with Morse fallback, lock-free prepared-speech RF status playback, and best-effort `L ` topology
-  exchange. See [AllStarLink status](allstarlink-status.md) for validation
-  limits.
+  duplicate-free enumeration of named nodes and their identifier, announcement,
+  and courtesy sets.
+- Local AllStarLink link control: verified inbound admission, duplicate and
+  topology-loop rejection, direct IAX peer routing, linking-only DTMF,
+  permanent-link recovery, direct-peer remote command mode, `*722` local-time
+  speech with Morse fallback, lock-free prepared-speech RF status playback, and
+  best-effort `L ` topology exchange. See
+  [AllStarLink status](allstarlink-status.md) for validation limits.
 - The quality policy requires strict formatting, compiler diagnostics, Cppcheck,
   Clang-Tidy, Doxygen, and per-platform line/branch coverage gates. Doxygen is
   published to GitHub Pages after the main-branch quality gate passes.
 
 The build produces a static controller library and `app_rpt_advanced.so`. The
-module starts named radio workers with inherited, prepared file/speech/Morse IDs.
+module starts named radio workers with inherited, prepared file/speech/Morse IDs,
+announcements, and courtesy tones.
 Invalid configuration
 leaves running workers untouched; a valid reload stops and replaces them. Failed
 radio startup releases partial resources and attempts to reopen the previous
@@ -86,8 +101,9 @@ configuration, reporting any restoration failure. Lifecycle tests use the real s
 Asterisk's public ABI, including configuration-path allocation and input errors.
 An integration test loads, reloads, and unloads the installed module in an isolated
 Asterisk process with temporary configuration and a synthetic radio. Other tests
-include a combined identifier/duplex state sequence. The native matrix also
-links the actual USBRadioPlus adapter to the synthetic hardware backend.
+include combined identifier/announcement/courtesy/duplex state sequences. The
+native matrix also links the actual USBRadioPlus adapter to the synthetic
+hardware backend.
 
 ## Remaining verification
 

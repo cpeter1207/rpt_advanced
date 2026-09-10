@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief File/Piper fallback and checked loading of rate-matched identifier PCM.
+ * @brief File/Piper fallback and checked loading of rate-matched scheduled-media PCM.
  */
 #include "assets.h"
 #include "speech.h"

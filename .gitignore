@@ -1,4 +1,5 @@
 /build/
 *.gcda
 *.gcno
+*.gcov
 __pycache__/

@@ -9,16 +9,17 @@
 /** @brief Check empty configuration and harmless empty-array activity events. */
 static void test_empty(void) {
     ra_id_activity(NULL, 0);
-    ra_id_first_key(NULL, NULL, 0, 0);
+    ra_id_first_key(NULL, NULL, 0, 0, 0);
     assert(ra_id_select(NULL, NULL, 0, 0, false, false) == SIZE_MAX);
 }
 
 /** @brief Verify exact interval boundaries, priority, ties, and hierarchy completion. */
 static void test_periods(void) {
-    const struct ra_id_rule rules[] = {{100, 1, false, false},
-                                       {100, 3, false, true},
-                                       {100, 3, false, true},
-                                       {100, 2, false, true}};
+    const struct ra_id_rule rules[] = {
+        {.interval_ms = 100, .priority = 1},
+        {.interval_ms = 100, .priority = 3, .regardless_of_activity = true},
+        {.interval_ms = 100, .priority = 3, .regardless_of_activity = true},
+        {.interval_ms = 100, .priority = 2, .regardless_of_activity = true}};
     struct ra_id_state states[4] = {{0}};
     assert(ra_id_select(rules, states, 4, 99, false, true) == SIZE_MAX);
     assert(ra_id_select(rules, states, 4, 100, false, true) == 1);
@@ -42,7 +43,7 @@ static void test_periods(void) {
 
 /** @brief Verify a quiet node stops periodic IDs unless explicitly configured otherwise. */
 static void test_activity(void) {
-    const struct ra_id_rule rule = {100, 0, false, false};
+    const struct ra_id_rule rule = {.interval_ms = 100};
     struct ra_id_state state = {0};
     assert(ra_id_select(&rule, &state, 1, 1000, false, false) == SIZE_MAX);
     ra_id_activity(&state, 1);
@@ -53,12 +54,17 @@ static void test_activity(void) {
 
 /** @brief Exercise welcome-only IDs, reception deferral, and conversation IDs together. */
 static void test_welcome(void) {
-    const struct ra_id_rule rules[] = {{100, 10, true, true}, {100, 1, false, false}};
+    const struct ra_id_rule rules[] = {{.interval_ms = 100,
+                                        .priority = 10,
+                                        .first_key_only = true,
+                                        .regardless_of_activity = true},
+                                       {.interval_ms = 100, .priority = 1}};
     struct ra_id_state states[2] = {{0}};
-    ra_id_first_key(rules, states, 2, 99);
+    ra_id_first_key(rules, states, 2, 99, 1000);
     assert(!states[0].first_key_pending);
     assert(ra_id_select(rules, states, 2, 1000, false, true) == SIZE_MAX);
-    ra_id_first_key(rules, states, 2, 100);
+    ra_id_first_key(rules, states, 2, 100, 1000);
+    assert(states[0].polite_due_ms == 1000);
     ra_id_activity(states, 2);
     assert(ra_id_select(rules, states, 2, 1000, true, false) == SIZE_MAX);
     assert(ra_id_select(rules, states, 2, 1000, false, false) == 0);

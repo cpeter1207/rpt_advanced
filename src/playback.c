@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Sample-driven identifier playback and irreversible receive interruption.
+ * @brief Sample-driven scheduled-media playback and irreversible receive interruption.
  */
 #include "playback.h"
 

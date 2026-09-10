@@ -23,6 +23,8 @@ AST_MUTEX_DEFINE_STATIC(routing_lock);
 _Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && ATOMIC_CHAR_LOCK_FREE == 2 &&
                    ATOMIC_INT_LOCK_FREE == 2 && ATOMIC_POINTER_LOCK_FREE == 2,
                "link status requires lock-free atomics");
+_Static_assert(RA_LINK_PEER_NAME_MAX <= RA_CONTROLLER_COURTESY_REMOTE_MAX,
+               "courtesy source identity must retain every direct-peer name");
 
 /** @brief Initialize all lifecycle and audio-list atomics before their first access.
  * @param hub Caller-owned storage with no active manager or attached peers.
@@ -489,24 +491,24 @@ static void topology_advertise_locked(struct ra_link_hub *hub) {
     }
 }
 
-/** @brief Check whether a validated remote route list reaches this local node.
+/** @brief Check whether a validated remote route list reaches a named node.
  * @param topology Comma-separated app_rpt route payload.
- * @param local_name Local node identity to find.
- * @return True when an advertised route names the local node.
+ * @param name Node identity to find.
+ * @return True when an advertised route names @p name.
  *
  * Both inputs are nonempty validated strings supplied by `detach_topology_loop_locked`. A remote
  * `L` list containing this node proves that retaining the direct peer would close an RF/IP
  * topology loop. Route mode is irrelevant: any reachable copy of the local node loops.
  */
-static bool topology_contains_local(const char *topology, const char *local_name) {
-    size_t local_length = strlen(local_name);
+static bool topology_contains_name(const char *topology, const char *name) {
+    size_t name_length = strlen(name);
     for (size_t start = 0; topology[start];) {
         size_t end = start;
         while (topology[end] && topology[end] != ',') {
             ++end;
         }
-        if (end - start - 1 == local_length &&
-            !memcmp(topology + start + 1, local_name, local_length)) {
+        size_t route_length = end - start;
+        if (route_length == name_length + 1 && !memcmp(topology + start + 1, name, name_length)) {
             return true;
         }
         start = topology[end] ? end + 1 : end;
@@ -514,7 +516,68 @@ static bool topology_contains_local(const char *topology, const char *local_name
     return false;
 }
 
-/** @brief Detach one peer whose advertised route graph has looped back to this node.
+/** @brief Check whether one peer advertises a route to another directly attached peer.
+ * @param hub Hub whose direct-peer list is stable under the lifecycle lock.
+ * @param source Peer that supplied the validated topology advertisement.
+ * @param topology Complete validated route list supplied by @p source.
+ * @return True when the advertised route would close a loop through another direct peer.
+ *
+ * A peer can omit its own topology while another peer still reports a route
+ * to it. Once both peers are attached locally, that reported route proves a
+ * cycle even though neither advertisement needs to name the local node.
+ */
+static bool topology_reaches_direct_peer_locked(const struct ra_link_hub *hub,
+                                                const struct ra_link_port *source,
+                                                const char *topology) {
+    for (const struct ra_link_port *port = atomic_load_explicit(&hub->ports, memory_order_seq_cst);
+         port; port = atomic_load_explicit(&port->next, memory_order_seq_cst)) {
+        if (port != source && !atomic_load(&port->peer.ended) &&
+            topology_contains_name(topology, port->name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** @brief Check one stable hub topology while its lifecycle lock is held.
+ * @param hub Hub whose attached ports and retained retries are stable.
+ * @param name Exact node identity to find.
+ * @param retries True to include pending permanent-link recovery records.
+ * @return True when an attached port, its live advertised topology, or a selected retry reaches
+ *         @p name.
+ *
+ * An ended port still reserves its direct identity until the manager reclaims it, so an immediate
+ * replacement cannot race the old reader. Its stale advertised topology is deliberately ignored:
+ * after the transport ends it is no longer evidence of a live transit route. Reconnect attaches
+ * while retaining its own retry record, so attachment checks omit retries whereas public admission
+ * checks include them.
+ */
+static bool reaches_locked(const struct ra_link_hub *hub, const char *name, bool retries) {
+    for (struct ra_link_port *port = atomic_load_explicit(&hub->ports, memory_order_seq_cst); port;
+         port = atomic_load_explicit(&port->next, memory_order_seq_cst)) {
+        if (!strcmp(port->name, name)) {
+            return true;
+        }
+        if (atomic_load(&port->peer.ended)) {
+            continue;
+        }
+        char topology[RA_LINK_TOPOLOGY_TEXT_MAX + 1];
+        size_t length = ra_link_peer_topology(&port->peer, topology, sizeof(topology));
+        if (length < sizeof(topology) && topology_contains_name(topology, name)) {
+            return true;
+        }
+    }
+    if (retries) {
+        for (const struct ra_link_retry *retry = hub->retries; retry; retry = retry->next) {
+            if (!strcmp(retry->name, name)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/** @brief Detach one peer whose advertised route graph proves a local loop.
  * @param hub Hub whose control-plane peer list is locked.
  * @return Detached loop-forming peer, or null.
  */
@@ -527,7 +590,9 @@ static struct ra_link_port *detach_topology_loop_locked(struct ra_link_hub *hub)
     while (port) {
         char topology[RA_LINK_TOPOLOGY_TEXT_MAX + 1];
         size_t length = ra_link_peer_topology(&port->peer, topology, sizeof(topology));
-        if (length < sizeof(topology) && topology_contains_local(topology, hub->local_name)) {
+        if (length < sizeof(topology) &&
+            (topology_contains_name(topology, hub->local_name) ||
+             topology_reaches_direct_peer_locked(hub, port, topology))) {
             atomic_store_explicit(cursor, atomic_load_explicit(&port->next, memory_order_seq_cst),
                                   memory_order_seq_cst);
             return port;
@@ -536,6 +601,16 @@ static struct ra_link_port *detach_topology_loop_locked(struct ra_link_hub *hub)
         port = atomic_load_explicit(cursor, memory_order_seq_cst);
     }
     return NULL;
+}
+
+bool ra_link_hub_reaches(const struct ra_link_hub *hub, const char *name) {
+    if (!hub || !name || !*name) {
+        return false;
+    }
+    ast_mutex_lock(&routing_lock);
+    bool reaches = reaches_locked(hub, name, true);
+    ast_mutex_unlock(&routing_lock);
+    return reaches;
 }
 
 /** @brief Wait outside real-time processing for readers of a detached port.
@@ -699,11 +774,9 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
         }
     }
     ast_mutex_lock(&routing_lock);
-    bool duplicate = false;
-    for (struct ra_link_port *entry = atomic_load_explicit(&hub->ports, memory_order_seq_cst);
-         entry; entry = atomic_load_explicit(&entry->next, memory_order_seq_cst)) {
-        duplicate |= !strcmp(entry->name, name);
-    }
+    /* Recheck while publishing: a peer topology can change after runtime admission and permanent
+     * reconnects attach through this lower layer without passing the runtime's initial check. */
+    bool blocked = reaches_locked(hub, name, false);
     if (!hub->local) {
         hub->local = ast_calloc(local_capacity * 3, sizeof(*hub->local));
         hub->capacity = local_capacity;
@@ -713,7 +786,7 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
             hub->outgoing = hub->remote + local_capacity;
         }
     }
-    if (duplicate || !hub->local) {
+    if (blocked || !hub->local) {
         ast_mutex_unlock(&routing_lock);
         release_port(port);
         return -1;
@@ -734,6 +807,14 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
     port->forward = forward;
     port->permanent = permanent;
     ast_mutex_lock(&routing_lock);
+    /* A concurrent attach can publish a duplicate or a newly advertised route while this peer
+     * starts. Recheck immediately before publication, while the shared route list is stable. */
+    blocked = reaches_locked(hub, name, false);
+    if (blocked) {
+        ast_mutex_unlock(&routing_lock);
+        release_port(port);
+        return -1;
+    }
     atomic_store_explicit(&port->next, atomic_load_explicit(&hub->ports, memory_order_seq_cst),
                           memory_order_seq_cst);
     atomic_store_explicit(&hub->ports, port, memory_order_seq_cst);
@@ -1120,6 +1201,9 @@ bool ra_link_hub_process(struct ra_link_hub *hub, struct ra_controller *controll
             bool active = ra_link_peer_receive(&port->peer, port->audio, port->samples);
             if (active && !port->active) {
                 remember_last_keyed(hub, port->name);
+                ra_controller_link_keyed(controller, port->name);
+            } else if (!active && port->active) {
+                ra_controller_link_unkeyed(controller, port->name, port->permanent, now_ms);
             }
             port->active = active;
             adapt(port->receive_src, port->src_in, port->src_out, port->audio, port->samples,

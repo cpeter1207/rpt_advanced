@@ -120,6 +120,44 @@ def media_case(configuration, radio_configuration, logfile, process) -> None:
     print(f"Asterisk prepared-file and receive Morse fallback: {records}")
 
 
+def announcement_case(configuration, radio_configuration, logfile, process) -> None:
+    """! @brief Verify a periodic announcement waits for half-duplex receiver release.
+    @param configuration Isolated Asterisk configuration.
+    @param radio_configuration Controller configuration path.
+    @param logfile Fixture observations.
+    @param process Test-owned running Asterisk.
+    @return None; assertions require balanced post-receive Morse transmission.
+    """
+    offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
+    radio_configuration.write_text(
+        "[half]\nfull_duplex=no\ntransmit_hang_ms=20\n"
+        "[announcement half idle]\ninterval_ms=50\nmorse_text=E\n",
+        encoding="utf-8",
+    )
+    cli(configuration, "module reload app_rpt_advanced.so")
+    deadline = time.monotonic() + 30
+    while (
+        "rpt_fixture ready RadioPlusAdvanced/half"
+        not in logfile.read_text(encoding="utf-8", errors="replace")[offset:]
+    ):
+        if process.poll() is not None or time.monotonic() >= deadline:
+            raise TimeoutError("periodic announcement exchange did not complete")
+        time.sleep(0.1)
+    radio_configuration.write_text("", encoding="utf-8")
+    cli(configuration, "module reload app_rpt_advanced.so")
+    records = re.findall(
+        r"rpt_fixture RadioPlusAdvanced/half ticks=(\d+) writes=(\d+) "
+        r"nonzero=(\d+) early=(\d+) keys=(\d+) unkeys=(\d+)",
+        logfile.read_text(encoding="utf-8", errors="replace")[offset:],
+    )
+    assert len(records) == 1, records
+    ticks, writes, nonzero, early, keys, unkeys = map(int, records[0])
+    assert ticks >= writes >= 30 and nonzero > 0 and early == 0, records
+    # A short fixture interval deliberately permits more than one idle cycle.
+    assert keys == unkeys and keys > 0, records
+    print(f"Asterisk half-duplex periodic announcement: {records}")
+
+
 def main() -> None:
     """! @brief Verify the real module ABI and always stop the test-owned process.
     @return None; failures raise an exception.
@@ -230,6 +268,7 @@ def main() -> None:
                         rate,
                         codec,
                     )
+                announcement_case(configuration, radio_configuration, logfile, process)
                 media_case(configuration, radio_configuration, logfile, process)
                 cli(configuration, "module unload chan_rpt_fixture.so")
                 assert "0 modules loaded" in cli(

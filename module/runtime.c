@@ -11,6 +11,7 @@
 #include "media.h"
 #include "schema.h"
 #include "time_announcement.h"
+#include "tone_sequence.h"
 #include "worker.h"
 #include <asterisk.h>
 #include <asterisk/astobj2.h>
@@ -21,7 +22,6 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -58,6 +58,13 @@ struct ra_runtime_node {
         status_settings; /**< Resolved speech and Morse defaults for RF telemetry. */
     struct ra_time_settings time_settings; /**< Resolved local clock-announcement format. */
     struct ra_controller_id *ids;          /**< Resolved identifier array. */
+    struct ra_controller_announcement
+        *announcements; /**< Resolved announcement media in configuration order. */
+    struct ra_controller_id
+        *courtesies; /**< Prepared named courtesy media in configuration order. */
+    struct ra_controller_peer_courtesy
+        *peer_courtesies;    /**< Prepared permanent-link courtesy overrides. */
+    size_t courtesy_count;   /**< Number of owned courtesy media records. */
     const char *reload_name; /**< Previous document-owned name while a replacement is pending. */
     struct ra_node_settings
         reload_settings;      /**< Previous resolved settings while a replacement is pending. */
@@ -252,18 +259,29 @@ static void stop_node_resources(struct ra_runtime_node *node) {
     for (size_t index = 0; index < node->controller.count; ++index) {
         ast_free((void *)node->ids[index].audio);
     }
-    for (size_t index = 0; index < RA_CONTROLLER_COURTESY_QUEUE_DEPTH; ++index) {
-        ast_free((void *)node->controller.courtesy[index].audio);
+    for (size_t index = 0; index < node->controller.announcement_count; ++index) {
+        ast_free((void *)node->announcements[index].media.audio);
+    }
+    for (size_t index = 0; index < node->courtesy_count; ++index) {
+        ast_free((void *)node->courtesies[index].audio);
     }
     for (size_t index = 0; index < RA_CONTROLLER_STATUS_QUEUE_DEPTH; ++index) {
         ast_free(node->controller.status_queue[index].audio);
     }
     ast_free(node->controller.states);
     ast_free(node->controller.rules);
+    ast_free(node->controller.announcement_states);
     ast_free(node->ids);
+    ast_free(node->announcements);
+    ast_free(node->courtesies);
+    ast_free(node->peer_courtesies);
     node->controller = (struct ra_controller){0};
     node->worker = (struct ra_worker){.digit = digit};
     node->ids = NULL;
+    node->announcements = NULL;
+    node->courtesies = NULL;
+    node->peer_courtesies = NULL;
+    node->courtesy_count = 0;
 }
 
 /** @brief Stop and release radio resources while retaining the node's routing hub.
@@ -366,6 +384,153 @@ static const char *identifiers(struct ra_runtime_node *node, const struct ra_doc
     return NULL;
 }
 
+/** @brief Allocate prepared announcement state and resolve its inherited media settings.
+ * @param node Reserved runtime node that owns the resulting arrays.
+ * @param document Valid configuration document.
+ * @param name Exact configured node name.
+ * @return Null on success, or an allocation diagnostic.
+ *
+ * An unrenderable set is omitted rather than being allowed to win repeatedly.  This mirrors
+ * identifier preparation and leaves the controller with only media that can reach RF.
+ */
+static const char *announcements(struct ra_runtime_node *node, const struct ra_document *document,
+                                 const char *name) {
+    size_t count = 0;
+    while (ra_document_announcement(document, name, count)) {
+        ++count;
+    }
+    if (!count) {
+        return NULL;
+    }
+    node->announcements = ast_calloc(count, sizeof(*node->announcements));
+    node->controller.announcement_states =
+        ast_calloc(count, sizeof(*node->controller.announcement_states));
+    if (!node->announcements || !node->controller.announcement_states) {
+        return "cannot allocate announcement state";
+    }
+    node->controller.announcements = node->announcements;
+    size_t usable = 0;
+    for (size_t index = 0; index < count; ++index) {
+        struct ra_announcement_settings settings;
+        struct ra_controller_announcement *announcement = &node->announcements[usable];
+        (void)ra_announcement_settings_resolve(document->entries, document->count, name,
+                                               ra_document_announcement(document, name, index),
+                                               &settings);
+        announcement->interval_ms = settings.interval_ms;
+        announcement->media.settings = settings.media;
+        int16_t *audio;
+        ra_identifier_prepare(&announcement->media.settings, node->controller.rate, &audio,
+                              &announcement->media.samples);
+        announcement->media.audio = audio;
+        if (audio || *announcement->media.settings.morse_text) {
+            ++usable;
+        }
+    }
+    node->controller.announcement_count = usable;
+    return NULL;
+}
+
+/** @brief Prepare one courtesy medium using file, speech, generated tones, then Morse fallback.
+ * @param settings Fully inherited source-specific courtesy settings.
+ * @param rate Negotiated node PCM rate.
+ * @param media Receives node-owned prepared media.
+ * @return Null on success, or a precise tone-sequence preparation diagnostic.
+ *
+ * File and speech use the established asset helper. A configured tone sequence is always parsed
+ * so reload reports invalid syntax even when a higher-priority file or speech source succeeds.
+ * Its independent allocator is copied into Asterisk-owned memory before the worker can see it.
+ */
+static const char *prepare_courtesy(const struct ra_courtesy_settings *settings, unsigned int rate,
+                                    struct ra_controller_id *media) {
+    media->settings = settings->media;
+    int16_t *audio;
+    size_t samples;
+    ra_identifier_prepare(&media->settings, rate, &audio, &samples);
+    bool file_or_speech = audio != NULL;
+    if (*settings->tone_sequence) {
+        int16_t *tones = NULL;
+        size_t tone_samples = 0;
+        const char *error = ra_tone_sequence_prepare(
+            settings->tone_sequence, rate, (int)settings->level_db, &tones, &tone_samples);
+        if (error) {
+            ast_free(audio);
+            return error;
+        }
+        if (!audio && tones) {
+            audio = ast_calloc(tone_samples, sizeof(*audio));
+            if (!audio) {
+                ra_tone_sequence_free(tones);
+                return "cannot allocate courtesy media";
+            }
+            /* Both arrays contain exactly tone_samples signed PCM values. */
+            for (size_t sample = 0; sample < tone_samples; ++sample) {
+                audio[sample] = tones[sample];
+            }
+            samples = tone_samples;
+        }
+        ra_tone_sequence_free(tones);
+    }
+    if (file_or_speech) {
+        apply_courtesy_gain(audio, samples, settings->level_db);
+    }
+    media->audio = audio;
+    media->samples = samples;
+    return NULL;
+}
+
+/** @brief Resolve, prepare, and publish all named courtesy inputs for one node.
+ * @param node Runtime node retaining media through the worker lifetime.
+ * @param document Valid configuration document.
+ * @param name Exact local node name.
+ * @return Null on success or an allocation/preparation diagnostic.
+ */
+static const char *courtesies(struct ra_runtime_node *node, const struct ra_document *document,
+                              const char *name) {
+    size_t count = 0;
+    while (ra_document_courtesy(document, name, count)) {
+        ++count;
+    }
+    if (!count) {
+        return NULL;
+    }
+    node->courtesies = ast_calloc(count, sizeof(*node->courtesies));
+    node->peer_courtesies = ast_calloc(count, sizeof(*node->peer_courtesies));
+    if (!node->courtesies || !node->peer_courtesies) {
+        return "cannot allocate courtesy media";
+    }
+    node->courtesy_count = count;
+    size_t peers = 0;
+    for (size_t index = 0; index < count; ++index) {
+        const char *set = ra_document_courtesy(document, name, index);
+        struct ra_courtesy_settings settings;
+        const char *error =
+            ra_courtesy_settings_resolve(document->entries, document->count, name, set, &settings);
+        if (!error) {
+            error = prepare_courtesy(&settings, node->controller.rate, &node->courtesies[index]);
+        }
+        if (error) {
+            return error;
+        }
+        struct ra_controller_id *media = &node->courtesies[index];
+        if (!media->audio && !*media->settings.morse_text) {
+            continue;
+        }
+        if (settings.input == RA_COURTESY_INPUT_RECEIVER) {
+            /* Schema validation guarantees this is the only receiver assignment. */
+            node->controller.receiver_courtesy = media;
+        } else if (!*settings.remote_node) {
+            /* Schema validation guarantees this is the only generic-link assignment. */
+            node->controller.link_courtesy = media;
+        } else {
+            node->peer_courtesies[peers++] = (struct ra_controller_peer_courtesy){
+                .remote = settings.remote_node, .media = media};
+        }
+    }
+    node->controller.peer_courtesies = node->peer_courtesies;
+    node->controller.peer_courtesy_count = peers;
+    return NULL;
+}
+
 /** @brief Reserve and activate one node without transferring partial ownership.
  * @param node List-owned zero-initialized state.
  * @param document Validated configuration.
@@ -397,39 +562,15 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     node->controller.status_frequency_hz = (unsigned int)node->status_settings.morse_frequency_hz;
     node->controller.status_level_db = (int)node->status_settings.morse_level_db;
     node->controller.courtesy_delay_ms = settings->courtesy_delay_ms;
-    struct ra_identifier_settings *receiver =
-        &node->controller.courtesy[RA_COURTESY_RECEIVER].settings;
-    *receiver = node->status_settings;
-    receiver->file = settings->receiver_courtesy_sound_file;
-    receiver->speech_text = settings->receiver_courtesy_speech_text;
-    receiver->morse_text = settings->receiver_courtesy_morse_text;
-    if (settings->receiver_courtesy_morse_frequency_hz) {
-        receiver->morse_frequency_hz = settings->receiver_courtesy_morse_frequency_hz;
+    error = courtesies(node, document, name);
+    if (error) {
+        return error;
     }
-    receiver->speech_level_db = 0;
-    receiver->morse_level_db = settings->receiver_courtesy_level_db;
-    int16_t *courtesy_audio;
-    ra_identifier_prepare(receiver, node->controller.rate, &courtesy_audio,
-                          &node->controller.courtesy[RA_COURTESY_RECEIVER].samples);
-    node->controller.courtesy[RA_COURTESY_RECEIVER].audio = courtesy_audio;
-    apply_courtesy_gain(courtesy_audio, node->controller.courtesy[RA_COURTESY_RECEIVER].samples,
-                        settings->receiver_courtesy_level_db);
-    struct ra_identifier_settings *link = &node->controller.courtesy[RA_COURTESY_LINK].settings;
-    *link = node->status_settings;
-    link->file = settings->link_courtesy_sound_file;
-    link->speech_text = settings->link_courtesy_speech_text;
-    link->morse_text = settings->link_courtesy_morse_text;
-    if (settings->link_courtesy_morse_frequency_hz) {
-        link->morse_frequency_hz = settings->link_courtesy_morse_frequency_hz;
-    }
-    link->speech_level_db = 0;
-    link->morse_level_db = settings->link_courtesy_level_db;
-    ra_identifier_prepare(link, node->controller.rate, &courtesy_audio,
-                          &node->controller.courtesy[RA_COURTESY_LINK].samples);
-    node->controller.courtesy[RA_COURTESY_LINK].audio = courtesy_audio;
-    apply_courtesy_gain(courtesy_audio, node->controller.courtesy[RA_COURTESY_LINK].samples,
-                        settings->link_courtesy_level_db);
     error = identifiers(node, document, name);
+    if (error) {
+        return error;
+    }
+    error = announcements(node, document, name);
     if (error) {
         return error;
     }
@@ -442,7 +583,7 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     node->controller.telemetry_duck_db = (int)settings->telemetry_duck_db;
     if (!ra_controller_start(&node->controller,
                              (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000)) {
-        return "identifier cannot render at negotiated sample rate";
+        return "scheduled media cannot render at negotiated sample rate";
     }
     if (ast_call(node->connection.channel, settings->channel, 0)) {
         return "cannot start radio channel";
@@ -535,6 +676,16 @@ static struct ra_runtime_node *runtime_node(struct ra_runtime *runtime, const ch
         }
     }
     return NULL;
+}
+
+static int queue_status_speech(struct ra_runtime_node *node, const char *text, const char *node_one,
+                               const char *node_two);
+
+/** @brief Announce rejection of a duplicate or loop-forming link request.
+ * @param node Running local node that owns the RF-status queue.
+ */
+static void announce_link_loop(struct ra_runtime_node *node) {
+    (void)queue_status_speech(node, "LINK REJECTED TOPOLOGY LOOP", NULL, NULL);
 }
 
 /** @brief Restart one stable node while retaining its peer manager and routing ownership.
@@ -736,7 +887,8 @@ int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char 
                       struct ast_channel *channel, bool verified) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
-            if (!strcmp(local, remote)) {
+            if (!strcmp(local, remote) || ra_link_hub_reaches(&node->links, remote)) {
+                announce_link_loop(node);
                 return -1;
             }
             if (!ra_link_access_allowed(node->settings.link_allow_nodes,
@@ -756,7 +908,8 @@ int ra_runtime_prepare_link(struct ra_runtime *runtime, const char *local, const
         if (strcmp(node->name, local)) {
             continue;
         }
-        if (!strcmp(local, remote)) {
+        if (!strcmp(local, remote) || ra_link_hub_reaches(&node->links, remote)) {
+            announce_link_loop(node);
             return -1;
         }
         char *destination = resolve_link_node(node, remote, NULL);
@@ -806,7 +959,8 @@ int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const 
                            bool permanent) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
-            if (!strcmp(local, remote)) {
+            if (!strcmp(local, remote) || ra_link_hub_reaches(&node->links, remote)) {
+                announce_link_loop(node);
                 return -1;
             }
             return ra_link_hub_attach(&node->links, remote, channel, node->connection.radio.linear,
@@ -820,7 +974,8 @@ bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *lo
                                       const char *remote, bool transmit, bool forward) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
-            if (!strcmp(local, remote)) {
+            if (!strcmp(local, remote) || ra_link_hub_reaches(&node->links, remote)) {
+                announce_link_loop(node);
                 return false;
             }
             return ra_link_hub_retain_permanent(&node->links, remote, transmit, forward);
@@ -1163,16 +1318,17 @@ static bool status_text_append(char text[RA_CONTROLLER_STATUS_TEXT_MAX], const c
     return true;
 }
 
-/** @brief Build bounded link-lifecycle speech from one to three known-safe words.
+/** @brief Build bounded link-lifecycle speech from one to four known-safe words.
  * @param text Empty bounded destination.
  * @param first First word to append.
  * @param second Second word to append.
- * @param third Optional final word, or null for a two-word report.
+ * @param third Optional third word, or null for a two-word report.
+ * @param fourth Optional final word, or null for a shorter report.
  * @return True only when every word fits with a separating space.
  */
 static bool status_text_words(char text[RA_CONTROLLER_STATUS_TEXT_MAX], const char *first,
-                              const char *second, const char *third) {
-    const char *const words[] = {first, second, third};
+                              const char *second, const char *third, const char *fourth) {
+    const char *const words[] = {first, second, third, fourth};
     text[0] = '\0';
     for (size_t index = 0; index < sizeof(words) / sizeof(*words) && words[index]; ++index) {
         if (index && !status_text_append(text, " ")) {
@@ -1197,11 +1353,11 @@ static bool link_event_text(const char *local, const char *first, const char *se
                             bool connected, char text[RA_CONTROLLER_STATUS_TEXT_MAX]) {
     const char *verb = connected ? "CONNECTED" : "DISCONNECTED";
     if (!strcmp(local, first)) {
-        return status_text_words(text, second, verb, NULL);
+        return status_text_words(text, second, verb, NULL, NULL);
     } else if (!strcmp(local, second)) {
-        return status_text_words(text, first, verb, NULL);
+        return status_text_words(text, first, verb, NULL, NULL);
     }
-    return status_text_words(text, first, verb, second);
+    return status_text_words(text, first, verb, connected ? "TO" : "FROM", second);
 }
 
 int ra_runtime_queue_link_event(struct ra_runtime *runtime, const char *first, const char *second,

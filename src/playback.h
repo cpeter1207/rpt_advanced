@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Hardware-paced prepared-audio playback with signal-triggered Morse fallback.
+ * @brief Hardware-paced scheduled-media playback with signal-triggered Morse fallback.
  */
 #ifndef RPT_ADVANCED_PLAYBACK_H
 #define RPT_ADVANCED_PLAYBACK_H
 #include "morse.h"
 #include "settings.h"
 
-/** @brief One playing identifier; audio and configuration remain owned by its node. */
+/** @brief One active scheduled-media renderer; audio and configuration remain node-owned. */
 struct ra_playback {
     const int16_t *audio;  /**< Prepared file or speech PCM at the playback rate. */
     size_t samples;        /**< Number of prepared samples. */
@@ -17,11 +17,11 @@ struct ra_playback {
     bool finished;         /**< Completion is terminal, including subsequent receive changes. */
 };
 
-/** @brief Initialize one ID, choosing Morse immediately during local or linked reception.
+/** @brief Initialize scheduled media, choosing Morse immediately during local or linked reception.
  * @param state Receives playback state on success only.
  * @param audio Borrowed prepared PCM, or null when file/speech preparation failed.
  * @param samples Prepared sample count; zero permits null audio.
- * @param settings Resolved ID settings whose borrowed strings remain valid.
+ * @param settings Resolved identifier or announcement settings whose strings remain valid.
  * @param rate Playback samples per second, matching prepared PCM.
  * @param receiving True selects Morse without playing file/speech audio.
  * @return False if the configured Morse fallback cannot be rendered at this rate.

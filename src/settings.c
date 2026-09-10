@@ -16,7 +16,9 @@ enum field_type {
     FIELD_BOOLEAN,
     FIELD_NUMBER,
     FIELD_SIGNED,
-    FIELD_TIME_FORMAT
+    FIELD_TIME_FORMAT,
+    FIELD_NODE_ID,
+    FIELD_COURTESY_INPUT
 };
 
 /** @brief One schema entry mapping a public name to a typed settings member. */
@@ -38,26 +40,6 @@ static const struct field node_fields[] = {
      0},
     {"courtesy_delay_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, courtesy_delay_ms), 0,
      UINT64_MAX},
-    {"receiver_courtesy_sound_file", FIELD_STRING,
-     offsetof(struct ra_node_settings, receiver_courtesy_sound_file), 0, 0},
-    {"receiver_courtesy_speech_text", FIELD_STRING,
-     offsetof(struct ra_node_settings, receiver_courtesy_speech_text), 0, 0},
-    {"receiver_courtesy_morse_text", FIELD_STRING,
-     offsetof(struct ra_node_settings, receiver_courtesy_morse_text), 0, 0},
-    {"receiver_courtesy_morse_frequency_hz", FIELD_NUMBER,
-     offsetof(struct ra_node_settings, receiver_courtesy_morse_frequency_hz), 1, UINT_MAX},
-    {"receiver_courtesy_level_db", FIELD_SIGNED,
-     offsetof(struct ra_node_settings, receiver_courtesy_level_db), 60, 0},
-    {"link_courtesy_sound_file", FIELD_STRING,
-     offsetof(struct ra_node_settings, link_courtesy_sound_file), 0, 0},
-    {"link_courtesy_speech_text", FIELD_STRING,
-     offsetof(struct ra_node_settings, link_courtesy_speech_text), 0, 0},
-    {"link_courtesy_morse_text", FIELD_STRING,
-     offsetof(struct ra_node_settings, link_courtesy_morse_text), 0, 0},
-    {"link_courtesy_morse_frequency_hz", FIELD_NUMBER,
-     offsetof(struct ra_node_settings, link_courtesy_morse_frequency_hz), 1, UINT_MAX},
-    {"link_courtesy_level_db", FIELD_SIGNED,
-     offsetof(struct ra_node_settings, link_courtesy_level_db), 60, 0},
     {"sample_rate_hz", FIELD_NUMBER, offsetof(struct ra_node_settings, sample_rate), 0, UINT_MAX},
     {"radio_channel", FIELD_STRING, offsetof(struct ra_node_settings, channel), 0, 0},
     {"codec", FIELD_STRING, offsetof(struct ra_node_settings, codec), 0, 0},
@@ -119,6 +101,30 @@ static bool lookup_method(const char *text, enum ra_link_lookup_method *method) 
     return true;
 }
 
+/** @brief Parse one mandatory named-courtesy input assignment.
+ * @param text Trimmed configuration value.
+ * @param input Receives the selected input only on success.
+ * @return True for `receiver` or `link`.
+ */
+static bool courtesy_input(const char *text, enum ra_courtesy_input *input) {
+    if (!strcmp(text, "receiver")) {
+        *input = RA_COURTESY_INPUT_RECEIVER;
+    } else if (!strcmp(text, "link")) {
+        *input = RA_COURTESY_INPUT_LINK;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/** @brief Validate an optional exact decimal remote-node identity.
+ * @param text Trimmed configuration value.
+ * @return True for empty text or one or more decimal digits.
+ */
+static bool remote_node_valid(const char *text) {
+    return !*text || strspn(text, "0123456789") == strlen(text);
+}
+
 /** @brief Identifier schema; media availability is evaluated when preparing playback. */
 static const struct field identifier_fields[] = {
     {"interval_ms", FIELD_NUMBER, offsetof(struct ra_identifier_settings, interval_ms), 1,
@@ -128,6 +134,9 @@ static const struct field identifier_fields[] = {
      0},
     {"regardless_of_activity", FIELD_BOOLEAN,
      offsetof(struct ra_identifier_settings, regardless_of_activity), 0, 0},
+    {"polite", FIELD_BOOLEAN, offsetof(struct ra_identifier_settings, polite), 0, 0},
+    {"polite_maximum_wait_ms", FIELD_NUMBER,
+     offsetof(struct ra_identifier_settings, polite_maximum_wait_ms), 1, UINT64_MAX},
     {"sound_file", FIELD_STRING, offsetof(struct ra_identifier_settings, file), 0, 0},
     {"speech_text", FIELD_STRING, offsetof(struct ra_identifier_settings, speech_text), 0, 0},
     {"speech_model", FIELD_STRING, offsetof(struct ra_identifier_settings, speech_model), 0, 0},
@@ -142,6 +151,116 @@ static const struct field identifier_fields[] = {
      offsetof(struct ra_identifier_settings, morse_frequency_hz), 1, UINT_MAX},
     {"morse_level_db", FIELD_SIGNED, offsetof(struct ra_identifier_settings, morse_level_db), 60,
      0},
+};
+
+/** @brief Announcement schema; media fields match identifier fallback preparation exactly. */
+static const struct field announcement_fields[] = {
+    {"interval_ms", FIELD_NUMBER, offsetof(struct ra_announcement_settings, interval_ms), 0,
+     UINT64_MAX},
+    {"sound_file", FIELD_STRING,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, file),
+     0, 0},
+    {"speech_text", FIELD_STRING,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_text),
+     0, 0},
+    {"morse_text", FIELD_STRING,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_text),
+     0, 0},
+    {"speech_model", FIELD_STRING,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_model),
+     0, 0},
+    {"speech_speed_percent", FIELD_NUMBER,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_speed_percent),
+     1, 1000},
+    {"speech_level_db", FIELD_SIGNED,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_level_db),
+     60, 0},
+    {"morse_speed_wpm", FIELD_NUMBER,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_speed_wpm),
+     1, 100},
+    {"morse_frequency_hz", FIELD_NUMBER,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_frequency_hz),
+     1, UINT_MAX},
+    {"morse_level_db", FIELD_SIGNED,
+     offsetof(struct ra_announcement_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_level_db),
+     60, 0},
+};
+
+/** @brief Courtesy defaults share media selection but use one uniform output level. */
+static const struct field courtesy_media_fields[] = {
+    {"sound_file", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) + offsetof(struct ra_identifier_settings, file),
+     0, 0},
+    {"speech_text", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_text),
+     0, 0},
+    {"morse_text", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_text),
+     0, 0},
+    {"speech_model", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_model),
+     0, 0},
+    {"speech_speed_percent", FIELD_NUMBER,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_speed_percent),
+     1, 1000},
+    {"morse_speed_wpm", FIELD_NUMBER,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_speed_wpm),
+     1, 100},
+    {"morse_frequency_hz", FIELD_NUMBER,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_frequency_hz),
+     1, UINT_MAX},
+    {"tone_sequence", FIELD_STRING, offsetof(struct ra_courtesy_settings, tone_sequence), 0, 0},
+    {"level_db", FIELD_SIGNED, offsetof(struct ra_courtesy_settings, level_db), 60, 0},
+};
+
+/** @brief A named courtesy tone adds one input assignment and optional permanent peer. */
+static const struct field courtesy_set_fields[] = {
+    {"sound_file", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) + offsetof(struct ra_identifier_settings, file),
+     0, 0},
+    {"speech_text", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_text),
+     0, 0},
+    {"morse_text", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_text),
+     0, 0},
+    {"speech_model", FIELD_STRING,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_model),
+     0, 0},
+    {"speech_speed_percent", FIELD_NUMBER,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, speech_speed_percent),
+     1, 1000},
+    {"morse_speed_wpm", FIELD_NUMBER,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_speed_wpm),
+     1, 100},
+    {"morse_frequency_hz", FIELD_NUMBER,
+     offsetof(struct ra_courtesy_settings, media) +
+         offsetof(struct ra_identifier_settings, morse_frequency_hz),
+     1, UINT_MAX},
+    {"tone_sequence", FIELD_STRING, offsetof(struct ra_courtesy_settings, tone_sequence), 0, 0},
+    {"level_db", FIELD_SIGNED, offsetof(struct ra_courtesy_settings, level_db), 60, 0},
+    {"input", FIELD_COURTESY_INPUT, offsetof(struct ra_courtesy_settings, input), 0, 0},
+    {"remote_node", FIELD_NODE_ID, offsetof(struct ra_courtesy_settings, remote_node), 0, 0},
 };
 
 /** @brief Per-node offline speech defaults. */
@@ -165,6 +284,27 @@ static const struct field time_fields[] = {
     {"format", FIELD_TIME_FORMAT, offsetof(struct ra_time_settings, format), 0, 0},
 };
 
+/** @brief Return the common file, speech, and Morse defaults used by scheduled media.
+ * @return Fully initialized default identifier-media settings.
+ */
+static struct ra_identifier_settings identifier_defaults(void) {
+    return (struct ra_identifier_settings){.interval_ms = 600000,
+                                           .priority = 0,
+                                           .first_key_only = false,
+                                           .regardless_of_activity = false,
+                                           .polite = false,
+                                           .polite_maximum_wait_ms = 60000,
+                                           .file = "",
+                                           .speech_text = "",
+                                           .speech_model = "en_US-lessac-medium.onnx",
+                                           .speech_speed_percent = 100,
+                                           .speech_level_db = 0,
+                                           .morse_text = "",
+                                           .morse_speed_wpm = 20,
+                                           .morse_frequency_hz = 800,
+                                           .morse_level_db = -6};
+}
+
 /** @brief Assign a validated value at its schema-declared, naturally aligned member offset.
  * @param field Schema descriptor.
  * @param text Borrowed configuration value.
@@ -173,8 +313,12 @@ static const struct field time_fields[] = {
  */
 static bool assign(const struct field *field, const char *text, void *output) {
     unsigned char *destination = (unsigned char *)output + field->offset;
-    if (field->type <= FIELD_PREFIX) {
+    if (field->type == FIELD_STRING || field->type == FIELD_NODE_LIST ||
+        field->type == FIELD_PREFIX || field->type == FIELD_NODE_ID) {
         if (field->type == FIELD_NODE_LIST && !ra_link_access_list_valid(text)) {
+            return false;
+        }
+        if (field->type == FIELD_NODE_ID && !remote_node_valid(text)) {
             return false;
         }
         struct ra_link_command_mapping mapping = {text, RA_LINK_DISCONNECT};
@@ -194,6 +338,8 @@ static bool assign(const struct field *field, const char *text, void *output) {
             return false;
         }
         *(bool *)destination = value;
+    } else if (field->type == FIELD_COURTESY_INPUT) {
+        return courtesy_input(text, (enum ra_courtesy_input *)destination);
     } else if (field->type == FIELD_NUMBER || field->type == FIELD_TIME_FORMAT) {
         uint64_t value;
         if (!ra_config_unsigned(text, field->type == FIELD_TIME_FORMAT ? 12 : field->minimum,
@@ -230,6 +376,9 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
     if (kind == RA_SETTINGS_IDENTIFIER) {
         fields = identifier_fields;
         count = sizeof(identifier_fields) / sizeof(identifier_fields[0]);
+    } else if (kind == RA_SETTINGS_ANNOUNCEMENT) {
+        fields = announcement_fields;
+        count = sizeof(announcement_fields) / sizeof(announcement_fields[0]);
     } else if (kind == RA_SETTINGS_MORSE) {
         fields = morse_fields;
         count = sizeof(morse_fields) / sizeof(morse_fields[0]);
@@ -242,10 +391,22 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
     }
     struct ra_node_settings node;
     struct ra_identifier_settings id;
+    struct ra_announcement_settings announcement;
+    struct ra_courtesy_settings courtesy;
     struct ra_time_settings time;
-    void *destination = kind == RA_SETTINGS_NODE   ? (void *)&node
-                        : kind == RA_SETTINGS_TIME ? (void *)&time
-                                                   : (void *)&id;
+    if (kind == RA_SETTINGS_COURTESY) {
+        fields = courtesy_media_fields;
+        count = sizeof(courtesy_media_fields) / sizeof(courtesy_media_fields[0]);
+    } else if (kind == RA_SETTINGS_COURTESY_SET) {
+        fields = courtesy_set_fields;
+        count = sizeof(courtesy_set_fields) / sizeof(courtesy_set_fields[0]);
+    }
+    void *destination = kind == RA_SETTINGS_NODE           ? (void *)&node
+                        : kind == RA_SETTINGS_TIME         ? (void *)&time
+                        : kind == RA_SETTINGS_ANNOUNCEMENT ? (void *)&announcement
+                        : kind == RA_SETTINGS_COURTESY || kind == RA_SETTINGS_COURTESY_SET
+                            ? (void *)&courtesy
+                            : (void *)&id;
     for (size_t i = 0; i < count; ++i) {
         if (!strcmp(key, fields[i].name)) {
             return assign(&fields[i], value, destination) ? NULL : "invalid option value";
@@ -323,14 +484,6 @@ const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size
                                          .dtmf_muting = true,
                                          .telemetry_duck_db = -20,
                                          .courtesy_delay_ms = 250,
-                                         .receiver_courtesy_sound_file = "",
-                                         .receiver_courtesy_speech_text = "",
-                                         .receiver_courtesy_morse_text = "",
-                                         .receiver_courtesy_level_db = -20,
-                                         .link_courtesy_sound_file = "",
-                                         .link_courtesy_speech_text = "",
-                                         .link_courtesy_morse_text = "",
-                                         .link_courtesy_level_db = -20,
                                          .channel = node,
                                          .codec = "",
                                          .link_allow_nodes = "",
@@ -354,8 +507,7 @@ const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size
 const char *ra_identifier_settings_resolve(const struct ra_config_entry *entries, size_t count,
                                            const char *node, const char *set,
                                            struct ra_identifier_settings *result) {
-    struct ra_identifier_settings temporary = {
-        600000, 0, false, false, "", "", "en_US-lessac-medium.onnx", 100, 0, "", 20, 800, -6};
+    struct ra_identifier_settings temporary = identifier_defaults();
     const char *error = resolve_prefixed(identifier_fields,
                                          sizeof(identifier_fields) / sizeof(identifier_fields[0]),
                                          entries, count, "identifier", node, &temporary);
@@ -376,6 +528,74 @@ const char *ra_identifier_settings_resolve(const struct ra_config_entry *entries
         *result = temporary;
     }
     return error;
+}
+
+const char *ra_announcement_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                             const char *node, const char *set,
+                                             struct ra_announcement_settings *result) {
+    struct ra_announcement_settings temporary = {.interval_ms = 0};
+    temporary.media = identifier_defaults();
+    const char *error = resolve_prefixed(
+        announcement_fields, sizeof(announcement_fields) / sizeof(announcement_fields[0]), entries,
+        count, "announcement", node, &temporary);
+    if (!error) {
+        error = resolve_prefixed(speech_fields, sizeof(speech_fields) / sizeof(speech_fields[0]),
+                                 entries, count, "speech", node, &temporary.media);
+    }
+    if (!error) {
+        error = resolve_prefixed(morse_fields, sizeof(morse_fields) / sizeof(morse_fields[0]),
+                                 entries, count, "morse", node, &temporary.media);
+    }
+    if (!error && set) {
+        const char *set_scopes[] = {NULL, NULL, set};
+        error = resolve(announcement_fields,
+                        sizeof(announcement_fields) / sizeof(announcement_fields[0]), entries,
+                        count, set_scopes, &temporary);
+    }
+    if (!error) {
+        *result = temporary;
+    }
+    return error;
+}
+
+const char *ra_courtesy_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                         const char *node, const char *set,
+                                         struct ra_courtesy_settings *result) {
+    if (!set) {
+        return "courtesy set is required";
+    }
+    struct ra_courtesy_settings temporary = {
+        .media = identifier_defaults(), .tone_sequence = "", .remote_node = "", .level_db = -20};
+    const char *error = resolve_prefixed(
+        courtesy_media_fields, sizeof(courtesy_media_fields) / sizeof(courtesy_media_fields[0]),
+        entries, count, "courtesy", node, &temporary);
+    if (!error) {
+        error = resolve_prefixed(speech_fields, sizeof(speech_fields) / sizeof(speech_fields[0]),
+                                 entries, count, "speech", node, &temporary.media);
+    }
+    if (!error) {
+        error = resolve_prefixed(morse_fields, sizeof(morse_fields) / sizeof(morse_fields[0]),
+                                 entries, count, "morse", node, &temporary.media);
+    }
+    if (!error) {
+        const char *set_scopes[] = {NULL, NULL, set};
+        error = resolve(courtesy_set_fields,
+                        sizeof(courtesy_set_fields) / sizeof(courtesy_set_fields[0]), entries,
+                        count, set_scopes, &temporary);
+    }
+    if (error) {
+        return error;
+    }
+    if (temporary.input == RA_COURTESY_INPUT_NONE) {
+        return "courtesy input is required";
+    }
+    if (*temporary.remote_node && temporary.input != RA_COURTESY_INPUT_LINK) {
+        return "courtesy remote node requires link input";
+    }
+    temporary.media.speech_level_db = 0;
+    temporary.media.morse_level_db = temporary.level_db;
+    *result = temporary;
+    return NULL;
 }
 
 const char *ra_time_settings_resolve(const struct ra_config_entry *entries, size_t count,

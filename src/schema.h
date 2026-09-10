@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Whole-document validation and unlimited named-node/identifier discovery.
+ * @brief Whole-document validation and unlimited named-node media-set discovery.
  */
 #ifndef RPT_ADVANCED_SCHEMA_H
 #define RPT_ADVANCED_SCHEMA_H
@@ -30,5 +30,23 @@ const char *ra_document_node(const struct ra_document *document, size_t index);
  */
 const char *ra_document_identifier(const struct ra_document *document, const char *node,
                                    size_t index);
+
+/** @brief Find a unique announcement set for one node, in configuration order.
+ * @param document Validated document.
+ * @param node Node name.
+ * @param index Zero-based set index.
+ * @return Borrowed complete section name, or null after the last set.
+ */
+const char *ra_document_announcement(const struct ra_document *document, const char *node,
+                                     size_t index);
+
+/** @brief Find a unique named courtesy tone for one node, in configuration order.
+ * @param document Validated document.
+ * @param node Node name.
+ * @param index Zero-based tone index.
+ * @return Borrowed complete section name, or null after the last tone.
+ */
+const char *ra_document_courtesy(const struct ra_document *document, const char *node,
+                                 size_t index);
 
 #endif

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Offline identifier preparation with shared child-process ownership.
+ * @brief Offline scheduled-media preparation with shared child-process ownership.
  */
 #include <asterisk.h>
 

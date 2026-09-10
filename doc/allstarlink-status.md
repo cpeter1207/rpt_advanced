@@ -17,6 +17,12 @@ and other unrelated commands are not implemented. The normal default mappings ar
 `*`, and destination-taking commands end with `#`, local receiver unkey, or a
 three-second interdigit timeout. Destination `0` selects the last link destination.
 
+For administrative testing, `rpt_advanced command <node> <DTMF>` injects a
+complete DTMF sequence through that same collector. For example,
+`rpt_advanced command 524950 *722` queues the configured time response. The
+command terminates an input not ending in `#` exactly as a local receiver
+unkey would; it does not bypass command mappings or authorization.
+
 `*4<node>` selects only a directly attached peer whose identity resolves and
 passes the same allow/deny policy required for an incoming peer. That policy is
 rechecked for every forwarded digit. Subsequent DTMF is delivered only to that
@@ -95,7 +101,12 @@ advertisement was truncated. A peer that has not advertised yet, does not
 support `L `, or has changed topology since its last update can therefore make
 the reported topology incomplete or stale.
 An advertised route containing the local node is treated as a topology loop;
-the direct peer is disconnected without retry. Direct self-links are rejected.
+the direct peer is disconnected without retry. A route naming another direct
+peer is also detached, covering a legacy peer that does not advertise its own
+topology. Direct self-links, duplicate direct links (including permanent links
+and retained retries), and a requested target already named by an attached peer
+are rejected. A local rejection queues the spoken status `LINK REJECTED
+TOPOLOGY LOOP`, with normal Morse fallback.
 
 Routing and audio exchange remain lock-free in hardware-paced callbacks. Link
 admission, dialing, retry, status, topology construction, and IAX text delivery

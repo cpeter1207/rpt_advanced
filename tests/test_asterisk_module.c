@@ -122,6 +122,12 @@ static unsigned int queue_failure;
 static bool reload_on_unlock;
 /** @brief Action produced by the collector fixture. */
 static enum ra_link_action digit_action;
+/** @brief Expected CLI DTMF stream, or null while testing worker-delivered digits. */
+static const char *cli_digit_stream;
+/** @brief Next expected position in the CLI DTMF stream. */
+static size_t cli_digit_position;
+/** @brief One-based stream position that completes a CLI command, or zero when incomplete. */
+static size_t cli_digit_complete_position;
 /** @brief Number of partial-command resets requested after queue loss. */
 static unsigned int digit_resets;
 /** @brief Direct-peer records returned by the administrative status fixture. */
@@ -232,11 +238,16 @@ void *__ast_calloc(size_t count, size_t size, const char *file, int line, const 
 bool ra_runtime_digit(struct ra_runtime *runtime, const char *local, char digit, uint64_t now_ms,
                       struct ra_link_operation *operation) {
     (void)runtime;
-    assert(runtime_locked && !strcmp(local, "usb") && now_ms == 100);
+    assert(runtime_locked && !strcmp(local, "usb") && (now_ms == 100 || now_ms == 0));
     ++runtime_digit_calls;
     operation->action = digit_action;
     memcpy(operation->remote, "123", 4);
     operation->digit = 0;
+    if (cli_digit_stream) {
+        assert(digit == cli_digit_stream[cli_digit_position]);
+        ++cli_digit_position;
+        return cli_digit_position == cli_digit_complete_position;
+    }
     return digit != '?';
 }
 
@@ -334,11 +345,13 @@ int ast_unregister_application(const char *app) {
  */
 int __ast_cli_register_multiple(struct ast_cli_entry *entries, int count, struct ast_module *mod) {
     (void)mod;
-    assert(count == 2);
+    assert(count == 3);
     command_entry = entries;
     assert(!entries->handler(entries, CLI_INIT, NULL));
     assert(!entries[1].handler(&entries[1], CLI_INIT, NULL));
     assert(!entries[1].handler(&entries[1], CLI_GENERATE, NULL));
+    assert(!entries[2].handler(&entries[2], CLI_INIT, NULL));
+    assert(!entries[2].handler(&entries[2], CLI_GENERATE, NULL));
     return link_failure == 9 ? -1 : 0;
 }
 
@@ -348,7 +361,7 @@ int __ast_cli_register_multiple(struct ast_cli_entry *entries, int count, struct
  * @return Zero.
  */
 int ast_cli_unregister_multiple(struct ast_cli_entry *entries, int count) {
-    assert(entries == command_entry && count == 2);
+    assert(entries == command_entry && count == 3);
     command_entry = NULL;
     return 0;
 }
@@ -862,6 +875,65 @@ int main(void) {
         assert(command_entry->handler(command_entry, CLI_HANDLER, &arguments) == CLI_FAILURE);
         link_failure = 0;
     }
+    const char *command_argv[] = {"rpt_advanced", "command", "usb", "*722"};
+    struct ast_cli_args command_arguments = {.argc = 4, .argv = command_argv};
+    struct ast_cli_args incomplete_command_arguments = {.argc = 3, .argv = command_argv};
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER,
+                                    &incomplete_command_arguments) == CLI_SHOWUSAGE);
+    command_argv[2] = "";
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER, &command_arguments) ==
+           CLI_SHOWUSAGE);
+    command_argv[2] = "usb";
+    command_argv[3] = "";
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER, &command_arguments) ==
+           CLI_SHOWUSAGE);
+    command_argv[3] = "*722";
+    const unsigned int command_digits_before = runtime_digit_calls;
+    const unsigned int command_status_before = status_queue_calls;
+    digit_action = RA_LINK_TIME;
+    cli_digit_stream = "*722#";
+    cli_digit_position = 0;
+    cli_digit_complete_position = 4;
+    clear_cli_output();
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER, &command_arguments) ==
+           CLI_SUCCESS);
+    assert(cli_digit_position == strlen(cli_digit_stream));
+    assert(runtime_digit_calls == command_digits_before + cli_digit_position);
+    assert(status_queue_calls == command_status_before + 1);
+    assert(!strcmp(cli_output, "rpt_advanced: DTMF command completed\n"));
+    command_argv[3] = "*7#";
+    cli_digit_stream = "*7#";
+    cli_digit_position = 0;
+    cli_digit_complete_position = 0;
+    clear_cli_output();
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER, &command_arguments) ==
+           CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: incomplete or unknown DTMF command\n"));
+    command_argv[3] = "*7x";
+    clear_cli_output();
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER, &command_arguments) ==
+           CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: invalid DTMF digit x\n"));
+    command_argv[3] = "*722";
+    cli_digit_stream = "*722#";
+    cli_digit_position = 0;
+    cli_digit_complete_position = 4;
+    status_queue_failure = true;
+    clear_cli_output();
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER, &command_arguments) ==
+           CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: DTMF command failed\n"));
+    status_queue_failure = false;
+    cli_digit_stream = "*722#";
+    cli_digit_position = 0;
+    cli_digit_complete_position = strlen(cli_digit_stream);
+    status_queue_failure = true;
+    clear_cli_output();
+    assert(command_entry[2].handler(&command_entry[2], CLI_HANDLER, &command_arguments) ==
+           CLI_FAILURE);
+    assert(!strcmp(cli_output, "rpt_advanced: DTMF command failed\n"));
+    status_queue_failure = false;
+    cli_digit_stream = NULL;
     const char *status_argv[] = {"rpt_advanced", "link", "status", "usb"};
     struct ast_cli_args status_arguments = {.argc = 4, .argv = status_argv};
     const char *short_argv[] = {"rpt_advanced", "link", "connect", "usb"};

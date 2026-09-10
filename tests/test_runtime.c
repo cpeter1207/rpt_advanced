@@ -61,8 +61,20 @@ static unsigned int rate = 16000;
 static unsigned int next_sample_rate;
 /** @brief Provide prepared media even when no Morse fallback exists. */
 static bool prepared;
+/** @brief Make the fixture's configured sound-file lookup fail. */
+static bool unavailable_file;
+/** @brief Make the fixture's configured speech synthesis fail. */
+static bool unavailable_speech;
+/** @brief Verify generated courtesy media and omission of an unplayable named courtesy source. */
+static bool verify_courtesy_preparation;
+/** @brief Verify that a generated tone wins over Morse after media preparation fails. */
+static bool verify_courtesy_tone_fallback;
+/** @brief Started controller retained only while the tone-fallback assertion runs. */
+static struct ra_controller *courtesy_tone_fallback_controller;
 /** @brief Count usable identifier sets bound to successful worker starts. */
 static size_t seen_ids;
+/** @brief Count usable announcement sets bound to successful worker starts. */
+static size_t seen_announcements;
 /** @brief Selected link failure: lookup, offer, dial, answer, or attachment. */
 static unsigned int link_error;
 /** @brief Opaque channel and capability identity. */
@@ -73,6 +85,8 @@ static unsigned int link_dials;
 static unsigned int link_hangups;
 /** @brief Whether the routing fixture retains an attached peer or reconnect request. */
 static bool retained_link_state;
+/** @brief Select whether the fixture reports the requested node as already reachable. */
+static bool reachable_link_state;
 /** @brief Initial permanent-link intents accepted by the routing fixture. */
 static unsigned int retained_permanent_links;
 /** @brief Routing hubs closed only when their owning runtime node is released. */
@@ -525,6 +539,13 @@ bool ra_link_hub_has_retained_state(struct ra_link_hub *hub) {
     return retained_link_state;
 }
 
+/** @cond TEST_FIXTURE */
+bool ra_link_hub_reaches(const struct ra_link_hub *hub, const char *name) {
+    assert(hub && !strcmp(name, "123"));
+    return reachable_link_state;
+}
+/** @endcond */
+
 /* Fixture stub: return caller-owned direct-peer status records from the fixture.
  * @param hub Fixture routing hub.
  * @param entries Output array, or null when only counting.
@@ -606,8 +627,11 @@ void ra_identifier_prepare(const struct ra_identifier_settings *settings, unsign
     assert(settings->morse_text && selected == rate);
     assert(settings->speech_text);
     ast_copy_string(prepared_speech, settings->speech_text, sizeof(prepared_speech));
-    *audio = prepared ? malloc(sizeof(**audio)) : NULL;
-    *samples = prepared ? 1 : 0;
+    /* Real preparation needs an available file or speech source; Morse is a fallback. */
+    bool source =
+        (*settings->file && !unavailable_file) || (*settings->speech_text && !unavailable_speech);
+    *audio = prepared && source ? malloc(sizeof(**audio)) : NULL;
+    *samples = prepared && source ? 1 : 0;
     if (*audio) {
         **audio = 1000;
     }
@@ -755,12 +779,45 @@ int ast_call(struct ast_channel *channel, const char *address, int timeout) {
 int ra_worker_start(struct ra_worker *worker) {
     assert(worker->channel && worker->controller->rate == rate);
     assert(worker->dtmf_muting);
-    if (!strcmp(worker->controller->courtesy[RA_COURTESY_RECEIVER].settings.morse_text, "R")) {
-        assert(worker->controller->courtesy[RA_COURTESY_RECEIVER].settings.morse_frequency_hz ==
-               500);
+    const struct ra_controller_id *receiver_courtesy = worker->controller->receiver_courtesy;
+    const struct ra_controller_id *link_courtesy = worker->controller->link_courtesy;
+    if (verify_courtesy_preparation) {
+        /* A tone sequence replaces unavailable file/speech media, while an empty set is omitted. */
+        assert(!strcmp(worker->name, "tones"));
+        assert(receiver_courtesy && !*receiver_courtesy->settings.file &&
+               !*receiver_courtesy->settings.speech_text &&
+               !*receiver_courtesy->settings.morse_text && receiver_courtesy->audio &&
+               receiver_courtesy->samples == rate / 20 && receiver_courtesy->audio[0] == 0 &&
+               receiver_courtesy->audio[1] != 0);
+        assert(!link_courtesy && !worker->controller->peer_courtesy_count);
     }
-    if (!strcmp(worker->controller->courtesy[RA_COURTESY_LINK].settings.morse_text, "L")) {
-        assert(worker->controller->courtesy[RA_COURTESY_LINK].settings.morse_frequency_hz == 1000);
+    if (verify_courtesy_tone_fallback) {
+        assert(!strcmp(worker->name, "fallback"));
+        assert(receiver_courtesy &&
+               !strcmp(receiver_courtesy->settings.file, "/missing/courtesy.wav") &&
+               !strcmp(receiver_courtesy->settings.speech_text, "Unavailable courtesy speech") &&
+               !strcmp(receiver_courtesy->settings.morse_text, "R") && receiver_courtesy->audio &&
+               receiver_courtesy->samples == rate / 20 && receiver_courtesy->audio[0] == 0 &&
+               receiver_courtesy->audio[1] != 0);
+        courtesy_tone_fallback_controller = worker->controller;
+    }
+    if (prepared && receiver_courtesy &&
+        !strcmp(receiver_courtesy->settings.speech_text, "Receiver courtesy")) {
+        /* Runtime applies the configured -20 dB courtesy level before worker ownership. */
+        assert(receiver_courtesy->audio && receiver_courtesy->samples == 1 &&
+               receiver_courtesy->audio[0] == 100);
+    }
+    if (receiver_courtesy && !strcmp(receiver_courtesy->settings.morse_text, "R")) {
+        assert(receiver_courtesy->settings.morse_frequency_hz == 500);
+    }
+    if (link_courtesy && !strcmp(link_courtesy->settings.morse_text, "L")) {
+        assert(link_courtesy->settings.morse_frequency_hz == 1000);
+    }
+    if (worker->controller->peer_courtesy_count) {
+        assert(worker->controller->peer_courtesy_count == 1 &&
+               !strcmp(worker->controller->peer_courtesies[0].remote, "123") &&
+               worker->controller->peer_courtesies[0].media->audio &&
+               worker->controller->peer_courtesies[0].media->samples);
     }
     ++starts;
     if (fail_worker_count && starts >= fail_worker_from) {
@@ -772,6 +829,7 @@ int ra_worker_start(struct ra_worker *worker) {
     }
     ++workers;
     seen_ids += worker->controller->count;
+    seen_announcements += worker->controller->announcement_count;
     return 0;
 }
 void ra_worker_stop(struct ra_worker *worker) {
@@ -865,18 +923,39 @@ int main(void) {
     assert(!ra_runtime_telemetry_speech_text("123", "123", NULL, speech_text, 5));
     assert(!ra_runtime_telemetry_speech_text("A", NULL, NULL, speech_text, 1));
     assert(!ra_runtime_telemetry_speech_text("", NULL, NULL, speech_text, 0));
-    char *sections[] = {"alpha", "disabled", "beta", "identifier alpha periodic"};
+    char *sections[] = {"alpha",
+                        "disabled",
+                        "beta",
+                        "identifier alpha periodic",
+                        "announcement alpha empty",
+                        "announcement alpha release",
+                        "courtesy alpha receiver",
+                        "courtesy alpha link",
+                        "courtesy alpha north"};
     struct ra_config_entry entries[] = {
         {"disabled", "node_enabled", "no"},
         {"beta", "link_deny_nodes", "123"},
-        {"general", "receiver_courtesy_morse_text", "R"},
-        {"general", "receiver_courtesy_morse_frequency_hz", "500"},
-        {"general", "link_courtesy_morse_text", "L"},
-        {"general", "link_courtesy_morse_frequency_hz", "1000"},
+        {"courtesy alpha receiver", "input", "receiver"},
+        {"courtesy alpha receiver", "morse_text", "R"},
+        {"courtesy alpha receiver", "morse_frequency_hz", "500"},
+        {"courtesy alpha receiver", "speech_text", "Receiver courtesy"},
+        {"courtesy alpha receiver", "level_db", "-20"},
+        {"courtesy alpha link", "input", "link"},
+        {"courtesy alpha link", "morse_text", "L"},
+        {"courtesy alpha link", "morse_frequency_hz", "1000"},
+        {"courtesy alpha north", "input", "link"},
+        {"courtesy alpha north", "remote_node", "123"},
+        {"courtesy alpha north", "tone_sequence", "900Hz+1200Hz / 75ms, silence / 25ms"},
         {"identifier alpha periodic", "morse_text", "TEST"},
+        {"identifier alpha periodic", "speech_text", "ID"},
+        {"announcement alpha release", "interval_ms", "0"},
+        {"announcement alpha release", "morse_text", "A"},
+        {"announcement alpha release", "speech_text", "Release announcement"},
+        /* This is parsed even when the prepared speech above takes media precedence. */
+        {"courtesy alpha receiver", "tone_sequence", "700Hz / 50ms"},
     };
     struct ra_document document = {.sections = sections,
-                                   .section_count = 4,
+                                   .section_count = sizeof(sections) / sizeof(*sections),
                                    .entries = entries,
                                    .count = sizeof(entries) / sizeof(*entries)};
     struct ra_runtime runtime = {.digit = receive_inbound_digit, .event = receive_inbound_event};
@@ -886,7 +965,8 @@ int main(void) {
     assert(!ra_document_validate(&document, &section, &key));
     assert(!ra_runtime_start(&runtime, &empty));
     ra_runtime_stop(&runtime);
-    for (fail_allocation = 1; fail_allocation <= 5; ++fail_allocation) {
+    /* Courtesy tone copies occupy two allocation slots before ID and announcement state. */
+    for (fail_allocation = 1; fail_allocation <= 10; ++fail_allocation) {
         rejected(&document);
     }
     fail_allocation = 0;
@@ -902,6 +982,143 @@ int main(void) {
     rate = 1000;
     rejected(&document);
     rate = 16000;
+    /* Invalid announcement fallback media reports a scheduled-media configuration diagnostic. */
+    char *invalid_announcement_sections[] = {"invalid", "announcement invalid bad"};
+    struct ra_config_entry invalid_announcement_entries[] = {
+        {"announcement invalid bad", "morse_text", "A"},
+        {"announcement invalid bad", "morse_frequency_hz", "8000"},
+    };
+    struct ra_document invalid_announcement = {
+        .sections = invalid_announcement_sections,
+        .section_count =
+            sizeof(invalid_announcement_sections) / sizeof(*invalid_announcement_sections),
+        .entries = invalid_announcement_entries,
+        .count = sizeof(invalid_announcement_entries) / sizeof(*invalid_announcement_entries),
+    };
+    assert(!ra_document_validate(&invalid_announcement, &section, &key));
+    struct ra_runtime invalid_announcement_runtime = {0};
+    const char *announcement_error =
+        ra_runtime_start(&invalid_announcement_runtime, &invalid_announcement);
+    assert(announcement_error &&
+           !strcmp(announcement_error, "scheduled media cannot render at negotiated sample rate"));
+    assert(!invalid_announcement_runtime.nodes && !channels && !workers);
+    ra_runtime_stop(&invalid_announcement_runtime);
+
+    /* Runtime parses tones after schema validation and retains the former radio on a bad reload. */
+    char *tone_courtesy_sections[] = {"tones", "courtesy tones receiver", "courtesy tones link"};
+    struct ra_config_entry tone_courtesy_current_entries[] = {
+        {"courtesy tones receiver", "input", "receiver"},
+        {"courtesy tones receiver", "tone_sequence", "700Hz / 50ms"},
+        {"courtesy tones link", "input", "link"},
+    };
+    struct ra_config_entry tone_courtesy_invalid_entries[] = {
+        {"courtesy tones receiver", "input", "receiver"},
+        {"courtesy tones receiver", "tone_sequence", "700Hz + / 50ms"},
+        {"courtesy tones link", "input", "link"},
+    };
+    struct ra_document tone_courtesy_current = {
+        .sections = tone_courtesy_sections,
+        .section_count = sizeof(tone_courtesy_sections) / sizeof(*tone_courtesy_sections),
+        .entries = tone_courtesy_current_entries,
+        .count = sizeof(tone_courtesy_current_entries) / sizeof(*tone_courtesy_current_entries),
+    };
+    struct ra_document tone_courtesy_invalid = {
+        .sections = tone_courtesy_sections,
+        .section_count = sizeof(tone_courtesy_sections) / sizeof(*tone_courtesy_sections),
+        .entries = tone_courtesy_invalid_entries,
+        .count = sizeof(tone_courtesy_invalid_entries) / sizeof(*tone_courtesy_invalid_entries),
+    };
+    assert(!ra_document_validate(&tone_courtesy_current, &section, &key));
+    assert(!ra_document_validate(&tone_courtesy_invalid, &section, &key));
+    struct ra_runtime invalid_tone_runtime = {0};
+    const char *tone_error = ra_runtime_start(&invalid_tone_runtime, &tone_courtesy_invalid);
+    assert(tone_error && !strcmp(tone_error, "invalid tone sequence"));
+    assert(!invalid_tone_runtime.nodes && !channels && !workers);
+    ra_runtime_stop(&invalid_tone_runtime);
+
+    /* A positive duration can round below one sample; it must omit the named courtesy cleanly. */
+    char *subsample_tone_sections[] = {"subsample", "morse", "courtesy subsample receiver"};
+    struct ra_config_entry subsample_tone_entries[] = {
+        {"morse", "frequency_hz", "1"},
+        {"courtesy subsample receiver", "input", "receiver"},
+        {"courtesy subsample receiver", "tone_sequence", "silence / 1ms"},
+    };
+    struct ra_document subsample_tone = {
+        .sections = subsample_tone_sections,
+        .section_count = sizeof(subsample_tone_sections) / sizeof(*subsample_tone_sections),
+        .entries = subsample_tone_entries,
+        .count = sizeof(subsample_tone_entries) / sizeof(*subsample_tone_entries),
+    };
+    assert(!ra_document_validate(&subsample_tone, &section, &key));
+    struct ra_runtime subsample_tone_runtime = {0};
+    rate = 4;
+    assert(!ra_runtime_start(&subsample_tone_runtime, &subsample_tone));
+    assert(subsample_tone_runtime.nodes && workers == 1 && channels == 1);
+    ra_runtime_stop(&subsample_tone_runtime);
+    rate = 16000;
+
+    /* The runtime returns a resolver diagnostic even if an invalid document bypasses validation. */
+    char *unresolved_courtesy_sections[] = {"unresolved", "courtesy unresolved receiver"};
+    struct ra_config_entry unresolved_courtesy_entries[] = {
+        {"courtesy unresolved receiver", "morse_text", "R"},
+    };
+    struct ra_document unresolved_courtesy = {
+        .sections = unresolved_courtesy_sections,
+        .section_count =
+            sizeof(unresolved_courtesy_sections) / sizeof(*unresolved_courtesy_sections),
+        .entries = unresolved_courtesy_entries,
+        .count = sizeof(unresolved_courtesy_entries) / sizeof(*unresolved_courtesy_entries),
+    };
+    struct ra_runtime unresolved_courtesy_runtime = {0};
+    const char *unresolved_error =
+        ra_runtime_start(&unresolved_courtesy_runtime, &unresolved_courtesy);
+    assert(unresolved_error && !strcmp(unresolved_error, "courtesy input is required"));
+    assert(!unresolved_courtesy_runtime.nodes && !channels && !workers);
+    ra_runtime_stop(&unresolved_courtesy_runtime);
+
+    struct ra_runtime tone_reload_runtime = {0};
+    verify_courtesy_preparation = true;
+    assert(!ra_runtime_start(&tone_reload_runtime, &tone_courtesy_current));
+    assert(tone_reload_runtime.nodes && workers == 1 && channels == 1);
+    tone_error =
+        ra_runtime_reload(&tone_reload_runtime, &tone_courtesy_current, &tone_courtesy_invalid);
+    assert(tone_error && !strcmp(tone_error, "invalid tone sequence"));
+    assert(tone_reload_runtime.nodes && workers == 1 && channels == 1);
+    ra_runtime_stop(&tone_reload_runtime);
+    verify_courtesy_preparation = false;
+
+    /* An unavailable file and unavailable speech fall through to configured tones, not Morse. */
+    char *tone_fallback_sections[] = {"fallback", "courtesy fallback receiver"};
+    struct ra_config_entry tone_fallback_entries[] = {
+        {"fallback", "courtesy_delay_ms", "0"},
+        {"courtesy fallback receiver", "input", "receiver"},
+        {"courtesy fallback receiver", "sound_file", "/missing/courtesy.wav"},
+        {"courtesy fallback receiver", "speech_text", "Unavailable courtesy speech"},
+        {"courtesy fallback receiver", "tone_sequence", "700Hz / 50ms"},
+        {"courtesy fallback receiver", "morse_text", "R"},
+        {"courtesy fallback receiver", "morse_frequency_hz", "500"},
+    };
+    struct ra_document tone_fallback = {
+        .sections = tone_fallback_sections,
+        .section_count = sizeof(tone_fallback_sections) / sizeof(*tone_fallback_sections),
+        .entries = tone_fallback_entries,
+        .count = sizeof(tone_fallback_entries) / sizeof(*tone_fallback_entries),
+    };
+    assert(!ra_document_validate(&tone_fallback, &section, &key));
+    struct ra_runtime tone_fallback_runtime = {0};
+    prepared = true;
+    unavailable_file = unavailable_speech = verify_courtesy_tone_fallback = true;
+    assert(!ra_runtime_start(&tone_fallback_runtime, &tone_fallback));
+    assert(courtesy_tone_fallback_controller);
+    int16_t rendered_tone[800] = {0};
+    assert(ra_controller_process(courtesy_tone_fallback_controller, true, NULL, 0, 10000));
+    assert(ra_controller_process(courtesy_tone_fallback_controller, false, rendered_tone,
+                                 sizeof(rendered_tone) / sizeof(*rendered_tone), 10001));
+    assert(rendered_tone[0] == 0 && rendered_tone[1] != 0);
+    ra_runtime_stop(&tone_fallback_runtime);
+    courtesy_tone_fallback_controller = NULL;
+    unavailable_file = unavailable_speech = verify_courtesy_tone_fallback = prepared = false;
+
     fail_call = 2;
     rejected(&document);
     fail_call = 0;
@@ -1256,6 +1473,12 @@ int main(void) {
     assert(!strcmp(prepared_speech, "node,1,2,3 CONNECTED"));
     assert(!ra_runtime_queue_link_event(&runtime, "alpha", "beta", false));
     assert(!strcmp(queued_status, "beta DISCONNECTED"));
+    assert(!ra_runtime_queue_link_event(&runtime, "456", "123", true));
+    assert(!strcmp(queued_status, "456 CONNECTED TO 123"));
+    assert(!strcmp(prepared_speech, "node,4,5,6 CONNECTED TO node,1,2,3"));
+    assert(!ra_runtime_queue_link_event(&runtime, "456", "123", false));
+    assert(!strcmp(queued_status, "456 DISCONNECTED FROM 123"));
+    assert(!strcmp(prepared_speech, "node,4,5,6 DISCONNECTED FROM node,1,2,3"));
     char oversized_event[RA_CONTROLLER_STATUS_TEXT_MAX + 1];
     memset(oversized_event, '1', sizeof(oversized_event) - 1);
     oversized_event[sizeof(oversized_event) - 1] = '\0';
@@ -1378,6 +1601,16 @@ int main(void) {
     assert(connect_fixture(&runtime, "missing") == -1);
     assert(ra_runtime_prepare_link(&runtime, "alpha", "123", NULL) == -1);
     assert(ra_runtime_prepare_link(&runtime, "alpha", "alpha", NULL) == -1);
+    size_t loop_rejection_statuses = queued_status_count;
+    reachable_link_state = true;
+    assert(ra_runtime_accept(&runtime, "alpha", "123", NULL, true) == -1);
+    assert(ra_runtime_prepare_link(&runtime, "alpha", "123", NULL) == -1);
+    assert(ra_runtime_attach_link(&runtime, "alpha", "123", NULL, true, true, false) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true));
+    assert(queued_status_count == loop_rejection_statuses + 4);
+    assert(!strcmp(queued_status, "LINK REJECTED TOPOLOGY LOOP"));
+    assert(!strcmp(prepared_speech, "LINK REJECTED TOPOLOGY LOOP"));
+    reachable_link_state = false;
     assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true, false) == -1);
     assert(ra_runtime_attach_link(&runtime, "alpha", "alpha", NULL, true, true, false) == -1);
     link_dials = 0;
@@ -1467,14 +1700,15 @@ int main(void) {
     assert(ra_runtime_remote_command(&runtime, "missing", "123", 0) == -1);
     ra_runtime_stop(&runtime);
     assert(!runtime.nodes && !workers && !channels);
-    entries[6].value = "";
-    seen_ids = 0;
+    entries[13].value = "";
+    seen_ids = seen_announcements = 0;
     assert(!ra_runtime_start(&runtime, &document));
-    assert(!seen_ids);
+    assert(!seen_ids && seen_announcements == 1);
     ra_runtime_stop(&runtime);
     prepared = true;
+    seen_announcements = 0;
     assert(!ra_runtime_start(&runtime, &document));
-    assert(seen_ids == 1);
+    assert(seen_ids == 1 && seen_announcements == 1);
     ra_runtime_stop(&runtime);
     ra_runtime_stop(&runtime);
     puts("configured node startup and joined resource cleanup passed");
