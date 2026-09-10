@@ -49,4 +49,33 @@ const char *ra_document_announcement(const struct ra_document *document, const c
 const char *ra_document_courtesy(const struct ra_document *document, const char *node,
                                  size_t index);
 
+/** @brief Find a resolved named template visible to one node.
+ * @param document Validated document.
+ * @param node Node whose same-label override takes precedence.
+ * @param label Case-sensitive template label.
+ * @return Borrowed complete section name, or null when no global or node definition exists.
+ */
+const char *ra_document_template_named(const struct ra_document *document, const char *node,
+                                       const char *label);
+
+/** @brief Find a resolved named macro visible to one node.
+ * @param document Validated document.
+ * @param node Node whose same-label override takes precedence.
+ * @param label Case-sensitive macro label.
+ * @return Borrowed complete section name, or null when no global or node definition exists.
+ */
+const char *ra_document_macro_named(const struct ra_document *document, const char *node,
+                                    const char *label);
+
+/** @brief Find a zero-time event in global configuration-section order.
+ * @param document Validated document.
+ * @param index Zero-based event index.
+ * @param node Receives the complete owning node name when non-null.
+ * @return Borrowed complete event section name, or null after the final event.
+ *
+ * Validation rejects repeated event headers. Enumeration returns each unique definition once in
+ * source order, so the scheduler can serialize same-minute events exactly as configured.
+ */
+const char *ra_document_event(const struct ra_document *document, size_t index, const char **node);
+
 #endif

@@ -11,8 +11,9 @@ remaining validation; it is not authorization to activate a live link.
 The controller accepts the configured linking-only DTMF operations: monitor,
 transceive, local-monitor, permanent variants, disconnect, `*10` temporary-link
 disconnect, disconnect-all, reconnect-all, status, last-keyed, full status, direct-peer remote-command
-mode, and the fixed `*722` local-time announcement. Forced-ID, macro, autopatch,
-and other unrelated commands are not implemented. The normal default mappings are documented in
+mode, and the fixed `*722` local-time announcement. Forced-ID, DTMF macros,
+autopatch, and other unrelated commands are not implemented. Scheduled controller
+macros are configured control-plane operations, not DTMF commands. The normal default mappings are documented in
 [configuration](configuration.md); mappings are configurable, use a leading
 `*`, and destination-taking commands end with `#`, local receiver unkey, or a
 three-second interdigit timeout. Destination `0` selects the last link destination.

@@ -17,7 +17,9 @@ static void defaults(void) {
     assert(node.enabled && node.full_duplex && node.dtmf_muting && node.hang_ms == 0 &&
            node.telemetry_duck_db == -20 && node.sample_rate == 0);
     assert(node.courtesy_delay_ms == 250);
-    assert(!strcmp(node.channel, "usb") && !*node.codec);
+    assert(node.transmit_timeout_ms == 180000 && node.timeout_lockout_ms == 30000 &&
+           node.kerchunk_max_ms == 500);
+    assert(!strcmp(node.channel, "usb") && !*node.callsign && !*node.codec);
     assert(!*node.link_allow_nodes && !*node.link_deny_nodes);
     assert(!*node.link_static_directory_file && !*node.link_directory_file &&
            node.link_lookup_method == RA_LINK_LOOKUP_BOTH);
@@ -44,6 +46,10 @@ static void defaults(void) {
 static void configured(void) {
     const struct ra_config_entry entries[] = {
         {"usb", "transmit_hang_ms", "500"},
+        {"general", "transmit_timeout_ms", "200000"},
+        {"usb", "transmit_timeout_ms", "100000"},
+        {"general", "timeout_lockout_ms", "40000"},
+        {"usb", "kerchunk_max_ms", "250"},
         {"general", "transmit_hang_ms", "100"},
         {"general", "node_enabled", "no"},
         {"general", "full_duplex", "no"},
@@ -53,6 +59,8 @@ static void configured(void) {
         {"general", "courtesy_delay_ms", "300"},
         {"usb", "sample_rate_hz", "48000"},
         {"usb", "radio_channel", "radio"},
+        {"general", "callsign", "KG0BP"},
+        {"usb", "callsign", "N0CALL"},
         {"usb", "codec", "slin48"},
         {"general", "link_allow_nodes", "508422"},
         {"usb", "link_allow_nodes", ""},
@@ -101,7 +109,10 @@ static void configured(void) {
     assert(!node.enabled && !node.full_duplex && node.dtmf_muting && node.hang_ms == 500 &&
            node.telemetry_duck_db == -18 && node.sample_rate == 48000);
     assert(node.courtesy_delay_ms == 300);
-    assert(!strcmp(node.channel, "radio") && !strcmp(node.codec, "slin48"));
+    assert(node.transmit_timeout_ms == 100000 && node.timeout_lockout_ms == 40000 &&
+           node.kerchunk_max_ms == 250);
+    assert(!strcmp(node.channel, "radio") && !strcmp(node.callsign, "N0CALL") &&
+           !strcmp(node.codec, "slin48"));
     assert(!*node.link_allow_nodes && !strcmp(node.link_deny_nodes, "1234, 5678"));
     assert(!strcmp(node.link_static_directory_file, "static.conf") &&
            !strcmp(node.link_directory_file, "node.conf") &&
@@ -444,6 +455,152 @@ static void command_settings(void) {
     assert(!node.enabled);
 }
 
+/** @brief Resolve inherited named templates/macros and strict zero-time event settings. */
+static void scheduler_settings(void) {
+    const struct ra_config_entry entries[] = {
+        {"template greeting", "text", "Good ${greeting}, ${callsign}."},
+        {"template usb greeting", "text", "Welcome to ${node}."},
+        {"template inherited", "text", "Inherited ${node}."},
+        {"macro clear", "action", "disconnect_all"},
+        {"macro reconnect", "action", "connect"},
+        {"macro reconnect", "target_node", "111111"},
+        {"macro usb reconnect", "target_node", "222222"},
+        {"macrobad", "action", "disconnect"},
+        {"macro usbx reconnect", "action", "disconnect"},
+        {"macro usb connect_news", "action", "connect"},
+        {"macro usb connect_news", "target_node", "123456"},
+        {"event usb morning", "at", "daily 08:30"},
+        {"event usb morning", "template", "greeting"},
+        {"event usb morning", "macro", "connect_news"},
+        {"event usb weekly", "at", "weekly Tuesday 19:15"},
+        {"event usb weekly", "message", "Net starts at ${time}."},
+        {"event usb once", "at", "once 2026-12-31 23:59"},
+        {"event usb once", "macro", "clear"},
+    };
+    struct ra_template_settings template_settings;
+    assert(!ra_template_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), NULL,
+                                         "template greeting", &template_settings));
+    assert(!strcmp(template_settings.name, "greeting") &&
+           !strcmp(template_settings.text, "Good ${greeting}, ${callsign}."));
+    assert(!ra_template_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                         "template greeting", &template_settings));
+    assert(!strcmp(template_settings.name, "greeting") &&
+           !strcmp(template_settings.text, "Welcome to ${node}."));
+    assert(!ra_template_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                         "template usb inherited", &template_settings));
+    assert(!strcmp(template_settings.name, "inherited") &&
+           !strcmp(template_settings.text, "Inherited ${node}."));
+
+    struct ra_macro_settings macro;
+    assert(!ra_macro_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                      "macro clear", &macro));
+    assert(!strcmp(macro.name, "clear") && macro.action == RA_SCHEDULED_ACTION_DISCONNECT_ALL &&
+           !*macro.target_node);
+    assert(!ra_macro_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                      "macro usb connect_news", &macro));
+    assert(!strcmp(macro.name, "connect_news") && macro.action == RA_SCHEDULED_ACTION_CONNECT &&
+           !strcmp(macro.target_node, "123456"));
+    assert(!ra_macro_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb",
+                                      "macro usb reconnect", &macro));
+    assert(!strcmp(macro.name, "reconnect") && macro.action == RA_SCHEDULED_ACTION_CONNECT &&
+           !strcmp(macro.target_node, "222222"));
+
+    struct ra_event_settings event;
+    assert(!ra_event_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]),
+                                      "event usb morning", &event));
+    assert(!strcmp(event.name, "morning") && !strcmp(event.at, "daily 08:30") &&
+           event.trigger.kind == RA_SCHEDULED_EVENT_DAILY && event.trigger.hour == 8 &&
+           event.trigger.minute == 30 && !strcmp(event.template_name, "greeting") &&
+           !*event.message && !strcmp(event.macro_name, "connect_news"));
+    assert(!ra_event_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]),
+                                      "event usb weekly", &event));
+    assert(event.trigger.kind == RA_SCHEDULED_EVENT_WEEKLY && event.trigger.weekday == 2 &&
+           !strcmp(event.message, "Net starts at ${time}.") && !*event.template_name &&
+           !*event.macro_name);
+    assert(!ra_event_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]),
+                                      "event usb once", &event));
+    assert(event.trigger.kind == RA_SCHEDULED_EVENT_ONCE && event.trigger.year == 2026 &&
+           event.trigger.month == 12 && event.trigger.day == 31 &&
+           !strcmp(event.macro_name, "clear"));
+
+    struct ra_config_entry invalid_template = {"template empty", "text", ""};
+    assert(!strcmp(ra_template_settings_resolve(&invalid_template, 1, NULL, "template empty",
+                                                &template_settings),
+                   "template text is required"));
+    assert(!strcmp(ra_template_settings_resolve(NULL, 0, NULL, "macro wrong", &template_settings),
+                   "invalid named section"));
+    assert(!strcmp(ra_template_settings_resolve(NULL, 0, NULL, "templatewrong", &template_settings),
+                   "invalid named section"));
+    assert(!strcmp(ra_template_settings_resolve(NULL, 0, NULL, "template ", &template_settings),
+                   "invalid named section"));
+    assert(
+        !strcmp(ra_template_settings_resolve(NULL, 0, NULL, "template no_text", &template_settings),
+                "template text is required"));
+    struct ra_config_entry invalid_macro = {"macro missing", "target_node", "123"};
+    assert(!strcmp(ra_macro_settings_resolve(&invalid_macro, 1, NULL, "macro missing", &macro),
+                   "macro action is required"));
+    struct ra_config_entry invalid_action = {"macro bad", "action", "system"};
+    assert(!strcmp(ra_macro_settings_resolve(&invalid_action, 1, NULL, "macro bad", &macro),
+                   "action"));
+    assert(!strcmp(ra_macro_settings_resolve(NULL, 0, NULL, "template wrong", &macro),
+                   "invalid named section"));
+    struct ra_config_entry missing_target = {"macro call", "action", "connect"};
+    assert(!strcmp(ra_macro_settings_resolve(&missing_target, 1, NULL, "macro call", &macro),
+                   "macro target node is required"));
+    struct ra_config_entry disconnect_macro[] = {{"macro drop", "action", "disconnect"},
+                                                 {"macro drop", "target_node", "123"}};
+    assert(!ra_macro_settings_resolve(disconnect_macro,
+                                      sizeof(disconnect_macro) / sizeof(disconnect_macro[0]), NULL,
+                                      "macro drop", &macro));
+    assert(macro.action == RA_SCHEDULED_ACTION_DISCONNECT && !strcmp(macro.target_node, "123"));
+    struct ra_config_entry unwanted_target[] = {{"macro all", "action", "disconnect_all"},
+                                                {"macro all", "target_node", "123"}};
+    assert(!strcmp(ra_macro_settings_resolve(unwanted_target,
+                                             sizeof(unwanted_target) / sizeof(unwanted_target[0]),
+                                             NULL, "macro all", &macro),
+                   "macro target node is not allowed"));
+    struct ra_config_entry no_work[] = {{"event usb idle", "at", "daily 00:00"}};
+    assert(!strcmp(ra_event_settings_resolve(no_work, sizeof(no_work) / sizeof(no_work[0]),
+                                             "event usb idle", &event),
+                   "event message, template, or macro is required"));
+    struct ra_config_entry invalid_at = {"event usb bad", "at", "not-a-time"};
+    assert(!strcmp(ra_event_settings_resolve(&invalid_at, 1, "event usb bad", &event), "at"));
+    assert(!strcmp(ra_event_settings_resolve(NULL, 0, "template wrong", &event),
+                   "invalid named section"));
+    struct ra_config_entry flat_event_values[] = {
+        {"general", "at", "daily 00:00"},
+        {"general", "message", "This must not be inherited."},
+        {"event usb isolated", "at", "daily 00:00"},
+    };
+    assert(!strcmp(ra_event_settings_resolve(
+                       flat_event_values, sizeof(flat_event_values) / sizeof(flat_event_values[0]),
+                       "event usb isolated", &event),
+                   "event message, template, or macro is required"));
+    struct ra_config_entry conflicting_work[] = {{"event usb conflict", "at", "daily 00:00"},
+                                                 {"event usb conflict", "template", "greeting"},
+                                                 {"event usb conflict", "message", "Hello"}};
+    assert(!strcmp(ra_event_settings_resolve(conflicting_work,
+                                             sizeof(conflicting_work) / sizeof(conflicting_work[0]),
+                                             "event usb conflict", &event),
+                   "event message and template are mutually exclusive"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_TEMPLATE, "text", "${node}"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_MACRO, "action", "connect"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_MACRO, "action", "system"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_EVENT, "at", "weekly Sunday 00:00"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_EVENT, "at", "daily 24:00"));
+
+    char maximum_identity[RA_NODE_NAME_MAX];
+    memset(maximum_identity, '1', sizeof(maximum_identity) - 1);
+    maximum_identity[sizeof(maximum_identity) - 1] = '\0';
+    char oversized_identity[RA_NODE_NAME_MAX + 1];
+    memset(oversized_identity, '1', sizeof(oversized_identity) - 1);
+    oversized_identity[sizeof(oversized_identity) - 1] = '\0';
+    assert(!ra_settings_validate_kind(RA_SETTINGS_MACRO, "target_node", maximum_identity));
+    assert(ra_settings_validate_kind(RA_SETTINGS_MACRO, "target_node", oversized_identity));
+    assert(!ra_settings_validate(false, "callsign", maximum_identity));
+    assert(ra_settings_validate(false, "callsign", oversized_identity));
+}
+
 /** @brief Execute all settings tests.
  * @return Zero after successful assertions.
  */
@@ -460,6 +617,7 @@ int main(void) {
     invalid();
     directory_settings();
     command_settings();
+    scheduler_settings();
     puts("settings resolution tests passed");
     return 0;
 }

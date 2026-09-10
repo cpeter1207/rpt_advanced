@@ -9,6 +9,7 @@
 #include "link_directory.h"
 #include "link_hub.h"
 #include "media.h"
+#include "message_template.h"
 #include "schema.h"
 #include "time_announcement.h"
 #include "tone_sequence.h"
@@ -21,6 +22,7 @@
 #include <asterisk/lock.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -49,8 +51,8 @@ struct ra_runtime_node {
     struct ra_link_hub links;           /**< Owned network peers and routing buffers. */
     ast_mutex_t callback_lock;          /**< Serializes non-audio hub callbacks with reconfigure. */
     struct ra_link_collector collector; /**< Local DTMF command state. */
-    char last_node[64];                 /**< Destination used by the zero-node shorthand. */
-    char remote_node[64];               /**< Direct peer receiving remote-command DTMF. */
+    char last_node[RA_NODE_NAME_MAX];   /**< Destination used by the zero-node shorthand. */
+    char remote_node[RA_NODE_NAME_MAX]; /**< Direct peer receiving remote-command DTMF. */
     const char *name;                   /**< Borrowed local node name. */
     struct ra_runtime *owner;           /**< Runtime retaining this stable node. */
     struct ra_node_settings settings; /**< Borrowed resolved settings retained by configuration. */
@@ -72,6 +74,57 @@ struct ra_runtime_node {
     bool reload_reconfigured; /**< Current replacement must restore this node on failure. */
     bool reload_new;          /**< Current replacement owns this node until commit. */
 };
+
+/** @brief One configuration-order event plus the control-plane state for its current occurrence. */
+struct ra_runtime_schedule_event {
+    struct ra_runtime_node *node; /**< Stable active node selected by the event's section scope. */
+    struct ra_event_settings
+        settings; /**< Resolved strings and parsed trigger owned by configuration. */
+    uint64_t completed_occurrence; /**< Last completed local calendar-minute key. */
+    uint64_t pending_occurrence;   /**< Reserved calendar-minute key awaiting telemetry enqueue. */
+    struct tm pending_local;       /**< Civil time retained for an unqueued retry. */
+    uint64_t ready_occurrence;     /**< Due calendar-minute key retained behind an earlier event. */
+    struct tm ready_local;         /**< Civil time retained with @c ready_occurrence. */
+    bool pending;                  /**< A dispatch was returned but not yet completed. */
+    bool message_queued; /**< The reserved dispatch's message is on the telemetry queue. */
+    bool ready;          /**< A due occurrence awaits its turn in configuration order. */
+};
+
+/** @brief Runtime-owned global event ordering and its document-backed configuration references. */
+struct ra_runtime_schedule {
+    const struct ra_document *document; /**< Immutable configuration retained by the runtime. */
+    struct ra_runtime_schedule_event *events; /**< Owned global configuration-order event array. */
+    size_t count;                             /**< Number of active-node events in @p events. */
+    uint64_t generation;                      /**< Invalidates copied dispatches after a reload. */
+    time_t
+        last_tick; /**< Latest control-task wall-clock instant permitted to create occurrences. */
+    bool has_last_tick; /**< True after @c last_tick has been initialized by a scheduler task. */
+};
+
+/** @brief Find a running node by its exact configuration name. */
+static struct ra_runtime_node *runtime_node(struct ra_runtime *runtime, const char *name);
+
+/** @brief Allocate a replacement global event schedule after all selected nodes start.
+ * @param runtime Active replacement-node owner whose private generation is advanced on commit.
+ * @param document Valid immutable configuration supplying global event order and definitions.
+ * @param previous Prior schedule retained only to preserve matching occurrence state.
+ * @param result Receives owned schedule state, or null when no enabled node has an event.
+ * @return Null on success or an allocation/configuration diagnostic.
+ */
+static const char *schedule_create(struct ra_runtime *runtime, const struct ra_document *document,
+                                   const struct ra_runtime_schedule *previous,
+                                   struct ra_runtime_schedule **result);
+
+/** @brief Advance a nonzero copied-dispatch generation without ever publishing zero.
+ * @param generation Previous private runtime generation.
+ * @return Next nonzero generation, restarting at one only after unsigned wrap.
+ */
+static uint64_t schedule_next_generation(uint64_t generation) {
+    return generation == UINT64_MAX ? 1 : generation + 1;
+}
+
+/** @brief Release one runtime-owned schedule without touching its borrowed configuration. */
+static void schedule_release(struct ra_runtime_schedule *schedule);
 
 /** @brief Resolve one peer using the selected node's inherited directory policy.
  * @param node Local runtime node whose settings own the policy strings.
@@ -337,6 +390,8 @@ static struct ra_runtime_node *new_node(struct ra_runtime *runtime) {
 }
 
 void ra_runtime_stop(struct ra_runtime *runtime) {
+    schedule_release(runtime->schedule);
+    runtime->schedule = NULL;
     while (runtime->nodes) {
         struct ra_runtime_node *node = runtime->nodes;
         runtime->nodes = node->next;
@@ -580,6 +635,9 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
     }
     node->controller.full_duplex = settings->full_duplex;
     node->controller.hang_ms = settings->hang_ms;
+    node->controller.transmit_timeout_ms = settings->transmit_timeout_ms;
+    node->controller.timeout_lockout_ms = settings->timeout_lockout_ms;
+    node->controller.kerchunk_max_ms = settings->kerchunk_max_ms;
     node->controller.telemetry_duck_db = (int)settings->telemetry_duck_db;
     if (!ra_controller_start(&node->controller,
                              (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000)) {
@@ -603,7 +661,9 @@ static const char *start_node(struct ra_runtime_node *node, const struct ra_docu
 }
 
 const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_document *document) {
-    struct ra_runtime replacement = {.digit = runtime->digit, .event = runtime->event};
+    struct ra_runtime replacement = {.digit = runtime->digit,
+                                     .event = runtime->event,
+                                     .schedule_generation = runtime->schedule_generation};
     const char *error = NULL;
     const char *name;
     for (size_t index = 0; (name = ra_document_node(document, index)); ++index) {
@@ -630,6 +690,12 @@ const char *ra_runtime_start(struct ra_runtime *runtime, const struct ra_documen
         ra_runtime_stop(&replacement);
         return error;
     }
+    error = schedule_create(&replacement, document, NULL, &replacement.schedule);
+    if (error) {
+        ra_runtime_stop(&replacement);
+        return error;
+    }
+    replacement.schedule_generation = schedule_next_generation(replacement.schedule_generation);
     *runtime = replacement;
     return NULL;
 }
@@ -675,6 +741,157 @@ static struct ra_runtime_node *runtime_node(struct ra_runtime *runtime, const ch
             return node;
         }
     }
+    return NULL;
+}
+
+/** @brief Pack one parsed trigger so equality never depends on structure padding.
+ * @param trigger Valid parsed trigger.
+ * @return Unique bitwise key for every documented trigger field.
+ */
+static uint64_t scheduled_trigger_key(const struct ra_scheduled_event_time *trigger) {
+    return (uint64_t)trigger->kind << 39 | (uint64_t)trigger->year << 23 |
+           (uint64_t)trigger->month << 19 | (uint64_t)trigger->day << 14 |
+           (uint64_t)trigger->weekday << 11 | (uint64_t)trigger->hour << 6 | trigger->minute;
+}
+
+/** @brief Compare two parsed event triggers without depending on structure padding.
+ * @param first First parsed trigger.
+ * @param second Second parsed trigger.
+ * @return True only when every scheduling field is equal.
+ */
+static bool same_event_trigger(const struct ra_scheduled_event_time *first,
+                               const struct ra_scheduled_event_time *second) {
+    return scheduled_trigger_key(first) == scheduled_trigger_key(second);
+}
+
+/** @brief Find the prior state for one unchanged event across a successful reload.
+ * @param previous Prior schedule, or null at initial startup.
+ * @param node Stable running node selected by the candidate event.
+ * @param settings Resolved candidate event whose name and trigger identify its state.
+ * @return Matching previous event, or null when the event was added or changed.
+ */
+static const struct ra_runtime_schedule_event *
+prior_schedule_event(const struct ra_runtime_schedule *previous, const struct ra_runtime_node *node,
+                     const struct ra_event_settings *settings) {
+    if (!previous) {
+        return NULL;
+    }
+    for (size_t index = 0; index < previous->count; ++index) {
+        const struct ra_runtime_schedule_event *event = &previous->events[index];
+        if (!strcmp(event->node->name, node->name) &&
+            !strcmp(event->settings.name, settings->name) &&
+            same_event_trigger(&event->settings.trigger, &settings->trigger)) {
+            return event;
+        }
+    }
+    return NULL;
+}
+
+/** @brief Release one runtime-owned schedule without touching its borrowed configuration.
+ * @param schedule Owned schedule, or null.
+ */
+static void schedule_release(struct ra_runtime_schedule *schedule) {
+    if (!schedule) {
+        return;
+    }
+    ast_free(schedule->events);
+    ast_free(schedule);
+}
+
+static const char *schedule_create(struct ra_runtime *runtime, const struct ra_document *document,
+                                   const struct ra_runtime_schedule *previous,
+                                   struct ra_runtime_schedule **result) {
+    *result = NULL;
+    size_t declared = 0;
+    while (ra_document_event(document, declared, NULL)) {
+        ++declared;
+    }
+    /* Avoid a new allocation and test fixture churn when no node has an event. */
+    if (!declared) {
+        return NULL;
+    }
+    struct ra_runtime_schedule *schedule = ast_calloc(1, sizeof(*schedule));
+    if (!schedule) {
+        return "cannot allocate scheduled event state";
+    }
+    schedule->events = ast_calloc(declared, sizeof(*schedule->events));
+    if (!schedule->events) {
+        schedule_release(schedule);
+        return "cannot allocate scheduled event state";
+    }
+    schedule->document = document;
+    schedule->generation = schedule_next_generation(runtime->schedule_generation);
+    /* Retain the chronological task boundary across reload so an old queued task cannot create a
+     * new occurrence after the replacement has already processed a newer minute. */
+    schedule->last_tick = previous ? previous->last_tick : (time_t)0;
+    schedule->has_last_tick = previous && previous->has_last_tick;
+    for (size_t index = 0; index < declared; ++index) {
+        const char *node_name = NULL;
+        const char *set = ra_document_event(document, index, &node_name);
+        struct ra_runtime_node *node = node_name ? runtime_node(runtime, node_name) : NULL;
+        struct ra_node_settings node_settings;
+        const char *node_error = node_name
+                                     ? ra_node_settings_resolve(document->entries, document->count,
+                                                                node_name, &node_settings)
+                                     : "event references an unknown node";
+        if (node_error) {
+            schedule_release(schedule);
+            return node_error;
+        }
+        /* A disabled node will be released at commit and has no controller to accept events. */
+        if (!node_settings.enabled) {
+            continue;
+        }
+        struct ra_event_settings settings;
+        const char *error =
+            ra_event_settings_resolve(document->entries, document->count, set, &settings);
+        if (error) {
+            schedule_release(schedule);
+            return error;
+        }
+        if (strnlen(node->name, RA_NODE_NAME_MAX) == RA_NODE_NAME_MAX) {
+            schedule_release(schedule);
+            return "scheduled event node name is too long";
+        }
+        if (*settings.macro_name) {
+            const char *macro_set =
+                ra_document_macro_named(document, node->name, settings.macro_name);
+            struct ra_macro_settings macro;
+            const char *macro_error =
+                macro_set ? ra_macro_settings_resolve(document->entries, document->count,
+                                                      node->name, macro_set, &macro)
+                          : "event references an unknown macro";
+            if (macro_error) {
+                schedule_release(schedule);
+                return macro_error;
+            }
+        }
+        const struct ra_runtime_schedule_event *prior =
+            prior_schedule_event(previous, node, &settings);
+        bool retry_pending = prior && prior->pending && !prior->message_queued;
+        /* A queued message may outlive a reload, but its stale dispatch cannot safely run a
+         * macro afterward.  Settle that occurrence rather than emitting it twice. */
+        bool settle_queued = prior && prior->pending && prior->message_queued;
+        schedule->events[schedule->count] = (struct ra_runtime_schedule_event){
+            .node = node,
+            .settings = settings,
+            .completed_occurrence = settle_queued ? prior->pending_occurrence
+                                    : prior       ? prior->completed_occurrence
+                                                  : UINT64_MAX,
+            .pending_occurrence = retry_pending ? prior->pending_occurrence : 0,
+            .pending_local = retry_pending ? prior->pending_local : (struct tm){0},
+            .ready_occurrence = prior && prior->ready ? prior->ready_occurrence : 0,
+            .ready_local = prior && prior->ready ? prior->ready_local : (struct tm){0},
+            .pending = retry_pending,
+            .ready = prior && prior->ready,
+        };
+        ++schedule->count;
+    }
+    if (!schedule->count) {
+        schedule_release(schedule);
+        return NULL;
+    }
+    *result = schedule;
     return NULL;
 }
 
@@ -822,7 +1039,17 @@ const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_docume
         node->next = runtime->nodes;
         runtime->nodes = node;
     }
+    struct ra_runtime_schedule *schedule = NULL;
+    const char *schedule_error =
+        schedule_create(runtime, replacement, runtime->schedule, &schedule);
+    if (schedule_error) {
+        const char *restoration = rollback_reload(runtime, current);
+        return restoration ? restoration : schedule_error;
+    }
     release_removed_nodes(runtime, replacement);
+    schedule_release(runtime->schedule);
+    runtime->schedule = schedule;
+    runtime->schedule_generation = schedule_next_generation(runtime->schedule_generation);
     return NULL;
 }
 
@@ -1301,6 +1528,531 @@ int ra_runtime_queue_link_status(struct ra_runtime *runtime, const char *local, 
         }
     }
     return -1;
+}
+
+/** @brief Return the fixed local-time greeting selected by a validated civil clock hour.
+ * @param hour Local hour from zero through 23.
+ * @return Static greeting selected for the supplied hour.
+ */
+static const char *scheduled_greeting(int hour) {
+    if (hour < 12) {
+        return "Good Morning";
+    }
+    if (hour < 17) {
+        return "Good Afternoon";
+    }
+    return "Good Evening";
+}
+
+/** @brief Copy a scheduled message into a bounded Morse-safe fallback without changing speech.
+ * @param source Complete rendered message from a validated template.
+ * @param destination Fixed output buffer receiving supported Morse characters or spaces.
+ * @return True only when the fallback contains at least one audible Morse character.
+ */
+static bool scheduled_morse_text(const char *source,
+                                 char destination[RA_MESSAGE_TEMPLATE_OUTPUT_MAX]) {
+    static const char allowed[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/.,?-=+@()'!\":;_$& \t\r\n";
+    size_t index = 0;
+    bool audible = false;
+    /* The renderer owns this input and proves it has at most 127 payload bytes. */
+    while (source[index]) {
+        destination[index] = strchr(allowed, source[index]) ? source[index] : ' ';
+        audible |= !isspace((unsigned char)destination[index]);
+        ++index;
+    }
+    destination[index] = '\0';
+    if (!audible) {
+        destination[0] = '\0';
+    }
+    return audible;
+}
+
+/** @brief Append one proven-bounded fragment while retaining one destination terminator.
+ * @param destination Initialized scheduled-speech output buffer.
+ * @param used Current destination length, updated after a complete append.
+ * @param source Source bytes to append.
+ * @param length Source byte count excluding a terminator.
+ *
+ * Template validation bounds rendered source text to 127 bytes. A scheduled node expands at most
+ * six-fold, and `RA_RUNTIME_SCHEDULED_SPEECH_MAX` is that conservative bound. Valid settings
+ * therefore cannot overrun the fixed output while they are expanded.
+ */
+static void scheduled_speech_append(char *destination, size_t *used, const char *source,
+                                    size_t length) {
+    for (size_t index = 0; index < length; ++index) {
+        destination[*used + index] = source[index];
+    }
+    *used += length;
+    destination[*used] = '\0';
+}
+
+/** @brief Expand one non-node scheduled-message fragment using ordinary telemetry speech rules.
+ * @param source Complete rendered message containing the fragment.
+ * @param offset First fragment byte in @p source.
+ * @param length Fragment byte count.
+ * @param destination Initialized scheduled-speech output buffer.
+ * @param used Current destination length, updated after a complete append.
+ */
+static void scheduled_speech_fragment(const char *source, size_t offset, size_t length,
+                                      char *destination, size_t *used) {
+    char fragment[RA_MESSAGE_TEMPLATE_OUTPUT_MAX];
+    char spoken[RA_RUNTIME_SCHEDULED_SPEECH_MAX];
+    for (size_t index = 0; index < length; ++index) {
+        fragment[index] = source[offset + index];
+    }
+    fragment[length] = '\0';
+    (void)ra_runtime_telemetry_speech_text(fragment, NULL, NULL, spoken, sizeof(spoken));
+    scheduled_speech_append(destination, used, spoken, strlen(spoken));
+}
+
+/** @brief Append a local-node identity as a speech-safe node prefix and individually spaced digits.
+ * @param node Valid nonempty local node identity.
+ * @param destination Initialized scheduled-speech output buffer.
+ * @param used Current destination length, updated after a complete append.
+ */
+static void scheduled_speech_node(const char *node, char *destination, size_t *used) {
+    static const char prefix[] = "node,";
+    scheduled_speech_append(destination, used, prefix, sizeof(prefix) - 1);
+    size_t length = strlen(node);
+    for (size_t index = 0; index < length; ++index) {
+        scheduled_speech_append(destination, used, node + index, 1);
+        if (index + 1 < length) {
+            scheduled_speech_append(destination, used, ",", 1);
+        }
+    }
+}
+
+/** @brief Append an amateur callsign one character at a time for offline speech synthesis.
+ * @param callsign Valid nonempty configured callsign.
+ * @param destination Initialized scheduled-speech output buffer.
+ * @param used Current destination length, updated after a complete append.
+ */
+static void scheduled_speech_callsign(const char *callsign, char *destination, size_t *used) {
+    size_t length = strlen(callsign);
+    for (size_t index = 0; index < length; ++index) {
+        scheduled_speech_append(destination, used, callsign + index, 1);
+        if (index + 1 < length) {
+            scheduled_speech_append(destination, used, ",", 1);
+        }
+    }
+}
+
+/** @brief Match one configured identity only at punctuation-safe word boundaries.
+ * @param source Complete scheduled message text.
+ * @param index Candidate identity offset in @p source.
+ * @param identity Nonempty configured node or callsign text.
+ * @return True when the complete identity is present without adjacent alphanumeric text.
+ */
+static bool scheduled_speech_identity_at(const char *source, size_t index, const char *identity) {
+    size_t length = strlen(identity);
+    if (length > strlen(source + index)) {
+        return false;
+    }
+    if (index && isalnum((unsigned char)source[index - 1])) {
+        return false;
+    }
+    if (strncmp(source + index, identity, length)) {
+        return false;
+    }
+    return !isalnum((unsigned char)source[index + length]);
+}
+
+/** @brief Render scheduled speech while recognizing configured node, peer, and callsign text
+ * beside punctuation.
+ * @param source Complete bounded message expanded from an event template.
+ * @param node Bounded local node identity to say as a node number.
+ * @param callsign Configured station callsign to say character-by-character.
+ * @param link_identity Current direct-peer identity selected by `${link_status}`, if any.
+ * @param destination Speech-synthesizer output destination.
+ *
+ * Ordinary numbers retain existing telemetry pronunciation.
+ *
+ * The general telemetry formatter intentionally treats only whitespace-separated identities as
+ * node numbers.  Scheduled templates commonly place `${node}` before sentence punctuation, so
+ * this small adapter recognizes configured node and callsign identities at non-alphanumeric
+ * boundaries before delegating all remaining text to that general formatter.
+ */
+static void scheduled_speech_text(const char *source, const char *node, const char *callsign,
+                                  const char *link_identity, char *destination) {
+    destination[0] = '\0';
+    size_t used = 0;
+    size_t fragment_start = 0;
+    size_t index = 0;
+    while (source[index]) {
+        if (scheduled_speech_identity_at(source, index, node)) {
+            scheduled_speech_fragment(source, fragment_start, index - fragment_start, destination,
+                                      &used);
+            scheduled_speech_node(node, destination, &used);
+            index += strlen(node);
+            fragment_start = index;
+            continue;
+        }
+        if (*link_identity && scheduled_speech_identity_at(source, index, link_identity)) {
+            scheduled_speech_fragment(source, fragment_start, index - fragment_start, destination,
+                                      &used);
+            scheduled_speech_node(link_identity, destination, &used);
+            index += strlen(link_identity);
+            fragment_start = index;
+            continue;
+        }
+        if (*callsign && scheduled_speech_identity_at(source, index, callsign)) {
+            scheduled_speech_fragment(source, fragment_start, index - fragment_start, destination,
+                                      &used);
+            scheduled_speech_callsign(callsign, destination, &used);
+            index += strlen(callsign);
+            fragment_start = index;
+            continue;
+        }
+        ++index;
+    }
+    scheduled_speech_fragment(source, fragment_start, index - fragment_start, destination, &used);
+}
+
+/** @brief Format a scheduler-validated local date as a fixed ISO calendar string.
+ * @param local Valid local civil time.
+ * @param date Fixed output buffer receiving `YYYY-MM-DD`.
+ */
+static void scheduled_date_text(const struct tm *local, char date[16]) {
+    unsigned int value = (unsigned int)(local->tm_year + 1900);
+    date[0] = (char)('0' + value / 1000);
+    date[1] = (char)('0' + value / 100 % 10);
+    date[2] = (char)('0' + value / 10 % 10);
+    date[3] = (char)('0' + value % 10);
+    date[4] = '-';
+    date[5] = (char)('0' + (local->tm_mon + 1) / 10);
+    date[6] = (char)('0' + (local->tm_mon + 1) % 10);
+    date[7] = '-';
+    date[8] = (char)('0' + local->tm_mday / 10);
+    date[9] = (char)('0' + local->tm_mday % 10);
+    date[10] = '\0';
+}
+
+/** @brief Format an already validated local time using one configured clock format.
+ * @param hour Local hour from zero through 23.
+ * @param minute Local minute from zero through 59.
+ * @param format Configured 12- or 24-hour format.
+ * @param time_text Fixed output buffer receiving the local clock text.
+ */
+static void scheduled_time_text(int hour, int minute, uint64_t format, char time_text[16]) {
+    if (format == 24) {
+        time_text[0] = (char)('0' + hour / 10);
+        time_text[1] = (char)('0' + hour % 10);
+        time_text[2] = ':';
+        time_text[3] = (char)('0' + minute / 10);
+        time_text[4] = (char)('0' + minute % 10);
+        time_text[5] = '\0';
+        return;
+    }
+    /* The settings resolver admits only 12 or 24; retain a useful 12-hour fallback defensively. */
+    int display_hour = hour % 12;
+    if (!display_hour) {
+        display_hour = 12;
+    }
+    size_t index = 0;
+    if (display_hour >= 10) {
+        time_text[index++] = (char)('0' + display_hour / 10);
+    }
+    time_text[index++] = (char)('0' + display_hour % 10);
+    time_text[index++] = ':';
+    time_text[index++] = (char)('0' + minute / 10);
+    time_text[index++] = (char)('0' + minute % 10);
+    time_text[index++] = ' ';
+    time_text[index++] = hour < 12 ? 'A' : 'P';
+    time_text[index++] = 'M';
+    time_text[index] = '\0';
+}
+
+/** @brief Format the fixed time-dependent values available to one due scheduled event.
+ * @param node Active event owner.
+ * @param local Current validated local civil time.
+ * @param values Receives pointers to the bounded generated values.
+ * @param day_of_week Receives the local weekday name.
+ * @param date Receives the ISO local date.
+ * @param time_text Receives the configured local clock text.
+ * @param link_status Receives the current bounded direct-peer summary.
+ * @param link_identity Receives the direct peer that appears in @p link_status, if any.
+ * @return True when every value is valid and complete.
+ */
+static bool scheduled_template_values(struct ra_runtime_node *node, const struct tm *local,
+                                      struct ra_message_template_values *values,
+                                      char day_of_week[16], char date[16], char time_text[16],
+                                      char link_status[RA_CONTROLLER_STATUS_TEXT_MAX],
+                                      char link_identity[RA_LINK_PEER_NAME_MAX]) {
+    static const char *const weekdays[] = {"Sunday",   "Monday", "Tuesday", "Wednesday",
+                                           "Thursday", "Friday", "Saturday"};
+    scheduled_date_text(local, date);
+    ast_copy_string(day_of_week, weekdays[local->tm_wday], 16);
+    scheduled_time_text(local->tm_hour, local->tm_min, node->time_settings.format, time_text);
+    if (!node_link_status_text(node, false, link_status, link_identity)) {
+        return false;
+    }
+    *values = (struct ra_message_template_values){
+        .day_of_week = day_of_week,
+        .date = date,
+        .time = time_text,
+        .greeting = scheduled_greeting(local->tm_hour),
+        .link_status = link_status,
+        .node = node->name,
+        .callsign = node->settings.callsign,
+    };
+    return true;
+}
+
+/** @brief Resolve and render an event's direct message or same-label inherited template.
+ * @param schedule Active schedule retaining the immutable configuration document.
+ * @param event Event selected for dispatch.
+ * @param local Current local civil time used by substitutions.
+ * @param dispatch Copied output receiving optional telemetry strings.
+ * @return True when no message is requested or the complete message renders.
+ */
+static bool scheduled_message(const struct ra_runtime_schedule *schedule,
+                              const struct ra_runtime_schedule_event *event, const struct tm *local,
+                              struct ra_scheduled_dispatch *dispatch) {
+    const char *template_text = event->settings.message;
+    if (!*template_text) {
+        if (!*event->settings.template_name) {
+            /* A macro-only event deliberately reserves no telemetry message. */
+            return true;
+        }
+        const char *set = ra_document_template_named(schedule->document, event->node->name,
+                                                     event->settings.template_name);
+        struct ra_template_settings template_settings;
+        if (!set ||
+            ra_template_settings_resolve(schedule->document->entries, schedule->document->count,
+                                         event->node->name, set, &template_settings)) {
+            return false;
+        }
+        template_text = template_settings.text;
+    }
+    char day_of_week[16];
+    char date[16];
+    char time_text[16];
+    char link_status[RA_CONTROLLER_STATUS_TEXT_MAX];
+    char link_identity[RA_LINK_PEER_NAME_MAX];
+    struct ra_message_template_values values;
+    char rendered[RA_MESSAGE_TEMPLATE_OUTPUT_MAX];
+    if (!scheduled_template_values(event->node, local, &values, day_of_week, date, time_text,
+                                   link_status, link_identity) ||
+        !ra_message_template_render(template_text, &values, rendered, sizeof(rendered))) {
+        return false;
+    }
+    /* An optional empty callsign can legitimately render an otherwise-empty template. */
+    if (!*rendered) {
+        return true;
+    }
+    if (!scheduled_morse_text(rendered, dispatch->morse)) {
+        /* A status without either speech-independent fallback or Morse would only key silently
+         * when the synthesizer is unavailable. */
+        return true;
+    }
+    scheduled_speech_text(rendered, event->node->name, event->node->settings.callsign,
+                          link_identity, dispatch->speech);
+    dispatch->has_message = true;
+    return true;
+}
+
+/** @brief Resolve an approved named macro into the existing app-facing link operation type.
+ * @param schedule Active schedule retaining the immutable configuration document.
+ * @param event Event selected for dispatch.
+ * @param dispatch Copied output receiving an optional validated operation.
+ * @return True when no macro is requested or its complete operation is copied.
+ */
+static bool scheduled_operation(const struct ra_runtime_schedule *schedule,
+                                const struct ra_runtime_schedule_event *event,
+                                struct ra_scheduled_dispatch *dispatch) {
+    if (!*event->settings.macro_name) {
+        return true;
+    }
+    const char *set =
+        ra_document_macro_named(schedule->document, event->node->name, event->settings.macro_name);
+    struct ra_macro_settings macro;
+    if (!set || ra_macro_settings_resolve(schedule->document->entries, schedule->document->count,
+                                          event->node->name, set, &macro)) {
+        return false;
+    }
+    static const enum ra_link_action actions[] = {
+        [RA_SCHEDULED_ACTION_CONNECT] = RA_LINK_TRANSCEIVE,
+        [RA_SCHEDULED_ACTION_DISCONNECT] = RA_LINK_DISCONNECT,
+        [RA_SCHEDULED_ACTION_DISCONNECT_ALL] = RA_LINK_DISCONNECT_ALL,
+        [RA_SCHEDULED_ACTION_RECONNECT_ALL] = RA_LINK_RECONNECT_ALL,
+    };
+    _Static_assert(sizeof(actions) / sizeof(*actions) == RA_SCHEDULED_ACTION_RECONNECT_ALL + 1,
+                   "every validated scheduled action needs one link operation");
+    dispatch->operation.action = actions[macro.action];
+    /* The resolver validates the target against RA_NODE_NAME_MAX before every copied dispatch. */
+    ast_copy_string(dispatch->operation.remote, macro.target_node,
+                    sizeof(dispatch->operation.remote));
+    dispatch->has_operation = true;
+    return true;
+}
+
+/** @brief Validate a copied dispatch against the one reserved runtime event that created it.
+ * @param runtime Active runtime owning the current schedule.
+ * @param dispatch Copied candidate dispatch.
+ * @return Reserved event only when its current generation and occurrence still match.
+ */
+static struct ra_runtime_schedule_event *
+scheduled_dispatch_event(struct ra_runtime *runtime, const struct ra_scheduled_dispatch *dispatch) {
+    if (!runtime || !runtime->schedule || !dispatch ||
+        dispatch->generation != runtime->schedule->generation ||
+        dispatch->event_index >= runtime->schedule->count) {
+        return NULL;
+    }
+    struct ra_runtime_schedule_event *event = &runtime->schedule->events[dispatch->event_index];
+    if (!event->pending || event->pending_occurrence != dispatch->occurrence ||
+        strcmp(event->node->name, dispatch->local)) {
+        return NULL;
+    }
+    return event;
+}
+
+/** @brief Fill one copied dispatch from an already due event without retaining configuration
+ * pointers.
+ * @param schedule Active schedule owning the selected event.
+ * @param index Configuration-order event index.
+ * @param local Current local civil time used by substitutions.
+ * @param occurrence Due civil calendar-minute key.
+ * @param dispatch Receives completely copied control-plane data.
+ * @return True when all optional message and macro data could be copied.
+ */
+static bool scheduled_dispatch_fill(struct ra_runtime_schedule *schedule, size_t index,
+                                    const struct tm *local, uint64_t occurrence,
+                                    struct ra_scheduled_dispatch *dispatch) {
+    struct ra_runtime_schedule_event *event = &schedule->events[index];
+    *dispatch = (struct ra_scheduled_dispatch){
+        .generation = schedule->generation, .event_index = index, .occurrence = occurrence};
+    ast_copy_string(dispatch->local, event->node->name, sizeof(dispatch->local));
+    if (!scheduled_message(schedule, event, local, dispatch)) {
+        return false;
+    }
+    return scheduled_operation(schedule, event, dispatch);
+}
+
+int ra_runtime_next_scheduled_dispatch(struct ra_runtime *runtime, time_t now,
+                                       struct ra_scheduled_dispatch *dispatch) {
+    if (!runtime || !dispatch || now == (time_t)-1) {
+        return -1;
+    }
+    *dispatch = (struct ra_scheduled_dispatch){0};
+    struct ra_runtime_schedule *schedule = runtime->schedule;
+    if (!schedule) {
+        return 0;
+    }
+    struct timeval when = {.tv_sec = now, .tv_usec = 0};
+    struct ast_tm ast_time = {0};
+    if (!ast_localtime(&when, &ast_time, NULL)) {
+        return -1;
+    }
+    struct tm local = {.tm_sec = ast_time.tm_sec,
+                       .tm_min = ast_time.tm_min,
+                       .tm_hour = ast_time.tm_hour,
+                       .tm_mday = ast_time.tm_mday,
+                       .tm_mon = ast_time.tm_mon,
+                       .tm_year = ast_time.tm_year,
+                       .tm_wday = ast_time.tm_wday,
+                       .tm_yday = ast_time.tm_yday,
+                       .tm_isdst = ast_time.tm_isdst};
+    /* A ready occurrence retains this civil clock for delayed config-order dispatch. */
+    if (local.tm_wday < 0 || local.tm_wday > 6 || local.tm_year < -1900 || local.tm_year > 8099 ||
+        local.tm_hour < 0 || local.tm_hour >= 24 || local.tm_min < 0 || local.tm_min >= 60 ||
+        local.tm_mon < 0 || local.tm_mon >= 12 || local.tm_mday <= 0 || local.tm_mday > 31) {
+        return -1;
+    }
+    /* The app bridge queues one task for each wall-clock minute in FIFO order.  An older task
+     * observed after a newer task may still drain reserved work, but must not create an
+     * occurrence from the past after the scheduler has advanced. */
+    if (!schedule->has_last_tick || now >= schedule->last_tick) {
+        schedule->last_tick = now;
+        schedule->has_last_tick = true;
+        /* Snapshot every due event before returning the first.  A slow macro therefore cannot
+         * age later same-minute events out of their local-time trigger. */
+        for (size_t index = 0; index < schedule->count; ++index) {
+            struct ra_runtime_schedule_event *event = &schedule->events[index];
+            uint64_t occurrence;
+            if (event->pending || event->ready ||
+                !ra_scheduled_event_due(&event->settings.trigger, &local, &occurrence) ||
+                event->completed_occurrence == occurrence) {
+                continue;
+            }
+            event->ready = true;
+            event->ready_occurrence = occurrence;
+            event->ready_local = local;
+        }
+    }
+    size_t selected = SIZE_MAX;
+    uint64_t selected_occurrence = 0;
+    for (size_t index = 0; index < schedule->count; ++index) {
+        const struct ra_runtime_schedule_event *event = &schedule->events[index];
+        if (!event->pending && !event->ready) {
+            continue;
+        }
+        uint64_t occurrence = event->pending ? event->pending_occurrence : event->ready_occurrence;
+        /* The first equal occurrence retains configuration order.  An earlier uncompleted minute
+         * always wins over a later minute, even when the later event appears first in config. */
+        if (selected == SIZE_MAX || occurrence < selected_occurrence) {
+            selected = index;
+            selected_occurrence = occurrence;
+        }
+    }
+    if (selected != SIZE_MAX) {
+        struct ra_runtime_schedule_event *event = &schedule->events[selected];
+        bool pending = event->pending;
+        uint64_t occurrence = pending ? event->pending_occurrence : event->ready_occurrence;
+        const struct tm *event_local = pending ? &event->pending_local : &event->ready_local;
+        if (!scheduled_dispatch_fill(schedule, selected, event_local, occurrence, dispatch)) {
+            /* Configuration was validated before startup; do not let an impossible render stall
+             * every subsequent event forever when a runtime bound is exceeded. */
+            event->pending = false;
+            event->message_queued = false;
+            event->ready = false;
+            event->completed_occurrence = occurrence;
+            return -1;
+        }
+        if (!pending) {
+            event->pending = true;
+            event->pending_occurrence = occurrence;
+            event->pending_local = *event_local;
+            event->message_queued = false;
+            event->ready = false;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+int ra_runtime_queue_scheduled_message(struct ra_runtime *runtime,
+                                       const struct ra_scheduled_dispatch *dispatch) {
+    struct ra_runtime_schedule_event *event = scheduled_dispatch_event(runtime, dispatch);
+    if (!event) {
+        return -1;
+    }
+    if (!dispatch->has_message) {
+        return 0;
+    }
+    if (event->message_queued) {
+        return 0;
+    }
+    if (queue_status(event->node, dispatch->speech, dispatch->morse)) {
+        return -1;
+    }
+    event->message_queued = true;
+    return 0;
+}
+
+bool ra_runtime_complete_scheduled_dispatch(struct ra_runtime *runtime,
+                                            const struct ra_scheduled_dispatch *dispatch) {
+    struct ra_runtime_schedule_event *event = scheduled_dispatch_event(runtime, dispatch);
+    if (!event) {
+        return false;
+    }
+    if (dispatch->has_message && !event->message_queued) {
+        return false;
+    }
+    event->completed_occurrence = event->pending_occurrence;
+    event->pending = false;
+    event->message_queued = false;
+    return true;
 }
 
 /** @brief Append one complete word to a bounded telemetry report.

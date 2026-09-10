@@ -72,15 +72,16 @@ struct ra_link_port {
     int16_t *output;                     /**< Peer-rate transmit block. */
     size_t rate;                         /**< Negotiated peer sample rate. */
     size_t samples;                      /**< Peer samples scheduled for the current local block. */
-    uint64_t remainder;     /**< Exact-rate scheduling remainder in local-rate units. */
-    SRC_STATE *receive_src; /**< Peer-to-radio sample-rate converter. */
-    SRC_STATE *send_src;    /**< Radio-to-peer sample-rate converter. */
-    float *src_in;          /**< Floating-point converter input workspace. */
-    float *src_out;         /**< Floating-point converter output workspace. */
-    bool transmit;          /**< Outbound audio permitted. */
-    bool forward;           /**< Relay received voice to other links. */
-    bool permanent;         /**< Redial after an unexpected transport failure. */
-    bool active;            /**< Receive activity for the current radio tick. */
+    uint64_t remainder;       /**< Exact-rate scheduling remainder in local-rate units. */
+    SRC_STATE *receive_src;   /**< Peer-to-radio sample-rate converter. */
+    SRC_STATE *send_src;      /**< Radio-to-peer sample-rate converter. */
+    float *src_in;            /**< Floating-point converter input workspace. */
+    float *src_out;           /**< Floating-point converter output workspace. */
+    bool transmit;            /**< Outbound audio permitted. */
+    bool forward;             /**< Relay received voice to other links. */
+    bool permanent;           /**< Redial after an unexpected transport failure. */
+    bool active;              /**< Receive activity for the current radio tick. */
+    uint64_t active_since_ms; /**< Rising-edge time for source-specific kerchunk detection. */
 };
 
 /** @brief One retained recovery request, owned outside audio processing. */
@@ -1203,7 +1204,13 @@ bool ra_link_hub_process(struct ra_link_hub *hub, struct ra_controller *controll
                 remember_last_keyed(hub, port->name);
                 ra_controller_link_keyed(controller, port->name);
             } else if (!active && port->active) {
-                ra_controller_link_unkeyed(controller, port->name, port->permanent, now_ms);
+                bool kerchunk = controller->kerchunk_max_ms &&
+                                now_ms - port->active_since_ms <= controller->kerchunk_max_ms;
+                ra_controller_link_unkeyed_kerchunk(controller, port->name, port->permanent,
+                                                    kerchunk, now_ms);
+            }
+            if (active && !port->active) {
+                port->active_since_ms = now_ms;
             }
             port->active = active;
             adapt(port->receive_src, port->src_in, port->src_out, port->audio, port->samples,

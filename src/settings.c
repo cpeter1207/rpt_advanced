@@ -18,7 +18,9 @@ enum field_type {
     FIELD_SIGNED,
     FIELD_TIME_FORMAT,
     FIELD_NODE_ID,
-    FIELD_COURTESY_INPUT
+    FIELD_COURTESY_INPUT,
+    FIELD_SCHEDULED_ACTION,
+    FIELD_EVENT_TIME
 };
 
 /** @brief One schema entry mapping a public name to a typed settings member. */
@@ -27,7 +29,8 @@ struct field {
     enum field_type type; /**< Destination representation. */
     size_t offset;        /**< Offset within its settings structure. */
     uint64_t minimum;     /**< Inclusive unsigned minimum or signed magnitude. */
-    uint64_t maximum;     /**< Inclusive numeric maximum. */
+    uint64_t
+        maximum; /**< Inclusive numeric maximum, or a nonzero maximum byte length for strings. */
 };
 
 /** @brief Node schema; zero rate requests automatic selection. */
@@ -36,12 +39,20 @@ static const struct field node_fields[] = {
     {"full_duplex", FIELD_BOOLEAN, offsetof(struct ra_node_settings, full_duplex), 0, 0},
     {"dtmf_muting", FIELD_BOOLEAN, offsetof(struct ra_node_settings, dtmf_muting), 0, 0},
     {"transmit_hang_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, hang_ms), 0, UINT64_MAX},
+    {"transmit_timeout_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, transmit_timeout_ms), 0,
+     UINT64_MAX},
+    {"timeout_lockout_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, timeout_lockout_ms), 0,
+     UINT64_MAX},
+    {"kerchunk_max_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, kerchunk_max_ms), 0,
+     UINT64_MAX},
     {"telemetry_duck_db", FIELD_SIGNED, offsetof(struct ra_node_settings, telemetry_duck_db), 60,
      0},
     {"courtesy_delay_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, courtesy_delay_ms), 0,
      UINT64_MAX},
     {"sample_rate_hz", FIELD_NUMBER, offsetof(struct ra_node_settings, sample_rate), 0, UINT_MAX},
     {"radio_channel", FIELD_STRING, offsetof(struct ra_node_settings, channel), 0, 0},
+    {"callsign", FIELD_STRING, offsetof(struct ra_node_settings, callsign), 0,
+     RA_NODE_NAME_MAX - 1U},
     {"codec", FIELD_STRING, offsetof(struct ra_node_settings, codec), 0, 0},
     {"link_allow_nodes", FIELD_NODE_LIST, offsetof(struct ra_node_settings, link_allow_nodes), 0,
      0},
@@ -119,10 +130,15 @@ static bool courtesy_input(const char *text, enum ra_courtesy_input *input) {
 
 /** @brief Validate an optional exact decimal remote-node identity.
  * @param text Trimmed configuration value.
- * @return True for empty text or one or more decimal digits.
+ * @return True for empty text or up to 63 decimal digits.
+ *
+ * The bound preserves the terminator required by the direct-peer transport and copied scheduled
+ * operations. It deliberately also applies to named courtesy-peer assignments, which use that
+ * same transport identity.
  */
 static bool remote_node_valid(const char *text) {
-    return !*text || strspn(text, "0123456789") == strlen(text);
+    size_t length = strlen(text);
+    return !length || (length < RA_NODE_NAME_MAX && strspn(text, "0123456789") == length);
 }
 
 /** @brief Identifier schema; media availability is evaluated when preparing playback. */
@@ -284,6 +300,25 @@ static const struct field time_fields[] = {
     {"format", FIELD_TIME_FORMAT, offsetof(struct ra_time_settings, format), 0, 0},
 };
 
+/** @brief Named templates contain one strict message-template string. */
+static const struct field template_fields[] = {
+    {"text", FIELD_STRING, offsetof(struct ra_template_settings, text), 0, 0},
+};
+
+/** @brief Named macros are deliberately limited to one validated controller operation. */
+static const struct field macro_fields[] = {
+    {"action", FIELD_SCHEDULED_ACTION, offsetof(struct ra_macro_settings, action), 0, 0},
+    {"target_node", FIELD_NODE_ID, offsetof(struct ra_macro_settings, target_node), 0, 0},
+};
+
+/** @brief Zero-time events can render one message source and invoke one named macro. */
+static const struct field event_fields[] = {
+    {"at", FIELD_EVENT_TIME, offsetof(struct ra_event_settings, at), 0, 0},
+    {"template", FIELD_STRING, offsetof(struct ra_event_settings, template_name), 0, 0},
+    {"message", FIELD_STRING, offsetof(struct ra_event_settings, message), 0, 0},
+    {"macro", FIELD_STRING, offsetof(struct ra_event_settings, macro_name), 0, 0},
+};
+
 /** @brief Return the common file, speech, and Morse defaults used by scheduled media.
  * @return Fully initialized default identifier-media settings.
  */
@@ -315,6 +350,9 @@ static bool assign(const struct field *field, const char *text, void *output) {
     unsigned char *destination = (unsigned char *)output + field->offset;
     if (field->type == FIELD_STRING || field->type == FIELD_NODE_LIST ||
         field->type == FIELD_PREFIX || field->type == FIELD_NODE_ID) {
+        if (field->type == FIELD_STRING && field->maximum && strlen(text) > field->maximum) {
+            return false;
+        }
         if (field->type == FIELD_NODE_LIST && !ra_link_access_list_valid(text)) {
             return false;
         }
@@ -340,6 +378,14 @@ static bool assign(const struct field *field, const char *text, void *output) {
         *(bool *)destination = value;
     } else if (field->type == FIELD_COURTESY_INPUT) {
         return courtesy_input(text, (enum ra_courtesy_input *)destination);
+    } else if (field->type == FIELD_SCHEDULED_ACTION) {
+        return ra_scheduled_action_parse(text, (enum ra_scheduled_action *)destination);
+    } else if (field->type == FIELD_EVENT_TIME) {
+        struct ra_event_settings *event = output;
+        if (!ra_scheduled_event_parse_at(text, &event->trigger)) {
+            return false;
+        }
+        *(const char **)destination = text;
     } else if (field->type == FIELD_NUMBER || field->type == FIELD_TIME_FORMAT) {
         uint64_t value;
         if (!ra_config_unsigned(text, field->type == FIELD_TIME_FORMAT ? 12 : field->minimum,
@@ -363,12 +409,7 @@ const char *ra_settings_validate(bool identifier, const char *key, const char *v
                                      value);
 }
 
-/** @brief Validate an option using its documented section schema.
- * @param kind Section category selecting the valid options.
- * @param key Option name.
- * @param value Trimmed option value.
- * @return Null when valid, otherwise a stable diagnostic.
- */
+/* The public declaration documents the contract; select its typed schema here. */
 const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *key,
                                       const char *value) {
     const struct field *fields = node_fields;
@@ -388,12 +429,24 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
     } else if (kind == RA_SETTINGS_TIME) {
         fields = time_fields;
         count = sizeof(time_fields) / sizeof(time_fields[0]);
+    } else if (kind == RA_SETTINGS_TEMPLATE) {
+        fields = template_fields;
+        count = sizeof(template_fields) / sizeof(template_fields[0]);
+    } else if (kind == RA_SETTINGS_MACRO) {
+        fields = macro_fields;
+        count = sizeof(macro_fields) / sizeof(macro_fields[0]);
+    } else if (kind == RA_SETTINGS_EVENT) {
+        fields = event_fields;
+        count = sizeof(event_fields) / sizeof(event_fields[0]);
     }
     struct ra_node_settings node;
     struct ra_identifier_settings id;
     struct ra_announcement_settings announcement;
     struct ra_courtesy_settings courtesy;
     struct ra_time_settings time;
+    struct ra_template_settings template_settings;
+    struct ra_macro_settings macro;
+    struct ra_event_settings event;
     if (kind == RA_SETTINGS_COURTESY) {
         fields = courtesy_media_fields;
         count = sizeof(courtesy_media_fields) / sizeof(courtesy_media_fields[0]);
@@ -403,6 +456,9 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
     }
     void *destination = kind == RA_SETTINGS_NODE           ? (void *)&node
                         : kind == RA_SETTINGS_TIME         ? (void *)&time
+                        : kind == RA_SETTINGS_TEMPLATE     ? (void *)&template_settings
+                        : kind == RA_SETTINGS_MACRO        ? (void *)&macro
+                        : kind == RA_SETTINGS_EVENT        ? (void *)&event
                         : kind == RA_SETTINGS_ANNOUNCEMENT ? (void *)&announcement
                         : kind == RA_SETTINGS_COURTESY || kind == RA_SETTINGS_COURTESY_SET
                             ? (void *)&courtesy
@@ -477,14 +533,105 @@ static const char *resolve_prefixed(const struct field *fields, size_t fields_co
     return NULL;
 }
 
+/** @brief Return the label portion of one validated named-section header.
+ * @param section Complete configuration section name.
+ * @param prefix Named-section type such as `template`.
+ * @return Borrowed final label, or null when the header cannot name that type.
+ */
+static const char *named_label(const char *section, const char *prefix) {
+    size_t prefix_length = strlen(prefix);
+    if (strncmp(section, prefix, prefix_length) || section[prefix_length] != ' ') {
+        return NULL;
+    }
+    const char *label = strrchr(section, ' ');
+    return label[1] ? label + 1 : NULL;
+}
+
+/** @brief Test one exact global or node-specific named-section identity.
+ * @param section Complete parsed section name.
+ * @param prefix Section type such as `macro`.
+ * @param node Null for a global section, otherwise the node owning the override.
+ * @param label Named template or macro label.
+ * @return True only when all requested section components match exactly.
+ */
+static bool named_section_matches(const char *section, const char *prefix, const char *node,
+                                  const char *label) {
+    size_t prefix_length = strlen(prefix);
+    if (strncmp(section, prefix, prefix_length) || section[prefix_length] != ' ') {
+        return false;
+    }
+    const char *component = section + prefix_length + 1;
+    if (node) {
+        size_t node_length = strlen(node);
+        if (strncmp(component, node, node_length) || component[node_length] != ' ') {
+            return false;
+        }
+        component += node_length + 1;
+    }
+    return !strcmp(component, label);
+}
+
+/** @brief Find one named value with global settings preceding a same-label node override.
+ * @param entries Parsed configuration entries.
+ * @param count Entry count.
+ * @param prefix Section type such as `template`.
+ * @param node Optional local node selecting an override.
+ * @param label Named definition label.
+ * @param key Option to locate.
+ * @return Borrowed final value, including an empty override, or null when absent.
+ */
+static const char *named_lookup(const struct ra_config_entry *entries, size_t count,
+                                const char *prefix, const char *node, const char *label,
+                                const char *key) {
+    const char *result = NULL;
+    for (size_t scope = 0; scope < (node ? 2U : 1U); ++scope) {
+        const char *scope_node = scope ? node : NULL;
+        for (size_t index = 0; index < count; ++index) {
+            if (named_section_matches(entries[index].section, prefix, scope_node, label) &&
+                !strcmp(entries[index].key, key)) {
+                result = entries[index].value;
+            }
+        }
+    }
+    return result;
+}
+
+/** @brief Apply global named settings and then their same-label node override.
+ * @param fields Schema descriptors for one named-section type.
+ * @param fields_count Descriptor count.
+ * @param entries Parsed configuration entries.
+ * @param count Entry count.
+ * @param prefix Section type such as `template`.
+ * @param node Optional local node selecting an override.
+ * @param label Validated named-definition label.
+ * @param output Destination structure.
+ * @return Invalid setting name, or null on success.
+ */
+static const char *resolve_named(const struct field *fields, size_t fields_count,
+                                 const struct ra_config_entry *entries, size_t count,
+                                 const char *prefix, const char *node, const char *label,
+                                 void *output) {
+    for (size_t field = 0; field < fields_count; ++field) {
+        const char *text = named_lookup(entries, count, prefix, node, label, fields[field].name);
+        if (text && !assign(&fields[field], text, output)) {
+            return fields[field].name;
+        }
+    }
+    return NULL;
+}
+
 const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size_t count,
                                      const char *node, struct ra_node_settings *result) {
     struct ra_node_settings temporary = {.enabled = true,
                                          .full_duplex = true,
                                          .dtmf_muting = true,
+                                         .transmit_timeout_ms = 180000,
+                                         .timeout_lockout_ms = 30000,
+                                         .kerchunk_max_ms = 500,
                                          .telemetry_duck_db = -20,
                                          .courtesy_delay_ms = 250,
                                          .channel = node,
+                                         .callsign = "",
                                          .codec = "",
                                          .link_allow_nodes = "",
                                          .link_deny_nodes = "",
@@ -607,4 +754,79 @@ const char *ra_time_settings_resolve(const struct ra_config_entry *entries, size
         *result = temporary;
     }
     return error;
+}
+
+const char *ra_template_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                         const char *node, const char *set,
+                                         struct ra_template_settings *result) {
+    const char *name = named_label(set, "template");
+    if (!name) {
+        return "invalid named section";
+    }
+    struct ra_template_settings temporary = {.name = name, .text = ""};
+    const char *text = named_lookup(entries, count, "template", node, name, "text");
+    if (text)
+        temporary.text = text;
+    if (!*temporary.text) {
+        return "template text is required";
+    }
+    *result = temporary;
+    return NULL;
+}
+
+const char *ra_macro_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                      const char *node, const char *set,
+                                      struct ra_macro_settings *result) {
+    const char *name = named_label(set, "macro");
+    if (!name) {
+        return "invalid named section";
+    }
+    struct ra_macro_settings temporary = {
+        .name = name, .action = RA_SCHEDULED_ACTION_CONNECT, .target_node = ""};
+    const char *error = resolve_named(macro_fields, sizeof(macro_fields) / sizeof(macro_fields[0]),
+                                      entries, count, "macro", node, name, &temporary);
+    if (error) {
+        return error;
+    }
+    const char *action = named_lookup(entries, count, "macro", node, name, "action");
+    if (!action) {
+        return "macro action is required";
+    }
+    bool target_required = temporary.action == RA_SCHEDULED_ACTION_CONNECT ||
+                           temporary.action == RA_SCHEDULED_ACTION_DISCONNECT;
+    if (target_required && !*temporary.target_node) {
+        return "macro target node is required";
+    }
+    if (!target_required && *temporary.target_node) {
+        return "macro target node is not allowed";
+    }
+    *result = temporary;
+    return NULL;
+}
+
+const char *ra_event_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                      const char *set, struct ra_event_settings *result) {
+    const char *name = named_label(set, "event");
+    if (!name) {
+        return "invalid named section";
+    }
+    struct ra_event_settings temporary = {
+        .name = name, .at = "", .template_name = "", .message = "", .macro_name = ""};
+    const char *scopes[] = {NULL, NULL, set};
+    const char *error = resolve(event_fields, sizeof(event_fields) / sizeof(event_fields[0]),
+                                entries, count, scopes, &temporary);
+    if (error) {
+        return error;
+    }
+    if (!*temporary.at) {
+        return "event at is required";
+    }
+    if (*temporary.template_name && *temporary.message) {
+        return "event message and template are mutually exclusive";
+    }
+    if (!*temporary.template_name && !*temporary.message && !*temporary.macro_name) {
+        return "event message, template, or macro is required";
+    }
+    *result = temporary;
+    return NULL;
 }

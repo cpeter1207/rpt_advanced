@@ -45,9 +45,10 @@ in half duplex; local receiver audio must not be repeated in that mode.
 The ASL3 manual defines linking behavior. Implement the documented linking
 operations, including monitor, transceive, local-monitor, permanent connections,
 disconnect, reconnect-all, remote command mode, linking status, and the requested
-`*722` local-time announcement. Do not add forced-ID, macro, autopatch, or unrelated DTMF operations. Permit command
-mappings to match a node's existing linking commands without importing app_rpt
-implementation or configuration syntax.
+`*722` local-time announcement. Do not add forced-ID, autopatch, or unrelated
+DTMF operations. Scheduled controller macros are separately defined control-plane
+configuration, not DTMF macro commands. Permit command mappings to match a node's
+existing linking commands without importing app_rpt implementation or configuration syntax.
 
 Use Asterisk IAX2 and existing ASL registration. Validate incoming node identity
 against ASL node resolution, not caller ID alone. By default accept valid ASL

@@ -6,6 +6,15 @@
 #define RPT_ADVANCED_SETTINGS_H
 #include "config.h"
 #include "link_command.h"
+#include "scheduled_action.h"
+#include "scheduled_event.h"
+
+/** @brief Maximum local or remote node-identity bytes, including the terminating null byte.
+ *
+ * This matches the fixed direct-peer transport identity used by the scheduler and link layer.
+ * Configuration therefore permits at most 63 identity bytes and never relies on truncation.
+ */
+#define RA_NODE_NAME_MAX 64U
 
 /** @brief Validate one option against the same schema used for resolution.
  * @param identifier True selects ID settings; false selects node settings.
@@ -15,7 +24,7 @@
  */
 const char *ra_settings_validate(bool identifier, const char *key, const char *value);
 
-/** @brief Validate an option for a node, identifier, announcement, Morse, speech, or time section.
+/** @brief Validate an option for one documented configuration-section category.
  */
 enum ra_settings_kind {
     RA_SETTINGS_NODE,
@@ -25,7 +34,10 @@ enum ra_settings_kind {
     RA_SETTINGS_COURTESY_SET,
     RA_SETTINGS_MORSE,
     RA_SETTINGS_SPEECH,
-    RA_SETTINGS_TIME
+    RA_SETTINGS_TIME,
+    RA_SETTINGS_TEMPLATE,
+    RA_SETTINGS_MACRO,
+    RA_SETTINGS_EVENT
 };
 
 /** @brief Select the network directory sources checked after a local static override. */
@@ -34,20 +46,32 @@ enum ra_link_lookup_method {
     RA_LINK_LOOKUP_DNS,  /**< Check ASL DNS only. */
     RA_LINK_LOOKUP_FILE  /**< Check the configured external file only. */
 };
+/** @brief Validate one option for a specific documented section category.
+ * @param kind Section category that owns @p key.
+ * @param key Exact option name.
+ * @param value Trimmed option value.
+ * @return Null on success, or a stable diagnostic for an unknown or invalid option.
+ */
 const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *key,
                                       const char *value);
 
 /** @brief One node's controller and media settings. Strings are borrowed. */
 struct ra_node_settings {
-    bool enabled;               /**< Start this node's controller. */
-    bool full_duplex;           /**< Permit simultaneous receive and transmit. */
-    bool dtmf_muting;           /**< Silence completed local DTMF frames before routing. */
-    uint64_t hang_ms;           /**< Transmit hang time in milliseconds. */
+    bool enabled;                 /**< Start this node's controller. */
+    bool full_duplex;             /**< Permit simultaneous receive and transmit. */
+    bool dtmf_muting;             /**< Silence completed local DTMF frames before routing. */
+    uint64_t hang_ms;             /**< Transmit hang time in milliseconds. */
+    uint64_t transmit_timeout_ms; /**< Continuous-PTT watchdog duration; zero disables it. */
+    uint64_t timeout_lockout_ms;  /**< Post-timeout PTT lockout duration; zero releases on unkey. */
+    uint64_t
+        kerchunk_max_ms; /**< Maximum receive duration treated as a kerchunk; zero disables it. */
     int64_t telemetry_duck_db;  /**< Receive-active identifier and telemetry attenuation in dB. */
     uint64_t courtesy_delay_ms; /**< Receiver/link unkey-to-courtesy delay. */
     uint64_t sample_rate; /**< Requested rate; zero selects hardware-bounded automatic mode. */
     const char *channel;  /**< USBRadioPlus channel identifier, without the technology prefix. */
-    const char *codec;    /**< Asterisk codec name; empty selects signed linear automatically. */
+    const char
+        *callsign;     /**< Optional station callsign, up to 63 bytes, used by message templates. */
+    const char *codec; /**< Asterisk codec name; empty selects signed linear automatically. */
     const char *link_allow_nodes; /**< Incoming allowlist; empty accepts all verified nodes. */
     const char *link_deny_nodes;  /**< Incoming denylist, overriding allowlist membership. */
     const char *link_static_directory_file; /**< Optional local-priority static node directory. */
@@ -106,6 +130,30 @@ struct ra_courtesy_settings {
 /** @brief One node's local clock-announcement format. */
 struct ra_time_settings {
     uint64_t format; /**< Clock format: 12 or 24 hours. */
+};
+
+/** @brief One resolved named message template. Strings are configuration-owned. */
+struct ra_template_settings {
+    const char *name; /**< Case-sensitive template label from its section header. */
+    const char *text; /**< Strict message text using documented `${name}` substitutions. */
+};
+
+/** @brief One resolved named controller-operation macro. Strings are configuration-owned. */
+struct ra_macro_settings {
+    const char *name;                /**< Case-sensitive macro label from its section header. */
+    enum ra_scheduled_action action; /**< Validated controller operation. */
+    const char
+        *target_node; /**< Required up-to-63-byte node identity for connect and disconnect. */
+};
+
+/** @brief One resolved zero-time event. Strings are configuration-owned. */
+struct ra_event_settings {
+    const char *name; /**< Case-sensitive event label from its section header. */
+    const char *at;   /**< Original strict local-time trigger text. */
+    struct ra_scheduled_event_time trigger; /**< Parsed local-time trigger. */
+    const char *template_name;              /**< Optional named template label. */
+    const char *message;                    /**< Optional direct message-template text. */
+    const char *macro_name;                 /**< Optional named macro label. */
 };
 
 /** @brief Resolve node settings without modifying the output on failure.
@@ -170,4 +218,38 @@ const char *ra_courtesy_settings_resolve(const struct ra_config_entry *entries, 
  */
 const char *ra_time_settings_resolve(const struct ra_config_entry *entries, size_t count,
                                      const char *node, struct ra_time_settings *result);
+
+/** @brief Resolve a named template from global defaults and a same-label node override.
+ * @param entries Parsed configuration entries, or null when @p count is zero.
+ * @param count Entry count.
+ * @param node Node whose same-label override applies, or null for a global template.
+ * @param set Complete discovered template section.
+ * @param result Receives immutable, configuration-owned strings on success.
+ * @return Invalid option name, incomplete template, or null on success.
+ */
+const char *ra_template_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                         const char *node, const char *set,
+                                         struct ra_template_settings *result);
+
+/** @brief Resolve a named macro from global defaults and a same-label node override.
+ * @param entries Parsed configuration entries, or null when @p count is zero.
+ * @param count Entry count.
+ * @param node Node whose same-label override applies, or null for a global macro.
+ * @param set Complete discovered macro section.
+ * @param result Receives immutable, validated operation settings on success.
+ * @return Invalid option name, incomplete macro, or null on success.
+ */
+const char *ra_macro_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                      const char *node, const char *set,
+                                      struct ra_macro_settings *result);
+
+/** @brief Resolve one node-scoped zero-time event without changing output on failure.
+ * @param entries Parsed configuration entries, or null when @p count is zero.
+ * @param count Entry count.
+ * @param set Complete discovered event section.
+ * @param result Receives immutable parsed event settings on success.
+ * @return Invalid option name, incomplete event, or null on success.
+ */
+const char *ra_event_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                      const char *set, struct ra_event_settings *result);
 #endif

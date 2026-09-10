@@ -45,6 +45,12 @@ new installed images for every release.
 Clean up project-owned stale test containers at test start and on test exit,
 whether tests pass or fail. Do not remove unrelated containers.
 
+Use the deterministic launcher maintained in `rpt_advanced-workflows` for every
+explicitly started test container. It labels only project-owned containers,
+cleans those labels before launch, and installs an exit cleanup trap. Quality
+images intentionally use their published `latest` tags; do not replace that
+policy with ad-hoc local builds during normal validation.
+
 ## Workflow separation
 
 Workflow implementations reside in

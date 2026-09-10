@@ -33,15 +33,26 @@ set. File order does not change this scope precedence; later occurrences of
 the same option in one section win. Empty media paths or text clear inherited
 values.
 
-Node and media-set names are case-sensitive and cannot contain whitespace or
-square brackets. Scoped headers use one space between components. `general`,
-`identifier`, `announcement`, `courtesy`, `speech`, `morse`, and `time` are reserved
-flat-section names. Scoped identifier, announcement, courtesy, speech, Morse, and time
-headers must name an existing node, which may be declared later in the file. Repeated
-section headers merge options without creating duplicate nodes or media sets. Unknown
-options and invalid values are rejected even if a later entry would override them.
-There is no fixed limit on the number of nodes, identifiers, announcements, or courtesy
-tones.
+Named templates and macros use `[template label]` and `[macro label]` globally;
+`[template node label]` and `[macro node label]` override same-label global
+settings for that node. Zero-time events are node-scoped: `[event node label]`.
+Template, macro, and event labels are case-sensitive single tokens and cannot
+contain whitespace or square brackets.
+
+Node names are case-sensitive, limited to 63 bytes, and cannot contain whitespace or square
+brackets. Media-set names are case-sensitive and cannot contain whitespace or square brackets.
+The same 63-byte limit applies to decimal remote-node identities, so configured names always fit
+the direct-peer and scheduler transports without truncation. Scoped headers use
+one space between components. `general`,
+`identifier`, `announcement`, `courtesy`, `speech`, `morse`, `time`, `template`,
+`macro`, and `event` are reserved section names. Scoped identifier, announcement,
+courtesy, speech, Morse, time, template, macro, and event headers must name an existing
+node where their syntax includes a node name, which may be declared later in the file.
+Repeated ordinary section headers merge options without creating duplicate nodes or media
+sets. A repeated named template, macro, or event header is instead rejected as a duplicate
+definition. Unknown options and invalid values are rejected even if a later entry would
+override them. There is no fixed limit on the number of nodes, identifiers, announcements,
+courtesy tones, templates, macros, or events.
 
 ## Node settings
 
@@ -51,10 +62,14 @@ tones.
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `dtmf_muting` | yes | Silence a local received PCM frame when an in-band DTMF digit completes decoding, before it reaches the local controller or link router. DTMF command decoding remains active when disabled. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
+| `transmit_timeout_ms` | 180000 | Maximum continuous PTT duration in milliseconds. Zero disables the watchdog. On expiry, PTT releases immediately and remains blocked until the active receiver/link source clears and `timeout_lockout_ms` has elapsed. |
+| `timeout_lockout_ms` | 30000 | Post-watchdog lockout in milliseconds. Zero permits recovery as soon as the timed-out source unkeys. |
+| `kerchunk_max_ms` | 500 | Maximum local-receiver or individual-link transmission duration treated as a kerchunk. A kerchunk does not queue its courtesy tone or every-release announcement. Zero disables kerchunk control. |
 | `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, Morse, and generated-tone identifiers, announcements, courtesy tones, and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
 | `courtesy_delay_ms` | 250 | Delay after a receiver or link source unkeys before its assigned courtesy tone starts. Each source retains its own delay when several tones are queued. A rekey by that same source before the delay ends cancels only that pending tone. PTT remains asserted from unkey through the queued tone's completion. |
 | `sample_rate_hz` | 0 | Zero selects the highest usable local signed-linear rate no greater than the hardware-native rate. An explicit rate selects the local channel rate and requires a supported bidirectional Asterisk conversion path. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
+| `callsign` | empty | Optional local station callsign, up to 63 bytes. `${callsign}` in a scheduled message renders this exact value; an empty value renders nothing. |
 | `codec` | empty | Empty selects signed linear for the local radio channel; otherwise select an available local Asterisk codec subject to `sample_rate_hz`. It does not otherwise restrict IAX link candidates. |
 | `link_allow_nodes` | empty | Incoming node allowlist; comma-separated decimal node numbers. Empty places no allowlist restriction on verified nodes or their IAX DTMF control events. |
 | `link_deny_nodes` | empty | Incoming node denylist. Explicit denial overrides allowlist membership and blocks that peer's IAX DTMF control events. |
@@ -257,6 +272,112 @@ for one node.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `format` | `12` | Clock format for `*722`: `12` sends an AM/PM time; `24` sends a 24-hour time. The local system timezone is used. |
+
+## Scheduled messages and macros
+
+Named templates avoid repeating message text. A global `[template label]`
+applies to every node. `[template node label]` overrides the global template of
+the same label for that node. A resolved template requires one nonempty `text`
+value; a node-specific template without `text` retains the global value.
+
+```ini
+[template net_start]
+text = ${greeting}. The ${callsign} net starts at ${time}.
+
+[template 524950 net_start]
+text = ${greeting}. The KG0BP net starts at ${time}.
+```
+
+Template text is strict. It accepts only `${day_of_week}`, `${date}`, `${time}`,
+`${greeting}`, `${link_status}`, `${node}`, and `${callsign}`. `${callsign}`
+uses the resolved node `callsign` setting and may render empty. Unknown,
+malformed, or unterminated substitutions reject the complete configuration
+reload; text is not interpreted as a shell command. A rendered scheduled message
+is limited to 127 bytes. Validation proves the worst case using the longest
+weekday, date, clock, greeting, direct-peer status, node, and callsign values;
+it rejects text that could exceed the limit rather than truncating it at runtime.
+
+| Substitution | Rendered value |
+| --- | --- |
+| `${day_of_week}` | Full local weekday name. |
+| `${date}` | Local date as `YYYY-MM-DD`. |
+| `${time}` | Local clock using the event node's `[time]` `format`. |
+| `${greeting}` | `Good Morning` before noon, `Good Afternoon` before 5 PM, or `Good Evening` afterward. |
+| `${link_status}` | Current bounded direct-peer status, such as `NO LINKS`. |
+| `${node}` | Event-owning node name. |
+| `${callsign}` | Event node's configured `callsign`, or empty when it is unset. |
+
+If rendered text contains no Morse-representable non-whitespace character, it
+is treated as no message. This prevents a silent transmission when speech is
+unavailable; an associated macro still runs.
+
+Named macros select exactly one validated controller operation. A global
+`[macro label]` may be overridden for one node by `[macro node label]`; omitted
+node-specific settings retain global values. The only initial operations are
+`connect`, `disconnect`, `disconnect_all`, and `reconnect_all`. `connect` and
+`disconnect` require a decimal `target_node` of at most 63 digits.
+`disconnect_all` and `reconnect_all` reject `target_node`. `connect` creates a
+nonpermanent transceive direct link. `disconnect` detaches the active direct
+peer named by `target_node`. `disconnect_all` detaches every current temporary
+and permanent direct peer and pauses their retained retry records;
+`reconnect_all` resumes every retained retry.
+Macros never run shell commands or launch processes.
+
+```ini
+[macro connect_news]
+action = connect
+target_node = 123456
+
+[macro 524950 clear_links]
+action = disconnect_all
+```
+
+Zero-time scheduled events use `[event node label]`; there is no global event
+section. Each event has one required local-time `at` trigger and must define a
+direct `message`, a named `template`, a named `macro`, or a message/template
+plus a macro. `message` and `template` are mutually exclusive. A message uses
+the same strict substitution syntax as a named template. The named template or
+macro is resolved global-first, then by a same-label node override.
+Events for a disabled node are skipped while that node is disabled. Missed
+occurrences are not retained or played later when the node is re-enabled.
+
+```ini
+[event 524950 morning_net]
+at = weekly Tuesday 19:00
+template = net_start
+macro = connect_news
+
+[event 524950 evening_id]
+at = daily 21:30
+message = ${greeting}. This is ${callsign}.
+
+[event 524950 special]
+at = once 2026-12-31 23:55
+macro = clear_links
+```
+
+`at` accepts exactly these local-time forms:
+
+| Form | Meaning |
+| --- | --- |
+| `daily HH:MM` | Run once each local day at a 24-hour hour and minute. |
+| `weekly weekday HH:MM` | Run on the named full weekday (`Sunday` through `Saturday`) at that local time. Weekday spelling is case-insensitive. |
+| `once YYYY-MM-DD HH:MM` | Run once on one valid local Gregorian calendar date and time. |
+
+Seconds, time zones, ranges, aliases, and cron expressions are intentionally
+invalid. A repeated local minute during daylight-saving fallback runs once, not
+twice. Events due in the same minute run in complete configuration-section
+order across all nodes. The scheduler retains one FIFO control task for each
+wall-clock minute it observes, so slow speech preparation or a link action
+cannot discard events due in a later minute. Their messages enter the serialized
+telemetry path. When an event has both a message/template and a macro, the
+message is queued before the macro executes. The macro does not wait for on-air playback: it runs
+after the telemetry queue accepts the message. If that queue is full, both the
+message and macro remain pending until a later control-plane tick can queue the
+message. A macro-only event has no telemetry-queue dependency and runs when it
+is selected. A successful configuration reload reevaluates the current local
+minute. Macro dispatch, local-time matching, template rendering, and speech
+preparation are control-plane work, never audio-callback work.
 
 ## Link lifetime, recovery, and duplex
 

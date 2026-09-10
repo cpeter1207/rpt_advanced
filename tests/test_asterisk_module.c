@@ -13,11 +13,15 @@
 #include <asterisk/module.h>
 #include <asterisk/pbx.h>
 #include <asterisk/taskprocessor.h>
+#include <asterisk/utils.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <semaphore.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /** @brief Number of runtime starts or replacements to reject in sequence. */
@@ -30,6 +34,8 @@ static ra_link_event_handler event_sink;
 static bool emit_digit_during_reload;
 /** @brief Inject one lifecycle report while reload temporarily rejects new producer events. */
 static bool emit_event_during_reload;
+/** @brief Interrupt the schedule ticker while a reload rejects control submissions. */
+static bool emit_schedule_during_reload;
 /** @brief Number of complete runtime replacements requested by the module. */
 static unsigned int runtime_reloads;
 /** @brief Number of full runtime shutdowns requested by the module. */
@@ -42,6 +48,58 @@ static bool runtime_locked;
 static unsigned int runtime_digit_calls;
 /** @brief Lifecycle reports queued through the module's serialized control path. */
 static unsigned int runtime_link_event_calls;
+/** @brief Yielded scheduled dispatches awaiting the module control bridge. */
+static unsigned int scheduled_dispatches;
+/** @brief Inject a scheduler dispatch construction failure. */
+static bool scheduled_dispatch_failure;
+/** @brief Reject scheduled telemetry while retaining its dispatch for a later retry. */
+static bool scheduled_message_failure;
+/** @brief Reject completion of a queued scheduled dispatch. */
+static bool scheduled_completion_failure;
+/** @brief Include speech/Morse telemetry in the next scheduled fixture dispatch. */
+static bool scheduled_has_message = true;
+/** @brief Include a validated link operation in the next scheduled fixture dispatch. */
+static bool scheduled_has_operation = true;
+/** @brief Number of scheduled telemetry messages offered to the fixture runtime. */
+static unsigned int scheduled_message_calls;
+/** @brief Number of scheduled events completed before their optional macro action begins. */
+static unsigned int scheduled_completions;
+/** @brief Scheduled disconnect macros executed after their telemetry was accepted. */
+static unsigned int scheduled_disconnects;
+/** @brief Number of fixture scheduler tick threads Asterisk requested. */
+static unsigned int scheduler_thread_starts;
+/** @brief Reject one Asterisk background-thread request. */
+static bool scheduler_thread_failure;
+/** @brief Joinable scheduler thread created by the successful module-load fixture. */
+static pthread_t scheduler_fixture_thread;
+/** @brief True after the fixture has captured the running scheduler thread. */
+static bool scheduler_fixture_thread_running;
+/** @brief Test-only scheduler sleep entries announced by the ticker thread. */
+static sem_t scheduler_sleep_entered;
+/** @brief Test-only permissions for the ticker thread to complete one sleep. */
+static sem_t scheduler_sleep_release;
+/** @brief True after the deterministic ticker synchronization fixtures are initialized. */
+static bool scheduler_sleep_synchronization_ready;
+/** @brief Fixture wall clock advanced one epoch minute for every requested scheduler tick. */
+static time_t scheduler_fixture_time = 7200;
+/** @brief Pause the next ticker allocation after its first reload-state check. */
+static bool block_scheduler_allocation;
+/** @brief Pause a replacement runtime while its module reload state remains asserted. */
+static bool block_runtime_reload;
+/** @brief Announces the controlled ticker allocation to the reloading test thread. */
+static sem_t scheduler_allocation_entered;
+/** @brief Releases the controlled ticker allocation after reload state is asserted. */
+static sem_t scheduler_allocation_release;
+/** @brief Announces that the fixture reload is holding the module runtime lock. */
+static sem_t runtime_reload_entered;
+/** @brief Releases the fixture reload after the ticker has rechecked its reload state. */
+static sem_t runtime_reload_release;
+/** @brief Wait for one deterministic fixture synchronization event. */
+static void wait_fixture_semaphore(sem_t *semaphore);
+/** @brief Publish one deterministic fixture synchronization event. */
+static void post_fixture_semaphore(sem_t *semaphore);
+/** @brief Prompt the timer thread to submit one control task under test synchronization. */
+static void trigger_schedule_tick(void);
 
 /** @cond TEST_FIXTURE */
 /** @brief Start an initially empty runtime fixture. */
@@ -64,6 +122,11 @@ const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_docume
     (void)replacement;
     assert(runtime_locked && runtime_active);
     ++runtime_reloads;
+    if (block_runtime_reload) {
+        block_runtime_reload = false;
+        post_fixture_semaphore(&runtime_reload_entered);
+        wait_fixture_semaphore(&runtime_reload_release);
+    }
     if (emit_digit_during_reload) {
         assert(digit_sink);
         digit_sink("usb", '1', 100);
@@ -71,6 +134,9 @@ const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_docume
     if (emit_event_during_reload) {
         assert(event_sink);
         event_sink("usb", "123", true);
+    }
+    if (emit_schedule_during_reload) {
+        trigger_schedule_tick();
     }
     if (runtime_failures) {
         --runtime_failures;
@@ -85,6 +151,63 @@ void ra_runtime_stop(struct ra_runtime *runtime) {
     (void)runtime;
     ++runtime_stops;
     runtime_active = false;
+}
+
+/** @brief Yield one controllable schedule dispatch for the Asterisk bridge fixture.
+ * @param runtime Active fixture runtime.
+ * @param now Wall-clock value supplied by the ticker.
+ * @param dispatch Output dispatch copied by the module before it releases its lock.
+ * @return One when a fixture event is ready, zero when idle, or minus one when injected broken.
+ */
+int ra_runtime_next_scheduled_dispatch(struct ra_runtime *runtime, time_t now,
+                                       struct ra_scheduled_dispatch *dispatch) {
+    (void)runtime;
+    (void)now;
+    assert(runtime_locked && runtime_active && dispatch);
+    if (scheduled_dispatch_failure) {
+        return -1;
+    }
+    if (!scheduled_dispatches) {
+        return 0;
+    }
+    --scheduled_dispatches;
+    *dispatch = (struct ra_scheduled_dispatch){.generation = 1,
+                                               .event_index = 0,
+                                               .occurrence = 1,
+                                               .has_message = scheduled_has_message,
+                                               .has_operation = scheduled_has_operation,
+                                               .operation = {.action = RA_LINK_DISCONNECT}};
+    strcpy(dispatch->local, "usb");
+    strcpy(dispatch->speech, "scheduled message");
+    strcpy(dispatch->morse, "SCHEDULED MESSAGE");
+    strcpy(dispatch->operation.remote, "123");
+    return 1;
+}
+
+/** @brief Record scheduled telemetry admission through the fixture runtime.
+ * @param runtime Active fixture runtime.
+ * @param dispatch Current copied event.
+ * @return Zero unless the test retains the event by simulating a full telemetry queue.
+ */
+int ra_runtime_queue_scheduled_message(struct ra_runtime *runtime,
+                                       const struct ra_scheduled_dispatch *dispatch) {
+    (void)runtime;
+    assert(runtime_locked && dispatch && !strcmp(dispatch->local, "usb"));
+    ++scheduled_message_calls;
+    return scheduled_message_failure ? -1 : 0;
+}
+
+/** @brief Record a completed scheduled event before its macro is attempted.
+ * @param runtime Active fixture runtime.
+ * @param dispatch Current copied event.
+ * @return True while the fixture runtime remains active.
+ */
+bool ra_runtime_complete_scheduled_dispatch(struct ra_runtime *runtime,
+                                            const struct ra_scheduled_dispatch *dispatch) {
+    (void)runtime;
+    assert(runtime_locked && dispatch && !strcmp(dispatch->local, "usb"));
+    ++scheduled_completions;
+    return !scheduled_completion_failure;
 }
 /** @endcond */
 
@@ -177,6 +300,143 @@ static void drain_tasks(void) {
     queued_count = 0;
 }
 
+/** @brief Reload the module while the scheduler-race fixture controls its runtime transition.
+ * @param unused Unused POSIX thread argument.
+ * @return Null after a successful replacement.
+ */
+static void *run_fixture_reload(void *unused) {
+    (void)unused;
+    assert(!registered->reload());
+    return NULL;
+}
+
+/** @brief Wait for one deterministic fixture synchronization event.
+ * @param semaphore Semaphore carrying the expected event.
+ */
+static void wait_fixture_semaphore(sem_t *semaphore) {
+    int result;
+    do {
+        result = sem_wait(semaphore);
+    } while (result && errno == EINTR);
+    assert(!result);
+}
+
+/** @brief Publish one deterministic fixture synchronization event.
+ * @param semaphore Semaphore receiving the event.
+ */
+static void post_fixture_semaphore(sem_t *semaphore) { assert(!sem_post(semaphore)); }
+
+/** @brief Wait until the fixture ticker is blocked at its deterministic sleep point. */
+static void wait_schedule_ticker_sleep(void) { wait_fixture_semaphore(&scheduler_sleep_entered); }
+
+/** @brief Permit the fixture ticker to complete one deterministic sleep. */
+static void release_schedule_ticker_sleep(void) {
+    post_fixture_semaphore(&scheduler_sleep_release);
+}
+
+/** @brief Replace the ticker's production sleep with a test-controlled synchronization point.
+ * @param requested Ignored production interval.
+ * @param remaining Ignored remainder output.
+ * @return Zero after the test releases this single sleep.
+ *
+ * The coverage-module link redirects its `nanosleep` reference here. This eliminates arbitrary
+ * signal delivery and wall-clock waits while retaining the production ticker implementation
+ * unchanged.
+ */
+int __wrap_nanosleep(const struct timespec *requested, struct timespec *remaining) {
+    (void)requested;
+    (void)remaining;
+    assert(scheduler_sleep_synchronization_ready);
+    post_fixture_semaphore(&scheduler_sleep_entered);
+    wait_fixture_semaphore(&scheduler_sleep_release);
+    return 0;
+}
+
+/** @brief Supply one deterministic epoch clock for ticker and immediate scheduling tests.
+ * @param result Optional destination for the returned epoch time.
+ * @return Current fixture epoch time.
+ */
+time_t __wrap_time(time_t *result) {
+    if (result) {
+        *result = scheduler_fixture_time;
+    }
+    return scheduler_fixture_time;
+}
+
+/** @brief Resolve the libc join implementation after waking the controlled ticker sleep.
+ * @param thread Thread to join with the native libc implementation.
+ * @param result Optional native thread-result destination.
+ * @return Native POSIX join result.
+ */
+static int call_libc_pthread_join(pthread_t thread, void **result) {
+    typedef int (*pthread_join_function)(pthread_t, void **);
+    pthread_join_function join = (pthread_join_function)dlsym(RTLD_NEXT, "pthread_join");
+    assert(join);
+    return join(thread, result);
+}
+
+/** @brief Wake the test-controlled ticker only after module teardown requests its stop.
+ * @param thread Thread the module is joining.
+ * @param result Optional thread-result destination.
+ * @return Native POSIX join result.
+ *
+ * `stop_schedule_ticker()` first clears its production run flag and then joins. Releasing the
+ * blocked fixture sleep at that point makes the ticker observe the cleared flag and exit normally,
+ * so unload is deterministic without changing production shutdown behavior.
+ */
+int __wrap_pthread_join(pthread_t thread, void **result) {
+    if (scheduler_fixture_thread_running && pthread_equal(thread, scheduler_fixture_thread)) {
+        release_schedule_ticker_sleep();
+    }
+    return call_libc_pthread_join(thread, result);
+}
+
+/** @brief Prompt the timer thread to submit a control task without a wall-clock test delay. */
+static void trigger_schedule_tick(void) {
+    assert(scheduler_fixture_thread_running);
+    scheduler_fixture_time += 60;
+    release_schedule_ticker_sleep();
+    /* This rendezvous proves submission returned before the test drains its control task. */
+    wait_schedule_ticker_sleep();
+}
+
+/** @brief Supply the Asterisk-selected background stack size to the module fixture.
+ * @return Zero because the fixture leaves stack selection to pthread.
+ */
+int ast_background_stacksize(void) { return 0; }
+
+/** @brief Create the module's control ticker with deterministic failure injection.
+ * @param thread Receives the joinable ticker thread.
+ * @param attributes Optional caller attributes.
+ * @param start Routine supplied by the module.
+ * @param argument Routine argument.
+ * @param stacksize Requested Asterisk background stack size.
+ * @param file Module source file.
+ * @param caller Module function name.
+ * @param line Module source line.
+ * @param start_name Stringified start routine.
+ * @return Zero on thread creation or a POSIX error selected by the fixture.
+ */
+int ast_pthread_create_stack(pthread_t *thread, pthread_attr_t *attributes, void *(*start)(void *),
+                             void *argument, size_t stacksize, const char *file, const char *caller,
+                             int line, const char *start_name) {
+    (void)stacksize;
+    (void)file;
+    (void)caller;
+    (void)line;
+    assert(thread && start && start_name && !strcmp(start_name, "run_schedule_ticker"));
+    ++scheduler_thread_starts;
+    if (scheduler_thread_failure) {
+        return EAGAIN;
+    }
+    int result = pthread_create(thread, attributes, start, argument);
+    if (!result) {
+        scheduler_fixture_thread = *thread;
+        scheduler_fixture_thread_running = true;
+    }
+    return result;
+}
+
 /** @brief Supply Asterisk's serial control executor.
  * @param name Module-specific executor name.
  * @param create Default creation policy.
@@ -220,7 +480,7 @@ int __ast_taskprocessor_push(struct ast_taskprocessor *processor, int (*execute)
     return 0;
 }
 
-/** @brief Supply digit-event allocation with injected failure.
+/** @brief Supply task allocation with injected failure and a controlled reload race.
  * @param count Element count.
  * @param size Element size.
  * @param file Caller file.
@@ -232,6 +492,11 @@ void *__ast_calloc(size_t count, size_t size, const char *file, int line, const 
     (void)file;
     (void)line;
     (void)function;
+    if (block_scheduler_allocation) {
+        block_scheduler_allocation = false;
+        post_fixture_semaphore(&scheduler_allocation_entered);
+        wait_fixture_semaphore(&scheduler_allocation_release);
+    }
     return queue_failure == 3 ? NULL : calloc(count, size);
 }
 
@@ -590,6 +855,9 @@ bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *lo
 bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const char *remote) {
     (void)runtime;
     assert(runtime_locked && local && remote);
+    if (!strcmp(local, "usb") && !strcmp(remote, "123")) {
+        ++scheduled_disconnects;
+    }
     return !link_failure;
 }
 
@@ -800,6 +1068,13 @@ static void write_config(const char *path, const char *content) {
  * @return Zero after assertions and temporary-file cleanup.
  */
 int main(void) {
+    assert(!sem_init(&scheduler_sleep_entered, 0, 0));
+    assert(!sem_init(&scheduler_sleep_release, 0, 0));
+    assert(!sem_init(&scheduler_allocation_entered, 0, 0));
+    assert(!sem_init(&scheduler_allocation_release, 0, 0));
+    assert(!sem_init(&runtime_reload_entered, 0, 0));
+    assert(!sem_init(&runtime_reload_release, 0, 0));
+    scheduler_sleep_synchronization_ready = true;
     char directory[] = "/tmp/rpt-advanced-module-XXXXXX";
     assert(mkdtemp(directory));
     ast_config_AST_CONFIG_DIR = directory;
@@ -831,7 +1106,16 @@ int main(void) {
     link_failure = 9;
     assert(registered->load() == AST_MODULE_LOAD_DECLINE);
     link_failure = 0;
+    scheduler_thread_failure = true;
+    assert(registered->load() == AST_MODULE_LOAD_DECLINE);
+    assert(scheduler_thread_starts == 1);
+    scheduler_thread_failure = false;
     assert(registered->load() == AST_MODULE_LOAD_SUCCESS);
+    assert(scheduler_thread_starts == 2);
+    /* Establish the ticker's blocked state before every deterministic release-and-rendezvous. */
+    wait_schedule_ticker_sleep();
+    /* Both startup paths submit the current minute; duplicate occurrence keys are harmless. */
+    drain_tasks();
     assert(application && command_entry);
     assert(event_sink);
     event_sink("usb", "123", true);
@@ -1045,6 +1329,7 @@ int main(void) {
         assert(command_entry->handler(command_entry, CLI_HANDLER, &arguments) == CLI_FAILURE);
     }
     link_failure = 0;
+    drain_tasks();
     unsigned int reloads_before = runtime_reloads;
     unsigned int stops_before = runtime_stops;
     write_config(path, "[usb]\nunknown=yes\n");
@@ -1061,6 +1346,7 @@ int main(void) {
            runtime_active);
     write_config(path, "[usb]\n");
     assert(registered->reload() == 0);
+    drain_tasks();
     assert(runtime_reloads == reloads_before + 3 && runtime_stops == stops_before &&
            runtime_active);
     assert(errors == 8);
@@ -1069,6 +1355,7 @@ int main(void) {
     emit_digit_during_reload = true;
     assert(!registered->reload());
     emit_digit_during_reload = false;
+    drain_tasks();
     assert(queued_count == 0 && runtime_stops == stops_before && runtime_active);
     assert(runtime_digit_calls == parsed_before_stop);
     unsigned int event_before_stale_reload = runtime_link_event_calls;
@@ -1222,10 +1509,140 @@ int main(void) {
     reload_on_unlock = true;
     digit_sink("usb", '1', 100);
     drain_tasks();
+    /* The background ticker does no audio work: it submits a revision-stamped control task. */
+    trigger_schedule_tick();
+    drain_tasks();
+    /* A failed wall clock is reported once and does not cause one task per second. */
+    scheduler_fixture_time = (time_t)-1;
+    release_schedule_ticker_sleep();
+    wait_schedule_ticker_sleep();
+    assert(queued_count == 1);
+    drain_tasks();
+    release_schedule_ticker_sleep();
+    wait_schedule_ticker_sleep();
+    assert(!queued_count);
+    scheduler_fixture_time = 7260;
+    release_schedule_ticker_sleep();
+    wait_schedule_ticker_sleep();
+    drain_tasks();
+    /* A reload beginning after allocation must invalidate the task before it reaches the queue. */
+    block_scheduler_allocation = true;
+    scheduler_fixture_time += 60;
+    release_schedule_ticker_sleep();
+    wait_fixture_semaphore(&scheduler_allocation_entered);
+    block_runtime_reload = true;
+    pthread_t reload_thread;
+    assert(!pthread_create(&reload_thread, NULL, run_fixture_reload, NULL));
+    wait_fixture_semaphore(&runtime_reload_entered);
+    post_fixture_semaphore(&scheduler_allocation_release);
+    wait_schedule_ticker_sleep();
+    post_fixture_semaphore(&runtime_reload_release);
+    assert(!pthread_join(reload_thread, NULL));
+    drain_tasks();
+    unsigned int scheduled_messages_before = scheduled_message_calls;
+    unsigned int scheduled_completions_before = scheduled_completions;
+    unsigned int scheduled_disconnects_before = scheduled_disconnects;
+    /* One minute may contain any number of configuration-order scheduled events. */
+    scheduled_dispatches = 2;
+    trigger_schedule_tick();
+    drain_tasks();
+    assert(scheduled_message_calls == scheduled_messages_before + 2);
+    assert(scheduled_completions == scheduled_completions_before + 2);
+    assert(scheduled_disconnects == scheduled_disconnects_before + 2);
+    scheduled_messages_before = scheduled_message_calls;
+    scheduled_completions_before = scheduled_completions;
+    scheduled_disconnects_before = scheduled_disconnects;
+    scheduled_has_message = false;
+    scheduled_has_operation = false;
+    scheduled_dispatches = 1;
+    trigger_schedule_tick();
+    drain_tasks();
+    scheduled_has_message = true;
+    scheduled_has_operation = true;
+    assert(scheduled_message_calls == scheduled_messages_before + 1);
+    assert(scheduled_completions == scheduled_completions_before + 1);
+    assert(scheduled_disconnects == scheduled_disconnects_before);
+    scheduled_messages_before = scheduled_message_calls;
+    scheduled_completions_before = scheduled_completions;
+    scheduled_disconnects_before = scheduled_disconnects;
+    scheduled_dispatches = 1;
+    scheduled_message_failure = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    scheduled_message_failure = false;
+    assert(scheduled_message_calls == scheduled_messages_before + 1);
+    assert(scheduled_completions == scheduled_completions_before);
+    assert(scheduled_disconnects == scheduled_disconnects_before);
+    scheduled_messages_before = scheduled_message_calls;
+    scheduled_completions_before = scheduled_completions;
+    scheduled_disconnects_before = scheduled_disconnects;
+    scheduled_dispatches = 1;
+    scheduled_completion_failure = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    scheduled_completion_failure = false;
+    assert(scheduled_message_calls == scheduled_messages_before + 1);
+    assert(scheduled_completions == scheduled_completions_before + 1);
+    assert(scheduled_disconnects == scheduled_disconnects_before);
+    scheduled_messages_before = scheduled_message_calls;
+    scheduled_dispatch_failure = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    scheduled_dispatch_failure = false;
+    assert(scheduled_message_calls == scheduled_messages_before);
+    scheduled_messages_before = scheduled_message_calls;
+    queue_failure = 3;
+    trigger_schedule_tick();
+    queue_failure = 0;
+    drain_tasks();
+    assert(scheduled_message_calls == scheduled_messages_before);
+    queue_failure = 2;
+    trigger_schedule_tick();
+    queue_failure = 0;
+    drain_tasks();
+    assert(scheduled_message_calls == scheduled_messages_before);
+    scheduled_completions_before = scheduled_completions;
+    scheduled_dispatches = 1;
+    reload_on_unlock = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    assert(scheduled_completions == scheduled_completions_before + 1);
+    emit_schedule_during_reload = true;
+    assert(!registered->reload());
+    emit_schedule_during_reload = false;
+    assert(queued_count == 1);
+    drain_tasks();
+    scheduled_dispatches = 1;
+    scheduled_messages_before = scheduled_message_calls;
+    scheduled_completions_before = scheduled_completions;
+    scheduled_disconnects_before = scheduled_disconnects;
+    assert(!registered->reload());
+    drain_tasks();
+    assert(scheduled_message_calls == scheduled_messages_before + 1);
+    assert(scheduled_completions == scheduled_completions_before + 1);
+    assert(scheduled_disconnects == scheduled_disconnects_before + 1);
+    scheduled_dispatches = 1;
+    trigger_schedule_tick();
+    assert(queued_count);
+    /* A task retained from the previous revision must not execute after the reload. */
+    scheduled_dispatches = 0;
+    scheduled_messages_before = scheduled_message_calls;
+    assert(!registered->reload());
+    drain_tasks();
+    assert(scheduled_message_calls == scheduled_messages_before);
+    scheduled_dispatches = 0;
     digit_sink("usb", '1', 100);
     assert(registered->unload() == 0);
+    scheduler_fixture_thread_running = false;
     assert(runtime_stops == stops_before + 1 && !runtime_active);
     assert(dlclose(handle) == 0 && !registered);
+    scheduler_sleep_synchronization_ready = false;
+    assert(!sem_destroy(&runtime_reload_release));
+    assert(!sem_destroy(&runtime_reload_entered));
+    assert(!sem_destroy(&scheduler_allocation_release));
+    assert(!sem_destroy(&scheduler_allocation_entered));
+    assert(!sem_destroy(&scheduler_sleep_release));
+    assert(!sem_destroy(&scheduler_sleep_entered));
     assert(unlink(path) == 0);
     assert(rmdir(directory) == 0);
     puts("Asterisk shared-module lifecycle tests passed");

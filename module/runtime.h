@@ -6,13 +6,18 @@
 #define RPT_ADVANCED_RUNTIME_H
 #include "document.h"
 #include "link_command.h"
+#include "message_template.h"
+#include "settings.h"
 #include <stddef.h>
+#include <time.h>
 
 struct ra_runtime_node;
+struct ra_runtime_schedule;
 struct ast_channel;
 struct ast_format;
 struct ast_format_cap;
 struct ra_link_peer_status;
+
 /** @brief Nonblocking delivery of decoded digits to the module's control queue.
  * @param node Borrowed node name; copy before returning if retained.
  * @param digit Completed digit, or zero for the interdigit timeout.
@@ -27,9 +32,9 @@ typedef void (*ra_digit_handler)(const char *node, char digit, uint64_t now_ms);
 typedef void (*ra_link_event_handler)(const char *local, const char *remote, bool connected);
 /** @brief Complete operation copied out of node-owned command state. */
 struct ra_link_operation {
-    enum ra_link_action action; /**< Requested linking action. */
-    char remote[64];            /**< Decimal destination, resolved from zero shorthand if needed. */
-    char digit;                 /**< Remote-mode digit, or zero when selecting the remote peer. */
+    enum ra_link_action action;    /**< Requested linking action. */
+    char remote[RA_NODE_NAME_MAX]; /**< Decimal destination, resolved from zero shorthand. */
+    char digit; /**< Remote-mode digit, or zero when selecting the remote peer. */
 };
 /** @brief Owned call preparation, independent of runtime configuration lifetime. */
 struct ra_link_dial {
@@ -37,11 +42,36 @@ struct ra_link_dial {
     struct ast_format **candidates; /**< Owned ordered wire-format references. */
     size_t candidate_count;         /**< Number of entries in candidates. */
 };
+
+/** @brief Maximum scheduled speech bytes after node/callsign pronunciation expansion.
+ *
+ * A one-character `${node}` expands to `node,X`, six bytes.  The strict template renderer keeps
+ * the source at `RA_MESSAGE_TEMPLATE_OUTPUT_MAX` bytes including its terminator, so this factor
+ * covers every possible rendered scheduled message while keeping the copied dispatch bounded.
+ */
+#define RA_RUNTIME_SCHEDULED_SPEECH_MAX (RA_MESSAGE_TEMPLATE_OUTPUT_MAX * 6U)
+
+/** @brief One copied control-plane event awaiting telemetry enqueue and optional link execution. */
+struct ra_scheduled_dispatch {
+    uint64_t generation;          /**< Runtime schedule generation that owns this dispatch. */
+    size_t event_index;           /**< Private configuration-order schedule index. */
+    uint64_t occurrence;          /**< Civil calendar-minute occurrence selected by the trigger. */
+    char local[RA_NODE_NAME_MAX]; /**< Copied local node identity. */
+    char speech[RA_RUNTIME_SCHEDULED_SPEECH_MAX]; /**< Piper input after bounded identity expansion.
+                                                   */
+    char morse[RA_MESSAGE_TEMPLATE_OUTPUT_MAX]; /**< Morse-safe fallback text when a message exists.
+                                                 */
+    struct ra_link_operation operation;         /**< Optional validated controller operation. */
+    bool has_message;   /**< The dispatch must enqueue telemetry before its action. */
+    bool has_operation; /**< The application must execute @p operation after enqueue. */
+};
 /** @brief Module-owned nodes; configuration strings must outlive this runtime. */
 struct ra_runtime {
     struct ra_runtime_node *nodes; /**< Private list, initially null. */
     ra_digit_handler digit;        /**< Control-queue submission callback retained across reload. */
     ra_link_event_handler event;   /**< Control-queue submission callback for link lifecycle. */
+    struct ra_runtime_schedule *schedule; /**< Private control-plane event state. */
+    uint64_t schedule_generation; /**< Private monotonic reload generation for copied dispatches. */
 };
 
 /** @brief Format known node identities and amateur callsigns for speech synthesis.
@@ -85,6 +115,43 @@ const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_docume
  * @param runtime Owned runtime, safe when empty.
  */
 void ra_runtime_stop(struct ra_runtime *runtime);
+
+/** @brief Obtain one earliest due scheduled event without touching audio processing.
+ * @param runtime Active runtime whose caller serializes control operations and reload.
+ * @param now Wall-clock instant captured by one FIFO control task and used with the host's local
+ * time zone.
+ * @param dispatch Receives copied telemetry and operation data when an event is ready.
+ * @return One when @p dispatch is ready, zero when no event is due, or minus one on a clock,
+ * template-rendering, configuration-reference, or bounded-output error.
+ *
+ * A returned event remains reserved until `ra_runtime_complete_scheduled_dispatch()` succeeds.
+ * The first call for a captured minute reserves every due event, then returns them in
+ * configuration order as the caller repeats this function with that same @p now. An older task
+ * received after a newer task may drain reservations but cannot create a past occurrence.
+ */
+int ra_runtime_next_scheduled_dispatch(struct ra_runtime *runtime, time_t now,
+                                       struct ra_scheduled_dispatch *dispatch);
+
+/** @brief Queue a copied scheduled message on the selected controller's serialized telemetry path.
+ * @param runtime Active runtime whose caller serializes control operations and reload.
+ * @param dispatch Dispatch returned by `ra_runtime_next_scheduled_dispatch()`.
+ * @return Zero when no message is needed or its speech/Morse fallback is queued; minus one when
+ * the dispatch is stale, the queue is full, or the selected node is no longer valid.
+ */
+int ra_runtime_queue_scheduled_message(struct ra_runtime *runtime,
+                                       const struct ra_scheduled_dispatch *dispatch);
+
+/** @brief Mark a queued scheduled dispatch complete so the next configuration-order event may run.
+ * @param runtime Active runtime whose caller serializes control operations and reload.
+ * @param dispatch Dispatch returned by `ra_runtime_next_scheduled_dispatch()` and successfully
+ * queued with `ra_runtime_queue_scheduled_message()` when it has a message.
+ * @return True when the current schedule accepted the matching reserved dispatch.
+ *
+ * The caller invokes its copied optional link operation only after this succeeds and releases its
+ * runtime lock. Link dialing therefore remains outside the lock and outside audio callbacks.
+ */
+bool ra_runtime_complete_scheduled_dispatch(struct ra_runtime *runtime,
+                                            const struct ra_scheduled_dispatch *dispatch);
 
 /** @brief Collect one decoded digit and resolve an inherited linking command.
  * @param runtime Active runtime, protected by the module lock.

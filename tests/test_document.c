@@ -103,12 +103,62 @@ static void syntax_failure(void) {
     assert(fclose(stream) == 0);
 }
 
+/** @brief Retain and discover global/node named definitions and globally ordered events. */
+static void scheduler_document(void) {
+    char input[] = "[general]\ncallsign=KG0BP\n[usb]\n"
+                   "[template greeting]\ntext=Good ${greeting}, ${callsign}.\n"
+                   "[template usb greeting]\ntext=Welcome to ${node}.\n"
+                   "[macro clear]\naction=disconnect_all\n"
+                   "[event usb first]\nat=daily 08:00\ntemplate=greeting\nmacro=clear\n"
+                   "[event usb second]\nat=weekly Tuesday 19:00\nmessage=Net at ${time}.\n";
+    FILE *stream = fmemopen(input, strlen(input), "r");
+    assert(stream);
+    struct ra_document document = {0};
+    size_t line;
+    assert(!ra_document_read(stream, &document, &line));
+    const char *section;
+    const char *key;
+    assert(!ra_document_validate(&document, &section, &key));
+    assert(
+        !strcmp(ra_document_template_named(&document, "usb", "greeting"), "template usb greeting"));
+    assert(!strcmp(ra_document_macro_named(&document, "usb", "clear"), "macro clear"));
+    const char *node;
+    assert(!strcmp(ra_document_event(&document, 0, &node), "event usb first") &&
+           !strcmp(node, "usb"));
+    assert(!strcmp(ra_document_event(&document, 1, &node), "event usb second") &&
+           !strcmp(node, "usb"));
+    assert(!ra_document_event(&document, 2, &node) && !node);
+    struct ra_node_settings settings;
+    assert(!ra_node_settings_resolve(document.entries, document.count, "usb", &settings));
+    assert(!strcmp(settings.callsign, "KG0BP"));
+    ra_document_destroy(&document);
+    assert(fclose(stream) == 0);
+}
+
+/** @brief Parse and validate the complete shipped configuration example. */
+static void shipped_example(void) {
+    FILE *stream = fopen("examples/rpt_advanced.conf", "r");
+    assert(stream);
+    struct ra_document document = {0};
+    size_t line;
+    assert(!ra_document_read(stream, &document, &line));
+    const char *section;
+    const char *key;
+    assert(!ra_document_validate(&document, &section, &key));
+    assert(!strcmp(ra_document_node(&document, 0), "example"));
+    assert(!ra_document_node(&document, 1));
+    ra_document_destroy(&document);
+    assert(fclose(stream) == 0);
+}
+
 /** @brief Run document ownership and settings integration tests.
  * @return Zero when every assertion passes.
  */
 int main(void) {
     load_and_resolve();
     syntax_failure();
+    scheduler_document();
+    shipped_example();
     puts("owned configuration and settings integration tests passed");
     return 0;
 }

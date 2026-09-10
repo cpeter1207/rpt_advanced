@@ -1009,6 +1009,65 @@ int main(void) {
     invalid_announcement = (struct ra_controller){
         .announcements = invalid_announcement_media, .announcement_count = 1, .rate = 8000};
     assert(!ra_controller_start(&invalid_announcement, 0));
+
+    /* The watchdog releases PTT immediately, then requires both source clear and lockout expiry. */
+    struct ra_controller watchdog = {.rate = 8000,
+                                     .full_duplex = true,
+                                     .transmit_timeout_ms = 100,
+                                     .timeout_lockout_ms = 30,
+                                     .link_active = true};
+    assert(ra_controller_start(&watchdog, 0));
+    assert(ra_controller_process(&watchdog, false, audio, 1, 1));
+    assert(!ra_controller_process(&watchdog, false, audio, 1, 101));
+    assert(watchdog.timeout_wait_unkey && watchdog.timeout_until_ms == 131);
+    watchdog.link_active = false;
+    assert(!ra_controller_process(&watchdog, false, audio, 1, 132));
+    watchdog.link_active = true;
+    assert(ra_controller_process(&watchdog, false, audio, 1, 133));
+
+    /* A source-specific kerchunk never queues the link courtesy tone. */
+    struct ra_controller kerchunk = {
+        .link_courtesy = &link_link_courtesy, .rate = 8000, .kerchunk_max_ms = 500};
+    assert(ra_controller_start(&kerchunk, 0));
+    ra_controller_link_unkeyed_kerchunk(&kerchunk, "link", false, true, 2);
+    assert(!kerchunk.courtesy_pending_count && kerchunk.suppress_release);
+
+    /* Local kerchunks suppress release handling, while a longer carrier is ordinary traffic. */
+    struct ra_controller local_kerchunk = {
+        .rate = 8000, .full_duplex = true, .kerchunk_max_ms = 10};
+    assert(ra_controller_start(&local_kerchunk, 0));
+    assert(ra_controller_process(&local_kerchunk, true, NULL, 0, 1));
+    assert(!ra_controller_process(&local_kerchunk, false, NULL, 0, 2));
+    assert(local_kerchunk.suppress_release);
+    assert(ra_controller_start(&local_kerchunk, 0));
+    assert(ra_controller_process(&local_kerchunk, true, NULL, 0, 10));
+    assert(!ra_controller_process(&local_kerchunk, false, NULL, 0, 21));
+    assert(!local_kerchunk.suppress_release);
+
+    /* The watchdog stays locked while its source remains active or its timer has not expired. */
+    struct ra_controller active_timeout = {.rate = 8000,
+                                           .full_duplex = true,
+                                           .transmit_timeout_ms = 100,
+                                           .timeout_lockout_ms = 30,
+                                           .link_active = true};
+    assert(ra_controller_start(&active_timeout, 0));
+    assert(ra_controller_process(&active_timeout, false, audio, 1, 1));
+    assert(ra_controller_process(&active_timeout, false, audio, 1, 2));
+    assert(!ra_controller_process(&active_timeout, false, audio, 1, 101));
+    assert(active_timeout.timeout_wait_unkey);
+    assert(!ra_controller_process(&active_timeout, false, audio, 1, 102));
+    assert(active_timeout.timeout_wait_unkey && !active_timeout.duplex.keyed);
+    active_timeout.link_active = false;
+    assert(!ra_controller_process(&active_timeout, false, audio, 1, 110));
+    assert(active_timeout.timeout_wait_unkey && !active_timeout.duplex.keyed);
+
+    /* A suppressed short transmission cannot arm an every-release announcement. */
+    struct ra_controller suppressed_release = {.rate = 8000, .full_duplex = true};
+    assert(ra_controller_start(&suppressed_release, 0));
+    suppressed_release.link_active = true;
+    suppressed_release.link_was_active = true;
+    suppressed_release.suppress_release = true;
+    assert(ra_controller_process(&suppressed_release, false, audio, 1, 1));
     puts("node controller audio and identification sequences passed");
     return 0;
 }

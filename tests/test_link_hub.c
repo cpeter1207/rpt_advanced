@@ -742,6 +742,37 @@ int main(void) {
     assert(courtesy_audio[0] == generic_courtesy_audio[0]);
     ra_link_hub_close(&courtesy_hub);
 
+    /* A linked carrier shorter than the configured limit is a kerchunk; a longer one is not. */
+    RA_TEST_HUB(short_kerchunk_hub);
+    struct ast_channel short_kerchunk_peer = {.active = true};
+    struct ra_controller short_kerchunk_controller = {
+        .rate = 8000, .full_duplex = true, .kerchunk_max_ms = 10};
+    assert(ra_controller_start(&short_kerchunk_controller, 0));
+    assert(!ra_link_hub_attach(&short_kerchunk_hub, "short", &short_kerchunk_peer, &format_8000,
+                               true, true, false));
+    (void)ra_link_hub_process(&short_kerchunk_hub, &short_kerchunk_controller, false,
+                              courtesy_audio, 1, 1);
+    short_kerchunk_peer.active = false;
+    (void)ra_link_hub_process(&short_kerchunk_hub, &short_kerchunk_controller, false,
+                              courtesy_audio, 1, 2);
+    assert(short_kerchunk_controller.suppress_release);
+    ra_link_hub_close(&short_kerchunk_hub);
+
+    RA_TEST_HUB(long_kerchunk_hub);
+    struct ast_channel long_kerchunk_peer = {.active = true};
+    struct ra_controller long_kerchunk_controller = {
+        .rate = 8000, .full_duplex = true, .kerchunk_max_ms = 10};
+    assert(ra_controller_start(&long_kerchunk_controller, 0));
+    assert(!ra_link_hub_attach(&long_kerchunk_hub, "long", &long_kerchunk_peer, &format_8000, true,
+                               true, false));
+    (void)ra_link_hub_process(&long_kerchunk_hub, &long_kerchunk_controller, false, courtesy_audio,
+                              1, 1);
+    long_kerchunk_peer.active = false;
+    (void)ra_link_hub_process(&long_kerchunk_hub, &long_kerchunk_controller, false, courtesy_audio,
+                              1, 12);
+    assert(!long_kerchunk_controller.suppress_release);
+    ra_link_hub_close(&long_kerchunk_hub);
+
     RA_TEST_HUB(hub);
     assert(!ra_link_hub_has_retained_state(&hub));
     ra_link_hub_set_reconnector(&hub, reconnect_stub, NULL);

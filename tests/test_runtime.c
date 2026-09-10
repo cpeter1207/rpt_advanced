@@ -159,6 +159,9 @@ static bool fail_localtime;
 static bool fail_wall_clock;
 /** @brief Return an invalid civil hour to exercise announcement validation. */
 static bool invalid_localtime;
+/** @brief Deterministic complete local civil clock shared by time and scheduler tests. */
+static struct ast_tm local_clock = {
+    .tm_year = 126, .tm_mon = 8, .tm_mday = 9, .tm_wday = 3, .tm_hour = 13, .tm_min = 7};
 
 /** @brief Provide a deterministic wall clock or its documented failure value.
  * @param output Optional destination for the selected epoch.
@@ -183,8 +186,8 @@ struct ast_tm *ast_localtime(const struct timeval *when, struct ast_tm *output, 
     if (fail_localtime) {
         return NULL;
     }
-    output->tm_hour = invalid_localtime ? 24 : 13;
-    output->tm_min = 7;
+    *output = local_clock;
+    output->tm_hour = invalid_localtime ? 24 : output->tm_hour;
     return output;
 }
 /** @brief Invoke the closing hub's reader callback after the runtime marks its worker stopped. */
@@ -293,6 +296,7 @@ static void inject_reconnect_race(enum reconnect_race_point point) {
     }
 }
 
+/** @cond RA_TEST_LINK_DIRECTORY_SHIM */
 char *ra_link_directory_lookup(const char *node, const char *peer_ip,
                                const struct ra_link_directory_policy *policy) {
     assert(!strcmp(node, "123") && policy && !*policy->static_file && !*policy->external_file &&
@@ -302,6 +306,7 @@ char *ra_link_directory_lookup(const char *node, const char *peer_ip,
     inject_reconnect_race(RECONNECT_RACE_AFTER_LOOKUP);
     return destination;
 }
+/** @endcond */
 
 /** @cond RA_TEST_MEDIA_SHIMS
  * These linker shims stand in for the separately documented media interface.  Keeping them out of
@@ -338,6 +343,7 @@ struct ast_format_cap *ra_media_offer_create(struct ast_format *format) {
 }
 /** @endcond */
 
+/** @cond RA_TEST_RUNTIME_SHIMS */
 /** @brief Verify offer ownership is released after dialing.
  * @param object Fixture capability.
  * @param tag Debug tag.
@@ -837,6 +843,7 @@ void ra_worker_stop(struct ra_worker *worker) {
     --workers;
     --channels;
 }
+/** @endcond */
 
 /** @brief Verify a failed startup returns an empty runtime with no owned radios.
  * @param document Test configuration.
@@ -898,6 +905,742 @@ static bool digits_fixture(struct ra_runtime *runtime, const char *digits,
         ready = ra_runtime_digit(runtime, "alpha", digits[i], 100, operation);
     }
     return ready;
+}
+
+/** @brief Queue and settle one runtime-owned scheduled dispatch in its required order.
+ * @param runtime Started runtime that owns @p dispatch.
+ * @param dispatch Current copied dispatch reserved by @p runtime.
+ */
+static void complete_scheduled_dispatch(struct ra_runtime *runtime,
+                                        const struct ra_scheduled_dispatch *dispatch) {
+    assert(!ra_runtime_queue_scheduled_message(runtime, dispatch));
+    assert(ra_runtime_complete_scheduled_dispatch(runtime, dispatch));
+}
+
+/** @brief Verify configuration-order scheduled telemetry and macro dispatch without dialing.
+ *
+ * The module control bridge owns actual link execution.  This runtime test instead proves that a
+ * message is accepted before its copied operation can complete, so that bridge cannot run a macro
+ * ahead of same-event telemetry while holding its runtime lock.
+ */
+static void verify_scheduled_dispatches(void) {
+    char *sections[] = {"524950",
+                        "template announcement",
+                        "macro connect",
+                        "macro alloff",
+                        "macro disconnect",
+                        "macro reconnect",
+                        "event 524950 daily",
+                        "event 524950 weekly",
+                        "event 524950 once",
+                        "event 524950 disconnect",
+                        "event 524950 reconnect"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"524950", "callsign", "KG0BP"},
+        {"template announcement", "text", "${callsign}."},
+        {"macro connect", "action", "connect"},
+        {"macro connect", "target_node", "123"},
+        {"macro alloff", "action", "disconnect_all"},
+        {"macro disconnect", "action", "disconnect"},
+        {"macro disconnect", "target_node", "123"},
+        {"macro reconnect", "action", "reconnect_all"},
+        {"event 524950 daily", "at", "daily 13:07"},
+        {"event 524950 daily", "template", "announcement"},
+        {"event 524950 daily", "macro", "connect"},
+        {"event 524950 weekly", "at", "weekly Wednesday 13:07"},
+        {"event 524950 weekly", "message", "${node}."},
+        {"event 524950 once", "at", "once 2026-09-09 13:07"},
+        {"event 524950 once", "macro", "alloff"},
+        {"event 524950 disconnect", "at", "daily 13:07"},
+        {"event 524950 disconnect", "macro", "disconnect"},
+        {"event 524950 reconnect", "at", "daily 13:07"},
+        {"event 524950 reconnect", "macro", "reconnect"},
+    };
+    struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const char *section;
+    const char *key;
+    assert(!ra_document_validate(&document, &section, &key));
+    unsigned int workers_before = workers;
+    unsigned int channels_before = channels;
+    struct ra_runtime runtime = {0};
+    status_peer_count = 0;
+    status_last_keyed[0] = '\0';
+    queued_status_count = 0;
+    queued_status_limit = SIZE_MAX;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(workers == workers_before + 1 && channels == channels_before + 1);
+
+    struct ra_scheduled_dispatch dispatch;
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, (time_t)-1, &dispatch) == -1);
+    assert(ra_runtime_next_scheduled_dispatch(NULL, 0, &dispatch) == -1);
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, NULL) == -1);
+    fail_localtime = true;
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == -1);
+    fail_localtime = false;
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(dispatch.has_message && dispatch.has_operation && !strcmp(dispatch.local, "524950"));
+    assert(dispatch.operation.action == RA_LINK_TRANSCEIVE &&
+           !strcmp(dispatch.operation.remote, "123"));
+    assert(!strcmp(dispatch.morse, "KG0BP."));
+    assert(!strcmp(dispatch.speech, "K,G,0,B,P."));
+    assert(!ra_runtime_complete_scheduled_dispatch(&runtime, &dispatch));
+    queued_status_limit = 0;
+    assert(ra_runtime_queue_scheduled_message(&runtime, &dispatch) == -1);
+    struct ra_scheduled_dispatch unqueued_dispatch = dispatch;
+    local_clock.tm_min = 8;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!ra_runtime_complete_scheduled_dispatch(&runtime, &unqueued_dispatch));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(dispatch.occurrence == unqueued_dispatch.occurrence &&
+           dispatch.generation != unqueued_dispatch.generation);
+    assert(!strcmp(dispatch.morse, "KG0BP."));
+    queued_status_limit = SIZE_MAX;
+    assert(!ra_runtime_queue_scheduled_message(&runtime, &dispatch));
+    assert(queued_status_count == 1 && !strcmp(queued_status, dispatch.morse));
+    /* Repeated app-bridge delivery must not queue the same copied telemetry twice. */
+    assert(!ra_runtime_queue_scheduled_message(&runtime, &dispatch));
+    assert(queued_status_count == 1);
+    struct ra_scheduled_dispatch queued_dispatch = dispatch;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!ra_runtime_complete_scheduled_dispatch(&runtime, &queued_dispatch));
+    assert(queued_status_count == 1);
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(dispatch.has_message && !dispatch.has_operation);
+    assert(!strcmp(dispatch.morse, "524950."));
+    assert(!strcmp(dispatch.speech, "node,5,2,4,9,5,0."));
+    struct ra_scheduled_dispatch wrong_local = dispatch;
+    wrong_local.local[0] = 'x';
+    assert(ra_runtime_queue_scheduled_message(&runtime, &wrong_local) == -1);
+    assert(!ra_runtime_complete_scheduled_dispatch(&runtime, &wrong_local));
+    struct ra_scheduled_dispatch wrong_generation = dispatch;
+    ++wrong_generation.generation;
+    assert(ra_runtime_queue_scheduled_message(&runtime, &wrong_generation) == -1);
+    struct ra_scheduled_dispatch wrong_index = dispatch;
+    wrong_index.event_index = SIZE_MAX;
+    assert(ra_runtime_queue_scheduled_message(&runtime, &wrong_index) == -1);
+    struct ra_scheduled_dispatch wrong_occurrence = dispatch;
+    ++wrong_occurrence.occurrence;
+    assert(ra_runtime_queue_scheduled_message(&runtime, &wrong_occurrence) == -1);
+    assert(ra_runtime_queue_scheduled_message(&runtime, NULL) == -1);
+    assert(!ra_runtime_queue_scheduled_message(&runtime, &dispatch));
+    assert(queued_status_count == 2);
+    assert(ra_runtime_complete_scheduled_dispatch(&runtime, &dispatch));
+    assert(ra_runtime_queue_scheduled_message(&runtime, &dispatch) == -1);
+
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!dispatch.has_message && dispatch.has_operation);
+    assert(dispatch.operation.action == RA_LINK_DISCONNECT_ALL);
+    struct ra_scheduled_dispatch macro_pending_dispatch = dispatch;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!ra_runtime_complete_scheduled_dispatch(&runtime, &macro_pending_dispatch));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(dispatch.occurrence == macro_pending_dispatch.occurrence &&
+           dispatch.generation != macro_pending_dispatch.generation);
+    assert(!dispatch.has_message && dispatch.has_operation);
+    assert(!ra_runtime_queue_scheduled_message(&runtime, &dispatch));
+    assert(ra_runtime_complete_scheduled_dispatch(&runtime, &dispatch));
+
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!dispatch.has_message && dispatch.has_operation);
+    assert(dispatch.operation.action == RA_LINK_DISCONNECT &&
+           !strcmp(dispatch.operation.remote, "123"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!dispatch.has_message && dispatch.has_operation);
+    assert(dispatch.operation.action == RA_LINK_RECONNECT_ALL);
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    assert(!ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch));
+
+    struct ra_scheduled_dispatch stale_dispatch = dispatch;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch));
+    /* A replacement may disable an event's node; schedule creation must not retain it. */
+    entries[0].value = "no";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!runtime.nodes && !runtime.schedule);
+    assert(!ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch));
+    assert(ra_runtime_queue_scheduled_message(&runtime, &stale_dispatch) == -1);
+    assert(ra_runtime_queue_scheduled_message(NULL, &stale_dispatch) == -1);
+    entries[0].value = "yes";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!ra_runtime_complete_scheduled_dispatch(&runtime, &stale_dispatch));
+    ra_runtime_stop(&runtime);
+    local_clock.tm_min = 7;
+    assert(workers == workers_before && channels == channels_before);
+}
+
+/** @brief Verify defensive copied-dispatch node bounds when an unchecked document bypasses schema.
+ *
+ * Normal configuration validation rejects the input before runtime startup.  The runtime repeats
+ * the check because it copies the node into a fixed control-plane dispatch and public callers can
+ * construct a document directly.
+ */
+static void verify_scheduled_dispatch_bounds(void) {
+    char long_node[RA_NODE_NAME_MAX + 1];
+    memset(long_node, '1', RA_NODE_NAME_MAX);
+    long_node[RA_NODE_NAME_MAX] = '\0';
+    char long_event[sizeof("event  scheduled") + sizeof(long_node)];
+    assert(snprintf(long_event, sizeof(long_event), "event %s scheduled", long_node) > 0);
+    char *long_node_sections[] = {long_node, long_event};
+    struct ra_config_entry long_node_entries[] = {
+        {long_node, "node_enabled", "yes"},
+        {long_event, "at", "daily 13:07"},
+        {long_event, "message", "bounds"},
+    };
+    struct ra_document long_node_document = {
+        .sections = long_node_sections,
+        .section_count = sizeof(long_node_sections) / sizeof(*long_node_sections),
+        .entries = long_node_entries,
+        .count = sizeof(long_node_entries) / sizeof(*long_node_entries),
+    };
+    struct ra_runtime runtime = {0};
+    const char *error = ra_runtime_start(&runtime, &long_node_document);
+    assert(error && !strcmp(error, "scheduled event node name is too long"));
+    assert(!runtime.nodes && !runtime.schedule);
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Verify every supported scheduled template value and rejected civil-clock input.
+ *
+ * A pending dispatch deliberately bypasses due-time matching on its second read.  That allows the
+ * runtime's defensive formatting checks to be exercised with malformed local-clock data without
+ * adding a production-only test hook.
+ */
+static void verify_scheduled_template_values(void) {
+    char at[32] = "daily 09:07";
+    char clock_format[3] = "12";
+    char message[RA_MESSAGE_TEMPLATE_OUTPUT_MAX] = "${greeting} ${date} ${time} ${link_status}";
+    char *sections[] = {"524950", "time 524950", "event 524950 values"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"time 524950", "format", clock_format},
+        {"event 524950 values", "at", at},
+        {"event 524950 values", "message", message},
+    };
+    struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_dispatch dispatch;
+    queued_status_limit = SIZE_MAX;
+    queued_status_count = 0;
+    status_peer_count = 0;
+    local_clock.tm_hour = 9;
+    assert(!ra_runtime_start(&runtime, &document));
+
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "Good Morning 2026-09-09 9:07 AM NO LINKS"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+
+    strcpy(at, "daily 18:07");
+    local_clock.tm_hour = 18;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "Good Evening 2026-09-09 6:07 PM NO LINKS"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+
+    strcpy(at, "daily 00:07");
+    local_clock.tm_hour = 0;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "Good Morning 2026-09-09 12:07 AM NO LINKS"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+
+    strcpy(at, "daily 10:07");
+    local_clock.tm_hour = 10;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "Good Morning 2026-09-09 10:07 AM NO LINKS"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+
+    strcpy(clock_format, "24");
+    strcpy(at, "daily 18:07");
+    local_clock.tm_hour = 18;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "Good Evening 2026-09-09 18:07 NO LINKS"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+
+    strcpy(clock_format, "12");
+    strcpy(at, "daily 13:07");
+    strcpy(message, "prefix ${node}. ${callsign}. X${node}.");
+    local_clock.tm_hour = 13;
+    entries[0].value = "yes";
+    entries[1].value = clock_format;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "prefix 524950. . X524950."));
+    assert(strstr(dispatch.speech, "prefix node,5,2,4,9,5,0.") != NULL);
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    ra_runtime_stop(&runtime);
+
+    /* Pending copies exercise every defensive civil-clock guard before any audio is queued. */
+    static const struct {
+        enum {
+            SCHEDULE_WDAY,
+            SCHEDULE_HOUR,
+            SCHEDULE_MINUTE,
+            SCHEDULE_MONTH,
+            SCHEDULE_DAY,
+            SCHEDULE_YEAR
+        } field;
+        int value;
+    } invalid[] = {
+        {SCHEDULE_WDAY, -1},   {SCHEDULE_WDAY, 7},    {SCHEDULE_HOUR, -1},    {SCHEDULE_HOUR, 24},
+        {SCHEDULE_MINUTE, -1}, {SCHEDULE_MINUTE, 60}, {SCHEDULE_MONTH, -1},   {SCHEDULE_MONTH, 12},
+        {SCHEDULE_DAY, 0},     {SCHEDULE_DAY, 32},    {SCHEDULE_YEAR, -1901}, {SCHEDULE_YEAR, 8100},
+    };
+    strcpy(at, "daily 13:07");
+    strcpy(message, "${date}");
+    for (size_t index = 0; index < sizeof(invalid) / sizeof(*invalid); ++index) {
+        local_clock = saved_clock;
+        struct ra_runtime invalid_runtime = {0};
+        assert(!ra_runtime_start(&invalid_runtime, &document));
+        switch (invalid[index].field) {
+        case SCHEDULE_WDAY:
+            local_clock.tm_wday = invalid[index].value;
+            break;
+        case SCHEDULE_HOUR:
+            local_clock.tm_hour = invalid[index].value;
+            break;
+        case SCHEDULE_MINUTE:
+            local_clock.tm_min = invalid[index].value;
+            break;
+        case SCHEDULE_MONTH:
+            local_clock.tm_mon = invalid[index].value;
+            break;
+        case SCHEDULE_DAY:
+            local_clock.tm_mday = invalid[index].value;
+            break;
+        case SCHEDULE_YEAR:
+            local_clock.tm_year = invalid[index].value;
+            break;
+        }
+        assert(ra_runtime_next_scheduled_dispatch(&invalid_runtime, 0, &dispatch) == -1);
+        ra_runtime_stop(&invalid_runtime);
+    }
+
+    local_clock = saved_clock;
+    struct ra_runtime status_runtime = {0};
+    assert(!ra_runtime_start(&status_runtime, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&status_runtime, 0, &dispatch) == 1);
+    status_peer_count = 1;
+    memset(status_peers[0].name, '1', sizeof(status_peers[0].name));
+    assert(ra_runtime_next_scheduled_dispatch(&status_runtime, 0, &dispatch) == -1);
+    status_peer_count = 0;
+    ra_runtime_stop(&status_runtime);
+
+    char maximum_message[RA_MESSAGE_TEMPLATE_OUTPUT_MAX];
+    memset(maximum_message, '~', sizeof(maximum_message) - 1);
+    maximum_message[sizeof(maximum_message) - 1] = '\0';
+    entries[3].value = maximum_message;
+    struct ra_runtime maximum_runtime = {0};
+    assert(!ra_runtime_start(&maximum_runtime, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&maximum_runtime, 0, &dispatch) == 1);
+    /* A speech-only literal with no Morse character must not key a silent fallback carrier. */
+    assert(!dispatch.has_message);
+    assert(!*dispatch.morse);
+    assert(!*dispatch.speech);
+    complete_scheduled_dispatch(&maximum_runtime, &dispatch);
+    ra_runtime_stop(&maximum_runtime);
+
+    entries[3].value = "${link_status}";
+    status_peers[0] = (struct ra_link_peer_status){.name = "506312", .transmit = true};
+    status_peer_count = 1;
+    struct ra_runtime link_status_runtime = {0};
+    assert(!ra_runtime_start(&link_status_runtime, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&link_status_runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "LINK 506312 TRANSCEIVE"));
+    assert(!strcmp(dispatch.speech, "LINK node,5,0,6,3,1,2 TRANSCEIVE"));
+    complete_scheduled_dispatch(&link_status_runtime, &dispatch);
+    ra_runtime_stop(&link_status_runtime);
+    status_peer_count = 0;
+
+    entries[3].value = "5249 524950A 524951. X524950.";
+    struct ra_runtime boundary_runtime = {0};
+    assert(!ra_runtime_start(&boundary_runtime, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&boundary_runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "5249 524950A 524951. X524950."));
+    complete_scheduled_dispatch(&boundary_runtime, &dispatch);
+    ra_runtime_stop(&boundary_runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Verify scheduler allocation, reload, document, rendering, and macro error handling. */
+static void verify_scheduled_failure_paths(void) {
+    char at[32] = "daily 13:07";
+    char template_name[32] = "announcement";
+    char template_text[RA_MESSAGE_TEMPLATE_OUTPUT_MAX] = "scheduled";
+    char message[RA_MESSAGE_TEMPLATE_OUTPUT_MAX] = "";
+    char macro_name[32] = "connect";
+    char macro_action[32] = "connect";
+    char target[RA_NODE_NAME_MAX + 1] = "123";
+    char *sections[] = {"524950", "template announcement", "macro connect",
+                        "event 524950 scheduled"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"template announcement", "text", template_text},
+        {"macro connect", "action", macro_action},
+        {"macro connect", "target_node", target},
+        {"event 524950 scheduled", "at", at},
+        {"event 524950 scheduled", "template", template_name},
+        {"event 524950 scheduled", "message", message},
+        {"event 524950 scheduled", "macro", macro_name},
+    };
+    struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    struct ra_scheduled_dispatch dispatch;
+    struct ra_runtime runtime = {.schedule_generation = UINT64_MAX};
+    queued_status_limit = SIZE_MAX;
+    queued_status_count = 0;
+    status_peer_count = 0;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(runtime.schedule_generation == 1);
+
+    strcpy(template_text, "${callsign}");
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!dispatch.has_message && dispatch.has_operation);
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    ra_runtime_stop(&runtime);
+
+    strcpy(template_text, "scheduled");
+    runtime = (struct ra_runtime){0};
+    assert(!ra_runtime_start(&runtime, &document));
+    template_text[0] = '\0';
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == -1);
+    ra_runtime_stop(&runtime);
+
+    strcpy(template_text, "scheduled");
+    runtime = (struct ra_runtime){0};
+    assert(!ra_runtime_start(&runtime, &document));
+    strcpy(template_name, "missing");
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == -1);
+    assert(!ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch));
+    ra_runtime_stop(&runtime);
+
+    strcpy(template_name, "");
+    strcpy(message, "${not_a_template_name}");
+    runtime = (struct ra_runtime){0};
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == -1);
+    ra_runtime_stop(&runtime);
+
+    strcpy(message, "scheduled");
+    strcpy(macro_name, "connect");
+    runtime = (struct ra_runtime){0};
+    assert(!ra_runtime_start(&runtime, &document));
+    strcpy(macro_name, "missing");
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == -1);
+    ra_runtime_stop(&runtime);
+
+    strcpy(macro_name, "connect");
+    strcpy(macro_action, "connect");
+    runtime = (struct ra_runtime){0};
+    assert(!ra_runtime_start(&runtime, &document));
+    strcpy(macro_action, "invalid");
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == -1);
+    ra_runtime_stop(&runtime);
+
+    strcpy(macro_action, "connect");
+    strcpy(target, "123");
+    runtime = (struct ra_runtime){0};
+    assert(!ra_runtime_start(&runtime, &document));
+    memset(target, '1', sizeof(target) - 1);
+    target[sizeof(target) - 1] = '\0';
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == -1);
+    ra_runtime_stop(&runtime);
+
+    strcpy(target, "123");
+    strcpy(at, "daily 13:08");
+    runtime = (struct ra_runtime){0};
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(!ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch));
+    local_clock.tm_min = 8;
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    strcpy(at, "daily 13:09");
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    local_clock.tm_min = 9;
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    local_clock.tm_min = 7;
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Exercise scheduler construction failures and preserve the active runtime on reload. */
+static void verify_scheduled_reload_failures(void) {
+    char *sections[] = {"524950", "event 524950 scheduled"};
+    struct ra_config_entry current_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"event 524950 scheduled", "at", "daily 13:07"},
+        {"event 524950 scheduled", "message", "scheduled"},
+    };
+    struct ra_config_entry disabled_entries[] = {
+        {"524950", "node_enabled", "no"},
+        {"event 524950 scheduled", "at", "daily 13:07"},
+        {"event 524950 scheduled", "message", "scheduled"},
+    };
+    struct ra_config_entry invalid_node_entries[] = {
+        {"524950", "node_enabled", "invalid"},
+        {"event 524950 scheduled", "at", "daily 13:07"},
+        {"event 524950 scheduled", "message", "scheduled"},
+    };
+    struct ra_config_entry invalid_event_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"event 524950 scheduled", "at", "daily 25:07"},
+        {"event 524950 scheduled", "message", "scheduled"},
+    };
+    struct ra_config_entry invalid_macro_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"event 524950 scheduled", "at", "daily 13:07"},
+        {"event 524950 scheduled", "macro", "missing"},
+    };
+    char *ghost_sections[] = {"524950", "event ghost scheduled"};
+    struct ra_config_entry ghost_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"event ghost scheduled", "at", "daily 13:07"},
+        {"event ghost scheduled", "message", "scheduled"},
+    };
+    struct ra_document current = {.sections = sections,
+                                  .section_count = sizeof(sections) / sizeof(*sections),
+                                  .entries = current_entries,
+                                  .count = sizeof(current_entries) / sizeof(*current_entries)};
+    struct ra_document disabled = {.sections = sections,
+                                   .section_count = sizeof(sections) / sizeof(*sections),
+                                   .entries = disabled_entries,
+                                   .count = sizeof(disabled_entries) / sizeof(*disabled_entries)};
+    struct ra_document invalid_node = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = invalid_node_entries,
+        .count = sizeof(invalid_node_entries) / sizeof(*invalid_node_entries),
+    };
+    struct ra_document invalid_event = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = invalid_event_entries,
+        .count = sizeof(invalid_event_entries) / sizeof(*invalid_event_entries),
+    };
+    struct ra_document invalid_macro = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = invalid_macro_entries,
+        .count = sizeof(invalid_macro_entries) / sizeof(*invalid_macro_entries),
+    };
+    struct ra_document ghost = {.sections = ghost_sections,
+                                .section_count = sizeof(ghost_sections) / sizeof(*ghost_sections),
+                                .entries = ghost_entries,
+                                .count = sizeof(ghost_entries) / sizeof(*ghost_entries)};
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_dispatch dispatch;
+    assert(!ra_runtime_start(&runtime, &current));
+
+    fail_allocation = allocations + 1;
+    const char *error = ra_runtime_reload(&runtime, &current, &disabled);
+    assert(error && !strcmp(error, "cannot allocate scheduled event state"));
+    fail_allocation = 0;
+    fail_allocation = allocations + 2;
+    error = ra_runtime_reload(&runtime, &current, &disabled);
+    assert(error && !strcmp(error, "cannot allocate scheduled event state"));
+    fail_allocation = 0;
+
+    error = ra_runtime_reload(&runtime, &current, &invalid_node);
+    assert(error);
+    error = ra_runtime_reload(&runtime, &current, &invalid_event);
+    assert(error);
+    error = ra_runtime_reload(&runtime, &current, &invalid_macro);
+    assert(error);
+
+    error = ra_runtime_reload(&runtime, &current, &ghost);
+    assert(error && !strcmp(error, "event references an unknown node"));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    ra_runtime_stop(&runtime);
+
+    /* If replacement scheduling fails after a worker restart, report a failed restoration rather
+     * than incorrectly claiming the invalid replacement was retained. */
+    struct ra_runtime restoration_runtime = {0};
+    assert(!ra_runtime_start(&restoration_runtime, &current));
+    fail_worker = starts + 2;
+    error = ra_runtime_reload(&restoration_runtime, &current, &invalid_event);
+    assert(error && !strcmp(error, "cannot start radio worker"));
+    fail_worker = 0;
+    ra_runtime_stop(&restoration_runtime);
+}
+
+/** @brief Preserve pending and ready occurrences by node/event identity across a node restart.
+ *
+ * The replacement deliberately uses separate equal strings.  State matching must therefore use
+ * stable node names rather than a previous runtime-node address.
+ */
+static void verify_scheduled_reload_state(void) {
+    char current_one[] = "one";
+    char current_two[] = "two";
+    char current_alpha[] = "event one alpha";
+    char current_beta[] = "event two beta";
+    char replacement_one[] = "one";
+    char replacement_two[] = "two";
+    char replacement_alpha[] = "event one alpha";
+    char replacement_beta[] = "event two beta";
+    char renamed_one[] = "one";
+    char renamed_two[] = "two";
+    char renamed_alpha[] = "event one gamma";
+    char renamed_beta[] = "event two beta";
+    char *current_sections[] = {current_one, current_two, current_alpha, current_beta};
+    char *replacement_sections[] = {replacement_one, replacement_two, replacement_alpha,
+                                    replacement_beta};
+    char *renamed_sections[] = {renamed_one, renamed_two, renamed_alpha, renamed_beta};
+    struct ra_config_entry current_entries[] = {
+        {current_one, "node_enabled", "yes"}, {current_two, "node_enabled", "yes"},
+        {current_alpha, "at", "daily 13:07"}, {current_alpha, "message", "alpha"},
+        {current_beta, "at", "daily 13:07"},  {current_beta, "message", "beta"},
+    };
+    struct ra_config_entry replacement_entries[] = {
+        {replacement_one, "node_enabled", "yes"}, {replacement_two, "node_enabled", "yes"},
+        {replacement_alpha, "at", "daily 13:07"}, {replacement_alpha, "message", "alpha"},
+        {replacement_beta, "at", "daily 13:07"},  {replacement_beta, "message", "beta"},
+    };
+    struct ra_config_entry renamed_entries[] = {
+        {renamed_one, "node_enabled", "yes"}, {renamed_two, "node_enabled", "yes"},
+        {renamed_alpha, "at", "daily 13:07"}, {renamed_alpha, "message", "gamma"},
+        {renamed_beta, "at", "daily 13:07"},  {renamed_beta, "message", "beta"},
+    };
+    struct ra_document current = {
+        .sections = current_sections,
+        .section_count = sizeof(current_sections) / sizeof(*current_sections),
+        .entries = current_entries,
+        .count = sizeof(current_entries) / sizeof(*current_entries),
+    };
+    struct ra_document replacement = {
+        .sections = replacement_sections,
+        .section_count = sizeof(replacement_sections) / sizeof(*replacement_sections),
+        .entries = replacement_entries,
+        .count = sizeof(replacement_entries) / sizeof(*replacement_entries),
+    };
+    struct ra_document renamed = {
+        .sections = renamed_sections,
+        .section_count = sizeof(renamed_sections) / sizeof(*renamed_sections),
+        .entries = renamed_entries,
+        .count = sizeof(renamed_entries) / sizeof(*renamed_entries),
+    };
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_dispatch dispatch;
+    assert(!ra_runtime_start(&runtime, &current));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.local, "one") && !strcmp(dispatch.morse, "alpha"));
+    local_clock.tm_min = 8;
+    assert(!ra_runtime_reload(&runtime, &current, &replacement));
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.local, "one") && !strcmp(dispatch.morse, "alpha"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, &dispatch) == 1);
+    assert(!strcmp(dispatch.local, "two") && !strcmp(dispatch.morse, "beta"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    assert(!ra_runtime_reload(&runtime, &replacement, &renamed));
+    local_clock.tm_min = 7;
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Preserve every FIFO tick's due work while rejecting an out-of-order stale tick.
+ *
+ * One slow control operation can span multiple minute tasks.  The scheduler snapshots each
+ * captured minute before returning its first dispatch, so a replacement runtime must retain both
+ * its pending first event and later ready events.  A stale task arriving after a newer task is
+ * intentionally not allowed to create a late occurrence.
+ */
+static void verify_scheduled_tick_order(void) {
+    char current_node[] = "524950";
+    char current_alpha[] = "event 524950 alpha";
+    char current_beta[] = "event 524950 beta";
+    char current_later[] = "event 524950 later";
+    char current_stale[] = "event 524950 stale";
+    char replacement_node[] = "524950";
+    char replacement_alpha[] = "event 524950 alpha";
+    char replacement_beta[] = "event 524950 beta";
+    char replacement_later[] = "event 524950 later";
+    char replacement_stale[] = "event 524950 stale";
+    char *current_sections[] = {current_node, current_later, current_alpha, current_beta,
+                                current_stale};
+    char *replacement_sections[] = {replacement_node, replacement_later, replacement_alpha,
+                                    replacement_beta, replacement_stale};
+    struct ra_config_entry current_entries[] = {
+        {current_node, "node_enabled", "yes"}, {current_later, "at", "daily 13:08"},
+        {current_later, "message", "later"},   {current_alpha, "at", "daily 13:07"},
+        {current_alpha, "message", "alpha"},   {current_beta, "at", "daily 13:07"},
+        {current_beta, "message", "beta"},     {current_stale, "at", "daily 13:11"},
+        {current_stale, "message", "stale"},
+    };
+    struct ra_config_entry replacement_entries[] = {
+        {replacement_node, "node_enabled", "yes"}, {replacement_later, "at", "daily 13:08"},
+        {replacement_later, "message", "later"},   {replacement_alpha, "at", "daily 13:07"},
+        {replacement_alpha, "message", "alpha"},   {replacement_beta, "at", "daily 13:07"},
+        {replacement_beta, "message", "beta"},     {replacement_stale, "at", "daily 13:11"},
+        {replacement_stale, "message", "stale"},
+    };
+    struct ra_document current = {
+        .sections = current_sections,
+        .section_count = sizeof(current_sections) / sizeof(*current_sections),
+        .entries = current_entries,
+        .count = sizeof(current_entries) / sizeof(*current_entries),
+    };
+    struct ra_document replacement = {
+        .sections = replacement_sections,
+        .section_count = sizeof(replacement_sections) / sizeof(*replacement_sections),
+        .entries = replacement_entries,
+        .count = sizeof(replacement_entries) / sizeof(*replacement_entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_dispatch dispatch;
+    local_clock.tm_hour = 13;
+    local_clock.tm_min = 7;
+    assert(!ra_runtime_start(&runtime, &current));
+
+    /* The first queued minute reserves both configuration-order events at 13:07. */
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 420, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "alpha"));
+    queued_status_limit = 0;
+    assert(ra_runtime_queue_scheduled_message(&runtime, &dispatch) == -1);
+    queued_status_limit = SIZE_MAX;
+
+    /* A later captured minute arrives while alpha's control work has not completed. */
+    local_clock.tm_min = 8;
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 480, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "alpha"));
+    assert(!ra_runtime_reload(&runtime, &current, &replacement));
+
+    /* The remaining work for the old task still drains after reload in configuration order. */
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 420, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "alpha"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 420, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "beta"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+    assert(ra_runtime_next_scheduled_dispatch(&runtime, 420, &dispatch) == 1);
+    assert(!strcmp(dispatch.morse, "later"));
+    complete_scheduled_dispatch(&runtime, &dispatch);
+
+    /* A task captured before a newer control task cannot resurrect an unsnapshotted past event. */
+    local_clock.tm_min = 12;
+    assert(!ra_runtime_next_scheduled_dispatch(&runtime, 720, &dispatch));
+    local_clock.tm_min = 11;
+    assert(!ra_runtime_next_scheduled_dispatch(&runtime, 660, &dispatch));
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
 }
 
 /** @brief Exercise multiple nodes, disabled nodes, ID state, and each failure boundary.
@@ -1091,6 +1834,8 @@ int main(void) {
     char *tone_fallback_sections[] = {"fallback", "courtesy fallback receiver"};
     struct ra_config_entry tone_fallback_entries[] = {
         {"fallback", "courtesy_delay_ms", "0"},
+        /* This fixture exercises courtesy media, not short-transmission suppression. */
+        {"fallback", "kerchunk_max_ms", "0"},
         {"courtesy fallback receiver", "input", "receiver"},
         {"courtesy fallback receiver", "sound_file", "/missing/courtesy.wav"},
         {"courtesy fallback receiver", "speech_text", "Unavailable courtesy speech"},
@@ -1711,6 +2456,13 @@ int main(void) {
     assert(seen_ids == 1 && seen_announcements == 1);
     ra_runtime_stop(&runtime);
     ra_runtime_stop(&runtime);
+    verify_scheduled_dispatches();
+    verify_scheduled_dispatch_bounds();
+    verify_scheduled_template_values();
+    verify_scheduled_failure_paths();
+    verify_scheduled_reload_failures();
+    verify_scheduled_reload_state();
+    verify_scheduled_tick_order();
     puts("configured node startup and joined resource cleanup passed");
     return 0;
 }

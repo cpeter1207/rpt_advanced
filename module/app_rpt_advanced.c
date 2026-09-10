@@ -19,10 +19,13 @@
 #include <asterisk/paths.h>
 #include <asterisk/pbx.h>
 #include <asterisk/taskprocessor.h>
+#include <asterisk/utils.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 /** @brief Require module-owned cross-thread counters to avoid libatomic fallback calls. */
 _Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && ATOMIC_INT_LOCK_FREE == 2 &&
@@ -46,6 +49,12 @@ static atomic_uint_fast64_t runtime_revision;
 static atomic_bool runtime_reloading;
 /** @brief Serial control executor, retained until radio workers stop and tasks drain. */
 static struct ast_taskprocessor *control_queue;
+/** @brief Owns the low-rate scheduler ticker while the module is loaded. */
+static pthread_t schedule_thread;
+/** @brief Ends the scheduler ticker before runtime or control-queue teardown. */
+static atomic_bool schedule_thread_running;
+/** @brief True only after the ticker was created and before its join completes. */
+static bool schedule_thread_started;
 /** @brief Bounded number of submitted digit tasks. */
 static atomic_uint pending_digits;
 /** @brief Invalidates partial commands when any digit cannot be delivered. */
@@ -67,6 +76,12 @@ struct link_event_task {
     bool connected;                     /**< True for attach, false for detach. */
     char local[RA_LINK_PEER_NAME_MAX];  /**< Stable local endpoint copy. */
     char remote[RA_LINK_PEER_NAME_MAX]; /**< Stable remote endpoint copy. */
+};
+
+/** @brief One wall-clock scheduling opportunity delivered to the serialized control queue. */
+struct schedule_tick_task {
+    uint64_t revision; /**< Runtime revision current when the ticker submitted this task. */
+    time_t now;        /**< Wall clock used to match local civil-time event triggers. */
 };
 
 /** @brief Keep a failed permanent request eligible for the hub's normal recovery manager.
@@ -287,6 +302,133 @@ static int process_link_event(void *argument) {
     ast_mutex_unlock(&runtime_lock);
     ast_free(task);
     return 0;
+}
+
+/** @brief Drain one captured minute's due events before optionally executing their macros.
+ * @param argument Owned wall-clock scheduling task.
+ * @return Zero after releasing task storage.
+ *
+ * The runtime returns retained occurrences first, then newly due occurrences for @p task's
+ * captured minute; ties retain global configuration order. Message preparation and completion
+ * happen under the same control lock as reload. Link dialing deliberately follows each unlock,
+ * because it can block on network work. Completing before the unlock gives a due event
+ * at-most-once control semantics across a configuration reload: a reload cannot redispatch its
+ * message or macro while a network action is in flight.
+ */
+static int process_schedule_tick(void *argument) {
+    struct schedule_tick_task *task = argument;
+    for (;;) {
+        struct ra_scheduled_dispatch dispatch = {0};
+        bool execute = false;
+        bool complete = false;
+        ast_mutex_lock(&runtime_lock);
+        if (task->revision == atomic_load(&runtime_revision)) {
+            int result = ra_runtime_next_scheduled_dispatch(&runtime, task->now, &dispatch);
+            if (result < 0) {
+                ast_log(LOG_WARNING,
+                        "rpt_advanced: scheduled event skipped: message could not be rendered "
+                        "within bounds or references are invalid\n");
+            } else if (result > 0 && !ra_runtime_queue_scheduled_message(&runtime, &dispatch) &&
+                       ra_runtime_complete_scheduled_dispatch(&runtime, &dispatch)) {
+                complete = true;
+                execute = dispatch.has_operation;
+            }
+        }
+        ast_mutex_unlock(&runtime_lock);
+        if (!complete) {
+            break;
+        }
+        if (execute) {
+            (void)execute_link(dispatch.local, &dispatch.operation, task->revision);
+        }
+    }
+    ast_free(task);
+    return 0;
+}
+
+/** @brief Submit one captured wall-clock minute to the non-audio control executor.
+ * @param now Current wall-clock time, including a possible failure value handled by the runtime.
+ *
+ * The producer rechecks `runtime_reloading` after copying its revision. This makes a task either
+ * belong to the previous revision or be discarded before reload/unload tears down the runtime.
+ */
+static void submit_schedule_tick(time_t now) {
+    if (atomic_load_explicit(&runtime_reloading, memory_order_acquire)) {
+        return;
+    }
+    struct schedule_tick_task *task = ast_calloc(1, sizeof(*task));
+    if (!task) {
+        return;
+    }
+    task->revision = atomic_load_explicit(&runtime_revision, memory_order_acquire);
+    task->now = now;
+    if (atomic_load_explicit(&runtime_reloading, memory_order_acquire)) {
+        ast_free(task);
+        return;
+    }
+    if (!ast_taskprocessor_push(control_queue, process_schedule_tick, task)) {
+        return;
+    }
+    ast_free(task);
+}
+
+/** @brief Capture each observed epoch minute once and hand it to the non-audio control queue.
+ * @param unused Unused POSIX thread argument.
+ * @return Null after module teardown requests the ticker stop.
+ *
+ * The ticker immediately captures its first minute, then samples once per second to detect the
+ * next boundary. It only allocates and queues control tasks; it never acquires a radio callback
+ * lock or performs speech, IAX, or PCM work. One FIFO task per minute preserves scheduled events
+ * when a preceding macro temporarily occupies the serialized control executor.
+ */
+static void *run_schedule_ticker(void *unused) {
+    (void)unused;
+    const struct timespec interval = {.tv_sec = 1, .tv_nsec = 0};
+    time_t last_minute = 0;
+    bool have_last_minute = false;
+    bool clock_failed = false;
+    while (atomic_load_explicit(&schedule_thread_running, memory_order_acquire)) {
+        time_t now = time(NULL);
+        if (now == (time_t)-1) {
+            if (!clock_failed) {
+                submit_schedule_tick(now);
+                clock_failed = true;
+            }
+        } else {
+            time_t minute = now / 60;
+            if (!have_last_minute || minute != last_minute) {
+                submit_schedule_tick(now);
+                last_minute = minute;
+                have_last_minute = true;
+            }
+            clock_failed = false;
+        }
+        (void)nanosleep(&interval, NULL);
+    }
+    return NULL;
+}
+
+/** @brief Start the non-audio scheduler ticker after configuration and the control queue exist.
+ * @return Zero on success or minus one when Asterisk cannot create the background thread.
+ */
+static int start_schedule_ticker(void) {
+    atomic_store_explicit(&schedule_thread_running, true, memory_order_release);
+    if (ast_pthread_create_background(&schedule_thread, NULL, run_schedule_ticker, NULL)) {
+        atomic_store_explicit(&schedule_thread_running, false, memory_order_release);
+        return -1;
+    }
+    schedule_thread_started = true;
+    return 0;
+}
+
+/** @brief Join the scheduler ticker before releasing runtime or task-processor ownership. */
+static void stop_schedule_ticker(void) {
+    if (!schedule_thread_started) {
+        return;
+    }
+    atomic_store_explicit(&schedule_thread_running, false, memory_order_release);
+    (void)pthread_join(schedule_thread, NULL);
+    schedule_thread_started = false;
 }
 
 /** @brief Copy a hub lifecycle event to the module's serial telemetry queue.
@@ -714,11 +856,15 @@ static int read_configuration(void) {
     return 0;
 }
 
-/** @brief Stop producers before draining the control queue, without joining under its lock. */
+/** @brief Stop producers before draining the control queue. */
 static void stop_runtime(void) {
     ast_mutex_lock(&runtime_lock);
+    /* Invalidate a schedule task before joining its ticker.  A task already dialing can finish
+     * its external call, but its revision check prevents attachment to torn-down runtime state. */
+    atomic_store_explicit(&runtime_reloading, true, memory_order_release);
+    atomic_fetch_add_explicit(&runtime_revision, 1, memory_order_acq_rel);
+    stop_schedule_ticker();
     ra_runtime_stop(&runtime);
-    atomic_fetch_add(&runtime_revision, 1);
     ra_document_destroy(&configuration);
     ast_mutex_unlock(&runtime_lock);
     control_queue = ast_taskprocessor_unreference(control_queue);
@@ -750,13 +896,26 @@ static int load_module(void) {
         stop_runtime();
         return AST_MODULE_LOAD_DECLINE;
     }
+    if (start_schedule_ticker()) {
+        ast_cli_unregister_multiple(commands, sizeof(commands) / sizeof(*commands));
+        ast_unregister_application("RptAdvanced");
+        stop_runtime();
+        return AST_MODULE_LOAD_DECLINE;
+    }
+    submit_schedule_tick(time(NULL));
     return AST_MODULE_LOAD_SUCCESS;
 }
 
 /** @brief Replace validated configuration on an Asterisk module reload.
  * @return Zero on success or minus one while retaining the previous configuration.
  */
-static int reload_module(void) { return read_configuration(); }
+static int reload_module(void) {
+    if (read_configuration()) {
+        return -1;
+    }
+    submit_schedule_tick(time(NULL));
+    return 0;
+}
 
 /** @brief Release module-owned configuration.
  * @return Zero after cleanup.

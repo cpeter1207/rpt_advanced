@@ -203,9 +203,18 @@ static void courtesy_start(struct ra_controller *state) {
     state->courtesy_playing = true;
 }
 
+void ra_controller_link_unkeyed_kerchunk(struct ra_controller *state, const char *remote,
+                                         bool permanent, bool kerchunk, uint64_t now_ms) {
+    if (kerchunk) {
+        state->suppress_release = true;
+        return;
+    }
+    courtesy_schedule(state, courtesy_link_select(state, remote, permanent), false, remote, now_ms);
+}
+
 void ra_controller_link_unkeyed(struct ra_controller *state, const char *remote, bool permanent,
                                 uint64_t now_ms) {
-    courtesy_schedule(state, courtesy_link_select(state, remote, permanent), false, remote, now_ms);
+    ra_controller_link_unkeyed_kerchunk(state, remote, permanent, false, now_ms);
 }
 
 void ra_controller_link_keyed(struct ra_controller *state, const char *remote) {
@@ -341,6 +350,11 @@ bool ra_controller_start(struct ra_controller *state, uint64_t now_ms) {
     state->duplex = (struct ra_duplex_state){0};
     state->playing = SIZE_MAX;
     state->receiving = false;
+    state->receiver_key_ms = now_ms;
+    state->transmit_key_ms = now_ms;
+    state->timeout_until_ms = 0;
+    state->timeout_wait_unkey = false;
+    state->suppress_release = false;
     state->last_activity_ms = now_ms;
     state->key_idle_ms = 0;
     state->status_speed_wpm = status_speed;
@@ -427,19 +441,28 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
     if (interrupting_receive) {
         if (!was_receiving) {
             state->key_idle_ms = idle;
+            state->suppress_release = false;
         }
         state->last_activity_ms = now_ms;
         ra_id_activity(state->states, state->count);
     }
     bool receiver_unkeyed = state->receiving && !receiving;
     bool receiver_keyed = !state->receiving && receiving;
+    if (receiver_keyed) {
+        state->receiver_key_ms = now_ms;
+    }
+    bool receiver_kerchunk = receiver_unkeyed && state->kerchunk_max_ms &&
+                             now_ms - state->receiver_key_ms <= state->kerchunk_max_ms;
     if (receiver_unkeyed) {
         state->receiver_unkey_ms = now_ms;
     }
     state->receiving = receiving;
     state->link_was_active = state->link_active;
-    if (receiver_unkeyed) {
+    if (receiver_unkeyed && !receiver_kerchunk) {
         courtesy_schedule(state, state->receiver_courtesy, true, NULL, now_ms);
+    }
+    if (receiver_kerchunk) {
+        state->suppress_release = true;
     }
     if (receiver_keyed) {
         courtesy_cancel_pending(state, true, NULL);
@@ -612,12 +635,28 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
                           state->status_playing || state->courtesy_playing ||
                           state->courtesy_pending_count != 0 ||
                           state->announcement_playing != SIZE_MAX || status_ready;
+    bool was_keyed = state->duplex.keyed;
     bool keyed = ra_duplex_update(
         &state->duplex, state->full_duplex, receiving, identifier_active || other_transmit, now_ms,
         identifier_active && !other_transmit ? RA_CONTROLLER_IDENTIFIER_RELEASE_MS
                                              : state->hang_ms);
+    if (state->timeout_wait_unkey && !interrupting_receive && now_ms >= state->timeout_until_ms) {
+        state->timeout_wait_unkey = false;
+    }
+    if (state->timeout_wait_unkey) {
+        state->duplex.keyed = false;
+        keyed = false;
+    } else if (keyed && !was_keyed) {
+        state->transmit_key_ms = now_ms;
+    } else if (keyed && state->transmit_timeout_ms &&
+               now_ms - state->transmit_key_ms >= state->transmit_timeout_ms) {
+        state->timeout_until_ms = now_ms + state->timeout_lockout_ms;
+        state->timeout_wait_unkey = true;
+        state->duplex.keyed = false;
+        keyed = false;
+    }
     /* An every-release announcement follows only traffic that actually keyed the transmitter. */
-    if (keyed && (ordinary_activity || ordinary_audio)) {
+    if (keyed && (ordinary_activity || ordinary_audio) && !state->suppress_release) {
         announcement_mark_release(state);
     }
     return keyed;

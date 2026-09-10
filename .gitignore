@@ -1,4 +1,7 @@
 /build/
+/.work/
+/html/
+/latex/
 *.gcda
 *.gcno
 *.gcov

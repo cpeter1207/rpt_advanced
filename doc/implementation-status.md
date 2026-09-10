@@ -87,6 +87,9 @@
   speech with Morse fallback, lock-free prepared-speech RF status playback, and
   best-effort `L ` topology exchange. See
   [AllStarLink status](allstarlink-status.md) for validation limits.
+- Local-time scheduled events with strict daily, weekly, and one-time triggers;
+  inherited named message templates; serialized speech/Morse telemetry; and
+  configuration-order controller macros limited to direct link operations.
 - The quality policy requires strict formatting, compiler diagnostics, Cppcheck,
   Clang-Tidy, Doxygen, and per-platform line/branch coverage gates. Doxygen is
   published to GitHub Pages after the main-branch quality gate passes.

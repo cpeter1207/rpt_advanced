@@ -75,17 +75,25 @@ struct ra_controller {
     unsigned int rate;         /**< Negotiated PCM sample rate. */
     bool full_duplex;          /**< Whether local reception may transmit. */
     bool link_active; /**< Current linked-receiver activity; it interrupts prepared identifiers. */
-    const int16_t *link_audio;  /**< Borrowed link mix for the current block, or null. */
-    uint64_t hang_ms;           /**< Transmitter hang time. */
+    const int16_t *link_audio;    /**< Borrowed link mix for the current block, or null. */
+    uint64_t hang_ms;             /**< Transmitter hang time. */
+    uint64_t transmit_timeout_ms; /**< Continuous-PTT watchdog duration; zero disables it. */
+    uint64_t timeout_lockout_ms;  /**< Post-timeout PTT lockout duration. */
+    uint64_t kerchunk_max_ms;     /**< Short receive duration that suppresses tail telemetry. */
     int telemetry_duck_db;      /**< Receive-active telemetry attenuation, from -60 through 0 dB. */
     double telemetry_duck_gain; /**< Precomputed receive-active telemetry gain. */
     double telemetry_gain;      /**< Audio-thread smoothed telemetry gain. */
-    struct ra_duplex_state duplex;    /**< Current PTT request and hang state. */
-    struct ra_playback playback;      /**< Currently selected identifier playback. */
-    size_t playing;                   /**< Active identifier index, or SIZE_MAX. */
-    bool receiving;                   /**< Previous qualified receiver indication. */
-    uint64_t last_activity_ms;        /**< Last receive activity, initially startup. */
-    uint64_t key_idle_ms;             /**< Idle period preceding the current conversation. */
+    struct ra_duplex_state duplex; /**< Current PTT request and hang state. */
+    struct ra_playback playback;   /**< Currently selected identifier playback. */
+    size_t playing;                /**< Active identifier index, or SIZE_MAX. */
+    bool receiving;                /**< Previous qualified receiver indication. */
+    uint64_t receiver_key_ms;      /**< Current local-receiver rising-edge time. */
+    uint64_t transmit_key_ms;      /**< Current continuous PTT rising-edge time. */
+    uint64_t timeout_until_ms;     /**< Earliest recovery after a watchdog timeout. */
+    bool timeout_wait_unkey;   /**< Timed-out source must clear before transmission may recover. */
+    bool suppress_release;     /**< Current short transmission must not create tail telemetry. */
+    uint64_t last_activity_ms; /**< Last receive activity, initially startup. */
+    uint64_t key_idle_ms;      /**< Idle period preceding the current conversation. */
     unsigned int status_speed_wpm;    /**< Per-node Morse speed used for RF-status fallback. */
     unsigned int status_frequency_hz; /**< Per-node Morse frequency used for RF-status fallback. */
     int status_level_db;              /**< Per-node Morse level used for RF-status fallback. */
@@ -154,6 +162,19 @@ bool ra_controller_queue_status(struct ra_controller *state, const char *text, i
  */
 void ra_controller_link_unkeyed(struct ra_controller *state, const char *remote, bool permanent,
                                 uint64_t now_ms);
+/** @brief Queue one link courtesy unless its source was a configured kerchunk.
+ * @param state Started controller owned by the same hardware-paced radio worker.
+ * @param remote Exact direct-peer identity from the routing hub.
+ * @param permanent True only for a configured permanent direct link.
+ * @param kerchunk True when the source transmission must suppress its courtesy media.
+ * @param now_ms Monotonic unkey time.
+ *
+ * This is the kerchunk-aware counterpart to ra_controller_link_unkeyed(). When
+ * @p kerchunk is true it leaves pending courtesy state unchanged. Otherwise it
+ * applies the normal peer-specific or generic-link courtesy selection.
+ */
+void ra_controller_link_unkeyed_kerchunk(struct ra_controller *state, const char *remote,
+                                         bool permanent, bool kerchunk, uint64_t now_ms);
 
 /** @brief Cancel one direct peer's pending courtesy media when that peer keys again.
  * @param state Started controller owned by the same hardware-paced radio worker.

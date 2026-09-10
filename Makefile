@@ -110,7 +110,8 @@ build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) $(RPCR_BUI
 	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
 
 build/module-coverage/app_rpt_advanced.so: build/module-coverage/app_rpt_advanced.o $(COVERAGE_OBJECTS)
-	$(CC) --coverage -shared $^ -lm $(SAMPLERATE_LIBS) -o $@
+	$(CC) --coverage -shared $^ -lm $(SAMPLERATE_LIBS) \
+		-Wl,--wrap=nanosleep,--wrap=pthread_join,--wrap=time -o $@
 
 build/test_asterisk_module: tests/test_asterisk_module.c build/module-coverage/app_rpt_advanced.so | build
 	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -DASTMM_LIBC=ASTMM_IGNORE $< -Wl,--export-dynamic -ldl -o $@
@@ -227,6 +228,9 @@ install-check: all
 	cmp src/playback.h build/stage/usr/include/rpt_advanced/playback.h
 	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
 	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
+	cmp src/message_template.h build/stage/usr/include/rpt_advanced/message_template.h
+	cmp src/scheduled_action.h build/stage/usr/include/rpt_advanced/scheduled_action.h
+	cmp src/scheduled_event.h build/stage/usr/include/rpt_advanced/scheduled_event.h
 	cmp src/link_access.h build/stage/usr/include/rpt_advanced/link_access.h
 	cmp src/link_audio.h build/stage/usr/include/rpt_advanced/link_audio.h
 	cmp src/link_command.h build/stage/usr/include/rpt_advanced/link_command.h

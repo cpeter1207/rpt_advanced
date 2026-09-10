@@ -45,3 +45,5 @@ required quality gate in the documented development environment.
 
 See [requirements](doc/requirements.md) and the precise
 [implementation status](doc/implementation-status.md).
+Architecture and durable design decisions are maintained in
+[doc/architecture](doc/architecture/README.md).
