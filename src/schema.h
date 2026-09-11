@@ -78,4 +78,22 @@ const char *ra_document_macro_named(const struct ra_document *document, const ch
  */
 const char *ra_document_event(const struct ra_document *document, size_t index, const char **node);
 
+/** @brief Find a configured permanent direct link in source order.
+ * @param document Validated document.
+ * @param index Zero-based configured-link index.
+ * @param node Receives the complete owning node name when non-null.
+ * @return Borrowed complete permanent-link section name, or null after the final link.
+ */
+const char *ra_document_permanent(const struct ra_document *document, size_t index,
+                                  const char **node);
+
+/** @brief Find a configured permanent-link replacement window in source order.
+ * @param document Validated document.
+ * @param index Zero-based schedule index.
+ * @param node Receives the complete owning node name when non-null.
+ * @return Borrowed complete schedule section name, or null after the final window.
+ */
+const char *ra_document_schedule(const struct ra_document *document, size_t index,
+                                 const char **node);
+
 #endif

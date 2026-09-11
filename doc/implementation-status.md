@@ -10,8 +10,10 @@
   serialization after ordinary hang and due IDs, idle PTT initiation, and smooth
   receive-active ducking.
 - Named courtesy-tone inputs with shared and per-node media defaults: receiver,
-  generic-link, and permanent-direct-peer routing; file/speech/generated-tone/Morse
-  fallback; source-specific pending cancellation; and receive-active ducking.
+  generic-link, exact-direct-peer, and advisory first-keyed-downstream-per-query routing
+  through canonical legacy-compatible `K?`/`K` reply and relay handling at the
+  receive edge and once per active second; file/speech/generated-tone/Morse fallback;
+  source-specific pending cancellation; and receive-active ducking.
   Generated sequences are pre-rendered on reload and support bounded mono-tone,
   dual-tone, silence, duration, and per-segment-level patterns.
 - File/speech/Morse preference policy, including Morse-only reception behavior.
@@ -85,11 +87,15 @@
   topology-loop rejection, direct IAX peer routing, linking-only DTMF,
   permanent-link recovery, direct-peer remote command mode, `*722` local-time
   speech with Morse fallback, lock-free prepared-speech RF status playback, and
-  best-effort `L ` topology exchange. See
+  best-effort `L ` topology plus canonical advisory keyed-source `K?`/`K`
+  reply and relay handling. See
   [AllStarLink status](allstarlink-status.md) for validation limits.
 - Local-time scheduled events with strict daily, weekly, and one-time triggers;
   inherited named message templates; serialized speech/Morse telemetry; and
   configuration-order controller macros limited to direct link operations.
+- Configuration-owned permanent transceive direct links and same-day local-time
+  replacement windows, including permanent-first withdrawal, optional
+  post-window receive quiet time, and reload-safe desired-link continuity.
 - The quality policy requires strict formatting, compiler diagnostics, Cppcheck,
   Clang-Tidy, Doxygen, and per-platform line/branch coverage gates. Doxygen is
   published to GitHub Pages after the main-branch quality gate passes.

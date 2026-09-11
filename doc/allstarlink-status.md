@@ -73,8 +73,10 @@ failure as well as after an unexpected transport failure. They retry
 immediately, then after one second with exponential backoff to a five-minute
 maximum. An explicit permanent disconnect cancels a queued retry.
 Disconnect-all retains both temporary and permanent links for reconnect-all;
-only permanent links retry automatically. Retained state is in memory only, so
-no link survives a local Asterisk restart.
+only permanent links retry automatically. Retained state for runtime-created
+links is in memory only. A configuration-owned `[permanent node label]` entry
+instead rebuilds its desired permanent peer at module startup and after a
+successful configuration reload; its live transport remains runtime state.
 
 The half-duplex policy prevents local receive audio from being repeated and
 holds transmit off while the local receiver is active. Linked audio remains
@@ -106,8 +108,30 @@ the direct peer is disconnected without retry. A route naming another direct
 peer is also detached, covering a legacy peer that does not advertise its own
 topology. Direct self-links, duplicate direct links (including permanent links
 and retained retries), and a requested target already named by an attached peer
-are rejected. A local rejection queues the spoken status `LINK REJECTED
-TOPOLOGY LOOP`, with normal Morse fallback.
+are rejected. An interactive local rejection queues the spoken status `LINK
+REJECTED TOPOLOGY LOOP`, with normal Morse fallback. Configuration-owned
+scheduled retries stay silent when topology admission rejects them, preventing
+repeated RF telemetry.
+
+For courtesy selection only, an active direct peer receives one advisory
+canonical legacy-compatible `K? * requester 0 0` key-status query at its
+receive edge and then once per second. rpt_advanced peers strictly parse this
+`K?`/`K` exchange in their reader/control plane: they queue their own key-state
+reply to the ingress peer, forward a query only to other direct peers, and
+relay a valid reply toward its named requester without returning it to ingress.
+A reply identifying the direct peer is ignored for candidate selection; the
+direct peer remains the normal fallback. The first valid keyed downstream `K`
+reply delivered for each successfully sent query wins, including a double where
+reader arrival order chooses the responder. Across periodic queries, the latest
+accepted candidate is used for courtesy lookup; a missing, malformed,
+unsupported, nonforwarding, or failed later query does not erase an earlier
+candidate from the same receive epoch. No reply delays the courtesy tone. `K`
+has no query serial, so a delayed valid reply may be attributed to a newer query
+and remains best-effort advisory evidence. The receive falling edge cancels an
+unsent locally originated query and rejects a late reply before courtesy
+selection. A peer with no accepted downstream reply uses the direct-peer
+courtesy, then the generic link tone. This does not tag individual media frames,
+alter `*70` or `*72`, or make the topology cache authoritative.
 
 Routing and audio exchange remain lock-free in hardware-paced callbacks. Link
 admission, dialing, retry, status, topology construction, and IAX text delivery
@@ -133,8 +157,8 @@ integration deployment has occurred.
 The ASL3 [IAX text page](https://allstarlink.github.io/developers/iaxtext/)
 warns that it is incomplete and potentially incorrect. The local implementation
 uses the documented behavior together with observed app_rpt wire conventions,
-including `!NEWKEY!`, `!NEWKEY1!`, and `L ` topology advertisements. No app_rpt
-implementation is copied.
+including `!NEWKEY!`, `!NEWKEY1!`, `L ` topology advertisements, and `K?`/`K`
+keyed-source queries. No app_rpt implementation is copied.
 
 Read-only checks on 524950 found an active RadioPlusAdvanced channel, an
 incoming dialplan still using `Rpt()` and `RPT_NODE()`, DNS-only lookup, and an

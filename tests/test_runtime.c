@@ -71,6 +71,8 @@ static bool verify_courtesy_preparation;
 static bool verify_courtesy_tone_fallback;
 /** @brief Started controller retained only while the tone-fallback assertion runs. */
 static struct ra_controller *courtesy_tone_fallback_controller;
+/** @brief Started controller retained only while configured-link scheduling is exercised. */
+static struct ra_controller *scheduled_link_controller;
 /** @brief Count usable identifier sets bound to successful worker starts. */
 static size_t seen_ids;
 /** @brief Count usable announcement sets bound to successful worker starts. */
@@ -87,6 +89,10 @@ static unsigned int link_hangups;
 static bool retained_link_state;
 /** @brief Select whether the fixture reports the requested node as already reachable. */
 static bool reachable_link_state;
+/** @brief Select whether the fixture reports a live route after paused retries are excluded. */
+static bool live_reachable_link_state;
+/** @brief Select whether the fixture simulates a lost permanent hub route with no retry record. */
+static bool permanent_route_missing;
 /** @brief Initial permanent-link intents accepted by the routing fixture. */
 static unsigned int retained_permanent_links;
 /** @brief Routing hubs closed only when their owning runtime node is released. */
@@ -139,6 +145,14 @@ static unsigned int reconnect_attachments;
 static unsigned int reconnect_cancellations;
 /** @brief Number of recovery-only pause detaches observed by the fixture. */
 static unsigned int reconnect_pauses;
+/** @brief Number of hub-wide retained-route resumptions requested by the runtime. */
+static unsigned int reconnect_all_calls;
+/** @brief Number of permanent hub cancellations recorded by the scheduler fixture. */
+static unsigned int permanent_disconnect_calls;
+/** @brief Exact peer from the most recently recorded permanent hub cancellation. */
+static char permanent_disconnect_name[RA_NODE_NAME_MAX];
+/** @brief True when a cancellation was recorded before the next reconnect-all request. */
+static bool permanent_disconnect_before_reconnect;
 /** @brief Reader-to-runtime handlers installed by each active node hub. */
 static ra_link_hub_digit_fn inbound_callbacks[2];
 /** @brief Contexts paired with the captured inbound handlers. */
@@ -162,6 +176,8 @@ static bool invalid_localtime;
 /** @brief Deterministic complete local civil clock shared by time and scheduler tests. */
 static struct ast_tm local_clock = {
     .tm_year = 126, .tm_mon = 8, .tm_mday = 9, .tm_wday = 3, .tm_hour = 13, .tm_min = 7};
+/** @brief Advance the fixture civil clock during a final hub attachment-policy callback. */
+static bool advance_clock_at_attachment_gate;
 
 /** @brief Provide a deterministic wall clock or its documented failure value.
  * @param output Optional destination for the selected epoch.
@@ -414,10 +430,16 @@ void ra_link_hub_init(struct ra_link_hub *hub) {
 }
 /** @endcond */
 
+/** @brief Accept fixture peers used by ordinary links and configuration-owned schedule routes. */
+static bool fixture_link_name(const char *name) {
+    return !strcmp(name, "123") || !strcmp(name, "506315") || !strcmp(name, "506316") ||
+           !strcmp(name, "2627");
+}
+
 int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
                        struct ast_format *linear, bool transmit, bool forward, bool permanent) {
     (void)linear;
-    assert(hub && !strcmp(name, "123") && channel == (struct ast_channel *)&link_identity);
+    assert(hub && fixture_link_name(name) && channel == (struct ast_channel *)&link_identity);
     assert(transmit && forward);
     int result = link_error == 5 ? -1 : 0;
     if (reconnect_invoking) {
@@ -432,6 +454,25 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
 }
 
 /** @cond TEST_FIXTURE */
+/** @brief Apply the retained-retry gate before using the ordinary attachment fixture. */
+int ra_link_hub_attach_gated(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
+                             struct ast_format *linear, bool transmit, bool forward, bool permanent,
+                             const atomic_bool *cancelled, const atomic_bool *paused,
+                             ra_link_hub_attach_gate_fn current, void *context) {
+    if (current && advance_clock_at_attachment_gate) {
+        advance_clock_at_attachment_gate = false;
+        local_clock.tm_hour = 11;
+        local_clock.tm_min = 0;
+    }
+    if ((cancelled && atomic_load(cancelled)) || (paused && atomic_load(paused)) ||
+        (current && !current(context))) {
+        return -1;
+    }
+    return ra_link_hub_attach(hub, name, channel, linear, transmit, forward, permanent);
+}
+/** @endcond */
+
+/** @cond TEST_FIXTURE */
 /** @brief Record a permanent retry intent passed through the runtime bridge.
  * @param hub Selected node routing hub.
  * @param name Requested remote identity.
@@ -441,7 +482,7 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
  */
 bool ra_link_hub_retain_permanent(struct ra_link_hub *hub, const char *name, bool transmit,
                                   bool forward) {
-    assert(hub && !strcmp(name, "123") && transmit && forward);
+    assert(hub && fixture_link_name(name) && transmit && forward);
     ++retained_permanent_links;
     return link_error != 10;
 }
@@ -489,7 +530,7 @@ void ra_link_hub_set_event_handler(struct ra_link_hub *hub, ra_link_hub_event_fn
 /** @endcond */
 
 bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
-    assert(hub && !strcmp(name, "123"));
+    assert(hub && fixture_link_name(name));
     return link_error != 7;
 }
 
@@ -499,7 +540,10 @@ bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
  * @return True after validating the requested peer.
  */
 bool ra_link_hub_disconnect_permanent(struct ra_link_hub *hub, const char *name) {
-    assert(hub && !strcmp(name, "123"));
+    assert(hub && fixture_link_name(name));
+    ++permanent_disconnect_calls;
+    assert(strlen(name) < sizeof(permanent_disconnect_name));
+    strcpy(permanent_disconnect_name, name);
     if (reconnect_invoking) {
         ++reconnect_cancellations;
     }
@@ -508,7 +552,7 @@ bool ra_link_hub_disconnect_permanent(struct ra_link_hub *hub, const char *name)
 
 /* Fixture stub: accept a race-safe recovery detachment in the runtime fixture. */
 bool ra_link_hub_detach_reconnect(struct ra_link_hub *hub, const char *name, bool permanent) {
-    assert(hub && !strcmp(name, "123"));
+    assert(hub && fixture_link_name(name));
     if (reconnect_invoking) {
         ++reconnect_pauses;
         assert(permanent);
@@ -533,6 +577,8 @@ size_t ra_link_hub_disconnect_nonpermanent_all(struct ra_link_hub *hub) {
  */
 size_t ra_link_hub_reconnect_all(struct ra_link_hub *hub) {
     assert(hub);
+    permanent_disconnect_before_reconnect = permanent_disconnect_calls != 0;
+    ++reconnect_all_calls;
     return 0;
 }
 
@@ -546,9 +592,21 @@ bool ra_link_hub_has_retained_state(struct ra_link_hub *hub) {
 }
 
 /** @cond TEST_FIXTURE */
+bool ra_link_hub_has_permanent_route(const struct ra_link_hub *hub, const char *name) {
+    assert(hub && fixture_link_name(name));
+    return !permanent_route_missing;
+}
+/** @endcond */
+
+/** @cond TEST_FIXTURE */
 bool ra_link_hub_reaches(const struct ra_link_hub *hub, const char *name) {
-    assert(hub && !strcmp(name, "123"));
+    assert(hub && fixture_link_name(name));
     return reachable_link_state;
+}
+
+bool ra_link_hub_reaches_live(const struct ra_link_hub *hub, const char *name) {
+    assert(hub && fixture_link_name(name));
+    return live_reachable_link_state;
 }
 /** @endcond */
 
@@ -819,6 +877,9 @@ int ra_worker_start(struct ra_worker *worker) {
     if (link_courtesy && !strcmp(link_courtesy->settings.morse_text, "L")) {
         assert(link_courtesy->settings.morse_frequency_hz == 1000);
     }
+    if (!strcmp(worker->name, "524950")) {
+        scheduled_link_controller = worker->controller;
+    }
     if (worker->controller->peer_courtesy_count) {
         assert(worker->controller->peer_courtesy_count == 1 &&
                !strcmp(worker->controller->peer_courtesies[0].remote, "123") &&
@@ -840,6 +901,9 @@ int ra_worker_start(struct ra_worker *worker) {
 }
 void ra_worker_stop(struct ra_worker *worker) {
     assert(worker->channel && workers && channels);
+    if (scheduled_link_controller == worker->controller) {
+        scheduled_link_controller = NULL;
+    }
     --workers;
     --channels;
 }
@@ -863,7 +927,7 @@ static void rejected(const struct ra_document *document) {
  */
 static int connect_fixture(struct ra_runtime *runtime, const char *local) {
     struct ra_link_dial dial = {0};
-    if (ra_runtime_prepare_link(runtime, local, "123", &dial)) {
+    if (ra_runtime_prepare_link(runtime, local, "123", &dial, NULL)) {
         return -1;
     }
     struct ast_channel *channel = ra_link_dial_run(&dial, local);
@@ -871,7 +935,7 @@ static int connect_fixture(struct ra_runtime *runtime, const char *local) {
     if (!channel) {
         return -1;
     }
-    int result = ra_runtime_attach_link(runtime, local, "123", channel, true, true, false);
+    int result = ra_runtime_attach_link(runtime, local, "123", channel, true, true, false, NULL);
     if (result) {
         ast_hangup(channel);
     }
@@ -977,6 +1041,8 @@ static void verify_scheduled_dispatches(void) {
     assert(workers == workers_before + 1 && channels == channels_before + 1);
 
     struct ra_scheduled_dispatch dispatch;
+    struct ra_scheduled_link_operation link_operation;
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &link_operation));
     assert(ra_runtime_next_scheduled_dispatch(&runtime, (time_t)-1, &dispatch) == -1);
     assert(ra_runtime_next_scheduled_dispatch(NULL, 0, &dispatch) == -1);
     assert(ra_runtime_next_scheduled_dispatch(&runtime, 0, NULL) == -1);
@@ -1641,6 +1707,1545 @@ static void verify_scheduled_tick_order(void) {
     assert(!ra_runtime_next_scheduled_dispatch(&runtime, 660, &dispatch));
     ra_runtime_stop(&runtime);
     local_clock = saved_clock;
+}
+
+/** @brief Assert one configuration-owned direct-link control operation in its required order.
+ * @param runtime Started runtime whose schedule owns the operation.
+ * @param now Captured scheduler wall-clock value.
+ * @param now_ms Captured scheduler monotonic timestamp.
+ * @param action Expected permanent attachment or withdrawal action.
+ * @param remote Expected decimal direct-peer identity.
+ */
+static void expect_scheduled_link_operation(struct ra_runtime *runtime, time_t now, uint64_t now_ms,
+                                            enum ra_link_action action, const char *remote) {
+    struct ra_scheduled_link_operation operation = {0};
+    assert(ra_runtime_next_scheduled_link_operation(runtime, now, now_ms, &operation) == 1);
+    assert(operation.schedule_generation && operation.reservation &&
+           !strcmp(operation.local, "524950") && operation.operation.action == action &&
+           !strcmp(operation.operation.remote, remote));
+    assert(ra_runtime_complete_scheduled_link_operation(runtime, &operation, true));
+}
+
+/** @brief Assert that an unchecked configuration fails runtime scheduling with one diagnostic.
+ * @param document Deliberately malformed document that bypasses schema validation.
+ * @param expected Stable runtime diagnostic expected from its defensive validation.
+ */
+static void expect_configured_link_start_error(const struct ra_document *document,
+                                               const char *expected) {
+    struct ra_runtime runtime = {0};
+    const char *error = ra_runtime_start(&runtime, document);
+    assert(error && !strcmp(error, expected));
+    assert(!runtime.nodes && !runtime.schedule && !workers && !channels);
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Verify configured permanent startup, weekday replacement, and quiet-time restoration.
+ *
+ * The scheduler must withdraw a primary before it attaches the replacement, and it must preserve
+ * the final local or linked receive timestamp through a configuration reload.  The fixture calls
+ * the real controller process function so this test exercises the same lock-free publication the
+ * radio worker uses rather than assigning test-only scheduler state.
+ */
+static void verify_configured_link_schedule(void) {
+    char *sections[] = {"524950", "permanent 524950 primary_506315",
+                        "schedule 524950 weekday_2627"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary_506315", "remote_node", "506315"},
+        {"schedule 524950 weekday_2627", "remote_node", "2627"},
+        {"schedule 524950 weekday_2627", "replace_permanent", "primary_506315"},
+        {"schedule 524950 weekday_2627", "days", "Monday-Friday"},
+        {"schedule 524950 weekday_2627", "start_time", "11:00"},
+        {"schedule 524950 weekday_2627", "end_time", "12:00"},
+        {"schedule 524950 weekday_2627", "end_inactivity_ms", "300000"},
+    };
+    char *primary_sections[] = {"524950", "permanent 524950 primary_506315"};
+    struct ra_config_entry primary_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary_506315", "remote_node", "506315"},
+    };
+    char *alternate_sections[] = {"524950", "permanent 524950 primary_506316"};
+    struct ra_config_entry alternate_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary_506316", "remote_node", "506316"},
+    };
+    struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    struct ra_document primary_only = {
+        .sections = primary_sections,
+        .section_count = sizeof(primary_sections) / sizeof(*primary_sections),
+        .entries = primary_entries,
+        .count = sizeof(primary_entries) / sizeof(*primary_entries),
+    };
+    struct ra_document alternate = {
+        .sections = alternate_sections,
+        .section_count = sizeof(alternate_sections) / sizeof(*alternate_sections),
+        .entries = alternate_entries,
+        .count = sizeof(alternate_entries) / sizeof(*alternate_entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation;
+    assert(!ra_document_validate(&document, &section, &key));
+    assert(!ra_document_validate(&primary_only, &section, &key));
+    assert(!ra_document_validate(&alternate, &section, &key));
+    assert(ra_runtime_next_scheduled_link_operation(NULL, 0, 0, &operation) == -1);
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, NULL) == -1);
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation));
+
+    scheduled_link_controller = NULL;
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(scheduled_link_controller);
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, (time_t)-1, 0, &operation) == -1);
+    fail_localtime = true;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == -1);
+    fail_localtime = false;
+    invalid_localtime = true;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == -1);
+    invalid_localtime = false;
+
+    expect_scheduled_link_operation(&runtime, 0, 1000, RA_LINK_PERMANENT_TRANSCEIVE, "506315");
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation));
+    /* Reloading an unchanged desired permanent route cannot duplicate its attach request. */
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(scheduled_link_controller);
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation));
+    /* A live reload fails closed instead of guessing replacement-window policy without a clock. */
+    fail_wall_clock = true;
+    const char *reload_error = ra_runtime_reload(&runtime, &document, &document);
+    assert(reload_error &&
+           !strcmp(reload_error, "cannot read local time to reconcile configured links"));
+    fail_wall_clock = false;
+    assert(scheduled_link_controller);
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation));
+
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    expect_scheduled_link_operation(&runtime, 60, 2000, RA_LINK_DISCONNECT_PERMANENT, "506315");
+    expect_scheduled_link_operation(&runtime, 60, 2000, RA_LINK_PERMANENT_TRANSCEIVE, "2627");
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 60, 2000, &operation));
+    /* A reload during the window retains the replacement rather than redialing it. */
+    local_clock.tm_min = 30;
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(scheduled_link_controller);
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 1800, 3000, &operation));
+
+    /* A real local receiver edge supplies the quiet-time reference, not telemetry activity. */
+    (void)ra_controller_process(scheduled_link_controller, true, NULL, 0, 10000);
+    assert(ra_controller_qualifying_activity_ms(scheduled_link_controller) == 10000);
+    (void)ra_controller_process(scheduled_link_controller, false, NULL, 0, 10001);
+    local_clock.tm_hour = 12;
+    local_clock.tm_min = 0;
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 3600, 309999, &operation));
+    /* Reload retains a pending quiet deadline even though worker replacement resets its atomic. */
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(scheduled_link_controller);
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 3600, 309999, &operation));
+    expect_scheduled_link_operation(&runtime, 3600, 310000, RA_LINK_DISCONNECT_PERMANENT, "2627");
+    expect_scheduled_link_operation(&runtime, 3600, 310000, RA_LINK_PERMANENT_TRANSCEIVE, "506315");
+
+    /* Linked receive has the same quiet-time effect as local RF receive. */
+    local_clock.tm_wday = 4;
+    local_clock.tm_hour = 11;
+    expect_scheduled_link_operation(&runtime, 86400, 400000, RA_LINK_DISCONNECT_PERMANENT,
+                                    "506315");
+    expect_scheduled_link_operation(&runtime, 86400, 400000, RA_LINK_PERMANENT_TRANSCEIVE, "2627");
+    scheduled_link_controller->link_active = true;
+    (void)ra_controller_process(scheduled_link_controller, false, NULL, 0, 500000);
+    scheduled_link_controller->link_active = false;
+    (void)ra_controller_process(scheduled_link_controller, false, NULL, 0, 500001);
+    assert(ra_controller_qualifying_activity_ms(scheduled_link_controller) == 500000);
+    local_clock.tm_hour = 12;
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 90000, 799999, &operation));
+    expect_scheduled_link_operation(&runtime, 90000, 800000, RA_LINK_DISCONNECT_PERMANENT, "2627");
+    expect_scheduled_link_operation(&runtime, 90000, 800000, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "506315");
+
+    /* The full weekday selector does not replace the primary on a weekend. */
+    local_clock.tm_wday = 0;
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 30;
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 172800, 900000, &operation));
+
+    /* Removing a live replacement from configuration retires it before restoring the primary. */
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    expect_scheduled_link_operation(&runtime, 259200, 1000000, RA_LINK_DISCONNECT_PERMANENT,
+                                    "506315");
+    expect_scheduled_link_operation(&runtime, 259200, 1000000, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "2627");
+    permanent_disconnect_calls = 0;
+    permanent_disconnect_name[0] = '\0';
+    assert(!ra_runtime_reload(&runtime, &document, &primary_only));
+    assert(permanent_disconnect_calls == 1 && !strcmp(permanent_disconnect_name, "2627"));
+    expect_scheduled_link_operation(&runtime, 259200, 1000000, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "506315");
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 259200, 1000000, &operation));
+    /* A changed remote is a new desired route; the old retry intent must retire first. */
+    permanent_disconnect_calls = 0;
+    permanent_disconnect_name[0] = '\0';
+    assert(!ra_runtime_reload(&runtime, &primary_only, &alternate));
+    assert(permanent_disconnect_calls == 1 && !strcmp(permanent_disconnect_name, "506315"));
+    expect_scheduled_link_operation(&runtime, 259200, 1000000, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "506316");
+    ra_runtime_stop(&runtime);
+    assert(!scheduled_link_controller);
+    local_clock = saved_clock;
+}
+
+/** @brief Verify multiple same-node replacement windows resolve one labelled permanent route. */
+static void verify_multiple_replacement_windows(void) {
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 weekday",
+                        "schedule 524950 weekend"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+        {"schedule 524950 weekend", "remote_node", "2628"},
+        {"schedule 524950 weekend", "replace_permanent", "primary"},
+        {"schedule 524950 weekend", "days", "Saturday-Sunday"},
+        {"schedule 524950 weekend", "start_time", "11:00"},
+        {"schedule 524950 weekend", "end_time", "12:00"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    assert(!ra_document_validate(&document, &section, &key));
+
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(operation.operation.remote, "506315"));
+    assert(ra_runtime_complete_scheduled_link_operation(&runtime, &operation, true));
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Preserve actual receive activity when a reload changes a post-window quiet interval. */
+static void verify_changed_window_reload_preserves_activity(void) {
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 weekday"};
+    struct ra_config_entry current_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+        {"schedule 524950 weekday", "end_inactivity_ms", "300000"},
+    };
+    struct ra_config_entry changed_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+        {"schedule 524950 weekday", "end_inactivity_ms", "600000"},
+    };
+    const struct ra_document current = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = current_entries,
+        .count = sizeof(current_entries) / sizeof(*current_entries),
+    };
+    const struct ra_document changed = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = changed_entries,
+        .count = sizeof(changed_entries) / sizeof(*changed_entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    assert(!ra_document_validate(&current, &section, &key));
+    assert(!ra_document_validate(&changed, &section, &key));
+
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &current));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == 1);
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    expect_scheduled_link_operation(&runtime, 0, 0, RA_LINK_DISCONNECT_PERMANENT, "506315");
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == 1);
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+    (void)ra_controller_process(scheduled_link_controller, true, NULL, 0, 10000);
+    (void)ra_controller_process(scheduled_link_controller, false, NULL, 0, 10001);
+    local_clock.tm_hour = 12;
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 309999, &operation));
+
+    assert(!ra_runtime_reload(&runtime, &current, &changed));
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 609999, &operation));
+    expect_scheduled_link_operation(&runtime, 0, 610000, RA_LINK_DISCONNECT_PERMANENT, "2627");
+    expect_scheduled_link_operation(&runtime, 0, 610000, RA_LINK_PERMANENT_TRANSCEIVE, "506315");
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Clear direct-peer remote-command selection when a schedule withdraws that peer.
+ *
+ * A selected peer receives raw DTMF before the ordinary collector.  The scheduled withdrawal
+ * therefore has to clear that selection just like an operator disconnect, otherwise the first
+ * subsequent digit would be sent to a peer that no longer exists.
+ */
+static void verify_scheduled_disconnect_clears_remote_selection(void) {
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 weekday"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "123"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    struct ra_link_operation command = {0};
+    assert(!ra_document_validate(&document, &section, &key));
+
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == 1);
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+    assert(!ra_runtime_remote_command(&runtime, "524950", "123", 0));
+
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_DISCONNECT_PERMANENT &&
+           !strcmp(operation.operation.remote, "123"));
+    /* A completed transport teardown reports no live hub port, but the scheduled policy still
+     * withdraws its selected remote-command target. */
+    link_error = 7;
+    assert(ra_runtime_disconnect_permanent(&runtime, operation.local, operation.operation.remote,
+                                           &operation));
+    link_error = 0;
+    assert(!ra_runtime_digit(&runtime, "524950", '5', 100, &command));
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Verify that an operator hold and reload cannot revive an old scheduled dial.
+ *
+ * A scheduler call intentionally drops the runtime lock before IAX dialing. This regression test
+ * reserves the old primary, applies `*806`, reloads, and then uses `*816` during the replacement
+ * window. The original reservation must fail every later prepare, attach, retry-retention, and
+ * settlement path, while the newly reserved replacement remains usable.
+ */
+static void verify_scheduled_link_reservations(void) {
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 weekday"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+        {"schedule 524950 weekday", "end_inactivity_ms", "300000"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    unsigned int retained_before = retained_permanent_links;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation old_operation = {0};
+    struct ra_scheduled_link_operation same_route = {0};
+    struct ra_scheduled_link_operation replacement = {0};
+    assert(!ra_document_validate(&document, &section, &key));
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &old_operation) == 1);
+    assert(old_operation.schedule_generation && old_operation.reservation &&
+           old_operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(old_operation.operation.remote, "506315"));
+
+    /* A failed reload invalidates its app task. The retained schedule must clear that pending
+     * reservation so the next ticker can issue a fresh nonce instead of being blocked forever. */
+    struct ra_scheduled_link_operation stale_after_failed_reload = old_operation;
+    struct ra_scheduled_link_operation after_failed_reload = {0};
+    fail_worker = starts + 1U;
+    const char *reload_error = ra_runtime_reload(&runtime, &document, &document);
+    assert(reload_error && !strcmp(reload_error, "cannot start radio worker"));
+    fail_worker = 0;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &after_failed_reload) == 1);
+    assert(after_failed_reload.schedule_generation ==
+               stale_after_failed_reload.schedule_generation &&
+           after_failed_reload.link_index == stale_after_failed_reload.link_index &&
+           after_failed_reload.reservation != stale_after_failed_reload.reservation);
+    assert(ra_runtime_prepare_link(&runtime, stale_after_failed_reload.local,
+                                   stale_after_failed_reload.operation.remote, NULL,
+                                   &stale_after_failed_reload) == -1);
+    assert(
+        !ra_runtime_complete_scheduled_link_operation(&runtime, &stale_after_failed_reload, true));
+    old_operation = after_failed_reload;
+
+    /* A topology conflict can persist for several scheduler ticks. It must not queue repeated
+     * RF loop telemetry while the configuration-owned retry waits for the route to clear. */
+    size_t queued_before_conflict = queued_status_count;
+    struct ra_scheduled_link_operation blocked_retry = {0};
+    reachable_link_state = true;
+    assert(ra_runtime_prepare_link(&runtime, old_operation.local, old_operation.operation.remote,
+                                   NULL, &old_operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(
+        &runtime, old_operation.local, old_operation.operation.remote, true, true, &old_operation));
+    assert(ra_runtime_complete_scheduled_link_operation(&runtime, &old_operation, false));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &blocked_retry) == 1);
+    assert(ra_runtime_prepare_link(&runtime, blocked_retry.local, blocked_retry.operation.remote,
+                                   NULL, &blocked_retry) == -1);
+    assert(!ra_runtime_retain_permanent_link(
+        &runtime, blocked_retry.local, blocked_retry.operation.remote, true, true, &blocked_retry));
+    assert(ra_runtime_complete_scheduled_link_operation(&runtime, &blocked_retry, false));
+    assert(queued_status_count == queued_before_conflict);
+    reachable_link_state = false;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &old_operation) == 1);
+
+    /* `*806` discards the outstanding reservation. `*816` can reserve the same slot again, so
+     * only a fresh nonce—not endpoint or schedule generation alone—may authorize it. */
+    assert(!ra_runtime_disconnect_all(&runtime, "524950"));
+    assert(!ra_runtime_reconnect_all(&runtime, "524950"));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &same_route) == 1);
+    assert(same_route.schedule_generation == old_operation.schedule_generation &&
+           same_route.link_index == old_operation.link_index &&
+           same_route.reservation != old_operation.reservation &&
+           !strcmp(same_route.operation.remote, old_operation.operation.remote));
+    assert(ra_runtime_prepare_link(&runtime, old_operation.local, old_operation.operation.remote,
+                                   NULL, &old_operation) == -1);
+    assert(ra_runtime_attach_link(&runtime, old_operation.local, old_operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &old_operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(
+        &runtime, old_operation.local, old_operation.operation.remote, true, true, &old_operation));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &old_operation, true));
+    assert(ra_runtime_retain_permanent_link(&runtime, same_route.local, same_route.operation.remote,
+                                            true, true, &same_route));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &same_route, true));
+
+    /* A permanent transport loss can fail to allocate its hub retry record. The next scheduler
+     * tick observes that exact route is gone, clears stale issued state, and retries it. */
+    struct ra_scheduled_link_operation recovered_route = {0};
+    permanent_route_missing = true;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &recovered_route) == 1);
+    assert(recovered_route.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(recovered_route.operation.remote, "506315"));
+    permanent_route_missing = false;
+    assert(ra_runtime_retain_permanent_link(&runtime, recovered_route.local,
+                                            recovered_route.operation.remote, true, true,
+                                            &recovered_route));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &recovered_route, true));
+
+    /* The hold survives a live reload. At 11:00 `*816` withdraws issued 506315 before it can
+     * resume, then permits only the configured replacement route. */
+    assert(!ra_runtime_disconnect_all(&runtime, "524950"));
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &replacement));
+
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    permanent_disconnect_calls = 0;
+    permanent_disconnect_name[0] = '\0';
+    permanent_disconnect_before_reconnect = false;
+    assert(!ra_runtime_reconnect_all(&runtime, "524950"));
+    assert(permanent_disconnect_calls == 1 && !strcmp(permanent_disconnect_name, "506315") &&
+           permanent_disconnect_before_reconnect);
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 60, 2000, &replacement) == 1);
+    assert(replacement.schedule_generation != old_operation.schedule_generation &&
+           replacement.reservation &&
+           replacement.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(replacement.operation.remote, "2627"));
+
+    /* The old dial cannot attach, retain a retry, or settle after the hold/reload handoff. */
+    assert(ra_runtime_prepare_link(&runtime, old_operation.local, old_operation.operation.remote,
+                                   NULL, &old_operation) == -1);
+    assert(ra_runtime_attach_link(&runtime, old_operation.local, old_operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &old_operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(
+        &runtime, old_operation.local, old_operation.operation.remote, true, true, &old_operation));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &old_operation, true));
+
+    /* The exact new reservation remains valid and settles only after the hub owns its retry. */
+    assert(ra_runtime_retain_permanent_link(
+        &runtime, replacement.local, replacement.operation.remote, true, true, &replacement));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &replacement, true));
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 60, 2000, &replacement));
+
+    /* Reload reconciles a pending withdrawal immediately. Its obsolete token cannot detach a
+     * later route, and the desired permanent route is the only remaining scheduler action. */
+    struct ra_scheduled_link_operation old_detach = {0};
+    local_clock.tm_hour = 12;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 3600, 3000, &old_detach) == 1);
+    assert(old_detach.operation.action == RA_LINK_DISCONNECT_PERMANENT &&
+           !strcmp(old_detach.operation.remote, "2627"));
+    permanent_disconnect_calls = 0;
+    permanent_disconnect_name[0] = '\0';
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(permanent_disconnect_calls == 1 && !strcmp(permanent_disconnect_name, "2627"));
+    assert(!ra_runtime_disconnect_permanent(&runtime, old_detach.local, old_detach.operation.remote,
+                                            &old_detach));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &old_detach, true));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 3600, 3000, &replacement) == 1);
+    assert(replacement.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(replacement.operation.remote, "506315"));
+
+    /* A failed local-clock read leaves the `*806` hold intact instead of resuming stale retries. */
+    unsigned int reconnect_before = reconnect_all_calls;
+    assert(!ra_runtime_disconnect_all(&runtime, "524950"));
+    fail_wall_clock = true;
+    assert(!ra_runtime_reconnect_all(&runtime, "524950"));
+    fail_wall_clock = false;
+    assert(reconnect_all_calls == reconnect_before);
+    assert(!ra_runtime_reconnect_all(&runtime, "524950"));
+    assert(reconnect_all_calls == reconnect_before + 1U);
+    retained_permanent_links = retained_before;
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Verify that copied configured-link reservations reject every stale identity field.
+ *
+ * The control task receives an independently owned operation after releasing the runtime lock.
+ * Exercise its complete validation boundary before proving that successful attach and withdrawal
+ * operations settle their exact pending route.
+ */
+static void verify_scheduled_link_operation_validation(void) {
+    char *sections[] = {"524950", "other", "permanent 524950 primary", "schedule 524950 weekday"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"other", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    struct ra_scheduled_link_operation pending;
+    struct ra_scheduled_link_operation invalid;
+    assert(!ra_document_validate(&document, &section, &key));
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 0;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(operation.operation.remote, "506315"));
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &pending));
+
+    assert(!ra_runtime_complete_scheduled_link_operation(NULL, &operation, true));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, NULL, true));
+    struct ra_runtime no_schedule = {0};
+    assert(!ra_runtime_complete_scheduled_link_operation(&no_schedule, &operation, true));
+    invalid = operation;
+    invalid.reservation = 0;
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &invalid, true));
+    invalid = operation;
+    ++invalid.schedule_generation;
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &invalid, true));
+    invalid = operation;
+    invalid.link_index = SIZE_MAX;
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &invalid, true));
+    invalid = operation;
+    strcpy(invalid.local, "other");
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &invalid, true));
+    invalid = operation;
+    strcpy(invalid.operation.remote, "506316");
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &invalid, true));
+
+    /* An unrecognized action clears only this reservation and cannot alter issued state. */
+    invalid = operation;
+    invalid.operation.action = RA_LINK_STATUS;
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &invalid, true));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation) == 1);
+
+    /* The operation itself may be current only for its exact local endpoint and remote peer. */
+    invalid = operation;
+    invalid.operation.action = RA_LINK_STATUS;
+    assert(ra_runtime_prepare_link(&runtime, operation.local, operation.operation.remote, NULL,
+                                   &invalid) == -1);
+    assert(ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &invalid) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, operation.local, operation.operation.remote,
+                                             true, true, &invalid));
+    assert(ra_runtime_prepare_link(&runtime, operation.local, "506316", NULL, &operation) == -1);
+    assert(ra_runtime_attach_link(&runtime, operation.local, "506316",
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, operation.local, "506316", true, true,
+                                             &operation));
+    assert(ra_runtime_prepare_link(&runtime, "other", operation.operation.remote, NULL,
+                                   &operation) == -1);
+    assert(ra_runtime_attach_link(&runtime, "other", operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, "other", operation.operation.remote, true,
+                                             true, &operation));
+    assert(!ra_runtime_disconnect_permanent(&runtime, operation.local, operation.operation.remote,
+                                            &operation));
+    reachable_link_state = true;
+    assert(ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &operation) == -1);
+    reachable_link_state = false;
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+
+    /* The active window withdraws the primary before it permits the replacement attachment. */
+    local_clock.tm_hour = 11;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 2000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_DISCONNECT_PERMANENT &&
+           !strcmp(operation.operation.remote, "506315"));
+    assert(!ra_runtime_disconnect_permanent(&runtime, operation.local, "506316", &operation));
+    invalid = operation;
+    strcpy(invalid.operation.remote, "506316");
+    assert(!ra_runtime_disconnect_permanent(&runtime, operation.local, invalid.operation.remote,
+                                            &invalid));
+    assert(!ra_runtime_disconnect_permanent(&runtime, "other", operation.operation.remote,
+                                            &operation));
+    assert(ra_runtime_disconnect_permanent(&runtime, operation.local, operation.operation.remote,
+                                           &operation));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 2000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(operation.operation.remote, "2627"));
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+
+    /* A manual request while `*806` holds configured retries consults only live routes. */
+    assert(!ra_runtime_disconnect_all(&runtime, "524950"));
+    reachable_link_state = true;
+    live_reachable_link_state = true;
+    assert(ra_runtime_prepare_link(&runtime, "524950", "506316", NULL, NULL) == -1);
+    reachable_link_state = false;
+    live_reachable_link_state = false;
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Reject scheduler-owned primary and replacement dials that cross their window boundary.
+ *
+ * The real IAX dial deliberately runs outside the serialized runtime lock.  Advancing the
+ * deterministic civil clock after a reservation models a dial that completes after the next
+ * scheduler tick should have selected the other route. Preparation, physical attachment,
+ * failed-dial retry retention, and withdrawal must all reject an obsolete reservation.
+ */
+static void verify_scheduled_link_boundary_revalidation(void) {
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 weekday"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    struct ra_link_dial dial = {0};
+    assert(!ra_document_validate(&document, &section, &key));
+
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(operation.operation.remote, "506315"));
+
+    /* A windowed reservation fails closed when its immediately preceding civil-time check fails. */
+    fail_wall_clock = true;
+    assert(ra_runtime_prepare_link(&runtime, operation.local, operation.operation.remote, &dial,
+                                   &operation) == -1);
+    assert(!dial.destination && !dial.candidates && !dial.candidate_count);
+    assert(ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, operation.local, operation.operation.remote,
+                                             true, true, &operation));
+    fail_wall_clock = false;
+
+    /* Crossing 11:00 while the peer starts is rejected by the final hub-publication gate, not
+     * merely by the earlier runtime check before channel setup. */
+    advance_clock_at_attachment_gate = true;
+    assert(ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &operation) == -1);
+    assert(!advance_clock_at_attachment_gate);
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &operation, true));
+
+    /* A primary dial reserved before 11:00 cannot attach or retain a retry after the window. */
+    assert(ra_runtime_prepare_link(&runtime, operation.local, operation.operation.remote, &dial,
+                                   &operation) == -1);
+    assert(!dial.destination && !dial.candidates && !dial.candidate_count);
+    assert(ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, operation.local, operation.operation.remote,
+                                             true, true, &operation));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &operation, true));
+
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 2000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(operation.operation.remote, "2627"));
+
+    /* The equivalent late replacement cannot survive the noon transition either. */
+    local_clock.tm_hour = 12;
+    local_clock.tm_min = 0;
+    assert(ra_runtime_prepare_link(&runtime, operation.local, operation.operation.remote, &dial,
+                                   &operation) == -1);
+    assert(!dial.destination && !dial.candidates && !dial.candidate_count);
+    assert(ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                  (struct ast_channel *)&link_identity, true, true, true,
+                                  &operation) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, operation.local, operation.operation.remote,
+                                             true, true, &operation));
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &operation, true));
+
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 3000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(operation.operation.remote, "506315"));
+
+    /* A queued withdrawal is symmetric: once the window ends, it must not detach the restored
+     * primary merely because its scheduler task was selected a moment earlier. */
+    ra_runtime_stop(&runtime);
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 4000, &operation) == 1);
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 5000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_DISCONNECT_PERMANENT &&
+           !strcmp(operation.operation.remote, "506315"));
+    unsigned int disconnects_before = permanent_disconnect_calls;
+    local_clock.tm_hour = 12;
+    assert(!ra_runtime_disconnect_permanent(&runtime, operation.local, operation.operation.remote,
+                                            &operation));
+    assert(permanent_disconnect_calls == disconnects_before);
+    assert(!ra_runtime_complete_scheduled_link_operation(&runtime, &operation, false));
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 6000, &operation));
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Verify ordinary permanent attachment and retry do not depend on civil time.
+ *
+ * A scheduler with no replacement window has no time-varying desired route.  A temporary
+ * wall-clock failure after the control tick has reserved the route must therefore not discard an
+ * answered channel or suppress the hub's ordinary permanent retry.
+ */
+static void verify_permanent_link_attachment_without_wall_clock(void) {
+    char *sections[] = {"524950", "permanent 524950 primary"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    unsigned int retained_before = retained_permanent_links;
+    bool missing_before = permanent_route_missing;
+    assert(!ra_document_validate(&document, &section, &key));
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation) == 1);
+
+    fail_wall_clock = true;
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+    fail_wall_clock = false;
+
+    permanent_route_missing = true;
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 2000, &operation) == 1);
+    permanent_route_missing = false;
+    fail_wall_clock = true;
+    assert(ra_runtime_retain_permanent_link(&runtime, operation.local, operation.operation.remote,
+                                            true, true, &operation));
+    fail_wall_clock = false;
+
+    retained_permanent_links = retained_before;
+    permanent_route_missing = missing_before;
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Verify reconnect reconciliation handles every configured-node ownership outcome.
+ *
+ * A node can own no configured routes even while other local nodes do.  Exercise that lookup,
+ * the filtered reservation reset, and the documented monotonic-clock fallback without requiring
+ * a transport peer.
+ */
+static void verify_scheduled_link_reconnect_paths(void) {
+    char *sections[] = {"alpha",
+                        "beta",
+                        "gamma",
+                        "permanent alpha primary",
+                        "schedule alpha weekday",
+                        "permanent beta primary"};
+    struct ra_config_entry entries[] = {
+        {"alpha", "node_enabled", "yes"},
+        {"beta", "node_enabled", "yes"},
+        {"gamma", "node_enabled", "yes"},
+        {"permanent alpha primary", "remote_node", "506315"},
+        {"schedule alpha weekday", "remote_node", "2627"},
+        {"schedule alpha weekday", "replace_permanent", "primary"},
+        {"schedule alpha weekday", "days", "Wednesday"},
+        {"schedule alpha weekday", "start_time", "11:00"},
+        {"schedule alpha weekday", "end_time", "12:00"},
+        {"permanent beta primary", "remote_node", "506316"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const char *section;
+    const char *key;
+    const struct ast_tm saved_clock = local_clock;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    unsigned int disconnect_before = permanent_disconnect_calls;
+    assert(!ra_document_validate(&document, &section, &key));
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 10;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&runtime, &document));
+
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 1000, &operation) == 1);
+    assert(!strcmp(operation.local, "alpha") && !strcmp(operation.operation.remote, "506315"));
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+
+    /* Reconnecting beta must not withdraw alpha's now-undesired primary. */
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    assert(!ra_runtime_disconnect_all(&runtime, "beta"));
+    assert(!ra_runtime_reconnect_all(&runtime, "beta"));
+    assert(permanent_disconnect_calls == disconnect_before);
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 2000, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_DISCONNECT_PERMANENT &&
+           !strcmp(operation.local, "alpha") && !strcmp(operation.operation.remote, "506315"));
+    assert(ra_runtime_disconnect_permanent(&runtime, operation.local, operation.operation.remote,
+                                           &operation));
+
+    /* A failed beta local-clock reconciliation leaves its operator hold in place. */
+    assert(!ra_runtime_disconnect_all(&runtime, "beta"));
+    fail_clock = true;
+    assert(!ra_runtime_reconnect_all(&runtime, "beta"));
+    fail_clock = false;
+
+    assert(!ra_runtime_disconnect_all(&runtime, "gamma"));
+    assert(!ra_runtime_reconnect_all(&runtime, "gamma"));
+    ra_runtime_stop(&runtime);
+    permanent_disconnect_calls = disconnect_before;
+    local_clock = saved_clock;
+}
+
+/** @brief Verify a failed local-time reconciliation reports a failed restoration when applicable.
+ *
+ * A reload first starts the candidate radio, then reads local civil time to reconcile configured
+ * links.  If that read fails, a separately failed restoration must remain the returned diagnostic.
+ */
+static void verify_scheduled_link_reload_clock_restore_failure(void) {
+    char *sections[] = {"524950", "permanent 524950 primary"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    assert(!ra_document_validate(&document, &section, &key));
+    assert(!ra_runtime_start(&runtime, &document));
+
+    fail_worker = starts + 2U;
+    fail_localtime = true;
+    const char *error = ra_runtime_reload(&runtime, &document, &document);
+    fail_localtime = false;
+    fail_worker = 0;
+    assert(error && !strcmp(error, "cannot start radio worker"));
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Verify cold-start restoration uses only the remaining post-window quiet interval. */
+static void verify_scheduled_link_cold_start_grace(void) {
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 weekday"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+        {"schedule 524950 weekday", "end_inactivity_ms", "300000"},
+    };
+    const struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation;
+    assert(!ra_document_validate(&document, &section, &key));
+
+    /* A Wednesday restart two minutes after noon retains the replacement for only three minutes. */
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 12;
+    local_clock.tm_min = 2;
+    local_clock.tm_sec = 0;
+    assert(!ra_runtime_start(&runtime, &document));
+    expect_scheduled_link_operation(&runtime, 0, 1000, RA_LINK_PERMANENT_TRANSCEIVE, "2627");
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 0, 180999, &operation));
+    expect_scheduled_link_operation(&runtime, 0, 181000, RA_LINK_DISCONNECT_PERMANENT, "2627");
+    expect_scheduled_link_operation(&runtime, 0, 181000, RA_LINK_PERMANENT_TRANSCEIVE, "506315");
+    ra_runtime_stop(&runtime);
+
+    /* Once the complete quiet interval elapsed before startup, no cold-start grace applies. */
+    struct ra_runtime late_runtime = {0};
+    local_clock.tm_hour = 12;
+    local_clock.tm_min = 5;
+    assert(!ra_runtime_start(&late_runtime, &document));
+    expect_scheduled_link_operation(&late_runtime, 0, 1000, RA_LINK_PERMANENT_TRANSCEIVE, "506315");
+    ra_runtime_stop(&late_runtime);
+
+    /* Preserve a bounded grace deadline even when the monotonic timestamp approaches overflow. */
+    struct ra_runtime saturated_runtime = {0};
+    local_clock.tm_hour = 12;
+    local_clock.tm_min = 2;
+    clock_sequence[0] = (struct timespec){.tv_sec = 10};
+    clock_sequence[1] = (struct timespec){.tv_sec = -1};
+    clock_sequence_count = sizeof(clock_sequence) / sizeof(*clock_sequence);
+    clock_sequence_index = 0;
+    assert(!ra_runtime_start(&saturated_runtime, &document));
+    clock_sequence_count = clock_sequence_index = 0;
+    expect_scheduled_link_operation(&saturated_runtime, 0, UINT64_MAX, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "506315");
+    ra_runtime_stop(&saturated_runtime);
+
+    /* Receive observed before the first post-window tick receives the full quiet interval rather
+     * than a shortened cold-start grace calculated only from the wall clock. */
+    struct ra_runtime activity_runtime = {0};
+    local_clock.tm_hour = 12;
+    local_clock.tm_min = 1;
+    assert(!ra_runtime_start(&activity_runtime, &document));
+    assert(scheduled_link_controller);
+    (void)ra_controller_process(scheduled_link_controller, true, NULL, 0, 10000);
+    (void)ra_controller_process(scheduled_link_controller, false, NULL, 0, 10001);
+    assert(ra_runtime_next_scheduled_link_operation(&activity_runtime, 0, 9999, &operation) == 1);
+    assert(operation.operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+           !strcmp(operation.operation.remote, "2627"));
+    assert(ra_runtime_complete_scheduled_link_operation(&activity_runtime, &operation, true));
+    assert(!ra_runtime_next_scheduled_link_operation(&activity_runtime, 0, 10001, &operation));
+    assert(!ra_runtime_next_scheduled_link_operation(&activity_runtime, 0, 309999, &operation));
+    expect_scheduled_link_operation(&activity_runtime, 0, 310000, RA_LINK_DISCONNECT_PERMANENT,
+                                    "2627");
+    expect_scheduled_link_operation(&activity_runtime, 0, 310000, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "506315");
+    ra_runtime_stop(&activity_runtime);
+
+    /* Zero inactivity makes the completed window restore its permanent peer immediately. */
+    struct ra_runtime immediate_runtime = {0};
+    entries[7].value = "0";
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 59;
+    assert(!ra_runtime_start(&immediate_runtime, &document));
+    expect_scheduled_link_operation(&immediate_runtime, 0, 1000, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "2627");
+    local_clock.tm_hour = 12;
+    local_clock.tm_min = 0;
+    expect_scheduled_link_operation(&immediate_runtime, 0, 2000, RA_LINK_DISCONNECT_PERMANENT,
+                                    "2627");
+    expect_scheduled_link_operation(&immediate_runtime, 0, 2000, RA_LINK_PERMANENT_TRANSCEIVE,
+                                    "506315");
+    ra_runtime_stop(&immediate_runtime);
+
+    /* A non-selected date cannot inherit a grace interval from an unrelated weekday. */
+    local_clock.tm_wday = 0;
+    assert(!ra_runtime_start(&runtime, &document));
+    expect_scheduled_link_operation(&runtime, 0, 1000, RA_LINK_PERMANENT_TRANSCEIVE, "506315");
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Exercise defensive configured-link scheduling paths not reachable through schema input.
+ *
+ * The public configuration validator rejects each malformed shape first. These direct-runtime
+ * cases retain the module's defensive boundary and cover allocation cleanup, disabled-node
+ * omission, stale replacement references, and reload comparisons using separately owned text.
+ */
+static void verify_configured_link_failure_paths(void) {
+    char *disabled_sections[] = {"disabled", "permanent disabled primary",
+                                 "schedule disabled weekday"};
+    struct ra_config_entry disabled_entries[] = {
+        {"disabled", "node_enabled", "no"},
+        {"permanent disabled primary", "remote_node", "506315"},
+        {"schedule disabled weekday", "remote_node", "2627"},
+        {"schedule disabled weekday", "replace_permanent", "primary"},
+        {"schedule disabled weekday", "start_time", "11:00"},
+        {"schedule disabled weekday", "end_time", "12:00"},
+    };
+    struct ra_document disabled = {
+        .sections = disabled_sections,
+        .section_count = sizeof(disabled_sections) / sizeof(*disabled_sections),
+        .entries = disabled_entries,
+        .count = sizeof(disabled_entries) / sizeof(*disabled_entries),
+    };
+    struct ra_runtime disabled_runtime = {0};
+    assert(!ra_runtime_start(&disabled_runtime, &disabled));
+    assert(!disabled_runtime.nodes && !disabled_runtime.schedule);
+    ra_runtime_stop(&disabled_runtime);
+
+    /* The schema rejects this scope before production reload.  The runtime still accepts direct
+     * test callers without dereferencing the absent owner node. */
+    char *unknown_permanent_sections[] = {"524950", "permanent ghost primary"};
+    struct ra_config_entry unknown_permanent_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent ghost primary", "remote_node", "506315"},
+    };
+    struct ra_document unknown_permanent = {
+        .sections = unknown_permanent_sections,
+        .section_count = sizeof(unknown_permanent_sections) / sizeof(*unknown_permanent_sections),
+        .entries = unknown_permanent_entries,
+        .count = sizeof(unknown_permanent_entries) / sizeof(*unknown_permanent_entries),
+    };
+    struct ra_runtime unknown_permanent_runtime = {0};
+    assert(!ra_runtime_start(&unknown_permanent_runtime, &unknown_permanent));
+    assert(unknown_permanent_runtime.nodes && !unknown_permanent_runtime.schedule);
+    ra_runtime_stop(&unknown_permanent_runtime);
+
+    for (unsigned int failure = 2; failure <= 3; ++failure) {
+        allocations = 0;
+        fail_allocation = failure;
+        expect_configured_link_start_error(&disabled, "cannot allocate configured link state");
+        fail_allocation = 0;
+    }
+
+    char *missing_sections[] = {"524950", "schedule 524950 missing"};
+    struct ra_config_entry missing_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"schedule 524950 missing", "remote_node", "2627"},
+        {"schedule 524950 missing", "replace_permanent", "primary"},
+        {"schedule 524950 missing", "start_time", "11:00"},
+        {"schedule 524950 missing", "end_time", "12:00"},
+    };
+    struct ra_document missing = {
+        .sections = missing_sections,
+        .section_count = sizeof(missing_sections) / sizeof(*missing_sections),
+        .entries = missing_entries,
+        .count = sizeof(missing_entries) / sizeof(*missing_entries),
+    };
+    expect_configured_link_start_error(&missing, "schedule references an unknown permanent link");
+
+    /* A prior replacement route is not a labelled permanent link for a later schedule. */
+    char *late_missing_sections[] = {"524950", "permanent 524950 primary", "schedule 524950 first",
+                                     "schedule 524950 missing"};
+    struct ra_config_entry late_missing_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 first", "remote_node", "2627"},
+        {"schedule 524950 first", "replace_permanent", "primary"},
+        {"schedule 524950 first", "start_time", "11:00"},
+        {"schedule 524950 first", "end_time", "12:00"},
+        {"schedule 524950 missing", "remote_node", "2628"},
+        {"schedule 524950 missing", "replace_permanent", "missing"},
+        {"schedule 524950 missing", "start_time", "11:00"},
+        {"schedule 524950 missing", "end_time", "12:00"},
+    };
+    struct ra_document late_missing = {
+        .sections = late_missing_sections,
+        .section_count = sizeof(late_missing_sections) / sizeof(*late_missing_sections),
+        .entries = late_missing_entries,
+        .count = sizeof(late_missing_entries) / sizeof(*late_missing_entries),
+    };
+    expect_configured_link_start_error(&late_missing,
+                                       "schedule references an unknown permanent link");
+
+    char *bad_permanent_sections[] = {"524950", "permanent 524950 primary"};
+    struct ra_config_entry bad_permanent_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", ""},
+    };
+    struct ra_document bad_permanent = {
+        .sections = bad_permanent_sections,
+        .section_count = sizeof(bad_permanent_sections) / sizeof(*bad_permanent_sections),
+        .entries = bad_permanent_entries,
+        .count = sizeof(bad_permanent_entries) / sizeof(*bad_permanent_entries),
+    };
+    expect_configured_link_start_error(&bad_permanent, "permanent remote node is required");
+
+    char *bad_schedule_sections[] = {"524950", "permanent 524950 primary", "schedule 524950 bad"};
+    struct ra_config_entry bad_schedule_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 bad", "remote_node", "2627"},
+        {"schedule 524950 bad", "replace_permanent", "primary"},
+        {"schedule 524950 bad", "start_time", "noon"},
+        {"schedule 524950 bad", "end_time", "12:00"},
+    };
+    struct ra_document bad_schedule = {
+        .sections = bad_schedule_sections,
+        .section_count = sizeof(bad_schedule_sections) / sizeof(*bad_schedule_sections),
+        .entries = bad_schedule_entries,
+        .count = sizeof(bad_schedule_entries) / sizeof(*bad_schedule_entries),
+    };
+    expect_configured_link_start_error(&bad_schedule, "invalid schedule window");
+
+    char long_node[RA_NODE_NAME_MAX + 1];
+    memset(long_node, '1', sizeof(long_node) - 1U);
+    long_node[sizeof(long_node) - 1U] = '\0';
+    char long_permanent[sizeof("permanent  primary") + sizeof(long_node)];
+    assert(snprintf(long_permanent, sizeof(long_permanent), "permanent %s primary", long_node) > 0);
+    char *long_permanent_sections[] = {long_node, long_permanent};
+    struct ra_config_entry long_permanent_entries[] = {
+        {long_node, "node_enabled", "yes"},
+        {long_permanent, "remote_node", "506315"},
+    };
+    struct ra_document long_permanent_document = {
+        .sections = long_permanent_sections,
+        .section_count = sizeof(long_permanent_sections) / sizeof(*long_permanent_sections),
+        .entries = long_permanent_entries,
+        .count = sizeof(long_permanent_entries) / sizeof(*long_permanent_entries),
+    };
+    expect_configured_link_start_error(&long_permanent_document,
+                                       "configured link node name is too long");
+
+    char long_schedule[sizeof("schedule  test") + sizeof(long_node)];
+    assert(snprintf(long_schedule, sizeof(long_schedule), "schedule %s test", long_node) > 0);
+    char *long_schedule_sections[] = {long_node, long_schedule};
+    struct ra_config_entry long_schedule_entries[] = {
+        {long_node, "node_enabled", "yes"},
+        {long_schedule, "remote_node", "2627"},
+        {long_schedule, "replace_permanent", "primary"},
+        {long_schedule, "start_time", "11:00"},
+        {long_schedule, "end_time", "12:00"},
+    };
+    struct ra_document long_schedule_document = {
+        .sections = long_schedule_sections,
+        .section_count = sizeof(long_schedule_sections) / sizeof(*long_schedule_sections),
+        .entries = long_schedule_entries,
+        .count = sizeof(long_schedule_entries) / sizeof(*long_schedule_entries),
+    };
+    expect_configured_link_start_error(&long_schedule_document,
+                                       "configured link node name is too long");
+
+    char *first_sections[] = {"524950", "permanent 524950 primary", "schedule 524950 date"};
+    char first_date[] = "2026-09-09";
+    char second_date[] = "2026-09-10";
+    char first_end[] = "12:00";
+    char second_end[] = "12:01";
+    struct ra_config_entry first_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 date", "remote_node", "2627"},
+        {"schedule 524950 date", "replace_permanent", "primary"},
+        {"schedule 524950 date", "dates", first_date},
+        {"schedule 524950 date", "start_time", "11:00"},
+        {"schedule 524950 date", "end_time", first_end},
+    };
+    struct ra_config_entry second_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 date", "remote_node", "2627"},
+        {"schedule 524950 date", "replace_permanent", "primary"},
+        {"schedule 524950 date", "dates", first_date},
+        {"schedule 524950 date", "start_time", "11:00"},
+        {"schedule 524950 date", "end_time", second_end},
+    };
+    struct ra_config_entry third_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 date", "remote_node", "2627"},
+        {"schedule 524950 date", "replace_permanent", "primary"},
+        {"schedule 524950 date", "dates", second_date},
+        {"schedule 524950 date", "start_time", "11:00"},
+        {"schedule 524950 date", "end_time", second_end},
+    };
+    struct ra_document first = {.sections = first_sections,
+                                .section_count = sizeof(first_sections) / sizeof(*first_sections),
+                                .entries = first_entries,
+                                .count = sizeof(first_entries) / sizeof(*first_entries)};
+    struct ra_document second = {.sections = first_sections,
+                                 .section_count = sizeof(first_sections) / sizeof(*first_sections),
+                                 .entries = second_entries,
+                                 .count = sizeof(second_entries) / sizeof(*second_entries)};
+    struct ra_document third = {.sections = first_sections,
+                                .section_count = sizeof(first_sections) / sizeof(*first_sections),
+                                .entries = third_entries,
+                                .count = sizeof(third_entries) / sizeof(*third_entries)};
+    struct ra_runtime comparison_runtime = {0};
+    assert(!ra_runtime_start(&comparison_runtime, &first));
+    assert(!ra_runtime_reload(&comparison_runtime, &first, &second));
+    assert(!ra_runtime_reload(&comparison_runtime, &second, &third));
+    ra_runtime_stop(&comparison_runtime);
+}
+
+/** @brief Verify reload comparisons across independent configured-link fields.
+ *
+ * Each replacement remains schema-valid.  The sequence exercises the same retained-state
+ * comparisons that preserve an active permanent route and its replacement window across reload.
+ */
+static void verify_configured_link_reload_comparisons(void) {
+    char *sections[] = {"524950",
+                        "other",
+                        "permanent 524950 primary",
+                        "permanent 524950 secondary",
+                        "permanent other primary",
+                        "schedule 524950 first",
+                        "schedule 524950 second",
+                        "schedule other third"};
+    struct ra_config_entry entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"other", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"permanent 524950 secondary", "remote_node", "506316"},
+        {"permanent other primary", "remote_node", "506317"},
+        {"schedule 524950 first", "remote_node", "2627"},
+        {"schedule 524950 first", "replace_permanent", "primary"},
+        {"schedule 524950 first", "days", "Monday"},
+        {"schedule 524950 first", "start_time", "11:00"},
+        {"schedule 524950 first", "end_time", "12:00"},
+        {"schedule 524950 first", "end_inactivity_ms", "0"},
+        {"schedule 524950 second", "remote_node", "2628"},
+        {"schedule 524950 second", "replace_permanent", "secondary"},
+        {"schedule 524950 second", "days", "Monday"},
+        {"schedule 524950 second", "start_time", "11:00"},
+        {"schedule 524950 second", "end_time", "12:00"},
+        {"schedule other third", "remote_node", "2629"},
+        {"schedule other third", "replace_permanent", "primary"},
+        {"schedule other third", "days", "Monday"},
+        {"schedule other third", "start_time", "11:00"},
+        {"schedule other third", "end_time", "12:00"},
+    };
+    enum {
+        FIRST_REMOTE = 5,
+        FIRST_REPLACED = 6,
+        FIRST_DAYS = 7,
+        FIRST_START = 8,
+        FIRST_END = 9,
+        FIRST_INACTIVITY = 10
+    };
+    struct ra_document document = {
+        .sections = sections,
+        .section_count = sizeof(sections) / sizeof(*sections),
+        .entries = entries,
+        .count = sizeof(entries) / sizeof(*entries),
+    };
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    assert(!ra_document_validate(&document, &section, &key));
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+
+    entries[FIRST_REMOTE].value = "2630";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_REMOTE].value = "2627";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_REPLACED].value = "secondary";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_REPLACED].value = "primary";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_INACTIVITY].value = "1";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_INACTIVITY].value = "0";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_START].value = "10:00";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_START].value = "11:00";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_END].value = "12:01";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_END].value = "12:00";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    entries[FIRST_DAYS].value = "Tuesday";
+    assert(!ra_runtime_reload(&runtime, &document, &document));
+    ra_runtime_stop(&runtime);
+
+    char *date_sections[] = {"524950", "permanent 524950 primary", "schedule 524950 date"};
+    struct ra_config_entry date_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 date", "remote_node", "2627"},
+        {"schedule 524950 date", "replace_permanent", "primary"},
+        {"schedule 524950 date", "dates", "2026-09-09"},
+        {"schedule 524950 date", "start_time", "11:00"},
+        {"schedule 524950 date", "end_time", "12:00"},
+    };
+    struct ra_document dates = {
+        .sections = date_sections,
+        .section_count = sizeof(date_sections) / sizeof(*date_sections),
+        .entries = date_entries,
+        .count = sizeof(date_entries) / sizeof(*date_entries),
+    };
+    assert(!ra_document_validate(&dates, &section, &key));
+    assert(!ra_runtime_start(&runtime, &dates));
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    date_entries[4].value = "2027-09-09";
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    date_entries[4].value = "2026-09-09";
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    date_entries[4].value = "2026-10-09";
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    date_entries[4].value = "2026-09-09";
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    date_entries[4].value = "2026-09-10";
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    date_entries[4].value = "2026-09-09";
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    date_entries[4].value = "2026-09-09, 2026-09-10";
+    assert(!ra_runtime_reload(&runtime, &dates, &dates));
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Exercise unowned schedule sections and activity capture after a node is removed.
+ * @param inactivity End-of-window quiet interval in milliseconds.
+ * @param publish_activity True to publish one local receiver edge before replacement.
+ * @param before_activity Monotonic test time before a published activity edge.
+ */
+static void verify_removed_schedule_node(uint64_t inactivity, bool publish_activity,
+                                         uint64_t before_activity) {
+    (void)before_activity;
+    char inactivity_text[32];
+    assert(snprintf(inactivity_text, sizeof(inactivity_text), "%llu",
+                    (unsigned long long)inactivity) > 0);
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 window"};
+    struct ra_config_entry active_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 window", "remote_node", "2627"},
+        {"schedule 524950 window", "replace_permanent", "primary"},
+        {"schedule 524950 window", "days", "Wednesday"},
+        {"schedule 524950 window", "start_time", "11:00"},
+        {"schedule 524950 window", "end_time", "12:00"},
+        {"schedule 524950 window", "end_inactivity_ms", inactivity_text},
+    };
+    struct ra_config_entry disabled_entries[] = {
+        {"524950", "node_enabled", "no"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 window", "remote_node", "2627"},
+        {"schedule 524950 window", "replace_permanent", "primary"},
+        {"schedule 524950 window", "days", "Wednesday"},
+        {"schedule 524950 window", "start_time", "11:00"},
+        {"schedule 524950 window", "end_time", "12:00"},
+        {"schedule 524950 window", "end_inactivity_ms", inactivity_text},
+    };
+    struct ra_document active = {.sections = sections,
+                                 .section_count = sizeof(sections) / sizeof(*sections),
+                                 .entries = active_entries,
+                                 .count = sizeof(active_entries) / sizeof(*active_entries)};
+    struct ra_document disabled = {.sections = sections,
+                                   .section_count = sizeof(sections) / sizeof(*sections),
+                                   .entries = disabled_entries,
+                                   .count = sizeof(disabled_entries) / sizeof(*disabled_entries)};
+    const struct ast_tm saved_clock = local_clock;
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation;
+    assert(!ra_document_validate(&active, &section, &key));
+    assert(!ra_document_validate(&disabled, &section, &key));
+    scheduled_link_controller = NULL;
+    local_clock.tm_wday = 3;
+    local_clock.tm_hour = 11;
+    local_clock.tm_min = 0;
+    assert(!ra_runtime_start(&runtime, &active));
+    assert(scheduled_link_controller);
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) >= 0);
+    if (publish_activity) {
+        (void)ra_controller_process(scheduled_link_controller, true, NULL, 0, 1000);
+        (void)ra_controller_process(scheduled_link_controller, false, NULL, 0, 1001);
+    }
+    assert(!ra_runtime_reload(&runtime, &active, &disabled));
+    assert(!runtime.nodes && !runtime.schedule && !scheduled_link_controller);
+    local_clock.tm_hour = 12;
+    assert(!ra_runtime_next_scheduled_link_operation(&runtime, 60, 0, &operation));
+    ra_runtime_stop(&runtime);
+    local_clock = saved_clock;
+}
+
+/** @brief Verify an issued route is not retained when its owner is disabled or removed on reload.
+ */
+static void verify_issued_link_owner_removal(void) {
+    char *active_sections[] = {"524950", "permanent 524950 primary"};
+    struct ra_config_entry active_entries[] = {
+        {"524950", "node_enabled", "yes"},
+        {"permanent 524950 primary", "remote_node", "506315"},
+    };
+    char *disabled_sections[] = {"524950"};
+    struct ra_config_entry disabled_entries[] = {
+        {"524950", "node_enabled", "no"},
+    };
+    char *omitted_sections[] = {"other"};
+    struct ra_config_entry omitted_entries[] = {
+        {"other", "node_enabled", "yes"},
+    };
+    const struct ra_document active = {
+        .sections = active_sections,
+        .section_count = sizeof(active_sections) / sizeof(*active_sections),
+        .entries = active_entries,
+        .count = sizeof(active_entries) / sizeof(*active_entries),
+    };
+    const struct ra_document disabled = {
+        .sections = disabled_sections,
+        .section_count = sizeof(disabled_sections) / sizeof(*disabled_sections),
+        .entries = disabled_entries,
+        .count = sizeof(disabled_entries) / sizeof(*disabled_entries),
+    };
+    const struct ra_document omitted = {
+        .sections = omitted_sections,
+        .section_count = sizeof(omitted_sections) / sizeof(*omitted_sections),
+        .entries = omitted_entries,
+        .count = sizeof(omitted_entries) / sizeof(*omitted_entries),
+    };
+    const char *section;
+    const char *key;
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {0};
+    assert(!ra_document_validate(&active, &section, &key));
+    assert(!ra_document_validate(&disabled, &section, &key));
+    assert(!ra_document_validate(&omitted, &section, &key));
+
+    assert(!ra_runtime_start(&runtime, &active));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == 1);
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+    assert(!ra_runtime_reload(&runtime, &active, &disabled));
+    assert(!runtime.nodes && !runtime.schedule);
+    ra_runtime_stop(&runtime);
+
+    runtime = (struct ra_runtime){0};
+    operation = (struct ra_scheduled_link_operation){0};
+    assert(!ra_runtime_start(&runtime, &active));
+    assert(ra_runtime_next_scheduled_link_operation(&runtime, 0, 0, &operation) == 1);
+    assert(!ra_runtime_attach_link(&runtime, operation.local, operation.operation.remote,
+                                   (struct ast_channel *)&link_identity, true, true, true,
+                                   &operation));
+    assert(!ra_runtime_reload(&runtime, &active, &omitted));
+    assert(runtime.nodes && !runtime.schedule);
+    ra_runtime_stop(&runtime);
+}
+
+/** @brief Verify runtime safety when a malformed schedule owner is absent from active nodes. */
+static void verify_missing_schedule_owner(void) {
+    char *sections[] = {"524950", "schedule missing window"};
+    struct ra_config_entry entries[] = {{"524950", "node_enabled", "yes"}};
+    struct ra_document document = {.sections = sections,
+                                   .section_count = sizeof(sections) / sizeof(*sections),
+                                   .entries = entries,
+                                   .count = sizeof(entries) / sizeof(*entries)};
+    struct ra_runtime runtime = {0};
+    struct ra_scheduled_link_operation operation = {
+        .operation.action = RA_LINK_PERMANENT_TRANSCEIVE,
+    };
+    assert(!ra_runtime_start(&runtime, &document));
+    assert(runtime.nodes && !runtime.schedule);
+    assert(ra_runtime_prepare_link(&runtime, "524950", "506315", NULL, &operation) == -1);
+    ra_runtime_stop(&runtime);
 }
 
 /** @brief Exercise multiple nodes, disabled nodes, ID state, and each failure boundary.
@@ -2326,38 +3931,38 @@ int main(void) {
     assert(!ra_runtime_disconnect_all(&runtime, "missing"));
     assert(!ra_runtime_disconnect_nonpermanent_all(&runtime, "missing"));
     assert(!ra_runtime_reconnect_all(&runtime, "missing"));
-    assert(!ra_runtime_retain_permanent_link(&runtime, "missing", "123", true, true));
-    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "alpha", true, true));
+    assert(!ra_runtime_retain_permanent_link(&runtime, "missing", "123", true, true, NULL));
+    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "alpha", true, true, NULL));
     link_error = 10;
-    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true));
+    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true, NULL));
     link_error = 0;
-    assert(ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true));
+    assert(ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true, NULL));
     assert(retained_permanent_links == 2);
     assert(!ra_runtime_disconnect_all(&runtime, "alpha"));
     assert(!ra_runtime_disconnect_nonpermanent_all(&runtime, "alpha"));
     assert(!ra_runtime_reconnect_all(&runtime, "alpha"));
     link_error = 7;
     assert(!ra_runtime_disconnect(&runtime, "alpha", "123"));
-    assert(!ra_runtime_disconnect_permanent(&runtime, "alpha", "123"));
+    assert(!ra_runtime_disconnect_permanent(&runtime, "alpha", "123", NULL));
     link_error = 0;
     assert(ra_runtime_disconnect(&runtime, "alpha", "123"));
-    assert(!ra_runtime_disconnect_permanent(&runtime, "missing", "123"));
-    assert(ra_runtime_disconnect_permanent(&runtime, "alpha", "123"));
+    assert(!ra_runtime_disconnect_permanent(&runtime, "missing", "123", NULL));
+    assert(ra_runtime_disconnect_permanent(&runtime, "alpha", "123", NULL));
     assert(connect_fixture(&runtime, "missing") == -1);
-    assert(ra_runtime_prepare_link(&runtime, "alpha", "123", NULL) == -1);
-    assert(ra_runtime_prepare_link(&runtime, "alpha", "alpha", NULL) == -1);
+    assert(ra_runtime_prepare_link(&runtime, "alpha", "123", NULL, NULL) == -1);
+    assert(ra_runtime_prepare_link(&runtime, "alpha", "alpha", NULL, NULL) == -1);
     size_t loop_rejection_statuses = queued_status_count;
     reachable_link_state = true;
     assert(ra_runtime_accept(&runtime, "alpha", "123", NULL, true) == -1);
-    assert(ra_runtime_prepare_link(&runtime, "alpha", "123", NULL) == -1);
-    assert(ra_runtime_attach_link(&runtime, "alpha", "123", NULL, true, true, false) == -1);
-    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true));
+    assert(ra_runtime_prepare_link(&runtime, "alpha", "123", NULL, NULL) == -1);
+    assert(ra_runtime_attach_link(&runtime, "alpha", "123", NULL, true, true, false, NULL) == -1);
+    assert(!ra_runtime_retain_permanent_link(&runtime, "alpha", "123", true, true, NULL));
     assert(queued_status_count == loop_rejection_statuses + 4);
     assert(!strcmp(queued_status, "LINK REJECTED TOPOLOGY LOOP"));
     assert(!strcmp(prepared_speech, "LINK REJECTED TOPOLOGY LOOP"));
     reachable_link_state = false;
-    assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true, false) == -1);
-    assert(ra_runtime_attach_link(&runtime, "alpha", "alpha", NULL, true, true, false) == -1);
+    assert(ra_runtime_attach_link(&runtime, "missing", "123", NULL, true, true, false, NULL) == -1);
+    assert(ra_runtime_attach_link(&runtime, "alpha", "alpha", NULL, true, true, false, NULL) == -1);
     link_dials = 0;
     assert(!connect_fixture(&runtime, "alpha"));
     assert(link_dials == 1);
@@ -2414,7 +4019,7 @@ int main(void) {
     assert(!ra_runtime_digit(&runtime, "alpha", '5', 150, &operation));
     assert(!ra_runtime_remote_command(&runtime, "alpha", "123", 0));
     assert(!ra_runtime_remote_command(&runtime, "alpha", "123", 0));
-    assert(ra_runtime_disconnect_permanent(&runtime, "alpha", "123"));
+    assert(ra_runtime_disconnect_permanent(&runtime, "alpha", "123", NULL));
     assert(!ra_runtime_digit(&runtime, "alpha", '5', 175, &operation));
     assert(!ra_runtime_remote_command(&runtime, "alpha", "123", 0));
     assert(!ra_runtime_remote_command(&runtime, "alpha", "123", 0));
@@ -2463,6 +4068,24 @@ int main(void) {
     verify_scheduled_reload_failures();
     verify_scheduled_reload_state();
     verify_scheduled_tick_order();
+    verify_configured_link_schedule();
+    verify_multiple_replacement_windows();
+    verify_changed_window_reload_preserves_activity();
+    verify_scheduled_disconnect_clears_remote_selection();
+    verify_scheduled_link_reservations();
+    verify_scheduled_link_operation_validation();
+    verify_scheduled_link_boundary_revalidation();
+    verify_permanent_link_attachment_without_wall_clock();
+    verify_scheduled_link_reconnect_paths();
+    verify_scheduled_link_reload_clock_restore_failure();
+    verify_scheduled_link_cold_start_grace();
+    verify_configured_link_failure_paths();
+    verify_configured_link_reload_comparisons();
+    verify_removed_schedule_node(5, false, 1000);
+    verify_removed_schedule_node(0, false, 1000);
+    verify_removed_schedule_node(5, true, 999);
+    verify_issued_link_owner_removal();
+    verify_missing_schedule_owner();
     puts("configured node startup and joined resource cleanup passed");
     return 0;
 }

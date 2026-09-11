@@ -86,7 +86,7 @@ lint:
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
-static-analysis:
+static-analysis: $(RPCR_BUILD_DEP)
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- $(CPPFLAGS) -std=c11
 	clang-tidy $(MODULE_SOURCE) $(MODULE_HELPERS) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
@@ -111,16 +111,17 @@ build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) $(RPCR_BUI
 
 build/module-coverage/app_rpt_advanced.so: build/module-coverage/app_rpt_advanced.o $(COVERAGE_OBJECTS)
 	$(CC) --coverage -shared $^ -lm $(SAMPLERATE_LIBS) \
-		-Wl,--wrap=nanosleep,--wrap=pthread_join,--wrap=time -o $@
+		-Wl,--wrap=nanosleep,--wrap=pthread_join,--wrap=time,--wrap=clock_gettime -o $@
 
 build/test_asterisk_module: tests/test_asterisk_module.c build/module-coverage/app_rpt_advanced.so | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -DASTMM_LIBC=ASTMM_IGNORE $< -Wl,--export-dynamic -ldl -o $@
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Imodule -Isrc -DASTMM_LIBC=ASTMM_IGNORE $< \
+		-Wl,--export-dynamic -ldl -o $@
 
-build/module-coverage/runtime.o: $(RUNTIME_SOURCE) $(wildcard module/*.h) $(HEADERS) | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
+build/module-coverage/runtime.o: $(RUNTIME_SOURCE) $(wildcard module/*.h) $(HEADERS) $(RPCR_BUILD_DEP) | build/module-coverage
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
 
 build/test_runtime: tests/test_runtime.c build/module-coverage/runtime.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=calloc,--wrap=clock_gettime,--wrap=time,--wrap=ra_controller_queue_status,--wrap=ra_controller_reclaim_status -o $@
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=calloc,--wrap=clock_gettime,--wrap=time,--wrap=ra_controller_queue_status,--wrap=ra_controller_reclaim_status -o $@
 
 build/module-coverage/assets.o: module/assets.c module/assets.h src/speech.h src/settings.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
@@ -156,10 +157,10 @@ build/test_connection: tests/test_connection.c build/module-coverage/connection.
 	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/connection.o --coverage -Wl,--wrap=ra_media_select -o $@
 
 build/module-coverage/worker.o: $(WORKER_SOURCE) module/worker.h $(HEADERS) | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
 
-build/worker_routing_fixture.o: tests/worker_routing_fixture.c tests/worker_dtmf_fixture.h module/link_hub.h module/dtmf.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -c $< -o $@
+build/worker_routing_fixture.o: tests/worker_routing_fixture.c tests/worker_dtmf_fixture.h module/link_hub.h module/dtmf.h $(RPCR_BUILD_DEP) | build
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Imodule -Isrc -c $< -o $@
 
 build/test_link_hub: tests/test_link_hub.c build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) | build
 	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
@@ -174,11 +175,11 @@ build/test_dtmf: tests/test_dtmf.c build/module-coverage/dtmf.o | build
 		-Wl,--wrap=calloc -o $@
 
 build/test_worker: tests/test_worker.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
 		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=clock_gettime,--wrap=nanosleep,--wrap=ra_radio_exchange -o $@
 
 build/test_worker_thread: tests/test_worker_thread.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=ra_radio_exchange -o $@
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=ra_radio_exchange -o $@
 
 build/module-coverage/speech.o: $(SPEECH_SOURCE) src/speech.h | build/module-coverage
 	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
@@ -204,7 +205,7 @@ check: $(RPCR_BUILD_DEP) $(TEST_PROGRAMS)
 
 coverage: check $(MODULE_COVERAGE_OBJECTS)
 	mkdir -p build/coverage
-	gcovr --root . --filter 'src/|module/' --fail-under-line 100 --fail-under-branch 100 --xml-pretty -o build/coverage/coverage.xml --print-summary
+	gcovr --root . build --filter 'src/|module/' --fail-under-line 100 --fail-under-branch 100 --xml-pretty -o build/coverage/coverage.xml --print-summary
 
 install: all
 	install -d $(DESTDIR)$(asteriskmoddir)
@@ -231,6 +232,7 @@ install-check: all
 	cmp src/message_template.h build/stage/usr/include/rpt_advanced/message_template.h
 	cmp src/scheduled_action.h build/stage/usr/include/rpt_advanced/scheduled_action.h
 	cmp src/scheduled_event.h build/stage/usr/include/rpt_advanced/scheduled_event.h
+	cmp src/scheduled_window.h build/stage/usr/include/rpt_advanced/scheduled_window.h
 	cmp src/link_access.h build/stage/usr/include/rpt_advanced/link_access.h
 	cmp src/link_audio.h build/stage/usr/include/rpt_advanced/link_audio.h
 	cmp src/link_command.h build/stage/usr/include/rpt_advanced/link_command.h
@@ -269,7 +271,7 @@ dist: | build
 distcheck: dist
 	+@set -e; stage=$$(mktemp -d build/dist-check.XXXXXX); \
 		tar -xzf build/$(DIST_NAME).tar.gz -C "$$stage"; \
-		$(MAKE) -C "$$stage/$(DIST_NAME)" all install-check
+		$(MAKE) -C "$$stage/$(DIST_NAME)" RPCR_SOURCE="$(RPCR_SOURCE)" all install-check
 
 platform-verify: all coverage install-check integration distcheck
 

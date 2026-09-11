@@ -8,6 +8,7 @@
 #include "link_command.h"
 #include "scheduled_action.h"
 #include "scheduled_event.h"
+#include "scheduled_window.h"
 
 /** @brief Maximum local or remote node-identity bytes, including the terminating null byte.
  *
@@ -37,7 +38,9 @@ enum ra_settings_kind {
     RA_SETTINGS_TIME,
     RA_SETTINGS_TEMPLATE,
     RA_SETTINGS_MACRO,
-    RA_SETTINGS_EVENT
+    RA_SETTINGS_EVENT,
+    RA_SETTINGS_PERMANENT,
+    RA_SETTINGS_SCHEDULE
 };
 
 /** @brief Select the network directory sources checked after a local static override. */
@@ -61,7 +64,8 @@ struct ra_node_settings {
     bool full_duplex;             /**< Permit simultaneous receive and transmit. */
     bool dtmf_muting;             /**< Silence completed local DTMF frames before routing. */
     uint64_t hang_ms;             /**< Transmit hang time in milliseconds. */
-    uint64_t transmit_timeout_ms; /**< Continuous-PTT watchdog duration; zero disables it. */
+    uint64_t transmit_timeout_ms; /**< Maximum keyed interval without a local/link unkey; zero
+                                     disables it. */
     uint64_t timeout_lockout_ms;  /**< Post-timeout PTT lockout duration; zero releases on unkey. */
     uint64_t
         kerchunk_max_ms; /**< Maximum receive duration treated as a kerchunk; zero disables it. */
@@ -122,7 +126,7 @@ struct ra_courtesy_settings {
     struct ra_identifier_settings media; /**< Resolved file, speech, and Morse fallback media. */
     const char *tone_sequence;    /**< Optional generated-tone sequence after file and speech. */
     enum ra_courtesy_input input; /**< Required source assignment for this named tone. */
-    const char *remote_node;      /**< Optional permanent direct peer for a link-specific tone. */
+    const char *remote_node;      /**< Optional exact direct peer for a link-specific tone. */
     int64_t
         level_db; /**< Uniform media level and default tone-segment level from -60 through 0 dB. */
 };
@@ -154,6 +158,26 @@ struct ra_event_settings {
     const char *template_name;              /**< Optional named template label. */
     const char *message;                    /**< Optional direct message-template text. */
     const char *macro_name;                 /**< Optional named macro label. */
+};
+
+/** @brief One configured always-desired bidirectional direct link. */
+struct ra_permanent_link_settings {
+    const char *name;        /**< Case-sensitive label from the section header. */
+    const char *remote_node; /**< Required decimal direct-peer node identity. */
+};
+
+/** @brief One configured local-time link replacement window. */
+struct ra_link_schedule_settings {
+    const char *name; /**< Case-sensitive label from the section header. */
+    const char
+        *remote_node; /**< Required decimal direct-peer node identity while the window runs. */
+    const char *replace_permanent; /**< Required permanent-link label suspended by this window. */
+    const char *days;  /**< Optional weekday selector retained for configuration reporting. */
+    const char *dates; /**< Optional explicit-date selector retained for configuration reporting. */
+    const char *start_time;     /**< Required inclusive local `HH:MM` start text. */
+    const char *end_time;       /**< Required exclusive local `HH:MM` end text. */
+    uint64_t end_inactivity_ms; /**< Zero disconnects at the end; otherwise wait for quiet time. */
+    struct ra_scheduled_window window; /**< Parsed same-day local civil-time selection. */
 };
 
 /** @brief Resolve node settings without modifying the output on failure.
@@ -202,7 +226,7 @@ const char *ra_announcement_settings_resolve(const struct ra_config_entry *entri
  * @return Invalid option name, incomplete assignment, or null on success.
  *
  * A named tone must assign `input = receiver` or `input = link`. `remote_node` is allowed only
- * for a link tone and identifies a permanent direct peer. Prepared media uses file, speech,
+ * for a link tone and identifies an exact direct peer. Prepared media uses file, speech,
  * generated tone sequence, then Morse fallback order.
  */
 const char *ra_courtesy_settings_resolve(const struct ra_config_entry *entries, size_t count,
@@ -252,4 +276,29 @@ const char *ra_macro_settings_resolve(const struct ra_config_entry *entries, siz
  */
 const char *ra_event_settings_resolve(const struct ra_config_entry *entries, size_t count,
                                       const char *set, struct ra_event_settings *result);
+
+/** @brief Resolve one node-scoped configured permanent direct link.
+ * @param entries Parsed configuration entries, or null when @p count is zero.
+ * @param count Entry count.
+ * @param set Complete discovered permanent-link section.
+ * @param result Receives immutable validated settings on success.
+ * @return Invalid option name, incomplete link, or null on success.
+ */
+const char *ra_permanent_link_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                               const char *set,
+                                               struct ra_permanent_link_settings *result);
+
+/** @brief Resolve one node-scoped configured permanent-link replacement window.
+ * @param entries Parsed configuration entries, or null when @p count is zero.
+ * @param count Entry count.
+ * @param set Complete discovered schedule section.
+ * @param result Receives immutable parsed settings on success.
+ * @return Invalid option name, incomplete schedule, or null on success.
+ *
+ * A nonzero @c end_inactivity_ms defers restoration until this long after the last local or
+ * linked receive activity. A zero value restores the replaced permanent link immediately.
+ */
+const char *ra_link_schedule_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                              const char *set,
+                                              struct ra_link_schedule_settings *result);
 #endif

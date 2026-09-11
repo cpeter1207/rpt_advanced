@@ -21,7 +21,8 @@ AST_MUTEX_DEFINE_STATIC(routing_lock);
 
 /** @brief Require status atomics that never acquire a library lock in the radio callback. */
 _Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && ATOMIC_CHAR_LOCK_FREE == 2 &&
-                   ATOMIC_INT_LOCK_FREE == 2 && ATOMIC_POINTER_LOCK_FREE == 2,
+                   ATOMIC_INT_LOCK_FREE == 2 && ATOMIC_POINTER_LOCK_FREE == 2 &&
+                   RA_ATOMIC_UINT_FAST64_LOCK_FREE,
                "link status requires lock-free atomics");
 _Static_assert(RA_LINK_PEER_NAME_MAX <= RA_CONTROLLER_COURTESY_REMOTE_MAX,
                "courtesy source identity must retain every direct-peer name");
@@ -55,10 +56,14 @@ void ra_link_hub_init(struct ra_link_hub *hub) {
     for (size_t index = 0; index < RA_LINK_PEER_NAME_MAX; ++index) {
         atomic_init(&hub->last_keyed[index], '\0');
     }
+    atomic_init(&hub->key_query_local_receiving, false);
+    atomic_init(&hub->key_query_local_transition_ms, 0);
 }
 
 /** @brief Refresh legacy app_rpt linked-node advertisements often enough to clear stale state. */
 #define RA_LINK_TOPOLOGY_POST_INTERVAL_MS UINT64_C(30000)
+/** @brief Request one legacy keyed-source query per second while a direct peer is active. */
+#define RA_LINK_KEY_QUERY_INTERVAL_MS UINT64_C(1000)
 /** @brief app_rpt's conventional route-list marker for a safely truncated advertisement. */
 #define RA_LINK_TOPOLOGY_TRUNCATION_ROUTE "R000000"
 
@@ -72,16 +77,17 @@ struct ra_link_port {
     int16_t *output;                     /**< Peer-rate transmit block. */
     size_t rate;                         /**< Negotiated peer sample rate. */
     size_t samples;                      /**< Peer samples scheduled for the current local block. */
-    uint64_t remainder;       /**< Exact-rate scheduling remainder in local-rate units. */
-    SRC_STATE *receive_src;   /**< Peer-to-radio sample-rate converter. */
-    SRC_STATE *send_src;      /**< Radio-to-peer sample-rate converter. */
-    float *src_in;            /**< Floating-point converter input workspace. */
-    float *src_out;           /**< Floating-point converter output workspace. */
-    bool transmit;            /**< Outbound audio permitted. */
-    bool forward;             /**< Relay received voice to other links. */
-    bool permanent;           /**< Redial after an unexpected transport failure. */
-    bool active;              /**< Receive activity for the current radio tick. */
-    uint64_t active_since_ms; /**< Rising-edge time for source-specific kerchunk detection. */
+    uint64_t remainder;        /**< Exact-rate scheduling remainder in local-rate units. */
+    SRC_STATE *receive_src;    /**< Peer-to-radio sample-rate converter. */
+    SRC_STATE *send_src;       /**< Radio-to-peer sample-rate converter. */
+    float *src_in;             /**< Floating-point converter input workspace. */
+    float *src_out;            /**< Floating-point converter output workspace. */
+    bool transmit;             /**< Outbound audio permitted. */
+    bool forward;              /**< Relay received voice to other links. */
+    bool permanent;            /**< Redial after an unexpected transport failure. */
+    bool active;               /**< Receive activity for the current radio tick. */
+    uint64_t active_since_ms;  /**< Rising-edge time for source-specific kerchunk detection. */
+    uint64_t key_query_due_ms; /**< Next active-receive keyed-source query deadline. */
 };
 
 /** @brief One retained recovery request, owned outside audio processing. */
@@ -145,12 +151,27 @@ static uint64_t topology_next_post(uint64_t now_ms) {
                : now_ms + RA_LINK_TOPOLOGY_POST_INTERVAL_MS;
 }
 
-/** @brief Release an unpublished port; a started reader owns its channel.
- * @param port Detached port.
+/** @brief Calculate the next bounded keyed-source query deadline.
+ * @param now_ms Current radio-worker monotonic time.
+ * @return One query interval later, saturated at the monotonic maximum.
  */
-static void release_port(struct ra_link_port *port) {
+static uint64_t key_query_next(uint64_t now_ms) {
+    return now_ms > UINT64_MAX - RA_LINK_KEY_QUERY_INTERVAL_MS
+               ? UINT64_MAX
+               : now_ms + RA_LINK_KEY_QUERY_INTERVAL_MS;
+}
+
+/** @brief Release one port and optionally its started reader's transferred channel.
+ * @param port Detached port.
+ * @param hangup_channel True after publication transferred channel ownership to the hub.
+ */
+static void release_port(struct ra_link_port *port, bool hangup_channel) {
     if (port->peer.channel) {
-        ra_link_peer_stop(&port->peer);
+        if (hangup_channel) {
+            ra_link_peer_stop(&port->peer);
+        } else {
+            ra_link_peer_stop_preserve_channel(&port->peer);
+        }
     }
     ast_free(port->audio);
     ast_free(port->output);
@@ -194,6 +215,105 @@ static void receive_digit(void *context, char digit) {
     if (hub->digit) {
         hub->digit(hub->digit_context, port->name, digit, monotonic_ms());
     }
+}
+
+/** @brief Queue one broadcast keyed-source query beyond its physical ingress link.
+ * @param hub Hub owning currently attached peers.
+ * @param ingress Reader port that received the query.
+ * @param requester Valid query origin identity.
+ *
+ * The peer reader calls this outside the radio callback.  The lifecycle lock only protects the
+ * port list and each destination retains its own bounded reader-owned text queue; no Asterisk
+ * channel operation occurs while the lock is held.
+ */
+static void relay_key_query(struct ra_link_hub *hub, const struct ra_link_port *ingress,
+                            const char *requester) {
+    ast_mutex_lock(&routing_lock);
+    for (struct ra_link_port *port = atomic_load_explicit(&hub->ports, memory_order_seq_cst); port;
+         port = atomic_load_explicit(&port->next, memory_order_seq_cst)) {
+        if (port != ingress && !atomic_load(&port->peer.ended) && strcmp(port->name, requester)) {
+            (void)ra_link_peer_queue_key_query(&port->peer, requester);
+        }
+    }
+    ast_mutex_unlock(&routing_lock);
+}
+
+/** @brief Queue one keyed-source reply toward its requesting node.
+ * @param hub Hub owning currently attached peers.
+ * @param ingress Reader port that received the reply.
+ * @param destination Valid requesting-node identity.
+ * @param source Valid reporting-node identity.
+ * @param keyed Reported receiver carrier state.
+ * @param age_seconds Reported whole seconds since local receiver transition.
+ *
+ * A directly attached destination gets the reply once.  Otherwise it is broadcast to other
+ * direct peers, excluding the physical ingress and reporting source just as app_rpt does.
+ */
+static void relay_key_reply(struct ra_link_hub *hub, const struct ra_link_port *ingress,
+                            const char *destination, const char *source, bool keyed,
+                            uint64_t age_seconds) {
+    ast_mutex_lock(&routing_lock);
+    struct ra_link_port *direct = NULL;
+    for (struct ra_link_port *port = atomic_load_explicit(&hub->ports, memory_order_seq_cst); port;
+         port = atomic_load_explicit(&port->next, memory_order_seq_cst)) {
+        if (port != ingress && !atomic_load(&port->peer.ended) &&
+            !strcmp(port->name, destination)) {
+            direct = port;
+            break;
+        }
+    }
+    if (direct) {
+        (void)ra_link_peer_queue_key_reply(&direct->peer, destination, source, keyed, age_seconds);
+    } else {
+        for (struct ra_link_port *port = atomic_load_explicit(&hub->ports, memory_order_seq_cst);
+             port; port = atomic_load_explicit(&port->next, memory_order_seq_cst)) {
+            if (port != ingress && !atomic_load(&port->peer.ended) && strcmp(port->name, source)) {
+                (void)ra_link_peer_queue_key_reply(&port->peer, destination, source, keyed,
+                                                   age_seconds);
+            }
+        }
+    }
+    ast_mutex_unlock(&routing_lock);
+}
+
+/** @brief Relay one parsed legacy keyed-source message without owning an Asterisk channel.
+ * @param context Stable ingress port retained until its reader joins.
+ * @param kind Broadcast query or routed reply class.
+ * @param destination Query wildcard requester target or reply destination.
+ * @param source Query requester or reply reporter.
+ * @param keyed Reply carrier state, false for queries.
+ * @param age_seconds Reply age in whole seconds, zero for queries.
+ *
+ * The radio callback publishes local-receiver state using lock-free atomics.  This reader-side
+ * callback reads that snapshot, queues an ingress-only reply to a canonical broadcast query, and
+ * forwards control text through other reader-owned peer queues.  It intentionally does not use
+ * controller state because link and telemetry activity must not be reported as local RF carrier.
+ */
+static void receive_key(void *context, enum ra_link_peer_key_kind kind, const char *destination,
+                        const char *source, bool keyed, uint64_t age_seconds) {
+    struct ra_link_port *ingress = context;
+    struct ra_link_hub *hub = ingress->hub;
+    const char *local = ingress->peer.key_query_requester;
+    if (kind == RA_LINK_PEER_KEY_QUERY) {
+        /* A reflected local query is neither useful evidence nor a safe relay target. */
+        if (!local[0] || !strcmp(source, local)) {
+            return;
+        }
+        bool receiving =
+            atomic_load_explicit(&hub->key_query_local_receiving, memory_order_acquire);
+        uint64_t transitioned =
+            atomic_load_explicit(&hub->key_query_local_transition_ms, memory_order_acquire);
+        uint64_t now_ms = monotonic_ms();
+        uint64_t reply_age =
+            transitioned && now_ms >= transitioned ? (now_ms - transitioned) / 1000U : 0;
+        (void)ra_link_peer_queue_key_reply(&ingress->peer, source, local, receiving, reply_age);
+        relay_key_query(hub, ingress, source);
+        return;
+    }
+    if (local[0] && !strcmp(destination, local)) {
+        return;
+    }
+    relay_key_reply(hub, ingress, destination, source, keyed, age_seconds);
 }
 
 /** @brief Hand one direct peer lifecycle change to the non-audio control plane.
@@ -305,15 +425,17 @@ static void finish_retry(struct ra_link_hub *hub, struct ra_link_retry *retry, i
         cursor = &(*cursor)->next;
     }
     retry->attempting = false;
-    if (atomic_load(&retry->paused)) {
-        ast_mutex_unlock(&routing_lock);
-        return;
-    }
+    /* Explicit cancellation wins over a concurrent disconnect-all pause.  The latter retains a
+     * retry for `*816`; the former must release it so a replacement schedule can use this peer. */
     if (atomic_load(&retry->cancelled) || !result || attached_locked(hub, retry->name) ||
         !retry->automatic) {
         *cursor = retry->next;
         ast_mutex_unlock(&routing_lock);
         release_retry(retry);
+        return;
+    }
+    if (atomic_load(&retry->paused)) {
+        ast_mutex_unlock(&routing_lock);
         return;
     }
     retry->delay_ms = ra_link_hub_retry_delay(retry->delay_ms);
@@ -543,7 +665,8 @@ static bool topology_reaches_direct_peer_locked(const struct ra_link_hub *hub,
 /** @brief Check one stable hub topology while its lifecycle lock is held.
  * @param hub Hub whose attached ports and retained retries are stable.
  * @param name Exact node identity to find.
- * @param retries True to include pending permanent-link recovery records.
+ * @param retries True to include retained recovery records.
+ * @param include_paused_retries True to include records held by disconnect-all.
  * @return True when an attached port, its live advertised topology, or a selected retry reaches
  *         @p name.
  *
@@ -553,7 +676,8 @@ static bool topology_reaches_direct_peer_locked(const struct ra_link_hub *hub,
  * while retaining its own retry record, so attachment checks omit retries whereas public admission
  * checks include them.
  */
-static bool reaches_locked(const struct ra_link_hub *hub, const char *name, bool retries) {
+static bool reaches_locked(const struct ra_link_hub *hub, const char *name, bool retries,
+                           bool include_paused_retries) {
     for (struct ra_link_port *port = atomic_load_explicit(&hub->ports, memory_order_seq_cst); port;
          port = atomic_load_explicit(&port->next, memory_order_seq_cst)) {
         if (!strcmp(port->name, name)) {
@@ -570,6 +694,9 @@ static bool reaches_locked(const struct ra_link_hub *hub, const char *name, bool
     }
     if (retries) {
         for (const struct ra_link_retry *retry = hub->retries; retry; retry = retry->next) {
+            if (!include_paused_retries && atomic_load(&retry->paused)) {
+                continue;
+            }
             if (!strcmp(retry->name, name)) {
                 return true;
             }
@@ -609,7 +736,17 @@ bool ra_link_hub_reaches(const struct ra_link_hub *hub, const char *name) {
         return false;
     }
     ast_mutex_lock(&routing_lock);
-    bool reaches = reaches_locked(hub, name, true);
+    bool reaches = reaches_locked(hub, name, true, true);
+    ast_mutex_unlock(&routing_lock);
+    return reaches;
+}
+
+bool ra_link_hub_reaches_live(const struct ra_link_hub *hub, const char *name) {
+    if (!hub || !name || !*name) {
+        return false;
+    }
+    ast_mutex_lock(&routing_lock);
+    bool reaches = reaches_locked(hub, name, true, false);
     ast_mutex_unlock(&routing_lock);
     return reaches;
 }
@@ -687,7 +824,7 @@ static void *manage(void *argument) {
         if (port) {
             wait_readers(hub);
             report_event(hub, port->name, false);
-            release_port(port);
+            release_port(port, true);
         } else if (retry) {
             int result = hub->reconnect
                              ? hub->reconnect(hub->reconnect_context, retry->name, retry->transmit,
@@ -722,8 +859,10 @@ static bool start_manager(struct ra_link_hub *hub) {
     return true;
 }
 
-int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
-                       struct ast_format *linear, bool transmit, bool forward, bool permanent) {
+int ra_link_hub_attach_gated(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
+                             struct ast_format *linear, bool transmit, bool forward, bool permanent,
+                             const atomic_bool *cancelled, const atomic_bool *paused,
+                             ra_link_hub_attach_gate_fn current, void *context) {
     unsigned int local_rate = ast_format_get_sample_rate(linear);
     struct ast_format *read_format = ast_channel_rawreadformat(channel);
     struct ast_format *write_format = ast_channel_rawwriteformat(channel);
@@ -762,7 +901,7 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
     port->src_out = ast_calloc(workspace, sizeof(*port->src_out));
     port->rate = read_rate;
     if (!port->name || !port->audio || !port->output || !port->src_in || !port->src_out) {
-        release_port(port);
+        release_port(port, false);
         return -1;
     }
     if (read_rate != local_rate) {
@@ -770,14 +909,14 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
         port->receive_src = src_new(SRC_SINC_FASTEST, 1, &error);
         port->send_src = src_new(SRC_SINC_FASTEST, 1, &error);
         if (!port->receive_src || !port->send_src || error) {
-            release_port(port);
+            release_port(port, false);
             return -1;
         }
     }
     ast_mutex_lock(&routing_lock);
     /* Recheck while publishing: a peer topology can change after runtime admission and permanent
      * reconnects attach through this lower layer without passing the runtime's initial check. */
-    bool blocked = reaches_locked(hub, name, false);
+    bool blocked = reaches_locked(hub, name, false, false);
     if (!hub->local) {
         hub->local = ast_calloc(local_capacity * 3, sizeof(*hub->local));
         hub->capacity = local_capacity;
@@ -789,19 +928,25 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
     }
     if (blocked || !hub->local) {
         ast_mutex_unlock(&routing_lock);
-        release_port(port);
+        release_port(port, false);
         return -1;
     }
     /* Caller serializes configuration/admission; the reader starts before publication. */
     ast_mutex_unlock(&routing_lock);
     if (!start_manager(hub)) {
-        release_port(port);
+        release_port(port, false);
         return -1;
     }
     port->hub = hub;
     port->peer.topology_generation = &hub->topology_generation;
-    if (ra_link_peer_start(&port->peer, channel, peer_linear, receive_digit, port)) {
-        release_port(port);
+    if (hub->local_name) {
+        ast_copy_string(port->peer.key_query_requester, hub->local_name,
+                        sizeof(port->peer.key_query_requester));
+    }
+    ast_copy_string(port->peer.key_query_direct, name, sizeof(port->peer.key_query_direct));
+    if (ra_link_peer_start(&port->peer, channel, peer_linear, receive_digit, port, receive_key,
+                           port)) {
+        release_port(port, false);
         return -1;
     }
     port->transmit = transmit;
@@ -810,10 +955,11 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
     ast_mutex_lock(&routing_lock);
     /* A concurrent attach can publish a duplicate or a newly advertised route while this peer
      * starts. Recheck immediately before publication, while the shared route list is stable. */
-    blocked = reaches_locked(hub, name, false);
-    if (blocked) {
+    blocked = reaches_locked(hub, name, false, false);
+    if (blocked || (cancelled && atomic_load(cancelled)) || (paused && atomic_load(paused)) ||
+        (current && !current(context))) {
         ast_mutex_unlock(&routing_lock);
-        release_port(port);
+        release_port(port, false);
         return -1;
     }
     atomic_store_explicit(&port->next, atomic_load_explicit(&hub->ports, memory_order_seq_cst),
@@ -823,6 +969,12 @@ int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_cha
     ast_mutex_unlock(&routing_lock);
     report_event(hub, port->name, true);
     return 0;
+}
+
+int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
+                       struct ast_format *linear, bool transmit, bool forward, bool permanent) {
+    return ra_link_hub_attach_gated(hub, name, channel, linear, transmit, forward, permanent, NULL,
+                                    NULL, NULL, NULL);
 }
 
 /** @brief Resample one bounded block with libsamplerate at the link boundary.
@@ -931,7 +1083,7 @@ bool ra_link_hub_disconnect(struct ra_link_hub *hub, const char *name) {
     }
     wait_readers(hub);
     report_event(hub, port->name, false);
-    release_port(port);
+    release_port(port, true);
     return true;
 }
 
@@ -946,7 +1098,7 @@ bool ra_link_hub_disconnect_permanent(struct ra_link_hub *hub, const char *name)
     if (port) {
         wait_readers(hub);
         report_event(hub, port->name, false);
-        release_port(port);
+        release_port(port, true);
     }
     return port || cancelled;
 }
@@ -963,7 +1115,7 @@ bool ra_link_hub_detach_reconnect(struct ra_link_hub *hub, const char *name, boo
     }
     wait_readers(hub);
     report_event(hub, port->name, false);
-    release_port(port);
+    release_port(port, true);
     return true;
 }
 
@@ -983,13 +1135,17 @@ size_t ra_link_hub_disconnect_all(struct ra_link_hub *hub) {
                                         monotonic_ms(), port->permanent, true);
             topology_changed(hub);
         }
-        ast_mutex_unlock(&routing_lock);
         if (!port) {
+            /* The manager can add an automatic retry after the initial pause while this drain
+             * releases ports. Pause once more at the terminal observation so `*806` wins. */
+            pause_retries_locked(hub);
+            ast_mutex_unlock(&routing_lock);
             return count;
         }
+        ast_mutex_unlock(&routing_lock);
         wait_readers(hub);
         report_event(hub, port->name, false);
-        release_port(port);
+        release_port(port, true);
         ++count;
     }
 }
@@ -1008,7 +1164,7 @@ size_t ra_link_hub_disconnect_nonpermanent_all(struct ra_link_hub *hub) {
         }
         wait_readers(hub);
         report_event(hub, port->name, false);
-        release_port(port);
+        release_port(port, true);
         ++count;
     }
 }
@@ -1034,6 +1190,28 @@ bool ra_link_hub_has_retained_state(struct ra_link_hub *hub) {
     bool retained = atomic_load_explicit(&hub->ports, memory_order_seq_cst) || hub->retries;
     ast_mutex_unlock(&routing_lock);
     return retained;
+}
+
+bool ra_link_hub_has_permanent_route(const struct ra_link_hub *hub, const char *name) {
+    if (!hub || !name || !*name) {
+        return false;
+    }
+    ast_mutex_lock(&routing_lock);
+    bool present = false;
+    for (const struct ra_link_port *port = atomic_load_explicit(&hub->ports, memory_order_seq_cst);
+         port; port = atomic_load_explicit(&port->next, memory_order_seq_cst)) {
+        if (port->permanent && !atomic_load(&port->peer.ended) && !strcmp(port->name, name)) {
+            present = true;
+            break;
+        }
+    }
+    for (const struct ra_link_retry *retry = hub->retries; !present && retry; retry = retry->next) {
+        if (retry->automatic && !atomic_load(&retry->cancelled) && !strcmp(retry->name, name)) {
+            present = true;
+        }
+    }
+    ast_mutex_unlock(&routing_lock);
+    return present;
 }
 
 size_t ra_link_hub_snapshot(struct ra_link_hub *hub, struct ra_link_peer_status *entries,
@@ -1182,10 +1360,30 @@ void ra_link_hub_close(struct ra_link_hub *hub) {
     for (size_t index = 0; index < RA_LINK_PEER_NAME_MAX; ++index) {
         atomic_store_explicit(&hub->last_keyed[index], '\0', memory_order_seq_cst);
     }
+    atomic_store_explicit(&hub->key_query_local_receiving, false, memory_order_seq_cst);
+    atomic_store_explicit(&hub->key_query_local_transition_ms, 0, memory_order_seq_cst);
+}
+
+/** @brief Publish the local receiver's legacy keyed-source response state.
+ * @param hub Hub retaining lock-free response state.
+ * @param receiving Qualified local receiver carrier state.
+ * @param now_ms Hardware-paced monotonic timestamp.
+ *
+ * app_rpt reports only local receiver carrier in a `K` response.  Keeping this separate from
+ * linked audio, transmitter state, and telemetry prevents a relay from claiming it is the source
+ * of downstream program audio while still allowing the query to reach the actual source.
+ */
+static void publish_local_receiver_state(struct ra_link_hub *hub, bool receiving, uint64_t now_ms) {
+    bool previous =
+        atomic_exchange_explicit(&hub->key_query_local_receiving, receiving, memory_order_release);
+    if (previous != receiving) {
+        atomic_store_explicit(&hub->key_query_local_transition_ms, now_ms, memory_order_release);
+    }
 }
 
 bool ra_link_hub_process(struct ra_link_hub *hub, struct ra_controller *controller, bool receiving,
                          int16_t *audio, size_t samples, uint64_t now_ms) {
+    publish_local_receiver_state(hub, receiving, now_ms);
     atomic_fetch_add_explicit(&hub->readers, 1, memory_order_seq_cst);
     struct ra_link_port *ports = atomic_load_explicit(&hub->ports, memory_order_seq_cst);
     if (samples || !ports) {
@@ -1201,13 +1399,23 @@ bool ra_link_hub_process(struct ra_link_hub *hub, struct ra_controller *controll
             port->samples = peer_samples(port, samples, hub->rate);
             bool active = ra_link_peer_receive(&port->peer, port->audio, port->samples);
             if (active && !port->active) {
+                ra_link_peer_begin_keyed_source(&port->peer);
+                port->key_query_due_ms = key_query_next(now_ms);
                 remember_last_keyed(hub, port->name);
                 ra_controller_link_keyed(controller, port->name);
+            } else if (active && now_ms >= port->key_query_due_ms) {
+                ra_link_peer_request_key_query(&port->peer);
+                port->key_query_due_ms = key_query_next(now_ms);
             } else if (!active && port->active) {
                 bool kerchunk = controller->kerchunk_max_ms &&
                                 now_ms - port->active_since_ms <= controller->kerchunk_max_ms;
-                ra_controller_link_unkeyed_kerchunk(controller, port->name, port->permanent,
-                                                    kerchunk, now_ms);
+                ra_link_peer_end_keyed_source(&port->peer);
+                char source[RA_LINK_PEER_NAME_MAX];
+                const char *selection =
+                    ra_link_peer_keyed_source(&port->peer, source, sizeof(source)) ? source
+                                                                                   : port->name;
+                ra_controller_link_unkeyed_selected_kerchunk(controller, port->name, selection,
+                                                             kerchunk, now_ms);
             }
             if (active && !port->active) {
                 port->active_since_ms = now_ms;

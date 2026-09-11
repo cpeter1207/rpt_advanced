@@ -66,6 +66,20 @@ static unsigned int scheduled_message_calls;
 static unsigned int scheduled_completions;
 /** @brief Scheduled disconnect macros executed after their telemetry was accepted. */
 static unsigned int scheduled_disconnects;
+/** @brief Ordered configured-link transitions returned by the scheduler fixture. */
+static enum ra_link_action scheduled_link_actions[2];
+/** @brief Number of configured-link transitions currently available to the fixture. */
+static size_t scheduled_link_action_count;
+/** @brief Next configured-link transition returned to the module scheduler. */
+static size_t scheduled_link_action_index;
+/** @brief Inject an invalid configured-link scheduler result. */
+static bool scheduled_link_failure;
+/** @brief Configured-link permanent withdrawals executed by the module bridge. */
+static unsigned int scheduled_link_withdrawals;
+/** @brief Configured-link permanent attachments executed by the module bridge. */
+static unsigned int scheduled_link_attachments;
+/** @brief Configured-link reservations settled after current-runtime execution. */
+static unsigned int scheduled_link_completions;
 /** @brief Number of fixture scheduler tick threads Asterisk requested. */
 static unsigned int scheduler_thread_starts;
 /** @brief Reject one Asterisk background-thread request. */
@@ -82,6 +96,8 @@ static sem_t scheduler_sleep_release;
 static bool scheduler_sleep_synchronization_ready;
 /** @brief Fixture wall clock advanced one epoch minute for every requested scheduler tick. */
 static time_t scheduler_fixture_time = 7200;
+/** @brief Make the scheduler's monotonic-clock snapshot unavailable for one submitted tick. */
+static bool scheduler_monotonic_clock_failure;
 /** @brief Pause the next ticker allocation after its first reload-state check. */
 static bool block_scheduler_allocation;
 /** @brief Pause a replacement runtime while its module reload state remains asserted. */
@@ -151,6 +167,49 @@ void ra_runtime_stop(struct ra_runtime *runtime) {
     (void)runtime;
     ++runtime_stops;
     runtime_active = false;
+}
+
+/** @brief Yield one ordered configuration-owned link transition to the module bridge.
+ * @param runtime Active fixture runtime.
+ * @param now Unused captured wall clock.
+ * @param now_ms Unused captured monotonic control timestamp.
+ * @param operation Receives one copied transition.
+ * @return One when a transition is ready, zero when idle, or minus one when failure is injected.
+ */
+int ra_runtime_next_scheduled_link_operation(struct ra_runtime *runtime, time_t now,
+                                             uint64_t now_ms,
+                                             struct ra_scheduled_link_operation *operation) {
+    (void)runtime;
+    (void)now;
+    (void)now_ms;
+    assert(runtime_locked && runtime_active && operation);
+    if (scheduled_link_failure) {
+        return -1;
+    }
+    if (scheduled_link_action_index == scheduled_link_action_count) {
+        return 0;
+    }
+    enum ra_link_action action = scheduled_link_actions[scheduled_link_action_index++];
+    *operation =
+        (struct ra_scheduled_link_operation){.schedule_generation = 1,
+                                             .link_index = scheduled_link_action_index - 1U,
+                                             .reservation = scheduled_link_action_index,
+                                             .operation = {.action = action}};
+    strcpy(operation->local, "usb");
+    strcpy(operation->operation.remote, action == RA_LINK_DISCONNECT_PERMANENT ? "123" : "456");
+    return 1;
+}
+
+/** @brief Observe settlement of one current scheduler reservation. */
+bool ra_runtime_complete_scheduled_link_operation(
+    struct ra_runtime *runtime, const struct ra_scheduled_link_operation *operation,
+    bool accepted) {
+    (void)runtime;
+    assert(runtime_locked && runtime_active && operation && operation->schedule_generation &&
+           operation->reservation && operation->local[0] && operation->operation.remote[0]);
+    (void)accepted;
+    ++scheduled_link_completions;
+    return true;
 }
 
 /** @brief Yield one controllable schedule dispatch for the Asterisk bridge fixture.
@@ -361,6 +420,20 @@ time_t __wrap_time(time_t *result) {
         *result = scheduler_fixture_time;
     }
     return scheduler_fixture_time;
+}
+
+/** @brief Supply the scheduler's deterministic monotonic timestamp or inject its failure path.
+ * @param clock_id Requested POSIX clock.
+ * @param value Receives the successful bounded monotonic timestamp.
+ * @return Zero on success or minus one when the test requests an unavailable clock.
+ */
+int __wrap_clock_gettime(clockid_t clock_id, struct timespec *value) {
+    assert(clock_id == CLOCK_MONOTONIC && value);
+    if (scheduler_monotonic_clock_failure) {
+        return -1;
+    }
+    *value = (struct timespec){.tv_sec = 123, .tv_nsec = 456000000};
+    return 0;
 }
 
 /** @brief Resolve the libc join implementation after waking the controlled ticker sleep.
@@ -808,10 +881,16 @@ int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char 
 }
 
 int ra_runtime_prepare_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                            struct ra_link_dial *dial) {
+                            struct ra_link_dial *dial,
+                            const struct ra_scheduled_link_operation *scheduled) {
     (void)runtime;
     (void)dial;
     assert(runtime_locked && local && remote);
+    if (scheduled) {
+        assert(scheduled->schedule_generation == 1 && scheduled->reservation &&
+               scheduled->operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+               !strcmp(local, scheduled->local) && !strcmp(remote, scheduled->operation.remote));
+    }
     return link_failure == 1 ? -1 : 0;
 }
 
@@ -824,13 +903,20 @@ struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *loca
 }
 
 int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                           struct ast_channel *channel, bool transmit, bool forward,
-                           bool permanent) {
-    (void)permanent;
+                           struct ast_channel *channel, bool transmit, bool forward, bool permanent,
+                           const struct ra_scheduled_link_operation *scheduled) {
     (void)runtime;
     (void)transmit;
     (void)forward;
     assert(runtime_locked && local && remote && channel);
+    if (scheduled) {
+        assert(scheduled->schedule_generation == 1 && scheduled->reservation &&
+               scheduled->operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+               !strcmp(local, scheduled->local) && !strcmp(remote, scheduled->operation.remote));
+    }
+    if (permanent && !strcmp(local, "usb") && !strcmp(remote, "456")) {
+        ++scheduled_link_attachments;
+    }
     return link_failure == 3 ? -1 : 0;
 }
 
@@ -844,9 +930,16 @@ int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const 
  * @return True unless retention is injected as unavailable.
  */
 bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *local,
-                                      const char *remote, bool transmit, bool forward) {
+                                      const char *remote, bool transmit, bool forward,
+                                      const struct ra_scheduled_link_operation *scheduled) {
     (void)runtime;
-    assert(runtime_locked && !strcmp(local, "usb") && !strcmp(remote, "123"));
+    assert(runtime_locked && !strcmp(local, "usb") &&
+           (!strcmp(remote, "123") || !strcmp(remote, "456")));
+    if (scheduled) {
+        assert(scheduled->schedule_generation == 1 && scheduled->reservation &&
+               scheduled->operation.action == RA_LINK_PERMANENT_TRANSCEIVE &&
+               !strcmp(local, scheduled->local) && !strcmp(remote, scheduled->operation.remote));
+    }
     ++retained_permanent_links;
     return !retain_permanent_failure && transmit && forward;
 }
@@ -868,9 +961,18 @@ bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const 
  * @return True unless the fixture injects a command failure.
  */
 bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *local,
-                                     const char *remote) {
+                                     const char *remote,
+                                     const struct ra_scheduled_link_operation *scheduled) {
     (void)runtime;
     assert(runtime_locked && local && remote);
+    if (scheduled) {
+        assert(scheduled->schedule_generation == 1 && scheduled->reservation &&
+               scheduled->operation.action == RA_LINK_DISCONNECT_PERMANENT &&
+               !strcmp(local, scheduled->local) && !strcmp(remote, scheduled->operation.remote));
+    }
+    if (!strcmp(local, "usb") && !strcmp(remote, "123")) {
+        ++scheduled_link_withdrawals;
+    }
     return !link_failure;
 }
 
@@ -1117,6 +1219,71 @@ int main(void) {
     /* Both startup paths submit the current minute; duplicate occurrence keys are harmless. */
     drain_tasks();
     assert(application && command_entry);
+    unsigned int scheduled_withdrawals_before = scheduled_link_withdrawals;
+    unsigned int scheduled_attachments_before = scheduled_link_attachments;
+    unsigned int scheduled_link_completions_before = scheduled_link_completions;
+    scheduled_link_actions[0] = RA_LINK_DISCONNECT_PERMANENT;
+    scheduled_link_actions[1] = RA_LINK_PERMANENT_TRANSCEIVE;
+    scheduled_link_action_count = sizeof(scheduled_link_actions) / sizeof(*scheduled_link_actions);
+    scheduled_link_action_index = 0;
+    trigger_schedule_tick();
+    drain_tasks();
+    assert(scheduled_link_action_index == scheduled_link_action_count);
+    assert(scheduled_link_withdrawals == scheduled_withdrawals_before + 1);
+    assert(scheduled_link_attachments == scheduled_attachments_before + 1);
+    assert(scheduled_link_completions == scheduled_link_completions_before + 2);
+    scheduled_link_actions[0] = RA_LINK_DISCONNECT_PERMANENT;
+    scheduled_link_action_count = 1;
+    scheduled_link_action_index = 0;
+    unsigned int rejected_scheduled_withdrawals_before = scheduled_link_withdrawals;
+    unsigned int rejected_scheduled_link_completions_before = scheduled_link_completions;
+    link_failure = 1;
+    trigger_schedule_tick();
+    drain_tasks();
+    link_failure = 0;
+    assert(scheduled_link_action_index == scheduled_link_action_count);
+    assert(scheduled_link_withdrawals == rejected_scheduled_withdrawals_before + 1);
+    assert(scheduled_link_completions == rejected_scheduled_link_completions_before + 1);
+    scheduled_link_actions[0] = RA_LINK_DISCONNECT_PERMANENT;
+    scheduled_link_action_count = 1;
+    scheduled_link_action_index = 0;
+    unsigned int stale_scheduled_withdrawals_before = scheduled_link_withdrawals;
+    unsigned int stale_scheduled_link_completions_before = scheduled_link_completions;
+    reload_on_unlock = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    assert(scheduled_link_action_index == scheduled_link_action_count);
+    assert(scheduled_link_withdrawals == stale_scheduled_withdrawals_before);
+    assert(scheduled_link_completions == stale_scheduled_link_completions_before);
+    scheduled_link_actions[0] = RA_LINK_PERMANENT_TRANSCEIVE;
+    scheduled_link_action_index = 0;
+    unsigned int stale_scheduled_attachments_before = scheduled_link_attachments;
+    reload_on_unlock = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    assert(scheduled_link_action_index == scheduled_link_action_count);
+    assert(scheduled_link_attachments == stale_scheduled_attachments_before);
+    assert(scheduled_link_completions == stale_scheduled_link_completions_before);
+    scheduled_link_action_index = 0;
+    unsigned int retained_scheduled_before = retained_permanent_links;
+    unsigned int retained_scheduled_completions_before = scheduled_link_completions;
+    link_failure = 1;
+    trigger_schedule_tick();
+    drain_tasks();
+    link_failure = 0;
+    assert(scheduled_link_action_index == scheduled_link_action_count);
+    assert(retained_permanent_links == retained_scheduled_before + 1);
+    assert(scheduled_link_completions == retained_scheduled_completions_before + 1);
+    scheduled_link_action_index = 0;
+    retain_permanent_failure = true;
+    link_failure = 1;
+    unsigned int rejected_scheduled_completions_before = scheduled_link_completions;
+    trigger_schedule_tick();
+    drain_tasks();
+    link_failure = 0;
+    retain_permanent_failure = false;
+    assert(scheduled_link_action_index == scheduled_link_action_count);
+    assert(scheduled_link_completions == rejected_scheduled_completions_before + 1);
     assert(event_sink);
     event_sink("usb", "123", true);
     drain_tasks();
@@ -1350,6 +1517,14 @@ int main(void) {
     assert(runtime_reloads == reloads_before + 3 && runtime_stops == stops_before &&
            runtime_active);
     assert(errors == 8);
+    unsigned int failed_schedule_withdrawals_before = scheduled_link_withdrawals;
+    unsigned int failed_schedule_attachments_before = scheduled_link_attachments;
+    scheduled_link_failure = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    scheduled_link_failure = false;
+    assert(scheduled_link_withdrawals == failed_schedule_withdrawals_before);
+    assert(scheduled_link_attachments == failed_schedule_attachments_before);
     assert(digit_sink);
     unsigned int parsed_before_stop = runtime_digit_calls;
     emit_digit_during_reload = true;
@@ -1525,6 +1700,10 @@ int main(void) {
     release_schedule_ticker_sleep();
     wait_schedule_ticker_sleep();
     drain_tasks();
+    scheduler_monotonic_clock_failure = true;
+    trigger_schedule_tick();
+    drain_tasks();
+    scheduler_monotonic_clock_failure = false;
     /* A reload beginning after allocation must invalidate the task before it reaches the queue. */
     block_scheduler_allocation = true;
     scheduler_fixture_time += 60;

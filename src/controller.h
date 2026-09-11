@@ -28,10 +28,10 @@ struct ra_controller_id {
     size_t samples;                         /**< Prepared samples at the controller rate. */
 };
 
-/** @brief Immutable courtesy-media override for one permanent direct peer. */
+/** @brief Immutable courtesy-media override for one exact courtesy identity. */
 struct ra_controller_peer_courtesy {
-    const char *remote;                   /**< Borrowed exact direct-peer identity. */
-    const struct ra_controller_id *media; /**< Borrowed prepared media for this direct peer. */
+    const char *remote; /**< Borrowed direct-peer or advisory downstream identity. */
+    const struct ra_controller_id *media; /**< Borrowed prepared media for this identity. */
 };
 
 /** @brief One scheduled courtesy item and the receive source that owns it. */
@@ -77,7 +77,8 @@ struct ra_controller {
     bool link_active; /**< Current linked-receiver activity; it interrupts prepared identifiers. */
     const int16_t *link_audio;    /**< Borrowed link mix for the current block, or null. */
     uint64_t hang_ms;             /**< Transmitter hang time. */
-    uint64_t transmit_timeout_ms; /**< Continuous-PTT watchdog duration; zero disables it. */
+    uint64_t transmit_timeout_ms; /**< Maximum keyed interval without a local/link unkey; zero
+                                     disables it. */
     uint64_t timeout_lockout_ms;  /**< Post-timeout PTT lockout duration. */
     uint64_t kerchunk_max_ms;     /**< Short receive duration that suppresses tail telemetry. */
     int telemetry_duck_db;      /**< Receive-active telemetry attenuation, from -60 through 0 dB. */
@@ -88,12 +89,14 @@ struct ra_controller {
     size_t playing;                /**< Active identifier index, or SIZE_MAX. */
     bool receiving;                /**< Previous qualified receiver indication. */
     uint64_t receiver_key_ms;      /**< Current local-receiver rising-edge time. */
-    uint64_t transmit_key_ms;      /**< Current continuous PTT rising-edge time. */
-    uint64_t timeout_until_ms;     /**< Earliest recovery after a watchdog timeout. */
+    uint64_t transmit_key_ms;  /**< Start of the current keyed interval without a receive unkey. */
+    uint64_t timeout_until_ms; /**< Earliest recovery after a watchdog timeout. */
     bool timeout_wait_unkey;   /**< Timed-out source must clear before transmission may recover. */
     bool suppress_release;     /**< Current short transmission must not create tail telemetry. */
     uint64_t last_activity_ms; /**< Last receive activity, initially startup. */
-    uint64_t key_idle_ms;      /**< Idle period preceding the current conversation. */
+    atomic_uint_fast64_t qualifying_activity_ms; /**< Last local or linked receive activity, zero
+                                                    before reception. */
+    uint64_t key_idle_ms;             /**< Idle period preceding the current conversation. */
     unsigned int status_speed_wpm;    /**< Per-node Morse speed used for RF-status fallback. */
     unsigned int status_frequency_hz; /**< Per-node Morse frequency used for RF-status fallback. */
     int status_level_db;              /**< Per-node Morse level used for RF-status fallback. */
@@ -111,8 +114,8 @@ struct ra_controller {
     const struct ra_controller_id
         *link_courtesy; /**< Borrowed fallback linked-receiver courtesy media. */
     const struct ra_controller_peer_courtesy
-        *peer_courtesies;       /**< Borrowed immutable permanent-peer courtesy overrides. */
-    size_t peer_courtesy_count; /**< Number of immutable permanent-peer courtesy overrides. */
+        *peer_courtesies;       /**< Borrowed immutable exact-direct-peer courtesy overrides. */
+    size_t peer_courtesy_count; /**< Number of immutable exact-direct-peer courtesy overrides. */
     struct ra_playback courtesy_playback; /**< Worker-owned active courtesy playback. */
     struct ra_controller_courtesy_pending
         courtesy_pending[RA_CONTROLLER_COURTESY_QUEUE_DEPTH]; /**< Per-source delayed media in FIFO
@@ -135,6 +138,15 @@ struct ra_controller {
  */
 bool ra_controller_start(struct ra_controller *state, uint64_t now_ms);
 
+/** @brief Read the last local or linked receive timestamp for control-plane idle policies.
+ * @param state Started controller retained by its owning runtime node.
+ * @return Monotonic receive timestamp, or zero when no qualifying activity has occurred.
+ *
+ * The hardware-paced worker publishes this value only for local receiver or direct-link receive
+ * activity. Telemetry, identifiers, courtesy tones, and other transmit-only work never update it.
+ */
+uint64_t ra_controller_qualifying_activity_ms(const struct ra_controller *state);
+
 /** @brief Queue prepared spoken RF status with Morse fallback without touching the radio callback.
  * @param state Started controller retained until its worker stops.
  * @param text ASCII status text accepted by the Morse encoder and Piper.
@@ -152,29 +164,44 @@ bool ra_controller_queue_status(struct ra_controller *state, const char *text, i
 /** @brief Queue the appropriate courtesy media when one direct peer unkeys.
  * @param state Started controller owned by the same hardware-paced radio worker.
  * @param remote Exact direct-peer identity from the routing hub.
- * @param permanent True only for a configured permanent direct link.
  * @param now_ms Monotonic unkey time.
  *
- * A permanent exact peer override wins when it has renderable media. All other
+ * An exact peer override wins when it has renderable media. All unmatched
  * links use the configured generic link courtesy media. This function only
  * changes worker-owned state and must not be called from a control or peer-reader
  * thread.
  */
-void ra_controller_link_unkeyed(struct ra_controller *state, const char *remote, bool permanent,
-                                uint64_t now_ms);
+void ra_controller_link_unkeyed(struct ra_controller *state, const char *remote, uint64_t now_ms);
+/** @brief Queue a link courtesy selected by advisory source identity without changing its owner.
+ * @param state Started controller owned by the same hardware-paced radio worker.
+ * @param direct_remote Exact direct-peer identity that owns flutter cancellation.
+ * @param selection_remote Exact advisory source identity used only for courtesy-media lookup.
+ * @param kerchunk True when the direct source transmission must suppress its courtesy media.
+ * @param now_ms Monotonic unkey time.
+ *
+ * The latest accepted first-per-query legacy keyed-source reply may select a downstream courtesy
+ * tone. Pending media remains owned by @p direct_remote so a resumed direct peer always cancels
+ * its own delayed courtesy. An unavailable or unconfigured @p selection_remote falls back to
+ * @p direct_remote and then the generic link courtesy. This changes only worker-owned state.
+ */
+void ra_controller_link_unkeyed_selected_kerchunk(struct ra_controller *state,
+                                                  const char *direct_remote,
+                                                  const char *selection_remote, bool kerchunk,
+                                                  uint64_t now_ms);
 /** @brief Queue one link courtesy unless its source was a configured kerchunk.
  * @param state Started controller owned by the same hardware-paced radio worker.
- * @param remote Exact direct-peer identity from the routing hub.
- * @param permanent True only for a configured permanent direct link.
+ * @param remote Exact direct-peer identity from the routing hub, used both for selection and
+ * owner tracking.
  * @param kerchunk True when the source transmission must suppress its courtesy media.
  * @param now_ms Monotonic unkey time.
  *
  * This is the kerchunk-aware counterpart to ra_controller_link_unkeyed(). When
  * @p kerchunk is true it leaves pending courtesy state unchanged. Otherwise it
- * applies the normal peer-specific or generic-link courtesy selection.
+ * applies the normal peer-specific or generic-link courtesy selection. Use
+ * ra_controller_link_unkeyed_selected_kerchunk() when a best-effort downstream source is known.
  */
 void ra_controller_link_unkeyed_kerchunk(struct ra_controller *state, const char *remote,
-                                         bool permanent, bool kerchunk, uint64_t now_ms);
+                                         bool kerchunk, uint64_t now_ms);
 
 /** @brief Cancel one direct peer's pending courtesy media when that peer keys again.
  * @param state Started controller owned by the same hardware-paced radio worker.

@@ -7,6 +7,7 @@
 #include <asterisk.h>
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -53,16 +54,42 @@ static unsigned int sent_digits;
 static unsigned int sent_topologies;
 /** @brief Most recent full IAX topology text sent by the channel owner. */
 static char sent_topology[RA_LINK_TOPOLOGY_ADVERTISEMENT_MAX + 3];
+/** @brief Number of legacy keyed-source queries delivered by the reader. */
+static unsigned int sent_key_queries;
+/** @brief Most recent full legacy keyed-source query sent by the channel owner. */
+static char sent_key_query[RA_LINK_PEER_NAME_MAX + sizeof("K? *  0 0")];
+/** @brief Exact keyed-source query expected from the current fixture requester identity. */
+static const char *expected_key_query = "K? * 524950 0 0";
+/** @brief Peer whose fixture K? write crosses a receive falling edge. */
+static struct ra_link_peer *end_key_query_during_send;
+/** @brief Number of relayed keyed-source texts sent by the peer reader. */
+static unsigned int sent_key_messages;
+/** @brief Ordered relay text emitted only from the fixture peer reader. */
+static char sent_key_message[RA_LINK_PEER_KEY_QUEUE_CAPACITY][RA_LINK_PEER_KEY_TEXT_MAX];
 /** @brief Number of initial voice-keyed IAX negotiation messages. */
 static unsigned int sent_newkey1s;
 /** @brief Number of IAX key-negotiation replies. */
 static unsigned int sent_iaxkeys;
 /** @brief Opaque identity required by the inbound-IAX DTMF callback fixture. */
 static int inbound_context;
+/** @brief Opaque identity required by the inbound keyed-source callback fixture. */
+static int inbound_key_context;
 /** @brief Number of valid inbound IAX DTMF end events delivered by the reader. */
 static unsigned int inbound_digits;
 /** @brief Most recent valid inbound IAX DTMF character. */
 static char inbound_digit;
+/** @brief Number of valid parsed keyed-source controls delivered to the reader callback. */
+static unsigned int inbound_key_messages;
+/** @brief Most recently delivered keyed-source control class. */
+static enum ra_link_peer_key_kind inbound_key_kind;
+/** @brief Most recently delivered keyed-source destination. */
+static char inbound_key_destination[RA_LINK_PEER_NAME_MAX];
+/** @brief Most recently delivered keyed-source reporting identity. */
+static char inbound_key_source[RA_LINK_PEER_NAME_MAX];
+/** @brief Most recently delivered keyed-source carrier state. */
+static bool inbound_keyed;
+/** @brief Most recently delivered keyed-source age. */
+static uint64_t inbound_key_age;
 /** @brief Selected result for the fixture's Asterisk translator. */
 static enum fixture_translation translation_mode;
 /** @brief Singleton translator returned for supported fixture conversions. */
@@ -124,6 +151,28 @@ static void receive_inbound_digit(void *context, char digit) {
     assert(context == &inbound_context && !locked);
     ++inbound_digits;
     inbound_digit = digit;
+}
+
+/** @brief Capture a validated K/K? control message outside reader queue exclusion.
+ * @param context Expected callback identity.
+ * @param kind Parsed query or reply class.
+ * @param destination Complete parsed destination string.
+ * @param source Complete parsed requester or reporter string.
+ * @param keyed Parsed reply carrier state.
+ * @param age_seconds Parsed reply age.
+ */
+static void receive_inbound_key(void *context, enum ra_link_peer_key_kind kind,
+                                const char *destination, const char *source, bool keyed,
+                                uint64_t age_seconds) {
+    assert(context == &inbound_key_context && !locked && destination && source);
+    ++inbound_key_messages;
+    inbound_key_kind = kind;
+    assert(strlen(destination) < sizeof(inbound_key_destination));
+    assert(strlen(source) < sizeof(inbound_key_source));
+    memcpy(inbound_key_destination, destination, strlen(destination) + 1);
+    memcpy(inbound_key_source, source, strlen(source) + 1);
+    inbound_keyed = keyed;
+    inbound_key_age = age_seconds;
 }
 
 /** @brief Real allocator for non-failing calls.
@@ -380,6 +429,24 @@ int ast_sendtext(struct ast_channel *channel, const char *text) {
         ++sent_iaxkeys;
         return failure == 13;
     }
+    if (!strncmp(text, "K? * ", 5)) {
+        if (!strcmp(text, expected_key_query)) {
+            memcpy(sent_key_query, text, strlen(text) + 1);
+            ++sent_key_queries;
+            if (end_key_query_during_send) {
+                ra_link_peer_end_keyed_source(end_key_query_during_send);
+                end_key_query_during_send = NULL;
+            }
+            return failure == 14;
+        }
+    }
+    if (!strncmp(text, "K? * ", 5) || !strncmp(text, "K ", 2)) {
+        assert(sent_key_messages < RA_LINK_PEER_KEY_QUEUE_CAPACITY);
+        assert(strlen(text) < sizeof(sent_key_message[0]));
+        memcpy(sent_key_message[sent_key_messages], text, strlen(text) + 1);
+        ++sent_key_messages;
+        return failure == 15;
+    }
     assert(!strncmp(text, "L ", 2));
     assert(strlen(text) <= RA_LINK_TOPOLOGY_TEXT_MAX);
     memcpy(sent_topology, text, strlen(text) + 1);
@@ -484,29 +551,32 @@ int main(void) {
     assert(!ra_link_peer_topology(&peer, topology, sizeof(topology)) && !topology[0]);
     assert(!ra_link_peer_topology(&peer, topology, 0) && !topology[0]);
     assert(ra_link_peer_queue_topology(&peer, "T1") == -1);
-    assert(ra_link_peer_start(&peer, NULL, &invalid, NULL, NULL) == -1);
+    assert(ra_link_peer_start(&peer, NULL, &invalid, NULL, NULL, NULL, NULL) == -1);
     for (allocation_failure = 1; allocation_failure <= 2; ++allocation_failure) {
         allocation_calls = 0;
-        assert(ra_link_peer_start(&peer, NULL, &linear, NULL, NULL) == -1);
+        assert(ra_link_peer_start(&peer, NULL, &linear, NULL, NULL, NULL, NULL) == -1);
     }
     allocation_failure = 0;
     struct ra_link_peer ring_failure = {0};
     rpcr_init_failure = true;
-    assert(ra_link_peer_start(&ring_failure, NULL, &linear, NULL, NULL) == -1);
+    assert(ra_link_peer_start(&ring_failure, NULL, &linear, NULL, NULL, NULL, NULL) == -1);
     rpcr_init_failure = false;
     rpcr_sample_rate_failure = true;
-    assert(ra_link_peer_start(&ring_failure, NULL, &linear, NULL, NULL) == -1);
+    assert(ra_link_peer_start(&ring_failure, NULL, &linear, NULL, NULL, NULL, NULL) == -1);
     rpcr_sample_rate_failure = false;
     for (failure = 1; failure <= 5; ++failure) {
         mutex_inits = 0;
         allocation_calls = 0;
-        assert(ra_link_peer_start(&peer, NULL, &linear, NULL, NULL) == -1);
+        assert(ra_link_peer_start(&peer, NULL, &linear, NULL, NULL, NULL, NULL) == -1);
     }
     failure = 0;
     mutex_inits = 0;
     allocation_calls = 0;
     sent_newkey1s = sent_iaxkeys = 0;
-    assert(!ra_link_peer_start(&peer, NULL, &linear, receive_inbound_digit, &inbound_context));
+    memcpy(peer.key_query_requester, "524950", sizeof("524950"));
+    memcpy(peer.key_query_direct, "direct", sizeof("direct"));
+    assert(!ra_link_peer_start(&peer, NULL, &linear, receive_inbound_digit, &inbound_context,
+                               receive_inbound_key, &inbound_key_context));
     assert(sent_newkey1s == 1);
     assert(peer.received.capacity == (size_t)linear.rate * RA_LINK_RECEIVE_CAPACITY_MS / 1000U);
     atomic_uint generation;
@@ -532,8 +602,269 @@ int main(void) {
     struct ast_frame control = {.frametype = AST_FRAME_CONTROL,
                                 .subclass.integer = AST_CONTROL_RADIO_KEY};
     struct ast_frame ignored = {.frametype = AST_FRAME_NULL};
+    struct ast_frame text = {.frametype = AST_FRAME_TEXT};
     struct ast_frame dtmf_begin = {.frametype = AST_FRAME_DTMF_BEGIN, .subclass.integer = '5'};
     struct ast_frame dtmf_end = {.frametype = AST_FRAME_DTMF_END, .subclass.integer = '5'};
+    char keyed_source[RA_LINK_PEER_NAME_MAX];
+    text.data.ptr = "!NEWKEY1!";
+    text.datalen = (int)strlen(text.data.ptr) + 1;
+    frame(&peer, &text);
+    text.data.ptr = NULL;
+    text.datalen = 0;
+    frame(&peer, &text);
+    text.data.ptr = "K? * 100 0 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(inbound_key_messages == 1 && inbound_key_kind == RA_LINK_PEER_KEY_QUERY &&
+           !strcmp(inbound_key_destination, "*") && !strcmp(inbound_key_source, "100") &&
+           !inbound_keyed && !inbound_key_age);
+    text.data.ptr = "K 100 300 1 2";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(inbound_key_messages == 2 && inbound_key_kind == RA_LINK_PEER_KEY_REPLY &&
+           !strcmp(inbound_key_destination, "100") && !strcmp(inbound_key_source, "300") &&
+           inbound_keyed && inbound_key_age == 2);
+    assert(!ra_link_peer_queue_key_query(&peer, "100"));
+    assert(!ra_link_peer_queue_key_reply(&peer, "100", "200", true, 3));
+    frame(&peer, &ignored);
+    assert(sent_key_messages == 2 && !strcmp(sent_key_message[0], "K? * 100 0 0") &&
+           !strcmp(sent_key_message[1], "K 100 200 1 3"));
+    failure = 15;
+    assert(!ra_link_peer_queue_key_reply(&peer, "100", "200", false, 4));
+    frame(&peer, &ignored);
+    failure = 0;
+    assert(sent_key_messages == 3 && !strcmp(sent_key_message[2], "K 100 200 0 4"));
+    assert(ra_link_peer_queue_key_query(&peer, NULL) == -1);
+    assert(ra_link_peer_queue_key_query(&peer, "") == -1);
+    assert(ra_link_peer_queue_key_query(&peer, "invalid!") == -1);
+    char overlong_name[RA_LINK_PEER_NAME_MAX + 1];
+    memset(overlong_name, 'x', RA_LINK_PEER_NAME_MAX);
+    overlong_name[RA_LINK_PEER_NAME_MAX] = '\0';
+    assert(ra_link_peer_queue_key_query(&peer, overlong_name) == -1);
+    assert(ra_link_peer_queue_key_reply(&peer, "invalid!", "200", true, 0) == -1);
+    assert(ra_link_peer_queue_key_reply(&peer, "100", "invalid!", true, 0) == -1);
+    unsigned int invalid_key_before = inbound_key_messages;
+    text.data.ptr = "K? 100 200 0 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K? * invalid! 0 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    char overlong_query[sizeof("K? * ") + sizeof(overlong_name) + sizeof(" 0 0")];
+    assert(snprintf(overlong_query, sizeof(overlong_query), "K? * %s 0 0", overlong_name) > 0);
+    text.data.ptr = overlong_query;
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K? * 100 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K? * 100 0 x";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K? * 100 0 0 extra";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K 100 300 2 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K 100 300 1 18446744073709551616";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(inbound_key_messages == invalid_key_before);
+    text.data.ptr = "K 524950 506312 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    ra_link_peer_begin_keyed_source(&peer);
+    frame(&peer, &ignored);
+    assert(sent_key_queries == 1 && !strcmp(sent_key_query, "K? * 524950 0 0"));
+    text.data.ptr = "K 524950 direct 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    text.data.ptr = "K 524950 506312 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !strcmp(keyed_source, "506312"));
+    text.data.ptr = "K 524950 506313 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !strcmp(keyed_source, "506312"));
+    ra_link_peer_request_key_query(&peer);
+    frame(&peer, &ignored);
+    assert(sent_key_queries == 2);
+    frame(&peer, &text);
+    assert(ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !strcmp(keyed_source, "506313"));
+    /* An unkey rejects a late reply but preserves the source already selected for this edge. */
+    ra_link_peer_end_keyed_source(&peer);
+    frame(&peer, &text);
+    assert(ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !strcmp(keyed_source, "506313"));
+    /* A following receive epoch cancels its unsent periodic query and rejects a late reply. */
+    ra_link_peer_begin_keyed_source(&peer);
+    ra_link_peer_request_key_query(&peer);
+    ra_link_peer_end_keyed_source(&peer);
+    uint_fast64_t cancelled_generation = atomic_load(&peer.key_query_generation);
+    ra_link_peer_request_key_query(&peer);
+    assert(atomic_load(&peer.key_query_generation) == cancelled_generation);
+    frame(&peer, &ignored);
+    assert(sent_key_queries == 2);
+    frame(&peer, &text);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    ra_link_peer_begin_keyed_source(&peer);
+    failure = 14;
+    frame(&peer, &ignored);
+    failure = 0;
+    assert(sent_key_queries == 3 &&
+           !ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)));
+    text.data.ptr = "K 524950 506312 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    text.data.ptr = "K 524950 invalid! 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "X 524950 506314 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K 524950 506314 1";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    char overlong_reply[sizeof("K 524950 ") + sizeof(overlong_name) + sizeof(" 1 0")];
+    assert(snprintf(overlong_reply, sizeof(overlong_reply), "K 524950 %s 1 0", overlong_name) > 0);
+    text.data.ptr = overlong_reply;
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    char overlong_destination[sizeof("K ") + sizeof(overlong_name) + sizeof(" 506314 1 0")];
+    assert(snprintf(overlong_destination, sizeof(overlong_destination), "K %s 506314 1 0",
+                    overlong_name) > 0);
+    text.data.ptr = overlong_destination;
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K invalid! 506314 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K other 506314 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K 524950 506314 0 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K 524950 506314 1 -1";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K 524950 506314 1 :";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    text.data.ptr = "K 524950 506314 1 0 extra";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    ra_link_peer_request_key_query(&peer);
+    frame(&peer, &ignored);
+    assert(sent_key_queries == 4);
+    text.data.ptr = "K 524950 506314 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !strcmp(keyed_source, "506314"));
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source) - 1) &&
+           !keyed_source[0]);
+    /* The audio-side request and snapshot APIs reject absent or stopped peer state without
+     * touching a channel. */
+    struct ra_link_peer no_query = {0};
+    atomic_init(&no_query.ended, false);
+    assert(ra_link_peer_queue_key_query(NULL, "100") == -1);
+    assert(ra_link_peer_queue_key_reply(&no_query, "100", "200", true, 0) == -1);
+    ra_link_peer_begin_keyed_source(NULL);
+    ra_link_peer_end_keyed_source(NULL);
+    ra_link_peer_request_key_query(NULL);
+    ra_link_peer_begin_keyed_source(&no_query);
+    ra_link_peer_request_key_query(&no_query);
+    assert(!ra_link_peer_keyed_source(NULL, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    assert(!ra_link_peer_keyed_source(&peer, NULL, 0));
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, 0));
+    uint_fast64_t query_generation = atomic_load(&peer.key_query_generation);
+    atomic_store(&peer.ended, true);
+    ra_link_peer_begin_keyed_source(&peer);
+    ra_link_peer_request_key_query(&peer);
+    assert(atomic_load(&peer.key_query_generation) == query_generation);
+    atomic_store(&peer.ended, false);
+    unsigned int inbound_before_no_key_handler = inbound_key_messages;
+    peer.inbound_key = NULL;
+    text.data.ptr = "K? * 100 0 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(inbound_key_messages == inbound_before_no_key_handler);
+    peer.inbound_key = receive_inbound_key;
+    uint_fast64_t start_generation = atomic_load(&peer.key_query_start_generation);
+    atomic_store(&peer.key_query_start_generation, 0);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    atomic_store(&peer.key_query_start_generation, query_generation + 1);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    atomic_store(&peer.key_query_start_generation, start_generation);
+    uint_fast64_t source_generation = atomic_load(&peer.key_source_generation);
+    atomic_store(&peer.key_source_generation, start_generation - 1);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    atomic_store(&peer.key_source_generation, query_generation + 1);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    atomic_store(&peer.key_source_generation, source_generation);
+    uint_fast64_t source_sequence = atomic_load(&peer.key_source_sequence);
+    assert(!(source_sequence & 1U));
+    atomic_store(&peer.key_source_sequence, source_sequence + 1);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
+    atomic_store(&peer.key_source_sequence, source_sequence + 2);
+    assert(ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !strcmp(keyed_source, "506314"));
+    peer.key_query_direct[0] = '\0';
+    ra_link_peer_request_key_query(&peer);
+    frame(&peer, &ignored);
+    text.data.ptr = "K 524950 506315 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !strcmp(keyed_source, "506315"));
+    memcpy(peer.key_query_direct, "direct", sizeof("direct"));
+    char full_requester[RA_LINK_PEER_NAME_MAX];
+    memset(full_requester, 'r', sizeof(full_requester) - 1);
+    full_requester[sizeof(full_requester) - 1] = '\0';
+    char full_query[sizeof("K? * ") + sizeof(full_requester) + sizeof(" 0 0")];
+    assert(snprintf(full_query, sizeof(full_query), "K? * %s 0 0", full_requester) > 0);
+    memcpy(peer.key_query_requester, full_requester, sizeof(peer.key_query_requester));
+    expected_key_query = full_query;
+    ra_link_peer_request_key_query(&peer);
+    frame(&peer, &ignored);
+    assert(sent_key_queries == 6 && !strcmp(sent_key_query, full_query));
+    expected_key_query = "K? * 524950 0 0";
+    memcpy(peer.key_query_requester, "524950", sizeof("524950"));
+    /* An in-flight channel write cannot be recalled without blocking audio, but its reply must
+     * be invalidated if the receive edge falls before the reader retains it. */
+    ra_link_peer_begin_keyed_source(&peer);
+    end_key_query_during_send = &peer;
+    frame(&peer, &ignored);
+    assert(!end_key_query_during_send && sent_key_queries == 7);
+    text.data.ptr = "K 524950 506316 1 0";
+    text.datalen = (int)strlen(text.data.ptr);
+    frame(&peer, &text);
+    assert(!ra_link_peer_keyed_source(&peer, keyed_source, sizeof(keyed_source)) &&
+           !keyed_source[0]);
     /* Before the protected reserve fills, playout remains silent without
      * consuming a partial network callback. */
     assert(!ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)) && !output[0] &&
@@ -541,7 +872,7 @@ int main(void) {
     /* A fresh voice indication keeps one short received fragment active until
      * its next hardware callback, even though the normal reserve is not full. */
     rpcr_write(&peer.received, samples, 1);
-    peer.received.primed = true;
+    peer.receive_primed = true;
     assert(ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)));
     /* A short empty interval after a valid source block stays active long
      * enough for the shared ring to synthesize its bounded PCM concealment. */
@@ -556,7 +887,7 @@ int main(void) {
     peer.seen_epoch = atomic_load(&peer.receive_epoch);
     assert(ra_link_peer_receive(&peer, output, sizeof(output) / sizeof(*output)));
     assert(output[0] || output[1]);
-    peer.received.primed = false;
+    peer.receive_primed = false;
     frame(&peer, &dtmf_begin);
     assert(!inbound_digits);
     frame(&peer, &dtmf_end);
@@ -604,7 +935,6 @@ int main(void) {
     failure = 0;
     assert(sent_topologies == 3 && !strcmp(sent_topology, "L T3"));
     frame(&peer, &ignored);
-    struct ast_frame text = {.frametype = AST_FRAME_TEXT};
     frame(&peer, &text);
     text.data.ptr = "";
     text.datalen = -1;
@@ -856,20 +1186,30 @@ int main(void) {
     failure = 10;
     frame(&peer, &ignored);
     failure = 0;
+    for (unsigned int index = 0; index < RA_LINK_PEER_KEY_QUEUE_CAPACITY; ++index) {
+        assert(!ra_link_peer_queue_key_reply(&peer, "100", "200", true, index));
+    }
+    assert(ra_link_peer_queue_key_reply(&peer, "100", "200", true,
+                                        RA_LINK_PEER_KEY_QUEUE_CAPACITY) == -1);
     atomic_store(&peer.ended, true);
     assert(ra_link_peer_send_digit(&peer, '1') == -1);
     assert(ra_link_peer_queue_topology(&peer, "T1") == -1);
+    assert(ra_link_peer_queue_key_query(&peer, "100") == -1);
+    assert(ra_link_peer_queue_key_reply(&peer, "100", "200", true, 0) == -1);
     assert(ra_link_peer_send(&peer, false, NULL, 0) == -1);
     assert(!ra_link_peer_receive(&peer, output, 2));
     unsigned int inbound_before_no_handler = inbound_digits;
     ra_link_peer_stop(&peer);
     peer = (struct ra_link_peer){0};
-    assert(!ra_link_peer_start(&peer, NULL, &linear, NULL, NULL));
+    assert(!ra_link_peer_start(&peer, NULL, &linear, NULL, NULL, NULL, NULL));
     dtmf_end.subclass.integer = '8';
     frame(&peer, &dtmf_end);
     assert(inbound_digits == inbound_before_no_handler);
     assert(!ra_link_peer_send(&peer, true, samples, 2));
-    ra_link_peer_stop(&peer);
+    ra_link_peer_stop_preserve_channel(&peer);
+    assert(hangups == 1);
+    /* Failed final publication leaves the caller responsible for exactly one channel hangup. */
+    ast_hangup(NULL);
     assert(hangups == 2);
     return 0;
 }

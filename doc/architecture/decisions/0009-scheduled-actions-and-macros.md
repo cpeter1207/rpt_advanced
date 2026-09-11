@@ -31,17 +31,24 @@ the external operation may be skipped if a reload invalidates it immediately
 before execution, but it is never duplicated. A full queue leaves both portions
 pending, preserving configuration order.
 
-The module ticker queues one captured control task for each wall-clock minute it
-observes. Each task snapshots all due events in its captured minute before it
-dispatches any. The FIFO control executor retries retained older occurrences
+The module ticker queues one captured control task each second. Runtime
+calendar-minute de-duplicates event occurrences, so a second-level tick cannot
+repeat an event. The FIFO control executor retries retained older occurrences
 before later ones. This preserves chronological and same-minute configuration
 order when speech preparation or a link operation temporarily occupies the
-control executor. A successful reload queues a fresh current-minute check after
-the new runtime is active.
+control executor, while allowing configured post-window quiet-time deadlines to
+expire without an extra minute of delay. A successful reload queues a fresh
+current-time check after the new runtime is active. A successful reload may
+discard queued or in-progress telemetry rather than replay it; the associated
+macro remains at-most-once. Event identity across reload is the owning node,
+section label, and trigger, so changing message text or a macro does not make an
+already-fired event eligible again. The civil-time discontinuity policy is
+defined by [ADR 0017](0017-scheduler-route-lifecycle-and-civil-time.md).
 
 ## Consequences
 
 No macro can execute shell code or launch a process. Scheduler wall-clock work,
 template expansion, message preparation, and macro dispatch cannot occur in an
-audio callback. Additional triggers or substitutions require a new requirement
-and ADR update.
+audio callback. A bounded IAX dial may delay later serialized control work but
+cannot delay audio; scheduler health and control-queue delay remain observable.
+Additional triggers or substitutions require a new requirement and ADR update.

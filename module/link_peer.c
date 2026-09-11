@@ -15,8 +15,11 @@
 #include <time.h>
 
 /** @brief Require hardware-facing peer state to use native lock-free atomics. */
-_Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && RA_ATOMIC_UINT_FAST64_LOCK_FREE,
+_Static_assert(ATOMIC_BOOL_LOCK_FREE == 2 && ATOMIC_CHAR_LOCK_FREE == 2 &&
+                   ATOMIC_INT_LOCK_FREE == 2 && RA_ATOMIC_UINT_FAST64_LOCK_FREE,
                "peer audio state must not call libatomic");
+_Static_assert(RA_LINK_PEER_KEY_TEXT_MAX >= 2U * (RA_LINK_PEER_NAME_MAX - 1U) + 27U,
+               "keyed-source reply storage must retain two longest names and a uint64 age");
 
 /** @brief Release the shared library's preallocated receiver playout state.
  * @param peer Peer owning the receiver ring.
@@ -36,6 +39,96 @@ static bool text_is(const struct ast_frame *frame, const char *text) {
            !memcmp(frame->data.ptr, text, length);
 }
 
+/** @brief Expose bounded, non-embedded-NUL IAX text payload bytes.
+ * @param frame Borrowed text frame.
+ * @param text Receives its first payload byte.
+ * @param length Receives payload bytes after one optional trailing terminator.
+ * @return True when the frame contains a safe nonempty text payload.
+ */
+static bool text_payload(const struct ast_frame *frame, const char **text, size_t *length) {
+    if (!frame->data.ptr || frame->datalen < 0) {
+        return false;
+    }
+    *text = frame->data.ptr;
+    *length = (size_t)frame->datalen;
+    if (*length && (*text)[*length - 1] == '\0') {
+        --*length;
+    }
+    return *length && !memchr(*text, '\0', *length);
+}
+
+/** @brief Advance across one nonempty space-separated bounded text token.
+ * @param text Bounded protocol bytes with no embedded NUL.
+ * @param length Exact number of readable bytes.
+ * @param cursor In/out byte offset.
+ * @param value Receives the token start.
+ * @param value_length Receives the token length.
+ * @return True when one token was found.
+ */
+static bool text_token(const char *text, size_t length, size_t *cursor, const char **value,
+                       size_t *value_length) {
+    while (*cursor < length && text[*cursor] == ' ') {
+        ++*cursor;
+    }
+    if (*cursor == length) {
+        return false;
+    }
+    size_t start = *cursor;
+    while (*cursor < length && text[*cursor] != ' ') {
+        ++*cursor;
+    }
+    *value = text + start;
+    *value_length = *cursor - start;
+    return true;
+}
+
+/** @brief Compare one bounded protocol token with a conventional C string.
+ * @param value Token bytes.
+ * @param length Exact token length.
+ * @param expected NUL-terminated expected value.
+ * @return True for exact equal bytes.
+ */
+static bool token_is(const char *value, size_t length, const char *expected) {
+    size_t expected_length = strlen(expected);
+    return length == expected_length && !memcmp(value, expected, length);
+}
+
+/** @brief Validate one decimal protocol token without converting it.
+ * @param value Token bytes.
+ * @param length Exact token length.
+ * @return True for one or more ASCII decimal digits.
+ */
+static bool decimal_token(const char *value, size_t length) {
+    for (size_t index = 0; index < length; ++index) {
+        if (value[index] < '0' || value[index] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** @brief Convert one bounded decimal protocol token without integer overflow.
+ * @param value Token bytes already known not to contain an embedded terminator.
+ * @param length Exact token length.
+ * @param result Receives the complete unsigned value.
+ * @return True only for a complete representable unsigned decimal value.
+ */
+static bool decimal_value(const char *value, size_t length, uint64_t *result) {
+    if (!decimal_token(value, length)) {
+        return false;
+    }
+    uint64_t converted = 0;
+    for (size_t index = 0; index < length; ++index) {
+        uint64_t digit = (uint64_t)(value[index] - '0');
+        if (converted > (UINT64_MAX - digit) / 10U) {
+            return false;
+        }
+        converted = converted * 10U + digit;
+    }
+    *result = converted;
+    return true;
+}
+
 /** @brief Check one app_rpt linked-node-list route marker.
  * @param value Untrusted route marker.
  * @return True when the marker is part of the documented app_rpt `L` payload.
@@ -49,6 +142,35 @@ static bool topology_mode(unsigned char value) { return strchr("TRCL", value) !=
 static bool topology_name_character(unsigned char value) {
     return strchr("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-", value) !=
            NULL;
+}
+
+/** @brief Validate one conservative remote node identity.
+ * @param value Untrusted identity bytes.
+ * @param length Exact identity length.
+ * @return True for one or more supported node-name characters.
+ */
+static bool topology_name_valid(const char *value, size_t length) {
+    if (!length) {
+        return false;
+    }
+    for (size_t index = 0; index < length; ++index) {
+        if (!topology_name_character((unsigned char)value[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** @brief Copy one validated bounded node identity into fixed control-plane storage.
+ * @param output Fixed destination identity storage.
+ * @param value Valid token bytes.
+ * @param length Exact source length, shorter than @ref RA_LINK_PEER_NAME_MAX.
+ */
+static void copy_name(char output[RA_LINK_PEER_NAME_MAX], const char *value, size_t length) {
+    for (size_t index = 0; index < length; ++index) {
+        output[index] = value[index];
+    }
+    output[length] = '\0';
 }
 
 /** @brief Validate an app_rpt comma-separated linked-node-list payload.
@@ -147,15 +269,12 @@ static void expire_digit_timeout(struct ra_link_peer *peer) {
  * prevents malformed IAX text from erasing a usable status report.
  */
 static bool cache_topology(struct ra_link_peer *peer, const struct ast_frame *frame) {
-    if (!frame->data.ptr || frame->datalen < 0) {
+    const char *text;
+    size_t length;
+    if (!text_payload(frame, &text, &length)) {
         return false;
     }
-    const char *text = frame->data.ptr;
-    size_t length = (size_t)frame->datalen;
-    if (length && text[length - 1] == '\0') {
-        --length;
-    }
-    if (!length || memchr(text, '\0', length) || text[0] != 'L') {
+    if (text[0] != 'L') {
         return false;
     }
     const char *payload = text + 1;
@@ -186,6 +305,122 @@ static bool cache_topology(struct ra_link_peer *peer, const struct ast_frame *fr
     return true;
 }
 
+/** @brief Publish a reader-owned keyed-source result for lock-free hub consumption.
+ * @param peer Peer whose current source snapshot changes.
+ * @param generation Query epoch paired with this result.
+ * @param source First keyed responder bytes for the query.
+ * @param source_length Exact responder length.
+ *
+ * One reader is the only writer. Its odd/even sequence makes a partial identity unavailable to
+ * the hardware callback instead of requiring a mutex in the audio path.
+ */
+static void publish_key_source(struct ra_link_peer *peer, uint_fast64_t generation,
+                               const char *source, size_t source_length) {
+    atomic_fetch_add_explicit(&peer->key_source_sequence, 1, memory_order_release);
+    atomic_store_explicit(&peer->key_source_generation, generation, memory_order_relaxed);
+    for (size_t index = 0; index < RA_LINK_PEER_NAME_MAX; ++index) {
+        char value = index < source_length ? source[index] : '\0';
+        atomic_store_explicit(&peer->key_source[index], value, memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&peer->key_source_sequence, 1, memory_order_release);
+}
+
+/** @brief One bounded, validated legacy keyed-source protocol message. */
+struct key_message {
+    enum ra_link_peer_key_kind kind;         /**< Query or reply class. */
+    char destination[RA_LINK_PEER_NAME_MAX]; /**< Wildcard requester target or reply target. */
+    char source[RA_LINK_PEER_NAME_MAX];      /**< Query requester or reply reporter. */
+    bool keyed;                              /**< Reply carrier state, false for queries. */
+    uint64_t age_seconds;                    /**< Reply age, zero for queries. */
+};
+
+/** @brief Parse one strictly bounded legacy keyed-source protocol message.
+ * @param frame Borrowed untrusted IAX text frame.
+ * @param message Receives a fully copied control message.
+ * @return True only for a supported complete `K?` broadcast query or `K` reply.
+ *
+ * The parser deliberately accepts only the broadcast query emitted by this module and app_rpt.
+ * It leaves directed query routing out of the radio hot path because source identification always
+ * originates with that canonical query form.
+ */
+static bool parse_key_message(const struct ast_frame *frame, struct key_message *message) {
+    const char *text;
+    size_t length;
+    if (!text_payload(frame, &text, &length)) {
+        return false;
+    }
+    const char *token[5];
+    size_t token_length[5];
+    size_t cursor = 0;
+    for (size_t index = 0; index < sizeof(token) / sizeof(*token); ++index) {
+        if (!text_token(text, length, &cursor, &token[index], &token_length[index])) {
+            return false;
+        }
+    }
+    const char *extra;
+    size_t extra_length;
+    if (text_token(text, length, &cursor, &extra, &extra_length)) {
+        return false;
+    }
+    if (token_is(token[0], token_length[0], "K?")) {
+        if (!token_is(token[1], token_length[1], "*") || token_length[2] >= RA_LINK_PEER_NAME_MAX ||
+            !topology_name_valid(token[2], token_length[2]) ||
+            !token_is(token[3], token_length[3], "0") ||
+            !token_is(token[4], token_length[4], "0")) {
+            return false;
+        }
+        message->kind = RA_LINK_PEER_KEY_QUERY;
+        copy_name(message->destination, token[1], token_length[1]);
+        copy_name(message->source, token[2], token_length[2]);
+        message->keyed = false;
+        message->age_seconds = 0;
+        return true;
+    }
+    if (!token_is(token[0], token_length[0], "K") || token_length[1] >= RA_LINK_PEER_NAME_MAX ||
+        token_length[2] >= RA_LINK_PEER_NAME_MAX ||
+        !topology_name_valid(token[1], token_length[1]) ||
+        !topology_name_valid(token[2], token_length[2]) ||
+        (!token_is(token[3], token_length[3], "0") && !token_is(token[3], token_length[3], "1")) ||
+        !decimal_value(token[4], token_length[4], &message->age_seconds)) {
+        return false;
+    }
+    message->kind = RA_LINK_PEER_KEY_REPLY;
+    copy_name(message->destination, token[1], token_length[1]);
+    copy_name(message->source, token[2], token_length[2]);
+    message->keyed = token_is(token[3], token_length[3], "1");
+    return true;
+}
+
+/** @brief Consume one matching legacy app_rpt keyed-source reply.
+ * @param peer Reader-owned peer transport.
+ * @param message Valid parsed keyed-source protocol message.
+ *
+ * `K` replies identify a currently keyed responder but do not prove PCM provenance. The direct
+ * peer's own reply is deliberately ignored: it is the fallback, not evidence of a downstream
+ * source. The first remaining valid keyed reply to each one-second query wins, which supplies a
+ * useful best-effort choice during doubles without delaying or suppressing the eventual courtesy
+ * tone.
+ */
+static void cache_key_source(struct ra_link_peer *peer, const struct key_message *message) {
+    if (message->kind != RA_LINK_PEER_KEY_REPLY || !message->keyed ||
+        strcmp(message->destination, peer->key_query_requester)) {
+        return;
+    }
+    uint_fast64_t generation =
+        atomic_load_explicit(&peer->key_query_generation, memory_order_acquire);
+    if (!generation || generation != peer->key_query_sent ||
+        generation !=
+            atomic_load_explicit(&peer->key_query_active_generation, memory_order_acquire)) {
+        return;
+    }
+    if ((peer->key_query_direct[0] && !strcmp(message->source, peer->key_query_direct)) ||
+        peer->key_query_responded) {
+        return;
+    }
+    peer->key_query_responded = true;
+    publish_key_source(peer, generation, message->source, strlen(message->source));
+}
+
 /** @brief Consume a checked network frame without retaining Asterisk's buffer.
  * @param peer Reader-owned transport state.
  * @param frame Owned input frame.
@@ -207,7 +442,16 @@ static int accept_frame(struct ra_link_peer *peer, struct ast_frame *frame) {
         } else if (text_is(frame, "!IAXKEY!")) {
             result = ast_sendtext(peer->channel, "!IAXKEY! 1 1 0 0") ? -1 : 0;
         } else {
-            (void)cache_topology(peer, frame);
+            struct key_message message;
+            if (parse_key_message(frame, &message)) {
+                cache_key_source(peer, &message);
+                if (peer->inbound_key) {
+                    peer->inbound_key(peer->inbound_key_context, message.kind, message.destination,
+                                      message.source, message.keyed, message.age_seconds);
+                }
+            } else {
+                (void)cache_topology(peer, frame);
+            }
         }
     } else if (frame->frametype == AST_FRAME_CONTROL) {
         if (frame->subclass.integer == AST_CONTROL_HANGUP) {
@@ -268,8 +512,9 @@ static int accept_frame(struct ra_link_peer *peer, struct ast_frame *frame) {
             result = -1;
             goto done;
         }
-        atomic_fetch_add(&peer->receive_epoch, 1);
         rpcr_write(&peer->received, audio->data.ptr, audio->samples);
+        /* Publish the activity edge after its PCM is visible to the radio worker. */
+        atomic_fetch_add_explicit(&peer->receive_epoch, 1, memory_order_release);
     done:
         ast_frfree(audio);
         return result;
@@ -294,6 +539,74 @@ static int send_digit(struct ra_link_peer *peer) {
     }
     atomic_store_explicit(&peer->digit_tail, tail + 1, memory_order_release);
     return 0;
+}
+
+/** @brief Send one requested legacy keyed-source query from the channel-owning reader.
+ * @param peer Reader-owned peer transport.
+ *
+ * Query delivery is advisory. A failed IAX text write must not drop a healthy media link, because
+ * ordinary peers may not implement the legacy `K?` control exchange at all.
+ */
+static void send_key_query(struct ra_link_peer *peer) {
+    uint_fast64_t generation =
+        atomic_load_explicit(&peer->key_query_generation, memory_order_acquire);
+    if (!generation || generation == peer->key_query_attempted) {
+        return;
+    }
+    static const char prefix[] = "K? * ";
+    static const char suffix[] = " 0 0";
+    char text[RA_LINK_PEER_NAME_MAX + sizeof(prefix) + sizeof(suffix)];
+    size_t position = 0;
+    for (size_t index = 0; index + 1 < sizeof(prefix); ++index) {
+        text[position++] = prefix[index];
+    }
+    for (size_t index = 0;
+         index + 1 < sizeof(peer->key_query_requester) && peer->key_query_requester[index];
+         ++index) {
+        text[position++] = peer->key_query_requester[index];
+    }
+    for (size_t index = 0; index + 1 < sizeof(suffix); ++index) {
+        text[position++] = suffix[index];
+    }
+    text[position] = '\0';
+    /* The falling edge invalidates an unsent request. Recheck after construction so a queued
+     * control iteration cannot start a K? exchange after the radio worker has unkeyed. */
+    if (atomic_load_explicit(&peer->key_query_active_generation, memory_order_acquire) !=
+        generation) {
+        return;
+    }
+    peer->key_query_attempted = generation;
+    peer->key_query_responded = false;
+    /* A `K` reply carries no request serial, so only a delivered current query is eligible.
+     * Later delayed replies remain inherently advisory and may be attributed to a newer query. */
+    peer->key_query_sent = ast_sendtext(peer->channel, text) ? 0 : generation;
+    if (atomic_load_explicit(&peer->key_query_active_generation, memory_order_acquire) !=
+        generation) {
+        peer->key_query_sent = 0;
+    }
+}
+
+/** @brief Send one relayed legacy keyed-source text from the channel-owning reader.
+ * @param peer Reader-owned peer transport.
+ *
+ * Relay text is advisory just like the locally originated `K?` message.  A failed IAX text
+ * write is discarded instead of tearing down voice media, and a bounded FIFO preserves arrival
+ * order when more than one remote responder is keyed during a double.
+ */
+static void send_key_message(struct ra_link_peer *peer) {
+    char text[RA_LINK_PEER_KEY_TEXT_MAX];
+    ast_mutex_lock(&peer->topology_lock);
+    if (peer->key_message_tail == peer->key_message_head) {
+        ast_mutex_unlock(&peer->topology_lock);
+        return;
+    }
+    unsigned int slot = peer->key_message_tail % RA_LINK_PEER_KEY_QUEUE_CAPACITY;
+    for (size_t index = 0; index < sizeof(text); ++index) {
+        text[index] = peer->key_messages[slot][index];
+    }
+    ++peer->key_message_tail;
+    ast_mutex_unlock(&peer->topology_lock);
+    (void)ast_sendtext(peer->channel, text);
 }
 
 /** @brief Send the latest queued linked-node list from the channel-owning reader.
@@ -336,6 +649,8 @@ static void *read_peer(void *context) {
         if (send_digit(peer)) {
             break;
         }
+        send_key_query(peer);
+        send_key_message(peer);
         if (send_topology(peer)) {
             break;
         }
@@ -387,7 +702,8 @@ static void close_topology(struct ra_link_peer *peer) {
 
 int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
                        struct ast_format *linear, ra_link_peer_digit_fn inbound_digit,
-                       void *inbound_digit_context) {
+                       void *inbound_digit_context, ra_link_peer_key_fn inbound_key,
+                       void *inbound_key_context) {
     unsigned int linear_rate = ast_format_get_sample_rate(linear);
     /* The protected reserve needs enough PCM above it for sinc conversion and
      * slow clock recovery.  Keep a fixed time budget across negotiated rates. */
@@ -416,6 +732,8 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     peer->advertised_length = 0;
     peer->advertised_pending = false;
     peer->advertised[0] = '\0';
+    peer->key_message_head = 0;
+    peer->key_message_tail = 0;
     if (ast_set_read_format(channel, linear) || ast_set_write_format(channel, linear) ||
         ast_sendtext(channel, "!NEWKEY1!")) {
         close_topology(peer);
@@ -432,11 +750,25 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
     peer->send_buffer = send_buffer;
     peer->inbound_digit = inbound_digit;
     peer->inbound_digit_context = inbound_digit_context;
+    peer->inbound_key = inbound_key;
+    peer->inbound_key_context = inbound_key_context;
     atomic_init(&peer->stop, false);
     atomic_init(&peer->ended, false);
     atomic_init(&peer->receive_epoch, 0);
+    peer->receive_primed = false;
     atomic_init(&peer->digit_head, 0);
     atomic_init(&peer->digit_tail, 0);
+    atomic_init(&peer->key_query_active_generation, 0);
+    atomic_init(&peer->key_query_generation, 0);
+    atomic_init(&peer->key_query_start_generation, 0);
+    peer->key_query_attempted = 0;
+    peer->key_query_sent = 0;
+    peer->key_query_responded = false;
+    atomic_init(&peer->key_source_sequence, 0);
+    atomic_init(&peer->key_source_generation, 0);
+    for (size_t index = 0; index < RA_LINK_PEER_NAME_MAX; ++index) {
+        atomic_init(&peer->key_source[index], '\0');
+    }
     if (pthread_create(&peer->thread, NULL, read_peer, peer)) {
         close_topology(peer);
         release_elastic(peer);
@@ -470,15 +802,15 @@ bool ra_link_peer_receive(struct ra_link_peer *peer, int16_t *audio, size_t samp
     if (target > maximum_target) {
         target = maximum_target;
     }
-    if (!peer->received.primed && available >= target) {
-        peer->received.primed = true;
+    if (!peer->receive_primed && available >= target) {
+        peer->receive_primed = true;
     }
     bool fresh = peer->receive_age < reserve;
     size_t protected_reserve = fresh ? reserve : 0;
     /* Keep the source active through one protected-reserve interval so the
      * shared PCM ring can conceal a brief network shortage. A real end of
      * stream still wins immediately and never synthesizes media. */
-    bool receiving = peer->received.primed && (available > protected_reserve || fresh) &&
+    bool receiving = peer->receive_primed && (available > protected_reserve || fresh) &&
                      !atomic_load(&peer->ended);
     if (!receiving) {
         for (size_t i = 0; i < samples; ++i) {
@@ -514,6 +846,77 @@ int ra_link_peer_send_digit(struct ra_link_peer *peer, char digit) {
     peer->digits[head % sizeof(peer->digits)] = digit;
     atomic_store_explicit(&peer->digit_head, head + 1, memory_order_release);
     return 0;
+}
+
+/** @brief Advance one advisory source-query epoch without using the peer's channel or locks.
+ * @param peer Started direct peer.
+ * @param begins_receive True when this is the direct peer's receive rising edge.
+ */
+static void request_key_query(struct ra_link_peer *peer, bool begins_receive) {
+    if (!peer || !peer->key_query_requester[0] ||
+        atomic_load_explicit(&peer->ended, memory_order_acquire)) {
+        return;
+    }
+    if (!begins_receive &&
+        !atomic_load_explicit(&peer->key_query_active_generation, memory_order_acquire)) {
+        return;
+    }
+    uint_fast64_t generation =
+        atomic_fetch_add_explicit(&peer->key_query_generation, 1, memory_order_release) + 1;
+    if (begins_receive) {
+        atomic_store_explicit(&peer->key_query_start_generation, generation, memory_order_release);
+    }
+    atomic_store_explicit(&peer->key_query_active_generation, generation, memory_order_release);
+}
+
+void ra_link_peer_begin_keyed_source(struct ra_link_peer *peer) { request_key_query(peer, true); }
+
+void ra_link_peer_end_keyed_source(struct ra_link_peer *peer) {
+    if (peer) {
+        atomic_store_explicit(&peer->key_query_active_generation, 0, memory_order_release);
+    }
+}
+
+void ra_link_peer_request_key_query(struct ra_link_peer *peer) { request_key_query(peer, false); }
+
+bool ra_link_peer_keyed_source(const struct ra_link_peer *peer, char *output, size_t capacity) {
+    if (output && capacity) {
+        output[0] = '\0';
+    }
+    if (!peer || !output || capacity < RA_LINK_PEER_NAME_MAX) {
+        return false;
+    }
+    uint_fast64_t start =
+        atomic_load_explicit(&peer->key_query_start_generation, memory_order_acquire);
+    uint_fast64_t current = atomic_load_explicit(&peer->key_query_generation, memory_order_acquire);
+    if (!start || start > current) {
+        return false;
+    }
+    for (unsigned int attempt = 0; attempt < 2; ++attempt) {
+        uint_fast64_t before =
+            atomic_load_explicit(&peer->key_source_sequence, memory_order_acquire);
+        uint_fast64_t generation =
+            atomic_load_explicit(&peer->key_source_generation, memory_order_relaxed);
+        for (size_t index = 0; index < RA_LINK_PEER_NAME_MAX; ++index) {
+            output[index] =
+                (char)atomic_load_explicit(&peer->key_source[index], memory_order_relaxed);
+        }
+        uint_fast64_t after =
+            atomic_load_explicit(&peer->key_source_sequence, memory_order_acquire);
+        /* Both checks must be evaluated: an in-progress writer and a completed publication
+         * during the copy are equally unsafe. */
+        bool stable = ((before & 1U) == 0U) & (before == after);
+        if (!stable) {
+            continue;
+        }
+        if (!output[0] || generation < start || generation > current) {
+            output[0] = '\0';
+            return false;
+        }
+        return true;
+    }
+    output[0] = '\0';
+    return false;
 }
 
 size_t ra_link_peer_topology(struct ra_link_peer *peer, char *output, size_t capacity) {
@@ -555,11 +958,119 @@ int ra_link_peer_queue_topology(struct ra_link_peer *peer, const char *topology)
     return 0;
 }
 
-void ra_link_peer_stop(struct ra_link_peer *peer) {
+/** @brief Validate one NUL-terminated remote identity for outbound keyed-source text.
+ * @param value Candidate node identity.
+ * @return True only for a complete supported identity shorter than the fixed message field.
+ */
+static bool key_name_valid(const char *value) {
+    if (!value) {
+        return false;
+    }
+    size_t length = strnlen(value, RA_LINK_PEER_NAME_MAX);
+    return length < RA_LINK_PEER_NAME_MAX && topology_name_valid(value, length);
+}
+
+/** @brief Retain one bounded keyed-source IAX text message for its peer reader.
+ * @param peer Started destination peer.
+ * @param text Complete canonical IAX text message.
+ * @param length Text length without its terminating NUL.
+ * @return Zero when queued, minus one when no control-plane slot is available.
+ */
+static int queue_key_message(struct ra_link_peer *peer, const char text[RA_LINK_PEER_KEY_TEXT_MAX],
+                             size_t length) {
+    if (!peer || !peer->topology_lock_initialized || atomic_load(&peer->ended)) {
+        return -1;
+    }
+    ast_mutex_lock(&peer->topology_lock);
+    if (peer->key_message_head - peer->key_message_tail >= RA_LINK_PEER_KEY_QUEUE_CAPACITY) {
+        ast_mutex_unlock(&peer->topology_lock);
+        return -1;
+    }
+    unsigned int slot = peer->key_message_head % RA_LINK_PEER_KEY_QUEUE_CAPACITY;
+    for (size_t index = 0; index <= length; ++index) {
+        peer->key_messages[slot][index] = text[index];
+    }
+    ++peer->key_message_head;
+    ast_mutex_unlock(&peer->topology_lock);
+    return 0;
+}
+
+/** @brief Append a known complete text field to a bounded keyed-source message.
+ * @param output Fixed outbound message storage.
+ * @param position First unwritten byte in @p output.
+ * @param value Complete field terminated by NUL.
+ * @return First unwritten byte after the appended field.
+ *
+ * Callers validate names and use compile-time-sized storage before appending. The static reply
+ * capacity assertion above proves every supported composition fits without truncation.
+ */
+static size_t append_key_text(char output[RA_LINK_PEER_KEY_TEXT_MAX], size_t position,
+                              const char *value) {
+    for (size_t index = 0; value[index]; ++index) {
+        output[position++] = value[index];
+    }
+    return position;
+}
+
+/** @brief Append one unsigned decimal reply age without library formatting.
+ * @param output Fixed outbound message storage.
+ * @param position First unwritten byte in @p output.
+ * @param value Nonnegative age in seconds.
+ * @return First unwritten byte after the decimal digits.
+ */
+static size_t append_key_age(char output[RA_LINK_PEER_KEY_TEXT_MAX], size_t position,
+                             uint64_t value) {
+    char digits[sizeof(value) * CHAR_BIT];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value);
+    while (count) {
+        output[position++] = digits[--count];
+    }
+    return position;
+}
+
+int ra_link_peer_queue_key_query(struct ra_link_peer *peer, const char *requester) {
+    if (!key_name_valid(requester)) {
+        return -1;
+    }
+    char text[RA_LINK_PEER_KEY_TEXT_MAX];
+    size_t length = append_key_text(text, 0, "K? * ");
+    length = append_key_text(text, length, requester);
+    length = append_key_text(text, length, " 0 0");
+    text[length] = '\0';
+    return queue_key_message(peer, text, length);
+}
+
+int ra_link_peer_queue_key_reply(struct ra_link_peer *peer, const char *destination,
+                                 const char *source, bool keyed, uint64_t age_seconds) {
+    if (!key_name_valid(destination) || !key_name_valid(source)) {
+        return -1;
+    }
+    char text[RA_LINK_PEER_KEY_TEXT_MAX];
+    size_t length = append_key_text(text, 0, "K ");
+    length = append_key_text(text, length, destination);
+    length = append_key_text(text, length, " ");
+    length = append_key_text(text, length, source);
+    length = append_key_text(text, length, keyed ? " 1 " : " 0 ");
+    length = append_key_age(text, length, age_seconds);
+    text[length] = '\0';
+    return queue_key_message(peer, text, length);
+}
+
+/** @brief Stop one started reader and release its private storage.
+ * @param peer Started peer, called once and with no concurrent sender/consumer.
+ * @param hangup_channel True when the peer owns the answered channel.
+ */
+static void stop_peer(struct ra_link_peer *peer, bool hangup_channel) {
     atomic_store(&peer->stop, true);
     pthread_join(peer->thread, NULL);
     (void)ast_indicate(peer->channel, AST_CONTROL_RADIO_UNKEY);
-    ast_hangup(peer->channel);
+    if (hangup_channel) {
+        ast_hangup(peer->channel);
+    }
     ast_free(peer->outgoing_storage);
     ast_free(peer->send_buffer);
     release_elastic(peer);
@@ -567,3 +1078,7 @@ void ra_link_peer_stop(struct ra_link_peer *peer) {
     peer->channel = NULL;
     close_topology(peer);
 }
+
+void ra_link_peer_stop(struct ra_link_peer *peer) { stop_peer(peer, true); }
+
+void ra_link_peer_stop_preserve_channel(struct ra_link_peer *peer) { stop_peer(peer, false); }

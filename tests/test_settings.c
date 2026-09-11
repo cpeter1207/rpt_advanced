@@ -601,6 +601,88 @@ static void scheduler_settings(void) {
     assert(ra_settings_validate(false, "callsign", oversized_identity));
 }
 
+/** @brief Resolve configured permanent links and their local-time replacement windows. */
+static void configured_link_settings(void) {
+    const struct ra_config_entry entries[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday_net", "remote_node", "2627"},
+        {"schedule 524950 weekday_net", "replace_permanent", "primary"},
+        {"schedule 524950 weekday_net", "days", "Monday-Friday"},
+        {"schedule 524950 weekday_net", "start_time", "11:00"},
+        {"schedule 524950 weekday_net", "end_time", "12:00"},
+        {"schedule 524950 weekday_net", "end_inactivity_ms", "300000"},
+    };
+    struct ra_permanent_link_settings permanent_link;
+    assert(!ra_permanent_link_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]),
+                                               "permanent 524950 primary", &permanent_link));
+    assert(!strcmp(permanent_link.name, "primary") &&
+           !strcmp(permanent_link.remote_node, "506315"));
+
+    struct ra_link_schedule_settings schedule;
+    assert(!ra_link_schedule_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]),
+                                              "schedule 524950 weekday_net", &schedule));
+    assert(!strcmp(schedule.name, "weekday_net") && !strcmp(schedule.remote_node, "2627") &&
+           !strcmp(schedule.replace_permanent, "primary") &&
+           schedule.window.weekday_mask == (1U << 1 | 1U << 2 | 1U << 3 | 1U << 4 | 1U << 5) &&
+           schedule.window.start_minute == 660 && schedule.window.end_minute == 720 &&
+           schedule.end_inactivity_ms == 300000);
+
+    assert(!ra_settings_validate_kind(RA_SETTINGS_PERMANENT, "remote_node", "506315"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_PERMANENT, "remote_node", "node"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_SCHEDULE, "end_inactivity_ms", "0"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_SCHEDULE, "end_inactivity_ms", "-1"));
+    assert(ra_settings_validate_kind(RA_SETTINGS_SCHEDULE, "unknown", "yes"));
+
+    assert(!strcmp(
+        ra_permanent_link_settings_resolve(NULL, 0, "schedule 524950 wrong", &permanent_link),
+        "invalid named section"));
+    assert(!strcmp(
+        ra_permanent_link_settings_resolve(NULL, 0, "permanent 524950 empty", &permanent_link),
+        "permanent remote node is required"));
+    struct ra_config_entry invalid_remote = {"permanent 524950 bad", "remote_node", "invalid"};
+    assert(!strcmp(ra_permanent_link_settings_resolve(&invalid_remote, 1, "permanent 524950 bad",
+                                                      &permanent_link),
+                   "remote_node"));
+
+    assert(!strcmp(ra_link_schedule_settings_resolve(NULL, 0, "event 524950 wrong", &schedule),
+                   "invalid named section"));
+    assert(!strcmp(ra_link_schedule_settings_resolve(NULL, 0, "schedule 524950 empty", &schedule),
+                   "schedule remote node, replacement, start time, and end time are required"));
+    const struct ra_config_entry missing_start[] = {
+        {"schedule 524950 missing_start", "remote_node", "2627"},
+        {"schedule 524950 missing_start", "replace_permanent", "primary"},
+        {"schedule 524950 missing_start", "end_time", "12:00"},
+    };
+    assert(!strcmp(ra_link_schedule_settings_resolve(
+                       missing_start, sizeof(missing_start) / sizeof(missing_start[0]),
+                       "schedule 524950 missing_start", &schedule),
+                   "schedule remote node, replacement, start time, and end time are required"));
+    const struct ra_config_entry missing_end[] = {
+        {"schedule 524950 missing_end", "remote_node", "2627"},
+        {"schedule 524950 missing_end", "replace_permanent", "primary"},
+        {"schedule 524950 missing_end", "start_time", "11:00"},
+    };
+    assert(!strcmp(ra_link_schedule_settings_resolve(missing_end,
+                                                     sizeof(missing_end) / sizeof(missing_end[0]),
+                                                     "schedule 524950 missing_end", &schedule),
+                   "schedule remote node, replacement, start time, and end time are required"));
+    struct ra_config_entry invalid_schedule_remote = {"schedule 524950 invalid", "remote_node",
+                                                      "invalid"};
+    assert(!strcmp(ra_link_schedule_settings_resolve(&invalid_schedule_remote, 1,
+                                                     "schedule 524950 invalid", &schedule),
+                   "remote_node"));
+    struct ra_config_entry invalid_window[] = {
+        {"schedule 524950 bad", "remote_node", "2627"},
+        {"schedule 524950 bad", "replace_permanent", "primary"},
+        {"schedule 524950 bad", "start_time", "12:00"},
+        {"schedule 524950 bad", "end_time", "11:00"},
+    };
+    assert(!strcmp(ra_link_schedule_settings_resolve(
+                       invalid_window, sizeof(invalid_window) / sizeof(invalid_window[0]),
+                       "schedule 524950 bad", &schedule),
+                   "invalid schedule window"));
+}
+
 /** @brief Execute all settings tests.
  * @return Zero after successful assertions.
  */
@@ -618,6 +700,7 @@ int main(void) {
     directory_settings();
     command_settings();
     scheduler_settings();
+    configured_link_settings();
     puts("settings resolution tests passed");
     return 0;
 }

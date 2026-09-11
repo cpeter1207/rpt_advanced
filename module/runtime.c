@@ -65,14 +65,15 @@ struct ra_runtime_node {
     struct ra_controller_id
         *courtesies; /**< Prepared named courtesy media in configuration order. */
     struct ra_controller_peer_courtesy
-        *peer_courtesies;    /**< Prepared permanent-link courtesy overrides. */
+        *peer_courtesies;    /**< Prepared exact-direct-peer courtesy overrides. */
     size_t courtesy_count;   /**< Number of owned courtesy media records. */
     const char *reload_name; /**< Previous document-owned name while a replacement is pending. */
     struct ra_node_settings
-        reload_settings;      /**< Previous resolved settings while a replacement is pending. */
-    bool running;             /**< Worker creation succeeded; it must be joined. */
-    bool reload_reconfigured; /**< Current replacement must restore this node on failure. */
-    bool reload_new;          /**< Current replacement owns this node until commit. */
+        reload_settings;          /**< Previous resolved settings while a replacement is pending. */
+    bool running;                 /**< Worker creation succeeded; it must be joined. */
+    bool reload_reconfigured;     /**< Current replacement must restore this node on failure. */
+    bool reload_new;              /**< Current replacement owns this node until commit. */
+    bool configured_links_paused; /**< Operator `*806` hold on configuration-owned links. */
 };
 
 /** @brief One configuration-order event plus the control-plane state for its current occurrence. */
@@ -90,12 +91,48 @@ struct ra_runtime_schedule_event {
     bool ready;          /**< A due occurrence awaits its turn in configuration order. */
 };
 
-/** @brief Runtime-owned global event ordering and its document-backed configuration references. */
+/** @brief One configuration-managed direct link and its issued control-plane intent. */
+struct ra_runtime_configured_link {
+    char local[RA_NODE_NAME_MAX];  /**< Copied local node identity. */
+    char remote[RA_NODE_NAME_MAX]; /**< Copied remote direct-peer identity. */
+    const char
+        *label;     /**< Borrowed permanent-link label; null for schedule routes or retirement. */
+    bool permanent; /**< True only for an always-desired configured permanent link. */
+    bool desired;   /**< Current scheduler policy requests this route. */
+    bool issued;    /**< The hub owns this route or its retained permanent retry intent. */
+    bool pending;   /**< A copied transition is outside the runtime lock awaiting settlement. */
+    uint64_t reservation; /**< Nonzero nonce for the copied transition while @c pending. */
+    bool retiring; /**< A removed reload-time route awaits one explicit permanent disconnect. */
+};
+
+/** @brief Runtime state for one configured local-time permanent-link replacement window. */
+struct ra_runtime_link_window {
+    const char *name; /**< Borrowed unique schedule label retained by the active document. */
+    char local[RA_NODE_NAME_MAX];      /**< Copied local node identity. */
+    struct ra_scheduled_window window; /**< Parsed local civil-time membership. */
+    uint64_t end_inactivity_ms;        /**< Quiet interval required after the window ends. */
+    size_t route_index;                /**< Configuration-managed replacement link in @c links. */
+    size_t replaced_index;             /**< Configured permanent link suspended by this window. */
+    uint64_t last_activity_ms;    /**< Last observed qualifying receive activity across reload. */
+    uint64_t initial_deadline_ms; /**< Cold-start remaining quiet-period deadline. */
+    bool was_active;       /**< The window was previously active and may now drain activity. */
+    bool waiting_for_idle; /**< End passed while qualifying receive activity may still be recent. */
+    bool initialized; /**< Initial policy evaluation has applied cold-start grace when required. */
+    bool initial_grace; /**< True while a post-restart remaining quiet period is still running. */
+};
+
+/** @brief Runtime-owned event ordering and configured permanent-link control state. */
 struct ra_runtime_schedule {
     const struct ra_document *document; /**< Immutable configuration retained by the runtime. */
     struct ra_runtime_schedule_event *events; /**< Owned global configuration-order event array. */
     size_t count;                             /**< Number of active-node events in @p events. */
-    uint64_t generation;                      /**< Invalidates copied dispatches after a reload. */
+    struct ra_runtime_configured_link *links; /**< Owned configured direct-link intent records. */
+    size_t link_count;                        /**< Number of current and retiring route records. */
+    struct ra_runtime_link_window *windows; /**< Owned configured local-time replacement windows. */
+    size_t window_count;                    /**< Number of active-node replacement windows. */
+    uint64_t generation;                    /**< Invalidates copied dispatches after a reload. */
+    uint64_t
+        next_link_reservation; /**< Advances copied link-operation nonces within this instance. */
     time_t
         last_tick; /**< Latest control-task wall-clock instant permitted to create occurrences. */
     bool has_last_tick; /**< True after @c last_tick has been initialized by a scheduler task. */
@@ -110,10 +147,46 @@ static struct ra_runtime_node *runtime_node(struct ra_runtime *runtime, const ch
  * @param previous Prior schedule retained only to preserve matching occurrence state.
  * @param result Receives owned schedule state, or null when no enabled node has an event.
  * @return Null on success or an allocation/configuration diagnostic.
+ *
+ * Every enabled scoped configuration has a running node before this helper builds its schedule.
  */
 static const char *schedule_create(struct ra_runtime *runtime, const struct ra_document *document,
                                    const struct ra_runtime_schedule *previous,
                                    struct ra_runtime_schedule **result);
+
+/** @brief Convert a captured wall-clock instant to validated local civil time. */
+static bool schedule_local_time(time_t now, struct tm *local);
+
+/** @brief Recompute configuration-owned direct-link policy under the runtime control lock. */
+static void schedule_link_desires(struct ra_runtime *runtime, struct ra_runtime_schedule *schedule,
+                                  const struct tm *local, uint64_t now_ms);
+
+/** @brief Clear stale configuration-issued state after an exact hub route has disappeared. */
+static void schedule_refresh_link_ownership(struct ra_runtime *runtime,
+                                            struct ra_runtime_schedule *schedule);
+
+/** @brief Return the current monotonic control timestamp, or zero after a clock failure. */
+static uint64_t runtime_monotonic_ms(void);
+
+/** @brief Withdraw configuration-owned routes the current schedule no longer requests.
+ * @param runtime Active runtime that owns every selected routing hub.
+ * @param schedule Candidate or active configuration-owned route state.
+ * @param local Valid current local civil time.
+ * @param now_ms Current monotonic control timestamp.
+ * @param selected_local Optional node restriction, or null for every active node.
+ *
+ * This control-plane reconciliation runs before resuming held retries and before a reload
+ * publishes replacement configuration. Cancelling first prevents an old permanent retry from
+ * attaching after its replacement window or configuration removal has taken effect.
+ * Its static callers have already selected a non-null schedule, validated @p local, and started
+ * every enabled route owner.
+ */
+static void reconcile_scheduled_links(struct ra_runtime *runtime,
+                                      struct ra_runtime_schedule *schedule, const struct tm *local,
+                                      uint64_t now_ms, const char *selected_local);
+
+/** @brief Discard copied configured-link reservations for one node or every node. */
+static void clear_scheduled_link_reservations(struct ra_runtime *runtime, const char *local);
 
 /** @brief Advance a nonzero copied-dispatch generation without ever publishing zero.
  * @param generation Previous private runtime generation.
@@ -270,8 +343,8 @@ static int reconnect_node(void *context, const char *remote, bool transmit, bool
         }
         goto done;
     }
-    if (ra_link_hub_attach(&node->links, remote, channel, node->connection.radio.linear, transmit,
-                           forward, permanent)) {
+    if (ra_link_hub_attach_gated(&node->links, remote, channel, node->connection.radio.linear,
+                                 transmit, forward, permanent, cancelled, paused, NULL, NULL)) {
         ast_hangup(channel);
         goto done;
     }
@@ -722,6 +795,10 @@ static const char *document_node_name(const struct ra_document *document, const 
  */
 static bool document_node_settings(const struct ra_document *document, const char *name,
                                    struct ra_node_settings *settings) {
+    /* Static callers hold the active validated document and provide local result storage. */
+    if (!name) {
+        return false;
+    }
     const char *candidate = document_node_name(document, name);
     if (!candidate) {
         return false;
@@ -734,6 +811,9 @@ static bool document_node_settings(const struct ra_document *document, const cha
  * @param runtime Runtime whose caller serializes lifecycle changes.
  * @param name Exact configured node name.
  * @return Stable node or null when it is not currently enabled.
+ *
+ * Lifecycle code assigns every node name before linking that node into @p runtime, and callers
+ * pass resolved document or copied route identities.
  */
 static struct ra_runtime_node *runtime_node(struct ra_runtime *runtime, const char *name) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
@@ -742,6 +822,19 @@ static struct ra_runtime_node *runtime_node(struct ra_runtime *runtime, const ch
         }
     }
     return NULL;
+}
+
+/** @brief Forget one direct peer selected for remote DTMF control.
+ * @param node Stable node that owns the selection.
+ * @param remote Direct peer being withdrawn.
+ *
+ * A peer can disappear through either operator control or scheduler reconciliation.  Clearing the
+ * selection in both paths prevents the next local digit from being sent to a withdrawn peer.
+ */
+static void clear_remote_selection(struct ra_runtime_node *node, const char *remote) {
+    if (!strcmp(node->remote_node, remote)) {
+        node->remote_node[0] = '\0';
+    }
 }
 
 /** @brief Pack one parsed trigger so equality never depends on structure padding.
@@ -787,6 +880,204 @@ prior_schedule_event(const struct ra_runtime_schedule *previous, const struct ra
     return NULL;
 }
 
+/** @brief Test exact copied endpoint identity equality without relying on configuration pointers.
+ * @param link Configured route record.
+ * @param local Complete local node identity.
+ * @param remote Complete remote node identity.
+ * @return True only for the same directed endpoint pair.
+ */
+static bool same_configured_link(const struct ra_runtime_configured_link *link, const char *local,
+                                 const char *remote) {
+    return !strcmp(link->local, local) && !strcmp(link->remote, remote);
+}
+
+/** @brief Locate the exact pending configured-link reservation copied to the control task.
+ * @param runtime Active runtime protected by the module control lock.
+ * @param operation Copied scheduler operation to validate.
+ * @return The matching pending route, or null after a reload, hold, re-reservation, or mismatch.
+ *
+ * A route endpoint alone is not an identity: `*806` can cancel an in-flight operation and `*816`
+ * can reserve that same endpoint again before the old dial returns. The schedule generation and
+ * per-reservation nonce make the stale operation unable to affect the new route.
+ */
+static struct ra_runtime_configured_link *
+scheduled_link_reservation(struct ra_runtime *runtime,
+                           const struct ra_scheduled_link_operation *operation) {
+    if (!runtime || !operation || !operation->reservation || !runtime->schedule ||
+        operation->schedule_generation != runtime->schedule->generation ||
+        operation->link_index >= runtime->schedule->link_count) {
+        return NULL;
+    }
+    struct ra_runtime_configured_link *link = &runtime->schedule->links[operation->link_index];
+    if (!link->pending || link->reservation != operation->reservation ||
+        !same_configured_link(link, operation->local, operation->operation.remote)) {
+        return NULL;
+    }
+    return link;
+}
+
+/** @brief Test whether a copied reservation still authorizes its physical link transition.
+ * @param runtime Active runtime protected by the module control lock.
+ * @param operation Copied scheduler operation to validate.
+ * @return True only while the matching route remains pending and requested by current policy.
+ */
+static bool scheduled_link_operation_current(struct ra_runtime *runtime,
+                                             const struct ra_scheduled_link_operation *operation) {
+    const struct ra_runtime_configured_link *link = scheduled_link_reservation(runtime, operation);
+    if (!link) {
+        return false;
+    }
+    switch (operation->operation.action) {
+    case RA_LINK_PERMANENT_TRANSCEIVE:
+        /* Reservation creation already proved unissued, unheld, nonretiring attachment state. */
+        return link->desired;
+    case RA_LINK_DISCONNECT_PERMANENT:
+        /* A pending withdrawal was issued only for an owned route; policy can still change. */
+        return !link->desired;
+    default:
+        return false;
+    }
+}
+
+/** @brief Recheck one pending configured-link transition against current civil-time policy.
+ * @param runtime Active runtime protected by its serialized control lock.
+ * @param operation Copied configured-link reservation.
+ * @return True only when the reservation remains current under the present civil-time policy.
+ *
+ * Dialing and queued withdrawals are intentionally outside the control lock and can span a window
+ * boundary. The ticker cannot update @c link->desired while the operation is in flight, so a
+ * cached policy could attach a primary after its replacement begins or detach it after that window
+ * ends. Refreshing before each scheduler-owned physical transition prevents either stale action.
+ * A schedule with no replacement windows has no civil-time policy, so its ordinary permanent
+ * route remains transitionable if the wall clock is temporarily unavailable.
+ */
+static bool scheduled_link_policy_current_now(struct ra_runtime *runtime,
+                                              const struct ra_scheduled_link_operation *operation) {
+    /* Public callers have already dereferenced @p runtime to locate their local node. */
+    if (!runtime->schedule) {
+        return false;
+    }
+    if (runtime->schedule->window_count) {
+        struct tm local;
+        if (!schedule_local_time(time(NULL), &local)) {
+            return false;
+        }
+        schedule_link_desires(runtime, runtime->schedule, &local, runtime_monotonic_ms());
+    }
+    return scheduled_link_operation_current(runtime, operation);
+}
+
+/** @brief Find prior issued state for one unchanged configured direct link.
+ * @param previous Prior schedule, or null on first startup.
+ * @param local Complete local node identity.
+ * @param remote Complete remote node identity.
+ * @return Prior route record, or null when it was newly configured.
+ */
+static const struct ra_runtime_configured_link *
+prior_configured_link(const struct ra_runtime_schedule *previous, const char *local,
+                      const char *remote) {
+    if (!previous) {
+        return NULL;
+    }
+    for (size_t index = 0; index < previous->link_count; ++index) {
+        const struct ra_runtime_configured_link *link = &previous->links[index];
+        if (!link->retiring && same_configured_link(link, local, remote)) {
+            return link;
+        }
+    }
+    return NULL;
+}
+
+/** @brief Compare two parsed local civil-time windows without depending on padding bytes.
+ * @param first First parsed window.
+ * @param second Second parsed window.
+ * @return True when every scheduling selector and bound is equal.
+ */
+static bool same_scheduled_window(const struct ra_scheduled_window *first,
+                                  const struct ra_scheduled_window *second) {
+    if (first->start_minute != second->start_minute || first->end_minute != second->end_minute ||
+        first->weekday_mask != second->weekday_mask || first->date_count != second->date_count) {
+        return false;
+    }
+    for (size_t index = 0; index < first->date_count; ++index) {
+        if (first->dates[index].year != second->dates[index].year ||
+            first->dates[index].month != second->dates[index].month ||
+            first->dates[index].day != second->dates[index].day) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** @brief Find prior receive activity for one same-identity configured link-replacement window.
+ * @param previous Prior schedule, or null on first startup.
+ * @param local Complete local node identity.
+ * @param settings Newly resolved window settings.
+ * @return Prior matching window, or null when its label or routing identity changed.
+ *
+ * A reload may deliberately change the window selector, time bounds, or quiet interval. Its most
+ * recent local/link receive time remains meaningful, so the new policy must start from it rather
+ * than treating the reload as a cold start.
+ */
+static const struct ra_runtime_link_window *
+prior_link_window(const struct ra_runtime_schedule *previous, const char *local,
+                  const struct ra_link_schedule_settings *settings) {
+    if (!previous) {
+        return NULL;
+    }
+    for (size_t index = 0; index < previous->window_count; ++index) {
+        const struct ra_runtime_link_window *window = &previous->windows[index];
+        const struct ra_runtime_configured_link *route = &previous->links[window->route_index];
+        const struct ra_runtime_configured_link *replaced =
+            &previous->links[window->replaced_index];
+        if (!strcmp(window->local, local) && !strcmp(window->name, settings->name) &&
+            !strcmp(route->remote, settings->remote_node) &&
+            !strcmp(replaced->label, settings->replace_permanent)) {
+            return window;
+        }
+    }
+    return NULL;
+}
+
+/** @brief Copy a bounded configured route into preallocated schedule storage.
+ * @param schedule Destination schedule with unused route capacity.
+ * @param local Complete local node identity.
+ * @param remote Complete remote node identity.
+ * @param label Permanent-link label, or null for a schedule route.
+ * @param permanent True for an always-desired configured link.
+ * @param issued Prior attach intent to retain across reload.
+ *
+ * Callers validate the local identity before reaching this helper. The settings resolver already
+ * bounds the decimal remote identity, and a retiring route was copied through this same helper.
+ */
+static void schedule_add_link(struct ra_runtime_schedule *schedule, const char *local,
+                              const char *remote, const char *label, bool permanent, bool issued) {
+    struct ra_runtime_configured_link *link = &schedule->links[schedule->link_count++];
+    ast_copy_string(link->local, local, sizeof(link->local));
+    ast_copy_string(link->remote, remote, sizeof(link->remote));
+    link->label = label;
+    link->permanent = permanent;
+    link->issued = issued;
+}
+
+/** @brief Locate a current configuration-managed permanent route by its same-node label.
+ * @param schedule New schedule under construction.
+ * @param local Complete local node identity.
+ * @param label Required permanent-link label.
+ * @return Route index, or SIZE_MAX when no matching configured permanent link exists.
+ */
+static size_t schedule_permanent_index(const struct ra_runtime_schedule *schedule,
+                                       const char *local, const char *label) {
+    for (size_t index = 0; index < schedule->link_count; ++index) {
+        const struct ra_runtime_configured_link *link = &schedule->links[index];
+        /* Prior window routes have no label, so ignore them while resolving another window. */
+        if (link->permanent && !strcmp(link->local, local) && !strcmp(link->label, label)) {
+            return index;
+        }
+    }
+    return SIZE_MAX;
+}
+
 /** @brief Release one runtime-owned schedule without touching its borrowed configuration.
  * @param schedule Owned schedule, or null.
  */
@@ -794,30 +1085,84 @@ static void schedule_release(struct ra_runtime_schedule *schedule) {
     if (!schedule) {
         return;
     }
+    ast_free(schedule->windows);
+    ast_free(schedule->links);
     ast_free(schedule->events);
     ast_free(schedule);
+}
+
+/** @brief Retain the newest receive timestamp for every configured link window.
+ * @param runtime Active nodes whose controllers publish lock-free receive timestamps.
+ * @param schedule Configuration-owned windows updated before a reload or policy evaluation.
+ *
+ * The audio worker writes only its controller atomic.  This control-plane snapshot preserves the
+ * most recent value through a live configuration reload, whose worker restart otherwise resets
+ * the replacement controller's atomic state.
+ */
+static void schedule_capture_activity(struct ra_runtime *runtime,
+                                      struct ra_runtime_schedule *schedule) {
+    if (!schedule) {
+        return;
+    }
+    for (size_t index = 0; index < schedule->window_count; ++index) {
+        struct ra_runtime_link_window *window = &schedule->windows[index];
+        struct ra_runtime_node *node = runtime_node(runtime, window->local);
+        /* Window creation requires this enabled owner, which outlives the schedule. */
+        uint64_t activity = ra_controller_qualifying_activity_ms(&node->controller);
+        if (activity > window->last_activity_ms) {
+            window->last_activity_ms = activity;
+            /* Real receive activity supersedes a cold-start estimate of the quiet deadline. */
+            window->initial_grace = false;
+        }
+    }
 }
 
 static const char *schedule_create(struct ra_runtime *runtime, const struct ra_document *document,
                                    const struct ra_runtime_schedule *previous,
                                    struct ra_runtime_schedule **result) {
     *result = NULL;
-    size_t declared = 0;
-    while (ra_document_event(document, declared, NULL)) {
-        ++declared;
+    size_t declared_events = 0;
+    size_t declared_permanents = 0;
+    size_t declared_windows = 0;
+    while (ra_document_event(document, declared_events, NULL)) {
+        ++declared_events;
     }
-    /* Avoid a new allocation and test fixture churn when no node has an event. */
-    if (!declared) {
+    while (ra_document_permanent(document, declared_permanents, NULL)) {
+        ++declared_permanents;
+    }
+    while (ra_document_schedule(document, declared_windows, NULL)) {
+        ++declared_windows;
+    }
+    size_t link_capacity =
+        declared_permanents + declared_windows + (previous ? previous->link_count : 0U);
+    /* Avoid allocations and fixture churn when neither event nor configured-link state exists. */
+    if (!declared_events && !link_capacity) {
         return NULL;
     }
     struct ra_runtime_schedule *schedule = ast_calloc(1, sizeof(*schedule));
     if (!schedule) {
         return "cannot allocate scheduled event state";
     }
-    schedule->events = ast_calloc(declared, sizeof(*schedule->events));
-    if (!schedule->events) {
+    if (declared_events) {
+        schedule->events = ast_calloc(declared_events, sizeof(*schedule->events));
+    }
+    if (declared_events && !schedule->events) {
         schedule_release(schedule);
         return "cannot allocate scheduled event state";
+    }
+    if (link_capacity) {
+        schedule->links = ast_calloc(link_capacity, sizeof(*schedule->links));
+    }
+    if (link_capacity && !schedule->links) {
+        schedule_release(schedule);
+        return "cannot allocate configured link state";
+    }
+    if (declared_windows) {
+        schedule->windows = ast_calloc(declared_windows, sizeof(*schedule->windows));
+    }
+    if (declared_windows && !schedule->windows) {
+        schedule_release(schedule);
+        return "cannot allocate configured link state";
     }
     schedule->document = document;
     schedule->generation = schedule_next_generation(runtime->schedule_generation);
@@ -825,7 +1170,7 @@ static const char *schedule_create(struct ra_runtime *runtime, const struct ra_d
      * new occurrence after the replacement has already processed a newer minute. */
     schedule->last_tick = previous ? previous->last_tick : (time_t)0;
     schedule->has_last_tick = previous && previous->has_last_tick;
-    for (size_t index = 0; index < declared; ++index) {
+    for (size_t index = 0; index < declared_events; ++index) {
         const char *node_name = NULL;
         const char *set = ra_document_event(document, index, &node_name);
         struct ra_runtime_node *node = node_name ? runtime_node(runtime, node_name) : NULL;
@@ -887,12 +1232,132 @@ static const char *schedule_create(struct ra_runtime *runtime, const struct ra_d
         };
         ++schedule->count;
     }
-    if (!schedule->count) {
+
+    for (size_t index = 0; index < declared_permanents; ++index) {
+        const char *node_name = NULL;
+        const char *set = ra_document_permanent(document, index, &node_name);
+        struct ra_node_settings node_settings;
+        if (!document_node_settings(document, node_name, &node_settings) ||
+            !node_settings.enabled) {
+            continue;
+        }
+        struct ra_runtime_node *node = runtime_node(runtime, node_name);
+        struct ra_permanent_link_settings settings;
+        const char *error =
+            ra_permanent_link_settings_resolve(document->entries, document->count, set, &settings);
+        if (error) {
+            schedule_release(schedule);
+            return error;
+        }
+        if (strnlen(node->name, RA_NODE_NAME_MAX) == RA_NODE_NAME_MAX) {
+            schedule_release(schedule);
+            return "configured link node name is too long";
+        }
+        const struct ra_runtime_configured_link *prior =
+            prior_configured_link(previous, node->name, settings.remote_node);
+        schedule_add_link(schedule, node->name, settings.remote_node, settings.name, true,
+                          prior && prior->issued);
+    }
+
+    for (size_t index = 0; index < declared_windows; ++index) {
+        const char *node_name = NULL;
+        const char *set = ra_document_schedule(document, index, &node_name);
+        struct ra_node_settings node_settings;
+        if (!document_node_settings(document, node_name, &node_settings) ||
+            !node_settings.enabled) {
+            continue;
+        }
+        struct ra_runtime_node *node = runtime_node(runtime, node_name);
+        struct ra_link_schedule_settings settings;
+        const char *error =
+            ra_link_schedule_settings_resolve(document->entries, document->count, set, &settings);
+        if (error) {
+            schedule_release(schedule);
+            return error;
+        }
+        if (strnlen(node->name, RA_NODE_NAME_MAX) == RA_NODE_NAME_MAX) {
+            schedule_release(schedule);
+            return "configured link node name is too long";
+        }
+        size_t replaced_index =
+            schedule_permanent_index(schedule, node->name, settings.replace_permanent);
+        if (replaced_index == SIZE_MAX) {
+            schedule_release(schedule);
+            return "schedule references an unknown permanent link";
+        }
+        const struct ra_runtime_configured_link *prior =
+            prior_configured_link(previous, node->name, settings.remote_node);
+        size_t route_index = schedule->link_count;
+        schedule_add_link(schedule, node->name, settings.remote_node, NULL, false,
+                          prior && prior->issued);
+        const struct ra_runtime_link_window *previous_window =
+            prior_link_window(previous, node->name, &settings);
+        bool same_window_policy =
+            previous_window && previous_window->end_inactivity_ms == settings.end_inactivity_ms &&
+            same_scheduled_window(&previous_window->window, &settings.window);
+        schedule->windows[schedule->window_count++] = (struct ra_runtime_link_window){
+            .name = settings.name,
+            .local = {0},
+            .window = settings.window,
+            .end_inactivity_ms = settings.end_inactivity_ms,
+            .route_index = route_index,
+            .replaced_index = replaced_index,
+            .last_activity_ms = previous_window ? previous_window->last_activity_ms : 0,
+            .initial_deadline_ms = same_window_policy ? previous_window->initial_deadline_ms : 0,
+            .was_active = same_window_policy && previous_window->was_active,
+            .waiting_for_idle = same_window_policy && previous_window->waiting_for_idle,
+            .initialized = same_window_policy && previous_window->initialized,
+            .initial_grace = same_window_policy && previous_window->initial_grace,
+        };
+        ast_copy_string(schedule->windows[schedule->window_count - 1U].local, node->name,
+                        sizeof(schedule->windows[schedule->window_count - 1U].local));
+    }
+
+    if (previous) {
+        for (size_t prior_index = 0; prior_index < previous->link_count; ++prior_index) {
+            const struct ra_runtime_configured_link *prior = &previous->links[prior_index];
+            bool retained = false;
+            for (size_t current_index = 0; current_index < schedule->link_count; ++current_index) {
+                if (same_configured_link(&schedule->links[current_index], prior->local,
+                                         prior->remote)) {
+                    retained = true;
+                    break;
+                }
+            }
+            struct ra_node_settings node_settings;
+            if (prior->issued && !retained &&
+                document_node_settings(document, prior->local, &node_settings) &&
+                node_settings.enabled) {
+                schedule_add_link(schedule, prior->local, prior->remote, NULL, false, true);
+                schedule->links[schedule->link_count - 1U].retiring = true;
+            }
+        }
+    }
+    if (!schedule->count && !schedule->link_count) {
         schedule_release(schedule);
         return NULL;
     }
     *result = schedule;
     return NULL;
+}
+
+static void reconcile_scheduled_links(struct ra_runtime *runtime,
+                                      struct ra_runtime_schedule *schedule, const struct tm *local,
+                                      uint64_t now_ms, const char *selected_local) {
+    schedule_link_desires(runtime, schedule, local, now_ms);
+    schedule_refresh_link_ownership(runtime, schedule);
+    for (size_t index = 0; index < schedule->link_count; ++index) {
+        struct ra_runtime_configured_link *link = &schedule->links[index];
+        if (!link->issued || link->desired ||
+            (selected_local && strcmp(link->local, selected_local))) {
+            continue;
+        }
+        struct ra_runtime_node *node = runtime_node(runtime, link->local);
+        link->pending = false;
+        clear_remote_selection(node, link->remote);
+        (void)ra_link_hub_disconnect_permanent(&node->links, link->remote);
+        link->issued = false;
+    }
 }
 
 static int queue_status_speech(struct ra_runtime_node *node, const char *text, const char *node_one,
@@ -973,6 +1438,9 @@ static const char *rollback_reload(struct ra_runtime *runtime, const struct ra_d
         }
         clear_node_snapshot(node);
     }
+    /* The module invalidates the current tick on every reload attempt. Release copied work so
+     * the retained schedule can issue a fresh nonce on the next ticker pass. */
+    clear_scheduled_link_reservations(runtime, NULL);
     return failure;
 }
 
@@ -999,6 +1467,7 @@ static void release_removed_nodes(struct ra_runtime *runtime,
 
 const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_document *current,
                               const struct ra_document *replacement) {
+    schedule_capture_activity(runtime, runtime->schedule);
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         struct ra_node_settings settings;
         if (!document_node_settings(replacement, node->name, &settings) || !settings.enabled) {
@@ -1045,6 +1514,16 @@ const char *ra_runtime_reload(struct ra_runtime *runtime, const struct ra_docume
     if (schedule_error) {
         const char *restoration = rollback_reload(runtime, current);
         return restoration ? restoration : schedule_error;
+    }
+    if (schedule && schedule->link_count) {
+        struct tm local;
+        if (!schedule_local_time(time(NULL), &local)) {
+            schedule_release(schedule);
+            const char *restoration = rollback_reload(runtime, current);
+            return restoration ? restoration
+                               : "cannot read local time to reconcile configured links";
+        }
+        reconcile_scheduled_links(runtime, schedule, &local, runtime_monotonic_ms(), NULL);
     }
     release_removed_nodes(runtime, replacement);
     schedule_release(runtime->schedule);
@@ -1129,14 +1608,37 @@ int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char 
     return -1;
 }
 
+/** @brief Test direct-link admission while honoring the operator disconnect-all hold.
+ * @param node Local route owner.
+ * @param remote Requested direct peer identity.
+ * @param scheduled Nullable scheduler reservation, or null for a manual operation.
+ * @return True when a live direct peer, topology advertisement, or eligible retry reaches remote.
+ */
+static bool runtime_link_reaches(const struct ra_runtime_node *node, const char *remote,
+                                 const struct ra_scheduled_link_operation *scheduled) {
+    return !scheduled && node->configured_links_paused
+               ? ra_link_hub_reaches_live(&node->links, remote)
+               : ra_link_hub_reaches(&node->links, remote);
+}
+
 int ra_runtime_prepare_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                            struct ra_link_dial *dial) {
+                            struct ra_link_dial *dial,
+                            const struct ra_scheduled_link_operation *scheduled) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (strcmp(node->name, local)) {
             continue;
         }
-        if (!strcmp(local, remote) || ra_link_hub_reaches(&node->links, remote)) {
-            announce_link_loop(node);
+        if (scheduled &&
+            (scheduled->operation.action != RA_LINK_PERMANENT_TRANSCEIVE ||
+             !scheduled_link_policy_current_now(runtime, scheduled) ||
+             strcmp(scheduled->local, local) || strcmp(scheduled->operation.remote, remote))) {
+            return -1;
+        }
+        /* `*806` retains dormant retries for `*816`, but an operator may replace them manually. */
+        if (!strcmp(local, remote) || runtime_link_reaches(node, remote, scheduled)) {
+            if (!scheduled) {
+                announce_link_loop(node);
+            }
             return -1;
         }
         char *destination = resolve_link_node(node, remote, NULL);
@@ -1146,6 +1648,40 @@ int ra_runtime_prepare_link(struct ra_runtime *runtime, const char *local, const
         return prepare_link_dial(dial, destination, node->connection.radio.linear);
     }
     return -1;
+}
+
+/** @brief Settle one reserved configured-link operation while the runtime lock is held.
+ * @param runtime Active runtime owning the current schedule.
+ * @param operation Exact copied scheduler reservation to settle.
+ * @param accepted True when the link hub accepted the requested resulting state.
+ * @return True only when a current, policy-authorized reservation was cleared.
+ *
+ * An attachment or retry is settled before the runtime lock is released. This prevents a reload
+ * from observing an attached route as unissued. A stale operation still clears only its exact
+ * pending reservation; it can never mark a newly reserved route issued.
+ */
+static bool settle_scheduled_link_operation(struct ra_runtime *runtime,
+                                            const struct ra_scheduled_link_operation *operation,
+                                            bool accepted) {
+    struct ra_runtime_configured_link *link = scheduled_link_reservation(runtime, operation);
+    if (!link) {
+        return false;
+    }
+    bool current = scheduled_link_operation_current(runtime, operation);
+    link->pending = false;
+    if (!current) {
+        return false;
+    }
+    if (accepted) {
+        link->issued = operation->operation.action == RA_LINK_PERMANENT_TRANSCEIVE;
+    }
+    return true;
+}
+
+bool ra_runtime_complete_scheduled_link_operation(
+    struct ra_runtime *runtime, const struct ra_scheduled_link_operation *operation,
+    bool accepted) {
+    return settle_scheduled_link_operation(runtime, operation, accepted);
 }
 
 struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *local) {
@@ -1181,31 +1717,79 @@ struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *loca
     return channel;
 }
 
+/** @brief Caller-owned state for an exact scheduled attachment at final hub publication. */
+struct scheduled_attachment_gate {
+    struct ra_runtime *runtime; /**< Runtime holding the current schedule under its control lock. */
+    const struct ra_scheduled_link_operation
+        *operation; /**< Copied reservation that must remain current at publication. */
+};
+
+/** @brief Revalidate a scheduled attachment immediately before the hub publishes its peer.
+ * @param context Pointer to one active @ref scheduled_attachment_gate.
+ * @return True only while the copied reservation remains selected by current civil-time policy.
+ *
+ * This runs under the hub routing lock but the caller already owns the runtime control lock. It
+ * reads only that runtime's scheduler state and lock-free receive activity, so it cannot block or
+ * take the routing lock recursively.
+ */
+static bool scheduled_attachment_current(void *context) {
+    const struct scheduled_attachment_gate *gate = context;
+    return scheduled_link_policy_current_now(gate->runtime, gate->operation);
+}
+
 int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                           struct ast_channel *channel, bool transmit, bool forward,
-                           bool permanent) {
+                           struct ast_channel *channel, bool transmit, bool forward, bool permanent,
+                           const struct ra_scheduled_link_operation *scheduled) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
-            if (!strcmp(local, remote) || ra_link_hub_reaches(&node->links, remote)) {
-                announce_link_loop(node);
+            if (scheduled &&
+                (scheduled->operation.action != RA_LINK_PERMANENT_TRANSCEIVE ||
+                 !scheduled_link_policy_current_now(runtime, scheduled) ||
+                 strcmp(scheduled->local, local) || strcmp(scheduled->operation.remote, remote))) {
                 return -1;
             }
-            return ra_link_hub_attach(&node->links, remote, channel, node->connection.radio.linear,
-                                      transmit, forward, permanent);
+            if (!strcmp(local, remote) || runtime_link_reaches(node, remote, scheduled)) {
+                if (!scheduled) {
+                    announce_link_loop(node);
+                }
+                return -1;
+            }
+            struct scheduled_attachment_gate gate = {.runtime = runtime, .operation = scheduled};
+            int result = ra_link_hub_attach_gated(
+                &node->links, remote, channel, node->connection.radio.linear, transmit, forward,
+                permanent, NULL, NULL, scheduled ? scheduled_attachment_current : NULL,
+                scheduled ? &gate : NULL);
+            if (!result && scheduled) {
+                (void)settle_scheduled_link_operation(runtime, scheduled, true);
+            }
+            return result;
         }
     }
     return -1;
 }
 
 bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *local,
-                                      const char *remote, bool transmit, bool forward) {
+                                      const char *remote, bool transmit, bool forward,
+                                      const struct ra_scheduled_link_operation *scheduled) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
-            if (!strcmp(local, remote) || ra_link_hub_reaches(&node->links, remote)) {
-                announce_link_loop(node);
+            if (scheduled &&
+                (scheduled->operation.action != RA_LINK_PERMANENT_TRANSCEIVE ||
+                 !scheduled_link_policy_current_now(runtime, scheduled) ||
+                 strcmp(scheduled->local, local) || strcmp(scheduled->operation.remote, remote))) {
                 return false;
             }
-            return ra_link_hub_retain_permanent(&node->links, remote, transmit, forward);
+            if (!strcmp(local, remote) || runtime_link_reaches(node, remote, scheduled)) {
+                if (!scheduled) {
+                    announce_link_loop(node);
+                }
+                return false;
+            }
+            bool retained = ra_link_hub_retain_permanent(&node->links, remote, transmit, forward);
+            if (retained && scheduled) {
+                (void)settle_scheduled_link_operation(runtime, scheduled, true);
+            }
+            return retained;
         }
     }
     return false;
@@ -1215,8 +1799,8 @@ bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const 
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
             bool disconnected = ra_link_hub_disconnect(&node->links, remote);
-            if (disconnected && !strcmp(node->remote_node, remote)) {
-                node->remote_node[0] = '\0';
+            if (disconnected) {
+                clear_remote_selection(node, remote);
             }
             return disconnected;
         }
@@ -1225,12 +1809,25 @@ bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const 
 }
 
 bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *local,
-                                     const char *remote) {
+                                     const char *remote,
+                                     const struct ra_scheduled_link_operation *scheduled) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
+            if (scheduled &&
+                (scheduled->operation.action != RA_LINK_DISCONNECT_PERMANENT ||
+                 !scheduled_link_policy_current_now(runtime, scheduled) ||
+                 strcmp(scheduled->local, local) || strcmp(scheduled->operation.remote, remote))) {
+                return false;
+            }
             bool disconnected = ra_link_hub_disconnect_permanent(&node->links, remote);
-            if (disconnected && !strcmp(node->remote_node, remote)) {
-                node->remote_node[0] = '\0';
+            if (disconnected || scheduled) {
+                clear_remote_selection(node, remote);
+            }
+            if (scheduled) {
+                /* A route already withdrawn by transport teardown has reached the requested state.
+                 */
+                (void)settle_scheduled_link_operation(runtime, scheduled, true);
+                return true;
             }
             return disconnected;
         }
@@ -1238,9 +1835,79 @@ bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *loc
     return false;
 }
 
+/** @brief Discard copied scheduler reservations for one node or after a failed reload.
+ * @param runtime Active runtime owning the schedule.
+ * @param local Exact selected local node identity, or null for every configured node.
+ */
+static void clear_scheduled_link_reservations(struct ra_runtime *runtime, const char *local) {
+    if (!runtime->schedule) {
+        return;
+    }
+    for (size_t index = 0; index < runtime->schedule->link_count; ++index) {
+        struct ra_runtime_configured_link *link = &runtime->schedule->links[index];
+        if (!local || !strcmp(link->local, local)) {
+            link->pending = false;
+        }
+    }
+}
+
+/** @brief Read a bounded monotonic timestamp for an operator reconnect reconciliation.
+ * @return Milliseconds since the monotonic epoch, or zero when the host clock is unavailable.
+ */
+static uint64_t runtime_monotonic_ms(void) {
+    struct timespec value;
+    if (clock_gettime(CLOCK_MONOTONIC, &value)) {
+        return 0;
+    }
+    return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
+}
+
+/** @brief Test whether a local node owns any configuration-managed direct route.
+ * @param schedule Active schedule, or null.
+ * @param local Exact local node identity.
+ * @return True when a permanent, replacement, or retiring route belongs to @p local.
+ */
+static bool schedule_has_links_for_node(const struct ra_runtime_schedule *schedule,
+                                        const char *local) {
+    if (!schedule) {
+        return false;
+    }
+    for (size_t index = 0; index < schedule->link_count; ++index) {
+        if (!strcmp(schedule->links[index].local, local)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** @brief Cancel paused retries that no longer match the current configured schedule.
+ * @param runtime Active runtime whose control caller serializes link state.
+ * @param node Local node leaving its operator disconnect-all hold.
+ * @return True after policy reconciliation, or false when required local time is unavailable.
+ *
+ * Scheduler policy is recalculated before the hub resumes its retained retries. This prevents a
+ * formerly permanent route from briefly reconnecting during a replacement window and preserves
+ * detach-before-attach ordering when `*816` restores configuration-owned links.
+ */
+static bool reconcile_scheduled_links_before_reconnect(struct ra_runtime *runtime,
+                                                       const struct ra_runtime_node *node) {
+    struct ra_runtime_schedule *schedule = runtime->schedule;
+    struct tm local;
+    if (!schedule_has_links_for_node(schedule, node->name)) {
+        return true;
+    }
+    if (!schedule_local_time(time(NULL), &local)) {
+        return false;
+    }
+    reconcile_scheduled_links(runtime, schedule, &local, runtime_monotonic_ms(), node->name);
+    return true;
+}
+
 size_t ra_runtime_disconnect_all(struct ra_runtime *runtime, const char *local) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
+            node->configured_links_paused = true;
+            clear_scheduled_link_reservations(runtime, local);
             size_t count = ra_link_hub_disconnect_all(&node->links);
             node->remote_node[0] = '\0';
             return count;
@@ -1263,6 +1930,11 @@ size_t ra_runtime_disconnect_nonpermanent_all(struct ra_runtime *runtime, const 
 size_t ra_runtime_reconnect_all(struct ra_runtime *runtime, const char *local) {
     for (struct ra_runtime_node *node = runtime->nodes; node; node = node->next) {
         if (!strcmp(node->name, local)) {
+            clear_scheduled_link_reservations(runtime, local);
+            if (!reconcile_scheduled_links_before_reconnect(runtime, node)) {
+                return 0;
+            }
+            node->configured_links_paused = false;
             return ra_link_hub_reconnect_all(&node->links);
         }
     }
@@ -1929,9 +2601,221 @@ static bool scheduled_dispatch_fill(struct ra_runtime_schedule *schedule, size_t
     return scheduled_operation(schedule, event, dispatch);
 }
 
+/** @brief Convert one captured wall-clock instant to a validated local civil time.
+ * @param now Captured wall-clock instant.
+ * @param local Receives the host-local civil time.
+ * @return True when the result has usable calendar and clock fields.
+ *
+ * Both zero-time events and configured replacement windows use this one conversion so their
+ * local-time and daylight-saving behavior cannot drift apart.
+ */
+static bool schedule_local_time(time_t now, struct tm *local) {
+    if (now == (time_t)-1) {
+        return false;
+    }
+    struct timeval when = {.tv_sec = now, .tv_usec = 0};
+    struct ast_tm ast_time = {0};
+    if (!ast_localtime(&when, &ast_time, NULL)) {
+        return false;
+    }
+    *local = (struct tm){.tm_sec = ast_time.tm_sec,
+                         .tm_min = ast_time.tm_min,
+                         .tm_hour = ast_time.tm_hour,
+                         .tm_mday = ast_time.tm_mday,
+                         .tm_mon = ast_time.tm_mon,
+                         .tm_year = ast_time.tm_year,
+                         .tm_wday = ast_time.tm_wday,
+                         .tm_yday = ast_time.tm_yday,
+                         .tm_isdst = ast_time.tm_isdst};
+    return local->tm_wday >= 0 && local->tm_wday <= 6 && local->tm_year >= -1900 &&
+           local->tm_year <= 8099 && local->tm_hour >= 0 && local->tm_hour < 24 &&
+           local->tm_min >= 0 && local->tm_min < 60 && local->tm_mon >= 0 && local->tm_mon < 12 &&
+           local->tm_mday > 0 && local->tm_mday <= 31;
+}
+
+/** @brief Test whether a current civil date selects a configured window regardless of its time.
+ * @param window Valid same-day configured window.
+ * @param local Valid current local civil time.
+ * @return True when the date selector accepts @p local's date.
+ */
+static bool schedule_window_date_matches(const struct ra_scheduled_window *window,
+                                         const struct tm *local) {
+    struct tm inside = *local;
+    unsigned int minute = window->end_minute - 1U;
+    inside.tm_hour = (int)(minute / 60U);
+    inside.tm_min = (int)(minute % 60U);
+    return ra_scheduled_window_matches(window, &inside);
+}
+
+/** @brief Recompute configured-link intent from the current local window and receive activity.
+ * @param runtime Active runtime whose nodes own the published receive timestamps.
+ * @param schedule Active schedule to update under the runtime control lock.
+ * @param local Valid current local civil time.
+ * @param now_ms Monotonic control timestamp used only for the inactivity deadline.
+ */
+static void schedule_link_desires(struct ra_runtime *runtime, struct ra_runtime_schedule *schedule,
+                                  const struct tm *local, uint64_t now_ms) {
+    schedule_capture_activity(runtime, schedule);
+    for (size_t index = 0; index < schedule->link_count; ++index) {
+        struct ra_runtime_configured_link *link = &schedule->links[index];
+        link->desired = link->permanent;
+    }
+    for (size_t index = 0; index < schedule->window_count; ++index) {
+        struct ra_runtime_link_window *window = &schedule->windows[index];
+        bool active = ra_scheduled_window_matches(&window->window, local);
+        if (!window->initialized) {
+            window->initialized = true;
+            unsigned int minute = (unsigned int)local->tm_hour * 60U + (unsigned int)local->tm_min;
+            if (!active && window->end_inactivity_ms && minute >= window->window.end_minute &&
+                schedule_window_date_matches(&window->window, local)) {
+                if (window->last_activity_ms) {
+                    /* Receive observed before this first control tick gets a full quiet period,
+                     * not the shorter wall-clock grace intended only for a true cold start. */
+                    window->waiting_for_idle = true;
+                } else {
+                    uint64_t elapsed_ms = ((uint64_t)(minute - window->window.end_minute) * 60U +
+                                           (uint64_t)local->tm_sec) *
+                                          1000U;
+                    if (elapsed_ms < window->end_inactivity_ms) {
+                        uint64_t remaining_ms = window->end_inactivity_ms - elapsed_ms;
+                        window->waiting_for_idle = true;
+                        window->initial_grace = true;
+                        window->initial_deadline_ms =
+                            UINT64_MAX - now_ms < remaining_ms ? UINT64_MAX : now_ms + remaining_ms;
+                    }
+                }
+            }
+        }
+        if (active) {
+            window->was_active = true;
+            window->waiting_for_idle = false;
+            window->initial_grace = false;
+        } else if (window->was_active) {
+            window->was_active = false;
+            window->waiting_for_idle = true;
+        }
+        bool requested = active;
+        if (window->waiting_for_idle) {
+            uint64_t activity = window->last_activity_ms;
+            bool quiet =
+                window->initial_grace
+                    ? now_ms >= window->initial_deadline_ms
+                    : !window->end_inactivity_ms || !activity ||
+                          (now_ms >= activity && now_ms - activity >= window->end_inactivity_ms);
+            if (quiet) {
+                window->waiting_for_idle = false;
+                window->initial_grace = false;
+            } else {
+                requested = true;
+            }
+        }
+        if (requested) {
+            schedule->links[window->route_index].desired = true;
+            schedule->links[window->replaced_index].desired = false;
+        }
+    }
+}
+
+/** @brief Reconcile scheduler-issued state with exact permanent hub ownership.
+ * @param runtime Active runtime whose hubs expose direct-route ownership.
+ * @param schedule Current schedule whose issued records may need reattachment.
+ *
+ * A hub normally turns a failed permanent port into a retry immediately. If that allocation
+ * fails, no direct route remains. Clearing only that stale issued bit lets the next scheduler
+ * tick retry the configured route without treating an advertised transitive topology as a peer.
+ */
+static void schedule_refresh_link_ownership(struct ra_runtime *runtime,
+                                            struct ra_runtime_schedule *schedule) {
+    for (size_t index = 0; index < schedule->link_count; ++index) {
+        struct ra_runtime_configured_link *link = &schedule->links[index];
+        struct ra_runtime_node *node = runtime_node(runtime, link->local);
+        if (link->issued && !ra_link_hub_has_permanent_route(&node->links, link->remote)) {
+            link->issued = false;
+        }
+    }
+}
+
+/** @brief Copy one exact configured-link reservation for unlocked control work.
+ * @param schedule Active schedule that owns @p index.
+ * @param index Configuration-route index selected by current policy.
+ * @param action Permanent attach or permanent-detach transition.
+ * @param operation Caller-owned output cleared by the scheduler before selection.
+ *
+ * The nonce changes on every reservation, including after an operator clears a pending request.
+ * A late dial therefore cannot become valid merely because the same endpoint is selected again.
+ */
+static void reserve_scheduled_link_operation(struct ra_runtime_schedule *schedule, size_t index,
+                                             enum ra_link_action action,
+                                             struct ra_scheduled_link_operation *operation) {
+    struct ra_runtime_configured_link *link = &schedule->links[index];
+    schedule->next_link_reservation = schedule_next_generation(schedule->next_link_reservation);
+    link->pending = true;
+    link->reservation = schedule->next_link_reservation;
+    operation->schedule_generation = schedule->generation;
+    operation->link_index = index;
+    operation->reservation = link->reservation;
+    ast_copy_string(operation->local, link->local, sizeof(operation->local));
+    operation->operation.action = action;
+    ast_copy_string(operation->operation.remote, link->remote, sizeof(operation->operation.remote));
+}
+
+int ra_runtime_next_scheduled_link_operation(struct ra_runtime *runtime, time_t now,
+                                             uint64_t now_ms,
+                                             struct ra_scheduled_link_operation *operation) {
+    if (!runtime) {
+        return -1;
+    }
+    if (!operation) {
+        return -1;
+    }
+    *operation = (struct ra_scheduled_link_operation){0};
+    struct ra_runtime_schedule *schedule = runtime->schedule;
+    if (!schedule) {
+        return 0;
+    }
+    if (!schedule->link_count) {
+        return 0;
+    }
+    struct tm local;
+    if (!schedule_local_time(now, &local)) {
+        return -1;
+    }
+    schedule_link_desires(runtime, schedule, &local, now_ms);
+    schedule_refresh_link_ownership(runtime, schedule);
+    /* Always withdraw routes first. A replacement cannot briefly overlap the permanent peer it
+     * suppresses, which prevents a configuration-driven topology loop during handoff. */
+    for (size_t index = 0; index < schedule->link_count; ++index) {
+        const struct ra_runtime_configured_link *link = &schedule->links[index];
+        const struct ra_runtime_node *node = runtime_node(runtime, link->local);
+        /* Reload reconciliation withdraws retiring routes before publishing this schedule, so an
+         * operator hold suppresses every remaining scheduler-owned route. */
+        if (node->configured_links_paused || link->pending) {
+            continue;
+        }
+        if (link->issued && !link->desired) {
+            reserve_scheduled_link_operation(schedule, index, RA_LINK_DISCONNECT_PERMANENT,
+                                             operation);
+            return 1;
+        }
+    }
+    for (size_t index = 0; index < schedule->link_count; ++index) {
+        const struct ra_runtime_configured_link *link = &schedule->links[index];
+        const struct ra_runtime_node *node = runtime_node(runtime, link->local);
+        if (node->configured_links_paused || link->pending) {
+            continue;
+        }
+        if (!link->issued && link->desired) {
+            reserve_scheduled_link_operation(schedule, index, RA_LINK_PERMANENT_TRANSCEIVE,
+                                             operation);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int ra_runtime_next_scheduled_dispatch(struct ra_runtime *runtime, time_t now,
                                        struct ra_scheduled_dispatch *dispatch) {
-    if (!runtime || !dispatch || now == (time_t)-1) {
+    if (!runtime || !dispatch) {
         return -1;
     }
     *dispatch = (struct ra_scheduled_dispatch){0};
@@ -1939,29 +2823,14 @@ int ra_runtime_next_scheduled_dispatch(struct ra_runtime *runtime, time_t now,
     if (!schedule) {
         return 0;
     }
-    struct timeval when = {.tv_sec = now, .tv_usec = 0};
-    struct ast_tm ast_time = {0};
-    if (!ast_localtime(&when, &ast_time, NULL)) {
+    struct tm local;
+    if (!schedule_local_time(now, &local)) {
         return -1;
     }
-    struct tm local = {.tm_sec = ast_time.tm_sec,
-                       .tm_min = ast_time.tm_min,
-                       .tm_hour = ast_time.tm_hour,
-                       .tm_mday = ast_time.tm_mday,
-                       .tm_mon = ast_time.tm_mon,
-                       .tm_year = ast_time.tm_year,
-                       .tm_wday = ast_time.tm_wday,
-                       .tm_yday = ast_time.tm_yday,
-                       .tm_isdst = ast_time.tm_isdst};
-    /* A ready occurrence retains this civil clock for delayed config-order dispatch. */
-    if (local.tm_wday < 0 || local.tm_wday > 6 || local.tm_year < -1900 || local.tm_year > 8099 ||
-        local.tm_hour < 0 || local.tm_hour >= 24 || local.tm_min < 0 || local.tm_min >= 60 ||
-        local.tm_mon < 0 || local.tm_mon >= 12 || local.tm_mday <= 0 || local.tm_mday > 31) {
-        return -1;
-    }
-    /* The app bridge queues one task for each wall-clock minute in FIFO order.  An older task
-     * observed after a newer task may still drain reserved work, but must not create an
-     * occurrence from the past after the scheduler has advanced. */
+    /* A ready occurrence retains this civil clock for delayed config-order dispatch. The app
+     * bridge queues one task each second in FIFO order; an older task observed after a newer task
+     * may still drain reserved work, but must not create an occurrence from the past after the
+     * scheduler has advanced. */
     if (!schedule->has_last_tick || now >= schedule->last_tick) {
         schedule->last_tick = now;
         schedule->has_last_tick = true;

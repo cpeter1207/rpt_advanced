@@ -36,6 +36,14 @@ struct ra_link_operation {
     char remote[RA_NODE_NAME_MAX]; /**< Decimal destination, resolved from zero shorthand. */
     char digit; /**< Remote-mode digit, or zero when selecting the remote peer. */
 };
+/** @brief One copied configuration-owned permanent-link control transition. */
+struct ra_scheduled_link_operation {
+    uint64_t schedule_generation; /**< Active schedule instance that reserved this transition. */
+    size_t link_index;    /**< Private configured-route slot within that schedule instance. */
+    uint64_t reservation; /**< Nonzero one-use reservation nonce for that route slot. */
+    char local[RA_NODE_NAME_MAX];       /**< Copied configured local node identity. */
+    struct ra_link_operation operation; /**< Attach or detach action and its remote identity. */
+};
 /** @brief Owned call preparation, independent of runtime configuration lifetime. */
 struct ra_link_dial {
     char *destination;              /**< Owned resolved dial string. */
@@ -132,6 +140,39 @@ void ra_runtime_stop(struct ra_runtime *runtime);
 int ra_runtime_next_scheduled_dispatch(struct ra_runtime *runtime, time_t now,
                                        struct ra_scheduled_dispatch *dispatch);
 
+/** @brief Obtain one required configured permanent-link transition.
+ * @param runtime Active runtime whose caller serializes control operations and reload.
+ * @param now Wall-clock instant used with the host local time zone for window membership.
+ * @param now_ms Monotonic timestamp used only to measure a configured post-window quiet period.
+ * @param operation Receives one copied local endpoint and permanent attach or detach request.
+ * @return One when @p operation is ready, zero when configured routes already match policy, or
+ * minus one for invalid arguments or an unavailable local clock.
+ *
+ * A window's replacement route is detached before its named permanent link is restored. The
+ * caller executes the copied operation only after releasing the runtime lock, then settles the
+ * reservation with @ref ra_runtime_complete_scheduled_link_operation(). Local and linked receive
+ * activity is read lock-free from the controller; identifiers, telemetry, and other
+ * transmit-only audio cannot delay restoration.
+ */
+int ra_runtime_next_scheduled_link_operation(struct ra_runtime *runtime, time_t now,
+                                             uint64_t now_ms,
+                                             struct ra_scheduled_link_operation *operation);
+
+/** @brief Settle one copied configured-link transition after its external control work ends.
+ * @param runtime Active runtime whose caller serializes control operations and reload.
+ * @param operation Reservation returned by @ref ra_runtime_next_scheduled_link_operation().
+ * @param accepted True only when the current runtime attached, retained for retry, or withdrew
+ * the requested route.
+ * @return True when a current matching reservation was found and cleared.
+ *
+ * An accepted attachment becomes issued only after the link hub owns it or its retry intent. A
+ * failed operation merely clears the reservation so a later ticker may retry; callers must not
+ * repeatedly retry it in the same control task. A reload discards all reservations, making a
+ * stale copied operation harmless.
+ */
+bool ra_runtime_complete_scheduled_link_operation(
+    struct ra_runtime *runtime, const struct ra_scheduled_link_operation *operation, bool accepted);
+
 /** @brief Queue a copied scheduled message on the selected controller's serialized telemetry path.
  * @param runtime Active runtime whose caller serializes control operations and reload.
  * @param dispatch Dispatch returned by `ra_runtime_next_scheduled_dispatch()`.
@@ -185,10 +226,13 @@ int ra_runtime_accept(struct ra_runtime *runtime, const char *local, const char 
  * @param local Local node name.
  * @param remote Decimal destination node.
  * @param dial Empty destination; owns resources on success.
+ * @param scheduled Nullable current scheduler reservation authorizing this configuration-owned
+ *                  call. A null value selects an administrative call.
  * @return Zero on preparation, minus one on lookup or media failure.
  */
 int ra_runtime_prepare_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                            struct ra_link_dial *dial);
+                            struct ra_link_dial *dial,
+                            const struct ra_scheduled_link_operation *scheduled);
 
 /** @brief Dial without holding the runtime lock, consuming prepared resources.
  * @param dial Prepared call, consumed even on failure.
@@ -205,11 +249,13 @@ struct ast_channel *ra_link_dial_run(struct ra_link_dial *dial, const char *loca
  * @param transmit Enable outbound audio; false selects monitor.
  * @param forward Forward received audio to other peers.
  * @param permanent Redial after an unexpected transport failure.
+ * @param scheduled Nullable current scheduler reservation authorizing this configuration-owned
+ *                  attachment. A null value selects an administrative attachment.
  * @return Zero on attachment, minus one on unknown node or attachment failure.
  */
 int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const char *remote,
-                           struct ast_channel *channel, bool transmit, bool forward,
-                           bool permanent);
+                           struct ast_channel *channel, bool transmit, bool forward, bool permanent,
+                           const struct ra_scheduled_link_operation *scheduled);
 
 /** @brief Retain a permanent link request whose first dial or attachment did not succeed.
  * @param runtime Active runtime; caller serializes with reload and other control commands.
@@ -217,6 +263,8 @@ int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const 
  * @param remote Remote node name.
  * @param transmit Enable outbound audio after recovery.
  * @param forward Forward recovered peer audio to other peers.
+ * @param scheduled Nullable current scheduler reservation authorizing this configuration-owned
+ *                  retry. A null value selects an administrative retry.
  * @return True after the node records automatic retry intent; false for an unknown node, an
  * existing route, unavailable recovery callback, or allocation/manager-start failure.
  *
@@ -224,7 +272,8 @@ int ra_runtime_attach_link(struct ra_runtime *runtime, const char *local, const 
  * transient dial or attachment failure and uses the same hub recovery policy as an ended peer.
  */
 bool ra_runtime_retain_permanent_link(struct ra_runtime *runtime, const char *local,
-                                      const char *remote, bool transmit, bool forward);
+                                      const char *remote, bool transmit, bool forward,
+                                      const struct ra_scheduled_link_operation *scheduled);
 
 /** @brief Disconnect an exact nonpermanent peer from a local node.
  * @param runtime Active runtime; caller serializes with reload and other commands.
@@ -238,10 +287,13 @@ bool ra_runtime_disconnect(struct ra_runtime *runtime, const char *local, const 
  * @param runtime Active runtime; caller serializes with reload and other commands.
  * @param local Local node name.
  * @param remote Remote node name.
+ * @param scheduled Nullable current scheduler reservation authorizing this configuration-owned
+ *                  withdrawal. A null value selects an administrative withdrawal.
  * @return True when an attached peer or pending permanent recovery was removed.
  */
 bool ra_runtime_disconnect_permanent(struct ra_runtime *runtime, const char *local,
-                                     const char *remote);
+                                     const char *remote,
+                                     const struct ra_scheduled_link_operation *scheduled);
 
 /** @brief Disconnect every peer attached to a local node.
  * @param runtime Active runtime.

@@ -73,49 +73,31 @@ the requirement is implemented.
 
 None.
 
-### Persistent, fallback, and scheduled links
+### Fallback links and remaining scheduled-link policy
 
 **Requirements**
 
-- Allow a node to declare permanent direct links that are connected at module
-  startup and reconnected according to the normal reconnect policy.
 - Allow a primary permanent link to name an ordered set of fallback links. A
   fallback is attempted when the primary link cannot be reconnected.
-- Allow a node to schedule connections to specific links at specified times for
-  scheduled nets. Scheduled connections persist across Asterisk restarts.
+- At a scheduled link-window start, allow configuration to disconnect all links,
+  temporary links only, permanent links only, or no existing links before it
+  connects the scheduled peer.
 
 **Decisions recorded**
 
-- Permanent links are expected to connect automatically at startup.
-- Scheduled links must survive Asterisk restarts.
 - Fallback links are used only when the primary link cannot be reconnected.
-- Schedules use a human-readable local-time format with start and end times,
-  specific calendar dates, and/or days of the week; they do not use cron.
-- A scheduled connection supports either an automatic end-of-window disconnect
-  or a configurable inactivity-based disconnect.
 - When a primary becomes available, disconnect its active fallback before
   reconnecting the primary to avoid network topology loops.
-- `*806` disconnects all permanent links so any permitted peer can be linked
-  manually. `*816` disconnects and then reconnects all permanent links.
-- At a scheduled event start, configuration may choose to disconnect all
-  links, temporary links only, permanent links only, or no existing links
-  before connecting the scheduled peer. Existing topology-loop prevention
-  handles all other overlap cases.
-- Only local-receiver activity or received activity from any linked peer resets
-  an inactivity disconnect timer. Telemetry, identifiers, announcements, and
-  other transmitter-only activity do not.
-- Any number of scheduled events may overlap. Existing topology-loop
-  prevention resolves connection conflicts.
-- For an inactivity-based scheduled connection, the end time ends the schedule
-  but is not a hard disconnect. The connection remains until its configured
-  inactivity period elapses, preventing an active net or post-net conversation
-  from being interrupted.
+- Future permanent-only semantics: `*806` will disconnect only permanent links
+  so any permitted peer can be linked manually, and `*816` will disconnect and
+  then reconnect only permanent links. Current all-link disconnect/reconnect
+  behavior remains documented in the configuration manual.
 
 **Material decisions needed before implementation**
 
 None.
 
-### Scheduled-event warnings
+### Scheduled-link warnings
 
 **Requirements**
 
@@ -157,6 +139,10 @@ None.
 - Make every DTMF command configurable.
 - Provide a REST API that can perform every supported operation and query every
   supported status.
+- Expose code-derived REST API documentation alongside the REST API. The
+  published contract must describe every versioned endpoint, request, response,
+  status code, authentication requirement, and streaming handoff where
+  applicable.
 - Provide a WebSocket streaming API for status changes, including audio-level
   data at a cadence suitable for real-time meter displays.
 - Use the CLI, DTMF, REST, and WebSocket interfaces as the stable control-plane
@@ -201,10 +187,12 @@ None.
   algorithm. The stored format supports migration to stronger algorithms.
 - Only a successful administrative command renews the administrative unlock
   timeout.
-
-**Material decisions needed before implementation**
-
-None.
+- Generate an OpenAPI 3.1 contract at `/api/v1/openapi.json` and provide an
+  interactive Swagger UI at `/api/v1/docs`.
+- The OpenAPI document and documentation UI are available without OIDC
+  authentication, matching read-only status access.
+- Use a maintained Rust code-first OpenAPI generator and schema annotations.
+  Tests fail if any routed REST endpoint lacks a documented operation.
 
 ### Mode- and frequency-agile remote base
 
@@ -320,6 +308,10 @@ None.
 **Decisions recorded**
 
 - DTMF and WebSocket do not provide configuration-management operations.
+- Unknown configuration sections and parameter names are ignored with warnings.
+  Unknown, malformed, or unsupported values are warnings that resolve through
+  inheritance and a documented sensible default. Warnings do not prevent a
+  configuration reload.
 
 **Material decisions needed before implementation**
 
@@ -395,6 +387,144 @@ None.
   behavior.
 - Whether and when to begin a native lock-free IAX2 replacement; it is an
   architectural direction, not an active implementation requirement.
+
+### Shared radio core and direct PortAudio adapter
+
+**Requirements**
+
+- Move code common to the USBRadioPlus legacy and modern implementations into
+  a dynamically linked shared object named `librptadvradio`.
+- `librptadvradio` must not depend on OSS or PortAudio. The ASL legacy and
+  modern channel adapters retain those audio-I/O dependencies.
+- Link `app_rpt_advanced` with `librptadvradio` and `libportaudio2`.
+- Add one focused source part that connects a CM119 through PortAudio's ALSA
+  backend using PortAudio's minimum recommended latency.
+- The PortAudio callback calls only the `librptadvradio` native tick. It must
+  perform no other controller, configuration, or blocking work.
+- Keep this boundary suitable for the eventual standalone application without
+  introducing standalone-only features in this work.
+
+**Decisions recorded**
+
+- The shared object is the home for code common to the USBRadioPlus legacy and
+  modern implementations.
+- `librptadvradio` is a separately versioned repository and Debian package,
+  with a published ABI consumed by USBRadioPlus and `app_rpt_advanced`.
+- OSS and PortAudio remain adapter dependencies rather than
+  `librptadvradio` dependencies.
+- Adapters own direct CM119 mixer, GPIO/PTT/COR, EEPROM, and device-selection
+  I/O. `librptadvradio` receives those services through a platform-neutral
+  callback contract.
+- `app_rpt_advanced` directly links both `librptadvradio` and `libportaudio2`.
+- The direct PortAudio/ALSA CM119 adapter coexists as a selectable per-node
+  path with the Asterisk adapters. Configuration rejects concurrent ownership
+  of one device.
+- Each configured radio owns one full-duplex PortAudio stream at its detected
+  native rate.
+- Its CM119 PortAudio source part uses ALSA with the device's
+  `defaultLowInputLatency` and `defaultLowOutputLatency` values.
+- The real-time callback delegates exclusively to the shared library's native
+  tick.
+
+### Independently versioned radio components
+
+**Requirements**
+
+- Split discrete `librptadvradio` functional components into independently
+  versioned shared objects, each maintained in its own repository and released
+  like `rate_adjusting_pcm_ring`.
+- Candidate component boundaries include squelch, CTCSS detection and
+  generation, DCS detection and generation, parallel-port and GPIO control,
+  and audio-device control.
+- Keep a component that is already working correctly isolated from unrelated
+  fixes or features in another radio function.
+- Retain `librptadvradio` as the radio-core integration layer; it consumes the
+  component shared objects rather than duplicating their implementations.
+
+**Decisions recorded**
+
+- Each extracted functional component has its own source repository, versioned
+  shared-library ABI, and release process.
+- Every extracted shared library—including `rate_adjusting_pcm_ring` and all
+  future separations—ships as a separate Debian runtime package and
+  development package with a normal SONAME compatibility policy. Consumers
+  declare a minimum compatible ABI rather than pinning an exact build.
+- The component split is intended to constrain change scope and regression
+  risk; it does not add features or alter radio behavior.
+- The established rule remains in force: OSS and PortAudio stay outside
+  `librptadvradio` and its portable signal-processing components.
+- CTCSS detection and generation form one independently versioned CTCSS
+  component; DCS detection and generation form one independently versioned
+  DCS component.
+- Audio-device control is a platform-neutral control contract. PortAudio and
+  OSS remain adapter dependencies.
+- GPIO and parallel-port components implement signaling semantics with
+  adapter-supplied pin I/O, rather than direct Linux device access.
+- Extraction order is squelch, CTCSS, DCS, then GPIO/parallel-port control.
+  Audio-device control remains deferred until its boundary is defined.
+
+### Independently versioned controller components
+
+**Requirements**
+
+- Split discrete `app_rpt_advanced` functional components into independently
+  versioned shared objects, each maintained in its own repository and released
+  under the established shared-library policy.
+- Candidate component boundaries include scheduling, Morse generation, general
+  tone generation, DTMF decoding and generation, and message templating.
+- Keep controller integration and node-specific policy in `app_rpt_advanced`;
+  extracted components provide focused, reusable behavior without duplicating
+  controller state.
+- Preserve behavior while extracting components. The purpose is to isolate
+  stable functions from unrelated feature and defect work.
+- Existing lock-free audio-operation and reload requirements apply to every
+  extracted component used from a real-time audio path.
+
+**Decisions recorded**
+
+- The repository, ABI, SONAME, Debian runtime/development-package, and
+  compatible-minimum dependency rules for extracted radio components apply to
+  every extracted controller component as well.
+- Morse uses the generic tone-generator component for waveform production; the
+  Morse component owns timing and character encoding.
+- DTMF detection and generation share one DTMF component because they use the
+  same digit, timing, and level definitions.
+- The scheduler component provides generic recurrence and due-event
+  calculation only. `app_rpt_advanced` retains link, announcement, warning,
+  and macro policy.
+- Message templating parses and expands a supplied key/value context only.
+  `app_rpt_advanced` defines available substitutions and access-sensitive
+  values.
+- Extraction order is tone generation, Morse, DTMF, message templating, then
+  scheduling.
+
+### Rust-owned implementation migration
+
+**Requirements**
+
+- Migrate all substantive owned implementation in USBRadioPlus,
+  `rate_adjusting_pcm_ring`, `librptadvradio`, rpt_advanced, and future
+  extracted components to Rust.
+- Preserve stable C ABI entry points and shared-library SONAME compatibility
+  where existing adapters or released packages consume them.
+- Use Rust FFI for external C APIs, including Asterisk, PortAudio, ALSA,
+  FFmpeg, and Hamlib.
+- Do not retain duplicate C implementations of controller, radio, audio, or
+  policy logic after a component is migrated.
+
+**Decisions recorded**
+
+- A tiny C Asterisk loader shim is permitted only when needed for
+  macro-generated module metadata or loader ABI. It forwards to Rust and
+  contains no substantive application logic.
+- Standalone binaries have no project C implementation or Asterisk shim.
+- Rust audio ticks preserve the lock-free real-time restrictions and never
+  allow a panic to cross an FFI boundary.
+- Rust formatting, Clippy, Rustdoc, coverage, and the existing native Debian
+  matrix become part of the component quality gate during migration.
+- Every external/system dependency and separately released project component
+  is dynamically linked and packaged. Rust implementation crates may compile
+  into their owning Rust shared object or executable.
 
 ### Standalone lock-free controller
 

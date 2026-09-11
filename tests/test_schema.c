@@ -185,7 +185,15 @@ static void sections_invalid(void) {
                    "event",
                    "event usb",
                    "event usb ",
-                   "event usb morning extra"};
+                   "event usb morning extra",
+                   "permanent",
+                   "permanent usb",
+                   "permanent usb ",
+                   "permanent usb primary extra",
+                   "schedule",
+                   "schedule usb",
+                   "schedule usb ",
+                   "schedule usb weekday extra"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
         struct ra_document document = {.sections = &bad[i], .section_count = 1};
         const char *section;
@@ -193,12 +201,20 @@ static void sections_invalid(void) {
         assert(!strcmp(ra_document_validate(&document, &section, &key), "invalid section name"));
         assert(section == bad[i] && !key);
     }
-    char *unknown[] = {"identifier missing",   "identifier missing welcome",
-                       "announcement missing", "announcement missing release",
-                       "courtesy missing",     "courtesy missing receiver",
-                       "morse missing",        "speech missing",
-                       "time missing",         "template missing welcome",
-                       "macro missing clear",  "event missing morning"};
+    char *unknown[] = {"identifier missing",
+                       "identifier missing welcome",
+                       "announcement missing",
+                       "announcement missing release",
+                       "courtesy missing",
+                       "courtesy missing receiver",
+                       "morse missing",
+                       "speech missing",
+                       "time missing",
+                       "template missing welcome",
+                       "macro missing clear",
+                       "event missing morning",
+                       "permanent missing primary",
+                       "schedule missing weekday"};
     for (size_t i = 0; i < sizeof(unknown) / sizeof(unknown[0]); ++i) {
         struct ra_document document = {.sections = &unknown[i], .section_count = 1};
         const char *section;
@@ -526,6 +542,164 @@ static void scheduler_definitions(void) {
     assert(!strcmp(section, "template same") && !key);
 }
 
+/** @brief Validate persistent direct-link declarations and their replacement windows. */
+static void configured_links(void) {
+    const char *section;
+    const char *key;
+    char *sections[] = {"524950", "permanent 524950 primary", "schedule 524950 weekday"};
+    struct ra_config_entry entries[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "days", "Monday-Friday"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+        {"schedule 524950 weekday", "end_inactivity_ms", "300000"},
+    };
+    struct ra_document document = {entries, sizeof(entries) / sizeof(entries[0]), sections,
+                                   sizeof(sections) / sizeof(sections[0])};
+    assert(!ra_document_validate(&document, &section, &key) && !section && !key);
+    const char *node;
+    assert(!strcmp(ra_document_permanent(&document, 0, &node), "permanent 524950 primary") &&
+           !strcmp(node, "524950"));
+    assert(!ra_document_permanent(&document, 1, &node) && !node);
+    assert(!strcmp(ra_document_schedule(&document, 0, &node), "schedule 524950 weekday") &&
+           !strcmp(node, "524950"));
+    assert(!ra_document_schedule(&document, 1, NULL));
+
+    char *missing_remote_sections[] = {"524950", "permanent 524950 primary"};
+    document = (struct ra_document){.sections = missing_remote_sections,
+                                    .section_count = sizeof(missing_remote_sections) /
+                                                     sizeof(missing_remote_sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "permanent remote node is required"));
+    assert(!strcmp(section, "permanent 524950 primary") && !key);
+
+    struct ra_config_entry missing_replacement[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    document = (struct ra_document){missing_replacement,
+                                    sizeof(missing_replacement) / sizeof(missing_replacement[0]),
+                                    sections, sizeof(sections) / sizeof(sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "schedule remote node, replacement, start time, and end time are required"));
+    assert(!strcmp(section, "schedule 524950 weekday") && !key);
+
+    struct ra_config_entry unknown_replacement[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "missing"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    document = (struct ra_document){unknown_replacement,
+                                    sizeof(unknown_replacement) / sizeof(unknown_replacement[0]),
+                                    sections, sizeof(sections) / sizeof(sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "schedule references an unknown permanent link"));
+    assert(!strcmp(section, "schedule 524950 weekday") && !strcmp(key, "replace_permanent"));
+
+    struct ra_config_entry same_remote[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "506315"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    document = (struct ra_document){same_remote, sizeof(same_remote) / sizeof(same_remote[0]),
+                                    sections, sizeof(sections) / sizeof(sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "schedule replacement must select another node"));
+    assert(!strcmp(section, "schedule 524950 weekday") && !strcmp(key, "remote_node"));
+
+    struct ra_config_entry scheduled_self_link[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "524950"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    document = (struct ra_document){scheduled_self_link,
+                                    sizeof(scheduled_self_link) / sizeof(scheduled_self_link[0]),
+                                    sections, sizeof(sections) / sizeof(sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "configured link cannot target its local node"));
+    assert(!strcmp(section, "schedule 524950 weekday") && !strcmp(key, "remote_node"));
+
+    struct ra_config_entry self_link[] = {{"permanent 524950 primary", "remote_node", "524950"}};
+    document = (struct ra_document){
+        self_link, sizeof(self_link) / sizeof(self_link[0]), missing_remote_sections,
+        sizeof(missing_remote_sections) / sizeof(missing_remote_sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "configured link cannot target its local node"));
+    assert(!strcmp(section, "permanent 524950 primary") && !strcmp(key, "remote_node"));
+
+    char *duplicate_sections[] = {"524950", "permanent 524950 primary", "permanent 524950 backup"};
+    struct ra_config_entry duplicate_entries[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"permanent 524950 backup", "remote_node", "506315"},
+    };
+    document = (struct ra_document){
+        duplicate_entries, sizeof(duplicate_entries) / sizeof(duplicate_entries[0]),
+        duplicate_sections, sizeof(duplicate_sections) / sizeof(duplicate_sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "duplicate configured link remote node"));
+    assert(!strcmp(section, "permanent 524950 backup") && !strcmp(key, "remote_node"));
+
+    char *scheduled_permanent_duplicate_sections[] = {
+        "524950", "permanent 524950 primary", "permanent 524950 backup", "schedule 524950 weekday"};
+    struct ra_config_entry scheduled_permanent_duplicate[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"permanent 524950 backup", "remote_node", "2627"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+    };
+    document = (struct ra_document){scheduled_permanent_duplicate,
+                                    sizeof(scheduled_permanent_duplicate) /
+                                        sizeof(scheduled_permanent_duplicate[0]),
+                                    scheduled_permanent_duplicate_sections,
+                                    sizeof(scheduled_permanent_duplicate_sections) /
+                                        sizeof(scheduled_permanent_duplicate_sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "duplicate configured link remote node"));
+    assert(!strcmp(section, "schedule 524950 weekday") && !strcmp(key, "remote_node"));
+
+    char *duplicate_schedule_sections[] = {"524950", "permanent 524950 primary",
+                                           "schedule 524950 weekday", "schedule 524950 weekend"};
+    struct ra_config_entry duplicate_schedule_entries[] = {
+        {"permanent 524950 primary", "remote_node", "506315"},
+        {"schedule 524950 weekday", "remote_node", "2627"},
+        {"schedule 524950 weekday", "replace_permanent", "primary"},
+        {"schedule 524950 weekday", "start_time", "11:00"},
+        {"schedule 524950 weekday", "end_time", "12:00"},
+        {"schedule 524950 weekend", "remote_node", "2627"},
+        {"schedule 524950 weekend", "replace_permanent", "primary"},
+        {"schedule 524950 weekend", "start_time", "13:00"},
+        {"schedule 524950 weekend", "end_time", "14:00"},
+    };
+    document = (struct ra_document){
+        duplicate_schedule_entries,
+        sizeof(duplicate_schedule_entries) / sizeof(duplicate_schedule_entries[0]),
+        duplicate_schedule_sections,
+        sizeof(duplicate_schedule_sections) / sizeof(duplicate_schedule_sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key),
+                   "duplicate configured link remote node"));
+    assert(!strcmp(section, "schedule 524950 weekend") && !strcmp(key, "remote_node"));
+
+    char *duplicate_header_sections[] = {"524950", "permanent 524950 primary",
+                                         "permanent 524950 primary"};
+    document = (struct ra_document){
+        entries, sizeof(entries) / sizeof(entries[0]), duplicate_header_sections,
+        sizeof(duplicate_header_sections) / sizeof(duplicate_header_sections[0])};
+    assert(!strcmp(ra_document_validate(&document, &section, &key), "duplicate named definition"));
+    assert(!strcmp(section, "permanent 524950 primary") && !key);
+}
+
 /** @brief Execute all schema and enumeration tests.
  * @return Zero after all assertions pass.
  */
@@ -535,6 +709,7 @@ int main(void) {
     options_invalid();
     courtesy_assignments();
     scheduler_definitions();
+    configured_links();
     puts("whole-document schema and enumeration tests passed");
     return 0;
 }

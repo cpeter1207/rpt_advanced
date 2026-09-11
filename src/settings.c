@@ -244,7 +244,7 @@ static const struct field courtesy_media_fields[] = {
     {"level_db", FIELD_SIGNED, offsetof(struct ra_courtesy_settings, level_db), 60, 0},
 };
 
-/** @brief A named courtesy tone adds one input assignment and optional permanent peer. */
+/** @brief A named courtesy tone adds one input assignment and optional exact direct peer. */
 static const struct field courtesy_set_fields[] = {
     {"sound_file", FIELD_STRING,
      offsetof(struct ra_courtesy_settings, media) + offsetof(struct ra_identifier_settings, file),
@@ -317,6 +317,24 @@ static const struct field event_fields[] = {
     {"template", FIELD_STRING, offsetof(struct ra_event_settings, template_name), 0, 0},
     {"message", FIELD_STRING, offsetof(struct ra_event_settings, message), 0, 0},
     {"macro", FIELD_STRING, offsetof(struct ra_event_settings, macro_name), 0, 0},
+};
+
+/** @brief Configured permanent links retain normal direct-peer recovery after transient loss. */
+static const struct field permanent_link_fields[] = {
+    {"remote_node", FIELD_NODE_ID, offsetof(struct ra_permanent_link_settings, remote_node), 0, 0},
+};
+
+/** @brief Same-day local-time windows temporarily replace one configured permanent link. */
+static const struct field link_schedule_fields[] = {
+    {"remote_node", FIELD_NODE_ID, offsetof(struct ra_link_schedule_settings, remote_node), 0, 0},
+    {"replace_permanent", FIELD_STRING,
+     offsetof(struct ra_link_schedule_settings, replace_permanent), 0, 0},
+    {"days", FIELD_STRING, offsetof(struct ra_link_schedule_settings, days), 0, 0},
+    {"dates", FIELD_STRING, offsetof(struct ra_link_schedule_settings, dates), 0, 0},
+    {"start_time", FIELD_STRING, offsetof(struct ra_link_schedule_settings, start_time), 0, 0},
+    {"end_time", FIELD_STRING, offsetof(struct ra_link_schedule_settings, end_time), 0, 0},
+    {"end_inactivity_ms", FIELD_NUMBER,
+     offsetof(struct ra_link_schedule_settings, end_inactivity_ms), 0, UINT64_MAX},
 };
 
 /** @brief Return the common file, speech, and Morse defaults used by scheduled media.
@@ -438,6 +456,12 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
     } else if (kind == RA_SETTINGS_EVENT) {
         fields = event_fields;
         count = sizeof(event_fields) / sizeof(event_fields[0]);
+    } else if (kind == RA_SETTINGS_PERMANENT) {
+        fields = permanent_link_fields;
+        count = sizeof(permanent_link_fields) / sizeof(permanent_link_fields[0]);
+    } else if (kind == RA_SETTINGS_SCHEDULE) {
+        fields = link_schedule_fields;
+        count = sizeof(link_schedule_fields) / sizeof(link_schedule_fields[0]);
     }
     struct ra_node_settings node;
     struct ra_identifier_settings id;
@@ -447,6 +471,8 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
     struct ra_template_settings template_settings;
     struct ra_macro_settings macro;
     struct ra_event_settings event;
+    struct ra_permanent_link_settings permanent_link;
+    struct ra_link_schedule_settings link_schedule;
     if (kind == RA_SETTINGS_COURTESY) {
         fields = courtesy_media_fields;
         count = sizeof(courtesy_media_fields) / sizeof(courtesy_media_fields[0]);
@@ -459,6 +485,8 @@ const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *ke
                         : kind == RA_SETTINGS_TEMPLATE     ? (void *)&template_settings
                         : kind == RA_SETTINGS_MACRO        ? (void *)&macro
                         : kind == RA_SETTINGS_EVENT        ? (void *)&event
+                        : kind == RA_SETTINGS_PERMANENT    ? (void *)&permanent_link
+                        : kind == RA_SETTINGS_SCHEDULE     ? (void *)&link_schedule
                         : kind == RA_SETTINGS_ANNOUNCEMENT ? (void *)&announcement
                         : kind == RA_SETTINGS_COURTESY || kind == RA_SETTINGS_COURTESY_SET
                             ? (void *)&courtesy
@@ -826,6 +854,64 @@ const char *ra_event_settings_resolve(const struct ra_config_entry *entries, siz
     }
     if (!*temporary.template_name && !*temporary.message && !*temporary.macro_name) {
         return "event message, template, or macro is required";
+    }
+    *result = temporary;
+    return NULL;
+}
+
+const char *ra_permanent_link_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                               const char *set,
+                                               struct ra_permanent_link_settings *result) {
+    const char *name = named_label(set, "permanent");
+    if (!name) {
+        return "invalid named section";
+    }
+    struct ra_permanent_link_settings temporary = {.name = name, .remote_node = ""};
+    const char *scopes[] = {NULL, NULL, set};
+    const char *error = resolve(permanent_link_fields,
+                                sizeof(permanent_link_fields) / sizeof(permanent_link_fields[0]),
+                                entries, count, scopes, &temporary);
+    if (error) {
+        return error;
+    }
+    if (!*temporary.remote_node) {
+        return "permanent remote node is required";
+    }
+    *result = temporary;
+    return NULL;
+}
+
+const char *ra_link_schedule_settings_resolve(const struct ra_config_entry *entries, size_t count,
+                                              const char *set,
+                                              struct ra_link_schedule_settings *result) {
+    const char *name = named_label(set, "schedule");
+    if (!name) {
+        return "invalid named section";
+    }
+    struct ra_link_schedule_settings temporary = {
+        .name = name,
+        .remote_node = "",
+        .replace_permanent = "",
+        .days = "",
+        .dates = "",
+        .start_time = "",
+        .end_time = "",
+        .end_inactivity_ms = 0,
+    };
+    const char *scopes[] = {NULL, NULL, set};
+    const char *error = resolve(link_schedule_fields,
+                                sizeof(link_schedule_fields) / sizeof(link_schedule_fields[0]),
+                                entries, count, scopes, &temporary);
+    if (error) {
+        return error;
+    }
+    if (!*temporary.remote_node || !*temporary.replace_permanent || !*temporary.start_time ||
+        !*temporary.end_time) {
+        return "schedule remote node, replacement, start time, and end time are required";
+    }
+    if (!ra_scheduled_window_parse(temporary.days, temporary.dates, temporary.start_time,
+                                   temporary.end_time, &temporary.window)) {
+        return "invalid schedule window";
     }
     *result = temporary;
     return NULL;

@@ -5,6 +5,7 @@
 #ifndef RPT_ADVANCED_LINK_HUB_H
 #define RPT_ADVANCED_LINK_HUB_H
 #include "controller.h"
+#include "link_peer.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -13,9 +14,6 @@
 struct ast_channel;
 struct ast_format;
 struct ra_link_port;
-
-/** @brief Maximum direct-peer identity length including the terminating null byte. */
-#define RA_LINK_PEER_NAME_MAX 64
 
 /** @brief One caller-owned snapshot of an attached or retained direct peer's routing state. */
 struct ra_link_peer_status {
@@ -68,6 +66,15 @@ typedef void (*ra_link_hub_digit_fn)(void *context, const char *remote, char dig
  */
 typedef void (*ra_link_hub_event_fn)(void *context, const char *remote, bool connected);
 
+/** @brief Test whether a pending attachment remains authorized at final publication.
+ * @param context Caller-owned state valid for the duration of one attach call.
+ * @return True only when the peer may be published.
+ *
+ * The hub invokes this only while its control-plane routing lock is held. Implementations must
+ * not block or reenter hub APIs. It is never called from the audio callback.
+ */
+typedef bool (*ra_link_hub_attach_gate_fn)(void *context);
+
 /** @brief Opaque retained-link recovery record owned by a routing hub. */
 struct ra_link_retry;
 /** @brief Node-owned routing state initialized with ra_link_hub_init(). */
@@ -93,6 +100,9 @@ struct ra_link_hub {
     atomic_uint topology_generation; /**< Control-plane topology changes pending advertisement. */
     atomic_uint last_keyed_sequence; /**< Lock-free coherent-copy generation for last_keyed. */
     atomic_uchar last_keyed[RA_LINK_PEER_NAME_MAX]; /**< Last direct peer to become active. */
+    atomic_bool key_query_local_receiving; /**< Local receiver state used for legacy `K` replies. */
+    atomic_uint_fast64_t
+        key_query_local_transition_ms; /**< Local receiver's most recent key or unkey time. */
 };
 
 /** @brief Initialize an unused routing hub before its first API call. */
@@ -111,6 +121,30 @@ void ra_link_hub_init(struct ra_link_hub *hub);
  */
 int ra_link_hub_attach(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
                        struct ast_format *linear, bool transmit, bool forward, bool permanent);
+
+/** @brief Attach a peer while honoring a retained-retry cancellation gate.
+ * @param hub Node-owned hub.
+ * @param name Verified remote node name.
+ * @param channel Answered channel, ownership transfers on success only.
+ * @param linear Cached local radio PCM format.
+ * @param transmit Send audio to this peer; false selects monitor mode.
+ * @param forward Forward received audio to other peers; false selects local-monitor mode.
+ * @param permanent Redial after an unexpected transport failure.
+ * @param cancelled Optional retry flag set by explicit permanent disconnection.
+ * @param paused Optional retry flag set by disconnect-all.
+ * @param current Optional final publication-policy callback.
+ * @param context Caller-owned context for @p current.
+ * @return Zero on success, minus one when a supplied gate rejects or on any ordinary attach
+ * failure.
+ *
+ * The final gate test occurs while the routing lock is held immediately before publication. That
+ * makes a concurrent cancellation linearize either before publication, where this call rejects
+ * the port, or after publication, where the disconnect removes it before returning.
+ */
+int ra_link_hub_attach_gated(struct ra_link_hub *hub, const char *name, struct ast_channel *channel,
+                             struct ast_format *linear, bool transmit, bool forward, bool permanent,
+                             const atomic_bool *cancelled, const atomic_bool *paused,
+                             ra_link_hub_attach_gate_fn current, void *context);
 
 /** @brief Set the callback used to restore retained peers after recovery events.
  * @param hub Node-owned hub.
@@ -208,12 +242,33 @@ size_t ra_link_hub_reconnect_all(struct ra_link_hub *hub);
  */
 bool ra_link_hub_has_retained_state(struct ra_link_hub *hub);
 
+/** @brief Test whether an exact permanent peer or automatic retry remains owned by the hub.
+ * @param hub Node-owned routing hub.
+ * @param name Exact remote node identity.
+ * @return True when a live permanent port or an uncancelled automatic retry owns @p name.
+ *
+ * Unlike topology reachability, this is an exact direct-route ownership query. The scheduler uses
+ * it to recover a configuration-owned route if a transport loss cannot allocate its retry record.
+ */
+bool ra_link_hub_has_permanent_route(const struct ra_link_hub *hub, const char *name);
+
 /** @brief Check whether a remote node is already directly or transitively reachable.
  * @param hub Node-owned routing hub.
  * @param name Exact remote node identity.
  * @return True when an attached peer, retained retry, or validated topology names it.
  */
 bool ra_link_hub_reaches(const struct ra_link_hub *hub, const char *name);
+
+/** @brief Check whether a remote is reachable through live peers or an active recovery request.
+ * @param hub Node-owned routing hub.
+ * @param name Exact remote node identity.
+ * @return True when an attached peer, its validated topology, or an unpaused retry names it.
+ *
+ * This deliberately ignores retries paused by disconnect-all. It lets an operator choose a new
+ * manual route while `*806` holds configured reconnection, without weakening loop prevention for
+ * live peers or recovery work that is still eligible to reconnect.
+ */
+bool ra_link_hub_reaches_live(const struct ra_link_hub *hub, const char *name);
 
 /** @brief Copy attached and retained peer identities and routing modes for a control-plane report.
  * @param hub Node-owned routing hub.

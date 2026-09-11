@@ -36,8 +36,10 @@ values.
 Named templates and macros use `[template label]` and `[macro label]` globally;
 `[template node label]` and `[macro node label]` override same-label global
 settings for that node. Zero-time events are node-scoped: `[event node label]`.
-Template, macro, and event labels are case-sensitive single tokens and cannot
-contain whitespace or square brackets.
+Configuration-owned permanent links and replacement windows are also
+node-scoped: `[permanent node label]` and `[schedule node label]`.
+Template, macro, event, permanent-link, and schedule labels are case-sensitive
+single tokens and cannot contain whitespace or square brackets.
 
 Node names are case-sensitive, limited to 63 bytes, and cannot contain whitespace or square
 brackets. Media-set names are case-sensitive and cannot contain whitespace or square brackets.
@@ -45,14 +47,15 @@ The same 63-byte limit applies to decimal remote-node identities, so configured 
 the direct-peer and scheduler transports without truncation. Scoped headers use
 one space between components. `general`,
 `identifier`, `announcement`, `courtesy`, `speech`, `morse`, `time`, `template`,
-`macro`, and `event` are reserved section names. Scoped identifier, announcement,
-courtesy, speech, Morse, time, template, macro, and event headers must name an existing
-node where their syntax includes a node name, which may be declared later in the file.
+`macro`, `event`, `permanent`, and `schedule` are reserved section names. Scoped identifier,
+announcement, courtesy, speech, Morse, time, template, macro, event, permanent, and schedule
+headers must name an existing node where their syntax includes a node name, which may be
+declared later in the file.
 Repeated ordinary section headers merge options without creating duplicate nodes or media
-sets. A repeated named template, macro, or event header is instead rejected as a duplicate
-definition. Unknown options and invalid values are rejected even if a later entry would
-override them. There is no fixed limit on the number of nodes, identifiers, announcements,
-courtesy tones, templates, macros, or events.
+sets. A repeated named template, macro, event, permanent-link, or schedule header is instead
+rejected as a duplicate definition. Unknown options and invalid values are rejected even if a
+later entry would override them. There is no fixed limit on the number of nodes, identifiers,
+announcements, courtesy tones, templates, macros, events, permanent links, or schedules.
 
 ## Node settings
 
@@ -62,7 +65,7 @@ courtesy tones, templates, macros, or events.
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `dtmf_muting` | yes | Silence a local received PCM frame when an in-band DTMF digit completes decoding, before it reaches the local controller or link router. DTMF command decoding remains active when disabled. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
-| `transmit_timeout_ms` | 180000 | Maximum continuous PTT duration in milliseconds. Zero disables the watchdog. On expiry, PTT releases immediately and remains blocked until the active receiver/link source clears and `timeout_lockout_ms` has elapsed. |
+| `transmit_timeout_ms` | 180000 | Maximum keyed interval in milliseconds without an individual local-receiver or direct-link unkey. Each such unkey restarts the watchdog even if hang time or another source keeps PTT asserted. Zero disables it. A source that never unkeys expires; on expiry, PTT releases immediately and remains blocked until the active receiver/link source clears and `timeout_lockout_ms` has elapsed. |
 | `timeout_lockout_ms` | 30000 | Post-watchdog lockout in milliseconds. Zero permits recovery as soon as the timed-out source unkeys. |
 | `kerchunk_max_ms` | 500 | Maximum local-receiver or individual-link transmission duration treated as a kerchunk. A kerchunk does not queue its courtesy tone or every-release announcement. Zero disables kerchunk control. |
 | `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, Morse, and generated-tone identifiers, announcements, courtesy tones, and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
@@ -136,13 +139,35 @@ tone_sequence = 800Hz / 80ms
 
 There may be one named `input = receiver` tone and one generic
 `input = link` tone per local node. The generic link tone has no
-`remote_node` and is the fallback for every direct linked peer that has no
-playable matching override. A named `input = link` tone may set `remote_node` to the
-exact decimal identity of a **permanent direct peer**. It then overrides the
-generic link tone only for that peer. A temporary peer never uses a
-permanent-peer override. An override without playable media therefore falls
-back to the generic link tone. `remote_node` is invalid for receiver input. If
-no assignment matches a receiver or link source, the result is silence.
+`remote_node` and is the fallback for every linked transmission that has no
+playable matching override. A named `input = link` tone may set `remote_node` to
+the exact decimal identity of a direct linked peer. It overrides the generic
+link tone for that peer whether the link is permanent or temporary. While a
+direct peer remains receive-active, rpt_advanced sends the canonical
+legacy-compatible `K? * requester 0 0` keyed-source query at the receive edge
+and then once per second. rpt_advanced peers strictly parse canonical `K?` and
+`K` text in their reader/control plane. They queue their own key-state reply to
+the ingress peer, forward a query only to other direct peers, and relay a valid
+reply toward its named requester without returning it to the ingress peer. A
+direct peer's own reply is not downstream evidence; the direct peer remains the
+fallback. The first valid keyed downstream `K` reply delivered for each
+successfully sent query can select that downstream node's `remote_node`
+override. During a double, reader arrival order selects the first responder.
+Across periodic queries, the latest accepted first response is retained until
+the direct peer unkeys. A missing, malformed, unsupported, nonforwarding, or
+failed later query does not erase an already accepted result from that receive
+epoch. This provides a useful best-effort choice without waiting for or
+delaying the courtesy tone. `K` replies have no query serial, so a delayed valid
+reply may be attributed to a newer query and remains advisory evidence only.
+The receive falling edge cancels any unsent locally originated query and
+rejects a late reply before courtesy selection. If no downstream result is
+accepted during the receive epoch, selection falls back to the direct peer and
+then the generic link tone. `L ` topology advertisements never select a
+courtesy override. An override without playable media falls back to the generic
+link tone. Keyed-source replies do not prove the origin of individual PCM
+frames.
+`remote_node` is invalid for receiver input. If no assignment matches a
+receiver or link source, the result is silence.
 
 When a source rekeys before its courtesy delay expires, only that source's
 pending courtesy tone is cancelled: a local-receiver rekey does not cancel a
@@ -153,7 +178,7 @@ telemetry ducking behavior.
 | Option | Applies to | Default | Meaning |
 | --- | --- | --- | --- |
 | `input` | Named tone | required | Source assignment: `receiver` or `link`. |
-| `remote_node` | Named link tone | empty | Exact permanent direct-peer node identity for an override. Omit it for the generic link fallback. |
+| `remote_node` | Named link tone | empty | Exact direct-peer identity, or the latest accepted first valid keyed downstream identity from the periodic canonical `K?`/`K` exchange, for an override. The direct peer's own reply is ignored; reader arrival order selects the first responder during a double. This advisory result does not prove the origin of individual PCM frames. Omit it for the generic link fallback. |
 | `sound_file` | Defaults and named tone | empty | Courtesy sound-file path. An absent or unusable file falls through to speech. |
 | `speech_text` | Defaults and named tone | empty | Courtesy speech text. Empty or unavailable speech falls through to the tone sequence. |
 | `tone_sequence` | Defaults and named tone | empty | Generated-tone sequence used after file and speech fail or are absent. An absent sequence falls through to Morse. |
@@ -227,14 +252,14 @@ three-second interdigit timeout. Prefixes contain up to 63 DTMF digits from
 | `link_command_transceive` | `3` | Connect in transceive mode. |
 | `link_command_remote` | `4` | Enter direct-peer remote-command mode. `#` exits this mode locally. |
 | `link_command_status` | `70` | Report direct-link status. |
-| `link_command_disconnect_all` | `806` | Disconnect all current links and retain them for reconnect-all. |
+| `link_command_disconnect_all` | `806` | Disconnect all current links, retain them for reconnect-all, and hold configuration-owned routes until reconnect-all. Manual direct links remain permitted while the hold is active. |
 | `link_command_last_keyed` | `72` | Report the most recently active direct linked node. |
 | `link_command_local_monitor` | `75` | Connect in local-monitor mode: receive locally without forwarding the peer to other links. |
-| `link_command_disconnect_permanent` | `811` | Disconnect a permanent link and cancel its recovery. |
+| `link_command_disconnect_permanent` | `811` | Disconnect a manually created permanent link and cancel its recovery. A configuration-owned route is restored by its configured policy; use `*806` to hold all configuration-owned routes and `*816` to resume them. |
 | `link_command_permanent_monitor` | `812` | Make a permanent monitor link. |
 | `link_command_permanent_transceive` | `813` | Make a permanent transceive link. |
 | `link_command_full_status` | `73` | Queue direct-link RF status and, when that reply is queued, log the best-effort topology cache. |
-| `link_command_reconnect_all` | `816` | Restore links saved by disconnect-all. |
+| `link_command_reconnect_all` | `816` | Re-evaluate the current local-time configured-link policy, then restore links saved by disconnect-all. An active replacement window remains selected; its suppressed permanent peer is withdrawn before retries resume. |
 | `link_command_permanent_local_monitor` | `818` | Make a permanent local-monitor link. |
 
 Destination-taking operations accept node number `0` as the last node used by a
@@ -365,28 +390,122 @@ macro = clear_links
 | `once YYYY-MM-DD HH:MM` | Run once on one valid local Gregorian calendar date and time. |
 
 Seconds, time zones, ranges, aliases, and cron expressions are intentionally
-invalid. A repeated local minute during daylight-saving fallback runs once, not
-twice. Events due in the same minute run in complete configuration-section
-order across all nodes. The scheduler retains one FIFO control task for each
-wall-clock minute it observes, so slow speech preparation or a link action
-cannot discard events due in a later minute. Their messages enter the serialized
+invalid. The host local timezone supplies all schedule civil time. A repeated
+local minute during daylight-saving fallback runs once, not twice; a skipped
+spring-forward minute does not run. Events due in the same minute run in
+complete configuration-section order across all nodes. A forward wall-clock
+step skips missed events. After a backward step, events remain suppressed until
+the clock reaches new civil time; no event is caught up or replayed. A `once`
+event is once per running scheduler instance, not once across an Asterisk
+restart.
+
+The scheduler submits one FIFO control task each second; the runtime
+calendar-minute de-duplicates event occurrences while allowing a configured
+link quiet-time deadline to expire promptly. Their messages enter the serialized
 telemetry path. When an event has both a message/template and a macro, the
-message is queued before the macro executes. The macro does not wait for on-air playback: it runs
-after the telemetry queue accepts the message. If that queue is full, both the
-message and macro remain pending until a later control-plane tick can queue the
-message. A macro-only event has no telemetry-queue dependency and runs when it
-is selected. A successful configuration reload reevaluates the current local
-minute. Macro dispatch, local-time matching, template rendering, and speech
-preparation are control-plane work, never audio-callback work.
+message is queued before the macro executes. The macro does not wait for
+on-air playback: it runs after the telemetry queue accepts the message. If that
+queue is full, both the message and macro remain pending until a later
+control-plane tick can queue the message. A macro-only event has no
+telemetry-queue dependency and runs when it is selected. A successful
+configuration reload reevaluates the current local time. It can cancel queued
+or in-progress scheduled telemetry; that telemetry is not replayed. An event
+keeps its completed state across reload when its node, section label, and `at`
+trigger are unchanged, even if its text or macro changes. Renaming the event
+makes it a new eligible event. Macro dispatch, local-time matching, template
+rendering, and speech preparation are control-plane work, never audio-callback
+work.
+
+## Configuration-owned permanent links and replacement windows
+
+`[permanent node label]` declares one configuration-owned transceive direct
+peer. It has no global form and does not inherit options. The configured intent
+is rebuilt at module start and after a successful configuration reload, so it
+is distinct from a link created by DTMF, CLI, or a macro. The peer continues to
+use the normal permanent-link recovery policy while its configuration remains
+active.
+
+| Option | Required | Meaning |
+| --- | --- | --- |
+| `remote_node` | yes | Decimal identity of the permanent direct peer. It must not be the local node or duplicate any configured permanent or schedule route for that node. |
+
+`[schedule node label]` temporarily replaces one same-node configured
+permanent peer with another direct peer during a bounded local-time window. It
+also has no global form or inherited options. `replace_permanent` is the exact
+label from a `[permanent node label]` section for the same local node. The
+replacement `remote_node` must differ from both the local node and the
+permanent peer being replaced.
+
+Declarations whose node is disabled have no running routing effect. They remain
+validated configuration and become active only when that node is enabled on a
+later reload.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `remote_node` | required | Decimal identity of the replacement direct peer. It must differ from the local node, the replaced permanent peer, and every other configured permanent or schedule route for that node. |
+| `replace_permanent` | required | Label of the same-node configured permanent link to suspend while this window is requested. |
+| `days` | empty | Comma-separated full weekday names or inclusive ranges, such as `Monday-Friday` or `Tuesday,Thursday`. Matching is case-insensitive. Empty selects every calendar day unless `dates` is set. |
+| `dates` | empty | Up to 64 comma-separated local Gregorian dates in exact `YYYY-MM-DD` form. It cannot be combined with `days`. |
+| `start_time` | required | Exact 24-hour local `HH:MM` inclusive window start. |
+| `end_time` | required | Exact 24-hour local `HH:MM` exclusive window end, later than `start_time` on the same date. Overnight windows are invalid. The current grammar does not yet accept `24:00`; it is reserved for a future end-only boundary. |
+| `end_inactivity_ms` | `0` | Post-window quiet interval in milliseconds. Zero restores the replaced permanent peer when the window ends. A nonzero value keeps the replacement after observed local-receiver or linked-peer activity until that activity has been quiet for this interval. |
+
+When a window becomes active, rpt_advanced detaches its named permanent peer
+before attaching the replacement. When the window ends, it detaches the
+replacement before restoring the named permanent peer. With nonzero
+`end_inactivity_ms`, the schedule no longer requires the replacement at
+`end_time`, but it remains connected until the quiet interval expires.
+Local-receiver and linked-peer activity can defer only that handoff; IDs,
+telemetry, and other transmit-only activity do not. If no qualifying receive
+activity was observed, the replacement restores at the window end. On a cold
+start during the configured quiet interval immediately after a selected window,
+the replacement is retained for only the interval still remaining; the first
+qualifying receive activity supersedes that estimate. A quiet interval crossing
+midnight after a cold start is currently not reconstructed; it is a documented
+limitation pending the preceding-window calculation selected by ADR 0017.
+
+Current membership is re-evaluated from host local time at startup and on
+successful reload; it follows daylight-saving and manual/NTP clock changes
+without catch-up operations. An unchanged issued route is not redialed solely
+because of reload. `*806` holds automatic configuration attachment and retry
+across reload, although a replacement configuration still withdraws an issued
+route that its policy now suppresses. `*816` re-evaluates current policy before
+any retained retry resumes. ADR 0017 records the required continuous
+route-ownership and final retry-policy gate for future scheduler and hub
+hardening.
+
+Multiple replacement windows are accepted, including windows that overlap.
+They form a union: every matching or deferred replacement is requested and its
+named primary is suppressed. Normal direct-link topology admission is the only
+conflict gate, so do not rely on an overlap to select one replacement route.
+
+```ini
+[permanent 524950 primary]
+remote_node = 506315
+
+[schedule 524950 weekday_net]
+remote_node = 2627
+replace_permanent = primary
+days = Monday-Friday
+start_time = 11:00
+end_time = 12:00
+end_inactivity_ms = 300000
+```
 
 ## Link lifetime, recovery, and duplex
 
-Temporary and permanent links exist only in the running Asterisk process; no
-link is written to configuration, so none survives an Asterisk restart. A
-permanent link whose initial dial or attachment fails, or whose established
-transport fails unexpectedly, retries immediately, then after one second with
-exponential backoff to a five-minute maximum.
-`link_command_disconnect_permanent` cancels its retained retry.
+Direct links created at runtime by DTMF, a CLI operation, or a macro exist only
+in the running Asterisk process. A configuration-owned `[permanent node label]`
+entry instead recreates its desired link from the configuration at module
+startup and after a successful reload; its live transport is still runtime
+state. A permanent link whose initial dial or attachment fails, or whose
+established transport fails unexpectedly, retries immediately, then after one
+second with exponential backoff to a five-minute maximum.
+`link_command_disconnect_permanent` cancels the retained retry of a manually
+created permanent link. Configuration-owned routes remain controlled by their
+current policy and are restored on the next scheduler reconciliation; use
+`link_command_disconnect_all` and `link_command_reconnect_all` to hold and
+resume those routes together.
 `link_command_disconnect_all` disconnects and retains both temporary and
 permanent links for `link_command_reconnect_all`; only permanent links retry
 automatically. Reconnect-all makes retained links eligible to dial again without

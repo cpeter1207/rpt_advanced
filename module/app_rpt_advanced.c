@@ -82,6 +82,7 @@ struct link_event_task {
 struct schedule_tick_task {
     uint64_t revision; /**< Runtime revision current when the ticker submitted this task. */
     time_t now;        /**< Wall clock used to match local civil-time event triggers. */
+    uint64_t now_ms;   /**< Monotonic timestamp used only for scheduled quiet-time expiry. */
 };
 
 /** @brief Keep a failed permanent request eligible for the hub's normal recovery manager.
@@ -89,6 +90,7 @@ struct schedule_tick_task {
  * @param remote Requested remote node name.
  * @param transmit Requested outbound-audio mode.
  * @param forward Requested peer-forwarding mode.
+ * @param scheduled Nullable exact scheduler reservation, or null for a manual request.
  * @param revision Runtime revision that prepared the failed attempt.
  * @return Zero when the current runtime retained the retry intent, minus one otherwise.
  *
@@ -96,13 +98,15 @@ struct schedule_tick_task {
  * stale task from adding retry state to a replacement configuration after its old dial unwinds.
  */
 static int retain_failed_permanent_link(const char *local, const char *remote, bool transmit,
-                                        bool forward, uint64_t revision) {
+                                        bool forward,
+                                        const struct ra_scheduled_link_operation *scheduled,
+                                        uint64_t revision) {
     ast_mutex_lock(&runtime_lock);
-    int result =
-        revision == atomic_load(&runtime_revision) &&
-                ra_runtime_retain_permanent_link(&runtime, local, remote, transmit, forward)
-            ? 0
-            : -1;
+    int result = revision == atomic_load(&runtime_revision) &&
+                         ra_runtime_retain_permanent_link(&runtime, local, remote, transmit,
+                                                          forward, scheduled)
+                     ? 0
+                     : -1;
     ast_mutex_unlock(&runtime_lock);
     return result;
 }
@@ -113,36 +117,41 @@ static int retain_failed_permanent_link(const char *local, const char *remote, b
  * @param transmit Send program audio to the peer.
  * @param forward Relay peer audio to other links.
  * @param permanent Reconnect automatically after an unexpected transport failure.
+ * @param scheduled Nullable exact scheduler reservation, or null for a manual request.
  * @param expected Required runtime revision, or zero for a fresh administrative command.
  * @return Zero on connection or retained permanent-retry intent, minus one on failure or an
  * intervening reload.
  */
 static int connect_link(const char *local, const char *remote, bool transmit, bool forward,
-                        bool permanent, uint64_t expected) {
+                        bool permanent, const struct ra_scheduled_link_operation *scheduled,
+                        uint64_t expected) {
     struct ra_link_dial dial = {0};
     ast_mutex_lock(&runtime_lock);
     uint64_t revision = atomic_load(&runtime_revision);
-    int result = expected && expected != revision
-                     ? -1
-                     : ra_runtime_prepare_link(&runtime, local, remote, &dial);
+    bool current = !expected || expected == revision;
+    int result = current ? ra_runtime_prepare_link(&runtime, local, remote, &dial, scheduled) : -1;
     ast_mutex_unlock(&runtime_lock);
     if (result) {
-        return -1;
+        return permanent && current ? retain_failed_permanent_link(local, remote, transmit, forward,
+                                                                   scheduled, revision)
+                                    : -1;
     }
     struct ast_channel *channel = ra_link_dial_run(&dial, local);
     if (!channel) {
-        return permanent ? retain_failed_permanent_link(local, remote, transmit, forward, revision)
+        return permanent ? retain_failed_permanent_link(local, remote, transmit, forward, scheduled,
+                                                        revision)
                          : -1;
     }
     ast_mutex_lock(&runtime_lock);
-    result =
-        revision == atomic_load(&runtime_revision)
-            ? ra_runtime_attach_link(&runtime, local, remote, channel, transmit, forward, permanent)
-            : -1;
+    result = revision == atomic_load(&runtime_revision)
+                 ? ra_runtime_attach_link(&runtime, local, remote, channel, transmit, forward,
+                                          permanent, scheduled)
+                 : -1;
     ast_mutex_unlock(&runtime_lock);
     if (result) {
         ast_hangup(channel);
-        return permanent ? retain_failed_permanent_link(local, remote, transmit, forward, revision)
+        return permanent ? retain_failed_permanent_link(local, remote, transmit, forward, scheduled,
+                                                        revision)
                          : -1;
     }
     return 0;
@@ -161,13 +170,13 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
     case RA_LINK_MONITOR:
     case RA_LINK_LOCAL_MONITOR:
         return connect_link(local, operation->remote, operation->action == RA_LINK_TRANSCEIVE,
-                            operation->action != RA_LINK_LOCAL_MONITOR, false, revision);
+                            operation->action != RA_LINK_LOCAL_MONITOR, false, NULL, revision);
     case RA_LINK_PERMANENT_TRANSCEIVE:
     case RA_LINK_PERMANENT_MONITOR:
     case RA_LINK_PERMANENT_LOCAL_MONITOR:
-        return connect_link(local, operation->remote,
-                            operation->action == RA_LINK_PERMANENT_TRANSCEIVE,
-                            operation->action != RA_LINK_PERMANENT_LOCAL_MONITOR, true, revision);
+        return connect_link(
+            local, operation->remote, operation->action == RA_LINK_PERMANENT_TRANSCEIVE,
+            operation->action != RA_LINK_PERMANENT_LOCAL_MONITOR, true, NULL, revision);
     case RA_LINK_DISCONNECT: {
         ast_mutex_lock(&runtime_lock);
         int result = revision == atomic_load(&runtime_revision)
@@ -233,9 +242,10 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
     }
     case RA_LINK_DISCONNECT_PERMANENT:
         ast_mutex_lock(&runtime_lock);
-        int result = revision == atomic_load(&runtime_revision)
-                         ? !ra_runtime_disconnect_permanent(&runtime, local, operation->remote)
-                         : -1;
+        int result =
+            revision == atomic_load(&runtime_revision)
+                ? !ra_runtime_disconnect_permanent(&runtime, local, operation->remote, NULL)
+                : -1;
         ast_mutex_unlock(&runtime_lock);
         return result;
     case RA_LINK_RECONNECT_ALL: {
@@ -259,6 +269,30 @@ static int execute_link(const char *local, const struct ra_link_operation *opera
     default:
         return -1;
     }
+}
+
+/** @brief Execute one configuration-owned permanent-link transition outside the runtime lock.
+ * @param scheduled Copied scheduler reservation and attach or detach operation.
+ * @param revision Runtime revision that selected the operation.
+ * @return Zero after a current-runtime operation, or minus one after a replacement.
+ *
+ * A detached configured route may already have been stopped by `*806` or a reload. That is the
+ * desired end state, so scheduled withdrawal deliberately treats it as successful.
+ */
+static int execute_scheduled_link(const struct ra_scheduled_link_operation *scheduled,
+                                  uint64_t revision) {
+    if (scheduled->operation.action != RA_LINK_DISCONNECT_PERMANENT) {
+        return connect_link(scheduled->local, scheduled->operation.remote, true, true, true,
+                            scheduled, revision);
+    }
+    ast_mutex_lock(&runtime_lock);
+    int result = revision == atomic_load(&runtime_revision) &&
+                         ra_runtime_disconnect_permanent(&runtime, scheduled->local,
+                                                         scheduled->operation.remote, scheduled)
+                     ? 0
+                     : -1;
+    ast_mutex_unlock(&runtime_lock);
+    return result;
 }
 
 /** @brief Interpret a queued digit only while its originating runtime is current.
@@ -318,6 +352,37 @@ static int process_link_event(void *argument) {
 static int process_schedule_tick(void *argument) {
     struct schedule_tick_task *task = argument;
     for (;;) {
+        struct ra_scheduled_link_operation operation = {0};
+        bool execute = false;
+        ast_mutex_lock(&runtime_lock);
+        if (task->revision == atomic_load(&runtime_revision)) {
+            int result = ra_runtime_next_scheduled_link_operation(&runtime, task->now, task->now_ms,
+                                                                  &operation);
+            if (result < 0) {
+                ast_log(
+                    LOG_WARNING,
+                    "rpt_advanced: configured link schedule skipped: local clock is unavailable\n");
+            } else {
+                execute = result > 0;
+            }
+        }
+        ast_mutex_unlock(&runtime_lock);
+        if (!execute) {
+            break;
+        }
+        int result = execute_scheduled_link(&operation, task->revision);
+        ast_mutex_lock(&runtime_lock);
+        if (task->revision == atomic_load(&runtime_revision)) {
+            (void)ra_runtime_complete_scheduled_link_operation(&runtime, &operation, !result);
+        }
+        ast_mutex_unlock(&runtime_lock);
+        if (result) {
+            /* Retry a rejected configuration route on the next one-second control tick, never in
+             * a tight loop. A retained permanent retry returns success and is owned by the hub. */
+            break;
+        }
+    }
+    for (;;) {
         struct ra_scheduled_dispatch dispatch = {0};
         bool execute = false;
         bool complete = false;
@@ -346,7 +411,18 @@ static int process_schedule_tick(void *argument) {
     return 0;
 }
 
-/** @brief Submit one captured wall-clock minute to the non-audio control executor.
+/** @brief Read one bounded millisecond monotonic timestamp for a scheduler control task.
+ * @return Milliseconds since the monotonic epoch, or zero when the clock is unavailable.
+ */
+static uint64_t scheduler_monotonic_ms(void) {
+    struct timespec value;
+    if (clock_gettime(CLOCK_MONOTONIC, &value)) {
+        return 0;
+    }
+    return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
+}
+
+/** @brief Submit one captured wall-clock instant to the non-audio control executor.
  * @param now Current wall-clock time, including a possible failure value handled by the runtime.
  *
  * The producer rechecks `runtime_reloading` after copying its revision. This makes a task either
@@ -362,6 +438,7 @@ static void submit_schedule_tick(time_t now) {
     }
     task->revision = atomic_load_explicit(&runtime_revision, memory_order_acquire);
     task->now = now;
+    task->now_ms = scheduler_monotonic_ms();
     if (atomic_load_explicit(&runtime_reloading, memory_order_acquire)) {
         ast_free(task);
         return;
@@ -372,20 +449,18 @@ static void submit_schedule_tick(time_t now) {
     ast_free(task);
 }
 
-/** @brief Capture each observed epoch minute once and hand it to the non-audio control queue.
+/** @brief Capture each scheduler second and hand it to the non-audio control queue.
  * @param unused Unused POSIX thread argument.
  * @return Null after module teardown requests the ticker stop.
  *
- * The ticker immediately captures its first minute, then samples once per second to detect the
- * next boundary. It only allocates and queues control tasks; it never acquires a radio callback
- * lock or performs speech, IAX, or PCM work. One FIFO task per minute preserves scheduled events
- * when a preceding macro temporarily occupies the serialized control executor.
+ * The ticker immediately captures its first second and then samples once per second. It only
+ * allocates and queues control tasks; it never acquires a radio callback lock or performs speech,
+ * IAX, or PCM work. Event occurrences remain calendar-minute deduplicated by the runtime, while
+ * one-second tasks let a configured quiet-time deadline expire without an extra minute of delay.
  */
 static void *run_schedule_ticker(void *unused) {
     (void)unused;
     const struct timespec interval = {.tv_sec = 1, .tv_nsec = 0};
-    time_t last_minute = 0;
-    bool have_last_minute = false;
     bool clock_failed = false;
     while (atomic_load_explicit(&schedule_thread_running, memory_order_acquire)) {
         time_t now = time(NULL);
@@ -395,12 +470,7 @@ static void *run_schedule_ticker(void *unused) {
                 clock_failed = true;
             }
         } else {
-            time_t minute = now / 60;
-            if (!have_last_minute || minute != last_minute) {
-                submit_schedule_tick(now);
-                last_minute = minute;
-                have_last_minute = true;
-            }
+            submit_schedule_tick(now);
             clock_failed = false;
         }
         (void)nanosleep(&interval, NULL);
@@ -644,7 +714,7 @@ static char *link_cli(struct ast_cli_entry *entry, int command, struct ast_cli_a
         ast_mutex_unlock(&runtime_lock);
     } else {
         result = connect_link(arguments->argv[3], arguments->argv[4], transmit, !local_monitor,
-                              false, 0);
+                              false, NULL, 0);
     }
     ast_cli(arguments->fd, "rpt_advanced: link %s %s\n", operation,
             result ? "failed" : "completed");

@@ -3,12 +3,14 @@
  * @brief Integrate scheduled-media policy and playback with hardware-paced local repeat.
  */
 #include "controller.h"
+#include "link_audio.h"
 #include <limits.h>
 #include <math.h>
 #include <string.h>
 
 /** @brief Require atomics that never fall back to a library mutex in the radio worker. */
-_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "status queue requires lock-free unsigned atomics");
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2 && RA_ATOMIC_UINT_FAST64_LOCK_FREE,
+               "controller cross-thread state must use lock-free atomics");
 
 /** @brief Attack duration for receive-active telemetry ducking. */
 #define RA_CONTROLLER_DUCK_ATTACK_MS 10.0
@@ -44,20 +46,19 @@ static bool courtesy_available(const struct ra_controller_id *courtesy) {
            (courtesy->audio || (courtesy->settings.morse_text && *courtesy->settings.morse_text));
 }
 
-/** @brief Select one permanent-peer override or the generic linked-receiver media.
+/** @brief Select one renderable courtesy override for an exact node identity.
  * @param state Started controller with immutable courtesy bindings.
- * @param remote Exact direct-peer identity supplied by the routing hub.
- * @param permanent True only for a configured permanent direct link.
- * @return Renderable peer-specific media when available, otherwise generic link media.
+ * @param remote Direct or advisory downstream node identity.
+ * @return Renderable peer-specific media, or null when this identity has no override.
  *
  * The lookup runs only at a link falling edge in the hardware-paced worker. It
  * intentionally reads the current controller binding rather than retaining a
  * media pointer in a link port: ports survive a configuration reload while
  * prepared media does not.
  */
-static const struct ra_controller_id *courtesy_link_select(const struct ra_controller *state,
-                                                           const char *remote, bool permanent) {
-    if (permanent && remote && *remote) {
+static const struct ra_controller_id *courtesy_peer_select(const struct ra_controller *state,
+                                                           const char *remote) {
+    if (remote && *remote) {
         for (size_t index = 0; index < state->peer_courtesy_count; ++index) {
             const struct ra_controller_peer_courtesy *override = &state->peer_courtesies[index];
             /* ra_controller_start() rejects null or empty immutable peer identities. */
@@ -66,7 +67,26 @@ static const struct ra_controller_id *courtesy_link_select(const struct ra_contr
             }
         }
     }
-    return state->link_courtesy;
+    return NULL;
+}
+
+/** @brief Select advisory downstream media, then direct-peer media, then the generic link media.
+ * @param state Started controller with immutable courtesy bindings.
+ * @param direct_remote Exact direct-peer identity that owns this transmission.
+ * @param selection_remote Latest accepted first-per-query downstream identity, or the direct one.
+ * @return Renderable selected media when configured, otherwise generic link media.
+ *
+ * A keyed-source response is only a best-effort control-plane observation. Falling back through
+ * the direct peer preserves its configured tone when the downstream node has no override.
+ */
+static const struct ra_controller_id *courtesy_link_select(const struct ra_controller *state,
+                                                           const char *direct_remote,
+                                                           const char *selection_remote) {
+    const struct ra_controller_id *courtesy = courtesy_peer_select(state, selection_remote);
+    if (!courtesy) {
+        courtesy = courtesy_peer_select(state, direct_remote);
+    }
+    return courtesy ? courtesy : state->link_courtesy;
 }
 
 /** @brief Select the first announcement currently due in configuration order.
@@ -203,18 +223,27 @@ static void courtesy_start(struct ra_controller *state) {
     state->courtesy_playing = true;
 }
 
-void ra_controller_link_unkeyed_kerchunk(struct ra_controller *state, const char *remote,
-                                         bool permanent, bool kerchunk, uint64_t now_ms) {
+void ra_controller_link_unkeyed_selected_kerchunk(struct ra_controller *state,
+                                                  const char *direct_remote,
+                                                  const char *selection_remote, bool kerchunk,
+                                                  uint64_t now_ms) {
+    /* The watchdog protects one continuous input, not a normal conversation held by PTT hang. */
+    state->transmit_key_ms = now_ms;
     if (kerchunk) {
         state->suppress_release = true;
         return;
     }
-    courtesy_schedule(state, courtesy_link_select(state, remote, permanent), false, remote, now_ms);
+    courtesy_schedule(state, courtesy_link_select(state, direct_remote, selection_remote), false,
+                      direct_remote, now_ms);
 }
 
-void ra_controller_link_unkeyed(struct ra_controller *state, const char *remote, bool permanent,
-                                uint64_t now_ms) {
-    ra_controller_link_unkeyed_kerchunk(state, remote, permanent, false, now_ms);
+void ra_controller_link_unkeyed_kerchunk(struct ra_controller *state, const char *remote,
+                                         bool kerchunk, uint64_t now_ms) {
+    ra_controller_link_unkeyed_selected_kerchunk(state, remote, remote, kerchunk, now_ms);
+}
+
+void ra_controller_link_unkeyed(struct ra_controller *state, const char *remote, uint64_t now_ms) {
+    ra_controller_link_unkeyed_kerchunk(state, remote, false, now_ms);
 }
 
 void ra_controller_link_keyed(struct ra_controller *state, const char *remote) {
@@ -356,6 +385,7 @@ bool ra_controller_start(struct ra_controller *state, uint64_t now_ms) {
     state->timeout_wait_unkey = false;
     state->suppress_release = false;
     state->last_activity_ms = now_ms;
+    atomic_store_explicit(&state->qualifying_activity_ms, 0, memory_order_relaxed);
     state->key_idle_ms = 0;
     state->status_speed_wpm = status_speed;
     state->status_frequency_hz = status_frequency;
@@ -380,6 +410,10 @@ bool ra_controller_start(struct ra_controller *state, uint64_t now_ms) {
             (struct ra_controller_announcement_state){.satisfied_ms = now_ms};
     }
     return true;
+}
+
+uint64_t ra_controller_qualifying_activity_ms(const struct ra_controller *state) {
+    return atomic_load_explicit(&state->qualifying_activity_ms, memory_order_acquire);
 }
 
 bool ra_controller_queue_status(struct ra_controller *state, const char *text, int16_t *audio,
@@ -444,6 +478,9 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
             state->suppress_release = false;
         }
         state->last_activity_ms = now_ms;
+        /* The scheduler reads this lock-free publication from its control thread to defer a
+         * scheduled disconnect only for actual local or linked reception. */
+        atomic_store_explicit(&state->qualifying_activity_ms, now_ms, memory_order_release);
         ra_id_activity(state->states, state->count);
     }
     bool receiver_unkeyed = state->receiving && !receiving;
@@ -455,6 +492,9 @@ bool ra_controller_process(struct ra_controller *state, bool receiving, int16_t 
                              now_ms - state->receiver_key_ms <= state->kerchunk_max_ms;
     if (receiver_unkeyed) {
         state->receiver_unkey_ms = now_ms;
+        /* A local transmission ending restarts the continuous-source watchdog even if hang
+         * time, a linked peer, or telemetry keeps the transmitter asserted. */
+        state->transmit_key_ms = now_ms;
     }
     state->receiving = receiving;
     state->link_was_active = state->link_active;

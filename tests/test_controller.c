@@ -24,15 +24,19 @@ int main(void) {
     const int16_t prepared[] = {100, -100, 200, -200};
     struct ra_controller controller = {.rate = 8000, .full_duplex = true};
     assert(ra_controller_start(&controller, 0));
+    assert(!ra_controller_qualifying_activity_ms(&controller));
     assert(!ra_controller_process(&controller, false, NULL, 0, 1));
+    assert(!ra_controller_qualifying_activity_ms(&controller));
     assert(controller.status_speed_wpm == 20 && controller.status_frequency_hz == 800 &&
            controller.status_level_db == -6);
     assert(!ra_controller_process(&controller, false, audio, 160, 0));
     assert(ra_controller_process(&controller, true, NULL, 0, 100));
+    assert(ra_controller_qualifying_activity_ms(&controller) == 100);
     rails(audio);
     assert(ra_controller_process(&controller, true, audio, 960, 120));
     assert(audio[0] == INT16_MAX && audio[1] == INT16_MIN);
     assert(!ra_controller_process(&controller, false, NULL, 0, 140));
+    assert(ra_controller_qualifying_activity_ms(&controller) == 120);
 
     /* RF status is prepared by control and deferred while receiving and for post-unkey silence. */
     char oversized[RA_CONTROLLER_STATUS_TEXT_MAX + 1];
@@ -150,7 +154,7 @@ int main(void) {
     controller.link_active = true;
     assert(ra_controller_process(&controller, false, NULL, 0, 100));
     controller.link_active = false;
-    ra_controller_link_unkeyed(&controller, "link", false, 100);
+    ra_controller_link_unkeyed(&controller, "link", 100);
     assert(ra_controller_process(&controller, false, NULL, 0, 349));
     assert(ra_controller_process(&controller, false, audio, 1, 600));
     assert(controller.courtesy_playing && controller.courtesy_pending_count == 0);
@@ -182,7 +186,7 @@ int main(void) {
     courtesy_controller.link_active = true;
     assert(ra_controller_process(&courtesy_controller, true, NULL, 0, 1));
     courtesy_controller.link_active = false;
-    ra_controller_link_unkeyed(&courtesy_controller, "link", false, 2);
+    ra_controller_link_unkeyed(&courtesy_controller, "link", 2);
     assert(ra_controller_process(&courtesy_controller, false, NULL, 0, 2));
     assert(courtesy_controller.courtesy_pending_count == 2);
     assert(ra_controller_process(&courtesy_controller, true, NULL, 0, 3));
@@ -230,7 +234,7 @@ int main(void) {
     assert(ra_controller_process(&link_only_courtesy, false, audio, 1, 12));
     assert(!link_only_courtesy.courtesy_playing && !link_only_courtesy.courtesy_pending_count);
     link_only_courtesy.link_active = false;
-    ra_controller_link_unkeyed(&link_only_courtesy, "link", false, 13);
+    ra_controller_link_unkeyed(&link_only_courtesy, "link", 13);
     assert(ra_controller_process(&link_only_courtesy, false, NULL, 0, 13));
     assert(ra_controller_process(&link_only_courtesy, false, audio, 1, 24));
     assert(link_only_courtesy.courtesy_playing && link_only_courtesy.courtesy_playback.prepared);
@@ -303,7 +307,7 @@ int main(void) {
     assert(audio[0] > 0 && audio[0] < ducked_courtesy_audio[2] &&
            ducked_courtesy_controller.courtesy_playback.prepared);
 
-    /* A permanent peer may override generic link media; temporary and unmatched peers fall back. */
+    /* An exact direct peer overrides generic link media; unmatched peers fall back. */
     const int16_t generic_link_audio[] = {101};
     const int16_t north_link_audio[] = {202};
     struct ra_controller_id generic_link_courtesy = {
@@ -321,20 +325,16 @@ int main(void) {
                                               .rate = 8000,
                                               .full_duplex = true};
     assert(ra_controller_start(&per_peer_courtesy, 0));
-    ra_controller_link_unkeyed(&per_peer_courtesy, "north", false, 1);
-    assert(ra_controller_process(&per_peer_courtesy, false, audio, 1, 1));
-    assert(audio[0] == generic_link_audio[0]);
-    assert(ra_controller_start(&per_peer_courtesy, 0));
-    ra_controller_link_unkeyed(&per_peer_courtesy, "north", true, 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, "north", 1);
     assert(ra_controller_process(&per_peer_courtesy, false, audio, 1, 1));
     assert(audio[0] == north_link_audio[0]);
     assert(ra_controller_start(&per_peer_courtesy, 0));
-    ra_controller_link_unkeyed(&per_peer_courtesy, "south", true, 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, "south", 1);
     assert(ra_controller_process(&per_peer_courtesy, false, audio, 1, 1));
     assert(audio[0] == generic_link_audio[0]);
     assert(ra_controller_start(&per_peer_courtesy, 0));
-    ra_controller_link_unkeyed(&per_peer_courtesy, "north", true, 1);
-    ra_controller_link_unkeyed(&per_peer_courtesy, "south", false, 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, "north", 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, "south", 1);
     assert(per_peer_courtesy.courtesy_pending_count == 2);
     ra_controller_link_keyed(&per_peer_courtesy, "north");
     assert(per_peer_courtesy.courtesy_pending_count == 1 &&
@@ -348,18 +348,17 @@ int main(void) {
         {"silent", &unavailable_peer_courtesy}};
     per_peer_courtesy.peer_courtesies = unavailable_override;
     assert(ra_controller_start(&per_peer_courtesy, 0));
-    ra_controller_link_unkeyed(&per_peer_courtesy, "silent", true, 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, "silent", 1);
     assert(ra_controller_process(&per_peer_courtesy, false, audio, 1, 1));
     assert(audio[0] == generic_link_audio[0]);
     assert(ra_controller_start(&per_peer_courtesy, 0));
-    ra_controller_link_unkeyed(&per_peer_courtesy, NULL, true, 1);
-    ra_controller_link_unkeyed(&per_peer_courtesy, "", true, 1);
-    ra_controller_link_unkeyed(&per_peer_courtesy, "", false, 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, NULL, 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, "", 1);
     assert(!per_peer_courtesy.courtesy_pending_count);
     char oversized_remote[RA_CONTROLLER_COURTESY_REMOTE_MAX + 1];
     memset(oversized_remote, 'x', sizeof(oversized_remote) - 1);
     oversized_remote[sizeof(oversized_remote) - 1] = '\0';
-    ra_controller_link_unkeyed(&per_peer_courtesy, oversized_remote, false, 1);
+    ra_controller_link_unkeyed(&per_peer_courtesy, oversized_remote, 1);
     assert(!per_peer_courtesy.courtesy_pending_count);
     struct ra_controller invalid_peer_courtesy = {.peer_courtesy_count = 1, .rate = 8000};
     assert(!ra_controller_start(&invalid_peer_courtesy, 0));
@@ -402,11 +401,11 @@ int main(void) {
     assert(!ordered_courtesy.courtesy_playing && ordered_courtesy.courtesy_pending_count == 1);
     assert(ra_controller_start(&ordered_courtesy, 0));
     ordered_courtesy.courtesy_pending_count = RA_CONTROLLER_COURTESY_QUEUE_DEPTH;
-    ra_controller_link_unkeyed(&ordered_courtesy, "overflow", false, 0);
+    ra_controller_link_unkeyed(&ordered_courtesy, "overflow", 0);
     assert(ordered_courtesy.courtesy_pending_count == RA_CONTROLLER_COURTESY_QUEUE_DEPTH);
     assert(ra_controller_start(&ordered_courtesy, 0));
     ordered_courtesy.courtesy_delay_ms = UINT64_MAX;
-    ra_controller_link_unkeyed(&ordered_courtesy, "saturated", false, 1);
+    ra_controller_link_unkeyed(&ordered_courtesy, "saturated", 1);
     assert(ordered_courtesy.courtesy_pending_count == 1 &&
            ordered_courtesy.courtesy_pending[0].due_ms == UINT64_MAX);
 
@@ -416,9 +415,9 @@ int main(void) {
                                                .full_duplex = true,
                                                .courtesy_delay_ms = 100};
     assert(ra_controller_start(&staggered_courtesy, 0));
-    ra_controller_link_unkeyed(&staggered_courtesy, "first", false, 0);
-    ra_controller_link_unkeyed(&staggered_courtesy, "second", false, 50);
-    ra_controller_link_unkeyed(&staggered_courtesy, "third", false, 75);
+    ra_controller_link_unkeyed(&staggered_courtesy, "first", 0);
+    ra_controller_link_unkeyed(&staggered_courtesy, "second", 50);
+    ra_controller_link_unkeyed(&staggered_courtesy, "third", 75);
     assert(ra_controller_process(&staggered_courtesy, false, audio, 1, 99));
     assert(!audio[0] && staggered_courtesy.courtesy_pending_count == 3 &&
            !staggered_courtesy.courtesy_playing);
@@ -604,6 +603,7 @@ int main(void) {
     audio[0] = audio[1] = 1000;
     assert(ra_controller_process(&controller, false, audio, 2, 100));
     assert(audio[0] == 100 && audio[1] == -100 && controller.last_activity_ms == 100);
+    assert(ra_controller_qualifying_activity_ms(&controller) == 100);
     assert(!ra_controller_process(&controller, true, audio, 2, 120));
     assert(!audio[0] && !audio[1]);
     controller.full_duplex = true;
@@ -1025,11 +1025,40 @@ int main(void) {
     watchdog.link_active = true;
     assert(ra_controller_process(&watchdog, false, audio, 1, 133));
 
+    /* Normal local turns reset the watchdog even while a long PTT hang holds the transmitter. */
+    struct ra_controller local_turns = {
+        .rate = 8000, .full_duplex = true, .hang_ms = 200, .transmit_timeout_ms = 100};
+    assert(ra_controller_start(&local_turns, 0));
+    assert(ra_controller_process(&local_turns, true, audio, 1, 1));
+    assert(ra_controller_process(&local_turns, false, audio, 1, 50));
+    assert(local_turns.transmit_key_ms == 50);
+    assert(ra_controller_process(&local_turns, false, audio, 1, 101));
+    assert(ra_controller_process(&local_turns, true, audio, 1, 120));
+    assert(ra_controller_process(&local_turns, false, audio, 1, 150));
+    assert(local_turns.transmit_key_ms == 150);
+    assert(ra_controller_process(&local_turns, false, audio, 1, 200));
+
+    /* Individual link unkeys, including kerchunks, restart the same continuous-source guard. */
+    struct ra_controller link_turns = {.rate = 8000,
+                                       .full_duplex = true,
+                                       .hang_ms = 200,
+                                       .transmit_timeout_ms = 100,
+                                       .link_active = true};
+    assert(ra_controller_start(&link_turns, 0));
+    assert(ra_controller_process(&link_turns, false, audio, 1, 1));
+    link_turns.link_active = false;
+    ra_controller_link_unkeyed_kerchunk(&link_turns, "link", false, 50);
+    assert(link_turns.transmit_key_ms == 50);
+    assert(ra_controller_process(&link_turns, false, audio, 1, 101));
+    ra_controller_link_unkeyed_kerchunk(&link_turns, "link", true, 125);
+    assert(link_turns.transmit_key_ms == 125 && link_turns.suppress_release);
+    assert(ra_controller_process(&link_turns, false, audio, 1, 200));
+
     /* A source-specific kerchunk never queues the link courtesy tone. */
     struct ra_controller kerchunk = {
         .link_courtesy = &link_link_courtesy, .rate = 8000, .kerchunk_max_ms = 500};
     assert(ra_controller_start(&kerchunk, 0));
-    ra_controller_link_unkeyed_kerchunk(&kerchunk, "link", false, true, 2);
+    ra_controller_link_unkeyed_kerchunk(&kerchunk, "link", true, 2);
     assert(!kerchunk.courtesy_pending_count && kerchunk.suppress_release);
 
     /* Local kerchunks suppress release handling, while a longer carrier is ordinary traffic. */
@@ -1058,7 +1087,11 @@ int main(void) {
     assert(!ra_controller_process(&active_timeout, false, audio, 1, 102));
     assert(active_timeout.timeout_wait_unkey && !active_timeout.duplex.keyed);
     active_timeout.link_active = false;
+    ra_controller_link_unkeyed_kerchunk(&active_timeout, "link", false, 102);
     assert(!ra_controller_process(&active_timeout, false, audio, 1, 110));
+    assert(active_timeout.timeout_wait_unkey && !active_timeout.duplex.keyed);
+    assert(!ra_controller_process(&active_timeout, true, audio, 1, 111));
+    assert(!ra_controller_process(&active_timeout, false, audio, 1, 112));
     assert(active_timeout.timeout_wait_unkey && !active_timeout.duplex.keyed);
 
     /* A suppressed short transmission cannot arm an every-release announcement. */

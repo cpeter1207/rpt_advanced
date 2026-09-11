@@ -8,6 +8,7 @@
 #include <asterisk.h>
 #include <asterisk/format.h>
 #include <asterisk/lock.h>
+#include <inttypes.h>
 #include <samplerate.h>
 #include <sched.h>
 #include <stdint.h>
@@ -32,24 +33,34 @@ static struct ast_format *cached_format_override;
 
 /** @brief Opaque transport represented by its observable audio and lifecycle. */
 struct ast_channel {
-    int16_t input;                       /**< Constant incoming sample. */
-    int16_t output;                      /**< Most recent outgoing sample. */
-    bool active;                         /**< Remote carrier. */
-    bool keyed;                          /**< Outgoing carrier. */
-    bool stopped;                        /**< Ownership was released. */
-    struct ra_link_peer *peer;           /**< Reader state retained by the routing hub. */
-    ra_link_peer_digit_fn inbound_digit; /**< Reader-to-control callback installed by the hub. */
-    void *inbound_context;               /**< Context paired with inbound_digit. */
-    const char *topology;                /**< Latest remote app_rpt `L` payload. */
-    char *advertised;                    /**< Caller-owned captured outbound `L` payload. */
-    size_t advertised_capacity;          /**< Captured payload capacity. */
-    unsigned int advertisements;         /**< Number of reader-owned outbound list queues. */
-    size_t received_samples;             /**< Total peer-rate samples consumed by the hub. */
-    size_t sent_samples;                 /**< Total peer-rate samples scheduled by the hub. */
-    struct ast_format *rawread;          /**< Negotiated inbound wire format. */
-    struct ast_format *rawwrite;         /**< Negotiated outbound wire format. */
-    bool missing_rawread;                /**< Simulate a transport without an inbound raw format. */
-    bool missing_rawwrite; /**< Simulate a transport without an outbound raw format. */
+    int16_t input;            /**< Constant incoming sample. */
+    int16_t output;           /**< Most recent outgoing sample. */
+    bool active;              /**< Remote carrier. */
+    const char *keyed_source; /**< Optional best-effort keyed downstream identity. */
+    unsigned int key_queries; /**< Number of lock-free keyed-source requests observed. */
+    unsigned int key_query_cancellations; /**< Number of direct receive-edge query cancellations. */
+    bool keyed;                           /**< Outgoing carrier. */
+    bool stopped;                         /**< Ownership was released. */
+    struct ra_link_peer *peer;            /**< Reader state retained by the routing hub. */
+    ra_link_peer_digit_fn inbound_digit;  /**< Reader-to-control callback installed by the hub. */
+    void *inbound_context;                /**< Context paired with inbound_digit. */
+    ra_link_peer_key_fn inbound_key;      /**< Reader-to-hub keyed-source callback. */
+    void *inbound_key_context;            /**< Context paired with inbound_key. */
+    char key_messages[RA_LINK_PEER_KEY_QUEUE_CAPACITY]
+                     [RA_LINK_PEER_KEY_TEXT_MAX]; /**< Ordered
+                                                      keyed-source
+                                                      relay texts. */
+    unsigned int key_message_count; /**< Reader-owned keyed-source texts queued by the hub. */
+    const char *topology;           /**< Latest remote app_rpt `L` payload. */
+    char *advertised;               /**< Caller-owned captured outbound `L` payload. */
+    size_t advertised_capacity;     /**< Captured payload capacity. */
+    unsigned int advertisements;    /**< Number of reader-owned outbound list queues. */
+    size_t received_samples;        /**< Total peer-rate samples consumed by the hub. */
+    size_t sent_samples;            /**< Total peer-rate samples scheduled by the hub. */
+    struct ast_format *rawread;     /**< Negotiated inbound wire format. */
+    struct ast_format *rawwrite;    /**< Negotiated outbound wire format. */
+    bool missing_rawread;           /**< Simulate a transport without an inbound raw format. */
+    bool missing_rawwrite;          /**< Simulate a transport without an outbound raw format. */
 };
 /** @brief Return no negotiated format for the transport fixture.
  * @param channel Unused fixture channel.
@@ -167,6 +178,12 @@ static struct ast_channel *topology_update_peer;
 static const char *topology_update_value;
 /** @brief Optional peer whose reader ends after the first idle pass. */
 static struct ast_channel *ended_after_first_idle;
+/** @brief Optional attachment whose recovery gate is set after peer startup and before publish. */
+static struct ast_channel *gated_publish_channel;
+/** @brief Optional retry cancellation or pause gate raised for @ref gated_publish_channel. */
+static atomic_bool *gated_publish_gate;
+/** @brief Current result of the explicit final attachment-policy callback fixture. */
+static bool attachment_policy_allowed;
 /** @brief Optional peer that ends while another peer's inbound topology is read. */
 static struct ast_channel *ended_during_topology_read;
 /** @brief Optional peer that ends while the manager posts one outbound topology. */
@@ -251,6 +268,31 @@ static void receive_lifecycle_event(void *context, const char *remote, bool conn
     ++lifecycle_events;
     memcpy(lifecycle_remote, remote, strlen(remote) + 1);
     lifecycle_connected = connected;
+}
+
+/** @brief Deliver one parsed keyed-source control message through a fixture peer reader.
+ * @param channel Direct fixture peer that received the IAX text.
+ * @param kind Query or reply class.
+ * @param destination Query wildcard requester target or reply destination.
+ * @param source Query requester or reply reporter.
+ * @param keyed Reply carrier state, false for a query.
+ * @param age_seconds Reply age in whole seconds, zero for a query.
+ */
+static void receive_inbound_key(struct ast_channel *channel, enum ra_link_peer_key_kind kind,
+                                const char *destination, const char *source, bool keyed,
+                                uint64_t age_seconds) {
+    assert(channel && channel->peer && channel->inbound_key && !locked);
+    channel->inbound_key(channel->inbound_key_context, kind, destination, source, keyed,
+                         age_seconds);
+}
+
+/** @brief Return the fixture's explicit final-publication policy.
+ * @param context Pointer to @ref attachment_policy_allowed.
+ * @return The policy result selected by the test case.
+ */
+static bool attachment_policy(void *context) {
+    assert(context == &attachment_policy_allowed);
+    return attachment_policy_allowed;
 }
 
 /** @brief Invoke the real libsamplerate state allocator behind a fixture wrapper.
@@ -487,7 +529,8 @@ int __wrap_clock_gettime(clockid_t clock, struct timespec *value) {
 
 int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
                        struct ast_format *linear, ra_link_peer_digit_fn inbound_digit,
-                       void *inbound_digit_context) {
+                       void *inbound_digit_context, ra_link_peer_key_fn inbound_key,
+                       void *inbound_key_context) {
     assert(!locked);
     if (failure == 2) {
         return -1;
@@ -502,19 +545,78 @@ int ra_link_peer_start(struct ra_link_peer *peer, struct ast_channel *channel,
         publish_race_outer = NULL;
         assert(!ra_link_hub_attach(hub, name, racing_channel, linear, true, true, false));
     }
+    if (channel == gated_publish_channel) {
+        atomic_store(gated_publish_gate, true);
+        gated_publish_channel = NULL;
+        gated_publish_gate = NULL;
+    }
     peer->channel = channel;
     peer->linear = linear;
     channel->peer = peer;
     channel->inbound_digit = inbound_digit;
     channel->inbound_context = inbound_digit_context;
+    channel->inbound_key = inbound_key;
+    channel->inbound_key_context = inbound_key_context;
     atomic_init(&peer->ended, false);
     atomic_init(&peer->stop, false);
     return 0;
 }
 
+/** @cond TEST_FIXTURE
+ * @brief Capture a direct-port receive-edge keyed-source request without taking a lock.
+ * @param peer Fixture peer associated with the routed channel.
+ */
+void ra_link_peer_begin_keyed_source(struct ra_link_peer *peer) {
+    assert(!locked);
+    ++peer->channel->key_queries;
+}
+
+/** @brief Capture a direct-port receive-edge keyed-source cancellation without taking a lock.
+ * @param peer Fixture peer associated with the routed channel.
+ */
+void ra_link_peer_end_keyed_source(struct ra_link_peer *peer) {
+    assert(!locked);
+    ++peer->channel->key_query_cancellations;
+}
+
+/** @brief Capture a periodic direct-port keyed-source request without taking a lock.
+ * @param peer Fixture peer associated with the routed channel.
+ */
+void ra_link_peer_request_key_query(struct ra_link_peer *peer) {
+    assert(!locked);
+    ++peer->channel->key_queries;
+}
+
+/** @brief Copy the configured fixture downstream identity when one is observable.
+ * @param peer Fixture peer associated with the routed channel.
+ * @param output Destination identity buffer.
+ * @param capacity Destination capacity.
+ * @return True only when the fixture exposes a complete identity.
+ */
+bool ra_link_peer_keyed_source(const struct ra_link_peer *peer, char *output, size_t capacity) {
+    assert(!locked);
+    if (output && capacity) {
+        output[0] = '\0';
+    }
+    const char *source = peer->channel->keyed_source;
+    if (!source || !output || capacity < RA_LINK_PEER_NAME_MAX ||
+        strlen(source) >= RA_LINK_PEER_NAME_MAX) {
+        return false;
+    }
+    memcpy(output, source, strlen(source) + 1);
+    return true;
+}
+/** @endcond */
+
 void ra_link_peer_stop(struct ra_link_peer *peer) {
     assert(!locked);
     peer->channel->stopped = true;
+    peer->channel->peer = NULL;
+    peer->channel = NULL;
+}
+
+void ra_link_peer_stop_preserve_channel(struct ra_link_peer *peer) {
+    assert(!locked);
     peer->channel->peer = NULL;
     peer->channel = NULL;
 }
@@ -559,6 +661,39 @@ int ra_link_peer_queue_topology(struct ra_link_peer *peer, const char *topology)
         atomic_store(&ended_during_advertisement->peer->ended, true);
         ended_during_advertisement = NULL;
     }
+    return atomic_load(&peer->ended) ? -1 : 0;
+}
+
+/* Capture one hub-relayed broadcast keyed-source query.
+ * @param peer Destination reader owned by the fixture channel.
+ * @param requester Valid source-query origin.
+ * @return Zero unless the target reader has ended.
+ */
+int ra_link_peer_queue_key_query(struct ra_link_peer *peer, const char *requester) {
+    assert(requester && peer->channel->key_message_count < RA_LINK_PEER_KEY_QUEUE_CAPACITY);
+    struct ast_channel *channel = peer->channel;
+    unsigned int slot = channel->key_message_count++;
+    assert(snprintf(channel->key_messages[slot], sizeof(channel->key_messages[slot]), "K? * %s 0 0",
+                    requester) > 0);
+    return atomic_load(&peer->ended) ? -1 : 0;
+}
+
+/* Capture one hub-relayed keyed-source reply.
+ * @param peer Destination reader owned by the fixture channel.
+ * @param destination Querying node identity.
+ * @param source Reporting node identity.
+ * @param keyed Reported local receiver state.
+ * @param age_seconds Reported local receiver age.
+ * @return Zero unless the target reader has ended.
+ */
+int ra_link_peer_queue_key_reply(struct ra_link_peer *peer, const char *destination,
+                                 const char *source, bool keyed, uint64_t age_seconds) {
+    assert(destination && source &&
+           peer->channel->key_message_count < RA_LINK_PEER_KEY_QUEUE_CAPACITY);
+    struct ast_channel *channel = peer->channel;
+    unsigned int slot = channel->key_message_count++;
+    assert(snprintf(channel->key_messages[slot], sizeof(channel->key_messages[slot]),
+                    "K %s %s %u %" PRIu64, destination, source, keyed ? 1U : 0U, age_seconds) > 0);
     return atomic_load(&peer->ended) ? -1 : 0;
 }
 
@@ -623,6 +758,7 @@ static int reconnect_stub(void *context, const char *remote, bool transmit, bool
     }
     if (cancel_reconnect) {
         assert(ra_link_hub_disconnect_permanent(managed, remote));
+        assert(!ra_link_hub_has_permanent_route(managed, remote));
         assert(!ra_link_hub_reconnect_all(managed));
     }
     if (pause_reconnect) {
@@ -742,11 +878,149 @@ int main(void) {
     assert(courtesy_audio[0] == generic_courtesy_audio[0]);
     ra_link_hub_close(&courtesy_hub);
 
+    /* A source response selects downstream media, but the direct input still owns cancellation. */
+    RA_TEST_HUB(key_source_hub);
+    struct ast_channel upstream_peer = {.active = true, .input = 300, .keyed_source = "south"};
+    const int16_t upstream_courtesy_audio[] = {333};
+    const int16_t south_courtesy_audio[] = {444};
+    struct ra_controller_id upstream_courtesy = {
+        .settings = {.morse_text = "U", .morse_speed_wpm = 20, .morse_frequency_hz = 800},
+        .audio = upstream_courtesy_audio,
+        .samples = 1};
+    struct ra_controller_id south_courtesy = {
+        .settings = {.morse_text = "S", .morse_speed_wpm = 20, .morse_frequency_hz = 800},
+        .audio = south_courtesy_audio,
+        .samples = 1};
+    const struct ra_controller_peer_courtesy source_overrides[] = {{"upstream", &upstream_courtesy},
+                                                                   {"south", &south_courtesy}};
+    struct ra_controller source_controller = {.link_courtesy = &generic_courtesy,
+                                              .peer_courtesies = source_overrides,
+                                              .peer_courtesy_count = 2,
+                                              .courtesy_delay_ms = 10,
+                                              .rate = 8000,
+                                              .full_duplex = true};
+    int16_t source_audio[] = {0};
+    assert(ra_controller_start(&source_controller, 0));
+    assert(!ra_link_hub_attach(&key_source_hub, "upstream", &upstream_peer, &format_8000, true,
+                               true, false));
+    assert(ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 1));
+    assert(upstream_peer.key_queries == 1);
+    assert(ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 2));
+    assert(upstream_peer.key_queries == 1);
+    assert(ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 1001));
+    assert(upstream_peer.key_queries == 2);
+    upstream_peer.active = false;
+    assert(ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 1002));
+    assert(upstream_peer.key_query_cancellations == 1 &&
+           source_controller.courtesy_pending_count == 1 &&
+           source_controller.courtesy_pending[0].media == &south_courtesy &&
+           !strcmp(source_controller.courtesy_pending[0].remote, "upstream"));
+    upstream_peer.active = true;
+    assert(ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 1003));
+    assert(source_controller.courtesy_pending_count == 0);
+    upstream_peer.active = false;
+    (void)ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 1004);
+    upstream_peer.keyed_source = NULL;
+    assert(ra_controller_start(&source_controller, 2000));
+    upstream_peer.active = true;
+    assert(ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 2000));
+    upstream_peer.active = false;
+    assert(ra_link_hub_process(&key_source_hub, &source_controller, false, source_audio, 1, 2001));
+    assert(source_controller.courtesy_pending_count == 1 &&
+           source_controller.courtesy_pending[0].media == &upstream_courtesy &&
+           !strcmp(source_controller.courtesy_pending[0].remote, "upstream"));
+    ra_link_hub_close(&key_source_hub);
+
+    /* A relay replies with its local-RF state, forwards a broadcast query, and routes replies
+     * back toward the requester without echoing the ingress link. */
+    RA_TEST_HUB(key_relay_hub);
+    key_relay_hub.local_name = "200";
+    struct ast_channel key_ingress = {0};
+    struct ast_channel key_child = {0};
+    struct ast_channel key_sibling = {0};
+    struct ra_controller key_relay_controller = {.rate = 8000, .full_duplex = true};
+    int16_t key_relay_audio[] = {0};
+    assert(ra_controller_start(&key_relay_controller, 0));
+    assert(
+        !ra_link_hub_attach(&key_relay_hub, "100", &key_ingress, &format_8000, true, true, false));
+    assert(!ra_link_hub_attach(&key_relay_hub, "300", &key_child, &format_8000, true, true, false));
+    assert(
+        !ra_link_hub_attach(&key_relay_hub, "400", &key_sibling, &format_8000, true, true, false));
+    assert(ra_link_hub_process(&key_relay_hub, &key_relay_controller, true, key_relay_audio, 1,
+                               10000));
+    receive_inbound_key(&key_ingress, RA_LINK_PEER_KEY_QUERY, "*", "100", false, 0);
+    assert(key_ingress.key_message_count == 1 &&
+           !strcmp(key_ingress.key_messages[0], "K 100 200 1 0"));
+    assert(key_child.key_message_count == 1 && !strcmp(key_child.key_messages[0], "K? * 100 0 0"));
+    assert(key_sibling.key_message_count == 1 &&
+           !strcmp(key_sibling.key_messages[0], "K? * 100 0 0"));
+    /* The relay never returns a broadcast query to its ingress, source peer, or an ended peer. */
+    atomic_store(&key_sibling.peer->ended, true);
+    receive_inbound_key(&key_ingress, RA_LINK_PEER_KEY_QUERY, "*", "300", false, 0);
+    atomic_store(&key_sibling.peer->ended, false);
+    assert(key_ingress.key_message_count == 2 &&
+           !strcmp(key_ingress.key_messages[1], "K 300 200 1 0"));
+    assert(key_child.key_message_count == 1 && key_sibling.key_message_count == 1);
+    /* Reflected queries and an unset local identity are deliberately not answered or relayed. */
+    receive_inbound_key(&key_ingress, RA_LINK_PEER_KEY_QUERY, "*", "200", false, 0);
+    unsigned int queries_before_no_local = key_ingress.key_message_count;
+    key_ingress.peer->key_query_requester[0] = '\0';
+    receive_inbound_key(&key_ingress, RA_LINK_PEER_KEY_QUERY, "*", "101", false, 0);
+    memcpy(key_ingress.peer->key_query_requester, "200", sizeof("200"));
+    assert(key_ingress.key_message_count == queries_before_no_local);
+    receive_inbound_key(&key_child, RA_LINK_PEER_KEY_REPLY, "100", "300", true, 0);
+    assert(key_ingress.key_message_count == 3 &&
+           !strcmp(key_ingress.key_messages[2], "K 100 300 1 0"));
+    assert(key_child.key_message_count == 1 && key_sibling.key_message_count == 1);
+    receive_inbound_key(&key_child, RA_LINK_PEER_KEY_REPLY, "999", "300", true, 4);
+    assert(key_ingress.key_message_count == 4 &&
+           !strcmp(key_ingress.key_messages[3], "K 999 300 1 4"));
+    assert(key_sibling.key_message_count == 2 &&
+           !strcmp(key_sibling.key_messages[1], "K 999 300 1 4"));
+    /* Fallback replies do not echo to the reporting source. */
+    receive_inbound_key(&key_child, RA_LINK_PEER_KEY_REPLY, "999", "400", true, 4);
+    assert(key_ingress.key_message_count == 5 &&
+           !strcmp(key_ingress.key_messages[4], "K 999 400 1 4"));
+    assert(key_sibling.key_message_count == 2);
+    /* An ended direct destination falls back to every other live route. */
+    atomic_store(&key_ingress.peer->ended, true);
+    receive_inbound_key(&key_child, RA_LINK_PEER_KEY_REPLY, "100", "300", true, 0);
+    atomic_store(&key_ingress.peer->ended, false);
+    assert(key_ingress.key_message_count == 5 && key_sibling.key_message_count == 3 &&
+           !strcmp(key_sibling.key_messages[2], "K 100 300 1 0"));
+    receive_inbound_key(&key_child, RA_LINK_PEER_KEY_REPLY, "200", "300", true, 0);
+    assert(key_ingress.key_message_count == 5 && key_sibling.key_message_count == 3);
+    /* Without a local name, a reply is relayed instead of being locally consumed. */
+    key_child.peer->key_query_requester[0] = '\0';
+    receive_inbound_key(&key_child, RA_LINK_PEER_KEY_REPLY, "200", "300", true, 0);
+    memcpy(key_child.peer->key_query_requester, "200", sizeof("200"));
+    assert(key_ingress.key_message_count == 6 && key_sibling.key_message_count == 4);
+    /* A failed or backward monotonic snapshot reports zero seconds rather than underflowing. */
+    atomic_store(&key_relay_hub.key_query_local_transition_ms, 0);
+    clock_ms = 12000;
+    receive_inbound_key(&key_ingress, RA_LINK_PEER_KEY_QUERY, "*", "101", false, 0);
+    assert(key_ingress.key_message_count == 7 &&
+           !strcmp(key_ingress.key_messages[6], "K 101 200 1 0"));
+    atomic_store(&key_relay_hub.key_query_local_transition_ms, 20000);
+    receive_inbound_key(&key_ingress, RA_LINK_PEER_KEY_QUERY, "*", "102", false, 0);
+    assert(key_ingress.key_message_count == 8 &&
+           !strcmp(key_ingress.key_messages[7], "K 102 200 1 0"));
+    (void)ra_link_hub_process(&key_relay_hub, &key_relay_controller, false, key_relay_audio, 1,
+                              11000);
+    clock_ms = 12000;
+    receive_inbound_key(&key_ingress, RA_LINK_PEER_KEY_QUERY, "*", "100", false, 0);
+    assert(key_ingress.key_message_count == 9 &&
+           !strcmp(key_ingress.key_messages[8], "K 100 200 0 1"));
+    ra_link_hub_close(&key_relay_hub);
+
     /* A linked carrier shorter than the configured limit is a kerchunk; a longer one is not. */
     RA_TEST_HUB(short_kerchunk_hub);
     struct ast_channel short_kerchunk_peer = {.active = true};
-    struct ra_controller short_kerchunk_controller = {
-        .rate = 8000, .full_duplex = true, .kerchunk_max_ms = 10};
+    struct ra_controller short_kerchunk_controller = {.rate = 8000,
+                                                      .full_duplex = true,
+                                                      .hang_ms = 200,
+                                                      .transmit_timeout_ms = 100,
+                                                      .kerchunk_max_ms = 10};
     assert(ra_controller_start(&short_kerchunk_controller, 0));
     assert(!ra_link_hub_attach(&short_kerchunk_hub, "short", &short_kerchunk_peer, &format_8000,
                                true, true, false));
@@ -756,6 +1030,9 @@ int main(void) {
     (void)ra_link_hub_process(&short_kerchunk_hub, &short_kerchunk_controller, false,
                               courtesy_audio, 1, 2);
     assert(short_kerchunk_controller.suppress_release);
+    assert(short_kerchunk_controller.transmit_key_ms == 2);
+    assert(ra_link_hub_process(&short_kerchunk_hub, &short_kerchunk_controller, false,
+                               courtesy_audio, 1, 101));
     ra_link_hub_close(&short_kerchunk_hub);
 
     RA_TEST_HUB(long_kerchunk_hub);
@@ -792,6 +1069,7 @@ int main(void) {
     failure = 0;
     ra_link_hub_set_digit_handler(&hub, receive_inbound_digit, &inbound_context);
     assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false));
+    assert(!ra_link_hub_has_permanent_route(&hub, "1"));
     assert(ra_link_hub_has_retained_state(&hub));
     assert(first.inbound_digit && first.inbound_context);
     first.inbound_digit(first.inbound_context, '5');
@@ -917,6 +1195,7 @@ int main(void) {
     failure = 0;
     assert(!ra_link_hub_attach(&hub, "1", &first, NULL, true, true, false));
     assert(ra_link_hub_disconnect_all(&hub) == 1);
+    assert(!ra_link_hub_has_permanent_route(&hub, "1"));
     struct ra_link_peer_status retry;
     /* Snapshot callers may count retained state without storage or with no free slot. */
     assert(ra_link_hub_snapshot(&hub, NULL, 0) == 1);
@@ -942,9 +1221,58 @@ int main(void) {
     publish_race_outer = &publish_target;
     assert(ra_link_hub_attach(&publish_recheck, "target", &publish_target, NULL, true, true,
                               false) == -1);
-    assert(publish_target.stopped && ra_link_hub_connected(&publish_recheck, "blocker") &&
+    assert(!publish_target.stopped && !publish_target.peer &&
+           ra_link_hub_connected(&publish_recheck, "blocker") &&
            !ra_link_hub_connected(&publish_recheck, "target"));
     ra_link_hub_close(&publish_recheck);
+
+    /* A permanent retry cancelled after its channel starts cannot publish before the scheduled
+     * replacement is allowed to attach. The same final gate handles an operator pause. */
+    RA_TEST_HUB(gated_publish);
+    struct ast_channel gated_cancelled = {0};
+    atomic_bool cancellation = false;
+    gated_publish_channel = &gated_cancelled;
+    gated_publish_gate = &cancellation;
+    assert(ra_link_hub_attach_gated(&gated_publish, "cancelled", &gated_cancelled, NULL, true, true,
+                                    true, &cancellation, NULL, NULL, NULL) == -1);
+    assert(atomic_load(&cancellation) && !gated_cancelled.stopped && !gated_cancelled.peer &&
+           !ra_link_hub_connected(&gated_publish, "cancelled"));
+    struct ast_channel gated_paused = {0};
+    atomic_bool pause = false;
+    gated_publish_channel = &gated_paused;
+    gated_publish_gate = &pause;
+    assert(ra_link_hub_attach_gated(&gated_publish, "paused", &gated_paused, NULL, true, true, true,
+                                    NULL, &pause, NULL, NULL) == -1);
+    assert(atomic_load(&pause) && !gated_paused.stopped && !gated_paused.peer &&
+           !ra_link_hub_connected(&gated_publish, "paused"));
+    ra_link_hub_close(&gated_publish);
+
+    /* A caller-owned policy is evaluated under the final routing lock after reader startup. */
+    RA_TEST_HUB(policy_gate);
+    struct ast_channel policy_rejected = {0};
+    attachment_policy_allowed = false;
+    assert(ra_link_hub_attach_gated(&policy_gate, "policy-rejected", &policy_rejected, NULL, true,
+                                    true, false, NULL, NULL, attachment_policy,
+                                    &attachment_policy_allowed) == -1);
+    assert(!policy_rejected.stopped && !policy_rejected.peer &&
+           !ra_link_hub_connected(&policy_gate, "policy-rejected"));
+    struct ast_channel policy_accepted = {0};
+    attachment_policy_allowed = true;
+    assert(!ra_link_hub_attach_gated(&policy_gate, "policy-accepted", &policy_accepted, NULL, true,
+                                     true, false, NULL, NULL, attachment_policy,
+                                     &attachment_policy_allowed));
+    assert(ra_link_hub_connected(&policy_gate, "policy-accepted"));
+    ra_link_hub_close(&policy_gate);
+
+    /* Retained retry flags are present but clear on an ordinary recovery attachment. */
+    RA_TEST_HUB(open_retry_gates);
+    struct ast_channel open_retry_channel = {0};
+    atomic_bool open_cancellation = false;
+    atomic_bool open_pause = false;
+    assert(!ra_link_hub_attach_gated(&open_retry_gates, "open", &open_retry_channel, NULL, true,
+                                     true, true, &open_cancellation, &open_pause, NULL, NULL));
+    assert(ra_link_hub_connected(&open_retry_gates, "open"));
+    ra_link_hub_close(&open_retry_gates);
 
     RA_TEST_HUB(monitor);
     struct ast_channel monitor_peer = {.topology = "T30,R31,C32"};
@@ -1248,6 +1576,30 @@ int main(void) {
     manager_idle_limit = 1;
     ra_link_hub_close(&initial_retry);
 
+    /* Loop prevention retains a paused retry, whereas live routing excludes it after *806. */
+    RA_TEST_HUB(live_retry);
+    ra_link_hub_set_reconnector(&live_retry, reconnect_stub, NULL);
+    reconnect_calls = 0;
+    reconnect_result = -1;
+    assert(!ra_link_hub_reaches_live(NULL, "3"));
+    assert(!ra_link_hub_reaches_live(&live_retry, NULL));
+    assert(!ra_link_hub_reaches_live(&live_retry, ""));
+    assert(!ra_link_hub_has_permanent_route(NULL, "3"));
+    assert(!ra_link_hub_has_permanent_route(&live_retry, NULL));
+    assert(!ra_link_hub_has_permanent_route(&live_retry, ""));
+    assert(ra_link_hub_retain_permanent(&live_retry, "3", true, true));
+    assert(ra_link_hub_has_permanent_route(&live_retry, "3"));
+    assert(!ra_link_hub_has_permanent_route(&live_retry, "4"));
+    assert(ra_link_hub_reaches(&live_retry, "3"));
+    assert(ra_link_hub_reaches_live(&live_retry, "3"));
+    assert(!ra_link_hub_disconnect_all(&live_retry));
+    assert(ra_link_hub_has_permanent_route(&live_retry, "3"));
+    assert(ra_link_hub_reaches(&live_retry, "3"));
+    assert(!ra_link_hub_reaches_live(&live_retry, "3"));
+    assert(ra_link_hub_disconnect_permanent(&live_retry, "3"));
+    assert(!ra_link_hub_has_permanent_route(&live_retry, "3"));
+    ra_link_hub_close(&live_retry);
+
     /* A retry search continues past a different retained identity before finding its target. */
     RA_TEST_HUB(multiple_retries);
     ra_link_hub_set_reconnector(&multiple_retries, reconnect_stub, NULL);
@@ -1417,10 +1769,35 @@ int main(void) {
     assert(ra_link_hub_disconnect_permanent(&paused_retry, "3"));
     ra_link_hub_close(&paused_retry);
 
+    /* A scheduled replacement can cancel a retry while `*806` has it paused.  Cancellation wins:
+     * the old request must not remain as a hidden duplicate that blocks the later replacement. */
+    RA_TEST_HUB(paused_cancelled_retry);
+    struct ast_channel paused_cancelled_channel = {.active = true, .input = 675};
+    ra_link_hub_set_reconnector(&paused_cancelled_retry, reconnect_stub, NULL);
+    reconnect_calls = 0;
+    reconnect_result = -1;
+    cancel_reconnect = true;
+    pause_reconnect = true;
+    assert(!ra_link_hub_attach(&paused_cancelled_retry, "3", &paused_cancelled_channel, NULL, true,
+                               true, true));
+    atomic_store(&paused_cancelled_channel.peer->ended, true);
+    assert(!manager(managed));
+    assert(reconnect_calls == 1 && !ra_link_hub_has_retained_state(&paused_cancelled_retry) &&
+           !ra_link_hub_reaches(&paused_cancelled_retry, "3"));
+    cancel_reconnect = false;
+    pause_reconnect = false;
+    assert(ra_link_hub_retain_permanent(&paused_cancelled_retry, "3", true, true));
+    assert(ra_link_hub_disconnect_permanent(&paused_cancelled_retry, "3"));
+    ra_link_hub_close(&paused_cancelled_retry);
+
     RA_TEST_HUB(active_permanent);
     struct ast_channel seventh = {.active = true, .input = 700};
     ra_link_hub_set_reconnector(&active_permanent, reconnect_stub, NULL);
     assert(!ra_link_hub_attach(&active_permanent, "3", &seventh, NULL, true, true, true));
+    assert(ra_link_hub_has_permanent_route(&active_permanent, "3"));
+    assert(!ra_link_hub_has_permanent_route(&active_permanent, "4"));
+    atomic_store(&seventh.peer->ended, true);
+    assert(!ra_link_hub_has_permanent_route(&active_permanent, "3"));
     assert(ra_link_hub_disconnect_permanent(&active_permanent, "3") && seventh.stopped);
     ra_link_hub_close(&active_permanent);
 

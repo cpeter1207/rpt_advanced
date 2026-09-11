@@ -31,14 +31,16 @@ enum scope_kind {
     TEMPLATE_NODE,
     MACRO_GLOBAL,
     MACRO_NODE,
-    EVENT_NODE
+    EVENT_NODE,
+    PERMANENT_NODE,
+    SCHEDULE_NODE
 };
 /** @brief Borrowed section interpretation; node and label may be substrings. */
 struct scope {
     enum scope_kind kind; /**< Section role. */
     const char *node;     /**< Node substring, empty for flat/global sections. */
     size_t node_length;   /**< Node substring length. */
-    const char *label;    /**< Named template, macro, or event substring when present. */
+    const char *label;    /**< Named definition substring when present. */
     size_t label_length;  /**< Named label length. */
 };
 
@@ -75,12 +77,15 @@ static struct scope parse(const char *name) {
     if (!strcmp(name, "time")) {
         return FLAT_SCOPE(TIME_DEFAULT);
     }
-    if (!strcmp(name, "template") || !strcmp(name, "macro") || !strcmp(name, "event")) {
+    if (!strcmp(name, "template") || !strcmp(name, "macro") || !strcmp(name, "event") ||
+        !strcmp(name, "permanent") || !strcmp(name, "schedule")) {
         return FLAT_SCOPE(INVALID);
     }
-    const char *named_prefixes[] = {"template ", "macro ", "event "};
-    const enum scope_kind named_global_kinds[] = {TEMPLATE_GLOBAL, MACRO_GLOBAL, INVALID};
-    const enum scope_kind named_node_kinds[] = {TEMPLATE_NODE, MACRO_NODE, EVENT_NODE};
+    const char *named_prefixes[] = {"template ", "macro ", "event ", "permanent ", "schedule "};
+    const enum scope_kind named_global_kinds[] = {TEMPLATE_GLOBAL, MACRO_GLOBAL, INVALID, INVALID,
+                                                  INVALID};
+    const enum scope_kind named_node_kinds[] = {TEMPLATE_NODE, MACRO_NODE, EVENT_NODE,
+                                                PERMANENT_NODE, SCHEDULE_NODE};
     for (size_t i = 0; i < sizeof(named_prefixes) / sizeof(named_prefixes[0]); ++i) {
         size_t prefix_length = strlen(named_prefixes[i]);
         if (!strncmp(name, named_prefixes[i], prefix_length)) {
@@ -273,13 +278,21 @@ const char *ra_document_macro_named(const struct ra_document *document, const ch
     return node && label ? select_named(document, MACRO_GLOBAL, MACRO_NODE, node, label) : NULL;
 }
 
-const char *ra_document_event(const struct ra_document *document, size_t index, const char **node) {
+/** @brief Enumerate one unique node-scoped named definition in source order.
+ * @param document Validated document.
+ * @param kind Requested named node-scoped role.
+ * @param index Zero-based occurrence among matching definitions.
+ * @param node Receives the complete owning node name when non-null.
+ * @return Borrowed complete section name, or null after the final matching definition.
+ */
+static const char *document_named_node(const struct ra_document *document, enum scope_kind kind,
+                                       size_t index, const char **node) {
     if (node) {
         *node = NULL;
     }
     for (size_t current = 0; current < document->section_count; ++current) {
         struct scope scope = parse(document->sections[current]);
-        if (scope.kind != EVENT_NODE || duplicate(document, current)) {
+        if (scope.kind != kind || duplicate(document, current)) {
             continue;
         }
         if (!index) {
@@ -291,6 +304,20 @@ const char *ra_document_event(const struct ra_document *document, size_t index, 
         --index;
     }
     return NULL;
+}
+
+const char *ra_document_event(const struct ra_document *document, size_t index, const char **node) {
+    return document_named_node(document, EVENT_NODE, index, node);
+}
+
+const char *ra_document_permanent(const struct ra_document *document, size_t index,
+                                  const char **node) {
+    return document_named_node(document, PERMANENT_NODE, index, node);
+}
+
+const char *ra_document_schedule(const struct ra_document *document, size_t index,
+                                 const char **node) {
+    return document_named_node(document, SCHEDULE_NODE, index, node);
 }
 
 /** @brief Validate named courtesy assignments that require resolved inherited values.
@@ -444,6 +471,131 @@ static const char *validate_events(const struct ra_document *document, const cha
     }
 }
 
+/** @brief Validate direct-link identities and every schedule replacement reference.
+ * @param document Fully parsed, option-valid document.
+ * @param section Receives the offending section on failure.
+ * @param key Receives the offending option when a direct option caused the failure.
+ * @return Null on success or a stable configured-link diagnostic.
+ *
+ * Every configured route has a distinct remote identity for one local node. This avoids two
+ * independent retry records for the same peer while keeping the initial permanent/window model
+ * deterministic. A schedule must replace a same-node permanent link with a different peer.
+ */
+static const char *validate_configured_links(const struct ra_document *document,
+                                             const char **section, const char **key) {
+    for (size_t permanent_index = 0;; ++permanent_index) {
+        const char *node = NULL;
+        const char *permanent = ra_document_permanent(document, permanent_index, &node);
+        if (!permanent) {
+            break;
+        }
+        struct ra_permanent_link_settings settings;
+        const char *error = ra_permanent_link_settings_resolve(document->entries, document->count,
+                                                               permanent, &settings);
+        if (error) {
+            *section = permanent;
+            *key = NULL;
+            return error;
+        }
+        if (!strcmp(node, settings.remote_node)) {
+            *section = permanent;
+            *key = "remote_node";
+            return "configured link cannot target its local node";
+        }
+        for (size_t prior_index = 0; prior_index < permanent_index; ++prior_index) {
+            const char *prior_node = NULL;
+            const char *prior = ra_document_permanent(document, prior_index, &prior_node);
+            struct ra_permanent_link_settings prior_settings;
+            (void)ra_permanent_link_settings_resolve(document->entries, document->count, prior,
+                                                     &prior_settings);
+            if (!strcmp(node, prior_node) &&
+                !strcmp(settings.remote_node, prior_settings.remote_node)) {
+                *section = permanent;
+                *key = "remote_node";
+                return "duplicate configured link remote node";
+            }
+        }
+    }
+    for (size_t schedule_index = 0;; ++schedule_index) {
+        const char *node = NULL;
+        const char *schedule = ra_document_schedule(document, schedule_index, &node);
+        if (!schedule) {
+            return NULL;
+        }
+        struct ra_link_schedule_settings settings;
+        const char *error = ra_link_schedule_settings_resolve(document->entries, document->count,
+                                                              schedule, &settings);
+        if (error) {
+            *section = schedule;
+            *key = NULL;
+            return error;
+        }
+        if (!strcmp(node, settings.remote_node)) {
+            *section = schedule;
+            *key = "remote_node";
+            return "configured link cannot target its local node";
+        }
+        const char *replaced = NULL;
+        for (size_t permanent_index = 0;; ++permanent_index) {
+            const char *permanent_node = NULL;
+            const char *permanent =
+                ra_document_permanent(document, permanent_index, &permanent_node);
+            if (!permanent) {
+                break;
+            }
+            struct scope permanent_scope = parse(permanent);
+            if (!strcmp(node, permanent_node) &&
+                same_label(permanent_scope, settings.replace_permanent)) {
+                replaced = permanent;
+                break;
+            }
+        }
+        if (!replaced) {
+            *section = schedule;
+            *key = "replace_permanent";
+            return "schedule references an unknown permanent link";
+        }
+        struct ra_permanent_link_settings replaced_settings;
+        (void)ra_permanent_link_settings_resolve(document->entries, document->count, replaced,
+                                                 &replaced_settings);
+        if (!strcmp(settings.remote_node, replaced_settings.remote_node)) {
+            *section = schedule;
+            *key = "remote_node";
+            return "schedule replacement must select another node";
+        }
+        for (size_t permanent_index = 0;; ++permanent_index) {
+            const char *permanent_node = NULL;
+            const char *permanent =
+                ra_document_permanent(document, permanent_index, &permanent_node);
+            if (!permanent) {
+                break;
+            }
+            struct ra_permanent_link_settings permanent_settings;
+            (void)ra_permanent_link_settings_resolve(document->entries, document->count, permanent,
+                                                     &permanent_settings);
+            if (!strcmp(node, permanent_node) &&
+                !strcmp(settings.remote_node, permanent_settings.remote_node)) {
+                *section = schedule;
+                *key = "remote_node";
+                return "duplicate configured link remote node";
+            }
+        }
+        for (size_t prior_index = 0; prior_index < schedule_index; ++prior_index) {
+            const char *prior_node = NULL;
+            const char *prior = ra_document_schedule(document, prior_index, &prior_node);
+            struct ra_link_schedule_settings prior_settings;
+            (void)ra_link_schedule_settings_resolve(document->entries, document->count, prior,
+                                                    &prior_settings);
+            if (!strcmp(node, prior_node) &&
+                !strcmp(settings.remote_node, prior_settings.remote_node)) {
+                *section = schedule;
+                *key = "remote_node";
+                return "duplicate configured link remote node";
+            }
+        }
+    }
+}
+
 const char *ra_document_validate(const struct ra_document *document, const char **section,
                                  const char **key) {
     *section = NULL;
@@ -458,7 +610,8 @@ const char *ra_document_validate(const struct ra_document *document, const char 
             return "node name exceeds transport limit";
         }
         if ((scope.kind == TEMPLATE_GLOBAL || scope.kind == TEMPLATE_NODE ||
-             scope.kind == MACRO_GLOBAL || scope.kind == MACRO_NODE || scope.kind == EVENT_NODE) &&
+             scope.kind == MACRO_GLOBAL || scope.kind == MACRO_NODE || scope.kind == EVENT_NODE ||
+             scope.kind == PERMANENT_NODE || scope.kind == SCHEDULE_NODE) &&
             duplicate(document, i)) {
             return "duplicate named definition";
         }
@@ -466,7 +619,8 @@ const char *ra_document_validate(const struct ra_document *document, const char 
             scope.kind == ANNOUNCEMENT_SET || scope.kind == COURTESY_NODE ||
             scope.kind == COURTESY_SET || scope.kind == MORSE_NODE || scope.kind == SPEECH_NODE ||
             scope.kind == TIME_NODE || scope.kind == TEMPLATE_NODE || scope.kind == MACRO_NODE ||
-            scope.kind == EVENT_NODE) {
+            scope.kind == EVENT_NODE || scope.kind == PERMANENT_NODE ||
+            scope.kind == SCHEDULE_NODE) {
             bool found = false;
             for (size_t j = 0; j < document->section_count; ++j) {
                 if (parse(document->sections[j]).kind == NODE &&
@@ -505,6 +659,10 @@ const char *ra_document_validate(const struct ra_document *document, const char 
             settings_kind = RA_SETTINGS_MACRO;
         } else if (kind == EVENT_NODE) {
             settings_kind = RA_SETTINGS_EVENT;
+        } else if (kind == PERMANENT_NODE) {
+            settings_kind = RA_SETTINGS_PERMANENT;
+        } else if (kind == SCHEDULE_NODE) {
+            settings_kind = RA_SETTINGS_SCHEDULE;
         }
         const char *error = ra_settings_validate_kind(settings_kind, entry->key, entry->value);
         if (error) {
@@ -524,6 +682,10 @@ const char *ra_document_validate(const struct ra_document *document, const char 
     const char *event_error = validate_events(document, section, key);
     if (event_error) {
         return event_error;
+    }
+    const char *link_error = validate_configured_links(document, section, key);
+    if (link_error) {
+        return link_error;
     }
     *section = NULL;
     return NULL;

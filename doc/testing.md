@@ -11,10 +11,14 @@ asserts carrier; negative Morse samples in the otherwise positive receive audio
 verify replacement of the prepared ID by its Morse fallback inside Asterisk.
 Controller sequence tests also cover polite-ID deferral, every-release and
 positive-interval announcements, identifier priority, idle announcement keying,
-and receive-active announcement ducking. The Asterisk integration additionally
+receive-active announcement ducking, and transmitter protection: a source that
+never unkeys times out, while every local or individual link unkey restarts the
+watchdog even when hang time keeps PTT asserted. The Asterisk integration additionally
 verifies that a periodic announcement waits through synthetic half-duplex
 receive and emits from the hardware-paced idle silent frames after it clears.
-Courtesy tests cover named receiver, generic-link, and permanent-peer routing;
+Courtesy tests cover named receiver, generic-link, exact-direct-peer, and
+best-effort keyed-downstream routing; strict canonical `K?`/`K` reply and relay
+handling; ingress exclusion; arrival-order handling during doubles;
 source-specific rekey cancellation; generic fallback; and pre-rendered mono,
 dual-tone, silence, level, syntax, duration, Nyquist, and bounded-length cases.
 The `integration` portion also starts isolated Asterisk processes and exercises
@@ -121,13 +125,29 @@ or service monitor to observe transmitted audio and transmitter release.
    linked receive, and that a positive interval keys from idle before releasing
    with the short natural tail.
 7. Configure named courtesy tones for `input = receiver`, generic `input = link`,
-   and one permanent direct peer. Use a single-tone receiver sequence and a
+   and one exact direct peer. Use a single-tone receiver sequence and a
    link sequence containing a dual tone, pause, and quieter final segment. On a
-   service monitor, verify frequency, duration, and relative level. Verify an
-   unmatched or temporary link uses the generic link tone, while the permanent
-   peer uses its override. Rekey each source before its delay expires and verify
+   service monitor, verify frequency, duration, and relative level. Verify both
+   temporary and permanent matching peers use the override, while an unmatched
+   peer uses the generic link tone. Rekey each source before its delay expires and verify
    that only its own pending courtesy tone is cancelled; rekey during a started
    tone should duck, not interrupt, that playback.
+   With three rpt_advanced nodes—origin, direct relay, and keyed downstream—
+   verify the relay replies with its current key state on the ingress peer,
+   forwards a canonical `K?` only to other direct peers, and relays a valid
+   `K` reply toward the requester without returning it to ingress. Verify the
+   direct peer's self-report is ignored and the first valid keyed downstream
+   responder to a successfully sent query selects its own `remote_node` tone.
+   During a sustained transmission, confirm a query at the receive edge and
+   then once per second. With two keyed downstream responders, confirm reader
+   arrival order selects the first reply. Confirm that a later query's first
+   accepted response replaces the prior one, while an absent or malformed later
+   response retains an earlier current-epoch result. An unsolicited reply with
+   no current query must use the direct-peer tone or, if none is configured,
+   the generic link tone. Confirm the receive falling edge cancels an unsent
+   locally originated query and rejects a late reply. Treat a delayed valid
+   reply as advisory because `K` has no serial. Repeat the downstream discovery
+   check with an app_rpt-compatible relay when available.
 8. Repeat transport checks with an explicitly supported converted rate and
    codec. Compare receive and transmitted audio for continuity. Run a sustained
    receive/repeat test, recording duration and USBRadioPlus queue/error counters
@@ -145,12 +165,19 @@ or service monitor to observe transmitted audio and transmitter release.
    local-monitor, permanent-link recovery, disconnect-all/reconnect-all, remote
    `*4<node>` command mode with local `#` exit, allow/deny rejection, and the
    `*70`, `*72`, and `*73` status replies. Confirm that an Asterisk restart
-   removes every link. Treat the CLI/log topology as best-effort: it can be
-   incomplete or stale, and `R000000` means a bounded `L ` advertisement was
+   removes runtime-created links and reissues configuration-owned permanent
+   links according to the current replacement window. Treat the CLI/log
+   topology as best-effort: it can be incomplete or stale, and `R000000` means
+   a bounded `L ` advertisement was
    truncated. Confirm self-links, duplicate direct links, retained permanent
    retries, and targets advertised by an attached peer are rejected with the RF
-   loop-rejection telemetry. Do not perform this test against 524950 or another
-   live node without separate approval.
+   loop-rejection telemetry for interactive requests. Confirm scheduled retries
+   stay silent when topology admission rejects them. Exercise a weekday
+   Monday-through-Friday 11:00--12:00 506315-to-2627 replacement window, its
+   five-minute qualifying-activity hold,
+   and `*806` followed by reload and `*816` during the window; confirm no
+   transient primary attachment occurs after policy reconciliation. Do not perform this test against 524950 or
+   another live node without separate approval.
 
 Record module revisions, OS/architecture, USB interface, radio wiring, selected
 codec/rate, configuration, measurements, and any failed step. These procedures
