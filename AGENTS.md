@@ -7,15 +7,22 @@ Before production development, establish the required automated quality gate.
 Every code change must keep that gate passing. Do not commit, merge, tag, or
 release code that fails compilation with warnings treated as errors, formatting,
 Ruff, ShellCheck, Cppcheck, Clang-Tidy, Doxygen, tests, install checks, or 100%
-line and branch coverage. Remove dead code instead of suppressing diagnostics
-or excluding it from coverage.
+line and branch coverage of production code on Debian 13 amd64. Test code is
+excluded from the coverage requirement. Remove dead code instead of suppressing
+diagnostics or excluding it from coverage.
 
 Document all code with concise, meaningful Doxygen comments. Update tests,
 manuals, examples, and install artifacts with every affected interface.
 
 Run platform-independent checks once, concurrently where independent. Run
-platform tests and coverage concurrently across Debian 12 and 13 on amd64 and
-arm64. Pushes, pull requests, and releases must use the same required gate.
+Debian 13 platform build, test, packaging, and staged-install checks
+concurrently on amd64 and arm64, with production coverage on amd64 only.
+Debian 12 support is aspirational: do not run automated Debian 12 tests or
+build Debian 12 packages as part of ordinary pushes, pull requests, or
+releases. Build Debian 12 packages manually only when explicitly requested.
+Automated releases publish Debian 13 packages only; node installations use
+Debian 13 arm64 packages. Pushes, pull requests, and releases must use the
+same required gate.
 
 Use prebuilt Intel container images for local validation. When those checks
 pass, commit and push so GitHub runs the parallel platform matrix in known-good
