@@ -17,9 +17,12 @@ node sections override them. ID sets inherit from node ID defaults, which
 inherit from shared ID defaults. Explicit empty ID text or paths clear an
 inherited value.
 
-Use USBRadioPlus through a thin compatibility adapter. Changes to USBRadioPlus
-are restricted to that adapter and the integration needed for it; its existing
-app_rpt behavior is preserved.
+In the current Asterisk composition, use USBRadioPlus through a thin
+compatibility adapter. Changes to USBRadioPlus are restricted to that adapter
+and the integration needed for it; its existing app_rpt behavior is preserved.
+The planned standalone appliance composition uses the Asterisk-free portable
+radio core and direct-codec radio ports under ADR 0005; it does not change this
+current Asterisk compatibility requirement.
 Use a separate rpt_advanced adapter with rate-aware shared code. The existing
 legacy and modern app_rpt adapters may retain their fixed 8 kHz interface.
 Keep the adapter limited to the current requirements.
@@ -30,9 +33,10 @@ independent periodic timer. Control events must not replace or consume audio
 clock ticks. Retain only bounded buffering needed for scheduling and conversion;
 do not apply independent-clock drift correction to this shared-clock path.
 Preserve app_rpt's existing independent-clock buffering behavior.
-Discover Asterisk's available audio formats and translation capabilities at
-runtime and specify the selected PCM sample rate
-to USBRadioPlus. Do not hard-code a list of codecs or sample rates.
+Discover Asterisk's available peer audio formats and translation capabilities
+at runtime when selecting IAX candidates. The local rpt_advanced adapter
+requests fixed 48 kHz signed-linear PCM from USBRadioPlus; do not expand the
+local native-rate set.
 
 Full duplex permits simultaneous reception and transmission. Half duplex does
 not repeat local receive audio and does not transmit during reception. An ID
@@ -104,9 +108,9 @@ adapter. No other engine is implemented now.
 The default Piper voice is `en_US-lessac-medium`; its local model path is
 configurable. Testing on 524950 may use the already installed
 `/usr/lib/piper-tts/voices/en_US-amy-low.onnx` without installing another voice.
-Automatic sample-rate selection chooses the highest mutually supported rate up
-to the detected hardware-native rate. CM119 is the initial supported hardware.
-Explicit rates remain supported where Asterisk provides the required conversions.
+The local radio/controller PCM rate is fixed at 48 kHz. Peer and Asterisk
+boundaries perform the required conversions. CM119 is the initial supported
+hardware.
 
 ## Reference material
 

@@ -60,7 +60,7 @@ format, Asterisk translates the wire codec to peer PCM, and the controller uses
 libsamplerate when peer PCM differs from the radio rate. Ordinary 8 kHz ASL
 operation remains the primary compatibility case; broader codec/rate
 interoperability is still to be demonstrated against real peers.
-The selected local radio rate bounds the dynamically discovered IAX candidates.
+The fixed 48 kHz local radio rate bounds the dynamically discovered IAX candidates.
 Asterisk's public IAX request path reduces a multi-format audio capability to
 one format before IAX negotiation, so rpt_advanced attempts one exact candidate
 at a time from the local native rate downward within one 20-second dial budget.

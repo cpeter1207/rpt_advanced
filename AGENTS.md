@@ -1,25 +1,43 @@
 # rpt_advanced development rules
 
+Initial-alpha clarification (2026-09-13): ADR 0040 supersedes instructions below
+that require backward compatibility with earlier project alpha artifacts. Do
+not retain compatibility-only code or interfaces. Preserve required current
+behavior and external interoperability; update consumers and artifact-version
+checks together so incompatible combinations fail safely.
+
 ## Shared rpt_advanced project baseline
 
 This baseline applies to every production, shared-library, and workflow
 repository in the rpt_advanced project. Repository-specific rules may add
 constraints but must not weaken it.
 
-Run platform-independent formatting, lint, static analysis—including
-Cppcheck—and Doxygen once, concurrently where independent. Do not run Cppcheck
-in each platform job. Run platform-dependent tests, coverage, build, packaging,
-and staged-install checks concurrently across Debian 12 and 13 on native amd64
-and arm64. Quality checks must not rewrite source files.
+Before a push, run platform-independent formatting, lint, and static
+analysis—including Cppcheck—without rewriting source files. Do not run
+Cppcheck in each platform job. GitHub repeats only those fast checks for an
+ordinary push.
 
-Complete the full quality gate before pushing, opening or updating a pull
-request, merging, tagging, or releasing. Local recovery commits may follow
-affected targeted checks, but must not be represented as fully verified or used
-for a push, pull request, merge, tag, or release until the full gate passes.
+The full quality gate runs for every pull request and must pass before that
+pull request can merge. It runs platform-independent formatting, lint, static
+analysis, and Doxygen once, concurrently where independent; then it runs
+platform-dependent build, tests, packaging, and staged-install checks
+concurrently on native Debian 13 amd64 and arm64. Require 100% line and branch
+coverage of production code only on Debian 13 amd64; test code is excluded from
+coverage. Debian 12 support is aspirational: do not run automated Debian 12
+tests or build Debian 12 packages as part of ordinary pushes, pull requests, or
+releases. Build Debian 12 packages manually only when explicitly requested.
+Automated releases publish Debian 13 packages only; node installations use
+Debian 13 arm64 packages. A release uses a main revision that has already
+passed the pull-request gate and performs only release-artifact validation; it
+does not repeat the full gate.
+
+Local recovery commits may follow affected targeted checks, but must not be
+represented as fully verified until the pull-request gate passes.
 Treat compiler warnings as errors and fail applicable formatting, Ruff,
 ShellCheck, Cppcheck, Clang-Tidy, Doxygen, tests, installation checks, and 100%
-line and branch coverage. Remove unreachable or dead code instead of
-suppressing diagnostics or excluding it from coverage.
+line and branch coverage of production code on Debian 13 amd64. Remove
+unreachable or dead code instead of suppressing diagnostics or excluding it
+from coverage.
 
 Update concise Doxygen comments, tests, user documentation, examples, and
 build, install, and package artifacts whenever an interface changes. Consumers
@@ -35,14 +53,16 @@ Follow [QUALITY.md](QUALITY.md). These requirements match USBRadioPlus's
 platform and quality requirements; they do not define product features.
 
 Before production development, establish the required automated quality gate.
-Run the full gate before a commit intended to push, a pull request, merge, tag,
-or release. Do not push, merge, tag, or release code that fails compilation
-with warnings treated as errors, formatting, Ruff, ShellCheck, Cppcheck,
-Clang-Tidy, Doxygen, tests, install checks, or 100% line and branch coverage.
-Remove dead code instead of suppressing diagnostics or excluding it from
-coverage. Local commits are encouraged as small recovery points after affected
-targeted checks; batch related small requirements before the next full-gate
-commit and push.
+Run formatting, lint, and static analysis before a commit intended to push;
+GitHub repeats those checks for the push. Do not merge a pull request until its
+full gate has passed. Do not release code unless it is already a validated main
+revision; the release workflow may run artifact checks but must not repeat the
+full gate. Do not push code that fails compilation with warnings
+treated as errors, formatting, Ruff, ShellCheck, Cppcheck, or Clang-Tidy.
+Require Doxygen, tests, install checks, and 100% production-code line and
+branch coverage only for the pull-request gate. Remove dead code instead of
+suppressing diagnostics or excluding it from coverage. Local commits are
+encouraged as small recovery points after affected targeted checks.
 
 Document all code with concise, meaningful Doxygen comments. Update tests,
 manuals, examples, and install artifacts with every affected interface.
@@ -122,15 +142,17 @@ conditions; reject it only when no safe deterministic configuration can be
 constructed after defaults are applied. Emit useful warnings and test both
 warning fallback and true-error behavior.
 
-Run platform-independent checks once, concurrently where independent. Run
-platform tests and coverage concurrently across Debian 12 and 13 on amd64 and
-arm64. Pushes, pull requests, and releases must use the same required gate.
+Run the full pull-request gate's platform-independent checks once,
+concurrently where independent. Run Debian 13 platform tests concurrently on
+amd64 and arm64, with production coverage on amd64 only. Pushes run only the
+fast preflight; pull requests use the required full gate; releases verify
+artifacts from a previously validated main revision. Debian 12 validation and
+packages are manual-only.
 
-Use prebuilt Intel container images for local validation. When those checks
-pass, commit and push so GitHub runs the parallel platform matrix in known-good
-prebuilt images on native runners. Local QEMU failures are not a prerequisite
-to resolve before pushing. The complete GitHub matrix must pass before merge
-or release.
+Use prebuilt Intel container images for local validation. When the fast checks
+pass, commit and push so GitHub can run them in known-good images. Local QEMU
+failures are not a prerequisite to resolve before pushing. The complete GitHub
+matrix must pass before merge; release inputs are already merged revisions.
 
 Run explicitly started project test containers through the labeled launcher in
 `rpt_advanced-workflows`. Use the maintained `latest` images and clean only

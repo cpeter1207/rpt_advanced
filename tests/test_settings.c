@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/** @brief Default settings require no identifier media or fixed hardware rate. */
+/** @brief Default settings require no identifier media. */
 static void defaults(void) {
     struct ra_node_settings node;
     struct ra_identifier_settings id;
@@ -15,11 +15,11 @@ static void defaults(void) {
     struct ra_time_settings time;
     assert(!ra_node_settings_resolve(NULL, 0, "usb", &node));
     assert(node.enabled && node.full_duplex && node.dtmf_muting && node.hang_ms == 0 &&
-           node.telemetry_duck_db == -20 && node.sample_rate == 0);
+           node.telemetry_duck_db == -20);
     assert(node.courtesy_delay_ms == 250);
     assert(node.transmit_timeout_ms == 180000 && node.timeout_lockout_ms == 30000 &&
            node.kerchunk_max_ms == 500);
-    assert(!strcmp(node.channel, "usb") && !*node.callsign && !*node.codec);
+    assert(!strcmp(node.channel, "usb") && !*node.callsign);
     assert(!*node.link_allow_nodes && !*node.link_deny_nodes);
     assert(!*node.link_static_directory_file && !*node.link_directory_file &&
            node.link_lookup_method == RA_LINK_LOOKUP_BOTH);
@@ -57,11 +57,9 @@ static void configured(void) {
         {"usb", "dtmf_muting", "yes"},
         {"general", "telemetry_duck_db", "-18"},
         {"general", "courtesy_delay_ms", "300"},
-        {"usb", "sample_rate_hz", "48000"},
         {"usb", "radio_channel", "radio"},
         {"general", "callsign", "KG0BP"},
         {"usb", "callsign", "N0CALL"},
-        {"usb", "codec", "slin48"},
         {"general", "link_allow_nodes", "508422"},
         {"usb", "link_allow_nodes", ""},
         {"general", "link_deny_nodes", "1234, 5678"},
@@ -107,12 +105,11 @@ static void configured(void) {
     struct ra_time_settings time;
     assert(!ra_node_settings_resolve(entries, count, "usb", &node));
     assert(!node.enabled && !node.full_duplex && node.dtmf_muting && node.hang_ms == 500 &&
-           node.telemetry_duck_db == -18 && node.sample_rate == 48000);
+           node.telemetry_duck_db == -18);
     assert(node.courtesy_delay_ms == 300);
     assert(node.transmit_timeout_ms == 100000 && node.timeout_lockout_ms == 40000 &&
            node.kerchunk_max_ms == 250);
-    assert(!strcmp(node.channel, "radio") && !strcmp(node.callsign, "N0CALL") &&
-           !strcmp(node.codec, "slin48"));
+    assert(!strcmp(node.channel, "radio") && !strcmp(node.callsign, "N0CALL"));
     assert(!*node.link_allow_nodes && !strcmp(node.link_deny_nodes, "1234, 5678"));
     assert(!strcmp(node.link_static_directory_file, "static.conf") &&
            !strcmp(node.link_directory_file, "node.conf") &&
@@ -126,6 +123,24 @@ static void configured(void) {
            !strcmp(id.morse_text, "KG0BP"));
     assert(id.morse_speed_wpm == 25 && id.morse_frequency_hz == 750 && id.morse_level_db == -7);
     assert(!ra_time_settings_resolve(entries, count, "usb", &time) && time.format == 12);
+}
+
+/** @brief Retired local-media selectors validate but resolve through fixed native defaults. */
+static void retired_local_media_options(void) {
+    const struct ra_config_entry entries[] = {
+        {"general", "sample_rate_hz", "8000"},
+        {"usb", "codec", "ulaw"},
+        {"general", "full_duplex", "no"},
+        {"usb", "full_duplex", "yes"},
+    };
+    struct ra_node_settings node;
+    assert(ra_settings_node_option_retired("sample_rate_hz"));
+    assert(ra_settings_node_option_retired("codec"));
+    assert(!ra_settings_node_option_retired("radio_channel"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_NODE, "sample_rate_hz", "invalid"));
+    assert(!ra_settings_validate_kind(RA_SETTINGS_NODE, "codec", "invalid"));
+    assert(!ra_node_settings_resolve(entries, sizeof(entries) / sizeof(entries[0]), "usb", &node));
+    assert(node.full_duplex);
 }
 
 /** @brief Courtesy media inherits its own defaults and node media defaults before its assignment.
@@ -364,10 +379,9 @@ static void time_settings(void) {
 
 /** @brief Every typed setting rejects invalid text without committing earlier fields. */
 static void invalid(void) {
-    const char *node_keys[] = {"node_enabled",      "full_duplex",       "dtmf_muting",
-                               "transmit_hang_ms",  "telemetry_duck_db", "courtesy_delay_ms",
-                               "sample_rate_hz",    "link_allow_nodes",  "link_deny_nodes",
-                               "link_lookup_method"};
+    const char *node_keys[] = {"node_enabled",     "full_duplex",       "dtmf_muting",
+                               "transmit_hang_ms", "telemetry_duck_db", "courtesy_delay_ms",
+                               "link_allow_nodes", "link_deny_nodes",   "link_lookup_method"};
     const char *id_keys[] = {"interval_ms",
                              "priority",
                              "first_key_only",
@@ -689,6 +703,7 @@ static void configured_link_settings(void) {
 int main(void) {
     defaults();
     configured();
+    retired_local_media_options();
     scoped_default_precedence();
     scoped_default_matching();
     announcement_settings();

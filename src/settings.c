@@ -33,7 +33,7 @@ struct field {
         maximum; /**< Inclusive numeric maximum, or a nonzero maximum byte length for strings. */
 };
 
-/** @brief Node schema; zero rate requests automatic selection. */
+/** @brief Node schema for fixed native radio PCM. */
 static const struct field node_fields[] = {
     {"node_enabled", FIELD_BOOLEAN, offsetof(struct ra_node_settings, enabled), 0, 0},
     {"full_duplex", FIELD_BOOLEAN, offsetof(struct ra_node_settings, full_duplex), 0, 0},
@@ -49,11 +49,9 @@ static const struct field node_fields[] = {
      0},
     {"courtesy_delay_ms", FIELD_NUMBER, offsetof(struct ra_node_settings, courtesy_delay_ms), 0,
      UINT64_MAX},
-    {"sample_rate_hz", FIELD_NUMBER, offsetof(struct ra_node_settings, sample_rate), 0, UINT_MAX},
     {"radio_channel", FIELD_STRING, offsetof(struct ra_node_settings, channel), 0, 0},
     {"callsign", FIELD_STRING, offsetof(struct ra_node_settings, callsign), 0,
      RA_NODE_NAME_MAX - 1U},
-    {"codec", FIELD_STRING, offsetof(struct ra_node_settings, codec), 0, 0},
     {"link_allow_nodes", FIELD_NODE_LIST, offsetof(struct ra_node_settings, link_allow_nodes), 0,
      0},
     {"link_deny_nodes", FIELD_NODE_LIST, offsetof(struct ra_node_settings, link_deny_nodes), 0, 0},
@@ -427,9 +425,16 @@ const char *ra_settings_validate(bool identifier, const char *key, const char *v
                                      value);
 }
 
+bool ra_settings_node_option_retired(const char *key) {
+    return key && (!strcmp(key, "sample_rate_hz") || !strcmp(key, "codec"));
+}
+
 /* The public declaration documents the contract; select its typed schema here. */
 const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *key,
                                       const char *value) {
+    if (kind == RA_SETTINGS_NODE && ra_settings_node_option_retired(key)) {
+        return NULL;
+    }
     const struct field *fields = node_fields;
     size_t count = sizeof(node_fields) / sizeof(node_fields[0]);
     if (kind == RA_SETTINGS_IDENTIFIER) {
@@ -660,7 +665,6 @@ const char *ra_node_settings_resolve(const struct ra_config_entry *entries, size
                                          .courtesy_delay_ms = 250,
                                          .channel = node,
                                          .callsign = "",
-                                         .codec = "",
                                          .link_allow_nodes = "",
                                          .link_deny_nodes = "",
                                          .link_static_directory_file = "",

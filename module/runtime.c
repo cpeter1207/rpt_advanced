@@ -462,6 +462,9 @@ static struct ra_runtime_node *new_node(struct ra_runtime *runtime) {
     return node;
 }
 
+/** @brief Stop every node after releasing scheduled runtime state.
+ * @param runtime Owned runtime, safe when empty.
+ */
 void ra_runtime_stop(struct ra_runtime *runtime) {
     schedule_release(runtime->schedule);
     runtime->schedule = NULL;
@@ -668,8 +671,7 @@ static const char *courtesies(struct ra_runtime_node *node, const struct ra_docu
  */
 static const char *start_node(struct ra_runtime_node *node, const struct ra_document *document,
                               const char *name, const struct ra_node_settings *settings) {
-    const char *error = ra_connection_open(&node->connection, settings->channel,
-                                           settings->sample_rate, settings->codec);
+    const char *error = ra_connection_open(&node->connection, settings->channel);
     if (error) {
         return error;
     }

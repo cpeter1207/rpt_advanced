@@ -14,7 +14,11 @@ path, or make link state depend on an Asterisk restart.
 Use `[permanent node label]` with one required `remote_node` for each
 configuration-owned permanent direct peer. On module start and a successful
 configuration reload, runtime derives the desired permanent-peer operations
-from those sections and uses the existing permanent link recovery behavior.
+from those sections and uses the existing permanent link recovery behavior. A
+permanent route may name an ordered fallback list. Runtime attempts a fallback
+only when the primary cannot be reconnected, and withdraws an active fallback
+before reconnecting a recovered primary so the two never create a topology
+overlap.
 
 Use `[schedule node label]` to replace one same-node permanent link during a
 bounded local-time window. Its settings are `remote_node`,
@@ -22,6 +26,10 @@ bounded local-time window. Its settings are `remote_node`,
 `end_inactivity_ms`. The schedule names an existing same-node permanent label,
 uses an inclusive-start/exclusive-end same-day local window, and may select
 either weekdays or explicit Gregorian dates, not both.
+
+At a window start, a schedule may first disconnect all links, temporary links,
+permanent links, or no existing links before it attaches its scheduled peer.
+Normal topology admission remains the final conflict gate.
 
 While a window is active, runtime first withdraws the named permanent route and
 then attaches the replacement. At the end, it withdraws the replacement before
@@ -36,13 +44,13 @@ remaining; later qualifying activity replaces that conservative estimate.
 
 Each copied configured-link transition carries its schedule generation, route
 slot, and one-use reservation nonce. The runtime validates that identity before
-preparing, attaching, retaining, or withdrawing a link. `*806` clears pending
-reservations and holds automatic configuration attachment and retry across
-reload. A replacement configuration can still withdraw an issued route its
-current policy suppresses. `*816` re-evaluates current local-time policy,
-withdraws any now-suppressed route, then resumes retained retries. This
-protects scheduler transitions from stale operations. The final hub-retry gate
-and continuous route-ownership rule are defined by ADR 0017.
+preparing, attaching, retaining, or withdrawing a link. `*806` disconnects and
+holds permanent links only, allowing permitted manual links to remain usable.
+`*816` withdraws, re-evaluates, and reconnects permanent links only. A
+replacement configuration can still withdraw an issued route its current
+policy suppresses. This protects scheduler transitions from stale operations.
+The final hub-retry gate and continuous route-ownership rule are defined by
+ADR 0017.
 
 ADR 0017 requires a final lock-free current-policy gate for direct scheduler
 attachment and retained hub retry immediately before a peer is published. It
@@ -60,5 +68,5 @@ and a replacement that names its permanent peer again. Multiple matching
 replacement windows intentionally form a union: every matching or deferred
 replacement is requested and every named primary is suppressed. They have no
 exclusive arbitration beyond normal direct-link topology admission; an overlap
-must not be used to select one replacement route. Fallback routing and
-start-of-window disconnect scope remain separate planned requirements.
+must not be used to select one replacement route. Warning timing and civil-time
+behavior are defined by ADRs 0009 and 0017.

@@ -1,0 +1,13 @@
+name: Publish documentation
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  publish:
+    uses: cpeter1207/rpt_advanced-workflows/.github/workflows/documentation.yml@main
+    with:
+      code_ref: ${{ github.sha }}

@@ -800,9 +800,8 @@ int __wrap_clock_gettime(clockid_t clock, struct timespec *value) {
     return 0;
 }
 
-const char *ra_connection_open(struct ra_connection *connection, const char *name,
-                               unsigned int requested, const char *codec) {
-    assert(*name && !requested && !*codec);
+const char *ra_connection_open(struct ra_connection *connection, const char *name) {
+    assert(*name);
     if (fail_open) {
         return "fixture unavailable";
     }

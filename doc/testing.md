@@ -4,9 +4,10 @@ Run `make ci` in the ASL3 development environment. It runs static checks,
 Doxygen, unit tests, line/branch coverage, staged installation, and an isolated
 Asterisk process. The test-only radio does not access USB devices and is not an
 installed artifact. It verifies two simultaneous nodes, half/full duplex, Morse
-output, PTT cleanup, and native 48 kHz, 16 kHz linear, and 8 kHz mu-law transport.
-An additional native-rate case prepares a WAV identifier through FFmpeg and
-observes its recognizable PCM at the transmitter. The synthetic receiver then
+output, PTT cleanup, direct native 48 kHz transport, and retained retired
+local-media selectors that warn while retaining that transport. An additional
+native-rate case prepares a WAV identifier through FFmpeg and observes its
+recognizable PCM at the transmitter. The synthetic receiver then
 asserts carrier; negative Morse samples in the otherwise positive receive audio
 verify replacement of the prepared ID by its Morse fallback inside Asterisk.
 Controller sequence tests also cover polite-ID deferral, every-release and
@@ -25,7 +26,8 @@ The `integration` portion also starts isolated Asterisk processes and exercises
 the local IAX link implementation. It is a controlled source-level test: it
 does not prove interoperability with a classic `app_rpt` node, authorize live
 link activation, or establish radio hardware behavior. The current AllStarLink
-changes require a fresh complete quality run before a merge or release.
+changes require a fresh complete quality run before a merge. A release uses the
+already validated main revision and performs only release-artifact checks.
 
 To exercise USBRadioPlus's actual adapter against the synthetic hardware backend,
 use a clean build directory and run
@@ -33,9 +35,9 @@ use a clean build directory and run
 The fixture links the adapter as a separate object from that checkout; it does
 not copy it into rpt_advanced or alter USBRadioPlus. Start from a clean build
 when switching fixture modes. This checks the real adapter's reservation and
-audio callbacks, but not the USB hardware backend. Run the same required quality
-gate after changing either project; a historical fixture result is not evidence
-for the current source revision.
+audio callbacks, but not the USB hardware backend. Require the full
+pull-request quality gate after changing either project; a historical fixture
+result is not evidence for the current source revision.
 
 ## Prebuilt test images
 
@@ -148,11 +150,13 @@ or service monitor to observe transmitted audio and transmitter release.
    locally originated query and rejects a late reply. Treat a delayed valid
    reply as advisory because `K` has no serial. Repeat the downstream discovery
    check with an app_rpt-compatible relay when available.
-8. Repeat transport checks with an explicitly supported converted rate and
-   codec. Compare receive and transmitted audio for continuity. Run a sustained
-   receive/repeat test, recording duration and USBRadioPlus queue/error counters
-   before and after. Inspect for underruns, overruns, gaps, and growing latency;
-   shared hardware pacing does not guarantee immunity to scheduling stalls.
+8. Repeat IAX-peer transport checks with an explicitly supported converted rate
+   and codec. The local RadioPlusAdvanced exchange remains fixed at 48 kHz
+   signed-linear PCM. Compare receive and transmitted audio for continuity. Run
+   a sustained receive/repeat test, recording duration and USBRadioPlus
+   queue/error counters before and after. Inspect for underruns, overruns, gaps,
+   and growing latency; shared hardware pacing does not guarantee immunity to
+   scheduling stalls.
 9. Reload invalid configuration while active and verify the old settings still
    operate. Restore valid configuration and reload; allow for the documented
    media-preparation pause. Unload normally and verify PTT drops and the radio

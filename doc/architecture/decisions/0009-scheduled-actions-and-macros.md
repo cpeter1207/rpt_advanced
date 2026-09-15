@@ -16,10 +16,10 @@ zero-time events only. Events due at the same instant execute in configuration
 order; their prepared messages use the existing serialized telemetry path.
 
 Templates accept exactly `day_of_week`, `date`, `time`, `greeting`,
-`link_status`, `node`, and `callsign`. Unknown or malformed substitutions make
-configuration invalid. Validation also proves that a worst-case expansion fits
-the 127-byte scheduled-message payload; node and callsign values are bounded to
-the 63-byte peer-identity transport limit.
+`link_status`, `node`, `callsign`, and `time_remaining`. Unknown or malformed
+substitutions make configuration invalid. Validation also proves that a
+worst-case expansion fits the 127-byte scheduled-message payload; node and
+callsign values are bounded to the 63-byte peer-identity transport limit.
 
 When an event has both a queueable message and a macro, its message must first
 be accepted by the serialized telemetry queue. A rendered message with no
@@ -44,6 +44,16 @@ macro remains at-most-once. Event identity across reload is the owning node,
 section label, and trigger, so changing message text or a macro does not make an
 already-fired event eligible again. The civil-time discontinuity policy is
 defined by [ADR 0017](0017-scheduler-route-lifecycle-and-civil-time.md).
+
+Each scheduled event may have multiple configurable warning lead times before
+its start and before its end or disconnect. One event-local warning template
+uses `time_remaining` as a natural-language remaining duration. For an
+inactivity-based event, warning times are derived from the expected inactivity
+deadline and reset whenever qualifying local-receiver or linked-peer activity
+resets that deadline. A warning due during qualifying activity is skipped, not
+delayed; warnings sent in a preceding quiet interval become eligible again
+after activity resets it. A warning due at or after its associated start, end,
+or inactivity deadline is skipped.
 
 ## Consequences
 

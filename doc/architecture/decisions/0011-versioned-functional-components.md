@@ -18,11 +18,17 @@ development packages. A consumer declares a minimum compatible ABI rather than
 an exact build. This applies to the existing rate-adjusting PCM ring and every
 future extracted library.
 
+These are public extracted-component boundaries. A deliberately separated
+private Rust component within one product is instead governed by ADR 0020: it
+uses `dylib` and is built with its owning product rather than becoming an
+independently released SONAME contract.
+
 `librptadvradio` remains the radio-core integration layer. Its initial
 extraction order is squelch, CTCSS, DCS, then GPIO/parallel-port signaling.
 CTCSS encode and decode are one component, as are DCS encode and decode. GPIO
 and parallel-port components implement signaling semantics through
-adapter-supplied pin I/O. They do not directly own Linux device access.
+adapter-supplied pin I/O. CM119 GPIO and parallel-port GPIO are supported
+site-I/O sources. These components do not directly own Linux device access.
 Portable radio components have no OSS or PortAudio dependency; host adapters
 retain direct audio and hardware-I/O ownership.
 
@@ -51,6 +57,10 @@ dependencies:
 - `librptadviax2` will own IAX2 framing, negotiation, control messages, and
   media transport for standalone interoperability. The current
   Asterisk-specific link implementation is not extracted prematurely.
+- The control-path execution adapter owns only taskprocessor submission,
+  serialized execution, and stop/drain. ADR 0038 selects Asterisk's
+  taskprocessor as its current backend; scheduling and controller policy are
+  not part of this adapter. Its versioned boundary follows ADR 0022.
 
 Controller orchestration, node-specific configuration resolution, identifiers,
 announcements, duplex policy, link topology policy, and Asterisk channel/media

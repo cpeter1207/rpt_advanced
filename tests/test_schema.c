@@ -257,7 +257,7 @@ static void sections_invalid(void) {
     assert(!ra_document_event(&document, 1, NULL));
 }
 
-/** @brief Unknown and invalid options are rejected even when later overridden. */
+/** @brief Retired local-media selectors resolve while invalid schema values are rejected. */
 static void options_invalid(void) {
     char *sections[] = {"usb", "identifier", "courtesy", "morse", "speech", "time"};
     struct ra_config_entry entry = {"usb", "bogus", "yes"};
@@ -266,7 +266,15 @@ static void options_invalid(void) {
     const char *key;
     assert(!strcmp(ra_document_validate(&document, &section, &key), "unknown option"));
     assert(!strcmp(section, "usb") && !strcmp(key, "bogus"));
+    entry.key = "sample_rate_hz";
+    entry.value = "8000";
+    assert(!ra_document_validate(&document, &section, &key));
+    entry.key = "codec";
+    entry.value = "ulaw";
+    assert(!ra_document_validate(&document, &section, &key));
     entry.section = "identifier";
+    entry.key = "bogus";
+    entry.value = "yes";
     assert(!strcmp(ra_document_validate(&document, &section, &key), "unknown option"));
     entry.key = "interval_ms";
     entry.value = "0";

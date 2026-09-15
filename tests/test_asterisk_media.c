@@ -275,21 +275,6 @@ void __ao2_cleanup_debug(void *object, const char *tag, const char *file, int li
     assert(0 && "unexpected reference");
 }
 
-/** @brief Check selection and that all temporary references were released.
- * @param rate Requested rate, or zero.
- * @param name Requested codec name.
- * @param expected Expected cache object, or null.
- */
-static void expect(unsigned int rate, const char *name, struct ast_format *expected) {
-    struct ast_format *result = ra_media_select(&formats[4], rate, name);
-    assert(result == expected);
-    ao2_cleanup(result);
-    assert(codec_references == 0);
-    for (size_t i = 0; i < sizeof(formats) / sizeof(*formats); ++i) {
-        assert(formats[i].references == 0);
-    }
-}
-
 /** @brief Verify that candidate ownership has returned to the fixture. */
 static void assert_released(void) {
     assert(!codec_references);
@@ -314,38 +299,14 @@ static void expect_candidates(struct ast_format *const *expected, size_t expecte
     assert_released();
 }
 
-/** @brief Exercise rate policy, registry holes, cache gaps, and both path directions.
+/** @brief Exercise peer candidate ordering, registry holes, cache gaps, and path directions.
  * @return Zero after all checks.
  */
 int main(void) {
     for (size_t i = 0; i < sizeof(formats) / sizeof(*formats); ++i) {
         formats[i].rate = codecs[i].sample_rate;
     }
-    expect(0, "", &formats[4]);
-    expect(96000, "slin", &formats[6]);
-    expect(8000, "slin", &formats[3]);
-    expect(44100, "slin", NULL);
-    expect(24000, "slin", NULL);
-    expect(12345, "slin", NULL);
-    expect(0, "missing", NULL);
-    missing_linear = true;
-    expect(16000, "slin", NULL);
-    missing_linear = false;
-    expect(0, "other", &formats[1]);
-    blocked_destination = &formats[3];
-    expect(8000, "slin", NULL);
-    blocked_destination = &formats[4];
-    expect(8000, "slin", NULL);
-    blocked_destination = NULL;
-    blocked_source = &formats[3];
-    expect(8000, "slin", NULL);
-    blocked_source = NULL;
-    /* Codec/radio conversion can work while codec/linear conversion fails. */
     formats[1].rate = codecs[1].sample_rate = 16000;
-    blocked_destination = &formats[5];
-    expect(16000, "other", NULL);
-    blocked_destination = NULL;
-    expect(16000, "other", &formats[1]);
     /* Candidates prefer direct 48 kHz PCM and never exceed the local hardware rate. */
     struct ast_format *expected[] = {&formats[4], &formats[5], &formats[1], &formats[9],
                                      &formats[3]};
@@ -434,6 +395,6 @@ int main(void) {
     append_error = false;
     ra_media_candidates_release(NULL, 0);
     assert_released();
-    puts("Asterisk runtime media selection tests passed");
+    puts("Asterisk peer media candidate tests passed");
     return 0;
 }

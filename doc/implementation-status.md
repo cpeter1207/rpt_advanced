@@ -26,16 +26,17 @@
   voice block, including silence. Carrier events change state without advancing
   audio. API-fixture tests cover ownership, malformed frames, and output failures;
   module startup now connects this exchange to per-node workers.
-- Optional Asterisk codec conversion around linear controller processing, with
-  buffered-conversion ownership tests. Native linear transport bypasses these
-  converters.
-- Exclusive RadioPlusAdvanced reservation with negotiated read/write formats and
-  converter ownership. Failure tests cover unavailable devices, unsupported media,
-  converter allocation, and channel-format setup; cleanup releases every resource.
+- Asterisk IAX wire-codec conversion and the rate-aware peer boundary, with
+  buffered-conversion ownership tests. The local RadioPlusAdvanced exchange is
+  direct 48 kHz signed-linear PCM.
+- Exclusive RadioPlusAdvanced reservation with fixed 48 kHz signed-linear
+  read/write formats. Failure tests cover unavailable devices, unsupported
+  media, and channel-format setup; cleanup releases every resource.
   Module startup invokes this helper, calls the channel, and starts its worker.
-- Asterisk codec-registry selection with bidirectional translation checks and
-  hardware-bounded automatic rate selection, tested with deterministic API fixtures.
-  The module's reservation path uses this selector.
+- Asterisk codec-registry selection with bidirectional translation checks for
+  IAX peer candidates bounded by the 48 kHz local radio rate, tested with
+  deterministic API fixtures. The reservation path always requests 48 kHz
+  signed-linear PCM.
 - Piper process adapter with direct argument execution, file-backed text input,
   nonblocking completion polling, cancellation, and Asterisk child-reaper
   coordination. Prepared output is validated and bound to scheduled playback.
@@ -49,9 +50,10 @@
   occupy a scheduling slot. Tests cover each I/O failure, allocation failure,
   timeout cancellation, and actual FFmpeg conversion of a fixture synthesizer's WAV.
 - Real-Asterisk two-node audio integration using a test-only 48 kHz radio driver.
-  Tests exercise native linear, 16 kHz linear, and 8 kHz mu-law with actual Asterisk
-  converters; verify half/full-duplex local repeat, Morse output, balanced PTT,
-  and reload-driven channel cleanup. The fixture is not installed by the package.
+  Tests exercise direct local 48 kHz signed-linear transport, retained
+  `sample_rate_hz`/`codec` warnings, and ULAW/SLIN16 IAX peer conversion;
+  they verify half/full-duplex local repeat, Morse output, balanced PTT, and
+  reload-driven channel cleanup. The fixture is not installed by the package.
 - Real Piper 1.8.0 synthesis using 524950's existing Amy-low model, tested locally
   on Debian 13 amd64 through the module's preparation code. See
   [testing](testing.md) for the optional real-model invocation and its scope.
@@ -113,6 +115,15 @@ Asterisk process with temporary configuration and a synthetic radio. Other tests
 include combined identifier/announcement/courtesy/duplex state sequences. The
 native matrix also links the actual USBRadioPlus adapter to the synthetic
 hardware backend.
+
+## Current USBRadioPlus integration boundary
+
+The current USBRadioPlus Rust migration implements independently paced
+PortAudio input and output callback entry points. Receive DSP runs from input
+callbacks, while transmit rendering runs from output callbacks. The complete
+local-receive, linked-peer, and telemetry inbound-ring topology, verified
+shared-clock fast path, and generational `NodeHost` lifecycle remain pending;
+the callback split alone does not implement those later architecture tranches.
 
 ## Remaining verification
 

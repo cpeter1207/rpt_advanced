@@ -302,7 +302,7 @@ static int load_module(void) {
     }
     technology.capabilities = capabilities;
 #ifdef RA_REAL_ADAPTER
-    if (usbradioplus_advanced_register(&technology, 48000, configure_native)) {
+    if (usbradioplus_advanced_register(&technology, configure_native)) {
 #else
     if (ast_channel_register(&technology)) {
 #endif

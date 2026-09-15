@@ -619,9 +619,8 @@ static void topology_advertise_locked(struct ra_link_hub *hub) {
  * @param name Node identity to find.
  * @return True when an advertised route names @p name.
  *
- * Both inputs are nonempty validated strings supplied by `detach_topology_loop_locked`. A remote
- * `L` list containing this node proves that retaining the direct peer would close an RF/IP
- * topology loop. Route mode is irrelevant: any reachable copy of the local node loops.
+ * Both inputs are nonempty validated strings supplied by the topology control plane. Route mode
+ * is irrelevant to a reachability lookup.
  */
 static bool topology_contains_name(const char *topology, const char *name) {
     size_t name_length = strlen(name);
@@ -710,17 +709,14 @@ static bool reaches_locked(const struct ra_link_hub *hub, const char *name, bool
  * @return Detached loop-forming peer, or null.
  */
 static struct ra_link_port *detach_topology_loop_locked(struct ra_link_hub *hub) {
-    if (!hub->local_name || !*hub->local_name) {
-        return NULL;
-    }
     _Atomic(struct ra_link_port *) *cursor = &hub->ports;
     struct ra_link_port *port = atomic_load_explicit(cursor, memory_order_seq_cst);
     while (port) {
         char topology[RA_LINK_TOPOLOGY_TEXT_MAX + 1];
         size_t length = ra_link_peer_topology(&port->peer, topology, sizeof(topology));
-        if (length < sizeof(topology) &&
-            (topology_contains_name(topology, hub->local_name) ||
-             topology_reaches_direct_peer_locked(hub, port, topology))) {
+        /* ASL peers echo the direct caller in their `L` list. Only another direct peer proves a
+         * second path and therefore a loop. */
+        if (length < sizeof(topology) && topology_reaches_direct_peer_locked(hub, port, topology)) {
             atomic_store_explicit(cursor, atomic_load_explicit(&port->next, memory_order_seq_cst),
                                   memory_order_seq_cst);
             return port;

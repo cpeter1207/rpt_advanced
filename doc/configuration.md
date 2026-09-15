@@ -53,8 +53,9 @@ headers must name an existing node where their syntax includes a node name, whic
 declared later in the file.
 Repeated ordinary section headers merge options without creating duplicate nodes or media
 sets. A repeated named template, macro, event, permanent-link, or schedule header is instead
-rejected as a duplicate definition. Unknown options and invalid values are rejected even if a
-later entry would override them. There is no fixed limit on the number of nodes, identifiers,
+rejected as a duplicate definition. Except for retired local-media selectors described below,
+unknown options and invalid values are rejected even if a later entry would override them. There
+is no fixed limit on the number of nodes, identifiers,
 announcements, courtesy tones, templates, macros, events, permanent links, or schedules.
 
 ## Node settings
@@ -70,10 +71,8 @@ announcements, courtesy tones, templates, macros, events, permanent links, or sc
 | `kerchunk_max_ms` | 500 | Maximum local-receiver or individual-link transmission duration treated as a kerchunk. A kerchunk does not queue its courtesy tone or every-release announcement. Zero disables kerchunk control. |
 | `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, Morse, and generated-tone identifiers, announcements, courtesy tones, and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
 | `courtesy_delay_ms` | 250 | Delay after a receiver or link source unkeys before its assigned courtesy tone starts. Each source retains its own delay when several tones are queued. A rekey by that same source before the delay ends cancels only that pending tone. PTT remains asserted from unkey through the queued tone's completion. |
-| `sample_rate_hz` | 0 | Zero selects the highest usable local signed-linear rate no greater than the hardware-native rate. An explicit rate selects the local channel rate and requires a supported bidirectional Asterisk conversion path. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
 | `callsign` | empty | Optional local station callsign, up to 63 bytes. `${callsign}` in a scheduled message renders this exact value; an empty value renders nothing. |
-| `codec` | empty | Empty selects signed linear for the local radio channel; otherwise select an available local Asterisk codec subject to `sample_rate_hz`. It does not otherwise restrict IAX link candidates. |
 | `link_allow_nodes` | empty | Incoming node allowlist; comma-separated decimal node numbers. Empty places no allowlist restriction on verified nodes or their IAX DTMF control events. |
 | `link_deny_nodes` | empty | Incoming node denylist. Explicit denial overrides allowlist membership and blocks that peer's IAX DTMF control events. |
 | `link_static_directory_file` | empty | Optional local-priority Asterisk-format node directory. `[extnodes]` records use `number=radio@host:port/number,numeric-address`; both `number` fields must be the requested node. A present static record is authoritative. |
@@ -94,16 +93,18 @@ mismatch rejects the request without trying a later source. Incoming links enter
 `RptAdvanced(node)` dialplan application; the IAX registration and dialplan
 remain Asterisk configuration.
 
-`sample_rate_hz` and `codec` configure only the local RadioPlusAdvanced
-connection. For an outbound IAX call, rpt_advanced discovers every concrete
-registered format at or below the local radio rate that Asterisk can translate
-bidirectionally to matching-rate signed-linear PCM. It attempts those candidates
-one at a time from the highest rate downward within one 20-second dialing budget.
-This is necessary because Asterisk's public IAX request API reduces a multi-audio
-capability to one format before IAX sees it. Each connected peer uses its
-negotiated PCM rate, and the link adapter resamples between it and the local
-radio rate. A peer can therefore negotiate a rate at or below the local radio
-rate without requiring `codec_resample` for the peer-to-radio conversion.
+The local RadioPlusAdvanced connection always uses 48 kHz signed-linear PCM.
+Retired `sample_rate_hz` and `codec` entries are ignored with a warning on load
+or reload, so their normal inherited defaults remain effective. For an outbound
+IAX call, rpt_advanced discovers every concrete registered format at or below
+48 kHz that Asterisk can translate bidirectionally to matching-rate
+signed-linear PCM. It attempts those candidates one at a time from the highest
+rate downward within one 20-second dialing budget. This is necessary because
+Asterisk's public IAX request API reduces a multi-audio capability to one format
+before IAX sees it. Each connected peer uses its negotiated PCM rate, and the
+link adapter resamples between it and the local 48 kHz radio rate. A peer can
+therefore negotiate a rate at or below 48 kHz without requiring
+`codec_resample` for the peer-to-radio conversion.
 
 ## Courtesy tones
 

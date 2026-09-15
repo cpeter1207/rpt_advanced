@@ -58,6 +58,14 @@ enum ra_link_lookup_method {
 const char *ra_settings_validate_kind(enum ra_settings_kind kind, const char *key,
                                       const char *value);
 
+/** @brief Check whether a retired local-media selector is accepted and ignored.
+ * @param key Exact option name.
+ * @return True only for a retired node media selector.
+ * The Asterisk module emits the warning because this resolver deliberately has
+ * no logging dependency. Retired selectors resolve through normal defaults.
+ */
+bool ra_settings_node_option_retired(const char *key);
+
 /** @brief One node's controller and media settings. Strings are borrowed. */
 struct ra_node_settings {
     bool enabled;                 /**< Start this node's controller. */
@@ -71,11 +79,9 @@ struct ra_node_settings {
         kerchunk_max_ms; /**< Maximum receive duration treated as a kerchunk; zero disables it. */
     int64_t telemetry_duck_db;  /**< Receive-active identifier and telemetry attenuation in dB. */
     uint64_t courtesy_delay_ms; /**< Receiver/link unkey-to-courtesy delay. */
-    uint64_t sample_rate; /**< Requested rate; zero selects hardware-bounded automatic mode. */
-    const char *channel;  /**< USBRadioPlus channel identifier, without the technology prefix. */
+    const char *channel; /**< USBRadioPlus channel identifier, without the technology prefix. */
     const char
-        *callsign;     /**< Optional station callsign, up to 63 bytes, used by message templates. */
-    const char *codec; /**< Asterisk codec name; empty selects signed linear automatically. */
+        *callsign; /**< Optional station callsign, up to 63 bytes, used by message templates. */
     const char *link_allow_nodes; /**< Incoming allowlist; empty accepts all verified nodes. */
     const char *link_deny_nodes;  /**< Incoming denylist, overriding allowlist membership. */
     const char *link_static_directory_file; /**< Optional local-priority static node directory. */

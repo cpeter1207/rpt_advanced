@@ -1996,19 +1996,18 @@ int main(void) {
     assert(lifecycle_events == 2 && !lifecycle_connected);
     ra_link_hub_close(&lifecycle);
 
-    /* A peer that advertises a route back to this node is a topology loop, not a retryable loss. */
-    RA_TEST_HUB(loop);
-    struct ast_channel loop_peer = {.topology = "Tlocal,R123"};
-    loop.local_name = "local";
-    ra_link_hub_set_reconnector(&loop, reconnect_stub, NULL);
-    reconnect_calls = 0;
-    assert(!ra_link_hub_attach(&loop, "123", &loop_peer, &format_8000, true, true, true));
+    /* ASL peers report the direct caller in their `L` list; that echo is not a second path. */
+    RA_TEST_HUB(direct_echo);
+    struct ast_channel direct_echo_peer = {.topology = "Tlocal,R123"};
+    direct_echo.local_name = "local";
+    assert(!ra_link_hub_attach(&direct_echo, "123", &direct_echo_peer, &format_8000, true, true,
+                               false));
     manager_idle_polls = 0;
     manager_idle_limit = 1;
-    atomic_store(&loop.stop, false);
+    atomic_store(&direct_echo.stop, false);
     assert(!manager(managed));
-    assert(loop_peer.stopped && !ra_link_hub_snapshot(&loop, NULL, 0) && !reconnect_calls);
-    ra_link_hub_close(&loop);
+    assert(!direct_echo_peer.stopped && ra_link_hub_snapshot(&direct_echo, NULL, 0) == 1);
+    ra_link_hub_close(&direct_echo);
 
     /* A complete but unrelated route list leaves the direct peer attached. */
     RA_TEST_HUB(nonloop);
@@ -2021,19 +2020,6 @@ int main(void) {
     assert(!manager(managed));
     assert(!nonloop_peer.stopped && ra_link_hub_connected(&nonloop, "456"));
     ra_link_hub_close(&nonloop);
-
-    /* An empty local identity disables topology loop matching. */
-    RA_TEST_HUB(empty_loop_name);
-    struct ast_channel empty_loop_peer = {.topology = "Tlocal"};
-    empty_loop_name.local_name = "";
-    assert(!ra_link_hub_attach(&empty_loop_name, "457", &empty_loop_peer, &format_8000, true, true,
-                               false));
-    manager_idle_polls = 0;
-    manager_idle_limit = 1;
-    atomic_store(&empty_loop_name.stop, false);
-    assert(!manager(managed));
-    assert(!empty_loop_peer.stopped);
-    ra_link_hub_close(&empty_loop_name);
 
     /* Oversized cached text cannot be used to make a topology-loop decision. */
     RA_TEST_HUB(truncated_loop);

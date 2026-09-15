@@ -276,6 +276,8 @@ const char *ast_config_AST_CONFIG_DIR;
 static const struct ast_module_info *registered;
 /** @brief Number of diagnostics observed. */
 static unsigned int errors;
+/** @brief Retired local-media selector warnings emitted by a successful reload. */
+static unsigned int retired_media_warnings;
 /** @brief Inject one configuration-path allocation failure. */
 static bool fail_allocation;
 /** @brief Selected admission or registration failure. */
@@ -1152,6 +1154,11 @@ void ast_log(int level, const char *file, int line, const char *function, const 
     if (!strcmp(format, "rpt_advanced: node %s network topology %s\n")) {
         ++topology_notices;
     }
+    if (!strcmp(format,
+                "rpt_advanced: %s [%s] %s is ignored; using fixed 48 kHz signed-linear "
+                "local radio PCM\n")) {
+        ++retired_media_warnings;
+    }
     ++errors;
 }
 
@@ -1517,6 +1524,11 @@ int main(void) {
     assert(runtime_reloads == reloads_before + 3 && runtime_stops == stops_before &&
            runtime_active);
     assert(errors == 8);
+    unsigned int retired_warnings_before = retired_media_warnings;
+    write_config(path, "[general]\nsample_rate_hz=8000\ncodec=ulaw\n[usb]\n");
+    assert(!registered->reload());
+    drain_tasks();
+    assert(runtime_active && retired_media_warnings == retired_warnings_before + 2);
     unsigned int failed_schedule_withdrawals_before = scheduled_link_withdrawals;
     unsigned int failed_schedule_attachments_before = scheduled_link_attachments;
     scheduled_link_failure = true;

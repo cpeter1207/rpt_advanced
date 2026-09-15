@@ -50,7 +50,7 @@ VERSION := 0.1.0-dev
 DIST_NAME := rpt_advanced-$(VERSION)
 DIST_FILES := Makefile COPYING README.md QUALITY.md AGENTS.md Doxyfile .clang-format src module tests examples doc
 
-.PHONY: all quality lint static-analysis docs check coverage install install-check integration dist distcheck platform-verify ci clean
+.PHONY: all quality lint static-analysis docs dependency-boundary check coverage install install-check integration dist distcheck platform-verify ci clean
 all: $(RPCR_BUILD_DEP) build/librpt_advanced.a build/app_rpt_advanced.so
 
 build:
@@ -86,13 +86,16 @@ lint:
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
-static-analysis: $(RPCR_BUILD_DEP)
+static-analysis: $(RPCR_BUILD_DEP) dependency-boundary
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS)
 	clang-tidy $(SOURCES) --warnings-as-errors='*' -- $(CPPFLAGS) -std=c11
 	clang-tidy $(MODULE_SOURCE) $(MODULE_HELPERS) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
 
 docs: $(RPCR_BUILD_DEP) | build
 	doxygen Doxyfile
+
+dependency-boundary:
+	python3 tests/test_asterisk_independence.py
 
 build/coverage-objects:
 	mkdir -p $@
@@ -154,7 +157,7 @@ build/module-coverage/connection.o: $(CONNECTION_SOURCE) module/connection.h mod
 	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
 
 build/test_connection: tests/test_connection.c build/module-coverage/connection.o module/connection.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/connection.o --coverage -Wl,--wrap=ra_media_select -o $@
+	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/connection.o --coverage -o $@
 
 build/module-coverage/worker.o: $(WORKER_SOURCE) module/worker.h $(HEADERS) | build/module-coverage
 	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@

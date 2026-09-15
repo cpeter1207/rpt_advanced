@@ -89,7 +89,7 @@ struct ra_link_hub {
     pthread_t manager;                    /**< Reaps disconnected peers outside the audio thread. */
     atomic_bool stop;                     /**< Requests manager shutdown. */
     bool manager_started;                 /**< Manager must be joined before releasing the hub. */
-    const char *local_name;               /**< Borrowed local node name used for loop prevention. */
+    const char *local_name;               /**< Borrowed local node name for legacy keyed-source queries. */
     ra_link_reconnect_fn reconnect;       /**< Runtime callback for retained peers. */
     void *reconnect_context;              /**< Borrowed runtime callback context. */
     ra_link_hub_digit_fn digit;           /**< Runtime callback for peer-identified IAX DTMF. */

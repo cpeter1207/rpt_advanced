@@ -33,7 +33,6 @@ def server(
     peer_port,
     codec,
     radio,
-    sample_rate=0,
     load_resample=True,
 ):
     """! @brief Own an isolated IAX/radio server and always terminate it.
@@ -45,7 +44,6 @@ def server(
     @param peer_port Remote IAX UDP port.
     @param codec Permitted IAX codec.
     @param radio Phased synthetic receiver name.
-    @param sample_rate Requested local PCM rate; zero selects native rate.
     @param load_resample Whether to load Asterisk's rate translator for a control case.
     @return Context yielding CLI configuration and output log paths.
     """
@@ -100,7 +98,7 @@ def server(
     )
     (directory / "rpt_advanced.conf").write_text(
         f"[{node}]\nradio_channel={radio}\nlink_directory_file={directory_file}\n"
-        f"link_lookup_method=file\nsample_rate_hz={sample_rate}\n",
+        "link_lookup_method=file\n",
         encoding="utf-8",
     )
     logfile = directory / "console.log"
@@ -294,51 +292,49 @@ def dtmf_links(modules):
     @param modules Staged module directory.
     @return None; both actions must arise from the synthetic receiver's tones.
     """
-    for rate in (8000, 16000, 48000):
-        with tempfile.TemporaryDirectory(prefix="rpt-advanced-dtmf-") as temporary:
-            directory = Path(temporary)
-            first_port, second_port = port(), port()
-            with (
-                server(
-                    directory / "b",
-                    modules,
-                    "508422",
-                    "524950",
-                    second_port,
-                    first_port,
-                    "ulaw",
-                    "network-b",
-                ) as second,
-                server(
-                    directory / "a",
-                    modules,
-                    "524950",
-                    "508422",
-                    first_port,
-                    second_port,
-                    "ulaw",
-                    "network-dtmf",
-                    rate,
-                ) as first,
-            ):
-                deadline = time.monotonic() + 15
-                while "IAX2/" not in cli(first[0], "core show channels concise"):
-                    assert time.monotonic() < deadline, (
-                        "received DTMF did not connect the link"
-                    )
-                    time.sleep(0.1)
-                assert "IAX2/" in cli(second[0], "core show channels concise")
-                deadline = time.monotonic() + 15
-                while "IAX2/" in cli(first[0], "core show channels concise"):
-                    assert time.monotonic() < deadline, (
-                        "DTMF timeout did not disconnect the link"
-                    )
-                    time.sleep(0.1)
-                log = first[1].read_text(encoding="utf-8")
-                assert log.count("node 524950 link command completed") == 2, log
-                print(
-                    f"received DTMF connect/hash and disconnect/timeout at {rate} Hz passed"
+    with tempfile.TemporaryDirectory(prefix="rpt-advanced-dtmf-") as temporary:
+        directory = Path(temporary)
+        first_port, second_port = port(), port()
+        with (
+            server(
+                directory / "b",
+                modules,
+                "508422",
+                "524950",
+                second_port,
+                first_port,
+                "ulaw",
+                "network-b",
+            ) as second,
+            server(
+                directory / "a",
+                modules,
+                "524950",
+                "508422",
+                first_port,
+                second_port,
+                "ulaw",
+                "network-dtmf",
+            ) as first,
+        ):
+            deadline = time.monotonic() + 15
+            while "IAX2/" not in cli(first[0], "core show channels concise"):
+                assert time.monotonic() < deadline, (
+                    "received DTMF did not connect the link"
                 )
+                time.sleep(0.1)
+            assert "IAX2/" in cli(second[0], "core show channels concise")
+            deadline = time.monotonic() + 15
+            while "IAX2/" in cli(first[0], "core show channels concise"):
+                assert time.monotonic() < deadline, (
+                    "DTMF timeout did not disconnect the link"
+                )
+                time.sleep(0.1)
+            log = first[1].read_text(encoding="utf-8")
+            assert log.count("node 524950 link command completed") == 2, log
+            print(
+                "received DTMF connect/hash and disconnect/timeout at fixed 48 kHz passed"
+            )
 
 
 def main():

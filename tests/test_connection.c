@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Reservation, format negotiation, converter allocation, and failure ownership.
+ * @brief Verify fixed 48 kHz native radio reservation and ownership cleanup.
  */
 #include <asterisk.h>
 
@@ -10,37 +10,32 @@
 #include <asterisk/channel.h>
 #include <asterisk/format.h>
 #include <asterisk/format_cap.h>
-#include <asterisk/translate.h>
 #include <stdio.h>
 #include <string.h>
 
 /** @brief Opaque format fixture with explicit owned-reference accounting. */
 struct ast_format {
-    unsigned int rate; /**< PCM or codec clock rate. */
-    int references;    /**< Owned references held by production code. */
+    unsigned int rate; /**< Sample clock reported by the public API. */
+    int references;    /**< References held by production code. */
 };
-/** @brief Native hardware format. */
+/** @brief Required native signed-linear format. */
 static struct ast_format native = {.rate = 48000};
-/** @brief Controller PCM format for the compressed-codec test. */
-static struct ast_format pcm = {.rate = 16000};
-/** @brief Selected compressed format. */
-static struct ast_format compressed = {.rate = 16000};
+/** @brief Unsupported native-rate fixture. */
+static struct ast_format wrong_rate = {.rate = 16000};
+/** @brief Unsupported non-linear fixture at the otherwise valid rate. */
+static struct ast_format wrong_format = {.rate = 48000};
+/** @brief Format presently advertised by the backend capability. */
+static struct ast_format *advertised = &native;
+/** @brief Cached 48 kHz signed-linear format. */
+static struct ast_format *cached_linear = &native;
 /** @brief Native interface descriptor, whose public fields are borrowed. */
 static const struct ast_channel_tech technology = {.type = "RadioPlusAdvanced"};
-/** @brief Decode-path identity. */
-static struct ast_trans_pvt decode;
-/** @brief Encode-path identity. */
-static struct ast_trans_pvt encode;
-/** @brief Inject one of the eight fallible operation results. */
+/** @brief Inject one of the six fallible operation results. */
 static int failure;
-/** @brief Select compressed rather than native linear transport. */
-static bool use_codec;
-/** @brief Count owned converter paths. */
-static int paths;
 /** @brief Count reserved channels. */
 static int channels;
 
-/** @brief Look up the requested native interface.
+/** @brief Look up the required native interface.
  * @param name Requested technology.
  * @return Descriptor or injected absence.
  */
@@ -49,7 +44,7 @@ const struct ast_channel_tech *ast_get_channel_tech(const char *name) {
     return failure == 1 ? NULL : &technology;
 }
 
-/** @brief Reference the backend's native format.
+/** @brief Reference the backend's advertised format.
  * @param cap Borrowed capability set.
  * @param position Native format position.
  * @return Owned format or injected absence.
@@ -59,26 +54,8 @@ struct ast_format *ast_format_cap_get_format(const struct ast_format_cap *cap, i
     if (failure == 2) {
         return NULL;
     }
-    ++native.references;
-    return &native;
-}
-
-/** @brief Supply the separately tested registry selector's chosen format.
- * @param radio Native hardware format.
- * @param rate Explicit or automatic policy.
- * @param name Codec name.
- * @return Owned chosen format or injected failure.
- */
-struct ast_format *__wrap_ra_media_select(struct ast_format *radio, unsigned int rate,
-                                          const char *name) {
-    assert(radio == &native && (rate == 0 || rate == 16000));
-    (void)name;
-    if (failure == 3) {
-        return NULL;
-    }
-    struct ast_format *selected = use_codec ? &compressed : &native;
-    ++selected->references;
-    return selected;
+    ++advertised->references;
+    return advertised;
 }
 
 /** @brief Release a fixture format reference.
@@ -101,22 +78,22 @@ void __ao2_cleanup_debug(void *object, const char *tag, const char *file, int li
     }
 }
 
-/** @brief Return a format's sample rate.
+/** @brief Return a format's native sample rate.
  * @param format Fixture format.
  * @return Samples per second.
  */
 unsigned int ast_format_get_sample_rate(const struct ast_format *format) { return format->rate; }
 
-/** @brief Return borrowed PCM without acquiring a reference.
+/** @brief Return the registered signed-linear format without acquiring a reference.
  * @param rate Requested PCM rate.
- * @return Corresponding linear format.
+ * @return Cached format or null for the injected absence.
  */
 struct ast_format *ast_format_cache_get_slin_by_rate(unsigned int rate) {
-    assert(rate == 48000 || rate == 16000);
-    return rate == 48000 ? &native : &pcm;
+    assert(rate == 48000);
+    return failure == 3 ? NULL : cached_linear;
 }
 
-/** @brief Compare format identity.
+/** @brief Compare fixture format identity.
  * @param first First format.
  * @param second Second format.
  * @return Equality result.
@@ -124,30 +101,6 @@ struct ast_format *ast_format_cache_get_slin_by_rate(unsigned int rate) {
 enum ast_format_cmp_res ast_format_cmp(const struct ast_format *first,
                                        const struct ast_format *second) {
     return first == second ? AST_FORMAT_CMP_EQUAL : AST_FORMAT_CMP_NOT_EQUAL;
-}
-
-/** @brief Allocate one required codec direction.
- * @param dest Destination format.
- * @param source Source format.
- * @return Owned path or injected allocation failure.
- */
-struct ast_trans_pvt *ast_translator_build_path(struct ast_format *dest,
-                                                struct ast_format *source) {
-    bool decoding = dest == &pcm;
-    assert(decoding ? source == &compressed : dest == &compressed && source == &pcm);
-    if (failure == (decoding ? 4 : 5)) {
-        return NULL;
-    }
-    ++paths;
-    return decoding ? &decode : &encode;
-}
-
-/** @brief Release a converter.
- * @param path Owned fixture path.
- */
-void ast_translator_free_path(struct ast_trans_pvt *path) {
-    assert((path == &decode || path == &encode) && paths > 0);
-    --paths;
 }
 
 /** @brief Reserve the native hardware channel without calling it.
@@ -165,7 +118,7 @@ struct ast_channel *ast_request(const char *type, struct ast_format_cap *request
     assert(!strcmp(type, "RadioPlusAdvanced") && request_cap == technology.capabilities);
     assert(!assignedids && !requestor && !strcmp(addr, "usb"));
     *cause = 0;
-    if (failure == 6) {
+    if (failure == 4) {
         return NULL;
     }
     ++channels;
@@ -180,58 +133,60 @@ void ast_hangup(struct ast_channel *channel) {
     --channels;
 }
 
-/** @brief Set the actual requested read codec, not just its sample rate.
+/** @brief Set the fixed native read format.
  * @param channel Reserved channel.
- * @param format Negotiated codec.
+ * @param format Required 48 kHz signed-linear format.
  * @return Injected status.
  */
 int ast_set_read_format(struct ast_channel *channel, struct ast_format *format) {
-    assert(channel && format == (use_codec ? &compressed : &native));
-    return failure == 7 ? -1 : 0;
+    assert(channel && format == &native);
+    return failure == 5 ? -1 : 0;
 }
 
-/** @brief Set the actual requested write codec.
+/** @brief Set the fixed native write format.
  * @param channel Reserved channel.
- * @param format Negotiated codec.
+ * @param format Required 48 kHz signed-linear format.
  * @return Injected status.
  */
 int ast_set_write_format(struct ast_channel *channel, struct ast_format *format) {
-    assert(channel && format == (use_codec ? &compressed : &native));
-    return failure == 8 ? -1 : 0;
+    assert(channel && format == &native);
+    return failure == 6 ? -1 : 0;
 }
 
-/** @brief Cover successful native/compressed reservations and every cleanup path.
+/** @brief Assert that no fixture retains a production-owned reference. */
+static void clean(void) {
+    assert(!channels && !native.references && !wrong_rate.references && !wrong_format.references);
+}
+
+/** @brief Cover fixed-native validation and every reservation cleanup path.
  * @return Zero after all ownership assertions.
  */
 int main(void) {
     struct ra_connection connection = {0};
-    use_codec = true;
-    for (failure = 1; failure <= 8; ++failure) {
-        assert(ra_connection_open(&connection, "usb", 0, "requested"));
-        assert(!connection.channel && !paths && !channels);
-        assert(!native.references && !compressed.references && !pcm.references);
+    for (failure = 1; failure <= 6; ++failure) {
+        assert(ra_connection_open(&connection, "usb"));
+        assert(!connection.channel);
+        clean();
     }
     failure = 0;
-    assert(!ra_connection_open(&connection, "usb", 0, "requested"));
-    assert(paths == 2 && channels == 1 && compressed.references == 1);
-    assert(connection.radio.linear == &pcm && connection.radio.codec == &compressed);
+    advertised = &wrong_rate;
+    assert(ra_connection_open(&connection, "usb"));
+    clean();
+    advertised = &wrong_format;
+    assert(ra_connection_open(&connection, "usb"));
+    clean();
+    advertised = &native;
+    assert(!ra_connection_open(&connection, "usb"));
+    assert(channels == 1 && native.references == 1 && connection.radio.linear == &native);
     ra_connection_close(&connection);
-    assert(!ra_connection_open(&connection, "usb", 0, ""));
-    ra_connection_close(&connection);
-    assert(!ra_connection_open(&connection, "usb", 0, ""));
-    ra_connection_close(&connection);
-    assert(!ra_connection_open(&connection, "usb", 16000, ""));
-    ra_connection_close(&connection);
-    assert(!paths && !channels && !compressed.references);
-    use_codec = false;
-    assert(!ra_connection_open(&connection, "usb", 0, "requested"));
-    assert(!paths && channels == 1 && native.references == 1);
+    clean();
+    assert(!ra_connection_open(&connection, "usb"));
     /* Simulate the worker releasing transferred channel ownership before media cleanup. */
     ast_hangup(connection.channel);
     connection.channel = NULL;
     ra_connection_close(&connection);
     ra_connection_close(&connection);
-    assert(!paths && !channels && !native.references);
-    puts("radio reservation and negotiated converter ownership tests passed");
+    clean();
+    puts("fixed 48 kHz radio reservation tests passed");
     return 0;
 }

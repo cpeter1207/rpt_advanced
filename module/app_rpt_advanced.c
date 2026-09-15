@@ -10,6 +10,7 @@
 #include "link_hub.h"
 #include "runtime.h"
 #include "schema.h"
+#include "settings.h"
 #include "worker.h"
 #include <asterisk/buildopts.h>
 #include <asterisk/channel.h>
@@ -871,6 +872,24 @@ static int incoming_link(struct ast_channel *channel, const char *data) {
     return result ? -1 : 0;
 }
 
+/** @brief Warn for retired local-media selectors while retaining a usable configuration.
+ * @param document Validated configuration candidate.
+ * @param path Configuration pathname for actionable diagnostics.
+ * Retired values have no runtime representation: the local radio boundary is
+ * always 48 kHz signed-linear PCM under ADR 0035.
+ */
+static void warn_retired_node_media_options(const struct ra_document *document, const char *path) {
+    for (size_t index = 0; index < document->count; ++index) {
+        const struct ra_config_entry *entry = &document->entries[index];
+        if (ra_settings_node_option_retired(entry->key)) {
+            ast_log(LOG_WARNING,
+                    "rpt_advanced: %s [%s] %s is ignored; using fixed 48 kHz signed-linear "
+                    "local radio PCM\n",
+                    path, entry->section, entry->key);
+        }
+    }
+}
+
 /** @brief Load a complete replacement without discarding working settings on failure.
  * @return Zero on success or minus one on file, syntax, or schema errors.
  */
@@ -904,6 +923,7 @@ static int read_configuration(void) {
         ast_free(path);
         return -1;
     }
+    warn_retired_node_media_options(&replacement, path);
     ast_free(path);
     ast_mutex_lock(&runtime_lock);
     /* Retained peer readers wait at each node's callback gate while resources are exchanged.

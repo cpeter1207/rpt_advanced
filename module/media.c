@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /** @file
- * @brief Select media from Asterisk's live codec registry and translation graph.
+ * @brief Collect peer media from Asterisk's live codec registry and translation graph.
  */
 #include <asterisk.h>
 
@@ -12,7 +12,6 @@
 #include <asterisk/format_cap.h>
 #include <asterisk/translate.h>
 #include <stdbool.h>
-#include <string.h>
 
 /** @brief Check both directions, including identity without a translator.
  * @param first First media format.
@@ -25,43 +24,6 @@ static int bidirectional(struct ast_format *first, struct ast_format *second) {
     }
     return ast_translate_path_steps(first, second) != UINT_MAX &&
            ast_translate_path_steps(second, first) != UINT_MAX;
-}
-
-struct ast_format *ra_media_select(struct ast_format *radio, unsigned int rate, const char *name) {
-    struct ast_format *selected = NULL;
-    unsigned int selected_rate = 0;
-    unsigned int native_rate = ast_format_get_sample_rate(radio);
-    const char *requested = *name ? name : "slin";
-    int maximum = ast_codec_get_max();
-    for (int index = 0; index < maximum; ++index) {
-        struct ast_codec *codec = ast_codec_get_by_id(index + 1);
-        if (!codec) {
-            continue;
-        }
-        unsigned int candidate_rate = codec->sample_rate;
-        if (codec->type != AST_MEDIA_TYPE_AUDIO || strcmp(codec->name, requested) ||
-            candidate_rate <= selected_rate ||
-            (rate ? candidate_rate != rate : candidate_rate > native_rate)) {
-            ao2_cleanup(codec);
-            continue;
-        }
-        struct ast_format *candidate = ast_format_cache_get_by_codec(codec);
-        ao2_cleanup(codec);
-        if (!candidate) {
-            continue;
-        }
-        struct ast_format *linear = ast_format_cache_get_slin_by_rate(candidate_rate);
-        /* The cache may round to a different rate: never silently accept that. */
-        if (linear && ast_format_get_sample_rate(linear) == candidate_rate &&
-            bidirectional(candidate, radio) && bidirectional(candidate, linear)) {
-            ao2_cleanup(selected);
-            selected = candidate;
-            selected_rate = candidate_rate;
-        } else {
-            ao2_cleanup(candidate);
-        }
-    }
-    return selected;
 }
 
 /** @brief One owned registry format eligible for an ordered IAX attempt. */
