@@ -1,6 +1,6 @@
 //! Owned configuration document storage.
 
-use super::{parse, ConfigError};
+use super::{ConfigError, parse, scope};
 
 /// One option retained in source order with owned strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +19,7 @@ pub struct ConfigEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigDocument {
     sections: Vec<String>,
+    section_lines: Vec<usize>,
     entries: Vec<ConfigEntry>,
 }
 
@@ -37,6 +38,7 @@ impl ConfigDocument {
                 Ok(parse::ParsedLine::Section(name)) => {
                     section = Some(name.to_owned());
                     document.sections.push(name.to_owned());
+                    document.section_lines.push(line_number);
                 }
                 Ok(parse::ParsedLine::Option(key, value)) => {
                     let Some(section_name) = section.as_ref() else {
@@ -50,7 +52,10 @@ impl ConfigDocument {
                     });
                 }
                 Err(()) => {
-                    return Err(ConfigError::syntax(line_number, "malformed section or option"));
+                    return Err(ConfigError::syntax(
+                        line_number,
+                        "malformed section or option",
+                    ));
                 }
             }
         }
@@ -67,6 +72,39 @@ impl ConfigDocument {
         &self.entries
     }
 
+    /// Return declared node sections in source order.
+    pub fn nodes(&self) -> Vec<&str> {
+        self.sections
+            .iter()
+            .enumerate()
+            .filter(|(index, section)| {
+                matches!(
+                    scope::parse_scope(section),
+                    Ok(parsed) if parsed.kind == scope::ScopeKind::Node
+                ) && !self.sections[..*index].contains(section)
+            })
+            .map(|(_, section)| section.as_str())
+            .collect()
+    }
+
+    /// Return matching named sections in source order.
+    pub fn named_sections(&self, family: &str, node: Option<&str>) -> Vec<&str> {
+        self.sections
+            .iter()
+            .enumerate()
+            .filter(|(index, section)| {
+                let Ok(parsed) = scope::parse_scope(section) else {
+                    return false;
+                };
+                scope::is_named(parsed.kind)
+                    && section.split(' ').next() == Some(family)
+                    && parsed.node == node
+                    && !self.sections[..*index].contains(section)
+            })
+            .map(|(_, section)| section.as_str())
+            .collect()
+    }
+
     pub(crate) fn lookup(&self, key: &str, scopes: &[&str]) -> Option<&str> {
         scopes.iter().find_map(|scope| {
             self.entries
@@ -78,6 +116,12 @@ impl ConfigDocument {
     }
 
     pub(crate) fn section_entries(&self, section: &str) -> impl Iterator<Item = &ConfigEntry> {
-        self.entries.iter().filter(move |entry| entry.section == section)
+        self.entries
+            .iter()
+            .filter(move |entry| entry.section == section)
+    }
+
+    pub(crate) fn section_line(&self, index: usize) -> usize {
+        self.section_lines[index]
     }
 }

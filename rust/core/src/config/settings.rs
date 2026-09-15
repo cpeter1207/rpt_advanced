@@ -1,6 +1,9 @@
 //! Owned node settings and inherited default resolution.
 
-use super::{parse, ConfigDocument, ConfigError, NodeId, Resolution, Schema};
+use super::{ConfigDocument, ConfigError, Resolution, Schema, parse};
+use crate::access::AccessPolicy;
+use crate::command::{CommandMapping, DtmfCommandMap, LinkAction};
+use crate::schedule::{date_selector_valid, weekday_selector_valid};
 use std::collections::BTreeMap;
 
 /// Directory lookup source selected after the local static directory.
@@ -54,12 +57,995 @@ pub struct ResolvedNodeSettings {
     pub link_commands: BTreeMap<String, String>,
 }
 
+/// Owned identifier media and scheduling defaults after scope resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedIdentifierSettings {
+    /// Positive identifier interval in milliseconds.
+    pub interval_ms: u64,
+    /// Nonnegative scheduler priority.
+    pub priority: u64,
+    /// Whether identification waits for the first qualifying key-up.
+    pub first_key_only: bool,
+    /// Whether to identify even while the node is inactive.
+    pub regardless_of_activity: bool,
+    /// Whether to defer identification while traffic is active.
+    pub polite: bool,
+    /// Maximum polite deferral in milliseconds.
+    pub polite_maximum_wait_ms: u64,
+    /// Configured sound-file path.
+    pub sound_file: String,
+    /// Configured speech text.
+    pub speech_text: String,
+    /// Piper voice model path.
+    pub speech_model: String,
+    /// Piper speaking speed percentage.
+    pub speech_speed_percent: u64,
+    /// Piper gain in dB.
+    pub speech_level_db: i64,
+    /// Configured Morse fallback text.
+    pub morse_text: String,
+    /// Morse speed in words per minute.
+    pub morse_speed_wpm: u64,
+    /// Morse tone frequency in hertz.
+    pub morse_frequency_hz: u64,
+    /// Morse gain in dB.
+    pub morse_level_db: i64,
+}
+
+/// Owned announcement settings after flat, node, and named resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedAnnouncementSettings {
+    /// Zero plays after each ordinary transmitter release.
+    pub interval_ms: u64,
+    /// Configured sound-file path.
+    pub sound_file: String,
+    /// Configured speech text.
+    pub speech_text: String,
+    /// Piper voice model path.
+    pub speech_model: String,
+    /// Piper speaking speed percentage.
+    pub speech_speed_percent: u64,
+    /// Piper gain in dB.
+    pub speech_level_db: i64,
+    /// Configured Morse fallback text.
+    pub morse_text: String,
+    /// Morse speed in words per minute.
+    pub morse_speed_wpm: u64,
+    /// Morse tone frequency in hertz.
+    pub morse_frequency_hz: u64,
+    /// Morse gain in dB.
+    pub morse_level_db: i64,
+}
+
+/// Resolved Morse defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMorseSettings {
+    /// Tone frequency in hertz.
+    pub frequency_hz: u64,
+    /// Speed in words per minute.
+    pub speed_wpm: u64,
+    /// Level in dB.
+    pub level_db: i64,
+}
+/// Resolved speech defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSpeechSettings {
+    /// Voice model path.
+    pub voice: String,
+    /// Speaking speed percentage.
+    pub speed_percent: u64,
+    /// Level in dB.
+    pub level_db: i64,
+}
+/// Resolved clock-announcement defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTimeSettings {
+    /// Twelve- or twenty-four-hour display.
+    pub format: u64,
+}
+/// Resolved named courtesy assignment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedCourtesySettings {
+    /// Configured sound-file path.
+    pub sound_file: String,
+    /// Configured speech text.
+    pub speech_text: String,
+    /// Piper voice model path.
+    pub speech_model: String,
+    /// Piper speaking speed percentage.
+    pub speech_speed_percent: u64,
+    /// Piper gain, fixed at zero because courtesy uses its common level.
+    pub speech_level_db: i64,
+    /// Configured Morse fallback text.
+    pub morse_text: String,
+    /// Morse speed in words per minute.
+    pub morse_speed_wpm: u64,
+    /// Morse tone frequency in hertz.
+    pub morse_frequency_hz: u64,
+    /// Morse gain, inherited from the common courtesy level.
+    pub morse_level_db: i64,
+    /// Optional generated tone sequence.
+    pub tone_sequence: String,
+    /// Courtesy input.
+    pub input: String,
+    /// Optional linked peer.
+    pub remote_node: String,
+    /// Common courtesy level in dB.
+    pub level_db: i64,
+}
+/// Resolved named message template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedTemplateSettings {
+    /// Template label.
+    pub name: String,
+    /// Template text.
+    pub text: String,
+}
+/// Resolved named controller macro.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMacroSettings {
+    /// Macro label.
+    pub name: String,
+    /// Controller action.
+    pub action: String,
+    /// Optional decimal target.
+    pub target_node: String,
+}
+/// Resolved zero-time event declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedEventSettings {
+    /// Event label.
+    pub name: String,
+    /// Civil trigger.
+    pub at: String,
+    /// Optional template.
+    pub template: String,
+    /// Optional message.
+    pub message: String,
+    /// Optional macro.
+    pub macro_name: String,
+}
+/// Resolved permanent direct-link declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPermanentLinkSettings {
+    /// Link label.
+    pub name: String,
+    /// Remote decimal node.
+    pub remote_node: String,
+}
+/// Resolved replacement-window declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedScheduleSettings {
+    /// Window label.
+    pub name: String,
+    /// Replacement remote node.
+    pub remote_node: String,
+    /// Permanent label replaced by the window.
+    pub replace_permanent: String,
+    /// Optional weekday selector.
+    pub days: String,
+    /// Optional explicit-date selector.
+    pub dates: String,
+    /// Inclusive local start.
+    pub start_time: String,
+    /// Exclusive local end.
+    pub end_time: String,
+    /// Post-window inactivity grace in milliseconds.
+    pub end_inactivity_ms: u64,
+}
+
+fn scoped<'a>(
+    document: &'a ConfigDocument,
+    node: &NodeId,
+    family: &str,
+    key: &str,
+) -> Option<&'a str> {
+    let node_scope = format!("{family} {}", node.as_str());
+    document.lookup(key, &[node_scope.as_str(), family])
+}
+
+fn lookup_valid_scopes<T>(
+    document: &ConfigDocument,
+    key: &str,
+    scopes: &[String],
+    parse_value: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
+    for scope in scopes {
+        if let Some(raw) = document.lookup(key, &[scope.as_str()]) {
+            if let Some(value) = parse_value(raw) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn lookup_scopes(document: &ConfigDocument, key: &str, scopes: &[String]) -> Option<String> {
+    scopes
+        .iter()
+        .find_map(|scope| document.lookup(key, &[scope.as_str()]).map(str::to_owned))
+}
+
+fn family_scopes(node: &NodeId, family: &str) -> [String; 2] {
+    [format!("{family} {}", node.as_str()), family.to_owned()]
+}
+impl ResolvedMorseSettings {
+    /// Resolve flat and node-specific Morse defaults.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        Ok(Resolution {
+            value: Self {
+                frequency_hz: lookup_valid_scopes(
+                    document,
+                    "frequency_hz",
+                    &family_scopes(node, "morse"),
+                    |value| parse::unsigned(value, 1, u32::MAX as u64),
+                )
+                .unwrap_or(800),
+                speed_wpm: lookup_valid_scopes(
+                    document,
+                    "speed_wpm",
+                    &family_scopes(node, "morse"),
+                    |value| parse::unsigned(value, 1, 100),
+                )
+                .unwrap_or(20),
+                level_db: lookup_valid_scopes(
+                    document,
+                    "level_db",
+                    &family_scopes(node, "morse"),
+                    |value| parse::signed(value, -60, 0),
+                )
+                .unwrap_or(-6),
+            },
+            warnings,
+        })
+    }
+}
+
+impl ResolvedSpeechSettings {
+    /// Resolve flat and node-specific speech defaults.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        Ok(Resolution {
+            value: Self {
+                voice: scoped(document, node, "speech", "voice")
+                    .unwrap_or("en_US-lessac-medium.onnx")
+                    .to_owned(),
+                speed_percent: lookup_valid_scopes(
+                    document,
+                    "speed_percent",
+                    &family_scopes(node, "speech"),
+                    |value| parse::unsigned(value, 1, 1000),
+                )
+                .unwrap_or(100),
+                level_db: lookup_valid_scopes(
+                    document,
+                    "level_db",
+                    &family_scopes(node, "speech"),
+                    |value| parse::signed(value, -60, 0),
+                )
+                .unwrap_or(0),
+            },
+            warnings,
+        })
+    }
+}
+
+impl ResolvedTimeSettings {
+    /// Resolve flat and node-specific time defaults.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        Ok(Resolution {
+            value: Self {
+                format: lookup_valid_scopes(
+                    document,
+                    "format",
+                    &family_scopes(node, "time"),
+                    |value| {
+                        matches!(value, "12" | "24")
+                            .then(|| value.parse().ok())
+                            .flatten()
+                    },
+                )
+                .unwrap_or(12),
+            },
+            warnings,
+        })
+    }
+}
+
+impl ResolvedCourtesySettings {
+    /// Resolve one named courtesy assignment.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+        label: &str,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        let section = format!("courtesy {} {label}", node.as_str());
+        let named_scopes = vec![section.clone()];
+        let courtesy_scopes = family_scopes(node, "courtesy");
+        let input = document
+            .lookup("input", &[section.as_str()])
+            .unwrap_or("")
+            .to_owned();
+        let remote_node = document
+            .lookup("remote_node", &[section.as_str()])
+            .unwrap_or("")
+            .to_owned();
+        if !matches!(input.as_str(), "receiver" | "link") {
+            return Err(ConfigError::structure(
+                &section,
+                "courtesy input is required",
+            ));
+        }
+        if input != "link" && !remote_node.is_empty() {
+            return Err(ConfigError::structure(
+                &section,
+                "courtesy remote node requires link input",
+            ));
+        }
+        let level_db = lookup_valid_scopes(document, "level_db", &named_scopes, |value| {
+            parse::signed(value, -60, 0)
+        })
+        .or_else(|| {
+            lookup_valid_scopes(document, "level_db", &courtesy_scopes, |value| {
+                parse::signed(value, -60, 0)
+            })
+        })
+        .unwrap_or(-20);
+        Ok(Resolution {
+            value: Self {
+                sound_file: lookup_scopes(document, "sound_file", &named_scopes)
+                    .or_else(|| lookup_scopes(document, "sound_file", &courtesy_scopes))
+                    .unwrap_or_default(),
+                speech_text: lookup_scopes(document, "speech_text", &named_scopes)
+                    .or_else(|| lookup_scopes(document, "speech_text", &courtesy_scopes))
+                    .unwrap_or_default(),
+                speech_model: lookup_scopes(document, "speech_model", &named_scopes)
+                    .or_else(|| lookup_scopes(document, "voice", &family_scopes(node, "speech")))
+                    .or_else(|| lookup_scopes(document, "speech_model", &courtesy_scopes))
+                    .unwrap_or_else(|| "en_US-lessac-medium.onnx".to_owned()),
+                speech_speed_percent: lookup_valid_scopes(
+                    document,
+                    "speech_speed_percent",
+                    &named_scopes,
+                    |value| parse::unsigned(value, 1, 1000),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speed_percent",
+                        &family_scopes(node, "speech"),
+                        |value| parse::unsigned(value, 1, 1000),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speech_speed_percent",
+                        &courtesy_scopes,
+                        |value| parse::unsigned(value, 1, 1000),
+                    )
+                })
+                .unwrap_or(100),
+                speech_level_db: 0,
+                morse_text: lookup_scopes(document, "morse_text", &named_scopes)
+                    .or_else(|| lookup_scopes(document, "morse_text", &courtesy_scopes))
+                    .unwrap_or_default(),
+                morse_speed_wpm: lookup_valid_scopes(
+                    document,
+                    "morse_speed_wpm",
+                    &named_scopes,
+                    |value| parse::unsigned(value, 1, 100),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speed_wpm",
+                        &family_scopes(node, "morse"),
+                        |value| parse::unsigned(value, 1, 100),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(document, "morse_speed_wpm", &courtesy_scopes, |value| {
+                        parse::unsigned(value, 1, 100)
+                    })
+                })
+                .unwrap_or(20),
+                morse_frequency_hz: lookup_valid_scopes(
+                    document,
+                    "morse_frequency_hz",
+                    &named_scopes,
+                    |value| parse::unsigned(value, 1, u32::MAX as u64),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "frequency_hz",
+                        &family_scopes(node, "morse"),
+                        |value| parse::unsigned(value, 1, u32::MAX as u64),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(document, "morse_frequency_hz", &courtesy_scopes, |value| {
+                        parse::unsigned(value, 1, u32::MAX as u64)
+                    })
+                })
+                .unwrap_or(800),
+                morse_level_db: level_db,
+                tone_sequence: lookup_scopes(document, "tone_sequence", &named_scopes)
+                    .or_else(|| lookup_scopes(document, "tone_sequence", &courtesy_scopes))
+                    .unwrap_or_default(),
+                input,
+                remote_node,
+                level_db,
+            },
+            warnings,
+        })
+    }
+}
+
+impl ResolvedTemplateSettings {
+    /// Resolve a global template and same-label node override.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: Option<&NodeId>,
+        label: &str,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        let mut scopes = Vec::new();
+        if let Some(node) = node {
+            scopes.push(format!("template {} {label}", node.as_str()));
+        }
+        scopes.push(format!("template {label}"));
+        let text = scopes
+            .iter()
+            .find_map(|scope| document.lookup("text", &[scope.as_str()]))
+            .unwrap_or("");
+        if text.is_empty() {
+            return Err(ConfigError::structure(
+                &scopes[0],
+                "template text is required",
+            ));
+        }
+        Ok(Resolution {
+            value: Self {
+                name: label.to_owned(),
+                text: text.to_owned(),
+            },
+            warnings,
+        })
+    }
+}
+
+impl ResolvedMacroSettings {
+    /// Resolve a global macro and same-label node override.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: Option<&NodeId>,
+        label: &str,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        let mut scopes = Vec::new();
+        if let Some(node) = node {
+            scopes.push(format!("macro {} {label}", node.as_str()));
+        }
+        scopes.push(format!("macro {label}"));
+        let action = scopes
+            .iter()
+            .find_map(|scope| document.lookup("action", &[scope.as_str()]))
+            .unwrap_or("");
+        let target = scopes
+            .iter()
+            .find_map(|scope| document.lookup("target_node", &[scope.as_str()]))
+            .unwrap_or("");
+        if !matches!(
+            action,
+            "connect" | "disconnect" | "disconnect_all" | "reconnect_all"
+        ) {
+            return Err(ConfigError::structure(
+                &scopes[0],
+                "macro action is required",
+            ));
+        }
+        if matches!(action, "connect" | "disconnect")
+            && (target.is_empty() || !target.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err(ConfigError::structure(
+                &scopes[0],
+                "macro target node is required",
+            ));
+        }
+        Ok(Resolution {
+            value: Self {
+                name: label.to_owned(),
+                action: action.to_owned(),
+                target_node: target.to_owned(),
+            },
+            warnings,
+        })
+    }
+}
+
+impl ResolvedEventSettings {
+    /// Resolve a required per-node event declaration.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+        label: &str,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        let section = format!("event {} {label}", node.as_str());
+        let get = |key| {
+            document
+                .lookup(key, &[section.as_str()])
+                .unwrap_or("")
+                .to_owned()
+        };
+        let value = Self {
+            name: label.to_owned(),
+            at: get("at"),
+            template: get("template"),
+            message: get("message"),
+            macro_name: get("macro"),
+        };
+        if value.at.is_empty() {
+            return Err(ConfigError::structure(&section, "event at is required"));
+        }
+        if !value.template.is_empty() && !value.message.is_empty() {
+            return Err(ConfigError::structure(
+                &section,
+                "event message and template are mutually exclusive",
+            ));
+        }
+        if value.template.is_empty() && value.message.is_empty() && value.macro_name.is_empty() {
+            return Err(ConfigError::structure(
+                &section,
+                "event message, template, or macro is required",
+            ));
+        }
+        Ok(Resolution { value, warnings })
+    }
+}
+
+impl ResolvedPermanentLinkSettings {
+    /// Resolve a required per-node permanent link.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+        label: &str,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        let section = format!("permanent {} {label}", node.as_str());
+        let remote = document
+            .lookup("remote_node", &[section.as_str()])
+            .unwrap_or("");
+        if remote.is_empty() {
+            return Err(ConfigError::structure(
+                &section,
+                "permanent remote node is required",
+            ));
+        }
+        if remote == node.as_str() || !remote.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ConfigError::structure(
+                &section,
+                "invalid permanent remote node",
+            ));
+        }
+        Ok(Resolution {
+            value: Self {
+                name: label.to_owned(),
+                remote_node: remote.to_owned(),
+            },
+            warnings,
+        })
+    }
+}
+
+impl ResolvedScheduleSettings {
+    /// Resolve a required same-node replacement window.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+        label: &str,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let warnings = Schema::validate(document)?.warnings;
+        let section = format!("schedule {} {label}", node.as_str());
+        let get = |key| {
+            document
+                .lookup(key, &[section.as_str()])
+                .unwrap_or("")
+                .to_owned()
+        };
+        let value = Self {
+            name: label.to_owned(),
+            remote_node: get("remote_node"),
+            replace_permanent: get("replace_permanent"),
+            days: document
+                .lookup("days", &[section.as_str()])
+                .filter(|raw| weekday_selector_valid(raw))
+                .unwrap_or("")
+                .to_owned(),
+            dates: document
+                .lookup("dates", &[section.as_str()])
+                .filter(|raw| date_selector_valid(raw))
+                .unwrap_or("")
+                .to_owned(),
+            start_time: get("start_time"),
+            end_time: get("end_time"),
+            end_inactivity_ms: document
+                .lookup("end_inactivity_ms", &[section.as_str()])
+                .and_then(|raw| parse::unsigned(raw, 0, u64::MAX))
+                .unwrap_or(0),
+        };
+        if value.remote_node.is_empty()
+            || value.replace_permanent.is_empty()
+            || value.start_time.is_empty()
+            || value.end_time.is_empty()
+        {
+            return Err(ConfigError::structure(
+                &section,
+                "schedule remote node, replacement, start time, and end time are required",
+            ));
+        }
+        Ok(Resolution { value, warnings })
+    }
+}
+
+impl ResolvedAnnouncementSettings {
+    /// Resolve announcement values with named settings taking precedence.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+        set: Option<&str>,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let schema = Schema::validate(document)?;
+        let mut announcement_scopes = Vec::new();
+        if let Some(set) = set {
+            announcement_scopes.push(format!("announcement {} {set}", node.as_str()));
+        }
+        announcement_scopes.push(format!("announcement {}", node.as_str()));
+        announcement_scopes.push("announcement".to_owned());
+        let named_count = usize::from(set.is_some());
+        Ok(Resolution {
+            value: Self {
+                interval_ms: lookup_valid_scopes(
+                    document,
+                    "interval_ms",
+                    &announcement_scopes,
+                    |raw| parse::unsigned(raw, 0, u64::MAX),
+                )
+                .unwrap_or(0),
+                sound_file: lookup_scopes(document, "sound_file", &announcement_scopes)
+                    .unwrap_or_default(),
+                speech_text: lookup_scopes(document, "speech_text", &announcement_scopes)
+                    .unwrap_or_default(),
+                speech_model: lookup_scopes(
+                    document,
+                    "speech_model",
+                    &announcement_scopes[..named_count],
+                )
+                .or_else(|| lookup_scopes(document, "voice", &family_scopes(node, "speech")))
+                .or_else(|| {
+                    lookup_scopes(
+                        document,
+                        "speech_model",
+                        &announcement_scopes[named_count..],
+                    )
+                })
+                .unwrap_or_else(|| "en_US-lessac-medium.onnx".to_owned()),
+                speech_speed_percent: lookup_valid_scopes(
+                    document,
+                    "speech_speed_percent",
+                    &announcement_scopes[..named_count],
+                    |raw| parse::unsigned(raw, 1, 1000),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speed_percent",
+                        &family_scopes(node, "speech"),
+                        |raw| parse::unsigned(raw, 1, 1000),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speech_speed_percent",
+                        &announcement_scopes[named_count..],
+                        |raw| parse::unsigned(raw, 1, 1000),
+                    )
+                })
+                .unwrap_or(100),
+                speech_level_db: lookup_valid_scopes(
+                    document,
+                    "speech_level_db",
+                    &announcement_scopes[..named_count],
+                    |raw| parse::signed(raw, -60, 0),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "level_db",
+                        &family_scopes(node, "speech"),
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speech_level_db",
+                        &announcement_scopes[named_count..],
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .unwrap_or(0),
+                morse_text: lookup_scopes(document, "morse_text", &announcement_scopes)
+                    .unwrap_or_default(),
+                morse_speed_wpm: lookup_valid_scopes(
+                    document,
+                    "morse_speed_wpm",
+                    &announcement_scopes[..named_count],
+                    |raw| parse::unsigned(raw, 1, 100),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speed_wpm",
+                        &family_scopes(node, "morse"),
+                        |raw| parse::unsigned(raw, 1, 100),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "morse_speed_wpm",
+                        &announcement_scopes[named_count..],
+                        |raw| parse::unsigned(raw, 1, 100),
+                    )
+                })
+                .unwrap_or(20),
+                morse_frequency_hz: lookup_valid_scopes(
+                    document,
+                    "morse_frequency_hz",
+                    &announcement_scopes[..named_count],
+                    |raw| parse::unsigned(raw, 1, u32::MAX as u64),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "frequency_hz",
+                        &family_scopes(node, "morse"),
+                        |raw| parse::unsigned(raw, 1, u32::MAX as u64),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "morse_frequency_hz",
+                        &announcement_scopes[named_count..],
+                        |raw| parse::unsigned(raw, 1, u32::MAX as u64),
+                    )
+                })
+                .unwrap_or(800),
+                morse_level_db: lookup_valid_scopes(
+                    document,
+                    "morse_level_db",
+                    &announcement_scopes[..named_count],
+                    |raw| parse::signed(raw, -60, 0),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "level_db",
+                        &family_scopes(node, "morse"),
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "morse_level_db",
+                        &announcement_scopes[named_count..],
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .unwrap_or(-6),
+            },
+            warnings: schema.warnings,
+        })
+    }
+}
+
+impl ResolvedIdentifierSettings {
+    /// Resolve flat, node, and named identifier values with the most-specific value first.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+        set: Option<&str>,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let schema = Schema::validate(document)?;
+        let mut identifier_scopes = Vec::new();
+        if let Some(set) = set {
+            identifier_scopes.push(format!("identifier {} {set}", node.as_str()));
+        }
+        identifier_scopes.push(format!("identifier {}", node.as_str()));
+        identifier_scopes.push("identifier".to_owned());
+        let named_count = usize::from(set.is_some());
+        let number = |key, default, minimum| {
+            lookup_valid_scopes(document, key, &identifier_scopes, |raw| {
+                parse::unsigned(raw, minimum, u64::MAX)
+            })
+            .unwrap_or(default)
+        };
+        let boolean = |key, default| {
+            lookup_valid_scopes(document, key, &identifier_scopes, parse::boolean)
+                .unwrap_or(default)
+        };
+        Ok(Resolution {
+            value: Self {
+                interval_ms: number("interval_ms", 600_000, 1),
+                priority: number("priority", 0, 0),
+                first_key_only: boolean("first_key_only", false),
+                regardless_of_activity: boolean("regardless_of_activity", false),
+                polite: boolean("polite", false),
+                polite_maximum_wait_ms: number("polite_maximum_wait_ms", 60_000, 1),
+                sound_file: lookup_scopes(document, "sound_file", &identifier_scopes)
+                    .unwrap_or_default(),
+                speech_text: lookup_scopes(document, "speech_text", &identifier_scopes)
+                    .unwrap_or_default(),
+                speech_model: lookup_scopes(
+                    document,
+                    "speech_model",
+                    &identifier_scopes[..named_count],
+                )
+                .or_else(|| lookup_scopes(document, "voice", &family_scopes(node, "speech")))
+                .or_else(|| {
+                    lookup_scopes(document, "speech_model", &identifier_scopes[named_count..])
+                })
+                .unwrap_or_else(|| "en_US-lessac-medium.onnx".to_owned()),
+                speech_speed_percent: lookup_valid_scopes(
+                    document,
+                    "speech_speed_percent",
+                    &identifier_scopes[..named_count],
+                    |raw| parse::unsigned(raw, 1, 1000),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speed_percent",
+                        &family_scopes(node, "speech"),
+                        |raw| parse::unsigned(raw, 1, 1000),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speech_speed_percent",
+                        &identifier_scopes[named_count..],
+                        |raw| parse::unsigned(raw, 1, 1000),
+                    )
+                })
+                .unwrap_or(100),
+                speech_level_db: lookup_valid_scopes(
+                    document,
+                    "speech_level_db",
+                    &identifier_scopes[..named_count],
+                    |raw| parse::signed(raw, -60, 0),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "level_db",
+                        &family_scopes(node, "speech"),
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speech_level_db",
+                        &identifier_scopes[named_count..],
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .unwrap_or(0),
+                morse_text: lookup_scopes(document, "morse_text", &identifier_scopes)
+                    .unwrap_or_default(),
+                morse_speed_wpm: lookup_valid_scopes(
+                    document,
+                    "morse_speed_wpm",
+                    &identifier_scopes[..named_count],
+                    |raw| parse::unsigned(raw, 1, 100),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "speed_wpm",
+                        &family_scopes(node, "morse"),
+                        |raw| parse::unsigned(raw, 1, 100),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "morse_speed_wpm",
+                        &identifier_scopes[named_count..],
+                        |raw| parse::unsigned(raw, 1, 100),
+                    )
+                })
+                .unwrap_or(20),
+                morse_frequency_hz: lookup_valid_scopes(
+                    document,
+                    "morse_frequency_hz",
+                    &identifier_scopes[..named_count],
+                    |raw| parse::unsigned(raw, 1, u32::MAX as u64),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "frequency_hz",
+                        &family_scopes(node, "morse"),
+                        |raw| parse::unsigned(raw, 1, u32::MAX as u64),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "morse_frequency_hz",
+                        &identifier_scopes[named_count..],
+                        |raw| parse::unsigned(raw, 1, u32::MAX as u64),
+                    )
+                })
+                .unwrap_or(800),
+                morse_level_db: lookup_valid_scopes(
+                    document,
+                    "morse_level_db",
+                    &identifier_scopes[..named_count],
+                    |raw| parse::signed(raw, -60, 0),
+                )
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "level_db",
+                        &family_scopes(node, "morse"),
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .or_else(|| {
+                    lookup_valid_scopes(
+                        document,
+                        "morse_level_db",
+                        &identifier_scopes[named_count..],
+                        |raw| parse::signed(raw, -60, 0),
+                    )
+                })
+                .unwrap_or(-6),
+            },
+            warnings: schema.warnings,
+        })
+    }
+}
+
 impl ResolvedNodeSettings {
     /// Resolve general defaults and an exact node override, returning warnings for recoverable values.
-    pub fn resolve(document: &ConfigDocument, node: &NodeId) -> Result<Resolution<Self>, ConfigError> {
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+    ) -> Result<Resolution<Self>, ConfigError> {
         let schema = Schema::validate(document)?;
         let mut value = Self::defaults(node);
-        let scopes = ["general".to_owned(), node.as_str().to_owned()];
+        let scopes = [node.as_str().to_owned(), "general".to_owned()];
         macro_rules! text {
             ($field:ident, $key:literal) => {
                 if let Some(raw) = lookup(document, $key, &scopes) {
@@ -76,7 +1062,9 @@ impl ResolvedNodeSettings {
         }
         macro_rules! number {
             ($field:ident, $key:literal) => {
-                if let Some(parsed) = lookup_valid(document, $key, &scopes, |raw| parse::unsigned(raw, 0, u64::MAX)) {
+                if let Some(parsed) = lookup_valid(document, $key, &scopes, |raw| {
+                    parse::unsigned(raw, 0, u64::MAX)
+                }) {
                     value.$field = parsed;
                 }
             };
@@ -89,29 +1077,53 @@ impl ResolvedNodeSettings {
         number!(timeout_lockout_ms, "timeout_lockout_ms");
         number!(kerchunk_max_ms, "kerchunk_max_ms");
         number!(courtesy_delay_ms, "courtesy_delay_ms");
-        if let Some(parsed) = lookup_valid(document, "telemetry_duck_db", &scopes, |raw| parse::signed(raw, -60, 0)) {
+        if let Some(parsed) = lookup_valid(document, "telemetry_duck_db", &scopes, |raw| {
+            parse::signed(raw, -60, 0)
+        }) {
             value.telemetry_duck_db = parsed;
         }
         text!(channel, "radio_channel");
-        text!(callsign, "callsign");
-        text!(link_allow_nodes, "link_allow_nodes");
-        text!(link_deny_nodes, "link_deny_nodes");
+        if let Some(raw) = lookup_valid(document, "callsign", &scopes, |raw| {
+            (raw.len() <= 63).then(|| raw.to_owned())
+        }) {
+            value.callsign = raw;
+        }
+        if let Some(raw) = lookup_valid(document, "link_allow_nodes", &scopes, |raw| {
+            AccessPolicy::list_valid(raw).then(|| raw.to_owned())
+        }) {
+            value.link_allow_nodes = raw;
+        }
+        if let Some(raw) = lookup_valid(document, "link_deny_nodes", &scopes, |raw| {
+            AccessPolicy::list_valid(raw).then(|| raw.to_owned())
+        }) {
+            value.link_deny_nodes = raw;
+        }
         text!(link_static_directory_file, "link_static_directory_file");
         text!(link_directory_file, "link_directory_file");
-        if let Some(parsed) = lookup_valid(document, "link_lookup_method", &scopes, |raw| match raw {
-                "dns" => LinkLookupMethod::Dns,
-                "file" => LinkLookupMethod::File,
-                "both" => LinkLookupMethod::Both,
-                _ => return None,
-            }) {
+        if let Some(parsed) = lookup_valid(document, "link_lookup_method", &scopes, |raw| match raw
+        {
+            "dns" => Some(LinkLookupMethod::Dns),
+            "file" => Some(LinkLookupMethod::File),
+            "both" => Some(LinkLookupMethod::Both),
+            _ => None,
+        }) {
             value.link_lookup_method = parsed;
         }
         for key in command_keys() {
-            if let Some(raw) = lookup(document, key, &scopes) {
-                value.link_commands.insert(key.to_owned(), raw.to_owned());
+            if let Some(raw) = lookup_valid(document, key, &scopes, |raw| {
+                DtmfCommandMap::validate(&[CommandMapping::new(raw, command_action(key))])
+                    .is_ok()
+                    .then(|| raw.to_owned())
+            }) {
+                value.link_commands.insert(key.to_owned(), raw);
             }
         }
-        Ok(Resolution { value, warnings: schema.warnings })
+        validate_command_map(&value.link_commands)
+            .map_err(|message| ConfigError::structure(node.as_str(), message))?;
+        Ok(Resolution {
+            value,
+            warnings: schema.warnings,
+        })
     }
 
     fn defaults(node: &NodeId) -> Self {
@@ -132,7 +1144,10 @@ impl ResolvedNodeSettings {
             link_static_directory_file: String::new(),
             link_directory_file: String::new(),
             link_lookup_method: LinkLookupMethod::Both,
-            link_commands: command_keys().into_iter().map(|key| (key.to_owned(), default_command(key))).collect(),
+            link_commands: command_keys()
+                .into_iter()
+                .map(|key| (key.to_owned(), default_command(key)))
+                .collect(),
         }
     }
 }
@@ -157,12 +1172,24 @@ fn lookup_valid<T>(
     None
 }
 
-fn command_keys() -> [&'static str; 14] {
+fn command_keys() -> [&'static str; 16] {
     [
-        "link_command_disconnect", "link_command_monitor", "link_command_transceive", "link_command_remote",
-        "link_command_status", "link_command_disconnect_all", "link_command_last_keyed", "link_command_local_monitor",
-        "link_command_disconnect_permanent", "link_command_permanent_monitor", "link_command_permanent_transceive",
-        "link_command_full_status", "link_command_reconnect_all", "link_command_permanent_local_monitor",
+        "link_command_disconnect",
+        "link_command_monitor",
+        "link_command_transceive",
+        "link_command_remote",
+        "link_command_status",
+        "link_command_disconnect_all",
+        "link_command_last_keyed",
+        "link_command_local_monitor",
+        "link_command_disconnect_permanent",
+        "link_command_permanent_monitor",
+        "link_command_permanent_transceive",
+        "link_command_full_status",
+        "link_command_reconnect_all",
+        "link_command_permanent_local_monitor",
+        "fixed_10",
+        "fixed_722",
     ]
 }
 
@@ -181,9 +1208,45 @@ fn default_command(key: &str) -> String {
         "link_command_permanent_transceive" => "813",
         "link_command_full_status" => "73",
         "link_command_reconnect_all" => "816",
-        _ => "818",
+        "link_command_permanent_local_monitor" => "818",
+        "fixed_10" => "10",
+        _ => "722",
     }
     .to_owned()
+}
+
+/// Validate command prefixes, preserving an empty configurable mapping as disabled.
+pub fn validate_command_map(commands: &BTreeMap<String, String>) -> Result<(), &'static str> {
+    let mappings = commands
+        .iter()
+        .map(|(key, digits)| CommandMapping::new(digits, command_action(key)))
+        .collect::<Vec<_>>();
+    DtmfCommandMap::validate(&mappings).map_err(|error| match error {
+        crate::command::CommandMapError::InvalidPrefix => "invalid command prefix",
+        crate::command::CommandMapError::AmbiguousPrefix => "ambiguous command prefix",
+    })
+}
+
+fn command_action(key: &str) -> LinkAction {
+    match key {
+        "link_command_disconnect" => LinkAction::Disconnect,
+        "link_command_monitor" => LinkAction::Monitor,
+        "link_command_transceive" => LinkAction::Transceive,
+        "link_command_remote" => LinkAction::Command,
+        "link_command_status" => LinkAction::Status,
+        "link_command_disconnect_all" => LinkAction::DisconnectAll,
+        "link_command_last_keyed" => LinkAction::LastKeyed,
+        "link_command_local_monitor" => LinkAction::LocalMonitor,
+        "link_command_disconnect_permanent" => LinkAction::DisconnectPermanent,
+        "link_command_permanent_monitor" => LinkAction::PermanentMonitor,
+        "link_command_permanent_transceive" => LinkAction::PermanentTransceive,
+        "link_command_full_status" => LinkAction::FullStatus,
+        "link_command_reconnect_all" => LinkAction::ReconnectAll,
+        "link_command_permanent_local_monitor" => LinkAction::PermanentLocalMonitor,
+        "fixed_10" => LinkAction::DisconnectNonPermanentAll,
+        "fixed_722" => LinkAction::Time,
+        _ => unreachable!("command keys are closed over the documented action set"),
+    }
 }
 
 /// A validated node identity with the transport's 63-byte limit.
@@ -194,7 +1257,12 @@ impl NodeId {
     /// Construct an identity containing no whitespace/brackets and at most 63 bytes.
     pub fn new(value: impl Into<String>) -> Result<Self, ConfigError> {
         let value = value.into();
-        if value.is_empty() || value.len() > 63 || value.chars().any(|c| c.is_whitespace() || matches!(c, '[' | ']')) {
+        if value.is_empty()
+            || value.len() > 63
+            || value
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '[' | ']'))
+        {
             return Err(ConfigError::structure(&value, "invalid node identity"));
         }
         Ok(Self(value))

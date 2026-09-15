@@ -44,6 +44,10 @@ pub(crate) fn unsigned(text: &str, min: u64, max: u64) -> Option<u64> {
 
 /// Parse a signed decimal value with inclusive bounds.
 pub(crate) fn signed(text: &str, min: i64, max: i64) -> Option<i64> {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     let value = text.parse::<i64>().ok()?;
     (min..=max).contains(&value).then_some(value)
 }
