@@ -1,5 +1,12 @@
 # Testing
 
+During the Rust migration, run `make rust-check` for the Rust workspace and
+`make rust-coverage` for its Debian 13 amd64 coverage report. Task 12 adds
+the production line and branch thresholds when the coverage harness is
+finalized. `make check` continues to run the C reference suite until a
+migration task explicitly replaces its corresponding C implementation. `make
+ci` runs both paths.
+
 Run `make ci` in the ASL3 development environment. It runs static checks,
 Doxygen, unit tests, line/branch coverage, staged installation, and an isolated
 Asterisk process. The test-only radio does not access USB devices and is not an

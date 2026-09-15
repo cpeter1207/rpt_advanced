@@ -1,0 +1,10 @@
+[package]
+name = "rptadv-asterisk-adapter"
+build = "build.rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["dylib"]

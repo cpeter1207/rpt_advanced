@@ -16,12 +16,13 @@ aspirational and is built manually only when explicitly requested.
 ## Required quality gate
 
 - No compiler errors or warnings; compile with warnings treated as errors.
-- Formatting checks, Ruff, ShellCheck, Cppcheck, and Clang-Tidy must pass for
-  their applicable source types. Validation must not modify source files.
+- Formatting checks, Ruff, ShellCheck, Cppcheck, Clang-Tidy, Rustfmt, Clippy,
+  and Rustdoc must pass for their applicable source types. Validation must not
+  modify source files.
 - No dead code or diagnostic suppression used to conceal defects.
-- All code documented with concise Doxygen comments, with zero Doxygen errors
-  or warnings. Publish generated documentation to GitHub Pages after a merged
-  pull request.
+- C-compatible surfaces have concise Doxygen comments; Rust has concise
+  Rustdoc. Both documentation checks run with zero errors or warnings. Publish
+  generated documentation to GitHub Pages after a merged pull request.
 - Unit, functional, and integration tests must pass on Debian 13 amd64 and
   arm64. Require 100% line and branch coverage of production code on Debian 13
   amd64 only.
@@ -40,6 +41,13 @@ static analysis, and Doxygen checks once, concurrently where independent,
 before the native Debian 13 platform matrix. Run platform tests concurrently.
 Keep failures tied to real validation failures, not fragile environmental or
 timing assumptions.
+
+`make rust-check` runs Rust formatting, Clippy with warnings denied, Rustdoc
+with warnings denied, and the workspace tests. `make rust-coverage` reports
+Rust coverage on Debian 13 amd64 using the Rust 1.85 MSRV toolchain. Task 12
+adds production line and branch thresholds when the coverage harness is
+finalized. `make check` continues to run the C reference suite while the
+migration is in progress.
 
 ## Test containers
 

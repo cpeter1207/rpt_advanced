@@ -48,9 +48,9 @@ asteriskmoddir ?= /usr/lib/$(multiarch)/asterisk/modules
 DESTDIR ?=
 VERSION := 0.1.0-dev
 DIST_NAME := rpt_advanced-$(VERSION)
-DIST_FILES := Makefile COPYING README.md QUALITY.md AGENTS.md Doxyfile .clang-format src module tests examples doc
+DIST_FILES := Makefile COPYING README.md QUALITY.md AGENTS.md Doxyfile .clang-format Cargo.toml Cargo.lock rust-toolchain.toml rust src module tests examples doc
 
-.PHONY: all quality lint static-analysis docs dependency-boundary check coverage install install-check integration dist distcheck platform-verify ci clean
+.PHONY: all quality lint static-analysis docs dependency-boundary rust-quality rust-check rust-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 all: $(RPCR_BUILD_DEP) build/librpt_advanced.a build/app_rpt_advanced.so
 
 build:
@@ -79,7 +79,18 @@ build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS) $(MODULE_OBJECTS)
 build/librpt_advanced.a: $(OBJECTS)
 	$(AR) rcs $@ $^
 
-quality: $(RPCR_BUILD_DEP) lint static-analysis docs
+quality: $(RPCR_BUILD_DEP) lint static-analysis docs rust-quality
+
+rust-quality:
+	cargo --locked fmt --all -- --check
+	cargo clippy --locked --workspace --all-targets -- -D warnings
+	RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+
+rust-check: rust-quality
+	cargo test --locked --workspace
+
+rust-coverage:
+	cargo llvm-cov --locked --workspace --all-targets
 
 lint:
 	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(wildcard tests/*.c tests/*.h)
@@ -278,8 +289,9 @@ distcheck: dist
 
 platform-verify: all coverage install-check integration distcheck
 
-ci: quality platform-verify
+ci: quality platform-verify rust-check rust-coverage
 
 clean:
 	rm -f *.gcov
 	rm -rf build
+	rm -rf target
