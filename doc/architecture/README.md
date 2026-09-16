@@ -125,6 +125,14 @@ never from a real-time tick. See
 
 ## Runtime structure
 
+`RuntimeNode` is the per-station policy and lifecycle aggregate. It owns that
+station's `NodeController`, link and schedule policy, adapter control, and
+generation-scoped resources. `NodeController` is the bounded audio and
+transmit-policy aggregate for duplex, hang time, identifiers, announcements,
+courtesy tones, timeout, and telemetry sequencing. `RadioCore` remains the
+real-time aggregate; none of these ownership names permits control work in an
+audio worker.
+
 ```text
 Asterisk frames / link peers                 configuration reload
            |                                           |

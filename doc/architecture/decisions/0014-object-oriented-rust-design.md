@@ -17,13 +17,19 @@ the class-and-method model; traits provide interfaces and controlled dynamic
 substitution. Use composition and constructor dependency injection rather than
 inheritance, global state, or cross-layer procedural orchestration.
 
-`NodeController` is the node-policy aggregate root. It owns and coordinates
-objects such as `LinkManager`, `TopologyManager`, `TelemetryPlanner`,
-`IdentifierPolicy`, `AnnouncementPolicy`, `DuplexPolicy`, and
-`TimeoutPolicy`. `RadioCore` is the real-time aggregate root. It owns native
-tick state and collaborates with signal-processing objects through narrowly
-defined interfaces. Adapters are objects that translate external APIs and
-hardware I/O into controller and radio-core contracts.
+`RuntimeNode` is the per-station policy and lifecycle aggregate root. It owns
+the station's `NodeController`, link/runtime policy, scheduler state, adapter
+control, generation-scoped resources, and the handles used by the serialized
+station-control owner. `NodeController` is the bounded audio and transmit-policy
+aggregate. It owns duplex, hang-time, identifier, announcement, courtesy,
+timeout, and telemetry sequencing state used to decide what the station emits.
+
+`RadioCore` is the real-time aggregate root. It owns native worker state and
+collaborates with signal-processing objects through narrowly defined
+interfaces. Adapters are objects that translate external APIs and hardware I/O
+into runtime-node, controller, and radio-core contracts. These aggregate names
+describe their current bounded ownership; they do not make one object a global
+service locator or permit state to cross the established worker boundaries.
 
 Examples of object boundaries include `PcmRing`, `ConfigDocument`, `Template`,
 `ScheduleRule`, `ToneOscillator`, `MorseRenderer`, `DtmfDetector`,
