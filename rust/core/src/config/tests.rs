@@ -2,9 +2,365 @@ use super::{
     ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings, ResolvedCourtesySettings,
     ResolvedEventSettings, ResolvedIdentifierSettings, ResolvedMorseSettings, ResolvedNodeSettings,
     ResolvedPermanentLinkSettings, ResolvedScheduleSettings, ResolvedSpeechSettings,
-    ResolvedTimeSettings, Schema, validate_command_map,
+    ResolvedTimeSettings, Schema,
 };
 use std::collections::BTreeMap;
+
+fn validate_command_map(
+    commands: &BTreeMap<String, String>,
+) -> Result<(), crate::command::CommandMapError> {
+    let mut settings = ResolvedNodeSettings::resolve(
+        &ConfigDocument::parse("[1000]\n").unwrap(),
+        &NodeId::new("1000").unwrap(),
+    )
+    .unwrap()
+    .value;
+    settings.link_commands = commands.clone();
+    settings.command_map().map(|_| ())
+}
+
+#[test]
+fn caller_supplied_unknown_command_action_is_rejected_without_panicking() {
+    let mut settings = ResolvedNodeSettings::resolve(
+        &ConfigDocument::parse("[1000]\n").unwrap(),
+        &NodeId::new("1000").unwrap(),
+    )
+    .unwrap()
+    .value;
+    settings
+        .link_commands
+        .insert("unknown_action".into(), "99".into());
+    let error = settings.command_map().unwrap_err();
+    assert_eq!(error, crate::command::CommandMapError::UnknownAction);
+    assert_eq!(error.to_string(), "unknown command action");
+}
+
+#[test]
+fn node_directory_access_and_lookup_settings_keep_valid_overrides() {
+    for (method, expected) in [
+        ("dns", super::LinkLookupMethod::Dns),
+        ("file", super::LinkLookupMethod::File),
+        ("both", super::LinkLookupMethod::Both),
+    ] {
+        let document = ConfigDocument::parse(&format!("[1000]\ncallsign=W1AW\nlink_allow_nodes=2000,3000\nlink_deny_nodes=4000\nlink_static_directory_file=static.conf\nlink_directory_file=directory.conf\nlink_lookup_method={method}\n")).unwrap();
+        let value = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap())
+            .unwrap()
+            .value;
+        assert_eq!(value.callsign, "W1AW");
+        assert_eq!(value.link_allow_nodes, "2000,3000");
+        assert_eq!(value.link_deny_nodes, "4000");
+        assert_eq!(value.link_static_directory_file, "static.conf");
+        assert_eq!(value.link_directory_file, "directory.conf");
+        assert_eq!(value.link_lookup_method, expected);
+    }
+    let commands = BTreeMap::from([("link_command_status".into(), "?".into())]);
+    assert_eq!(
+        validate_command_map(&commands),
+        Err(crate::command::CommandMapError::InvalidPrefix)
+    );
+    assert_eq!(
+        NodeId::new("").unwrap_err().to_string(),
+        ": invalid node identity"
+    );
+    assert_eq!(
+        ConfigDocument::parse("key=value\n")
+            .unwrap_err()
+            .to_string(),
+        "line 1: option before section"
+    );
+}
+
+#[test]
+fn invalid_optional_node_values_fall_back_and_courtesy_level_inherits() {
+    let document = ConfigDocument::parse(&format!(
+        "[1000]\ncallsign={}\nlink_allow_nodes=?\nlink_deny_nodes=?\nlink_lookup_method=?\n",
+        "A".repeat(64)
+    ))
+    .unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let settings = ResolvedNodeSettings::resolve(&document, &node).unwrap();
+    assert_eq!(settings.warnings.len(), 4);
+    assert_eq!(settings.value.callsign, "");
+    assert_eq!(settings.value.link_allow_nodes, "");
+    assert_eq!(settings.value.link_deny_nodes, "");
+    assert_eq!(
+        settings.value.link_lookup_method,
+        super::LinkLookupMethod::Both
+    );
+    for (level, expected) in [("", -20), ("level_db=-15\n", -15), ("level_db=?\n", -20)] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[courtesy]\n{level}[courtesy 1000 test]\ninput=receiver\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            ResolvedCourtesySettings::resolve(&document, &node, "test")
+                .unwrap()
+                .value
+                .level_db,
+            expected
+        );
+    }
+    for invalid in ["bad node".to_owned(), "[node]".to_owned(), "n".repeat(64)] {
+        assert!(NodeId::new(invalid).is_err());
+    }
+}
+
+#[test]
+fn named_resolvers_keep_structural_validation_and_reject_absent_definitions() {
+    let node = NodeId::new("1000").unwrap();
+    let resolve = |family, document: &ConfigDocument| match family {
+        "courtesy" => ResolvedCourtesySettings::resolve(document, &node, "test").map(|_| ()),
+        "macro" => super::ResolvedMacroSettings::resolve(document, Some(&node), "test").map(|_| ()),
+        "event" => ResolvedEventSettings::resolve(document, &node, "test").map(|_| ()),
+        "permanent" => ResolvedPermanentLinkSettings::resolve(document, &node, "test").map(|_| ()),
+        "template" => {
+            super::ResolvedTemplateSettings::resolve(document, Some(&node), "test").map(|_| ())
+        }
+        _ => ResolvedScheduleSettings::resolve(document, &node, "test").map(|_| ()),
+    };
+    for (family, body) in [
+        ("courtesy", "input=receiver\nremote_node=2000\n"),
+        ("macro", "action=connect\n"),
+        ("event", "at=daily 09:07\nmessage=TEST\ntemplate=missing\n"),
+        ("event", "at=daily 09:07\n"),
+        ("permanent", "remote_node=1000\n"),
+        ("permanent", "remote_node=invalid\n"),
+        ("template", ""),
+        ("schedule", "remote_node=2000\n"),
+    ] {
+        let document =
+            ConfigDocument::parse(&format!("[1000]\n[{family} 1000 test]\n{body}")).unwrap();
+        let error = resolve(family, &document).unwrap_err();
+        assert!(matches!(error, ConfigError::Structure { .. }));
+        assert!(resolve(family, &ConfigDocument::parse("[1000]\n").unwrap()).is_err());
+    }
+}
+
+#[test]
+fn media_settings_respect_named_family_flat_and_invalid_override_precedence() {
+    let node = NodeId::new("1000").unwrap();
+    for family in ["identifier", "announcement", "courtesy"] {
+        for (stage, speed, frequency, speech_speed, model) in [
+            (0, 23, 603, 113, "flat.onnx"),
+            (1, 22, 602, 112, "family.onnx"),
+            (2, 21, 601, 111, "named.onnx"),
+            (3, 23, 603, 113, "family.onnx"),
+        ] {
+            let mut source = format!(
+                "[1000]\n[{family}]\nmorse_speed_wpm=23\nmorse_frequency_hz=603\nmorse_level_db=-7\nspeech_speed_percent=113\nspeech_level_db=-8\nspeech_model=flat.onnx\n"
+            );
+            if stage > 0 {
+                source.push_str(if stage == 3 {
+                    "[morse]\nspeed_wpm=invalid\nfrequency_hz=invalid\nlevel_db=invalid\n[speech]\nvoice=family.onnx\nspeed_percent=invalid\nlevel_db=invalid\n"
+                } else {
+                    "[morse]\nspeed_wpm=22\nfrequency_hz=602\nlevel_db=-5\n[speech]\nvoice=family.onnx\nspeed_percent=112\nlevel_db=-6\n"
+                });
+            }
+            source.push_str(&format!("[{family} 1000 named]\nmorse_text=TEST\n"));
+            if family == "courtesy" {
+                source.push_str("input=link\nremote_node=2000\nlevel_db=-9\n");
+            }
+            if family == "announcement" {
+                source.push_str("interval_ms=100\n");
+            }
+            if stage == 2 {
+                source.push_str("morse_speed_wpm=21\nmorse_frequency_hz=601\nmorse_level_db=-3\nspeech_speed_percent=111\nspeech_level_db=-4\nspeech_model=named.onnx\n");
+            } else if stage == 3 {
+                source.push_str("morse_speed_wpm=invalid\nmorse_frequency_hz=invalid\nmorse_level_db=invalid\nspeech_speed_percent=invalid\nspeech_level_db=invalid\n");
+            }
+            let document = ConfigDocument::parse(&source).unwrap();
+            let (
+                actual_speed,
+                actual_frequency,
+                actual_speech_speed,
+                actual_model,
+                morse_level,
+                speech_level,
+            ) = match family {
+                "identifier" => {
+                    let value =
+                        ResolvedIdentifierSettings::resolve(&document, &node, Some("named"))
+                            .unwrap()
+                            .value;
+                    (
+                        value.morse_speed_wpm,
+                        value.morse_frequency_hz,
+                        value.speech_speed_percent,
+                        value.speech_model,
+                        value.morse_level_db,
+                        value.speech_level_db,
+                    )
+                }
+                "announcement" => {
+                    let value =
+                        ResolvedAnnouncementSettings::resolve(&document, &node, Some("named"))
+                            .unwrap()
+                            .value;
+                    (
+                        value.morse_speed_wpm,
+                        value.morse_frequency_hz,
+                        value.speech_speed_percent,
+                        value.speech_model,
+                        value.morse_level_db,
+                        value.speech_level_db,
+                    )
+                }
+                _ => {
+                    let value = ResolvedCourtesySettings::resolve(&document, &node, "named")
+                        .unwrap()
+                        .value;
+                    assert_eq!(value.remote_node, "2000");
+                    (
+                        value.morse_speed_wpm,
+                        value.morse_frequency_hz,
+                        value.speech_speed_percent,
+                        value.speech_model,
+                        value.morse_level_db,
+                        value.speech_level_db,
+                    )
+                }
+            };
+            assert_eq!(
+                (
+                    actual_speed,
+                    actual_frequency,
+                    actual_speech_speed,
+                    actual_model.as_str()
+                ),
+                (speed, frequency, speech_speed, model),
+                "{family}, stage {stage}"
+            );
+            let expected = if family == "courtesy" {
+                (-9, 0)
+            } else {
+                match stage {
+                    1 => (-5, -6),
+                    2 => (-3, -4),
+                    _ => (-7, -8),
+                }
+            };
+            assert_eq!((morse_level, speech_level), expected);
+        }
+    }
+}
+
+#[test]
+fn dedicated_media_family_settings_apply_node_overrides_and_warn_before_fallback() {
+    let node = NodeId::new("1000").unwrap();
+    for (overrides, frequency, speed, level, speech_speed, speech_level, format) in [
+        (
+            "frequency_hz=901\nspeed_wpm=31\nlevel_db=-11",
+            901,
+            31,
+            -11,
+            151,
+            -13,
+            24,
+        ),
+        (
+            "frequency_hz=bad\nspeed_wpm=bad\nlevel_db=bad",
+            902,
+            32,
+            -12,
+            152,
+            -14,
+            12,
+        ),
+    ] {
+        let invalid = overrides.contains("bad");
+        let speech = if invalid {
+            "speed_percent=bad\nlevel_db=bad"
+        } else {
+            "speed_percent=151\nlevel_db=-13"
+        };
+        let time = if invalid { "invalid" } else { "24" };
+        let source = format!(
+            "[1000]\n[morse]\nfrequency_hz=902\nspeed_wpm=32\nlevel_db=-12\n[morse 1000]\n{overrides}\n[speech]\nspeed_percent=152\nlevel_db=-14\n[speech 1000]\n{speech}\n[time 1000]\nformat={time}\n"
+        );
+        let document = ConfigDocument::parse(&source).unwrap();
+        let morse = ResolvedMorseSettings::resolve(&document, &node).unwrap();
+        assert_eq!(
+            (
+                morse.value.frequency_hz,
+                morse.value.speed_wpm,
+                morse.value.level_db
+            ),
+            (frequency, speed, level)
+        );
+        let speech = ResolvedSpeechSettings::resolve(&document, &node).unwrap();
+        assert_eq!(
+            (speech.value.speed_percent, speech.value.level_db),
+            (speech_speed, speech_level)
+        );
+        assert_eq!(
+            ResolvedTimeSettings::resolve(&document, &node)
+                .unwrap()
+                .value
+                .format,
+            format
+        );
+        assert_eq!(!morse.warnings.is_empty(), invalid);
+    }
+}
+
+#[test]
+fn invalid_macro_overrides_resolve_to_valid_inherited_values() {
+    let node = NodeId::new("524950").unwrap();
+    for option in [
+        "action=invalid",
+        "target_node=invalid",
+        "target_node=1234567890123456789012345678901234567890123456789012345678901234",
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "[524950]\n[macro connect]\naction=connect\ntarget_node=123\n[macro 524950 connect]\n{option}\n"
+        )).unwrap();
+        let resolved =
+            super::ResolvedMacroSettings::resolve(&document, Some(&node), "connect").unwrap();
+        assert_eq!(resolved.warnings.len(), 1);
+        assert_eq!(
+            resolved.value.action(),
+            crate::schedule::ScheduledAction::Connect
+        );
+        assert_eq!(resolved.value.target_node, "123");
+    }
+}
+
+#[test]
+fn invalid_courtesy_remote_resolves_to_unassigned_input() {
+    let node = NodeId::new("524950").unwrap();
+    for input in ["receiver", "link"] {
+        let document = ConfigDocument::parse(&format!(
+            "[524950]\n[courtesy 524950 tail]\ninput={input}\nremote_node=invalid\n"
+        ))
+        .unwrap();
+        let resolved = ResolvedCourtesySettings::resolve(&document, &node, "tail").unwrap();
+        assert_eq!(resolved.warnings.len(), 1);
+        assert_eq!(resolved.value.remote_node, "");
+    }
+}
+
+#[test]
+fn oversized_priority_resolves_to_inherited_priority() {
+    let document = ConfigDocument::parse(
+        "[524950]\n[identifier]\npriority=7\n[identifier 524950]\npriority=2147483648\n",
+    )
+    .unwrap();
+    let resolved =
+        ResolvedIdentifierSettings::resolve(&document, &NodeId::new("524950").unwrap(), None)
+            .unwrap();
+    assert_eq!(resolved.warnings.len(), 1);
+    assert_eq!(resolved.value.priority, 7);
+}
+
+#[test]
+fn unknown_fixed_command_options_cannot_disable_builtin_commands() {
+    let document = ConfigDocument::parse("[524950]\nfixed_10=\nfixed_722=\n").unwrap();
+    let resolved =
+        ResolvedNodeSettings::resolve(&document, &NodeId::new("524950").unwrap()).unwrap();
+    assert_eq!(resolved.warnings.len(), 2);
+    assert_eq!(resolved.value.link_commands["fixed_10"], "10");
+    assert_eq!(resolved.value.link_commands["fixed_722"], "722");
+}
 
 #[test]
 fn parses_owned_sections_and_options_without_borrowing_input() {
@@ -338,6 +694,41 @@ fn command_map_has_all_defaults_and_rejects_node_taking_prefix_collisions() {
 }
 
 #[test]
+fn telemetry_duck_override_uses_bounded_signed_decibels() {
+    for (raw, expected) in [("-60", -60), ("-17", -17), ("0", 0)] {
+        let document =
+            ConfigDocument::parse(&format!("[node]\ntelemetry_duck_db={raw}\n")).unwrap();
+        let resolved =
+            ResolvedNodeSettings::resolve(&document, &NodeId::new("node").unwrap()).unwrap();
+        assert_eq!(resolved.value.telemetry_duck_db, expected);
+        assert!(resolved.warnings.is_empty());
+    }
+}
+
+#[test]
+fn global_template_and_macro_can_be_resolved_without_a_node() {
+    use super::{ResolvedMacroSettings, ResolvedTemplateSettings};
+    let document = ConfigDocument::parse(
+        "[template greeting]\ntext=hello\n[macro connect]\naction=connect\ntarget_node=2000\n",
+    )
+    .unwrap();
+    assert_eq!(
+        ResolvedTemplateSettings::resolve(&document, None, "greeting")
+            .unwrap()
+            .value
+            .text,
+        "hello"
+    );
+    assert_eq!(
+        ResolvedMacroSettings::resolve(&document, None, "connect")
+            .unwrap()
+            .value
+            .target_node,
+        "2000"
+    );
+}
+
+#[test]
 fn command_prefix_overlap_depends_on_the_longer_mapping() {
     let cases = [
         ("link_command_status", "7", "fixed_722", "72", true),
@@ -370,4 +761,21 @@ fn command_prefix_overlap_depends_on_the_longer_mapping() {
         ]);
         assert_eq!(validate_command_map(&commands).is_ok(), valid);
     }
+}
+#[test]
+fn resolved_command_map_preserves_configured_and_fixed_actions() {
+    let document = super::ConfigDocument::parse("[524950]\nlink_command_transceive=9\n").unwrap();
+    let node = super::NodeId::new("524950").unwrap();
+    let settings = super::ResolvedNodeSettings::resolve(&document, &node)
+        .unwrap()
+        .value;
+    let map = settings.command_map().unwrap();
+    assert_eq!(
+        map.parse("92000").unwrap().action,
+        crate::command::LinkAction::Transceive
+    );
+    assert_eq!(
+        map.parse("722").unwrap().action,
+        crate::command::LinkAction::Time
+    );
 }

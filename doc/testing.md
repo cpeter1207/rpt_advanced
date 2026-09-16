@@ -1,62 +1,44 @@
 # Testing
 
-During the Rust migration, run `make rust-check` for the Rust workspace and
-`make rust-coverage` for its Debian 13 amd64 coverage report. Task 12 adds
-the production line and branch thresholds when the coverage harness is
-finalized. `make check` continues to run the C reference suite until a
-migration task explicitly replaces its corresponding C implementation. `make
-ci` runs both paths.
+The Rust product is tested through Cargo. `make check` runs the workspace tests;
+`make rust-check` adds Rustfmt, Clippy, and Rustdoc with warnings denied; and
+`make rust-coverage` produces the Debian 13 amd64 production coverage report.
+`make ci` is the conventional complete local gate. It also runs the narrow C
+shim/header checks, packaging, staged installation, and isolated Asterisk
+integration. No retired C controller suite is part of the product gate.
 
-Run `make ci` in the ASL3 development environment. It runs static checks,
-Doxygen, unit tests, line/branch coverage, staged installation, and an isolated
-Asterisk process. The test-only radio does not access USB devices and is not an
-installed artifact. It verifies two simultaneous nodes, half/full duplex, Morse
-output, PTT cleanup, direct native 48 kHz transport, and retained retired
-local-media selectors that warn while retaining that transport. An additional
-native-rate case prepares a WAV identifier through FFmpeg and observes its
-recognizable PCM at the transmitter. The synthetic receiver then
-asserts carrier; negative Morse samples in the otherwise positive receive audio
-verify replacement of the prepared ID by its Morse fallback inside Asterisk.
-Controller sequence tests also cover polite-ID deferral, every-release and
-positive-interval announcements, identifier priority, idle announcement keying,
-receive-active announcement ducking, and transmitter protection: a source that
-never unkeys times out, while every local or individual link unkey restarts the
-watchdog even when hang time keeps PTT asserted. The Asterisk integration additionally
-verifies that a periodic announcement waits through synthetic half-duplex
-receive and emits from the hardware-paced idle silent frames after it clears.
-Courtesy tests cover named receiver, generic-link, exact-direct-peer, and
-best-effort keyed-downstream routing; strict canonical `K?`/`K` reply and relay
-handling; ingress exclusion; arrival-order handling during doubles;
-source-specific rekey cancellation; generic fallback; and pre-rendered mono,
-dual-tone, silence, level, syntax, duration, Nyquist, and bounded-length cases.
-The `integration` portion also starts isolated Asterisk processes and exercises
-the local IAX link implementation. It is a controlled source-level test: it
-does not prove interoperability with a classic `app_rpt` node, authorize live
-link activation, or establish radio hardware behavior. The current AllStarLink
-changes require a fresh complete quality run before a merge. A release uses the
-already validated main revision and performs only release-artifact checks.
+Run `make ci` in the Debian 13 ASL3 development environment. The test-only
+radio does not access USB devices and is not an installed artifact. The gate
+checks Rust controller policy, channel/codec ownership, 48 kHz radio transport,
+media preparation, bounded Asterisk taskprocessor execution, staged package
+contents, and isolated Asterisk lifecycle behavior. Link tests cover
+decoded-rate ingress, persistent egress conversion, queued IAX control,
+generation replacement, mix-minus, and generated-program routing.
 
-To exercise USBRadioPlus's actual adapter against the synthetic hardware backend,
-use a clean build directory and run
-`make integration USBRADIOPLUS_SOURCE=/absolute/path/to/USBRadioPlus`.
-The fixture links the adapter as a separate object from that checkout; it does
-not copy it into rpt_advanced or alter USBRadioPlus. Start from a clean build
-when switching fixture modes. This checks the real adapter's reservation and
-audio callbacks, but not the USB hardware backend. Require the full
-pull-request quality gate after changing either project; a historical fixture
-result is not evidence for the current source revision.
+The integration gate is a controlled source-level test. It does not prove
+interoperability with a classic `app_rpt` node, authorize live link activation,
+or establish radio-hardware behavior. A release uses the already validated main
+revision and performs only release-artifact checks.
+
+The focused component checks are `cargo test -p rpt-advanced-core --test link`,
+`cargo test -p rptadv-asterisk-adapter`,
+`cargo test -p rptadv-file-adapter -p rptadv-speech-adapter`, and
+`cargo test -p rptadv-control-asterisk-adapter`. The Asterisk adapter loads the
+released `librate_adjusting_pcm_ring2.so.2` and
+`librptadv_samplerate_adapter.so.1`; install their matching development packages
+before building. File tests use FFmpeg; speech tests compile a local Piper fixture
+and verify synthesis without an FFmpeg dependency. They need no voice model or
+network access. Each media descriptor is also exercised independently through
+its public C header and dynamically loaded versioned shared object.
 
 ## Prebuilt test images
 
-Public images are available for Debian 12 and 13, each containing native amd64
-and arm64 variants:
+Public images are available for Debian 13, with native amd64 and arm64 variants:
 
 | Image under `ghcr.io/cpeter1207/` | Purpose |
 | --- | --- |
-| `rpt-advanced-asl3-debian12` | Clean Debian 12 ASL3 installation |
-| `rpt-advanced-asl3-debian13` | Clean Debian 13 ASL3 installation |
-| `rpt-advanced-installed-debian12` | Debian 12 with the tested module and integration fixture |
-| `rpt-advanced-installed-debian13` | Debian 13 with the tested module and integration fixture |
+| `rpt-advanced-test-asl3-debian13` | Clean Debian 13 ASL3 installation |
+| `rpt-advanced-test-installed-debian13` | Debian 13 with the tested module and integration fixture |
 
 Tags are the full production commit hash and `latest`. Use the commit tag for
 reproducible tests. The installed image derives from its clean ASL3 image and
@@ -65,34 +47,14 @@ Its default command runs the isolated Asterisk audio and reload tests:
 
 ```sh
 docker run --rm --label rpt_advanced.test=true \
-  ghcr.io/cpeter1207/rpt-advanced-installed-debian13:latest
+  ghcr.io/cpeter1207/rpt-advanced-test-installed-debian13:latest
 ```
 
 No USB device, host network, or privileged access is needed. Use the host's
 native architecture; the CI matrix uses native runners, not QEMU. Publication
-requires the production quality gate and clean/installed checks on all four
-platforms before creating the multiarch tags. The fixture is only in the test
-image; `make install` does not install it.
-
-## Real Piper voice
-
-The ordinary process tests use a fixture synthesizer and real FFmpeg. To also
-exercise an installed Piper executable and local voice model:
-
-```sh
-make build/test_speech_process
-RPT_TEST_PIPER_MODEL=/path/to/voice.onnx ./build/test_speech_process
-```
-
-Put `piper` on `PATH`, with its model's adjacent `.onnx.json` file available.
-Piper's [installation instructions](https://github.com/OHF-Voice/piper1-gpl)
-describe installation of `piper-tts`. The test restores the original `PATH`
-after its fixture checks, then prepares real speech through the module's media
-preparation code. It checks nonempty 48 kHz PCM and reports sample count and peak.
-
-The existing `en_US-amy-low` model copied read-only from 524950 was tested with
-Piper 1.8.0 on Debian 13 amd64. The phrase “This is the KG0BP repeater.” produced
-136,704 samples at 48 kHz. This test did not change or transmit from the node.
+requires the production quality gate and clean/installed checks on both supported
+platforms before creating multiarch tags. The fixture is only in the test image;
+`make install` does not install it.
 
 Synthetic-radio results do not establish USB hardware performance, radio
 deviation, or on-air audio quality. Those require separately approved hardware

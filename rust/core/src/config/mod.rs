@@ -24,7 +24,7 @@ pub use settings::{
     ResolvedEventSettings, ResolvedIdentifierSettings, ResolvedMacroSettings,
     ResolvedMorseSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
     ResolvedScheduleSettings, ResolvedSpeechSettings, ResolvedTemplateSettings,
-    ResolvedTimeSettings, validate_command_map,
+    ResolvedTimeSettings,
 };
 
 /// A recoverable unknown option or invalid value.

@@ -20,34 +20,37 @@ aspirational and is built manually only when explicitly requested.
   and Rustdoc must pass for their applicable source types. Validation must not
   modify source files.
 - No dead code or diagnostic suppression used to conceal defects.
-- C-compatible surfaces have concise Doxygen comments; Rust has concise
-  Rustdoc. Both documentation checks run with zero errors or warnings. Publish
-  generated documentation to GitHub Pages after a merged pull request.
+- Rust production code has concise Rustdoc. The metadata shim and public C
+  adapter headers have concise Doxygen comments. Both applicable documentation
+  checks run with zero errors or warnings. Publish generated documentation to
+  GitHub Pages after a merged pull request.
 - Unit, functional, and integration tests must pass on Debian 13 amd64 and
   arm64. Require 100% line and branch coverage of production code on Debian 13
   amd64 only.
 - Build, packaging, and installation checks must pass on native Debian 13 amd64
   and arm64.
 - A production push runs only formatting, lint, and static analysis. It does
-  not run Doxygen, the platform matrix, coverage, packaging, or installation
-  checks.
+  not run Rustdoc/Doxygen, the platform matrix, coverage, packaging, or
+  installation checks.
 - The complete gate runs for every pull request and is required before merging.
   A release relies on the successful gate already run for the merged pull
   request and performs only release-artifact validation; it does not repeat the
   complete gate.
 
 The complete pull-request gate runs platform-independent formatting, lint,
-static analysis, and Doxygen checks once, concurrently where independent,
-before the native Debian 13 platform matrix. Run platform tests concurrently.
-Keep failures tied to real validation failures, not fragile environmental or
-timing assumptions.
+static analysis, Rustdoc, and applicable Doxygen checks once, concurrently
+where independent, before the native Debian 13 platform matrix. Run platform
+tests concurrently. Keep failures tied to real validation failures, not fragile
+environmental or timing assumptions.
 
-`make rust-check` runs Rust formatting, Clippy with warnings denied, Rustdoc
-with warnings denied, and the workspace tests. `make rust-coverage` reports
-Rust coverage on Debian 13 amd64 using the Rust 1.85 MSRV toolchain. Task 12
-adds production line and branch thresholds when the coverage harness is
-finalized. `make check` continues to run the C reference suite while the
-migration is in progress.
+`make check` runs the Rust workspace tests. `make rust-check` runs Rustfmt,
+Clippy with warnings denied, Rustdoc with warnings denied, and the workspace
+tests. `make rust-coverage` reports production Rust coverage on Debian 13 amd64
+using `nightly-2025-02-20` with LLVM branch instrumentation, `llvm-tools-preview`,
+and `cargo-llvm-cov`. Normal builds and tests use the Rust 1.85 MSRV toolchain.
+The only production C checks cover the
+metadata shim and C-compatible public adapter headers; no C controller archive
+or legacy controller headers are packaged.
 
 ## Test containers
 
@@ -85,10 +88,10 @@ pull-request quality gate, pull requests, linear history, and resolved review
 conversations, and prohibits force pushes and branch deletion. The gate runs
 applicable checks for the source types present. Ruff checks the Python Asterisk
 integration runner; ShellCheck applies when shell source is introduced.
-Module-interface code uses GNU C as required by Asterisk's headers; the
-controller library uses strict C11. Clang analysis enables the block syntax
-present in Asterisk's headers. Both source directories are included in static
-analysis, Doxygen, and coverage.
+The metadata shim uses GNU C as required by Asterisk's headers. Clang analysis
+enables the block syntax present in those headers. Cppcheck, Clang-Tidy, and
+Doxygen apply only to that shim and any C-compatible public adapter header;
+Rustfmt, Clippy, and Rustdoc cover the Rust product.
 
 See [implementation status](doc/implementation-status.md) for the distinction
 between tested components and the remaining module, container, release, and

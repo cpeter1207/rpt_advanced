@@ -1,8 +1,14 @@
 PROJECT_NAME = rpt_advanced
 OUTPUT_DIRECTORY = build/docs
-INPUT = src module tests
-RECURSIVE = YES
-FILE_PATTERNS = *.c *.h *.py
+INPUT = module/app_rpt_advanced_loader.c \
+        rust/asterisk/include/rptadv_asterisk_adapter.h \
+        rust/product/include/rptadv_product.h \
+        rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h \
+        rust/file-adapter/include/rptadv_file_adapter.h \
+        rust/speech-adapter/include/rptadv_speech_adapter.h \
+        rust/media-support/include/rptadv_media_types.h
+RECURSIVE = NO
+FILE_PATTERNS = *.c *.h
 EXTRACT_ALL = NO
 EXTRACT_STATIC = YES
 WARNINGS = YES
@@ -14,3 +20,7 @@ GENERATE_LATEX = NO
 QUIET = YES
 HAVE_DOT = NO
 FULL_PATH_NAMES = NO
+MACRO_EXPANSION = YES
+EXPAND_ONLY_PREDEF = YES
+# Asterisk's metadata registration is a declaration macro, not a public function.
+PREDEFINED = "AST_MODULE_INFO(...)="

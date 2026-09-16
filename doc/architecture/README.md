@@ -11,11 +11,12 @@ supersedes backward-compatibility requirements for project-owned interfaces.
 Do not retain compatibility-only code; preserve required current behavior and
 external interoperability, and reject incompatible artifact combinations safely.
 
-`app_rpt_advanced.so` is an Asterisk application module. It owns controller
-configuration, node workers, radio exchange, local radio policy, telemetry,
-and AllStarLink peer control. USBRadioPlus remains the radio channel driver and
-owns hardware access. The separately released `rate_adjusting_pcm_ring` shared
-library provides lock-free playout buffering and clock-rate recovery.
+`app_rpt_advanced.so` is the metadata loader for an Asterisk-hosted Rust product.
+The product owns controller configuration, node workers, local radio policy,
+telemetry, and AllStarLink peer control; the Asterisk adapter owns channel/frame
+exchange. USBRadioPlus remains the radio channel driver and owns hardware
+access. The separately released `rate_adjusting_pcm_ring2` and samplerate
+adapter DSOs provide playout buffering, clock-rate recovery, and edge conversion.
 
 Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that
@@ -34,10 +35,12 @@ The audio, radio-control, and GPIO boundaries are defined by
 [ADR 0028](decisions/0028-remove-res-usbradio-through-hardware-adapters.md).
 The accepted 2026-09-13 amendment splits that tick into an input-driven local
 receive worker and a DAC/adapter-output-clocked transmit worker. The callback
-split is implemented in the current migration. The local/link/telemetry
-inbound-ring topology, shared-clock fast path, and generational `NodeHost`
-lifecycle below remain target architecture pending implementation; none was
-part of released alpha18.
+split is implemented in USBRadioPlus's Rust migration. The rpt_advanced Rust
+product now implements generational `NodeHost` ownership, coherent paired
+receive/transmit calls, per-peer inbound rings, and the program-audio loopback
+dispatcher. This does not claim completion of USBRadioPlus's separate
+direct-hardware local/telemetry-ring topology or shared-clock adapter cutover;
+none of those changes was part of released alpha18.
 Separately, [ADR 0039](decisions/0039-retire-usbradioplus-native-mode.md)
 retires USBRadioPlus's driver-native software-repeat and native parrot modes.
 They are not rpt_advanced prerequisites and will no longer be supported for
@@ -48,17 +51,40 @@ roles are defined by [ADR 0030](decisions/0030-appliance-update-trust-and-compli
 The fully populated appliance interface, power, and thermal ceilings are
 defined by [ADR 0032](decisions/0032-four-port-appliance-interface-and-power-ceiling.md).
 
-The approved implementation migration is Rust-owned. Each C-facing integration,
-whether C calls Rust or Rust calls C, is a separate versioned Rust `dylib`
-adapter shared object with only its required external ABI surface. Each adapter
-uses a stable C-compatible descriptor/function-table contract and belongs to a
-complete selected-product adapter manifest; Asterisk is the primary inbound
-case. ADRs
+The product implementation is Rust-owned. The only retained production C is the
+minimal Asterisk metadata shim; it has no controller, media, radio, or control
+policy. Each C-facing integration, whether C calls Rust or Rust calls C, is a
+separate versioned Rust shared object with only its required
+external ABI surface. Each adapter uses a stable C-compatible
+descriptor/function-table contract and belongs to a complete selected-product
+adapter manifest; Asterisk is the primary inbound case. ADRs
 [0013](decisions/0013-rust-owned-implementation-and-asterisk-abi-shims.md) and
 [0021](decisions/0021-versioned-rust-c-adapter-boundaries.md) define that
 boundary; [ADR 0022](decisions/0022-versioned-external-c-dependency-adapters.md)
-defines outbound external-dependency adapters. This is a planned migration,
-not a claim that current C sources have already been replaced.
+defines outbound external-dependency adapters.
+
+### Current product artifacts
+
+The loader selects these C-compatible descriptors. Cargo builds the C-facing
+shared objects as `cdylib`; their stable contract is the versioned C table, not
+Rust's private ABI.
+
+| Artifact | Ownership |
+| --- | --- |
+| `librptadv_product.so.1` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
+| `librptadv_asterisk_adapter.so.1` | Public Asterisk application/CLI, channel, codec, directory, and frame services |
+| `librptadv_control_asterisk_adapter.so.1` | Replaceable serialized control executor backed by Asterisk's taskprocessor |
+| `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
+| `librptadv_speech_adapter.so.1` | Offline Piper synthesis, direct WAV reading, and speech-only level adjustment |
+
+The file and speech providers are independently replaceable and expose only
+their own operation. Speech does not invoke FFmpeg; file decoding does not
+invoke Piper. Their private process/WAV source is shared at build time, without
+a support DSO or a duplicate controller core. The product converts their
+source-rate PCM through the released ring2 before prepared playback. Asterisk
+child-reaper coordination arrives through host callbacks, not product imports.
+Adapter replacement requires quiescence and controlled reload/restart. The
+retired combined media descriptor is not retained for initial-alpha compatibility.
 
 ## Layering
 
@@ -215,10 +241,11 @@ submission/ownership results, and safe stop/drain. Its current backend is the
 Asterisk taskprocessor; standalone can select an owned or third-party backend
 with the same contract. Scheduling and controller policy stay outside the
 adapter. See [ADR 0038](decisions/0038-replaceable-control-path-adapter.md).
-The current C module still calls that taskprocessor directly; isolating those
-calls is pending, not replacing the Asterisk backend. Its radio and peer
-workers already use POSIX threads. ADR 0036 confines other required Asterisk
-thread handling to the appropriate integration adapter.
+The Rust product submits through the neutral execution contract and its
+validated control-descriptor client. Only the control provider owns Asterisk
+taskprocessor handles. Product radio/peer workers and the periodic control
+trigger use Rust-owned threads; ADR 0036 confines required Asterisk handling
+to the integration adapters.
 
 The station host persists across ordinary reloads. It atomically
 publishes a prepared immutable `RuntimeGeneration`; the radio-port audio engine
@@ -231,26 +258,33 @@ retired generation only after protected users, queued work, and old callbacks
 are gone. [ADR 0026](decisions/0026-generational-real-time-runtime-lifecycle.md)
 defines the full reload, hardware-handoff, and failure policy.
 
-- `module/` is the Asterisk boundary: module lifecycle, channels, frames,
-  codec selection, radio reservation, and worker ownership.
-- `src/controller.*`, `src/duplex.*`, and `src/playback.*` implement node
-  transmit ownership, half/full duplex behavior, hang time, and telemetry
-  sequencing.
-- `src/identifier.*`, `src/time_announcement.*`, `src/morse.*`,
-  `src/speech.*`, and `src/tone_sequence.*` prepare and render telemetry.
+- `module/app_rpt_advanced_loader.c` supplies only Asterisk module metadata and
+  passes selected descriptors to the versioned Rust Asterisk entry adapter.
+- `rust/product/` owns product lifecycle, node/radio/peer workers, runtime
+  composition, and clients of the host, control, file, and speech descriptors.
+  It embeds the controller core once and imports no Asterisk API.
+- `rust/asterisk/` owns public-Asterisk registration and host services:
+  applications, CLI, channels, frames, codec selection, directory lookup, and
+  radio reservation. It does not embed the controller core.
+- `rust/control-asterisk-adapter/` owns only control-executor backend resources.
+  `rust/file-adapter/` and `rust/speech-adapter/` compile the private
+  `rust/media-support/` source into separate capability providers.
+- `rust/core/src/controller/`, `rust/core/src/policy/`, and
+  `rust/core/src/audio/` implement node transmit ownership, duplex behavior,
+  hang time, identification, and telemetry sequencing and rendering.
 - One node owns one receiver and one transmitter. Multiple local radios use
   additional configured nodes joined through loopback or the local network;
   voter and simulcast timing is defined by
   [ADR 0024](decisions/0024-voting-receivers-and-simulcast-timing.md).
-- `src/scheduled_event.*`, `src/scheduled_action.*`, `src/scheduled_window.*`,
-  and `src/message_template.*` parse civil-time triggers and replacement
+- `rust/core/src/schedule/`, `rust/core/src/schedule.rs`, and
+  `rust/core/src/template.rs` parse civil-time triggers and replacement
   windows, constrain macro operations, and render scheduled messages. The
-  module control plane runs them; they never execute in a radio worker.
-- `module/runtime.*` materializes configuration-owned permanent-link intent and
-  local-time replacement windows. It snapshots lock-free local/link receive
-  activity and returns ordinary attach or detach work to the serialized control
-  plane; it never changes a peer from a radio worker.
-- `src/link_*.*`, `module/connection.*`, and `module/dtmf.*` implement
+  control plane runs them; they never execute in a radio worker.
+- `rust/core/src/runtime/` materializes configuration-owned permanent-link
+  intent and local-time replacement windows. It snapshots lock-free local/link
+  receive activity and returns ordinary attach or detach work to the serialized
+  control plane; it never changes a peer from a radio worker.
+- `rust/core/src/link/`, `rust/product/src/link/`, and `rust/asterisk/src/link/` implement
   AllStarLink admission, peer media, topology, advisory keyed-source queries,
   and permitted DTMF control. A direct receive edge starts the canonical
   legacy-compatible `K?` exchange and repeats it once per active second. Peer
@@ -264,8 +298,7 @@ defines the full reload, hardware-handoff, and failure policy.
   an audio callback.
   A dedicated external-peer adapter owns EchoLink registration, UDP transport,
   and callsign access control while using the same controller audio boundary.
-- `src/config_reader.*`, `src/config.*`, `src/schema.*`, and
-  `src/settings.*` parse, validate, and inherit configuration.
+- `rust/core/src/config/` parses, validates, and inherits configuration.
 
 ## Core invariants
 

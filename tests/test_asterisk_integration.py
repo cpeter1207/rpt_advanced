@@ -53,23 +53,17 @@ def audio_case(
     radio_configuration: Path,
     logfile: Path,
     process: subprocess.Popen,
-    retired_local_options: bool,
 ) -> None:
-    """! @brief Exchange direct 48 kHz radios and reload retained local-media
-    options.
+    """! @brief Exchange direct 48 kHz radios with current fixed-native settings.
     @param configuration Isolated Asterisk configuration.
     @param radio_configuration Controller configuration to replace.
     @param logfile Test-owned diagnostic output.
     @param process Running isolated Asterisk.
-    @param retired_local_options Whether to retain removed local selector names.
     @return None; assertions verify transport and duplex behavior.
     """
     offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
-    retired = (
-        "[general]\nsample_rate_hz=8000\ncodec=ulaw\n" if retired_local_options else ""
-    )
     radio_configuration.write_text(
-        retired + "[full]\nfull_duplex=yes\n"
+        "[full]\nfull_duplex=yes\n"
         "[half]\nfull_duplex=no\n"
         "[identifier]\ninterval_ms=50\nmorse_text=E\n"
         "[identifier full periodic]\n"
@@ -85,20 +79,8 @@ def audio_case(
         < 2
     ):
         if process.poll() is not None or time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"radio exchange did not complete: {retired_local_options=}"
-            )
+            raise TimeoutError("radio exchange did not complete")
         time.sleep(0.1)
-    records_text = logfile.read_text(encoding="utf-8", errors="replace")[offset:]
-    if retired_local_options:
-        assert (
-            "[general] sample_rate_hz is ignored; using fixed 48 kHz signed-linear "
-            "local radio PCM" in records_text
-        ), records_text
-        assert (
-            "[general] codec is ignored; using fixed 48 kHz signed-linear local radio PCM"
-            in records_text
-        ), records_text
     radio_configuration.write_text("", encoding="utf-8")
     cli(configuration, "module reload app_rpt_advanced.so")
     records = re.findall(
@@ -112,7 +94,7 @@ def audio_case(
         assert writes >= 30 and ticks == writes, records
         assert nonzero > 0 and keys > 0 and unkeys == keys, records
         assert (early > 0) == (name == "full"), records
-    print(f"Asterisk direct 48 kHz audio {retired_local_options=}: {records}")
+    print(f"Asterisk direct 48 kHz audio: {records}")
 
 
 def media_case(configuration, radio_configuration, logfile, process) -> None:
@@ -215,7 +197,7 @@ def main() -> None:
         radio_configuration = directory / "rpt_advanced.conf"
         radio_configuration.write_text(
             Path(
-                "build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf"
+                "build/stage/usr/share/doc/rpt-advanced/examples/rpt_advanced.conf"
             ).read_text(encoding="utf-8"),
             encoding="utf-8",
         )
@@ -284,14 +266,7 @@ def main() -> None:
                     module_directory / "chan_rpt_fixture.so",
                 )
                 cli(configuration, "module load chan_rpt_fixture.so")
-                for retired_local_options in (False, True):
-                    audio_case(
-                        configuration,
-                        radio_configuration,
-                        logfile,
-                        process,
-                        retired_local_options,
-                    )
+                audio_case(configuration, radio_configuration, logfile, process)
                 announcement_case(configuration, radio_configuration, logfile, process)
                 media_case(configuration, radio_configuration, logfile, process)
                 cli(configuration, "module unload chan_rpt_fixture.so")

@@ -180,3 +180,137 @@ fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
         assert_eq!(structure_error(source).1, expected, "{source}");
     }
 }
+
+#[test]
+fn invalid_typed_options_report_exact_builtin_fallbacks() {
+    for (section, key, expected) in [
+        ("general", "transmit_timeout_ms", "180000"),
+        ("general", "timeout_lockout_ms", "30000"),
+        ("general", "kerchunk_max_ms", "500"),
+        ("general", "telemetry_duck_db", "-20"),
+        ("general", "courtesy_delay_ms", "250"),
+        ("general", "link_lookup_method", "both"),
+        ("general", "link_allow_nodes", "not configured"),
+        ("identifier", "interval_ms", "600000"),
+        ("identifier", "priority", "0"),
+        ("identifier", "first_key_only", "no"),
+        ("identifier", "polite_maximum_wait_ms", "60000"),
+        ("identifier", "speech_speed_percent", "100"),
+        ("identifier", "speech_level_db", "0"),
+        ("identifier", "morse_speed_wpm", "20"),
+        ("identifier", "morse_frequency_hz", "800"),
+        ("identifier", "morse_level_db", "-6"),
+        ("announcement", "interval_ms", "0"),
+        ("courtesy", "level_db", "-20"),
+        ("morse", "level_db", "not configured"),
+        ("time", "format", "12"),
+        ("general", "link_command_disconnect", "1"),
+        ("general", "link_command_monitor", "2"),
+        ("general", "link_command_transceive", "3"),
+        ("general", "link_command_remote", "4"),
+        ("general", "link_command_status", "70"),
+        ("general", "link_command_disconnect_all", "806"),
+        ("general", "link_command_last_keyed", "72"),
+        ("general", "link_command_local_monitor", "75"),
+        ("general", "link_command_disconnect_permanent", "811"),
+        ("general", "link_command_permanent_monitor", "812"),
+        ("general", "link_command_permanent_transceive", "813"),
+        ("general", "link_command_full_status", "73"),
+        ("general", "link_command_reconnect_all", "816"),
+        ("general", "link_command_permanent_local_monitor", "818"),
+    ] {
+        let document = ConfigDocument::parse(&format!("[{section}]\n{key}=?\n")).unwrap();
+        let warnings = Schema::validate(&document).unwrap().warnings;
+        assert_eq!(warnings.len(), 1, "{section}/{key}");
+        assert_eq!(warnings[0].fallback, expected, "{section}/{key}");
+    }
+}
+
+#[test]
+fn inherited_warning_fallbacks_follow_each_family_scope() {
+    for (family, key, value) in [
+        ("identifier", "priority", "9"),
+        ("announcement", "interval_ms", "91"),
+        ("courtesy", "level_db", "-9"),
+        ("morse", "frequency_hz", "901"),
+        ("speech", "speed_percent", "151"),
+        ("time", "format", "24"),
+    ] {
+        let source = format!("[1000]\n[{family}]\n{key}={value}\n[{family} 1000]\n{key}=?\n");
+        let warnings = Schema::validate(&ConfigDocument::parse(&source).unwrap())
+            .unwrap()
+            .warnings;
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].fallback, value);
+    }
+    for (key, family, family_key, value) in [
+        ("speech_speed_percent", "speech", "speed_percent", "151"),
+        ("speech_level_db", "speech", "level_db", "-9"),
+        ("morse_speed_wpm", "morse", "speed_wpm", "31"),
+        ("morse_frequency_hz", "morse", "frequency_hz", "901"),
+        ("morse_level_db", "morse", "level_db", "-11"),
+    ] {
+        let source =
+            format!("[1000]\n[{family}]\n{family_key}={value}\n[identifier 1000 test]\n{key}=?\n");
+        let warnings = Schema::validate(&ConfigDocument::parse(&source).unwrap())
+            .unwrap()
+            .warnings;
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].fallback, value);
+    }
+}
+
+#[test]
+fn structural_errors_cover_bounded_labels_missing_macros_and_colliding_schedules() {
+    assert_eq!(
+        structure_error(&format!(
+            "[node]\n[template node {}]\ntext=x\n",
+            "x".repeat(64)
+        ))
+        .1,
+        "node or label exceeds transport limit"
+    );
+    assert_eq!(
+        structure_error("[macro empty]\n").1,
+        "macro action is required"
+    );
+    assert_eq!(
+        structure_error("[node]\n[template node absent]\n").1,
+        "template text is required"
+    );
+    assert_eq!(
+        structure_error(&format!("[template long]\ntext={}\n", "x".repeat(1025))).1,
+        "scheduled message exceeds maximum output"
+    );
+    let primary = "[1000]\n[permanent 1000 primary]\nremote_node=2000\n";
+    let schedule = |label, remote| {
+        format!(
+            "[schedule 1000 {label}]\nremote_node={remote}\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n"
+        )
+    };
+    assert_eq!(
+        structure_error(&format!("{primary}{}", schedule("self", "1000"))).1,
+        "configured link cannot target its local node"
+    );
+    assert_eq!(
+        structure_error(&format!(
+            "{primary}{}{}",
+            schedule("one", "3000"),
+            schedule("two", "3000")
+        ))
+        .1,
+        "duplicate configured link remote node"
+    );
+    for missing in ["remote_node", "replace_permanent", "start_time", "end_time"] {
+        let complete = schedule("incomplete", "3000");
+        let incomplete = complete
+            .lines()
+            .filter(|line| !line.starts_with(missing))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            structure_error(&format!("{primary}{incomplete}\n")).1,
+            "schedule remote node, replacement, start time, and end time are required"
+        );
+    }
+}

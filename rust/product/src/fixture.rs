@@ -1,0 +1,350 @@
+//! Test-only deterministic allocation seams.
+
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
+    collections::VecDeque,
+    ffi::{c_char, c_void},
+    mem::size_of,
+    ptr,
+    sync::{
+        Mutex,
+        atomic::{AtomicPtr, AtomicUsize, Ordering},
+    },
+};
+
+thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
+struct Allocator;
+
+fn reject(bytes: usize) -> bool {
+    FAIL_BYTES
+        .try_with(|slot| {
+            if slot.get() == bytes {
+                slot.set(0);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+// SAFETY: layouts and live pointers are forwarded unchanged to System. Returning null
+// for one selected allocation is explicitly permitted by GlobalAlloc.
+unsafe impl GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if reject(layout.size()) {
+            ptr::null_mut()
+        } else {
+            unsafe { System.alloc(layout) }
+        }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, bytes: usize) -> *mut u8 {
+        if reject(bytes) {
+            ptr::null_mut()
+        } else {
+            unsafe { System.realloc(pointer, layout, bytes) }
+        }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Allocator = Allocator;
+
+pub static LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub static RADIO_DROPS: AtomicUsize = AtomicUsize::new(0);
+pub static RADIO_OPENS: AtomicUsize = AtomicUsize::new(0);
+pub static PEER_DROPS: AtomicUsize = AtomicUsize::new(0);
+pub static PEER_OPENS: AtomicUsize = AtomicUsize::new(0);
+pub static RADIO_OPEN_RESULT: AtomicUsize = AtomicUsize::new(0);
+pub static CONTROL_STOP_RESULT: AtomicUsize = AtomicUsize::new(0);
+pub static CONTROL_SUBMIT_MODE: AtomicUsize = AtomicUsize::new(0);
+pub static CONTROL_REVISION: AtomicPtr<std::sync::atomic::AtomicU64> =
+    AtomicPtr::new(ptr::null_mut());
+pub static LOCAL_TIME_RESULT: AtomicUsize = AtomicUsize::new(0);
+pub static NOTICE_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub static PEER_DIAL_RESULT: AtomicUsize = AtomicUsize::new(0);
+pub static PEER_DIAL_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
+pub static PEER_SEND_TEXT_RESULT: AtomicUsize = AtomicUsize::new(0);
+pub static PEER_DIGITS: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
+pub static RADIO_READY: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn local_time(
+    _: *mut c_void,
+    _: i64,
+    result: *mut crate::abi::rptadv_local_time_v1,
+) -> i32 {
+    if LOCAL_TIME_RESULT
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+    {
+        return -1;
+    }
+    let Some(result) = (unsafe { result.as_mut() }) else {
+        return -1;
+    };
+    result.valid = 1;
+    result.year = 2030;
+    result.month = 1;
+    result.day = 1;
+    result.weekday = 2;
+    result.hour = 9;
+    result.minute = 7;
+    result.second = 3;
+    0
+}
+unsafe extern "C" fn notice(_: *mut c_void, _: *const c_char, _: usize, _: u32) {
+    NOTICE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+unsafe extern "C" fn reaper() {}
+unsafe extern "C" fn lookup(
+    _: *mut c_void,
+    _: u32,
+    _: *const c_char,
+    _: usize,
+    _: *const c_char,
+    _: usize,
+    remote: *const c_char,
+    remote_length: usize,
+    _: *const c_char,
+    _: usize,
+    output: *mut c_char,
+    capacity: usize,
+    written: *mut usize,
+) -> i32 {
+    if remote.is_null() || output.is_null() || written.is_null() {
+        return -1;
+    }
+    let remote = unsafe { std::slice::from_raw_parts(remote.cast::<u8>(), remote_length) };
+    let mut destination = b"radio@fixture/".to_vec();
+    destination.extend_from_slice(remote);
+    if destination.len() > capacity {
+        return -1;
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(destination.as_ptr(), output.cast(), destination.len());
+        written.write(destination.len());
+    }
+    0
+}
+unsafe extern "C" fn radio_open(
+    _: *mut c_void,
+    _: *const c_char,
+    _: usize,
+    _: usize,
+    output: *mut *mut c_void,
+) -> i32 {
+    let Some(output) = (unsafe { output.as_mut() }) else {
+        return -1;
+    };
+    if RADIO_OPEN_RESULT.swap(0, Ordering::AcqRel) != 0 {
+        *output = ptr::null_mut();
+        return -1;
+    }
+    RADIO_OPENS.fetch_add(1, Ordering::Relaxed);
+    *output = Box::into_raw(Box::new(0_u8)).cast();
+    0
+}
+unsafe extern "C" fn peer_ready(_: *mut c_void, _: *mut c_void) -> i32 {
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    i32::from(
+        !PEER_DIGITS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty(),
+    )
+}
+unsafe extern "C" fn radio_ready(_: *mut c_void, _: *mut c_void) -> i32 {
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    RADIO_READY.load(Ordering::Acquire) as i32
+}
+unsafe extern "C" fn exchange(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: u64,
+    render: crate::abi::rptadv_radio_render_v1,
+    context: *mut c_void,
+) -> i32 {
+    let mut samples = [0.0_f32; 8];
+    if let Some(render) = render {
+        unsafe { render(context, 0, samples.as_mut_ptr(), samples.len()) };
+    }
+    0
+}
+unsafe extern "C" fn radio_destroy(_: *mut c_void, handle: *mut c_void) {
+    if !handle.is_null() {
+        unsafe { drop(Box::from_raw(handle.cast::<u8>())) };
+        RADIO_DROPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+unsafe extern "C" fn peer_dial(
+    _: *mut c_void,
+    _: *const c_char,
+    _: usize,
+    _: *const c_char,
+    _: usize,
+    _: usize,
+    current: crate::abi::rptadv_current_v1,
+    context: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    let Some(output) = (unsafe { output.as_mut() }) else {
+        return -1;
+    };
+    if PEER_DIAL_RESULT.swap(0, Ordering::AcqRel) != 0 {
+        *output = ptr::null_mut();
+        return -1;
+    }
+    let delay = PEER_DIAL_DELAY_MS.swap(0, Ordering::AcqRel);
+    if delay != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay as u64));
+    }
+    if current.is_none_or(|current| unsafe { current(context) } == 0) {
+        return -1;
+    }
+    *output = peer();
+    0
+}
+unsafe extern "C" fn peer_rate(_: *mut c_void, _: *const c_void) -> u32 {
+    8000
+}
+unsafe extern "C" fn peer_read(
+    _: *mut c_void,
+    _: *mut c_void,
+    event: crate::abi::rptadv_peer_event_v1,
+    context: *mut c_void,
+) -> i32 {
+    if let Some(event) = event {
+        if let Some(digit) = PEER_DIGITS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+        {
+            unsafe { event(context, 2, ptr::from_ref(&digit).cast(), 1) };
+        } else {
+            let samples = [0.25_f32; 4];
+            unsafe { event(context, 3, samples.as_ptr().cast(), samples.len()) };
+        }
+    }
+    0
+}
+unsafe extern "C" fn send_text(_: *mut c_void, _: *mut c_void, _: *const c_char, _: usize) -> i32 {
+    -(PEER_SEND_TEXT_RESULT.swap(0, Ordering::AcqRel) as i32)
+}
+unsafe extern "C" fn send_digit(_: *mut c_void, _: *mut c_void, _: u8) -> i32 {
+    0
+}
+unsafe extern "C" fn write(_: *mut c_void, _: *mut c_void, _: *const f32, _: usize) -> i32 {
+    0
+}
+unsafe extern "C" fn peer_destroy(_: *mut c_void, handle: *mut c_void) {
+    if !handle.is_null() {
+        unsafe { drop(Box::from_raw(handle.cast::<u8>())) };
+        PEER_DROPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+static mut HOST: crate::abi::rptadv_host_services_v1 = crate::abi::rptadv_host_services_v1 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v1>() as u32,
+    abi_version: 1,
+    capability: *b"rptadv.host\0",
+    context: ptr::null_mut(),
+    local_time: Some(local_time),
+    command_notice: Some(notice),
+    reaper_acquire: Some(reaper),
+    reaper_release: Some(reaper),
+    directory_lookup: Some(lookup),
+    radio_open: Some(radio_open),
+    radio_ready: Some(radio_ready),
+    radio_exchange: Some(exchange),
+    radio_destroy: Some(radio_destroy),
+    peer_dial: Some(peer_dial),
+    peer_rate: Some(peer_rate),
+    peer_ready: Some(peer_ready),
+    peer_read: Some(peer_read),
+    peer_send_text: Some(send_text),
+    peer_send_digit: Some(send_digit),
+    peer_write: Some(write),
+    peer_destroy: Some(peer_destroy),
+};
+
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v1 {
+    &raw const HOST
+}
+
+pub fn peer() -> *mut c_void {
+    PEER_OPENS.fetch_add(1, Ordering::Relaxed);
+    Box::into_raw(Box::new(0_u8)).cast()
+}
+
+pub unsafe fn release_peer(handle: *mut c_void) {
+    unsafe { peer_destroy(ptr::null_mut(), handle) };
+}
+
+unsafe extern "C" fn control_open(_: *const c_char, _: usize) -> *mut c_void {
+    ptr::dangling_mut::<u8>().cast()
+}
+unsafe extern "C" fn control_submit(
+    _: *mut c_void,
+    task: crate::abi::rptadv_control_task_v1,
+) -> i32 {
+    match CONTROL_SUBMIT_MODE.swap(0, Ordering::AcqRel) {
+        1 => return -1,
+        2 => {
+            unsafe { task.release.unwrap()(task.context) };
+            return 0;
+        }
+        3 => {
+            let revision = CONTROL_REVISION.swap(ptr::null_mut(), Ordering::AcqRel);
+            if !revision.is_null() {
+                unsafe { &*revision }.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+        _ => {}
+    }
+    unsafe {
+        task.run.unwrap()(task.context);
+        task.release.unwrap()(task.context);
+    }
+    0
+}
+unsafe extern "C" fn control_stop(_: *mut c_void) -> i32 {
+    CONTROL_STOP_RESULT.swap(0, Ordering::AcqRel) as i32
+}
+unsafe extern "C" fn control_close(_: *mut c_void) -> i32 {
+    0
+}
+static mut CONTROL: crate::abi::rptadv_control_descriptor_v1 =
+    crate::abi::rptadv_control_descriptor_v1 {
+        abi_version: 1,
+        struct_size: size_of::<crate::abi::rptadv_control_descriptor_v1>(),
+        capability: c"rptadv.control".as_ptr(),
+        open: Some(control_open),
+        submit: Some(control_submit),
+        stop_and_drain: Some(control_stop),
+        close: Some(control_close),
+    };
+
+pub fn control_descriptor() -> *const crate::abi::rptadv_control_descriptor_v1 {
+    &raw const CONTROL
+}
+
+pub fn fail_allocation<T>(bytes: usize, operation: impl FnOnce() -> T) -> T {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            FAIL_BYTES.set(0);
+        }
+    }
+    assert_ne!(bytes, 0);
+    assert_eq!(FAIL_BYTES.replace(bytes), 0);
+    let _clear = Clear;
+    let result = operation();
+    assert_eq!(FAIL_BYTES.get(), 0, "selected allocation was not reached");
+    result
+}

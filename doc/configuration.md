@@ -6,7 +6,7 @@ implemented locally, but it has not been enabled on a live node and classic
 `app_rpt` interoperability remains to be verified. These are the supported
 settings.
 
-The installed example is `share/doc/rpt_advanced/examples/rpt_advanced.conf`
+The installed example is `share/doc/rpt-advanced/examples/rpt_advanced.conf`
 under the installation prefix. Its example node is disabled and its ID text is
 empty. Installation does not replace an active configuration or activate a node.
 

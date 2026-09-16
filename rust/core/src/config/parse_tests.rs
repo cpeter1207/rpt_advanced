@@ -1,6 +1,13 @@
 use super::parse;
 
 #[test]
+fn empty_section_names_are_rejected_by_the_line_parser() {
+    for text in ["[]", "[ ]", "[\t]"] {
+        assert!(parse::parse_line(text).is_err());
+    }
+}
+
+#[test]
 fn signed_decimal_accepts_only_an_optional_minus_sign() {
     assert_eq!(parse::signed("-60", -60, 0), Some(-60));
     assert_eq!(

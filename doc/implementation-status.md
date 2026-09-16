@@ -1,8 +1,15 @@
 # Implementation status
 
-## Implemented and tested
+## Implemented behavior
 
-- Original C identifier scheduling policy: intervals, priorities, activity-based
+The Rust migration replaces the C controller; only the metadata loader remains
+production C. The product library embeds the controller core once, with separate
+versioned Asterisk entry, control-execution, file, and speech providers. The
+[architecture artifact map](architecture/README.md#current-product-artifacts)
+records their ownership. Component and isolated-host tests exercise the behavior
+below; they do not replace the fresh full gate or live verification listed later.
+
+- Identifier scheduling policy: intervals, priorities, activity-based
   and unconditional periods, first-key-only sets, bounded polite deferral while
   receiver/link activity or queued telemetry is present, and completion hierarchy.
 - Named announcements with inherited file/speech/Morse media: zero-interval
@@ -17,7 +24,7 @@
   Generated sequences are pre-rendered on reload and support bounded mono-tone,
   dual-tone, silence, duration, and per-segment-level patterns.
 - File/speech/Morse preference policy, including Morse-only reception behavior.
-- Streaming signed-linear Morse renderer with configurable rate, speed, and tone
+- Streaming normalized-F32 Morse renderer with configurable rate, speed, and tone
   frequency; fractional-sample timing and block-independent output tests.
 - Sample-driven prepared-PCM playback with immediate, irreversible Morse fallback
   on reception. Completion remains terminal, and control events need not consume
@@ -37,25 +44,31 @@
   IAX peer candidates bounded by the 48 kHz local radio rate, tested with
   deterministic API fixtures. The reservation path always requests 48 kHz
   signed-linear PCM.
-- Piper process adapter with direct argument execution, file-backed text input,
+- Independent Piper speech adapter with direct argument execution, file-backed text input,
   nonblocking completion polling, cancellation, and Asterisk child-reaper
-  coordination. Prepared output is validated and bound to scheduled playback.
+  coordination supplied through host callbacks. It reads Piper's WAV directly,
+  applies speech-only gain, and never invokes FFmpeg. Prepared output is
+  validated and bound to scheduled playback.
   Tests cover injected failures and real subprocess execution with a fixture
   executable; they do not claim verification of a real Piper voice model.
-- File-backed FFmpeg preparation of mono playback PCM at the chosen rate, sharing
-  process lifecycle handling with Piper. A real 22050-to-48000 Hz WAV conversion
-  test checks sample count and level; malformed input is rejected.
+- Independent FFmpeg file adapter preparing mono PCM at the decoded source rate.
+  It shares private process/WAV source with the speech provider, not a combined
+  runtime capability. The product uses the released ring2 for finite source-rate
+  conversion to 48 kHz; short-impulse and nonintegral-rate tests check duration
+  and sample level. Neither provider embeds controller code or a resampler.
 - Runtime file-to-speech-to-Morse preparation, checked PCM loading, bounded child
   execution, and temporary-file cleanup. Unavailable sets without Morse do not
   occupy a scheduling slot. Tests cover each I/O failure, allocation failure,
-  timeout cancellation, and actual FFmpeg conversion of a fixture synthesizer's WAV.
+  timeout cancellation, actual FFmpeg file decode, and direct fixture-Piper WAV
+  preparation with no FFmpeg speech dependency.
 - Real-Asterisk two-node audio integration using a test-only 48 kHz radio driver.
   Tests exercise direct local 48 kHz signed-linear transport, retained
   `sample_rate_hz`/`codec` warnings, and ULAW/SLIN16 IAX peer conversion;
   they verify half/full-duplex local repeat, Morse output, balanced PTT, and
   reload-driven channel cleanup. The fixture is not installed by the package.
-- Real Piper 1.8.0 synthesis using 524950's existing Amy-low model, tested locally
-  on Debian 13 amd64 through the module's preparation code. See
+- Historical, pre-split real Piper 1.8.0 synthesis using 524950's existing Amy-low
+  model was tested locally on Debian 13 amd64. This does not verify the current
+  split provider with that model. See
   [testing](testing.md) for the optional real-model invocation and its scope.
 - Half/full-duplex transmit ownership and configurable hang-time policy.
 - Integrated node controller joining ID and announcement scheduling, prepared
@@ -70,14 +83,15 @@
   configuration loading now starts these workers for every enabled node.
 - Shared, node, and ID/announcement/courtesy-set configuration-value inheritance,
   including explicit empty overrides and scope independence from file order.
-- In-place configuration-line syntax parsing, including whitespace, semicolon
-  comments, section names, and empty option values. File loading and schema
-  validation remain separate work.
+- Configuration-line syntax parsing, including whitespace, semicolon comments,
+  section names, and empty option values, composed with file loading and schema
+  validation.
 - Bounded unsigned-decimal and explicit yes/no value validation. Invalid values
   leave their destination unchanged; numeric overflow is rejected.
 - Typed node, ID, announcement, and courtesy settings with shared/node/set
-  inheritance, documented in [configuration](configuration.md), and atomic
-  rejection of invalid values.
+  inheritance, documented in [configuration](configuration.md). Unknown or bad
+  values warn and use inherited sensible defaults; only an inability to build a
+  safe deterministic configuration rejects reload.
 - Streaming file-syntax reader with physical-line diagnostics, unbounded line
   lengths, embedded-null rejection, and builder-error propagation.
 - Owned configuration storage, including empty sections, with complete cleanup
@@ -98,15 +112,30 @@
 - Configuration-owned permanent transceive direct links and same-day local-time
   replacement windows, including permanent-first withdrawal, optional
   post-window receive quiet time, and reload-safe desired-link continuity.
-- The quality policy requires strict formatting, compiler diagnostics, Cppcheck,
-  Clang-Tidy, Doxygen, and per-platform line/branch coverage gates. Doxygen is
-  published to GitHub Pages after the main-branch quality gate passes.
+- Generational `NodeHost` ownership with fixed receive/transmit registrations,
+  coherent paired radio calls, hazard-protected retirement, and explicit
+  callback-detachment acknowledgment. Generation-owned peer rings prevent old
+  ingress from crossing into the replacement mix.
+- One bounded program-audio loopback SPSC from radio TX to a non-audio link
+  dispatcher. The dispatcher owns per-peer fanout; each peer's TX owner alone
+  converts, encodes, and sends. Preallocated block recycling preserves mix-minus
+  without allocation or locking on radio TX.
+- Descriptor-backed control execution with accepted/rejected ownership, FIFO
+  serialization, stop/drain, and worker-join close. Product scheduling and command
+  policy remain outside the Asterisk taskprocessor provider.
+- The quality policy requires strict formatting, compiler diagnostics, Rustdoc,
+  and Debian 13 amd64 production line/branch coverage, plus Cppcheck, Clang-Tidy, and
+  Doxygen for the metadata shim and public C adapter headers. Generated API
+  documentation is published to GitHub Pages after the main-branch quality gate
+  passes.
 
-The build produces a static controller library and `app_rpt_advanced.so`. The
+The build produces `app_rpt_advanced.so`, `librptadv_product.so.1`, and the four
+versioned Asterisk, control, file, and speech adapter DSOs; it
+does not ship a static controller library or legacy controller headers. The
 module starts named radio workers with inherited, prepared file/speech/Morse IDs,
-announcements, and courtesy tones.
-Invalid configuration
-leaves running workers untouched; a valid reload stops and replaces them. Failed
+announcements, and courtesy tones. Invalid configuration leaves the running
+generation untouched; a valid reload publishes a prepared replacement and uses
+a controlled handoff for changed radio leases. Failed
 radio startup releases partial resources and attempts to reopen the previous
 configuration, reporting any restoration failure. Lifecycle tests use the real shared library and
 Asterisk's public ABI, including configuration-path allocation and input errors.
@@ -118,27 +147,30 @@ hardware backend.
 
 ## Current USBRadioPlus integration boundary
 
+The rpt_advanced generational host and link/program-audio routing above are
+implemented. They are distinct from USBRadioPlus's direct-hardware migration.
 The current USBRadioPlus Rust migration implements independently paced
 PortAudio input and output callback entry points. Receive DSP runs from input
 callbacks, while transmit rendering runs from output callbacks. The complete
 local-receive, linked-peer, and telemetry inbound-ring topology, verified
-shared-clock fast path, and generational `NodeHost` lifecycle remain pending;
-the callback split alone does not implement those later architecture tranches.
+shared-clock fast path, and corresponding hardware-side generation integration
+remain pending; the callback split alone does not implement those later
+architecture tranches.
 
 ## Remaining verification
 
 - Physical identifier playback/interruption and the remaining hardware acceptance
   cases in [testing](testing.md).
-- A fresh complete quality gate and Debian 12/13 amd64/arm64 matrix for the
-  current AllStarLink source changes.
+- A fresh complete quality gate and Debian 13 amd64/arm64 matrix for the
+  current Rust product.
 - Explicitly approved live interoperability testing with classic `app_rpt` and
   higher-rate capable peers. The AllStarLink integration has not been deployed
   on 524950 or any other live node.
 - Execution verification of the version-tag release workflow. Source archive
   rebuilding is covered by the platform gate; no project release has been cut.
 
-The project provides clean ASL3 and installed-module test images for Debian
-12/13 and amd64/arm64; see [testing](testing.md). The quality images remain
+The project provides clean ASL3 and installed-module test images for Debian 13
+amd64/arm64; see [testing](testing.md). The quality images remain
 separate development environments with compilers and analysis tools. Their
 existence is not a quality result for the current working tree.
 

@@ -16,6 +16,49 @@ use std::str::FromStr;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Schema;
 
+// Only documented option families reach key validation; unknown whole sections
+// are diagnosed at the schema boundary instead of becoming a fictitious family.
+#[derive(Clone, Copy)]
+enum KnownScope {
+    General,
+    Identifier,
+    Announcement,
+    Courtesy { named: bool },
+    Morse,
+    Speech,
+    Time,
+    Template,
+    Macro,
+    Event,
+    Permanent,
+    Schedule,
+}
+
+impl KnownScope {
+    fn from_kind(kind: ScopeKind) -> Option<Self> {
+        Some(match kind {
+            ScopeKind::General | ScopeKind::Node => Self::General,
+            ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet => {
+                Self::Identifier
+            }
+            ScopeKind::AnnouncementDefault
+            | ScopeKind::AnnouncementNode
+            | ScopeKind::AnnouncementSet => Self::Announcement,
+            ScopeKind::CourtesyDefault | ScopeKind::CourtesyNode => Self::Courtesy { named: false },
+            ScopeKind::CourtesySet => Self::Courtesy { named: true },
+            ScopeKind::MorseDefault | ScopeKind::MorseNode => Self::Morse,
+            ScopeKind::SpeechDefault | ScopeKind::SpeechNode => Self::Speech,
+            ScopeKind::TimeDefault | ScopeKind::TimeNode => Self::Time,
+            ScopeKind::TemplateGlobal | ScopeKind::TemplateNode => Self::Template,
+            ScopeKind::MacroGlobal | ScopeKind::MacroNode => Self::Macro,
+            ScopeKind::EventNode => Self::Event,
+            ScopeKind::PermanentNode => Self::Permanent,
+            ScopeKind::ScheduleNode => Self::Schedule,
+            ScopeKind::Unknown => return None,
+        })
+    }
+}
+
 impl Schema {
     /// Validate a parsed document. Safely ignored input is returned as a warning.
     pub fn validate(document: &ConfigDocument) -> Result<Resolution<()>, ConfigError> {
@@ -51,7 +94,7 @@ impl Schema {
             if repeated {
                 continue;
             }
-            if parsed.kind == ScopeKind::Unknown {
+            let Some(known) = KnownScope::from_kind(parsed.kind) else {
                 warnings.push(ConfigWarning::new(
                     document.section_line(index),
                     section,
@@ -61,9 +104,9 @@ impl Schema {
                     "section ignored",
                 ));
                 continue;
-            }
+            };
             for entry in document.section_entries(section) {
-                if !key_known(parsed.kind, &entry.key) {
+                if !key_known(known, &entry.key) {
                     warnings.push(ConfigWarning::new(
                         entry.line,
                         section,
@@ -96,9 +139,9 @@ impl Schema {
     }
 }
 
-fn key_known(kind: ScopeKind, key: &str) -> bool {
+fn key_known(kind: KnownScope, key: &str) -> bool {
     match kind {
-        ScopeKind::General | ScopeKind::Node => matches!(
+        KnownScope::General => matches!(
             key,
             "node_enabled"
                 | "full_duplex"
@@ -131,7 +174,7 @@ fn key_known(kind: ScopeKind, key: &str) -> bool {
                 | "link_command_reconnect_all"
                 | "link_command_permanent_local_monitor"
         ),
-        ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet => {
+        KnownScope::Identifier => {
             matches!(
                 key,
                 "interval_ms"
@@ -151,9 +194,7 @@ fn key_known(kind: ScopeKind, key: &str) -> bool {
                     | "morse_level_db"
             )
         }
-        ScopeKind::AnnouncementDefault
-        | ScopeKind::AnnouncementNode
-        | ScopeKind::AnnouncementSet => matches!(
+        KnownScope::Announcement => matches!(
             key,
             "interval_ms"
                 | "sound_file"
@@ -166,7 +207,7 @@ fn key_known(kind: ScopeKind, key: &str) -> bool {
                 | "morse_frequency_hz"
                 | "morse_level_db"
         ),
-        ScopeKind::CourtesyDefault | ScopeKind::CourtesyNode | ScopeKind::CourtesySet => {
+        KnownScope::Courtesy { named } => {
             matches!(
                 key,
                 "sound_file"
@@ -178,20 +219,20 @@ fn key_known(kind: ScopeKind, key: &str) -> bool {
                     | "morse_frequency_hz"
                     | "tone_sequence"
                     | "level_db"
-            ) || (kind == ScopeKind::CourtesySet && matches!(key, "input" | "remote_node"))
+            ) || (named && matches!(key, "input" | "remote_node"))
         }
-        ScopeKind::MorseDefault | ScopeKind::MorseNode => {
+        KnownScope::Morse => {
             matches!(key, "frequency_hz" | "speed_wpm" | "level_db")
         }
-        ScopeKind::SpeechDefault | ScopeKind::SpeechNode => {
+        KnownScope::Speech => {
             matches!(key, "voice" | "speed_percent" | "level_db")
         }
-        ScopeKind::TimeDefault | ScopeKind::TimeNode => key == "format",
-        ScopeKind::TemplateGlobal | ScopeKind::TemplateNode => key == "text",
-        ScopeKind::MacroGlobal | ScopeKind::MacroNode => matches!(key, "action" | "target_node"),
-        ScopeKind::EventNode => matches!(key, "at" | "template" | "message" | "macro"),
-        ScopeKind::PermanentNode => key == "remote_node",
-        ScopeKind::ScheduleNode => matches!(
+        KnownScope::Time => key == "format",
+        KnownScope::Template => key == "text",
+        KnownScope::Macro => matches!(key, "action" | "target_node"),
+        KnownScope::Event => matches!(key, "at" | "template" | "message" | "macro"),
+        KnownScope::Permanent => key == "remote_node",
+        KnownScope::Schedule => matches!(
             key,
             "remote_node"
                 | "replace_permanent"
@@ -201,7 +242,6 @@ fn key_known(kind: ScopeKind, key: &str) -> bool {
                 | "end_time"
                 | "end_inactivity_ms"
         ),
-        ScopeKind::Unknown => false,
     }
 }
 
@@ -265,7 +305,7 @@ fn node_value_valid(value: &str) -> bool {
     value.len() <= 63 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn default_value(kind: ScopeKind, key: &str, node: Option<&str>) -> String {
+fn default_value(kind: ScopeKind, key: &str) -> String {
     let value = match (kind, key) {
         (ScopeKind::General | ScopeKind::Node, "node_enabled" | "full_duplex" | "dtmf_muting") => {
             "yes"
@@ -288,7 +328,6 @@ fn default_value(kind: ScopeKind, key: &str, node: Option<&str>) -> String {
         (_, "interval_ms" | "priority") => "0",
         (_, "first_key_only" | "regardless_of_activity" | "polite") => "no",
         (_, "polite_maximum_wait_ms") => "60000",
-        (_, "speech_model" | "voice") => "en_US-lessac-medium.onnx",
         (_, "speech_speed_percent" | "speed_percent") => "100",
         (_, "speech_level_db") => "0",
         (_, "morse_speed_wpm" | "speed_wpm") => "20",
@@ -305,9 +344,7 @@ fn default_value(kind: ScopeKind, key: &str, node: Option<&str>) -> String {
         (_, "format") => "12",
         _ => "",
     };
-    if key == "radio_channel" {
-        node.unwrap_or_default().to_owned()
-    } else if let Some(command) = command_default(key) {
+    if let Some(command) = command_default(key) {
         command.to_owned()
     } else if value.is_empty() {
         "not configured".to_owned()
@@ -363,7 +400,6 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
         ScopeKind::MorseNode => candidates.push(("morse".to_owned(), key)),
         ScopeKind::SpeechNode => candidates.push(("speech".to_owned(), key)),
         ScopeKind::TimeNode => candidates.push(("time".to_owned(), key)),
-        ScopeKind::TemplateNode => candidates.push((format!("template {label}"), key)),
         ScopeKind::MacroNode => candidates.push((format!("macro {label}"), key)),
         _ => {}
     }
@@ -374,12 +410,11 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
             }
         }
     }
-    default_value(scope.kind, key, scope.node)
+    default_value(scope.kind, key)
 }
 
 fn add_media_defaults<'a>(candidates: &mut Vec<(String, &'a str)>, key: &'a str, node: &str) {
     let family_key = match key {
-        "speech_model" => Some(("speech", "voice")),
         "speech_speed_percent" => Some(("speech", "speed_percent")),
         "speech_level_db" => Some(("speech", "level_db")),
         "morse_speed_wpm" => Some(("morse", "speed_wpm")),

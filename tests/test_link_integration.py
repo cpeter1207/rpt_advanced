@@ -392,6 +392,14 @@ def main():
                 for configuration, _ in (first, second):
                     channels = cli(configuration, "core show channels concise")
                     assert "IAX2/" in channels, channels
+                for _ in range(6):
+                    for configuration, _ in (first, second):
+                        cli(configuration, "module reload app_rpt_advanced.so")
+                    time.sleep(0.03)
+                    for configuration, _ in (first, second):
+                        assert "IAX2/" in cli(
+                            configuration, "core show channels concise"
+                        )
                 result = cli(first[0], "rpt_advanced link disconnect 524950 508422")
                 assert "completed" in result, result
                 deadline = time.monotonic() + 5

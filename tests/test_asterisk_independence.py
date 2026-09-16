@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""! @file
-@brief Enforce ADR 0036's source-level Asterisk and ASL3 dependency boundary.
+"""Enforce ADR 0036's source-level Asterisk and ASL3 dependency boundary.
 
-The check deliberately examines only C include directives, module-descriptor
-dependencies, and code tokens.  It permits public Asterisk APIs and
-AllStarLink wire-protocol strings while preventing portable source from
-acquiring a host dependency or the module from importing known ASL3 internals.
+The check permits public Asterisk APIs and AllStarLink wire-protocol strings,
+while preventing portable Rust or the module adapter from importing ASL3
+internals. Provider crates must not embed the controller core.
 """
 
 from __future__ import annotations
@@ -39,6 +37,12 @@ NON_CODE = re.compile(
 )
 ## @brief Removes C comments while retaining quoted include paths.
 COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
+RUST_FFI = re.compile(r'\bextern\s*"C"|#\s*\[\s*link\s*\(')
+FORBIDDEN_RUST_ADAPTER = re.compile(
+    r"\b(?:ast_radio_[A-Za-z0-9_]*|res_usbradio|app_rpt\.h|"
+    r"chan_(?:usbradio|simpleusb|voter|echolink|irlp)\.h|asl3)\b",
+    re.IGNORECASE,
+)
 
 
 def c_sources(directory: Path) -> list[Path]:
@@ -96,13 +100,52 @@ def check_module_source(root: Path) -> list[str]:
                 )
         if FORBIDDEN_RADIO_SYMBOL.search(code_only(source)):
             violations.append(f"{source.relative_to(root)} uses ast_radio_* helper")
-    descriptor = root / "module" / "app_rpt_advanced.c"
-    for dependency in MODULE_DEPENDENCY.findall(descriptor.read_text(encoding="utf-8")):
-        for name in dependency.split(","):
-            if FORBIDDEN_MODULE_DEPENDENCY.search(name.strip()):
-                violations.append(
-                    f"{descriptor.relative_to(root)} requires ASL module {name.strip()}"
-                )
+    candidates = (
+        root / "module" / "app_rpt_advanced_loader.c",
+        root / "module" / "app_rpt_advanced.c",
+    )
+    descriptor = next((path for path in candidates if path.exists()), None)
+    if descriptor is not None:
+        for dependency in MODULE_DEPENDENCY.findall(
+            descriptor.read_text(encoding="utf-8")
+        ):
+            for name in dependency.split(","):
+                if FORBIDDEN_MODULE_DEPENDENCY.search(name.strip()):
+                    violations.append(
+                        f"{descriptor.relative_to(root)} requires ASL module {name.strip()}"
+                    )
+    return violations
+
+
+def check_rust_source(root: Path) -> list[str]:
+    """Reject host FFI from core and ASL-private imports from Rust adapters."""
+    violations: list[str] = []
+    core = root / "rust" / "core"
+    if core.exists():
+        for source in sorted((core / "src").rglob("*.rs")):
+            if RUST_FFI.search(source.read_text(encoding="utf-8")):
+                violations.append(f"{source.relative_to(root)} imports a C ABI")
+        manifest = (core / "Cargo.toml").read_text(encoding="utf-8")
+        if FORBIDDEN_RUST_ADAPTER.search(manifest):
+            violations.append("rust/core/Cargo.toml imports a host dependency")
+
+    for name in ("asterisk", "control-asterisk-adapter"):
+        crate = root / "rust" / name
+        if not crate.exists():
+            continue
+        for source in sorted((*crate.rglob("*.rs"), *crate.rglob("*.h"))):
+            if FORBIDDEN_RUST_ADAPTER.search(source.read_text(encoding="utf-8")):
+                violations.append(f"{source.relative_to(root)} imports ASL-private API")
+
+    for name in ("file-adapter", "speech-adapter", "control-asterisk-adapter"):
+        manifest = root / "rust" / name / "Cargo.toml"
+        if not manifest.exists():
+            continue
+        production = manifest.read_text(encoding="utf-8").split(
+            "[dev-dependencies]", maxsplit=1
+        )[0]
+        if "rpt-advanced-core" in production:
+            violations.append(f"{manifest.relative_to(root)} embeds controller core")
     return violations
 
 
@@ -112,7 +155,11 @@ def check_tree(root: Path) -> None:
     @return None; raises only for a boundary violation.
     @exception AssertionError When one direct forbidden dependency is found.
     """
-    violations = check_portable_source(root) + check_module_source(root)
+    violations = (
+        check_portable_source(root)
+        + check_module_source(root)
+        + check_rust_source(root)
+    )
     assert not violations, "\n".join(violations)
 
 
@@ -194,6 +241,29 @@ def verify_examples() -> None:
             'struct descriptor value = {.optional_modules = "res_usbradio"};\n',
         )
         expect_violation(root, "requires ASL module")
+
+        write(root, "module/app_rpt_advanced.c", "")
+        write(root, "rust/core/Cargo.toml", "[dependencies]\nrtrb = '1'\n")
+        write(root, "rust/core/src/lib.rs", 'extern "C" { fn host(); }\n')
+        expect_violation(root, "imports a C ABI")
+        write(root, "rust/core/src/lib.rs", "pub fn portable() {}\n")
+
+        write(
+            root,
+            "rust/file-adapter/Cargo.toml",
+            "[dependencies]\nrpt-advanced-core = { path = '../core' }\n",
+        )
+        expect_violation(root, "embeds controller core")
+        write(
+            root,
+            "rust/file-adapter/Cargo.toml",
+            "[dependencies]\nlibc = '1'\n"
+            "[dev-dependencies]\nrpt-advanced-core = { path = '../core' }\n",
+        )
+        check_tree(root)
+
+        write(root, "rust/asterisk/src/lib.rs", "fn bad() { res_usbradio(); }\n")
+        expect_violation(root, "imports ASL-private API")
 
 
 def main() -> None:

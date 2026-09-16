@@ -6,4 +6,6 @@
 *.gcda
 *.gcno
 *.gcov
+*.profraw
+*.profdata
 __pycache__/

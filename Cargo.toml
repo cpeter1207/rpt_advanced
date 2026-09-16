@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/core", "rust/asterisk"]
+members = ["rust/core", "rust/product", "rust/asterisk", "rust/file-adapter", "rust/speech-adapter", "rust/control-asterisk-adapter"]
 resolver = "3"
 
 [workspace.package]

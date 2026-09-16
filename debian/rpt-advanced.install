@@ -1,0 +1,3 @@
+usr/lib/*/asterisk/modules/app_rpt_advanced.so
+usr/lib/*/rpt_advanced/librptadv_asterisk_adapter.so.1*
+usr/share/doc/rpt-advanced/**

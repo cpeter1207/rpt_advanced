@@ -1,0 +1,86 @@
+Source: rpt-advanced
+Section: hamradio
+Priority: optional
+Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
+ libclang-dev, pkg-config, dh-sequence-asterisk,
+ librate-adjusting-pcm-ring2-dev (>= 2.0.0~alpha1),
+ librptadv-samplerate-adapter-dev (>= 0.1.0~alpha1), ffmpeg
+Standards-Version: 4.7.2
+Homepage: https://github.com/cpeter1207/rpt_advanced
+Rules-Requires-Root: no
+
+Package: rpt-advanced
+Architecture: amd64 arm64
+Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends},
+ librate-adjusting-pcm-ring2 (>= 2.0.0~alpha1),
+ librptadv-samplerate-adapter1 (>= 0.1.0~alpha1),
+ librptadv-product1 (= ${binary:Version}),
+ librptadv-file-adapter1 (= ${binary:Version}),
+ librptadv-speech-adapter1 (= ${binary:Version}),
+ librptadv-control-asterisk-adapter1 (= ${binary:Version})
+Description: Rust-owned Asterisk radio controller for USBRadioPlus
+ A controller module for USBRadioPlus RadioPlusAdvanced channels. It installs
+ only the Asterisk metadata shim and versioned Rust adapter objects; it ships no
+ static controller archive or legacy controller headers.
+
+Package: librptadv-product1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends},
+ librate-adjusting-pcm-ring2 (>= 2.0.0~alpha1),
+ librptadv-samplerate-adapter1 (>= 0.1.0~alpha1)
+Description: portable controller product for rpt_advanced
+ Versioned Rust C-ABI product that owns configuration, controller policy,
+ workers, and portable host-service clients.
+
+Package: librptadv-product-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-product1 (= ${binary:Version})
+Description: development files for the rpt_advanced product
+ Public C header and unversioned linker name for the versioned product.
+
+Package: librptadv-file-adapter1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}, ffmpeg
+Description: local-file preparation adapter for rpt_advanced
+ Versioned Rust C-ABI adapter that prepares local files outside the real-time
+ audio path.
+
+Package: librptadv-file-adapter-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-file-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced file adapter
+ Public C headers and unversioned linker name for the versioned file adapter.
+
+Package: librptadv-speech-adapter1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: offline speech preparation adapter for rpt_advanced
+ Versioned Rust C-ABI adapter that prepares Piper speech outside the real-time
+ audio path.
+
+Package: librptadv-speech-adapter-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-speech-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced speech adapter
+ Public C headers and unversioned linker name for the versioned speech adapter.
+
+Package: librptadv-control-asterisk-adapter1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends}
+Description: Asterisk taskprocessor adapter for rpt_advanced
+ Versioned Rust C-ABI adapter for bounded Asterisk taskprocessor execution.
+
+Package: librptadv-control-asterisk-adapter-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-control-asterisk-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced control adapter
+ Public C header and unversioned linker name for the versioned control adapter.

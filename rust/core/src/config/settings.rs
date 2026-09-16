@@ -186,8 +186,7 @@ pub struct ResolvedTemplateSettings {
 pub struct ResolvedMacroSettings {
     /// Macro label.
     pub name: String,
-    /// Controller action.
-    pub action: String,
+    action: crate::schedule::ScheduledAction,
     /// Optional decimal target.
     pub target_node: String,
 }
@@ -264,6 +263,10 @@ fn lookup_scopes(document: &ConfigDocument, key: &str, scopes: &[String]) -> Opt
     scopes
         .iter()
         .find_map(|scope| document.lookup(key, &[scope.as_str()]).map(str::to_owned))
+}
+
+fn node_value(value: &str) -> Option<String> {
+    (value.len() <= 63 && value.bytes().all(|byte| byte.is_ascii_digit())).then(|| value.to_owned())
 }
 
 fn family_scopes(node: &NodeId, family: &str) -> [String; 2] {
@@ -378,20 +381,12 @@ impl ResolvedCourtesySettings {
             .lookup("input", &[section.as_str()])
             .unwrap_or("")
             .to_owned();
-        let remote_node = document
-            .lookup("remote_node", &[section.as_str()])
-            .unwrap_or("")
-            .to_owned();
+        let remote_node = lookup_valid_scopes(document, "remote_node", &named_scopes, node_value)
+            .unwrap_or_default();
         if !matches!(input.as_str(), "receiver" | "link") {
             return Err(ConfigError::structure(
                 &section,
                 "courtesy input is required",
-            ));
-        }
-        if input != "link" && !remote_node.is_empty() {
-            return Err(ConfigError::structure(
-                &section,
-                "courtesy remote node requires link input",
             ));
         }
         let level_db = lookup_valid_scopes(document, "level_db", &named_scopes, |value| {
@@ -529,6 +524,10 @@ impl ResolvedTemplateSettings {
 }
 
 impl ResolvedMacroSettings {
+    /// Validated controller operation, fixed when the macro definition is resolved.
+    pub fn action(&self) -> crate::schedule::ScheduledAction {
+        self.action
+    }
     /// Resolve a global macro and same-label node override.
     pub fn resolve(
         document: &ConfigDocument,
@@ -541,36 +540,18 @@ impl ResolvedMacroSettings {
             scopes.push(format!("macro {} {label}", node.as_str()));
         }
         scopes.push(format!("macro {label}"));
-        let action = scopes
-            .iter()
-            .find_map(|scope| document.lookup("action", &[scope.as_str()]))
-            .unwrap_or("");
-        let target = scopes
-            .iter()
-            .find_map(|scope| document.lookup("target_node", &[scope.as_str()]))
-            .unwrap_or("");
-        if !matches!(
-            action,
-            "connect" | "disconnect" | "disconnect_all" | "reconnect_all"
-        ) {
-            return Err(ConfigError::structure(
-                &scopes[0],
-                "macro action is required",
-            ));
-        }
-        if matches!(action, "connect" | "disconnect")
-            && (target.is_empty() || !target.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            return Err(ConfigError::structure(
-                &scopes[0],
-                "macro target node is required",
-            ));
-        }
+        let action = lookup_valid_scopes(document, "action", &scopes, |value| {
+            value.parse::<crate::schedule::ScheduledAction>().ok()
+        });
+        let target =
+            lookup_valid_scopes(document, "target_node", &scopes, node_value).unwrap_or_default();
+        let action =
+            action.ok_or_else(|| ConfigError::structure(&scopes[0], "macro action is required"))?;
         Ok(Resolution {
             value: Self {
                 name: label.to_owned(),
-                action: action.to_owned(),
-                target_node: target.to_owned(),
+                action,
+                target_node: target,
             },
             warnings,
         })
@@ -602,18 +583,6 @@ impl ResolvedEventSettings {
         if value.at.is_empty() {
             return Err(ConfigError::structure(&section, "event at is required"));
         }
-        if !value.template.is_empty() && !value.message.is_empty() {
-            return Err(ConfigError::structure(
-                &section,
-                "event message and template are mutually exclusive",
-            ));
-        }
-        if value.template.is_empty() && value.message.is_empty() && value.macro_name.is_empty() {
-            return Err(ConfigError::structure(
-                &section,
-                "event message, template, or macro is required",
-            ));
-        }
         Ok(Resolution { value, warnings })
     }
 }
@@ -634,12 +603,6 @@ impl ResolvedPermanentLinkSettings {
             return Err(ConfigError::structure(
                 &section,
                 "permanent remote node is required",
-            ));
-        }
-        if remote == node.as_str() || !remote.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(ConfigError::structure(
-                &section,
-                "invalid permanent remote node",
             ));
         }
         Ok(Resolution {
@@ -688,11 +651,7 @@ impl ResolvedScheduleSettings {
                 .and_then(|raw| parse::unsigned(raw, 0, u64::MAX))
                 .unwrap_or(0),
         };
-        if value.remote_node.is_empty()
-            || value.replace_permanent.is_empty()
-            || value.start_time.is_empty()
-            || value.end_time.is_empty()
-        {
+        if value.remote_node.is_empty() {
             return Err(ConfigError::structure(
                 &section,
                 "schedule remote node, replacement, start time, and end time are required",
@@ -895,7 +854,10 @@ impl ResolvedIdentifierSettings {
         Ok(Resolution {
             value: Self {
                 interval_ms: number("interval_ms", 600_000, 1),
-                priority: number("priority", 0, 0),
+                priority: lookup_valid_scopes(document, "priority", &identifier_scopes, |raw| {
+                    parse::unsigned(raw, 0, i32::MAX as u64)
+                })
+                .unwrap_or(0),
                 first_key_only: boolean("first_key_only", false),
                 regardless_of_activity: boolean("regardless_of_activity", false),
                 polite: boolean("polite", false),
@@ -1038,6 +1000,19 @@ impl ResolvedIdentifierSettings {
 }
 
 impl ResolvedNodeSettings {
+    /// Build the effective command map, rejecting unknown option names or invalid prefixes.
+    pub fn command_map(&self) -> Result<DtmfCommandMap, crate::command::CommandMapError> {
+        DtmfCommandMap::new(
+            self.link_commands
+                .iter()
+                .map(|(key, digits)| {
+                    command_action(key)
+                        .map(|action| CommandMapping::new(digits, action))
+                        .ok_or(crate::command::CommandMapError::UnknownAction)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    }
     /// Resolve general defaults and an exact node override, returning warnings for recoverable values.
     pub fn resolve(
         document: &ConfigDocument,
@@ -1109,17 +1084,21 @@ impl ResolvedNodeSettings {
         }) {
             value.link_lookup_method = parsed;
         }
-        for key in command_keys() {
+        for key in command_keys()
+            .into_iter()
+            .filter(|key| key.starts_with("link_command_"))
+        {
             if let Some(raw) = lookup_valid(document, key, &scopes, |raw| {
-                DtmfCommandMap::validate(&[CommandMapping::new(raw, command_action(key))])
+                DtmfCommandMap::validate(&[CommandMapping::new(raw, LinkAction::Status)])
                     .is_ok()
                     .then(|| raw.to_owned())
             }) {
                 value.link_commands.insert(key.to_owned(), raw);
             }
         }
-        validate_command_map(&value.link_commands)
-            .map_err(|message| ConfigError::structure(node.as_str(), message))?;
+        value
+            .command_map()
+            .map_err(|error| ConfigError::structure(node.as_str(), &error.to_string()))?;
         Ok(Resolution {
             value,
             warnings: schema.warnings,
@@ -1215,20 +1194,8 @@ fn default_command(key: &str) -> String {
     .to_owned()
 }
 
-/// Validate command prefixes, preserving an empty configurable mapping as disabled.
-pub fn validate_command_map(commands: &BTreeMap<String, String>) -> Result<(), &'static str> {
-    let mappings = commands
-        .iter()
-        .map(|(key, digits)| CommandMapping::new(digits, command_action(key)))
-        .collect::<Vec<_>>();
-    DtmfCommandMap::validate(&mappings).map_err(|error| match error {
-        crate::command::CommandMapError::InvalidPrefix => "invalid command prefix",
-        crate::command::CommandMapError::AmbiguousPrefix => "ambiguous command prefix",
-    })
-}
-
-fn command_action(key: &str) -> LinkAction {
-    match key {
+fn command_action(key: &str) -> Option<LinkAction> {
+    Some(match key {
         "link_command_disconnect" => LinkAction::Disconnect,
         "link_command_monitor" => LinkAction::Monitor,
         "link_command_transceive" => LinkAction::Transceive,
@@ -1245,8 +1212,8 @@ fn command_action(key: &str) -> LinkAction {
         "link_command_permanent_local_monitor" => LinkAction::PermanentLocalMonitor,
         "fixed_10" => LinkAction::DisconnectNonPermanentAll,
         "fixed_722" => LinkAction::Time,
-        _ => unreachable!("command keys are closed over the documented action set"),
-    }
+        _ => return None,
+    })
 }
 
 /// A validated node identity with the transport's 63-byte limit.

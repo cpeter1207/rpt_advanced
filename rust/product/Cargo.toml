@@ -1,0 +1,17 @@
+[package]
+name = "rptadv-product"
+build = "build.rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rpt-advanced-core = { path = "../core" }
+rtrb = "0.3.2"
+
+[build-dependencies]
+bindgen = "0.72.1"

@@ -2,11 +2,14 @@
 
 ## Prerequisites
 
-Supported test targets are Debian 12 and 13 on amd64 and arm64, using ASL3
-Asterisk and matching `asl3-asterisk-dev` headers. Build with `build-essential`.
-USBRadioPlus must provide the `RadioPlusAdvanced` channel technology; older
-releases without that adapter cannot serve this controller. No radio hardware
-is required for the automated synthetic-radio tests.
+Supported targets are Debian 13 on amd64 and arm64, using ASL3 Asterisk and
+matching public Asterisk development headers (provided through
+`dh-sequence-asterisk`). Source builds need Rust 1.85, Cargo,
+`libclang-dev`, `pkg-config`, `librate-adjusting-pcm-ring2-dev`, and
+`librptadv-samplerate-adapter-dev` in addition to `build-essential`. USBRadioPlus
+must provide the `RadioPlusAdvanced` channel technology; older releases without
+that adapter cannot serve this controller. No radio hardware is required for
+the automated synthetic-radio tests.
 
 Load the Asterisk codec modules required by the IAX peers you intend to use.
 The local RadioPlusAdvanced exchange is always 48 kHz signed-linear PCM, so it
@@ -16,7 +19,8 @@ negotiated peer PCM rate and that fixed local rate at the peer boundary.
 dialplan paths. Installed but unloaded codec modules are unavailable to IAX
 negotiation; use `core show translation` to inspect available paths.
 
-FFmpeg prepares sound files and synthesized speech before a radio worker starts.
+FFmpeg prepares sound files before a radio worker starts. The independent speech
+adapter reads Piper's WAV output directly and does not invoke FFmpeg.
 For speech, install an offline Piper executable named `piper` in Asterisk's
 service PATH and configure a local voice model. The service account must be able
 to read the model, its companion JSON file, and all configured sound files.
@@ -25,19 +29,30 @@ See [configuration](configuration.md) for the complete media hierarchy.
 
 ## Build and install
 
-From the source directory:
+Install the Debian package when it is available:
+
+```sh
+sudo apt-get install ./rpt-advanced_*.deb
+```
+
+For a source build, from the source directory:
 
 ```sh
 make -j2
 sudo make prefix=/usr install
 ```
 
-The module is installed as
+Cargo builds the Rust product; `make` orchestrates the conventional build and
+installation. The installed module is
 `/usr/lib/<Debian multiarch triplet>/asterisk/modules/app_rpt_advanced.so`.
-Set `asteriskmoddir` explicitly if Asterisk uses another module directory.
-Use `DESTDIR` for staging; it prefixes install destinations without changing
-runtime configuration paths. `make install` does not edit `modules.conf`,
-`rpt.conf`, or any active configuration.
+Its versioned Rust adapter DSOs are installed privately under
+`/usr/lib/<Debian multiarch triplet>/rpt_advanced/`:
+`librptadv_asterisk_adapter.so.1`, `librptadv_product.so.1`,
+`librptadv_file_adapter.so.1`, `librptadv_speech_adapter.so.1`, and
+`librptadv_control_asterisk_adapter.so.1`. Set `asteriskmoddir` explicitly if
+Asterisk uses another module directory. Use `DESTDIR` for staging; it prefixes
+install destinations without changing runtime configuration paths. `make
+install` does not edit `modules.conf`, `rpt.conf`, or any active configuration.
 
 `make dist` creates a source tarball under `build/`. Extract it on a machine
 with the prerequisites above and run the same build/install commands there;
@@ -46,9 +61,11 @@ builds and stages installation from the extracted archive. This packaging check
 is part of the required platform gate. No compiled module or voice model is
 included in the source archive.
 
-The current install also provides the controller static archive and headers
-under the selected prefix, the license under `share/doc/rpt_advanced/copyright`,
-and the disabled example under `share/doc/rpt_advanced/examples/`.
+The runtime package provides no static controller archive or legacy controller
+headers. It installs the module, required versioned product and adapter DSOs, license under
+`share/doc/rpt-advanced/copyright`, and the disabled example under
+`share/doc/rpt-advanced/examples/`. The product, file, speech, and control
+development packages separately provide their public C headers and unversioned linker names.
 
 ## Activate a test node
 

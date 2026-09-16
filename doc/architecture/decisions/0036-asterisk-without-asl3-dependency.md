@@ -74,10 +74,21 @@ This clarifies the current migration boundary without adding another
 controller, transport, codec implementation, or future compatibility layer.
 The standalone application still has no Asterisk dependency.
 
-The current C module dispatches scheduler, link-event, and DTMF work directly
-through an Asterisk taskprocessor and starts its ticker with an Asterisk thread
-helper. Isolating backend execution behind ADR 0038's adapter is the migration
-gap; the Asterisk backend itself remains supported. Existing POSIX radio and
-peer workers already demonstrate independent media ownership. Execution
-contract tests cover ordering, reload, invalidation, and unload for every
-backend, plus actual Asterisk integration for the current backend.
+## Implementation status — 2026-09-15
+
+At acceptance, the C module directly used Asterisk's taskprocessor and thread
+helper. The Rust migration has replaced that implementation: the metadata-only
+C loader selects versioned descriptors; `librptadv_product.so.1` owns lifecycle,
+workers, and the single embedded controller core. It has no Asterisk imports.
+`librptadv_asterisk_adapter.so.1` supplies public host services through a C table,
+and `librptadv_control_asterisk_adapter.so.1` alone owns taskprocessor resources.
+The periodic trigger and radio/peer workers use Rust-owned threads. File and
+speech providers receive paired child-reaper callbacks through the product's
+host-services boundary rather than importing Asterisk themselves.
+
+This closes the direct-taskprocessor migration gap without removing the
+supported Asterisk backend or adding a standalone backend. It is an implemented
+source boundary, not proof of every deployment environment: the ordinary
+Asterisk/ASL3 independence checks and full platform/integration gate above remain
+required. Current release and live-radio limits are tracked in
+[implementation status](../../implementation-status.md).

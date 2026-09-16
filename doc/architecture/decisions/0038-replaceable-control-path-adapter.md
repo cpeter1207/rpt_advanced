@@ -4,7 +4,7 @@ Status: Accepted
 
 ## Context
 
-The current module serializes scheduler work, link events, and DTMF commands
+At acceptance, the module serialized scheduler work, link events, and DTMF commands
 through an Asterisk taskprocessor. That behavior is useful, but the controller
 must not depend directly on a particular taskprocessor or thread model.
 Standalone operation must be able to use another implementation without
@@ -102,14 +102,30 @@ safe unload. Exercise existing DTMF, link-event, scheduler, reload, and module
 unload integration against the Asterisk backend. Verify no control-adapter
 operation is reachable from a native audio callback.
 
-This records the approved boundary. The current C module still invokes the
-Asterisk taskprocessor directly; the separate adapter is not yet implemented.
-Current CLI command execution and incoming-link admission also enter runtime
-mutation directly under the runtime lock. Adapter extraction must account for
-those synchronous entry points and preserve their serialization with queued
-work; replacing taskprocessor calls alone does not isolate the entire control
-path. Their Asterisk request/response handling stays in the entry adapter,
-not in taskprocessor-specific policy. Tests must exercise these entry points
+At acceptance, the C module still invoked the taskprocessor directly, and CLI
+execution and incoming-link admission mutated runtime state under its lock.
+The original decision changed architecture only; the implementation status below
+records the later extraction. Synchronous entry points must remain serialized
+with queued work. Their Asterisk request/response handling belongs in the entry
+adapter, not in taskprocessor-specific policy. Tests must exercise them
 concurrently with queued work, reload, and shutdown.
-No production behavior, package, deployment, or configuration changes are made
-by this decision.
+
+## Implementation status — 2026-09-15
+
+`librptadv_control_asterisk_adapter.so.1` now implements the versioned execution
+descriptor. The product-owned client implements core's neutral `ControlExecutor`
+contract; neither the controller core nor the product owns an Asterisk
+taskprocessor handle. Application/CLI entry handling stays in the separate
+Asterisk adapter and forwards into product lifecycle/control operations.
+
+The provider opens one uniquely named executor, transfers accepted task
+ownership, reports rejection without inline fallback, gates admission, and drains
+accepted work. Its final close releases the sole taskprocessor reference and
+waits for its worker to finish; the loader retains the provider DSO through that
+barrier. Radio rendering and peer PCM exchange do not use this executor.
+The product still owns generation validation, scheduling, retry decisions, and
+the periodic trigger. No non-Asterisk backend was added by this migration.
+
+The required contract and integration checks above continue to apply. This
+implemented boundary is not a claim that the current working tree has passed
+its full release gate or been deployed.

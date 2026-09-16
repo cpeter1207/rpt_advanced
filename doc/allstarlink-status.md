@@ -144,13 +144,12 @@ merged or released. Focused unit and isolated-Asterisk integration tests cover
 the local behavior, but this document intentionally makes no current aggregate
 coverage or platform-matrix claim.
 
-Before a live deployment, complete the required Debian 12/13 amd64/arm64
-quality matrix and staged-install checks, then perform explicitly approved
-testing with the existing 524950 link settings. That testing must cover the
-linking commands, allow/deny behavior, connection failure and recovery,
-disconnect-all/reconnect-all, reload, half-duplex behavior, status, and both
-classic 8 kHz `app_rpt` peers and any higher-rate capable peer. No AllStarLink
-integration deployment has occurred.
+Before a live deployment, complete the required Debian 13 amd64/arm64 quality
+matrix and staged-install checks, then perform explicitly approved testing with
+the existing 524950 link settings. That testing must cover the linking commands,
+allow/deny behavior, connection failure and recovery, disconnect-all/reconnect-all,
+reload, half-duplex behavior, status, and both classic 8 kHz `app_rpt` peers and
+any higher-rate capable peer. No AllStarLink integration deployment has occurred.
 
 ## Reference checks
 

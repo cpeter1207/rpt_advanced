@@ -79,3 +79,13 @@ fn enumeration_keeps_unique_known_definitions_in_source_order() {
         ["event node first"]
     );
 }
+
+#[test]
+fn enumeration_skips_malformed_known_scope_without_hiding_valid_definitions() {
+    let document = ConfigDocument::parse(
+        "[template]\n[template good]\ntext=hello\n[template node local extra]\n",
+    )
+    .unwrap();
+    assert_eq!(document.named_sections("template", None), ["template good"]);
+    assert!(document.named_sections("template", Some("node")).is_empty());
+}
