@@ -1,6 +1,6 @@
 use super::*;
 use std::{
-    ffi::c_void,
+    ffi::{c_char, c_void},
     ptr,
     sync::atomic::{AtomicU8, Ordering},
 };
@@ -52,15 +52,15 @@ unsafe extern "C" fn local_time_mode(
 unsafe extern "C" fn lookup_mode(
     _: *mut c_void,
     _: u32,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
-    output: *mut i8,
+    output: *mut c_char,
     _: usize,
     written: *mut usize,
 ) -> i32 {
@@ -98,7 +98,7 @@ unsafe extern "C" fn lookup_mode(
 
 unsafe extern "C" fn radio_open_mode(
     _: *mut c_void,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
     _: usize,
     output: *mut *mut c_void,
@@ -121,9 +121,9 @@ unsafe extern "C" fn radio_open_mode(
 
 unsafe extern "C" fn peer_dial_mode(
     _: *mut c_void,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
     _: usize,
     _: abi::rptadv_current_v1,
@@ -243,7 +243,7 @@ unsafe extern "C" fn peer_read_failure(
 unsafe extern "C" fn send_text_failure(
     _: *mut c_void,
     _: *mut c_void,
-    _: *const i8,
+    _: *const c_char,
     _: usize,
 ) -> i32 {
     -1
