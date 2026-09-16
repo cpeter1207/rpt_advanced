@@ -461,7 +461,7 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
 }
 
 #[test]
-fn generated_status_reaches_link_before_rf_access_tones() {
+fn generated_status_stays_local_and_never_reaches_a_link() {
     use rpt_advanced_core::{
         audio::LinkAudioQueue,
         controller::{ControllerSettings, CourtesySettings, NodeController},
@@ -502,22 +502,20 @@ fn generated_status_reaches_link_before_rf_access_tones() {
     )
     .unwrap();
     control.queue_status("E", Some(vec![0.5; 240])).unwrap();
-    let mut found = false;
+    let mut found_local = false;
     for _ in 0..14 {
         let mut rf = [0.0; 960];
         links.process(&mut controller, false, &mut rf).unwrap();
         assert_eq!(dispatcher.dispatch(1), 1);
         let mut output = [0.0; 960];
         let shortfall = consumer.read(&mut output);
-        if output.iter().any(|sample| *sample > 0.0) {
-            assert_eq!(shortfall, 0);
-            assert_eq!(rf, output);
-            found = true;
-        } else {
-            assert_eq!(shortfall, 960);
+        assert_eq!(shortfall, 960);
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        if rf.iter().any(|sample| *sample > 0.0) {
+            found_local = true;
         }
     }
-    assert!(found);
+    assert!(found_local);
 }
 
 #[test]

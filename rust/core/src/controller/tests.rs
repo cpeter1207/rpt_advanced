@@ -147,11 +147,7 @@ fn empty_audio_calls_process_edges_without_advancing_time() {
     .unwrap();
     assert!(node.process_audio(true, false, &[], &mut []));
     assert_eq!(node.now, 0);
-    assert!(
-        node.process_audio_with_program(false, true, &[], &mut [], &mut [])
-            .unwrap()
-            .0
-    );
+    assert!(node.process_audio(false, true, &[], &mut []));
     assert_eq!(node.now, 0);
 }
 
@@ -183,56 +179,7 @@ fn status_rejection_retains_empty_nonfinite_and_overrange_pcm_without_consuming_
 }
 
 #[test]
-fn program_output_is_generated_only_partition_invariant_and_length_checked() {
-    fn run(partitions: &[usize]) -> (Vec<f32>, Vec<f32>) {
-        let identifier = Identifier {
-            media: media(0.2, 192),
-            interval_ms: 1,
-            priority: 1,
-            first_key_only: false,
-            regardless_of_activity: true,
-            polite_maximum_wait_ms: None,
-        };
-        let (mut node, _control) = NodeController::new(
-            ControllerSettings {
-                full_duplex: true,
-                ..ControllerSettings::default()
-            },
-            vec![identifier],
-            vec![],
-            CourtesySettings::default(),
-        )
-        .unwrap();
-        assert!(
-            node.process_audio_with_program(false, true, &[0.25], &mut [0.5], &mut [])
-                .is_err()
-        );
-        let (mut rf, mut program) = (Vec::new(), Vec::new());
-        for &count in partitions {
-            let mut block = vec![0.5; count];
-            let mut generated = vec![0.0; count];
-            node.process_audio_with_program(
-                false,
-                true,
-                &vec![0.25; count],
-                &mut block,
-                &mut generated,
-            )
-            .unwrap();
-            rf.extend(block);
-            program.extend(generated);
-        }
-        assert!(program.iter().any(|sample| *sample > 0.0));
-        for (rf, generated) in rf.iter().zip(&program) {
-            assert!((*rf - (0.25 + generated)).abs() < 0.00001);
-        }
-        (rf, program)
-    }
-    assert_eq!(run(&[240]), run(&[1, 47, 48, 96, 48]));
-}
-
-#[test]
-fn courtesy_and_hang_are_local_only_but_receive_and_status_reach_peers() {
+fn courtesy_hang_and_status_are_local_only_but_receive_reaches_peers() {
     use crate::link::LinkAudio;
 
     const MAXIMUM: usize = 12_010;
@@ -273,8 +220,8 @@ fn courtesy_and_hang_are_local_only_but_receive_and_status_reach_peers() {
     links.process(&mut node, false, &mut elapsed).unwrap();
     dispatcher.dispatch(1);
     let mut status = [0.0; MAXIMUM];
-    assert_eq!(outbound.read(&mut status), 0);
-    assert!(status.iter().any(|sample| *sample > 0.0));
+    assert_eq!(outbound.read(&mut status), MAXIMUM);
+    assert!(status.iter().all(|sample| *sample == 0.0));
 }
 
 #[test]

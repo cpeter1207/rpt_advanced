@@ -86,7 +86,6 @@ pub struct LinkAudio<P: PeerInput> {
     peers: Vec<AudioPeer<P>>,
     local: Vec<f32>,
     mix: Vec<f32>,
-    program: Vec<f32>,
     status: LinkAudioStatus,
     destinations: Vec<usize>,
     publish: Producer<ProgramBlock>,
@@ -95,13 +94,13 @@ pub struct LinkAudio<P: PeerInput> {
 
 #[derive(Debug)]
 struct ProgramBlock {
-    // One composite plane followed by each transmitting destination's own contribution.
+    // One peer-routable composite plane followed by each destination's contribution.
     audio: Vec<f32>,
     frames: usize,
     enabled: Vec<bool>,
 }
 
-/// Sole program-loopback consumer and producer of all per-peer transmit queues.
+/// Sole peer-audio loopback consumer and producer of all per-peer transmit queues.
 /// It performs no codec/channel I/O and runs outside both radio workers.
 pub struct LinkDispatcher {
     incoming: Consumer<ProgramBlock>,
@@ -137,7 +136,7 @@ impl LinkDispatcher {
     }
 }
 impl<P: PeerInput> LinkAudio<P> {
-    /// Prepare radio and dispatcher owners plus exactly two recycled program blocks.
+    /// Prepare radio and dispatcher owners plus exactly two recycled peer-audio blocks.
     /// Retain the dispatcher with this generation until its producer/callbacks are detached.
     pub fn new(
         mut peers: Vec<AudioPeer<P>>,
@@ -187,7 +186,6 @@ impl<P: PeerInput> LinkAudio<P> {
                 peers,
                 local: vec![0.0; maximum],
                 mix: vec![0.0; maximum],
-                program: vec![0.0; maximum],
                 status,
                 destinations,
                 publish,
@@ -204,7 +202,7 @@ impl<P: PeerInput> LinkAudio<P> {
     pub fn active_count(&self) -> usize {
         self.peers.iter().filter(|peer| peer.active).count()
     }
-    /// Render RF and publish one prepared pre-access-tone program block for the dispatcher.
+    /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
     pub fn process(
         &mut self,
         controller: &mut NodeController,
@@ -251,15 +249,12 @@ impl<P: PeerInput> LinkAudio<P> {
             peer.active = active;
             peer.input.signals().set_active(active);
         }
-        let (keyed, program_active) = controller
-            .process_audio_with_program(
-                receiving,
-                self.active_count() != 0,
-                &self.mix[..count],
-                audio,
-                &mut self.program[..count],
-            )
-            .unwrap_or((false, false));
+        let keyed = controller.process_audio(
+            receiving,
+            self.active_count() != 0,
+            &self.mix[..count],
+            audio,
+        );
         if count == 0 || self.destinations.is_empty() {
             return Ok(keyed);
         }
@@ -268,7 +263,7 @@ impl<P: PeerInput> LinkAudio<P> {
             return Ok(keyed);
         };
         block.frames = count;
-        block.audio[..count].copy_from_slice(&self.program[..count]);
+        block.audio[..count].fill(0.0);
         if receiving {
             for (output, local) in block.audio[..count].iter_mut().zip(&self.local) {
                 *output += local;
@@ -289,8 +284,8 @@ impl<P: PeerInput> LinkAudio<P> {
         for (destination, &peer_index) in self.destinations.iter().enumerate() {
             let peer = &self.peers[peer_index];
             let own_source = usize::from(peer.active && peer.mode.forwards());
-            block.enabled[destination] = !peer.input.signals().ended()
-                && (receiving || program_active || forwarding_sources > own_source);
+            block.enabled[destination] =
+                !peer.input.signals().ended() && (receiving || forwarding_sources > own_source);
             let offset = (destination + 1) * self.local.len();
             let own = &mut block.audio[offset..offset + count];
             // Every transmitting mode forwards; preparation excludes monitor destinations.
