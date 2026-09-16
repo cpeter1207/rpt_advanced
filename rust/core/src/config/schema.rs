@@ -146,6 +146,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
             "node_enabled"
                 | "full_duplex"
                 | "dtmf_muting"
+                | "squelch_delay_ms"
                 | "transmit_hang_ms"
                 | "transmit_timeout_ms"
                 | "timeout_lockout_ms"
@@ -258,6 +259,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "timeout_lockout_ms"
         | "kerchunk_max_ms"
         | "courtesy_delay_ms"
+        | "squelch_delay_ms"
         | "end_inactivity_ms" => parse::unsigned(value, 0, u64::MAX).is_some(),
         "polite_maximum_wait_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "interval_ms" => parse::unsigned(
@@ -316,6 +318,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "kerchunk_max_ms") => "500",
         (ScopeKind::General | ScopeKind::Node, "telemetry_duck_db") => "-20",
         (ScopeKind::General | ScopeKind::Node, "courtesy_delay_ms") => "250",
+        (ScopeKind::General | ScopeKind::Node, "squelch_delay_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "link_lookup_method") => "both",
         (_, "interval_ms")
             if matches!(

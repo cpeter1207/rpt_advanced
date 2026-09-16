@@ -104,6 +104,12 @@ impl DtmfWorker {
         });
         self.publisher.finish_frame(receiving, now_ms, emitted);
     }
+
+    /// Current receive-side muting state for the delayed PCM consumer.
+    #[must_use]
+    pub fn suppressing(&self) -> bool {
+        self.detector.suppressing()
+    }
 }
 
 fn character(digit: DtmfDigit) -> char {

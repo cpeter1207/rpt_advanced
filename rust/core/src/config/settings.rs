@@ -27,6 +27,8 @@ pub struct ResolvedNodeSettings {
     pub full_duplex: bool,
     /// Whether completed local DTMF frames are muted.
     pub dtmf_muting: bool,
+    /// Extra receive-to-transmit delay used for squelch-tail and DTMF lookback.
+    pub squelch_delay_ms: u64,
     /// Transmit hang duration in milliseconds.
     pub hang_ms: u64,
     /// Continuous-source watchdog duration; zero disables it.
@@ -1047,6 +1049,7 @@ impl ResolvedNodeSettings {
         boolean!(enabled, "node_enabled");
         boolean!(full_duplex, "full_duplex");
         boolean!(dtmf_muting, "dtmf_muting");
+        number!(squelch_delay_ms, "squelch_delay_ms");
         number!(hang_ms, "transmit_hang_ms");
         number!(transmit_timeout_ms, "transmit_timeout_ms");
         number!(timeout_lockout_ms, "timeout_lockout_ms");
@@ -1110,6 +1113,7 @@ impl ResolvedNodeSettings {
             enabled: true,
             full_duplex: true,
             dtmf_muting: true,
+            squelch_delay_ms: 0,
             hang_ms: 0,
             transmit_timeout_ms: 180_000,
             timeout_lockout_ms: 30_000,

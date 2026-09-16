@@ -61,6 +61,7 @@ fn worker() -> RadioWorker {
         services.radio("usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
+        0,
     )
     .unwrap_or_else(|_| panic!("prepare callbacks"))
 }
@@ -155,6 +156,7 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
         services.radio("usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
+        0,
     ) else {
         panic!("expected failure")
     };
@@ -244,11 +246,12 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
         services.radio("usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
+        0,
     ) else {
         panic!("activation must fail")
     };
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
-    let mut worker = RadioWorker::prepare(radio, Instant::now(), RadioStatus::default())
+    let mut worker = RadioWorker::prepare(radio, Instant::now(), RadioStatus::default(), 0)
         .unwrap_or_else(|_| panic!("reservation retry"));
     assert!(worker.attach(owners).is_ok());
     drop(worker.stop().unwrap());
@@ -332,6 +335,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
         services.radio("usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
+        0,
     )
     .unwrap_or_else(|_| panic!("prepare"));
     assert!(worker.attach(owners).is_ok());

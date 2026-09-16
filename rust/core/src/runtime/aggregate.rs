@@ -459,6 +459,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 device: settings.channel.clone(),
                 receive_maximum: prepared.receive_maximum,
                 transmit_maximum: prepared.transmit_maximum,
+                squelch_delay_ms: settings.squelch_delay_ms,
             };
             let generation = RuntimeGeneration::prepare(
                 generation_id,

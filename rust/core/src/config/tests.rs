@@ -477,6 +477,26 @@ fn node_override_precedes_general_and_invalid_node_value_falls_back_to_general()
 }
 
 #[test]
+fn squelch_delay_inherits_and_defaults_to_zero() {
+    let node = NodeId::new("node").unwrap();
+    let defaults = ResolvedNodeSettings::resolve(&ConfigDocument::parse("[node]\n").unwrap(), &node)
+        .unwrap()
+        .value;
+    assert_eq!(defaults.squelch_delay_ms, 0);
+    let document = ConfigDocument::parse(
+        "[general]\nsquelch_delay_ms=20\n[node]\nsquelch_delay_ms=40\n",
+    )
+    .unwrap();
+    assert_eq!(
+        ResolvedNodeSettings::resolve(&document, &node)
+            .unwrap()
+            .value
+            .squelch_delay_ms,
+        40
+    );
+}
+
+#[test]
 fn identifier_set_overrides_node_and_flat_defaults_including_empty_media() {
     let document = ConfigDocument::parse(
         "[node]\n[identifier]\ninterval_ms=600000\nsound_file=flat.wav\n[identifier node]\ninterval_ms=120000\nsound_file=node.wav\n[identifier node id]\ninterval_ms=60000\nsound_file=\n",

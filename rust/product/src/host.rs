@@ -85,7 +85,12 @@ impl DeviceHandoff for Device {
         let Ok(radio) = radio else {
             return false;
         };
-        match RadioWorker::prepare(radio, lease.epoch, lease.status.clone()) {
+        match RadioWorker::prepare(
+            radio,
+            lease.epoch,
+            lease.status.clone(),
+            settings.squelch_delay_ms,
+        ) {
             Ok(worker) => {
                 lease.worker = Some(worker);
                 if let Some(owners) = lease.owners.take() {

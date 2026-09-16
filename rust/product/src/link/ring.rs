@@ -96,6 +96,7 @@ impl InboundRing {
                 || api.ring_destroy.is_none()
                 || api.ring_producer_push.is_none()
                 || api.ring_consumer_render.is_none()
+                || api.ring_consumer_reset.is_none()
                 || api.ring_observe.is_none()
             {
                 return Err(RingError);
@@ -180,6 +181,16 @@ impl PeerInput for InboundConsumer {
 impl InboundConsumer {
     /// Render the requested native block; the library counts concealment exactly once.
     pub fn render(&mut self, samples: &mut [f32]) -> Result<usize, RingError> {
+        self.render_with_timing(samples, 60, 260)
+    }
+    /// Render with a caller-owned native delay policy. Local RF uses this same
+    /// released ring as its squelch-delay line rather than a second PCM queue.
+    pub fn render_with_timing(
+        &mut self,
+        samples: &mut [f32],
+        reserve_ms: u64,
+        target_ms: u64,
+    ) -> Result<usize, RingError> {
         let mut real = 0;
         let rate = u64::from(self.0.input_rate);
         // SAFETY: the unique consumer owns conversion state and this output slice.
@@ -188,8 +199,8 @@ impl InboundConsumer {
                 self.0.handle.as_ptr(),
                 samples.as_mut_ptr(),
                 samples.len() as u64,
-                rate * 60 / 1000,
-                rate * 260 / 1000,
+                rate.saturating_mul(reserve_ms) / 1000,
+                rate.saturating_mul(target_ms.max(reserve_ms)) / 1000,
                 &mut real,
             )
         };
@@ -203,6 +214,11 @@ impl InboundConsumer {
     /// Copy current diagnostics without locking either endpoint.
     pub fn observe(&self) -> Result<Observation, RingError> {
         self.0.observe()
+    }
+    /// End a receive burst so the next one must refill its reserve.
+    pub fn reset(&mut self) -> Result<(), RingError> {
+        let code = unsafe { (self.0.api.ring_consumer_reset.unwrap())(self.0.handle.as_ptr()) };
+        (code == 0).then_some(()).ok_or(RingError)
     }
 }
 impl Shared {

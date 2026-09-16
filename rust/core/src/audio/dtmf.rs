@@ -121,6 +121,12 @@ impl DtmfDetector {
         self.muting = enabled;
     }
 
+    /// Whether a qualified tone is presently subject to configured muting.
+    #[must_use]
+    pub fn suppressing(&self) -> bool {
+        self.muting && self.suppressing
+    }
+
     /// Process one arbitrary PCM partition, emitting every completed digit in order.
     ///
     /// Work and callback count are bounded by the supplied sample count. The callback

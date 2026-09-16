@@ -19,6 +19,8 @@ pub struct GenerationSettings {
     pub receive_maximum: usize,
     /// Largest supported transmit callback, in frames.
     pub transmit_maximum: usize,
+    /// Receive-to-transmit lookback applied by the local shared PCM ring.
+    pub squelch_delay_ms: u64,
 }
 
 /// A candidate or lifecycle operation that cannot safely proceed.

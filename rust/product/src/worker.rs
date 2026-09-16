@@ -1,7 +1,10 @@
 //! Fixed direct radio callbacks and control-only reservation lifetime.
-use crate::{Error, link::ring::InboundConsumer, services::Radio};
+use crate::{
+    Error,
+    link::ring::{InboundConsumer, InboundProducer, InboundRing},
+    services::Radio,
+};
 use rpt_advanced_core::{
-    audio::{LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue},
     link::LinkAudio,
     runtime::{
         OwnedReceiveOwner, OwnedTransmitOwner, RuntimeAudioOwners, RuntimeTransmit,
@@ -54,24 +57,33 @@ type TransmitOwner = OwnedTransmitOwner<DtmfWorker, RuntimeTransmit<Audio>>;
 
 /// Control-readable carrier edge with coherent monotonic transition time.
 #[derive(Clone, Default)]
-pub struct RadioStatus(Arc<AtomicU64>);
+pub struct RadioStatus {
+    carrier: Arc<AtomicU64>,
+    dtmf: Arc<AtomicBool>,
+}
 impl RadioStatus {
     /// Current receive state and original transition time.
     pub fn snapshot(&self) -> (bool, u64) {
-        let value = self.0.load(Ordering::Acquire);
+        let value = self.carrier.load(Ordering::Acquire);
         (value & 1 != 0, value >> 1)
     }
     fn update(&self, receiving: bool, now_ms: u64) {
-        if self.0.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
-            self.0.store(
+        if self.carrier.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
+            self.carrier.store(
                 (now_ms.min(u64::MAX >> 1) << 1) | u64::from(receiving),
                 Ordering::Release,
             );
         }
     }
+    fn set_dtmf_muted(&self, muted: bool) {
+        self.dtmf.store(muted, Ordering::Release);
+    }
+    fn dtmf_muted(&self) -> bool {
+        self.dtmf.load(Ordering::Acquire)
+    }
 }
 struct ReceiveState {
-    producer: LinkAudioProducer,
+    producer: InboundProducer,
     elapsed_samples: u64,
 }
 struct ReceiveContext {
@@ -85,9 +97,11 @@ struct ReceiveContext {
 struct TransmitContext {
     active: Arc<AtomicBool>,
     owner: UnsafeCell<Option<TransmitOwner>>,
-    consumer: UnsafeCell<LinkAudioConsumer>,
+    consumer: UnsafeCell<InboundConsumer>,
     maximum: usize,
     status: RadioStatus,
+    squelch_delay_ms: u64,
+    receiving: UnsafeCell<bool>,
 }
 // SAFETY: callbacks are serialized independently by the host. Control writes owner slots
 // only before release-publishing active, and takes them only after synchronous radio destroy.
@@ -165,7 +179,12 @@ unsafe fn receive(context: *mut c_void, receiving: u32, pointer: *mut f32, count
         panic!("injected receive processing panic");
     }
     generation.state().process(receiving != 0, samples, now_ms);
-    state.producer.write(samples);
+    context
+        .status
+        .set_dtmf_muted(receiving != 0 && generation.state().suppressing());
+    if receiving != 0 {
+        let _ = state.producer.write(samples);
+    }
     0
 }
 unsafe extern "C" fn transmit_callback(
@@ -217,8 +236,29 @@ unsafe fn transmit(context: *mut c_void, pointer: *mut f32, count: u32, keyed: *
     }
     // SAFETY: only this serial transmit endpoint accesses these cells while active.
     let (owner, consumer) = unsafe { (&mut *context.owner.get(), &mut *context.consumer.get()) };
-    consumer.read(samples);
     let receiving = context.status.snapshot().0;
+    // Reset on the qualification edge so old tail PCM cannot satisfy the next
+    // burst's priming reserve.
+    let previous = unsafe { &mut *context.receiving.get() };
+    if *previous && !receiving {
+        let _ = consumer.reset();
+    }
+    *previous = receiving;
+    if consumer
+        .render_with_timing(
+            samples,
+            context.squelch_delay_ms,
+            context.squelch_delay_ms,
+        )
+        .is_err()
+    {
+        samples.fill(0.0);
+    }
+    // The ring holds the unkey tail until this current qualification snapshot
+    // reaches it, removing squelch crash without adding another PCM buffer.
+    if !receiving || context.status.dtmf_muted() {
+        samples.fill(0.0);
+    }
     let Some(mut generation) = owner.as_mut().and_then(TransmitOwner::acquire) else {
         samples.fill(0.0);
         return 0;
@@ -258,18 +298,16 @@ impl RadioWorker {
         mut radio: Radio,
         epoch: Instant,
         status: RadioStatus,
+        squelch_delay_ms: u64,
     ) -> Result<Self, (Error, Radio)> {
         #[cfg(test)]
         if take_test_failure(TestFailure::Prepare) {
             return Err((Error::Allocation, radio));
         }
         let maximum = radio.maximum_frames();
-        let Some(capacity) = maximum.checked_mul(2).filter(|n| *n != 0) else {
-            return Err((Error::InvalidFrame, radio));
+        let Ok((producer, consumer)) = InboundRing::open(48_000) else {
+            return Err((Error::Allocation, radio));
         };
-        let (producer, consumer) = LinkAudioQueue::new(capacity)
-            .expect("nonzero capacity")
-            .into_endpoints();
         let active = Arc::new(AtomicBool::new(false));
         let receive = Box::new(ReceiveContext {
             active: active.clone(),
@@ -288,6 +326,8 @@ impl RadioWorker {
             consumer: UnsafeCell::new(consumer),
             maximum,
             status,
+            squelch_delay_ms,
+            receiving: UnsafeCell::new(false),
         });
         // SAFETY: boxes have stable addresses and outlive the activated radio. On failure
         // the host must detach both endpoints before returning the still-owned reservation.
