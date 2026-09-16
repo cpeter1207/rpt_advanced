@@ -101,6 +101,7 @@ pub struct State {
     pub channels: usize,
     pub freed: usize,
     pub writes: Vec<Vec<i16>>,
+    pub write_types: Vec<u32>,
     pub indications: Vec<i32>,
     pub offers: Vec<usize>,
     pub translators: usize,
@@ -134,6 +135,7 @@ impl Default for State {
             channels: 0,
             freed: 0,
             writes: vec![],
+            write_types: vec![],
             indications: vec![],
             offers: vec![],
             translators: 0,
@@ -461,9 +463,13 @@ unsafe extern "C" fn ast_frame_free(frame: *mut ast_frame, cache: i32) {
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_write(_: *mut ast_channel, frame: *mut ast_frame) -> i32 {
-    let words =
-        std::slice::from_raw_parts((*frame).data.ptr.cast::<i16>(), (*frame).samples as usize);
+    let words = if (*frame).samples == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts((*frame).data.ptr.cast::<i16>(), (*frame).samples as usize)
+    };
     host(|s| {
+        s.write_types.push((*frame).frametype);
         s.writes.push(words.to_vec());
         if s.failure == 8 { -1 } else { 0 }
     })

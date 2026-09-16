@@ -15,6 +15,7 @@ pub(crate) struct State {
     pub(crate) texts: Vec<Vec<u8>>,
     pub(crate) digits: Vec<u8>,
     pub(crate) audio: Vec<f32>,
+    pub(crate) writes: Vec<usize>,
     pub(crate) fail_text: bool,
     pub(crate) fail_read: bool,
     pub(crate) fail_ready: bool,
@@ -96,10 +97,24 @@ unsafe extern "C" fn write(
     if state.fail_write {
         return -1;
     }
+    state.writes.push(count);
     state
         .audio
         .extend_from_slice(unsafe { std::slice::from_raw_parts(samples, count) });
     0
+}
+
+#[test]
+fn audio_burst_ends_with_exactly_one_idle_marker() {
+    let (mut session, _control, state, mut output) = make_session("1000");
+    assert_eq!(output.write(&[0.25; 960]), 0);
+
+    session.step(20).unwrap();
+    session.step(40).unwrap();
+    session.step(60).unwrap();
+
+    let writes = state.lock().unwrap().writes.clone();
+    assert_eq!(writes, [960, 0]);
 }
 unsafe extern "C" fn destroy(_: *mut c_void, peer: *mut c_void) {
     let state = unsafe { Box::from_raw(peer.cast::<Shared>()) };

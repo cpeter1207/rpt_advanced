@@ -152,6 +152,13 @@ fn peer_frame_owner_publishes_voice_and_frees_every_frame_and_channel() {
         .unwrap();
     peer.write(&[-2.0, 0.5, 2.0]).unwrap();
     host(|state| assert_eq!(state.writes.last().unwrap(), &[-32768, 16384, 32767]));
+    peer.write(&[]).unwrap();
+    host(|state| {
+        assert_eq!(
+            state.write_types.last(),
+            Some(&crate::bindings::AST_FRAME_CNG)
+        )
+    });
     assert!(peer.write(&[0.0; 961]).is_err());
     host(|state| {
         state.buffered = true;

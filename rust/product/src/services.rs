@@ -393,7 +393,7 @@ impl PeerIo {
         };
         (code == 0).then_some(()).ok_or(Error::Write)
     }
-    /// Send codec-rate normalized F32 audio.
+    /// Send codec-rate normalized F32 audio, or one end-of-burst marker when empty.
     pub fn write(&mut self, samples: &[f32]) -> Result<(), Error> {
         let code = unsafe {
             self.services.0.peer_write.unwrap()(

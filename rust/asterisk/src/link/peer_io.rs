@@ -317,11 +317,15 @@ impl PeerIo {
         // SAFETY: ast_write borrows the frame and bounded samples for this call only.
         unsafe {
             let mut frame: ffi::ast_frame = std::mem::zeroed();
-            frame.frametype = ffi::AST_FRAME_VOICE;
-            frame.subclass.__bindgen_anon_1.format = self.linear.0.pointer();
-            frame.data.ptr = self.output.as_mut_ptr().cast();
-            frame.samples = audio.len() as i32;
-            frame.datalen = frame.samples * 2;
+            if audio.is_empty() {
+                frame.frametype = ffi::AST_FRAME_CNG;
+            } else {
+                frame.frametype = ffi::AST_FRAME_VOICE;
+                frame.subclass.__bindgen_anon_1.format = self.linear.0.pointer();
+                frame.data.ptr = self.output.as_mut_ptr().cast();
+                frame.samples = audio.len() as i32;
+                frame.datalen = frame.samples * 2;
+            }
             if ffi::ast_write(self.channel.pointer.as_ptr(), &mut frame) == 0 {
                 Ok(())
             } else {

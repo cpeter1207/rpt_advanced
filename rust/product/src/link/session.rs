@@ -131,6 +131,7 @@ pub struct PeerSession {
     egress: Egress,
     native: [f32; 960],
     next_audio: u64,
+    sent_audio: bool,
     edge: u64,
     query_epoch: Option<u64>,
 }
@@ -171,6 +172,7 @@ impl PeerSession {
                 egress,
                 native: [0.0; 960],
                 next_audio: 0,
+                sent_audio: false,
                 edge: 0,
                 query_epoch: None,
             },
@@ -300,7 +302,11 @@ impl PeerSession {
                     .map_err(|_| Error::Translation)?;
                 if !audio.is_empty() {
                     self.io.write(audio)?;
+                    self.sent_audio = true;
                 }
+            } else if self.sent_audio {
+                self.io.write(&[])?;
+                self.sent_audio = false;
             }
         }
         Ok(())

@@ -27,7 +27,7 @@ fn main() {
         .allowlist_var("(PARSE_PORT_FORBID|AST_AF_UNSPEC|AST_SOCKADDR_STR_ADDR|AST_FRAME_(TEXT|DTMF_END))")
         .allowlist_type("ast_control_frame_type")
         .allowlist_type("ast_parse_flags")
-        .allowlist_var("AST_(FRAME_(VOICE|CONTROL|NULL)|CONTROL_(RADIO_KEY|RADIO_UNKEY)|FORMAT_CMP_EQUAL|MEDIA_TYPE_AUDIO|FORMAT_CAP_FLAG_DEFAULT)")
+        .allowlist_var("AST_(FRAME_(VOICE|CONTROL|NULL|CNG)|CONTROL_(RADIO_KEY|RADIO_UNKEY)|FORMAT_CMP_EQUAL|MEDIA_TYPE_AUDIO|FORMAT_CAP_FLAG_DEFAULT)")
         .opaque_type("ast_(channel|format|format_cap|assigned_ids|trans_pvt)")
         .layout_tests(false)
         .generate_comments(false)

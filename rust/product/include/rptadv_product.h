@@ -108,7 +108,7 @@ struct rptadv_host_services_v1 {
     int (*peer_send_text)(void *context, void *peer, const char *text, size_t length);
     /** Send one completed DTMF digit. */
     int (*peer_send_digit)(void *context, void *peer, uint8_t digit);
-    /** Send one normalized F32 PCM block. */
+    /** Send one normalized F32 PCM block, or one end-of-burst marker when empty. */
     int (*peer_write)(void *context, void *peer, const float *samples, size_t sample_count);
     /** Destroy one uniquely owned peer. */
     void (*peer_destroy)(void *context, void *peer);
