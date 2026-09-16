@@ -45,6 +45,11 @@ Encoding and network transmission never occur in either radio audio worker.
 The split preserves existing duplex, source qualification, mix-minus, and
 per-link routing; it must not reflect a peer's own audio back to that peer or
 send locally generated CTCSS/DCS onto network links.
+Local courtesy tones and transmitter hang are likewise excluded from peer
+program audio. The dispatcher queues a destination block only for local
+receive, peer-routable status/identifier/announcement telemetry, or another
+active forwarding peer; a destination's own input alone does not qualify its
+mix-minus output.
 Logical linked-peer workers may run on a common worker pool, but no two receive
 or transmit jobs for the same peer run at once.
 

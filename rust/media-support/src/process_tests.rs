@@ -120,6 +120,24 @@ fn run_honors_cancellation_before_spawning() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn normal_scheduler_request_uses_other_at_zero_priority_and_propagates_errors() {
+    let mut request = None;
+    assert!(
+        set_normal_scheduler(|policy, parameters| {
+            request = Some((policy, parameters.sched_priority));
+            Ok(())
+        })
+        .is_ok()
+    );
+    assert_eq!(request, Some((libc::SCHED_OTHER, 0)));
+
+    let error =
+        set_normal_scheduler(|_, _| Err(io::Error::from_raw_os_error(libc::EPERM))).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+}
+
+#[test]
 fn run_reports_success_and_process_failure() {
     let config = Config {
         #[cfg(file_adapter)]
@@ -172,6 +190,51 @@ fn run_reports_success_and_process_failure() {
         }),
         Err(MediaError::Cancelled)
     );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn run_starts_children_with_normal_scheduling() {
+    let original_policy = unsafe { libc::sched_getscheduler(0) };
+    assert_ne!(original_policy, -1);
+    let mut original_parameters = libc::sched_param { sched_priority: 0 };
+    assert_eq!(
+        unsafe { libc::sched_getparam(0, &mut original_parameters) },
+        0
+    );
+
+    let realtime_parameters = libc::sched_param {
+        sched_priority: unsafe { libc::sched_get_priority_min(libc::SCHED_RR) },
+    };
+    let realtime =
+        unsafe { libc::sched_setscheduler(0, libc::SCHED_RR, &realtime_parameters) } == 0;
+    if !realtime {
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+    }
+
+    let config = Config {
+        #[cfg(file_adapter)]
+        ffmpeg: "ffmpeg".into(),
+        #[cfg(speech_adapter)]
+        piper: "piper".into(),
+        temporary_directory: std::env::temp_dir(),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    };
+    let mut command = Command::new("/bin/sh");
+    command.arg("-c").arg(
+        "read -r stat < /proc/self/stat; set -- $stat; \
+         test \"${40}\" -eq 0 && test \"${41}\" -eq 0",
+    );
+    let result = run(&config, &mut command, &|| false);
+
+    if realtime {
+        assert_eq!(
+            unsafe { libc::sched_setscheduler(0, original_policy, &original_parameters) },
+            0
+        );
+    }
+    assert_eq!(result, Ok(()));
 }
 
 #[test]

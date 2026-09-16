@@ -508,9 +508,14 @@ fn generated_status_reaches_link_before_rf_access_tones() {
         links.process(&mut controller, false, &mut rf).unwrap();
         assert_eq!(dispatcher.dispatch(1), 1);
         let mut output = [0.0; 960];
-        assert_eq!(consumer.read(&mut output), 0);
-        found |= output.iter().any(|sample| *sample > 0.0);
-        assert_eq!(rf, output);
+        let shortfall = consumer.read(&mut output);
+        if output.iter().any(|sample| *sample > 0.0) {
+            assert_eq!(shortfall, 0);
+            assert_eq!(rf, output);
+            found = true;
+        } else {
+            assert_eq!(shortfall, 960);
+        }
     }
     assert!(found);
 }

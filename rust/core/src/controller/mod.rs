@@ -232,10 +232,12 @@ impl NodeController {
         audio: &mut [f32],
     ) -> bool {
         self.process_audio_outputs(receiving, linked, link_audio, audio, None)
+            .0
     }
 
-    /// Render RF and locally generated program in one native sample loop.
-    /// Program excludes received peer/local PCM and downstream RF access tones.
+    /// Render RF and peer-routable generated program in one native sample loop.
+    /// Program excludes courtesy, received peer/local PCM, and downstream RF access tones.
+    /// The result contains final requested PTT and whether the block has routable telemetry.
     /// Unequal output lengths reject the block without advancing controller state.
     pub fn process_audio_with_program(
         &mut self,
@@ -244,7 +246,7 @@ impl NodeController {
         link_audio: &[f32],
         audio: &mut [f32],
         program: &mut [f32],
-    ) -> Result<bool, ControllerError> {
+    ) -> Result<(bool, bool), ControllerError> {
         if program.len() != audio.len() {
             return Err(ControllerError);
         }
@@ -258,24 +260,26 @@ impl NodeController {
         link_audio: &[f32],
         audio: &mut [f32],
         mut program: Option<&mut [f32]>,
-    ) -> bool {
+    ) -> (bool, bool) {
         if audio.is_empty() {
-            return self.process_event(receiving, linked);
+            return (self.process_event(receiving, linked), false);
         }
+        let mut routable = false;
         for (offset, sample) in audio.iter_mut().enumerate() {
-            let (rf, generated) = self.step(
+            let (rf, generated, sample_routable) = self.step(
                 receiving,
                 linked,
                 Some(*sample),
                 link_audio.get(offset).copied().unwrap_or(0.0),
             );
+            routable |= sample_routable;
             *sample = rf;
             if let Some(output) = program.as_mut() {
                 output[offset] = generated;
             }
             self.now = self.now.saturating_add(1);
         }
-        self.keyed
+        (self.keyed, routable)
     }
 
     fn id_ready(&self, selected: usize, busy: bool) -> bool {
@@ -302,7 +306,7 @@ impl NodeController {
         linked: bool,
         input: Option<f32>,
         link_sample: f32,
-    ) -> (f32, f32) {
+    ) -> (f32, f32, bool) {
         let receive = receiving || linked;
         let idle = self.now.saturating_sub(self.last_activity);
         if receive {
@@ -552,8 +556,16 @@ impl NodeController {
         } else {
             0.0
         };
-        let program = telemetry_sample[0] * gain;
-        ((local + link + program).clamp(-1.0, 1.0), program)
+        let telemetry = telemetry_sample[0] * gain;
+        let routable = matches!(
+            rendered_source,
+            Some(Source::Status | Source::Identifier(_) | Source::Announcement(_))
+        );
+        (
+            (local + link + telemetry).clamp(-1.0, 1.0),
+            if routable { telemetry } else { 0.0 },
+            routable,
+        )
     }
 }
 

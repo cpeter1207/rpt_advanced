@@ -251,7 +251,7 @@ impl<P: PeerInput> LinkAudio<P> {
             peer.active = active;
             peer.input.signals().set_active(active);
         }
-        let keyed = controller
+        let (keyed, program_active) = controller
             .process_audio_with_program(
                 receiving,
                 self.active_count() != 0,
@@ -259,7 +259,7 @@ impl<P: PeerInput> LinkAudio<P> {
                 audio,
                 &mut self.program[..count],
             )
-            .unwrap_or(false);
+            .unwrap_or((false, false));
         if count == 0 || self.destinations.is_empty() {
             return Ok(keyed);
         }
@@ -281,9 +281,16 @@ impl<P: PeerInput> LinkAudio<P> {
                 }
             }
         }
+        let forwarding_sources = self
+            .peers
+            .iter()
+            .filter(|peer| peer.active && peer.mode.forwards())
+            .count();
         for (destination, &peer_index) in self.destinations.iter().enumerate() {
             let peer = &self.peers[peer_index];
-            block.enabled[destination] = !peer.input.signals().ended();
+            let own_source = usize::from(peer.active && peer.mode.forwards());
+            block.enabled[destination] = !peer.input.signals().ended()
+                && (receiving || program_active || forwarding_sources > own_source);
             let offset = (destination + 1) * self.local.len();
             let own = &mut block.audio[offset..offset + count];
             // Every transmitting mode forwards; preparation excludes monitor destinations.

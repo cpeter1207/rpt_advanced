@@ -33,6 +33,69 @@ fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
 }
 
+struct TestPeerInput {
+    signals: crate::link::PeerSignals,
+    sample: Option<f32>,
+}
+
+impl TestPeerInput {
+    fn new(sample: Option<f32>) -> Self {
+        let signals = crate::link::PeerSignals::new();
+        if sample.is_some() {
+            signals.publish_pcm();
+        }
+        Self { signals, sample }
+    }
+}
+
+impl crate::link::PeerInput for TestPeerInput {
+    fn source_rate(&self) -> u32 {
+        48000
+    }
+
+    fn signals(&self) -> &crate::link::PeerSignals {
+        &self.signals
+    }
+
+    fn available(&self) -> u64 {
+        self.sample.map_or(0, |_| 20_000)
+    }
+
+    fn render(&mut self, output: &mut [f32]) -> bool {
+        let Some(sample) = self.sample else {
+            return false;
+        };
+        output.fill(sample);
+        true
+    }
+}
+
+fn test_audio_peer(
+    direct: &str,
+    mode: crate::link::Mode,
+    sample: Option<f32>,
+    maximum: usize,
+) -> (
+    crate::link::AudioPeer<TestPeerInput>,
+    crate::audio::LinkAudioConsumer,
+) {
+    let (outbound, consumer) = crate::audio::LinkAudioQueue::new(maximum * 2)
+        .unwrap()
+        .into_endpoints();
+    (
+        crate::link::AudioPeer::new(
+            direct,
+            mode,
+            TestPeerInput::new(sample),
+            outbound,
+            maximum,
+            0,
+        )
+        .unwrap(),
+        consumer,
+    )
+}
+
 #[test]
 fn courtesy_queue_bounds_identity_and_retains_other_sources() {
     let mut planner = courtesy::CourtesyPlanner::new(CourtesySettings {
@@ -87,6 +150,7 @@ fn empty_audio_calls_process_edges_without_advancing_time() {
     assert!(
         node.process_audio_with_program(false, true, &[], &mut [], &mut [])
             .unwrap()
+            .0
     );
     assert_eq!(node.now, 0);
 }
@@ -165,6 +229,87 @@ fn program_output_is_generated_only_partition_invariant_and_length_checked() {
         (rf, program)
     }
     assert_eq!(run(&[240]), run(&[1, 47, 48, 96, 48]));
+}
+
+#[test]
+fn courtesy_and_hang_are_local_only_but_receive_and_status_reach_peers() {
+    use crate::link::LinkAudio;
+
+    const MAXIMUM: usize = 12_010;
+    let (peer, mut outbound) = test_audio_peer("200", crate::link::Mode::TRANSCEIVE, None, MAXIMUM);
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], MAXIMUM).unwrap();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            hang_ms: 100,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings {
+            receiver: Some(media(0.4, 1)),
+            ..CourtesySettings::default()
+        },
+    )
+    .unwrap();
+
+    links.process(&mut node, true, &mut [0.25]).unwrap();
+    dispatcher.dispatch(1);
+    let mut sent = [0.0];
+    assert_eq!(outbound.read(&mut sent), 0);
+    assert_eq!(sent, [0.25]);
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    dispatcher.dispatch(1);
+    assert_eq!(outbound.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    dispatcher.dispatch(1);
+    assert_eq!(outbound.read(&mut sent), 1);
+
+    control.queue_status("E", Some(vec![0.6])).unwrap();
+    let mut elapsed = [0.0; MAXIMUM];
+    links.process(&mut node, false, &mut elapsed).unwrap();
+    dispatcher.dispatch(1);
+    let mut status = [0.0; MAXIMUM];
+    assert_eq!(outbound.read(&mut status), 0);
+    assert!(status.iter().any(|sample| *sample > 0.0));
+}
+
+#[test]
+fn mix_minus_queues_other_forwarding_peers_but_not_the_destination_itself() {
+    use crate::link::LinkAudio;
+
+    let (peer, mut outbound) = test_audio_peer("200", crate::link::Mode::TRANSCEIVE, Some(0.4), 1);
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    dispatcher.dispatch(1);
+    let mut sent = [0.0];
+    assert_eq!(outbound.read(&mut sent), 1);
+
+    let (destination, mut outbound) =
+        test_audio_peer("200", crate::link::Mode::TRANSCEIVE, None, 1);
+    let (source, _unused) = test_audio_peer("201", crate::link::Mode::MONITOR, Some(0.7), 1);
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![destination, source], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    dispatcher.dispatch(1);
+    assert_eq!(outbound.read(&mut sent), 0);
+    assert_eq!(sent, [0.7]);
 }
 
 #[test]

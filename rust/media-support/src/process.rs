@@ -125,6 +125,13 @@ impl Drop for ReaperGuard {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn set_normal_scheduler(
+    set: impl FnOnce(libc::c_int, &libc::sched_param) -> io::Result<()>,
+) -> io::Result<()> {
+    set(libc::SCHED_OTHER, &libc::sched_param { sched_priority: 0 })
+}
+
 pub(crate) fn run(
     config: &Config,
     command: &mut Command,
@@ -138,6 +145,24 @@ pub(crate) fn run(
         (reaper.acquire)();
     }
     let _reaper = ReaperGuard(config.child_reaper);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // Asterisk host threads may be real-time scheduled. Do not let CPU-heavy
+        // Piper or FFmpeg children inherit that policy and compete with audio delivery.
+        unsafe {
+            command.pre_exec(|| {
+                set_normal_scheduler(|policy, parameters| {
+                    if libc::sched_setscheduler(0, policy, parameters) == -1 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                })
+            });
+        }
+    }
     let mut child = OwnedChild(
         command
             .stdout(Stdio::null())

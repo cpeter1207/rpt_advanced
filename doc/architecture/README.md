@@ -148,7 +148,7 @@ station telemetry producer → telemetry playout ring ────────�
                                                                 ▼
                       transmit worker ← DAC / adapter output demand
                       ├─ native-rate mix / transmit processing / Morse / tones
-                      ├─ pre-access-tone program-audio loopback ring
+                      ├─ pre-access-tone peer-routable program-audio loopback ring
                       │  └─ link distributor → per-link egress queues
                       │     └─ serial codec encode / send outside audio workers
                       └─ selected CTCSS or DCS → adapter-owned output buffer

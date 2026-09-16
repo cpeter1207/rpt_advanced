@@ -100,6 +100,12 @@ and a useful nonfatal diagnostic outside the callback; never claim priority 99
 was established when it was not. The adapter must not grant itself additional
 privileges or change system-wide scheduling policy to satisfy this preference.
 
+Offline media subprocesses must not inherit a real-time host-thread policy.
+Before executing Piper or FFmpeg, the media adapter resets the child to
+`SCHED_OTHER` at priority zero. If that reset fails, media preparation fails and
+the configured telemetry fallback applies; a CPU-heavy media child must never
+compete with audio callbacks at their real-time priority.
+
 Any temporary scheduling change to the startup caller is restored before
 returning. Inability to restore a scheduling change that actually succeeded
 remains a distinct lifecycle-safety fault; this amendment does not hide that
