@@ -637,6 +637,59 @@ fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
 }
 
 #[test]
+fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
+    use super::links::LinkEffect;
+    let text = "[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 window]\nremote_node=3000\nreplace_permanent=main\nstart_time=12:00\nend_time=13:00\nend_inactivity_ms=60000\n";
+    let at = |now_ms, hour, minute| RuntimeClock {
+        now_ms,
+        wall_seconds: 0,
+        civil: Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap(),
+            0,
+        )),
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(text).unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        at(0, 12, 59),
+    )
+    .unwrap();
+    runtime.tick_links(at(0, 12, 59));
+    let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+        panic!("replacement dial")
+    };
+    assert_eq!(attempt.remote(), "3000");
+    assert_eq!(
+        runtime.finish_connect(&local, attempt, true, at(0, 12, 59)),
+        Ok(true)
+    );
+
+    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut guard = receive.acquire_pair(&mut transmit).unwrap();
+    guard
+        .transmit()
+        .controller
+        .process_audio(true, false, &[], &mut [0.0]);
+    drop(guard);
+
+    runtime.tick_links(at(1, 13, 0));
+    assert!(runtime.next_link().is_none());
+    runtime.tick_links(at(59_999, 13, 0));
+    assert!(runtime.next_link().is_none());
+    runtime.tick_links(at(60_000, 13, 1));
+    assert!(matches!(
+        runtime.next_link(),
+        Some((local, LinkEffect::Detach(peers))) if local == "1000" && peers == ["3000"]
+    ));
+    runtime.peer_detached("1000", "3000", 60_000);
+    drop((receive, transmit));
+    assert!(runtime.stop(60_000));
+}
+
+#[test]
 fn render_preserves_c_scheduled_identity_and_ordinary_speech_rules() {
     assert_eq!(
         telemetry_speech("COUNT 42 AB1CD 1000", &["1000"]),

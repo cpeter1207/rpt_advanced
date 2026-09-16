@@ -352,7 +352,7 @@ impl NodeLinkControl {
         answered: bool,
         now_ms: u64,
         current_clock: Option<(CivilTime, u8)>,
-        activity: impl FnMut(&str) -> u64,
+        activity: impl FnMut(&str) -> Option<u64>,
     ) -> Result<bool, AdmissionError> {
         let needs_calendar = attempt.scheduled.is_some()
             && self
@@ -432,7 +432,7 @@ impl NodeLinkControl {
         local: CivilTime,
         second: u8,
         now_ms: u64,
-        activity: impl FnMut(&str) -> u64,
+        activity: impl FnMut(&str) -> Option<u64>,
     ) {
         if let Some(schedule) = &mut self.schedule {
             schedule.tick(local, second, now_ms, activity, |route| {

@@ -32,14 +32,14 @@ fn scheduler() -> LinkScheduler {
 #[test]
 fn quiet_window_exit_and_cold_start_after_grace_restore_primary_immediately() {
     let mut cold = scheduler();
-    cold.tick(civil(13, 2), 0, 1, |_| 0, |_| false);
+    cold.tick(civil(13, 2), 0, 1, |_| None, |_| false);
     assert_eq!(cold.next_operation().unwrap().remote(), "2000");
     let mut active = scheduler();
-    active.tick(civil(12, 59), 0, 1, |_| 0, |_| false);
+    active.tick(civil(12, 59), 0, 1, |_| None, |_| false);
     let attach = active.next_operation().unwrap();
     assert_eq!(attach.remote(), "3000");
     assert!(active.complete(&attach, true));
-    active.tick(civil(13, 0), 0, 2, |_| 0, |_| true);
+    active.tick(civil(13, 0), 0, 2, |_| None, |_| true);
     let detach = active.next_operation().unwrap();
     assert_eq!(detach.remote(), "3000");
     assert_eq!(detach.action(), LinkTransition::Detach);
@@ -62,7 +62,7 @@ fn same_revision_reservation_from_another_route_cannot_consume_current_intent() 
 #[test]
 fn different_local_routes_do_not_inherit_ownership_and_future_activity_waits() {
     let mut old = scheduler();
-    old.tick(civil(11, 0), 0, 1, |_| 0, |_| false);
+    old.tick(civil(11, 0), 0, 1, |_| None, |_| false);
     let attach = old.next_operation().unwrap();
     assert!(old.complete(&attach, true));
     let mut routes = old.route_specs();
@@ -75,12 +75,12 @@ fn different_local_routes_do_not_inherit_ownership_and_future_activity_waits() {
     next.pause("other");
     assert!(next.next_operation().is_none());
     let mut schedule = scheduler();
-    schedule.tick(civil(12, 59), 0, 100, |_| 200, |_| false);
+    schedule.tick(civil(12, 59), 0, 100, |_| Some(200), |_| false);
     let replacement = schedule.next_operation().unwrap();
     assert!(schedule.complete(&replacement, true));
-    schedule.tick(civil(13, 0), 0, 101, |_| 200, |_| true);
+    schedule.tick(civil(13, 0), 0, 101, |_| Some(200), |_| true);
     assert!(schedule.next_operation().is_none());
-    schedule.tick(civil(13, 1), 0, 60200, |_| 200, |_| true);
+    schedule.tick(civil(13, 1), 0, 60200, |_| Some(200), |_| true);
     assert_eq!(
         schedule.next_operation().unwrap().action(),
         LinkTransition::Detach
@@ -89,14 +89,14 @@ fn different_local_routes_do_not_inherit_ownership_and_future_activity_waits() {
 #[test]
 fn withdraw_before_attach_and_revalidate_each_reservation() {
     let mut schedule = scheduler();
-    schedule.tick(civil(11, 0), 0, 1, |_| 0, |_| false);
+    schedule.tick(civil(11, 0), 0, 1, |_| None, |_| false);
     let permanent = schedule.next_operation().unwrap();
     assert_eq!(
         (permanent.remote(), permanent.action()),
         ("2000", LinkTransition::Attach)
     );
     assert!(schedule.complete(&permanent, true));
-    schedule.tick(civil(12, 0), 0, 2, |_| 0, |_| true);
+    schedule.tick(civil(12, 0), 0, 2, |_| None, |_| true);
     let withdraw = schedule.next_operation().unwrap();
     assert_eq!(
         (withdraw.remote(), withdraw.action()),
@@ -118,17 +118,35 @@ fn withdraw_before_attach_and_revalidate_each_reservation() {
 fn cold_start_grace_and_real_receive_activity_have_distinct_deadlines() {
     for activity in [0, 99000] {
         let mut schedule = scheduler();
-        schedule.tick(civil(13, 0), 30, 100000, |_| activity, |_| false);
+        schedule.tick(
+            civil(13, 0),
+            30,
+            100000,
+            |_| (activity != 0).then_some(activity),
+            |_| false,
+        );
         let replacement = schedule.next_operation().unwrap();
         assert_eq!(replacement.remote(), "3000");
         schedule.complete(&replacement, true);
-        schedule.tick(civil(13, 1), 0, 130000, |_| activity, |_| true);
+        schedule.tick(
+            civil(13, 1),
+            0,
+            130000,
+            |_| (activity != 0).then_some(activity),
+            |_| true,
+        );
         let next = schedule.next_operation();
         if activity == 0 {
             assert_eq!(next.unwrap().action(), LinkTransition::Detach);
         } else {
             assert!(next.is_none());
-            schedule.tick(civil(13, 1), 30, 159000, |_| activity, |_| true);
+            schedule.tick(
+                civil(13, 1),
+                30,
+                159000,
+                |_| (activity != 0).then_some(activity),
+                |_| true,
+            );
             assert_eq!(
                 schedule.next_operation().unwrap().action(),
                 LinkTransition::Detach
@@ -136,28 +154,66 @@ fn cold_start_grace_and_real_receive_activity_have_distinct_deadlines() {
         }
     }
 }
+
+#[test]
+fn activity_at_monotonic_zero_is_observed_and_survives_reload() {
+    let mut never_observed = scheduler();
+    never_observed.tick(civil(12, 59), 0, 0, |_| None, |_| false);
+    let attach = never_observed.next_operation().unwrap();
+    assert!(never_observed.complete(&attach, true));
+    never_observed.tick(civil(13, 0), 0, 1, |_| None, |_| true);
+    assert_eq!(never_observed.windows[0].last_activity, None);
+    assert_eq!(
+        never_observed.next_operation().unwrap().action(),
+        LinkTransition::Detach
+    );
+
+    let mut observed = scheduler();
+    observed.tick(civil(12, 59), 0, 0, |_| Some(0), |_| false);
+    let attach = observed.next_operation().unwrap();
+    assert!(observed.complete(&attach, true));
+    observed.tick(civil(13, 0), 0, 1, |_| Some(0), |_| true);
+    assert_eq!(observed.windows[0].last_activity, Some(0));
+    assert!(observed.next_operation().is_none());
+
+    let mut reloaded = LinkScheduler::new(
+        2,
+        observed.route_specs(),
+        observed.window_specs(),
+        Some(&observed),
+    )
+    .unwrap();
+    assert_eq!(reloaded.windows[0].last_activity, Some(0));
+    reloaded.tick(civil(13, 0), 0, 59_999, |_| Some(0), |_| true);
+    assert!(reloaded.next_operation().is_none());
+    reloaded.tick(civil(13, 1), 0, 60_000, |_| Some(0), |_| true);
+    assert_eq!(
+        reloaded.next_operation().unwrap().action(),
+        LinkTransition::Detach
+    );
+}
 #[test]
 fn reload_keeps_activity_but_invalidates_old_inflight_dials() {
     let mut old = scheduler();
-    old.tick(civil(12, 59), 0, 100000, |_| 100000, |_| false);
+    old.tick(civil(12, 59), 0, 100000, |_| Some(100000), |_| false);
     let pending = old.next_operation().unwrap();
     let mut replacement =
         LinkScheduler::new(2, old.route_specs(), old.window_specs(), Some(&old)).unwrap();
     assert!(!replacement.current(&pending));
-    replacement.tick(civil(13, 0), 30, 120000, |_| 0, |_| false);
+    replacement.tick(civil(13, 0), 30, 120000, |_| None, |_| false);
     assert_eq!(replacement.next_operation().unwrap().remote(), "3000");
 }
 
 #[test]
 fn receive_activity_replaces_cold_start_estimate() {
     let mut schedule = scheduler();
-    schedule.tick(civil(13, 0), 30, 100000, |_| 0, |_| false);
+    schedule.tick(civil(13, 0), 30, 100000, |_| None, |_| false);
     let replacement = schedule.next_operation().unwrap();
     schedule.complete(&replacement, true);
-    schedule.tick(civil(13, 0), 50, 120000, |_| 120000, |_| true);
-    schedule.tick(civil(13, 1), 0, 130000, |_| 120000, |_| true);
+    schedule.tick(civil(13, 0), 50, 120000, |_| Some(120000), |_| true);
+    schedule.tick(civil(13, 1), 0, 130000, |_| Some(120000), |_| true);
     assert!(schedule.next_operation().is_none());
-    schedule.tick(civil(13, 1), 50, 180000, |_| 120000, |_| true);
+    schedule.tick(civil(13, 1), 50, 180000, |_| Some(120000), |_| true);
     assert_eq!(
         schedule.next_operation().unwrap().action(),
         LinkTransition::Detach
@@ -208,7 +264,7 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
 #[test]
 fn route_removal_and_lost_ownership_only_reissue_exact_configured_intent() {
     let mut schedule = scheduler();
-    schedule.tick(civil(11, 0), 0, 0, |_| 0, |_| false);
+    schedule.tick(civil(11, 0), 0, 0, |_| None, |_| false);
     let attach = schedule.next_operation().unwrap();
     assert_eq!(attach.local(), "524950");
     assert!(schedule.complete(&attach, true));
@@ -226,7 +282,7 @@ fn route_removal_and_lost_ownership_only_reissue_exact_configured_intent() {
         schedule.removed_routes(&removed),
         [schedule.route_specs()[0].clone()]
     );
-    schedule.tick(civil(11, 1), 0, 1, |_| 0, |_| false);
+    schedule.tick(civil(11, 1), 0, 1, |_| None, |_| false);
     let redial = schedule.next_operation().unwrap();
     assert_eq!(redial.remote(), "2000");
     assert!(schedule.complete(&redial, false));
@@ -236,7 +292,7 @@ fn route_removal_and_lost_ownership_only_reissue_exact_configured_intent() {
 #[test]
 fn changed_windows_preserve_activity_but_not_previous_window_state() {
     let mut old = scheduler();
-    old.tick(civil(12, 0), 0, 1000, |_| 900, |_| false);
+    old.tick(civil(12, 0), 0, 1000, |_| Some(900), |_| false);
     for change in ["time", "inactivity", "replacement", "primary"] {
         let mut routes = old.route_specs();
         let mut windows = old.window_specs();
@@ -249,9 +305,9 @@ fn changed_windows_preserve_activity_but_not_previous_window_state() {
             _ => routes[0].remote = "4000".into(),
         }
         let mut next = LinkScheduler::new(2, routes, windows, Some(&old)).unwrap();
-        assert_eq!(next.windows[0].last_activity, 900);
+        assert_eq!(next.windows[0].last_activity, Some(900));
         assert!(!next.windows[0].initialized);
-        next.tick(civil(13, 0), 0, 1000, |_| 0, |_| false);
+        next.tick(civil(13, 0), 0, 1000, |_| None, |_| false);
         assert_eq!(
             next.next_operation().unwrap().remote(),
             if change == "replacement" {
@@ -263,5 +319,5 @@ fn changed_windows_preserve_activity_but_not_previous_window_state() {
     }
     let empty = LinkScheduler::new(1, vec![], vec![], None).unwrap();
     let fresh = LinkScheduler::new(2, old.route_specs(), old.window_specs(), Some(&empty)).unwrap();
-    assert_eq!(fresh.windows[0].last_activity, 0);
+    assert_eq!(fresh.windows[0].last_activity, None);
 }

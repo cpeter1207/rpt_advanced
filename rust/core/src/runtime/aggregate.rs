@@ -69,14 +69,14 @@ struct ControlState<C: Send> {
     digits: DtmfDispatcher,
     activity: ActivitySnapshot,
     started_ms: u64,
-    prior_activity_ms: u64,
+    prior_activity_ms: Option<u64>,
 }
 impl<C: Send> ControlState<C> {
-    fn activity_ms(&self) -> u64 {
+    fn activity_ms(&self) -> Option<u64> {
         self.activity
             .last_sample()
             .map(|sample| self.started_ms.saturating_add(sample / 48))
-            .unwrap_or(self.prior_activity_ms)
+            .or(self.prior_activity_ms)
     }
 }
 /// Stable per-node control identity, retained across successful generation swaps.
@@ -310,7 +310,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             digits,
             activity,
             started_ms: now_ms,
-            prior_activity_ms: 0,
+            prior_activity_ms: None,
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
         std::mem::swap(&mut next.digits, &mut node.control.digits);
@@ -485,7 +485,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 digits,
                 activity,
                 started_ms: clock.now_ms,
-                prior_activity_ms: existing.map_or(0, |node| node.control.activity_ms()),
+                prior_activity_ms: existing.and_then(|node| node.control.activity_ms()),
             };
             candidates.push(Candidate {
                 name: name.into(),

@@ -43,7 +43,7 @@ struct Route {
 }
 struct Window {
     spec: ReplacementSpec,
-    last_activity: u64,
+    last_activity: Option<u64>,
     initialized: bool,
     was_active: bool,
     waiting: bool,
@@ -127,15 +127,14 @@ impl LinkScheduler {
                     })
                 });
                 // Changed windows still inherit node receive activity, never silently resetting idle.
-                let activity = previous.map_or(0, |old| {
+                let activity = previous.and_then(|old| {
                     old.windows
                         .iter()
                         .filter(|window| {
                             old.routes[window.spec.route].spec.local == routes[spec.route].local
                         })
-                        .map(|window| window.last_activity)
+                        .filter_map(|window| window.last_activity)
                         .max()
-                        .unwrap_or(0)
                 });
                 Window {
                     spec,
@@ -204,7 +203,7 @@ impl LinkScheduler {
         local: CivilTime,
         second: u8,
         now_ms: u64,
-        mut activity: impl FnMut(&str) -> u64,
+        mut activity: impl FnMut(&str) -> Option<u64>,
         mut owns: impl FnMut(&RouteSpec) -> bool,
     ) {
         for route in &mut self.routes {
@@ -215,7 +214,9 @@ impl LinkScheduler {
         }
         for window in &mut self.windows {
             let observed = activity(&self.routes[window.spec.route].spec.local);
-            if observed > window.last_activity {
+            if observed
+                .is_some_and(|observed| window.last_activity.is_none_or(|last| observed > last))
+            {
                 window.last_activity = observed;
                 window.initial_deadline = None;
             }
@@ -224,7 +225,7 @@ impl LinkScheduler {
                 window.initialized = true;
                 if !active && window.spec.end_inactivity_ms != 0 {
                     if let Some(elapsed) = window.spec.window.elapsed_after_end(&local, second) {
-                        if window.last_activity != 0 {
+                        if window.last_activity.is_some() {
                             window.waiting = true;
                         } else if elapsed < window.spec.end_inactivity_ms {
                             window.waiting = true;
@@ -247,9 +248,10 @@ impl LinkScheduler {
                 let quiet = window.initial_deadline.map_or_else(
                     || {
                         window.spec.end_inactivity_ms == 0
-                            || window.last_activity == 0
-                            || (now_ms >= window.last_activity
-                                && now_ms - window.last_activity >= window.spec.end_inactivity_ms)
+                            || window.last_activity.is_none()
+                            || window.last_activity.is_some_and(|last| {
+                                now_ms >= last && now_ms - last >= window.spec.end_inactivity_ms
+                            })
                     },
                     |deadline| now_ms >= deadline,
                 );

@@ -65,7 +65,7 @@ fn unconfigured_schedule_and_closed_or_stale_admission_do_not_reserve_work() {
         CivilTime::new(2026, 9, 15, crate::schedule::Weekday::Tuesday, 12, 0).unwrap(),
         0,
         0,
-        |_| 0,
+        |_| None,
     );
     assert!(
         links
@@ -177,7 +177,7 @@ fn administrative_cancellation_and_foreign_scheduled_dials_do_not_change_links()
     };
     local.close();
     assert_eq!(
-        local.finish_connect_at(attempt, true, 0, None, |_| 0),
+        local.finish_connect_at(attempt, true, 0, None, |_| None),
         Err(AdmissionError::Stale)
     );
     let mut local = links();
@@ -206,7 +206,7 @@ fn administrative_cancellation_and_foreign_scheduled_dials_do_not_change_links()
         panic!("scheduled dial")
     };
     assert_eq!(
-        local.finish_connect_at(attempt, true, 0, None, |_| 0),
+        local.finish_connect_at(attempt, true, 0, None, |_| None),
         Err(AdmissionError::Stale)
     );
 }
@@ -228,7 +228,7 @@ fn slow_connect_revalidates_generation_and_new_loop_before_publication() {
     };
     control.publish(generation(2), 1).unwrap();
     assert_eq!(
-        links.finish_connect_at(attempt, true, 2, None, |_| 0),
+        links.finish_connect_at(attempt, true, 2, None, |_| None),
         Err(AdmissionError::Stale)
     );
     assert!(!links.manager.reaches("2000", true));
@@ -245,7 +245,7 @@ fn slow_connect_revalidates_generation_and_new_loop_before_publication() {
     };
     links.accept("3000", true).unwrap();
     assert_eq!(
-        links.finish_connect_at(attempt, true, 3, None, |_| 0),
+        links.finish_connect_at(attempt, true, 3, None, |_| None),
         Err(AdmissionError::Loop)
     );
 }
@@ -266,7 +266,7 @@ fn permanent_failure_retains_retry_and_operator_disconnect_cancels_it() {
         panic!("dial")
     };
     assert_eq!(
-        links.finish_connect_at(attempt, false, 10, None, |_| 0),
+        links.finish_connect_at(attempt, false, 10, None, |_| None),
         Ok(false)
     );
     assert!(links.manager.reaches("2000", true));
@@ -357,13 +357,13 @@ fn configured_dial_rechecks_window_boundary_and_requires_clock_only_for_windows(
             Some(schedule),
         )
         .unwrap();
-        links.tick(clock(11), 0, 1, |_| 0);
+        links.tick(clock(11), 0, 1, |_| None);
         let LinkEffect::Connect(attempt) = links.next_scheduled(control.work().unwrap()).unwrap()
         else {
             panic!("dial")
         };
         let result =
-            links.finish_connect_at(attempt, true, 2, window.then_some((clock(12), 0)), |_| 0);
+            links.finish_connect_at(attempt, true, 2, window.then_some((clock(12), 0)), |_| None);
         assert_eq!(
             result,
             if window {
@@ -401,7 +401,7 @@ fn dial_modes_failed_temporary_calls_and_telemetry_preserve_command_semantics() 
         );
         assert!(attempt.current());
         assert_eq!(
-            links.finish_connect_at(attempt, false, 1, None, |_| 0),
+            links.finish_connect_at(attempt, false, 1, None, |_| None),
             Ok(false)
         );
         assert_eq!(links.manager().owns_permanent("2000"), permanent);
@@ -613,7 +613,7 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
     .unwrap();
     let mut host = NodeHost::new(generation(1));
     let (control, _, _) = host.split();
-    links.tick(civil(11), 0, 0, |_| 0);
+    links.tick(civil(11), 0, 0, |_| None);
     let LinkEffect::Connect(cancelled) = links.next_scheduled(control.work().unwrap()).unwrap()
     else {
         panic!("dial")
@@ -625,7 +625,7 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
             panic!("dial")
         };
         assert_eq!(
-            links.finish_connect_at(attempt, true, 0, clock, |_| 0),
+            links.finish_connect_at(attempt, true, 0, clock, |_| None),
             Err(AdmissionError::Stale)
         );
     }
@@ -635,7 +635,7 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
     };
     links.policy = AccessPolicy::new("", "2000").unwrap();
     assert_eq!(
-        links.finish_connect_at(attempt, true, 0, Some((civil(11), 0)), |_| 0),
+        links.finish_connect_at(attempt, true, 0, Some((civil(11), 0)), |_| None),
         Err(AdmissionError::Denied)
     );
     links.policy = AccessPolicy::new("", "").unwrap();
@@ -644,10 +644,10 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
         panic!("dial")
     };
     assert_eq!(
-        links.finish_connect_at(attempt, true, 0, Some((civil(11), 0)), |_| 0),
+        links.finish_connect_at(attempt, true, 0, Some((civil(11), 0)), |_| None),
         Ok(true)
     );
-    links.tick(civil(12), 0, 1, |_| 0);
+    links.tick(civil(12), 0, 1, |_| None);
     assert!(
         matches!(links.next_scheduled(control.work().unwrap()), Some(LinkEffect::Detach(names)) if names == ["2000"])
     );
@@ -658,7 +658,7 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
     };
     assert_eq!(attempt.remote(), "3000");
     assert_eq!(
-        links.finish_connect_at(attempt, true, 1, Some((civil(12), 0)), |_| 0),
+        links.finish_connect_at(attempt, true, 1, Some((civil(12), 0)), |_| None),
         Ok(true)
     );
     links
@@ -670,7 +670,7 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
         )
         .unwrap();
     links.reclaimed("3000", 2);
-    links.tick(civil(13), 0, 3, |_| 0);
+    links.tick(civil(13), 0, 3, |_| None);
     assert!(
         matches!(links.command(operation(LinkAction::ReconnectAll, ""), control.work().unwrap(), 3, false), Ok(LinkEffect::Detach(names)) if names == ["3000"])
     );
