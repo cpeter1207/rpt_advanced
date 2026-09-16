@@ -246,7 +246,19 @@ impl ScheduledWindow {
     /// Elapsed wall-clock milliseconds after this selected date's window end.
     /// Returns `None` before the end, on another selected date, or for invalid seconds.
     pub fn elapsed_after_end(&self, local: &CivilTime, second: u8) -> Option<u64> {
-        if second >= 60 || local.minute_of_day() < self.end_minute {
+        if second >= 60 {
+            return None;
+        }
+        if self.end_minute == 24 * 60 {
+            if self.matches(local) {
+                return None;
+            }
+            let previous = previous_civil_day(*local)?;
+            return self
+                .matches(&previous)
+                .then(|| (u64::from(local.minute_of_day()) * 60 + u64::from(second)) * 1000);
+        }
+        if local.minute_of_day() < self.end_minute {
             return None;
         }
         let inside = CivilTime {
@@ -267,7 +279,7 @@ impl ScheduledWindow {
         end: &str,
     ) -> Result<Self, ScheduleError> {
         let start_minute = clock_minute(start)?;
-        let end_minute = clock_minute(end)?;
+        let end_minute = end_clock_minute(end)?;
         let weekday_mask = parse_weekdays(days.unwrap_or(""))?;
         let dates = parse_dates(dates.unwrap_or(""))?;
         if start_minute >= end_minute || (weekday_mask != 0 && !dates.is_empty()) {
@@ -341,6 +353,14 @@ fn clock_minute(text: &str) -> Result<u16, ScheduleError> {
     Ok(u16::from(hour) * 60 + u16::from(minute))
 }
 
+fn end_clock_minute(text: &str) -> Result<u16, ScheduleError> {
+    if text == "24:00" {
+        Ok(24 * 60)
+    } else {
+        clock_minute(text)
+    }
+}
+
 /// Check one inclusive start boundary.
 pub(crate) fn start_time_valid(text: &str) -> bool {
     clock_minute(text).is_ok()
@@ -348,7 +368,37 @@ pub(crate) fn start_time_valid(text: &str) -> bool {
 
 /// Check one exclusive end boundary.
 pub(crate) fn end_time_valid(text: &str) -> bool {
-    clock_minute(text).is_ok()
+    end_clock_minute(text).is_ok()
+}
+
+fn previous_civil_day(local: CivilTime) -> Option<CivilTime> {
+    let (year, month, day) = if local.day > 1 {
+        (local.year, local.month, local.day - 1)
+    } else if local.month > 1 {
+        let month = local.month - 1;
+        (local.year, month, month_days(local.year, month))
+    } else if local.year > 1 {
+        (local.year - 1, 12, 31)
+    } else {
+        return None;
+    };
+    let weekday = match local.weekday {
+        Weekday::Sunday => Weekday::Saturday,
+        Weekday::Monday => Weekday::Sunday,
+        Weekday::Tuesday => Weekday::Monday,
+        Weekday::Wednesday => Weekday::Tuesday,
+        Weekday::Thursday => Weekday::Wednesday,
+        Weekday::Friday => Weekday::Thursday,
+        Weekday::Saturday => Weekday::Friday,
+    };
+    Some(CivilTime {
+        year,
+        month,
+        day,
+        weekday,
+        hour: 23,
+        minute: 59,
+    })
 }
 
 fn parse_digits(bytes: &[u8]) -> Result<u32, ScheduleError> {

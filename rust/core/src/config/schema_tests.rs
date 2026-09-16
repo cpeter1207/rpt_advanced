@@ -149,6 +149,10 @@ fn templates_macros_and_events_are_validated_after_inheritance() {
 fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
     let valid = "[524950]\n[permanent 524950 primary]\nremote_node=506315\n[schedule 524950 net]\nremote_node=2627\nreplace_permanent=primary\ndays=Monday-Friday\nstart_time=11:00\nend_time=12:00\nend_inactivity_ms=300000\n";
     Schema::validate(&ConfigDocument::parse(valid).unwrap()).unwrap();
+    Schema::validate(
+        &ConfigDocument::parse(&valid.replace("end_time=12:00", "end_time=24:00")).unwrap(),
+    )
+    .unwrap();
 
     let cases = [
         (
@@ -174,6 +178,10 @@ fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
         (
             "[node]\n[permanent node primary]\nremote_node=1\n[schedule node net]\nremote_node=2\nreplace_permanent=primary\nstart_time=12:00\nend_time=11:00\n",
             "invalid schedule window",
+        ),
+        (
+            "[node]\n[permanent node primary]\nremote_node=1\n[schedule node net]\nremote_node=2\nreplace_permanent=primary\nstart_time=24:00\nend_time=24:01\n",
+            "schedule remote node, replacement, start time, and end time are required",
         ),
     ];
     for (source, expected) in cases {

@@ -1,4 +1,7 @@
-use super::{CivilTime, ScheduledAction, ScheduledEvent, ScheduledWindow, Weekday};
+use super::{
+    CivilTime, ScheduledAction, ScheduledEvent, ScheduledWindow, Weekday, end_time_valid,
+    start_time_valid,
+};
 use std::str::FromStr;
 
 #[test]
@@ -43,10 +46,50 @@ fn events_parse_strictly_and_match_a_stable_civil_minute() {
 }
 
 #[test]
-fn windows_reject_2400_at_either_boundary() {
-    assert!(ScheduledWindow::parse(Some("Monday-Friday"), None, "11:00", "24:00").is_err());
+fn windows_accept_midnight_only_as_an_exclusive_end() {
+    assert!(start_time_valid("23:59"));
+    assert!(!start_time_valid("24:00"));
+    assert!(end_time_valid("24:00"));
+    assert!(!end_time_valid("24:01"));
+
+    let window = ScheduledWindow::parse(Some("Monday"), None, "23:00", "24:00").unwrap();
+    assert!(window.matches(&CivilTime::new(2026, 9, 14, Weekday::Monday, 23, 59).unwrap()));
+    let midnight = CivilTime::new(2026, 9, 15, Weekday::Tuesday, 0, 0).unwrap();
+    assert!(!window.matches(&midnight));
+    assert_eq!(window.elapsed_after_end(&midnight, 0), Some(0));
+
     assert!(ScheduledWindow::parse(None, None, "24:00", "12:00").is_err());
     assert!(ScheduledWindow::parse(None, None, "11:00", "11:00").is_err());
+}
+
+#[test]
+fn midnight_end_elapsed_time_crosses_calendar_boundaries() {
+    let cases = [
+        (
+            Some("Monday"),
+            None,
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 0, 5).unwrap(),
+        ),
+        (
+            None,
+            Some("2026-04-30"),
+            CivilTime::new(2026, 5, 1, Weekday::Friday, 0, 5).unwrap(),
+        ),
+        (
+            None,
+            Some("2026-12-31"),
+            CivilTime::new(2027, 1, 1, Weekday::Friday, 0, 5).unwrap(),
+        ),
+        (
+            None,
+            Some("2028-02-29"),
+            CivilTime::new(2028, 3, 1, Weekday::Wednesday, 0, 5).unwrap(),
+        ),
+    ];
+    for (days, dates, current) in cases {
+        let window = ScheduledWindow::parse(days, dates, "23:00", "24:00").unwrap();
+        assert_eq!(window.elapsed_after_end(&current, 7), Some(307_000));
+    }
 }
 
 #[test]

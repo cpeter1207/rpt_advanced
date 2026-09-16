@@ -448,7 +448,7 @@ later reload.
 | `days` | empty | Comma-separated full weekday names or inclusive ranges, such as `Monday-Friday` or `Tuesday,Thursday`. Matching is case-insensitive. Empty selects every calendar day unless `dates` is set. |
 | `dates` | empty | Up to 64 comma-separated local Gregorian dates in exact `YYYY-MM-DD` form. It cannot be combined with `days`. |
 | `start_time` | required | Exact 24-hour local `HH:MM` inclusive window start. |
-| `end_time` | required | Exact 24-hour local `HH:MM` exclusive window end, later than `start_time` on the same date. Overnight windows are invalid. The current grammar does not yet accept `24:00`; it is reserved for a future end-only boundary. |
+| `end_time` | required | Exact 24-hour local `HH:MM` exclusive window end, later than `start_time` on the same date. `24:00` is accepted only here to mean the end of the selected date. Overnight windows are invalid. |
 | `end_inactivity_ms` | `0` | Post-window quiet interval in milliseconds. Zero restores the replaced permanent peer when the window ends. A nonzero value keeps the replacement after observed local-receiver or linked-peer activity until that activity has been quiet for this interval. |
 
 When a window becomes active, rpt_advanced detaches its named permanent peer
