@@ -314,8 +314,9 @@ defines the full reload, hardware-handoff, and failure policy.
   media preparation, and process execution never occur in an audio callback.
 - Audio scheduling is best-effort: prefer FIFO priority 99, otherwise obtain
   the highest permitted priority, and continue with inherited scheduling if no
-  increase is possible. Elevation denial alone is not an audio-start failure.
-  See the pending implementation amendment in
+  increase is possible. Elevation denial alone is not an audio-start failure;
+  the audio adapter reports the inherited policy, priority, and limitation for
+  each callback worker. See
   [ADR 0028](decisions/0028-remove-res-usbradio-through-hardware-adapters.md).
 - Standalone code uses thread-safe ownership, messages, and atomics instead
   of locks wherever possible. Concurrent packet producers hand off through

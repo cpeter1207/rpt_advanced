@@ -127,30 +127,18 @@ None.
 
 None.
 
-### Best-effort audio scheduling and external-load diagnostics
+### External-load xrun diagnostics
 
 **Requirements**
 
-- Implement the amended scheduling contract in
-  [ADR 0028](doc/architecture/decisions/0028-remove-res-usbradio-through-hardware-adapters.md):
-  attempt FIFO priority 99, fall back to the highest permitted priority, and
-  continue normal audio startup with inherited scheduling if no increase is
-  possible. Denied elevation is nonfatal and observable outside callbacks.
-- Preserve callback safety, caller-scheduling restoration, genuine device-error
-  handling, DSP, and buffering behavior. Test successful, reduced-priority, and
-  unprivileged operation for both capture and playback.
 - Investigate output underruns caused or aggravated by high activity outside
   Asterisk. Compare quiescent and CPU/I/O-loaded operation and correlate xrun
   timestamps with host scheduling and system load before changing audio code.
 
 **Decisions recorded**
 
-- This is an accepted requirement, not yet implemented in the released
-  PortAudio/ALSA adapter alpha2 used by USBRadioPlus alpha18.
-- Priority is a preference, not a prerequisite for an otherwise usable device.
-  No automatic privilege escalation or system-wide policy change is required.
-- The ADR amendment does not change installed node settings or release a new
-  adapter binary. Record validation evidence before marking this implemented.
+- Use the adapter's per-callback scheduling and xrun statistics when comparing
+  quiescent and loaded operation; do not infer a cause from an xrun alone.
 
 **Material decisions needed before implementation**
 

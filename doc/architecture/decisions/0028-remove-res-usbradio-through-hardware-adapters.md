@@ -188,11 +188,15 @@ generational station-host lifecycle. Those remain a later implementation
 tranche. Released alpha18 still hands raw capture through its clock-recovery
 ring to a playback-driven combined native tick.
 
-The best-effort scheduling amendment is an accepted requirement awaiting an
-adapter implementation and release. USBRadioPlus alpha18 with the released
-PortAudio/ALSA adapter alpha2 still requires permission for priority 99. This
-documentation amendment does not change those binaries or installed service
-limits; track implementation and validation in the wishlist.
+The current PortAudio/ALSA adapter source implements best-effort scheduling at
+stream startup. It tries FIFO priorities from 99 downward, continues with the
+inherited scheduler when elevation or metadata is unavailable, and records the
+policy, priority, and limitation separately for capture and playback. The new
+statistics append the original ABI-2 prefix, so the adapter retains SONAME 2
+and accepts ABI-2 callers using the earlier prefix size. Restoration failure
+after an actual scheduling change remains fatal. Publishing and deploying that
+source remain separate release operations; already released binaries are
+unchanged.
 
 Released alpha18's hardware cutover removed the duplicate backend and
 resource-module imports before the complete Rust migration. In the current
