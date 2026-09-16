@@ -369,6 +369,7 @@ impl NodeLinkControl {
                 .as_ref()
                 .is_some_and(|schedule| schedule.current(reservation))
         });
+        let mut topology_blocked = false;
         let result = if !self.admitting
             || !attempt.work.is_current()
             || !scheduled_current
@@ -378,9 +379,19 @@ impl NodeLinkControl {
         } else if !self.policy.allows(&attempt.remote, true) {
             Err(AdmissionError::Denied)
         } else if answered {
-            self.manager
+            match self
+                .manager
                 .attach(&attempt.remote, attempt.mode, attempt.permanent)
-                .map(|()| true)
+            {
+                Ok(()) => Ok(true),
+                Err(AdmissionError::Loop) if attempt.permanent => {
+                    self.manager
+                        .retain_topology_blocked(&attempt.remote, attempt.mode);
+                    topology_blocked = true;
+                    Err(AdmissionError::Loop)
+                }
+                Err(error) => Err(error),
+            }
         } else if attempt.permanent {
             self.manager
                 .retain_retry(&attempt.remote, attempt.mode, now_ms)
@@ -391,7 +402,7 @@ impl NodeLinkControl {
         if let (Some(schedule), Some(reservation)) = (&mut self.schedule, &attempt.scheduled) {
             schedule.complete(
                 reservation,
-                result.is_ok() && (answered || attempt.permanent),
+                topology_blocked || (result.is_ok() && (answered || attempt.permanent)),
             );
         }
         result

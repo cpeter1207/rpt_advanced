@@ -285,6 +285,113 @@ fn permanent_failure_retains_retry_and_operator_disconnect_cancels_it() {
     );
     assert!(!links.manager.reaches("2000", true));
 }
+
+#[test]
+fn topology_blocked_automatic_route_retries_only_after_explicit_evidence_change() {
+    use super::super::link_schedule::RouteSpec;
+    let schedule = |generation| {
+        LinkScheduler::new(
+            generation,
+            vec![RouteSpec {
+                local: "524950".into(),
+                remote: "3000".into(),
+                permanent: true,
+            }],
+            vec![],
+            None,
+        )
+        .unwrap()
+    };
+    let mut host = NodeHost::new(generation(1));
+    let (control, _, _) = host.split();
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule(1)),
+    )
+    .unwrap();
+    links.accept("2000", true).unwrap();
+    assert!(matches!(
+        links.peer_text("2000", b"L T3000", false, 0, 0),
+        Ok(LinkEffect::None)
+    ));
+    let LinkEffect::Connect(attempt) = links.next_scheduled(control.work().unwrap()).unwrap()
+    else {
+        panic!("configured dial")
+    };
+    assert_eq!(
+        links.finish_connect_at(attempt, true, 0, None, |_| None),
+        Err(AdmissionError::Loop)
+    );
+    let status = links
+        .manager()
+        .snapshot()
+        .into_iter()
+        .find(|status| status.name == "3000")
+        .unwrap();
+    assert!(status.retrying && status.topology_blocked);
+    assert_eq!(status.due_ms, None);
+    assert!(
+        links
+            .take_retry(u64::MAX, control.work().unwrap())
+            .is_none()
+    );
+
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::ReconnectAll, ""),
+            control.work().unwrap(),
+            1,
+            false
+        ),
+        Ok(LinkEffect::None)
+    ));
+    let retry = links.take_retry(1, control.work().unwrap()).unwrap();
+    assert_eq!(
+        links.finish_retry(retry, true, 1),
+        Err(AdmissionError::Loop)
+    );
+
+    links.reconfigure(
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule(2)),
+    );
+    let retry = links.take_retry(2, control.work().unwrap()).unwrap();
+    assert_eq!(
+        links.finish_retry(retry, true, 2),
+        Err(AdmissionError::Loop)
+    );
+
+    links.accept("4000", true).unwrap();
+    links.peer_text("4000", b"L T5000", false, 0, 3).unwrap();
+    assert!(
+        links
+            .take_retry(u64::MAX, control.work().unwrap())
+            .is_none()
+    );
+    links.ended("2000");
+    links.reclaimed("2000", 4);
+    assert!(
+        links
+            .take_retry(u64::MAX, control.work().unwrap())
+            .is_none()
+    );
+
+    links.accept("2000", true).unwrap();
+    links.peer_text("2000", b"L T6000", false, 0, 5).unwrap();
+    let retry = links.take_retry(5, control.work().unwrap()).unwrap();
+    assert_eq!(links.finish_retry(retry, false, 5), Ok(false));
+    let status = links
+        .manager()
+        .snapshot()
+        .into_iter()
+        .find(|status| status.name == "3000")
+        .unwrap();
+    assert!(!status.topology_blocked);
+    assert_eq!(status.due_ms, Some(1005));
+}
 #[test]
 fn incoming_and_remote_selection_use_current_deny_first_policy() {
     let mut host = NodeHost::new(generation(1));

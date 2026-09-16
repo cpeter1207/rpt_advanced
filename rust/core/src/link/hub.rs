@@ -64,7 +64,11 @@ struct Retry {
     due: u64,
     delay: u64,
     attempt: Option<u64>,
+    blocked_topology: Option<TopologyEvidence>,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TopologyEvidence(Vec<(String, char)>);
 
 /// Owned token permits a dial outside the serialized control owner.
 #[derive(Debug)]
@@ -92,6 +96,8 @@ pub struct LinkStatus {
     pub paused: bool,
     /// Monotonic retry deadline, absent for published peers.
     pub due_ms: Option<u64>,
+    /// Automatic recovery is waiting for relevant peer-advertised topology to change.
+    pub topology_blocked: bool,
 }
 impl RetryAttempt {
     /// Destination identity for external directory and dial operations.
@@ -213,14 +219,22 @@ impl LinkManager {
         let looped = self.peers.iter().any(|peer| {
             peer.name != name && !peer.ended && routes.iter().any(|route| route.node == peer.name)
         });
-        let peer = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.name == name)
-            .ok_or(AdmissionError::Invalid)?;
-        if peer.routes != routes {
-            peer.routes = routes;
+        let changed = {
+            let peer = self
+                .peers
+                .iter_mut()
+                .find(|peer| peer.name == name)
+                .ok_or(AdmissionError::Invalid)?;
+            if peer.routes == routes {
+                false
+            } else {
+                peer.routes = routes;
+                true
+            }
+        };
+        if changed {
             self.revision = self.revision.wrapping_add(1);
+            self.release_changed_topology_blocks();
         }
         Ok(looped)
     }
@@ -256,6 +270,7 @@ impl LinkManager {
                     due: now_ms,
                     delay: 0,
                     attempt: None,
+                    blocked_topology: None,
                 });
             }
             self.revision = self.revision.wrapping_add(1);
@@ -277,15 +292,40 @@ impl LinkManager {
             due: now_ms,
             delay: 0,
             attempt: None,
+            blocked_topology: None,
         });
         Ok(())
     }
+    /// Retain automatic intent after a final publication gate proves a topology loop.
+    pub(crate) fn retain_topology_blocked(&mut self, name: &str, mode: Mode) {
+        let evidence = self.topology_evidence(name);
+        if let Some(retry) = self.retries.iter_mut().find(|retry| retry.name == name) {
+            retry.mode = mode;
+            retry.automatic = true;
+            retry.paused = false;
+            retry.attempt = None;
+            retry.blocked_topology = Some(evidence);
+            return;
+        }
+        self.retries.push(Retry {
+            name: name.into(),
+            mode,
+            automatic: true,
+            paused: false,
+            due: 0,
+            delay: 0,
+            attempt: None,
+            blocked_topology: Some(evidence),
+        });
+    }
     /// Acquire one due dial token, keeping external I/O outside control ownership.
     pub fn take_retry(&mut self, now_ms: u64) -> Option<RetryAttempt> {
-        let retry = self
-            .retries
-            .iter_mut()
-            .find(|retry| !retry.paused && retry.attempt.is_none() && now_ms >= retry.due)?;
+        let retry = self.retries.iter_mut().find(|retry| {
+            !retry.paused
+                && retry.blocked_topology.is_none()
+                && retry.attempt.is_none()
+                && now_ms >= retry.due
+        })?;
         self.serial = self.serial.wrapping_add(1);
         retry.attempt = Some(self.serial);
         Some(RetryAttempt {
@@ -304,7 +344,17 @@ impl LinkManager {
         {
             return Err(AdmissionError::Stale);
         }
-        self.check(&attempt.name, false)?;
+        if let Err(error) = self.check(&attempt.name, false) {
+            if error == AdmissionError::Loop {
+                let evidence = self.topology_evidence(&attempt.name);
+                if let Some(retry) = self.retries.iter_mut().find(|retry| {
+                    retry.name == attempt.name && retry.attempt == Some(attempt.serial)
+                }) {
+                    retry.blocked_topology = Some(evidence);
+                }
+            }
+            return Err(error);
+        }
         let automatic = self
             .retries
             .iter()
@@ -322,6 +372,10 @@ impl LinkManager {
         else {
             return;
         };
+        if self.retries[index].blocked_topology.is_some() {
+            self.retries[index].attempt = None;
+            return;
+        }
         if success
             || attempt.generation != self.generation
             || self.peers.iter().any(|peer| peer.name == attempt.name)
@@ -353,6 +407,7 @@ impl LinkManager {
             retry.paused = false;
             retry.delay = 0;
             retry.due = now_ms;
+            retry.blocked_topology = None;
         }
     }
 
@@ -361,6 +416,9 @@ impl LinkManager {
         self.generation = self.generation.wrapping_add(1);
         for retry in &mut self.retries {
             retry.attempt = None;
+            retry.due = 0;
+            retry.delay = 0;
+            retry.blocked_topology = None;
         }
     }
 
@@ -411,6 +469,7 @@ impl LinkManager {
                 retrying: false,
                 paused: false,
                 due_ms: None,
+                topology_blocked: false,
             })
             .chain(
                 self.retries
@@ -423,7 +482,8 @@ impl LinkManager {
                         ended: false,
                         retrying: true,
                         paused: retry.paused,
-                        due_ms: Some(retry.due),
+                        due_ms: retry.blocked_topology.is_none().then_some(retry.due),
+                        topology_blocked: retry.blocked_topology.is_some(),
                     }),
             )
             .collect()
@@ -456,6 +516,7 @@ impl LinkManager {
                 due: 0,
                 delay: 0,
                 attempt: None,
+                blocked_topology: None,
             });
         }
         self.revision = self.revision.wrapping_add(1);
@@ -542,5 +603,44 @@ impl LinkManager {
         self.peers
             .iter()
             .filter(move |peer| !peer.ended && peer.name != ingress && peer.name != source)
+    }
+
+    fn topology_evidence(&self, name: &str) -> TopologyEvidence {
+        let mut evidence = self
+            .peers
+            .iter()
+            .filter(|peer| !peer.ended)
+            .flat_map(|peer| {
+                peer.routes
+                    .iter()
+                    .filter(move |route| route.node == name)
+                    .map(|route| (peer.name.clone(), route.mode))
+            })
+            .collect::<Vec<_>>();
+        evidence.sort_unstable();
+        evidence.dedup();
+        TopologyEvidence(evidence)
+    }
+
+    fn release_changed_topology_blocks(&mut self) {
+        let released = self
+            .retries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, retry)| {
+                retry
+                    .blocked_topology
+                    .as_ref()
+                    .filter(|evidence| **evidence != self.topology_evidence(&retry.name))
+                    .map(|_| index)
+            })
+            .collect::<Vec<_>>();
+        for index in released {
+            let retry = &mut self.retries[index];
+            retry.blocked_topology = None;
+            retry.attempt = None;
+            retry.delay = 0;
+            retry.due = 0;
+        }
     }
 }

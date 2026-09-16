@@ -29,6 +29,18 @@ fn direct_status_describes_every_mode_and_excludes_retiring_or_retrying_peers() 
 }
 
 #[test]
+fn direct_status_excludes_topology_blocked_automatic_intent() {
+    let mut links = LinkManager::new("1000").unwrap();
+    links.attach("2000", Mode::TRANSCEIVE, false).unwrap();
+    links.update_topology("2000", b"L T3000").unwrap();
+    links.retain_topology_blocked("3000", Mode::TRANSCEIVE);
+    assert_eq!(
+        direct_status(&links),
+        ("LINK 2000 TRANSCEIVE".into(), "2000".into())
+    );
+}
+
+#[test]
 fn scheduled_greetings_use_captured_civil_time_and_reject_unknown_clock_format() {
     let template = MessageTemplate::parse("${greeting}").unwrap();
     let links = LinkManager::new("1000").unwrap();
