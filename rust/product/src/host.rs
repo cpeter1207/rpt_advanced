@@ -5,7 +5,7 @@ use crate::{
         session::{Command as PeerCommand, Event, PeerControl, PeerReader, PeerSession},
     },
     media::NativeMediaPreparer,
-    services::{HostServices, PeerIo, Radio},
+    services::{HostServices, PeerIo},
     worker::{Audio, AudioOwners, RadioWorker},
 };
 use rpt_advanced_core::{
@@ -27,30 +27,21 @@ use std::{
 pub const MAXIMUM_FRAMES: usize = 4096;
 
 struct Lease {
-    radio: Option<Radio>,
+    quiesced: bool,
     owners: Option<AudioOwners>,
     worker: Option<RadioWorker>,
     epoch: Instant,
-    failed: bool,
     status: crate::worker::RadioStatus,
 }
 impl Lease {
     fn quiesce(&mut self) -> bool {
         if let Some(worker) = self.worker.take() {
-            match worker.stop() {
-                Ok((radio, owners)) => {
-                    self.radio = Some(radio);
-                    if owners.is_some() {
-                        self.owners = owners;
-                    }
-                }
-                Err(_) => {
-                    self.failed = true;
-                    return false;
-                }
+            self.quiesced = true;
+            if let Some(owners) = worker.stop() {
+                self.owners = Some(owners);
             }
         }
-        !self.failed
+        true
     }
     fn attach(&mut self, owners: AudioOwners) -> bool {
         let Some(worker) = &mut self.worker else {
@@ -79,13 +70,12 @@ impl DeviceHandoff for Device {
     }
     fn close(&mut self) {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-        if lease.quiesce() {
-            lease.radio = None;
-        }
+        lease.quiesce();
+        lease.quiesced = false;
     }
     fn open(&mut self, settings: &GenerationSettings) -> bool {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-        if lease.failed || lease.worker.is_some() || lease.radio.is_some() {
+        if lease.worker.is_some() || lease.quiesced {
             return false;
         }
         let radio = self.services.radio(
@@ -128,6 +118,7 @@ struct PeerOwner {
     local: String,
     remote: String,
     mode: Mode,
+    announced: bool,
     reader: PeerReader,
     control: PeerControl,
 }
@@ -203,7 +194,7 @@ impl Host {
     fn prune_leases(&mut self) {
         prune_leases(&mut self.leases);
     }
-    /// Prepare all candidate resources, including parked hardware workers, before registration.
+    /// Prepare and activate inactive callback contexts before publishing fixed registrations.
     pub fn start(
         document: ConfigDocument,
         media: NativeMediaPreparer,
@@ -218,11 +209,10 @@ impl Host {
             |name, settings| prepared(name, settings, &[]),
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
-                    radio: None,
+                    quiesced: false,
                     owners: None,
                     worker: None,
                     epoch,
-                    failed: false,
                     status: Default::default(),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
@@ -245,7 +235,7 @@ impl Host {
     fn attach_workers(&mut self) {
         // New leases precede retained same-name leases in reverse order. Registering
         // takes the unique owners once, so an older lease cannot attach them again.
-        // A successfully prepared parked worker owns a live receiver until this send.
+        // Inactive prepared contexts accept their fixed registrations without failure.
         for (local, lease) in self.leases.iter().rev() {
             if let Some(owners) = self
                 .runtime
@@ -275,10 +265,6 @@ impl Host {
         document: ConfigDocument,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        #[cfg(test)]
-        if crate::worker::take_test_failure(crate::worker::TestFailure::Attach) {
-            return Err(RuntimeError::Device);
-        }
         let peers = &self.peers;
         let leases = &mut self.leases;
         let epoch = self.epoch;
@@ -289,11 +275,10 @@ impl Host {
             |name, settings| prepared(name, settings, peers),
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
-                    radio: None,
+                    quiesced: false,
                     owners: None,
                     worker: None,
                     epoch,
-                    failed: false,
                     status: Default::default(),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
@@ -355,12 +340,23 @@ impl Host {
             local: local.into(),
             remote: remote.into(),
             mode,
+            announced: false,
             reader,
             control,
         });
         if let Err(error) = self.refresh(local, clock) {
             self.detach(local, remote, clock.now_ms);
             return Err(error);
+        }
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.local == local && peer.remote == remote)
+        {
+            peer.announced = true;
+            let _ = self
+                .runtime
+                .queue_link_event(local, remote, true, &self.media);
         }
         Ok(())
     }
@@ -380,19 +376,28 @@ impl Host {
         Err(RuntimeError::Busy)
     }
     fn detach(&mut self, local: &str, remote: &str, now_ms: u64) {
-        if let Some(index) = self
+        let announced = if let Some(index) = self
             .peers
             .iter()
             .position(|peer| peer.local == local && peer.remote == remote)
         {
             let peer = self.peers.remove(index);
+            let announced = peer.announced;
             peer.control.stop();
             peer.reader.join();
-        }
+            announced
+        } else {
+            false
+        };
         if let Some(node) = self.runtime.node(local) {
             node.links().ended(remote);
         }
         self.runtime.peer_detached(local, remote, now_ms);
+        if announced {
+            let _ = self
+                .runtime
+                .queue_link_event(local, remote, false, &self.media);
+        }
     }
     pub(crate) fn reject_peer(&mut self, local: &str, remote: &str, now_ms: u64) {
         self.detach(local, remote, now_ms);

@@ -146,6 +146,10 @@ unsafe extern "C" fn directory_lookup(
         0
     })
 }
+struct ReservedRadio {
+    radio: Option<Radio>,
+    name: CString,
+}
 unsafe extern "C" fn radio_open(
     _context: *mut c_void,
     name: *const c_char,
@@ -162,57 +166,61 @@ unsafe extern "C" fn radio_open(
         else {
             return -1;
         };
-        let radio = Connection::open(&name)
-            .and_then(|connection| connection.into_radio(maximum))
-            .and_then(|mut radio| {
-                radio.start(&name)?;
-                Ok(radio)
-            });
+        let radio = Connection::open(&name).and_then(|connection| connection.into_radio(maximum));
         match radio {
             Ok(radio) => {
-                *output = Box::into_raw(Box::new(radio)).cast();
+                *output = Box::into_raw(Box::new(ReservedRadio {
+                    radio: Some(radio),
+                    name,
+                }))
+                .cast();
                 0
             }
             Err(_) => -1,
         }
     })
 }
-unsafe extern "C" fn radio_ready(_context: *mut c_void, radio: *mut c_void) -> i32 {
-    boundary(-1, || {
-        let Some(radio) = (unsafe { radio.cast::<Radio>().as_mut() }) else {
-            return -1;
-        };
-        radio.ready().map_or(-1, i32::from)
-    })
-}
-unsafe extern "C" fn radio_exchange(
+unsafe extern "C" fn radio_activate(
     _context: *mut c_void,
     radio: *mut c_void,
-    _now_ms: u64,
-    render: ffi::rptadv_radio_render_v1,
-    render_context: *mut c_void,
+    receive: ffi::rptadv_radio_receive_v2,
+    receive_context: *mut c_void,
+    transmit: ffi::rptadv_radio_transmit_v2,
+    transmit_context: *mut c_void,
 ) -> i32 {
     boundary(-1, || {
-        let (Some(radio), Some(render)) = (unsafe { radio.cast::<Radio>().as_mut() }, render)
-        else {
+        let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
             return -1;
         };
-        radio
-            .exchange(|receiving, samples| unsafe {
-                render(
-                    render_context,
-                    u32::from(receiving),
-                    samples.as_mut_ptr(),
-                    samples.len(),
-                ) != 0
-            })
-            .map_or(-1, |()| 0)
+        let Some(radio) = reserved.radio.as_mut() else {
+            return -1;
+        };
+        let mut direct = ffi::urp_ast_direct_callbacks {
+            struct_size: size_of::<ffi::urp_ast_direct_callbacks>() as u32,
+            abi_version: ffi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
+            receive_context,
+            receive,
+            transmit_context,
+            transmit,
+            accepted_abi_version: 0,
+        };
+        if receive.is_some()
+            && transmit.is_some()
+            && unsafe { radio.attach_direct(&mut direct) }.is_ok()
+            && radio.start(&reserved.name).is_ok()
+        {
+            return 0;
+        }
+        // A failed option/start may already have copied callbacks. Hangup must quiesce
+        // those callbacks before returning failure to their owner.
+        drop(reserved.radio.take());
+        -1
     })
 }
 unsafe extern "C" fn radio_destroy(_context: *mut c_void, radio: *mut c_void) {
     boundary((), || {
         if !radio.is_null() {
-            unsafe { drop(Box::from_raw(radio.cast::<Radio>())) };
+            unsafe { drop(Box::from_raw(radio.cast::<ReservedRadio>())) };
         }
     });
 }
@@ -350,14 +358,14 @@ unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     });
 }
 
-struct Services(ffi::rptadv_host_services_v1);
+struct Services(ffi::rptadv_host_services_v2);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v1 {
-    struct_size: size_of::<ffi::rptadv_host_services_v1>() as u32,
-    abi_version: 1,
-    capability: *b"rptadv.host\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v2 {
+    struct_size: size_of::<ffi::rptadv_host_services_v2>() as u32,
+    abi_version: 2,
+    capability: *b"rptadv.hst2\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -365,8 +373,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v1 {
     reaper_release: Some(ffi::ast_unreplace_sigchld),
     directory_lookup: Some(directory_lookup),
     radio_open: Some(radio_open),
-    radio_ready: Some(radio_ready),
-    radio_exchange: Some(radio_exchange),
+    radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
     peer_dial: Some(peer_dial),
     peer_rate: Some(peer_rate),
@@ -379,7 +386,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v1 {
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v1 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v2 {
     &SERVICES.0
 }
 

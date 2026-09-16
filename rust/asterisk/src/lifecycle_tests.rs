@@ -18,7 +18,7 @@ pub(crate) fn incoming_result(result: i32) {
 static DIGITS: Mutex<String> = Mutex::new(String::new());
 
 unsafe extern "C" fn start(
-    _: *const ffi::rptadv_host_services_v1,
+    _: *const ffi::rptadv_host_services_v2,
     _: *const ffi::rptadv_control_descriptor_v1,
     _: *const ffi::rptadv_file_descriptor,
     _: *const ffi::rptadv_speech_descriptor,
@@ -151,8 +151,8 @@ unsafe extern "C" fn digit(
 
 static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<ffi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 1,
-    capability: *b"rptadv.product\0\0",
+    abi_version: 2,
+    capability: *b"rptadv.prod2\0\0\0\0",
     start: Some(start),
     reload: Some(reload),
     stop: Some(stop),

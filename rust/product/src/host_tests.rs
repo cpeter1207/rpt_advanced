@@ -7,7 +7,7 @@ use rpt_advanced_core::{
     command::{Command, LinkAction},
     runtime::dtmf::DigitEvent,
 };
-use std::{ffi::c_void, path::Path, time::Duration};
+use std::{ffi::c_void, path::Path, ptr, time::Duration};
 
 #[link(name = "rptadv_file_adapter")]
 unsafe extern "C" {
@@ -18,10 +18,6 @@ unsafe extern "C" {
     fn rptadv_speech_adapter_descriptor() -> *const crate::media::SpeechDescriptor;
 }
 unsafe extern "C" fn reaper() {}
-unsafe extern "C" fn radio_ready(_: *mut c_void, _: *mut c_void) -> i32 {
-    std::thread::sleep(Duration::from_millis(1));
-    1
-}
 fn media() -> NativeMediaPreparer {
     unsafe {
         NativeMediaPreparer::from_descriptors(
@@ -37,9 +33,9 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v1 =
+    let mut table: abi::rptadv_host_services_v2 =
         unsafe { crate::fixture::host_descriptor().read() };
-    table.radio_ready = Some(radio_ready);
+    table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
 }
 fn clock() -> RuntimeClock {
@@ -121,6 +117,61 @@ fn attach(
             .all(|peer| !peer.control.snapshot().unwrap().ended)
     });
     state
+}
+
+fn render_queued_telemetry(host: &mut Host, owners: &mut AudioOwners) -> bool {
+    let mut heard = false;
+    for block in 0..1024_u64 {
+        let mut audio = [0.0; 960];
+        owners
+            .0
+            .acquire()
+            .unwrap()
+            .state()
+            .process(false, &mut audio, block * 20);
+        let mut generation = owners.1.acquire().unwrap();
+        let transmit = generation.state();
+        let keyed = transmit
+            .adapter
+            .process(&mut transmit.controller, false, &mut audio)
+            .unwrap();
+        drop(generation);
+        heard |= audio.iter().any(|sample| *sample != 0.0);
+        host.pump(clock()).unwrap();
+        if heard && !keyed {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn peer_attach_and_detach_queue_lifecycle_telemetry() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+
+    attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    assert!(render_queued_telemetry(&mut host, &mut owners));
+
+    let effect = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::Disconnect, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    host.immediate("1000", effect, clock()).unwrap();
+    assert!(render_queued_telemetry(&mut host, &mut owners));
+
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(30));
 }
 
 #[test]
@@ -575,11 +626,10 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     assert!(second.stop(10));
 
     let lease = Arc::new(Mutex::new(Lease {
-        radio: None,
+        quiesced: false,
         owners: None,
         worker: None,
         epoch: Instant::now(),
-        failed: false,
         status: Default::default(),
     }));
     let mut device = Device {
@@ -597,11 +647,8 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     assert!(device.quiesce());
     assert!(lease.lock().unwrap().owners.is_none());
     device.close();
-    let radio = services().radio("usb", MAXIMUM_FRAMES).unwrap();
-    lease.lock().unwrap().worker = Some(RadioWorker::terminated_for_test(radio));
-    assert!(!device.quiesce());
+    assert!(device.open(&settings));
     device.close();
-    assert!(!device.open(&settings));
 }
 
 #[test]
@@ -672,7 +719,7 @@ fn failed_audio_preparation_and_attachment_preserve_start_and_reload_state() {
     let old_document = host.runtime.document().clone();
     let revision = host.runtime.revision();
     let lease = Arc::clone(&host.leases[0].1);
-    RadioWorker::fail_next_for_test(crate::worker::TestFailure::Attach);
+    crate::fixture::RADIO_ACTIVATE_RESULT.store(1, std::sync::atomic::Ordering::Release);
     assert!(matches!(
         host.reload(
             document("usb", "[2000]\nradio_channel=usb2\nduplex=full\n"),
@@ -724,7 +771,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
         .unwrap_or_else(|error| error.into_inner());
     FAIL.store(false, Ordering::Release);
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
-    table.radio_ready = Some(radio_ready);
+    table.context = ptr::without_provenance_mut(1);
     table.radio_open = Some(open);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let mut host = Host::start(

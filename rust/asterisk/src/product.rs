@@ -20,12 +20,12 @@ impl Product {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
                 != size_of::<ffi::rptadv_product_descriptor_v1>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 1
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 2
         {
             return None;
         }
         let descriptor = unsafe { &*pointer };
-        (descriptor.capability == *b"rptadv.product\0\0"
+        (descriptor.capability == *b"rptadv.prod2\0\0\0\0"
             && descriptor.start.is_some()
             && descriptor.reload.is_some()
             && descriptor.stop.is_some()
@@ -43,7 +43,7 @@ impl Product {
     /// remains loaded until a successful product stop.
     pub unsafe fn start(
         &self,
-        host: *const ffi::rptadv_host_services_v1,
+        host: *const ffi::rptadv_host_services_v2,
         control: *const ffi::rptadv_control_descriptor_v1,
         file: *const ffi::rptadv_file_descriptor,
         speech: *const ffi::rptadv_speech_descriptor,

@@ -147,7 +147,11 @@ unsafe extern "C" fn radio_open(
         return -1;
     }
     RADIO_OPENS.fetch_add(1, Ordering::Relaxed);
-    *output = Box::into_raw(Box::new(0_u8)).cast();
+    *output = Box::into_raw(Box::new(FakeRadio {
+        stop: Default::default(),
+        thread: None,
+    }))
+    .cast();
     0
 }
 unsafe extern "C" fn peer_ready(_: *mut c_void, _: *mut c_void) -> i32 {
@@ -159,26 +163,57 @@ unsafe extern "C" fn peer_ready(_: *mut c_void, _: *mut c_void) -> i32 {
             .is_empty(),
     )
 }
-unsafe extern "C" fn radio_ready(_: *mut c_void, _: *mut c_void) -> i32 {
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    RADIO_READY.load(Ordering::Acquire) as i32
+struct FakeRadio {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
-unsafe extern "C" fn exchange(
-    _: *mut c_void,
-    _: *mut c_void,
-    _: u64,
-    render: crate::abi::rptadv_radio_render_v1,
-    context: *mut c_void,
+pub static RADIO_ACTIVATE_RESULT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+unsafe extern "C" fn radio_activate(
+    host_context: *mut c_void,
+    handle: *mut c_void,
+    receive: crate::abi::rptadv_radio_receive_v2,
+    receive_context: *mut c_void,
+    transmit: crate::abi::rptadv_radio_transmit_v2,
+    transmit_context: *mut c_void,
 ) -> i32 {
-    let mut samples = [0.0_f32; 8];
-    if let Some(render) = render {
-        unsafe { render(context, 0, samples.as_mut_ptr(), samples.len()) };
+    if RADIO_ACTIVATE_RESULT.swap(0, Ordering::AcqRel) != 0 {
+        return -1;
     }
+    let (Some(receive), Some(transmit)) = (receive, transmit) else {
+        return -1;
+    };
+    let radio = unsafe { &mut *handle.cast::<FakeRadio>() };
+    let stop = radio.stop.clone();
+    let contexts = (receive_context as usize, transmit_context as usize);
+    let always = !host_context.is_null();
+    radio.thread = Some(std::thread::spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            if always || RADIO_READY.load(Ordering::Acquire) != 0 {
+                let mut samples = [0.0; 8];
+                let mut keyed = 0;
+                unsafe {
+                    receive(contexts.0 as *mut c_void, 0, samples.as_mut_ptr(), 8);
+                    transmit(
+                        contexts.1 as *mut c_void,
+                        samples.as_mut_ptr(),
+                        8,
+                        &mut keyed,
+                    );
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }));
     0
 }
 unsafe extern "C" fn radio_destroy(_: *mut c_void, handle: *mut c_void) {
     if !handle.is_null() {
-        unsafe { drop(Box::from_raw(handle.cast::<u8>())) };
+        let mut radio = unsafe { Box::from_raw(handle.cast::<FakeRadio>()) };
+        radio.stop.store(true, Ordering::Release);
+        if let Some(thread) = radio.thread.take() {
+            thread.join().unwrap();
+        }
         RADIO_DROPS.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -249,10 +284,10 @@ unsafe extern "C" fn peer_destroy(_: *mut c_void, handle: *mut c_void) {
     }
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v1 = crate::abi::rptadv_host_services_v1 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v1>() as u32,
-    abi_version: 1,
-    capability: *b"rptadv.host\0",
+static mut HOST: crate::abi::rptadv_host_services_v2 = crate::abi::rptadv_host_services_v2 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v2>() as u32,
+    abi_version: 2,
+    capability: *b"rptadv.hst2\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -260,8 +295,7 @@ static mut HOST: crate::abi::rptadv_host_services_v1 = crate::abi::rptadv_host_s
     reaper_release: Some(reaper),
     directory_lookup: Some(lookup),
     radio_open: Some(radio_open),
-    radio_ready: Some(radio_ready),
-    radio_exchange: Some(exchange),
+    radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
     peer_dial: Some(peer_dial),
     peer_rate: Some(peer_rate),
@@ -273,7 +307,7 @@ static mut HOST: crate::abi::rptadv_host_services_v1 = crate::abi::rptadv_host_s
     peer_destroy: Some(peer_destroy),
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v1 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v2 {
     &raw const HOST
 }
 

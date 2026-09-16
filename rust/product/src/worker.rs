@@ -1,13 +1,21 @@
-//! Fixed radio callback ownership and control-only worker start/stop.
+//! Fixed direct radio callbacks and control-only reservation lifetime.
 use crate::{Error, link::ring::InboundConsumer, services::Radio};
-use rpt_advanced_core::{link::LinkAudio, runtime::RuntimeAudioOwners};
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, SyncSender},
+use rpt_advanced_core::{
+    audio::{LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue},
+    link::LinkAudio,
+    runtime::{
+        OwnedReceiveOwner, OwnedTransmitOwner, RuntimeAudioOwners, RuntimeTransmit,
+        dtmf::DtmfWorker,
     },
-    thread::JoinHandle,
+};
+use std::{
+    cell::UnsafeCell,
+    ffi::c_void,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -15,17 +23,17 @@ use std::{
 thread_local! {
     static NEXT_FAILURE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
-
-/// One test-only radio-worker failure injection point shared by product lifecycle tests.
+/// Test-only lifecycle failure.
 #[cfg(test)]
 #[derive(Clone, Copy)]
 pub(crate) enum TestFailure {
-    /// Fail candidate worker thread creation without consuming the reserved radio.
+    /// Fail preparation while preserving the reservation.
     Prepare = 1,
-    /// Reject one candidate audio-owner attachment before runtime publication.
-    Attach = 2,
+    /// Inject a receive-processing panic for boundary coverage.
+    ReceivePanic = 2,
+    /// Inject a transmit-processing panic for boundary coverage.
+    TransmitPanic = 3,
 }
-
 #[cfg(test)]
 pub(crate) fn take_test_failure(failure: TestFailure) -> bool {
     NEXT_FAILURE.with(|next| {
@@ -37,17 +45,18 @@ pub(crate) fn take_test_failure(failure: TestFailure) -> bool {
         }
     })
 }
-
-/// Unique prepared link state consumed by the radio TX half.
+/// Unique generation-owned transmit mixer.
 pub type Audio = LinkAudio<InboundConsumer>;
-/// Fixed RX/TX registrations moved once into a radio worker, never cloned per frame.
+/// Fixed registrations transferred once on control.
 pub type AudioOwners = RuntimeAudioOwners<Audio>;
+type ReceiveOwner = OwnedReceiveOwner<DtmfWorker, RuntimeTransmit<Audio>>;
+type TransmitOwner = OwnedTransmitOwner<DtmfWorker, RuntimeTransmit<Audio>>;
 
-/// Stable control-readable local carrier edge; one packed atomic keeps state and time coherent.
+/// Control-readable carrier edge with coherent monotonic transition time.
 #[derive(Clone, Default)]
 pub struct RadioStatus(Arc<AtomicU64>);
 impl RadioStatus {
-    /// Current hardware receive state and its original monotonic transition time.
+    /// Current receive state and original transition time.
     pub fn snapshot(&self) -> (bool, u64) {
         let value = self.0.load(Ordering::Acquire);
         (value & 1 != 0, value >> 1)
@@ -61,164 +70,280 @@ impl RadioStatus {
         }
     }
 }
+struct ReceiveState {
+    producer: LinkAudioProducer,
+    elapsed_samples: u64,
+}
+struct ReceiveContext {
+    active: Arc<AtomicBool>,
+    owner: UnsafeCell<Option<ReceiveOwner>>,
+    state: UnsafeCell<ReceiveState>,
+    maximum: usize,
+    origin_ms: u64,
+    status: RadioStatus,
+}
+struct TransmitContext {
+    active: Arc<AtomicBool>,
+    owner: UnsafeCell<Option<TransmitOwner>>,
+    consumer: UnsafeCell<LinkAudioConsumer>,
+    maximum: usize,
+    status: RadioStatus,
+}
+// SAFETY: callbacks are serialized independently by the host. Control writes owner slots
+// only before release-publishing active, and takes them only after synchronous radio destroy.
+unsafe impl Send for ReceiveContext {}
+// SAFETY: shared fields are immutable or atomic. Control initializes the owner cell
+// only while inactive, then release-publishes it. The host serializes RX accesses
+// to the owner/state cells and synchronously stops RX before control reclaims them.
+unsafe impl Sync for ReceiveContext {}
+// SAFETY: the transmit endpoint has the same single-callback/control publication contract.
+unsafe impl Send for TransmitContext {}
+// SAFETY: shared fields are immutable or atomic; the acquire/release activation
+// handshake publishes the owner cell once. One serial TX callback owns its mutable
+// cells until synchronous radio destroy makes control reclamation exclusive again.
+unsafe impl Sync for TransmitContext {}
 
-/// Process one shared-clock pair without allocation, locking, logging, or reference counting.
-pub fn render(owners: &mut AudioOwners, receiving: bool, samples: &mut [f32], now_ms: u64) -> bool {
-    let Some(mut generation) = owners.0.acquire_pair(&mut owners.1) else {
-        samples.fill(0.0);
-        return false;
+unsafe fn samples<'a>(pointer: *mut f32, count: u32) -> Option<&'a mut [f32]> {
+    if pointer.is_null() || count == 0 {
+        return None;
+    }
+    // SAFETY: the host supplies aligned writable storage for the complete declared count.
+    Some(unsafe { std::slice::from_raw_parts_mut(pointer, count as usize) })
+}
+unsafe extern "C" fn receive_callback(
+    context: *mut c_void,
+    receiving: u32,
+    pointer: *mut f32,
+    count: u32,
+) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        receive(context, receiving, pointer, count)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            // SAFETY: the same host-owned buffer remains borrowed until callback return.
+            if let Some(samples) = unsafe { samples(pointer, count) } {
+                samples.fill(0.0);
+            }
+            -1
+        }
+    }
+}
+unsafe fn receive(context: *mut c_void, receiving: u32, pointer: *mut f32, count: u32) -> i32 {
+    let Some(samples) = (unsafe { samples(pointer, count) }) else {
+        return -1;
     };
-    generation.receive().process(receiving, samples, now_ms);
-    let transmit = generation.transmit();
+    // SAFETY: the host retains this context until synchronous destroy returns.
+    let Some(context) = (unsafe { context.cast::<ReceiveContext>().as_ref() }) else {
+        samples.fill(0.0);
+        return -1;
+    };
+    if samples.len() > context.maximum {
+        samples.fill(0.0);
+        return -1;
+    }
+    if !context.active.load(Ordering::Acquire) {
+        samples.fill(0.0);
+        // SAFETY: only the serial receive callback accesses its elapsed sample counter.
+        let elapsed = unsafe { &*context.state.get() }.elapsed_samples;
+        context
+            .status
+            .update(false, context.origin_ms.saturating_add(elapsed / 48));
+        return 0;
+    }
+    // SAFETY: only this serial receive endpoint accesses these cells while active.
+    let (owner, state) = unsafe { (&mut *context.owner.get(), &mut *context.state.get()) };
+    state.elapsed_samples = state.elapsed_samples.saturating_add(u64::from(count));
+    let now_ms = context.origin_ms.saturating_add(state.elapsed_samples / 48);
+    context.status.update(receiving != 0, now_ms);
+    let Some(mut generation) = owner.as_mut().and_then(ReceiveOwner::acquire) else {
+        samples.fill(0.0);
+        return 0;
+    };
+    #[cfg(test)]
+    if take_test_failure(TestFailure::ReceivePanic) {
+        panic!("injected receive processing panic");
+    }
+    generation.state().process(receiving != 0, samples, now_ms);
+    state.producer.write(samples);
+    0
+}
+unsafe extern "C" fn transmit_callback(
+    context: *mut c_void,
+    pointer: *mut f32,
+    count: u32,
+    keyed: *mut u32,
+) -> i32 {
+    // SAFETY: the host supplies writable key storage for this call.
+    if !keyed.is_null() {
+        unsafe {
+            keyed.write(0);
+        }
+    }
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        transmit(context, pointer, count, keyed)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            // SAFETY: the borrowed host buffer remains valid through this return.
+            if let Some(samples) = unsafe { samples(pointer, count) } {
+                samples.fill(0.0);
+            }
+            if !keyed.is_null() {
+                unsafe {
+                    keyed.write(0);
+                }
+            }
+            -1
+        }
+    }
+}
+unsafe fn transmit(context: *mut c_void, pointer: *mut f32, count: u32, keyed: *mut u32) -> i32 {
+    let Some(samples) = (unsafe { samples(pointer, count) }) else {
+        return -1;
+    };
+    // SAFETY: the host retains this context until synchronous destroy returns.
+    let Some(context) = (unsafe { context.cast::<TransmitContext>().as_ref() }) else {
+        samples.fill(0.0);
+        return -1;
+    };
+    if keyed.is_null() || samples.len() > context.maximum {
+        samples.fill(0.0);
+        return -1;
+    }
+    if !context.active.load(Ordering::Acquire) {
+        samples.fill(0.0);
+        return 0;
+    }
+    // SAFETY: only this serial transmit endpoint accesses these cells while active.
+    let (owner, consumer) = unsafe { (&mut *context.owner.get(), &mut *context.consumer.get()) };
+    consumer.read(samples);
+    let receiving = context.status.snapshot().0;
+    let Some(mut generation) = owner.as_mut().and_then(TransmitOwner::acquire) else {
+        samples.fill(0.0);
+        return 0;
+    };
+    let transmit = generation.state();
+    #[cfg(test)]
+    if take_test_failure(TestFailure::TransmitPanic) {
+        panic!("injected transmit processing panic");
+    }
     match transmit
         .adapter
         .process(&mut transmit.controller, receiving, samples)
     {
-        Ok(keyed) => keyed,
+        Ok(value) => {
+            // SAFETY: checked non-null writable result, borrowed for this call.
+            unsafe {
+                keyed.write(u32::from(value));
+            }
+            0
+        }
         Err(_) => {
             samples.fill(0.0);
-            false
+            -1
         }
     }
 }
-
-/// Prepared owner thread. It waits for fixed registrations before entering any audio callback.
-/// The lifecycle caller must stop/join it before closing its channel or unloading callback code.
+/// Stable preallocated callback contexts; no product audio OS thread is created.
 pub struct RadioWorker {
-    start: Option<SyncSender<AudioOwners>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<(Radio, Option<AudioOwners>)>>,
+    radio: Option<Radio>,
+    receive: Box<ReceiveContext>,
+    transmit: Box<TransmitContext>,
 }
 impl RadioWorker {
-    /// Allocate/start a parked thread during candidate preparation. Failure returns the exact
-    /// reserved radio; no live callback registration has been consumed yet.
+    /// Attach both inactive endpoints and start the reserved channel transactionally.
+    /// Failed activation synchronously detaches endpoints and returns the reservation.
     pub fn prepare(
-        radio: Radio,
+        mut radio: Radio,
         epoch: Instant,
         status: RadioStatus,
     ) -> Result<Self, (Error, Radio)> {
-        let slot = Arc::new(Mutex::new(Some(radio)));
-        let input = Arc::clone(&slot);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        let (start, receive) = mpsc::sync_channel(1);
-        let spawn = move || {
-            std::thread::Builder::new()
-                .name("rpt-radio".into())
-                .spawn(move || {
-                    // Setup only: the mutex/refcount operations precede the first callback.
-                    let mut radio = input
-                        .lock()
-                        .expect("prepared radio slot is private and cannot be poisoned")
-                        .take()
-                        .expect("unique prepared radio");
-                    drop(input);
-                    let Ok(mut owners) = receive.recv() else {
-                        return (radio, None);
-                    };
-                    while !stopped.load(Ordering::Acquire) {
-                        match radio.ready() {
-                            Ok(false) => continue,
-                            Err(_) => break,
-                            Ok(true) => {}
-                        }
-                        let now_ms = epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-                        if radio
-                            .exchange(now_ms, |receiving, samples| {
-                                status.update(receiving, now_ms);
-                                render(&mut owners, receiving, samples, now_ms)
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    (radio, Some(owners))
-                })
-        };
         #[cfg(test)]
-        let thread = if take_test_failure(TestFailure::Prepare) {
-            Err(std::io::Error::other("injected worker preparation failure"))
-        } else {
-            spawn()
-        };
-        #[cfg(not(test))]
-        let thread = spawn();
-        match thread {
-            Ok(thread) => Ok(Self {
-                start: Some(start),
-                stop,
-                thread: Some(thread),
-            }),
-            Err(_) => Err((
-                Error::Thread,
-                slot.lock()
-                    .expect("unstarted private radio slot cannot be poisoned")
-                    .take()
-                    .expect("unstarted radio"),
-            )),
+        if take_test_failure(TestFailure::Prepare) {
+            return Err((Error::Allocation, radio));
         }
+        let maximum = radio.maximum_frames();
+        let Some(capacity) = maximum.checked_mul(2).filter(|n| *n != 0) else {
+            return Err((Error::InvalidFrame, radio));
+        };
+        let (producer, consumer) = LinkAudioQueue::new(capacity)
+            .expect("nonzero capacity")
+            .into_endpoints();
+        let active = Arc::new(AtomicBool::new(false));
+        let receive = Box::new(ReceiveContext {
+            active: active.clone(),
+            owner: UnsafeCell::new(None),
+            state: UnsafeCell::new(ReceiveState {
+                producer,
+                elapsed_samples: 0,
+            }),
+            maximum,
+            origin_ms: epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            status: status.clone(),
+        });
+        let transmit = Box::new(TransmitContext {
+            active,
+            owner: UnsafeCell::new(None),
+            consumer: UnsafeCell::new(consumer),
+            maximum,
+            status,
+        });
+        // SAFETY: boxes have stable addresses and outlive the activated radio. On failure
+        // the host must detach both endpoints before returning the still-owned reservation.
+        if unsafe {
+            radio.activate(
+                Some(receive_callback),
+                std::ptr::from_ref(&*receive).cast_mut().cast(),
+                Some(transmit_callback),
+                std::ptr::from_ref(&*transmit).cast_mut().cast(),
+            )
+        }
+        .is_err()
+        {
+            return Err((Error::Operation, radio));
+        }
+        Ok(Self {
+            radio: Some(radio),
+            receive,
+            transmit,
+        })
     }
-    /// Inject one shared worker failure at the selected product lifecycle boundary.
+    /// Inject a single preparation/admission failure.
     #[cfg(test)]
     pub(crate) fn fail_next_for_test(failure: TestFailure) {
         NEXT_FAILURE.with(|next| next.set(failure as u8));
     }
-    /// Return a terminated worker that has released its radio so stop/error handling is testable.
-    #[cfg(test)]
-    pub(crate) fn terminated_for_test(radio: Radio) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread = std::thread::spawn(move || -> (Radio, Option<AudioOwners>) {
-            drop(radio);
-            panic!("injected terminated radio worker");
-        });
-        Self {
-            start: None,
-            stop,
-            thread: Some(thread),
-        }
-    }
-    /// Return a worker whose parked receiver has already disappeared for send-failure coverage.
-    #[cfg(test)]
-    pub(crate) fn disconnected_for_test(radio: Radio) -> Self {
-        let (start, receive) = mpsc::sync_channel(1);
-        drop(receive);
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread = std::thread::spawn(move || (radio, None));
-        Self {
-            start: Some(start),
-            stop,
-            thread: Some(thread),
-        }
-    }
-    /// Activate the parked thread after generation publication, transferring fixed owners once.
+    /// Publish the two fixed owners once after runtime publication.
     pub fn attach(&mut self, owners: AudioOwners) -> Result<(), AudioOwners> {
-        let Some(start) = self.start.take() else {
+        if self.receive.active.load(Ordering::Acquire) {
             return Err(owners);
-        };
-        start.send(owners).map_err(|error| error.0)
+        }
+        // SAFETY: inactive callbacks never access either owner slot. Release publication
+        // occurs only after both slots are initialized; no further control writes occur.
+        unsafe {
+            *self.receive.owner.get() = Some(owners.0);
+            *self.transmit.owner.get() = Some(owners.1);
+        }
+        self.receive.active.store(true, Ordering::Release);
+        Ok(())
     }
-    /// Stop and return the exact device and fixed registrations for a controlled handoff.
-    pub fn stop(mut self) -> Result<(Radio, Option<AudioOwners>), Error> {
-        self.stop.store(true, Ordering::Release);
-        self.start = None;
-        self.thread
-            .take()
-            .expect("prepared worker has one join handle")
-            .join()
-            .map_err(|_| Error::Thread)
+    /// Synchronously stop/destroy the channel before reclaiming either fixed owner.
+    pub fn stop(mut self) -> Option<AudioOwners> {
+        drop(self.radio.take());
+        self.receive.active.store(false, Ordering::Release);
+        // SAFETY: synchronous destroy has stopped both callbacks.
+        let receive = unsafe { &mut *self.receive.owner.get() }.take();
+        let transmit = unsafe { &mut *self.transmit.owner.get() }.take();
+        receive.zip(transmit)
     }
 }
 impl Drop for RadioWorker {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.start = None;
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        // Must precede automatic field destruction, including partially activated setup.
+        drop(self.radio.take());
     }
 }
-
 #[cfg(test)]
 #[path = "worker_tests.rs"]
 mod tests;

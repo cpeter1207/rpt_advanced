@@ -631,7 +631,7 @@ unsafe fn incoming_identity(
 /// # Safety
 /// The complete descriptor/code allocations must remain live through successful stop.
 unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v1,
+    host: *const abi::rptadv_host_services_v2,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
@@ -927,8 +927,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 1,
-    capability: *b"rptadv.product\0\0",
+    abi_version: 2,
+    capability: *b"rptadv.prod2\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),

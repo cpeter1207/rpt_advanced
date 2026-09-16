@@ -851,6 +851,46 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .queue_status(&text, audio)
             .map_err(|_| RuntimeError::Rejected)
     }
+    /// Queue one direct-link lifecycle event from every configured node's perspective.
+    ///
+    /// Each node is attempted independently so one unavailable speech provider or full
+    /// telemetry queue cannot suppress the announcement on another node.
+    pub fn queue_link_event(
+        &mut self,
+        first: &str,
+        second: &str,
+        connected: bool,
+        media: &dyn NativeMediaPreparer,
+    ) -> Result<(), RuntimeError> {
+        let verb = if connected {
+            "CONNECTED"
+        } else {
+            "DISCONNECTED"
+        };
+        let relation = if connected { "TO" } else { "FROM" };
+        let mut failure = None;
+        for node in &mut self.nodes {
+            let text = if node.name == first {
+                format!("{second} {verb}")
+            } else if node.name == second {
+                format!("{first} {verb}")
+            } else {
+                format!("{first} {verb} {relation} {second}")
+            };
+            let spoken = render::telemetry_speech(&text, &[first, second]);
+            let queued = prepare::speech(media, &node.status, &spoken).and_then(|audio| {
+                node.control.telemetry.reclaim().for_each(drop);
+                node.control
+                    .telemetry
+                    .queue_status(&text, audio)
+                    .map_err(|_| RuntimeError::Rejected)
+            });
+            if let Err(error) = queued {
+                failure = Some(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
     /// Process one copied local event on the same serialized owner as reload and incoming admission.
     pub fn digit(&mut self, local: &str, event: DigitEvent) -> Option<DigitOperation> {
         self.node(local)?.links.digit(event)

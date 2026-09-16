@@ -11,11 +11,51 @@ extern "C" fn ast_log(_: i32, _: *const c_char, _: i32, _: *const c_char, _: *co
 unsafe extern "C" fn current(_: *mut c_void) -> u32 {
     1
 }
-unsafe extern "C" fn render(_: *mut c_void, _: u32, _: *mut f32, _: usize) -> u32 {
-    1
+unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
+    0
+}
+unsafe extern "C" fn transmit(_: *mut c_void, _: *mut f32, _: u32, _: *mut u32) -> i32 {
+    0
+}
+#[unsafe(no_mangle)]
+unsafe extern "C" fn ast_channel_setoption(
+    _: *mut ffi::ast_channel,
+    option: i32,
+    data: *mut c_void,
+    length: i32,
+    _: i32,
+) -> i32 {
+    assert_eq!(option, 0x52504144);
+    assert_eq!(length as usize, size_of::<ffi::urp_ast_direct_callbacks>());
+    let descriptor = unsafe { &mut *data.cast::<ffi::urp_ast_direct_callbacks>() };
+    assert!(descriptor.receive.is_some() && descriptor.transmit.is_some());
+    assert_eq!(descriptor.abi_version, 2);
+    assert_eq!(descriptor.accepted_abi_version, 0);
+    if host(|state| state.failure != 31) {
+        descriptor.accepted_abi_version = 2;
+    }
+    0
 }
 unsafe extern "C" fn event(context: *mut c_void, kind: u32, _: *const c_void, count: usize) {
     unsafe { &mut *context.cast::<Vec<(u32, usize)>>() }.push((kind, count));
+}
+
+#[test]
+fn radio_activation_rejects_success_without_acknowledgment_before_call() {
+    reset();
+    let null = ptr::null_mut();
+    unsafe {
+        let mut radio = null;
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+        host(|state| state.failure = 31);
+        let result = radio_activate(null, radio, Some(receive), null, Some(transmit), null);
+        radio_destroy(null, radio);
+        assert_eq!(result, -1);
+    }
+    host(|state| {
+        assert_eq!(state.calls, 0);
+        state.clean();
+    });
 }
 
 #[test]
@@ -42,7 +82,7 @@ fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
         command_notice(null, c"100".as_ptr(), 3, 0);
     }
     assert_eq!(boundary(-1, || panic!("callback fault")), -1);
-    assert_eq!(descriptor().abi_version, 1);
+    assert_eq!(descriptor().abi_version, 2);
 }
 
 #[test]
@@ -54,22 +94,30 @@ fn radio_service_validates_handles_and_releases_each_successful_open() {
         let mut radio = ptr::dangling_mut();
         assert_eq!(radio_open(null, ptr::null(), 1, 8, &mut radio), -1);
         assert!(radio.is_null());
-        for failure in [1, 30] {
+        for failure in [1] {
             host(|state| state.failure = failure);
             assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), -1);
             assert!(radio.is_null());
         }
         host(|state| state.failure = 0);
         assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
-        assert_eq!(radio_ready(null, null), -1);
-        assert_eq!(radio_ready(null, radio), 0);
-        assert_eq!(radio_exchange(null, null, 0, Some(render), null), -1);
-        assert_eq!(radio_exchange(null, radio, 0, None, null), -1);
-        host(|state| state.voice(vec![8192; 2], 0));
-        assert_eq!(radio_exchange(null, radio, 0, Some(render), null), 0);
-        assert_eq!(radio_exchange(null, radio, 0, Some(render), null), -1);
+        assert_eq!(
+            radio_activate(null, null, Some(receive), null, Some(transmit), null),
+            -1
+        );
+        assert_eq!(
+            radio_activate(null, radio, Some(receive), null, Some(transmit), null),
+            0
+        );
         radio_destroy(null, radio);
         radio_destroy(null, null);
+        host(|state| state.failure = 30);
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+        assert_eq!(
+            radio_activate(null, radio, Some(receive), null, Some(transmit), null),
+            -1
+        );
+        radio_destroy(null, radio);
     }
     host(|state| state.clean());
 }

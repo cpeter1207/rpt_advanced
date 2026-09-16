@@ -21,14 +21,14 @@ pub enum PeerInput<'a> {
 
 /// Validated process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(&'static abi::rptadv_host_services_v1);
+pub struct HostServices(&'static abi::rptadv_host_services_v2);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
 // SAFETY: the immutable table and context may be copied; object operations remain serialized.
 unsafe impl Sync for HostServices {}
 
-fn complete(api: &abi::rptadv_host_services_v1) -> bool {
+fn complete(api: &abi::rptadv_host_services_v2) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -36,8 +36,7 @@ fn complete(api: &abi::rptadv_host_services_v1) -> bool {
         api.reaper_release.is_some(),
         api.directory_lookup.is_some(),
         api.radio_open.is_some(),
-        api.radio_ready.is_some(),
-        api.radio_exchange.is_some(),
+        api.radio_activate.is_some(),
         api.radio_destroy.is_some(),
         api.peer_dial.is_some(),
         api.peer_rate.is_some(),
@@ -61,16 +60,16 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v1) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v2) -> Result<Self, Error> {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-                < size_of::<abi::rptadv_host_services_v1>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 1
+                < size_of::<abi::rptadv_host_services_v2>() as u32
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 2
         {
             return Err(Error::Admission);
         }
         let api = unsafe { &*pointer };
-        if api.capability != *b"rptadv.host\0" || !complete(api) {
+        if api.capability != *b"rptadv.hst2\0" || !complete(api) {
             return Err(Error::Admission);
         }
         Ok(Self(api))
@@ -163,7 +162,7 @@ impl HostServices {
             .map(str::to_owned)
             .map_err(|_| Error::Operation)
     }
-    /// Open and start one uniquely owned radio channel.
+    /// Reserve one uniquely owned radio channel without starting callbacks.
     pub fn radio(&self, name: &str, maximum_frames: usize) -> Result<Radio, Error> {
         let mut handle = ptr::null_mut();
         let code = unsafe {
@@ -180,6 +179,7 @@ impl HostServices {
         }
         Ok(Radio {
             services: *self,
+            maximum_frames,
             handle: NonNull::new(handle).ok_or(Error::Operation)?,
         })
     }
@@ -234,58 +234,39 @@ impl HostServices {
 /// Unique radio handle operated by one product worker.
 pub struct Radio {
     services: HostServices,
+    maximum_frames: usize,
     handle: NonNull<c_void>,
 }
 // SAFETY: the handle is uniquely owned and never used concurrently.
 unsafe impl Send for Radio {}
 impl Radio {
-    /// Wait for one host audio/control frame.
-    pub fn ready(&mut self) -> Result<bool, Error> {
-        match unsafe {
-            self.services.0.radio_ready.unwrap()(self.services.0.context, self.handle.as_ptr())
-        } {
-            value if value < 0 => Err(Error::Hangup),
-            value => Ok(value != 0),
-        }
+    /// Prepared native callback frame bound.
+    pub fn maximum_frames(&self) -> usize {
+        self.maximum_frames
     }
-    /// Exchange one frame through the canonical product renderer.
-    pub fn exchange<F>(&mut self, now_ms: u64, mut render: F) -> Result<(), Error>
-    where
-        F: FnMut(bool, &mut [f32]) -> bool,
-    {
-        unsafe extern "C" fn callback<F: FnMut(bool, &mut [f32]) -> bool>(
-            context: *mut c_void,
-            receiving: u32,
-            samples: *mut f32,
-            count: usize,
-        ) -> u32 {
-            let samples = if count == 0 {
-                &mut []
-            } else if samples.is_null() {
-                return 0;
-            } else {
-                unsafe { std::slice::from_raw_parts_mut(samples, count) }
-            };
-            match catch_unwind(AssertUnwindSafe(
-                || unsafe { &mut *context.cast::<F>() }(receiving != 0, samples),
-            )) {
-                Ok(keyed) => u32::from(keyed),
-                Err(_) => {
-                    samples.fill(0.0);
-                    0
-                }
-            }
-        }
+    /// Attach both stable endpoints and start the channel.
+    ///
+    /// # Safety
+    /// Contexts and endpoint code remain live until this radio is dropped.
+    /// The host serializes each endpoint and synchronously stops both on destroy.
+    pub unsafe fn activate(
+        &mut self,
+        receive: abi::rptadv_radio_receive_v2,
+        receive_context: *mut c_void,
+        transmit: abi::rptadv_radio_transmit_v2,
+        transmit_context: *mut c_void,
+    ) -> Result<(), Error> {
         let code = unsafe {
-            self.services.0.radio_exchange.unwrap()(
+            self.services.0.radio_activate.unwrap()(
                 self.services.0.context,
                 self.handle.as_ptr(),
-                now_ms,
-                Some(callback::<F>),
-                ptr::from_mut(&mut render).cast(),
+                receive,
+                receive_context,
+                transmit,
+                transmit_context,
             )
         };
-        (code == 0).then_some(()).ok_or(Error::Write)
+        (code == 0).then_some(()).ok_or(Error::Operation)
     }
 }
 impl Drop for Radio {

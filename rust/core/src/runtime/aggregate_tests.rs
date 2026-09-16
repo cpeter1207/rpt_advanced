@@ -1249,6 +1249,57 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
 }
 
 #[test]
+fn link_lifecycle_events_prepare_perspective_aware_speech_for_every_node() {
+    struct Speech(Mutex<Vec<String>>);
+    impl NativeFilePreparer for Speech {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Speech {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            self.0.lock().unwrap().push(request.text.into());
+            PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+
+    let media = Speech(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\nradio_channel=first\n\
+             [2000]\nradio_channel=second\n\
+             [3000]\nradio_channel=third\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+
+    runtime
+        .queue_link_event("1000", "2000", true, &media)
+        .unwrap();
+    runtime
+        .queue_link_event("1000", "2000", false, &media)
+        .unwrap();
+    assert_eq!(
+        *media.0.lock().unwrap(),
+        [
+            "node,2,0,0,0 CONNECTED",
+            "node,1,0,0,0 CONNECTED",
+            "node,1,0,0,0 CONNECTED TO node,2,0,0,0",
+            "node,2,0,0,0 DISCONNECTED",
+            "node,1,0,0,0 DISCONNECTED",
+            "node,1,0,0,0 DISCONNECTED FROM node,2,0,0,0",
+        ]
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct PausingDevice(Arc<AtomicBool>);

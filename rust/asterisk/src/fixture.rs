@@ -77,7 +77,10 @@ unsafe extern "C" fn ast_call(
 ) -> i32 {
     assert_eq!(CStr::from_ptr(destination), c"usb");
     assert_eq!(timeout, 0);
-    host(|s| if s.failure == 30 { -1 } else { 0 })
+    host(|s| {
+        s.calls += 1;
+        if s.failure == 30 { -1 } else { 0 }
+    })
 }
 
 pub struct Pending {
@@ -86,6 +89,7 @@ pub struct Pending {
 }
 
 pub struct State {
+    pub calls: usize,
     pub failure: u8,
     pub native: usize,
     pub missing_linear: bool,
@@ -120,6 +124,7 @@ impl Default for State {
             codec.sample_rate = rates[index];
         }
         Self {
+            calls: 0,
             failure: 0,
             native: 0,
             missing_linear: false,

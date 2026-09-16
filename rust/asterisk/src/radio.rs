@@ -26,6 +26,30 @@ impl Drop for Frame {
 }
 
 impl Radio {
+    /// Attach both direct callbacks before starting the reserved channel.
+    ///
+    /// # Safety
+    /// Endpoint code and contexts must remain valid through synchronous channel hangup.
+    pub unsafe fn attach_direct(
+        &mut self,
+        direct: &mut ffi::urp_ast_direct_callbacks,
+    ) -> Result<(), Error> {
+        // SAFETY: the uniquely owned channel copies this complete descriptor synchronously.
+        let result = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_DIRECT_CALLBACKS as i32,
+                std::ptr::from_mut(direct).cast(),
+                std::mem::size_of_val(direct) as i32,
+                0,
+            )
+        };
+        if result == 0 && direct.accepted_abi_version == direct.abi_version {
+            Ok(())
+        } else {
+            Err(Error::Call)
+        }
+    }
     /// Start the already reserved radio only after all candidate media is prepared.
     pub fn start(&mut self, destination: &CStr) -> Result<(), Error> {
         if unsafe {

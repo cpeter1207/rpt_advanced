@@ -9,9 +9,35 @@ static LOCAL_TIME_MODE: AtomicU8 = AtomicU8::new(0);
 static LOOKUP_MODE: AtomicU8 = AtomicU8::new(0);
 static RADIO_OPEN_MODE: AtomicU8 = AtomicU8::new(0);
 static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
-static EXCHANGE_PANIC_CLEARED: AtomicU8 = AtomicU8::new(0);
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v1)) -> HostServices {
+#[test]
+fn obsolete_exchange_host_revision_is_rejected_before_callbacks() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.abi_version = 1;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+}
+
+#[test]
+fn direct_table_requires_both_activation_and_destroy() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    assert!(unsafe { HostServices::open(crate::fixture::host_descriptor()) }.is_ok());
+    table.radio_activate = None;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+    table.radio_activate = unsafe { (*crate::fixture::host_descriptor()).radio_activate };
+    table.radio_destroy = None;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+}
+
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v2)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -112,10 +138,15 @@ unsafe extern "C" fn radio_open_mode(
             *output = ptr::null_mut();
             0
         }
-        _ => {
-            *output = Box::into_raw(Box::new(0_u8)).cast();
-            0
-        }
+        _ => unsafe {
+            (*crate::fixture::host_descriptor()).radio_open.unwrap()(
+                ptr::null_mut(),
+                c"usb".as_ptr(),
+                3,
+                8,
+                output,
+            )
+        },
     }
 }
 
@@ -151,58 +182,6 @@ unsafe extern "C" fn ready_true(_: *mut c_void, _: *mut c_void) -> i32 {
 }
 
 unsafe extern "C" fn ready_hangup(_: *mut c_void, _: *mut c_void) -> i32 {
-    -1
-}
-
-unsafe extern "C" fn exchange_empty(
-    _: *mut c_void,
-    _: *mut c_void,
-    _: u64,
-    render: abi::rptadv_radio_render_v1,
-    context: *mut c_void,
-) -> i32 {
-    if let Some(render) = render {
-        unsafe { render(context, 1, ptr::null_mut(), 0) };
-    }
-    0
-}
-
-unsafe extern "C" fn exchange_null(
-    _: *mut c_void,
-    _: *mut c_void,
-    _: u64,
-    render: abi::rptadv_radio_render_v1,
-    context: *mut c_void,
-) -> i32 {
-    if let Some(render) = render {
-        unsafe { render(context, 1, ptr::null_mut(), 1) };
-    }
-    0
-}
-
-unsafe extern "C" fn exchange_panic(
-    _: *mut c_void,
-    _: *mut c_void,
-    _: u64,
-    render: abi::rptadv_radio_render_v1,
-    context: *mut c_void,
-) -> i32 {
-    let Some(render) = render else {
-        return -1;
-    };
-    let mut samples = [0.5_f32];
-    let keyed = unsafe { render(context, 0, samples.as_mut_ptr(), samples.len()) };
-    EXCHANGE_PANIC_CLEARED.store(u8::from(keyed == 0 && samples == [0.0]), Ordering::Relaxed);
-    0
-}
-
-unsafe extern "C" fn exchange_failure(
-    _: *mut c_void,
-    _: *mut c_void,
-    _: u64,
-    _: abi::rptadv_radio_render_v1,
-    _: *mut c_void,
-) -> i32 {
     -1
 }
 
@@ -272,19 +251,19 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v1>() as u32;
-    table.abi_version = 2;
+    table.struct_size = size_of::<abi::rptadv_host_services_v2>() as u32;
+    table.abi_version = 1;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 1;
+    table.abi_version = 2;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.host\0";
+    table.capability = *b"rptadv.hst2\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -366,9 +345,7 @@ fn radio_and_peer_callbacks_contain_client_panics_and_release_once() {
     crate::fixture::RADIO_DROPS.store(0, Ordering::Relaxed);
     crate::fixture::PEER_DROPS.store(0, Ordering::Relaxed);
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
-    let mut radio = services.radio("usb", 8).unwrap();
-    assert!(!radio.ready().unwrap());
-    radio.exchange(0, |_, _| panic!("render")).unwrap();
+    let radio = services.radio("usb", 8).unwrap();
     drop(radio);
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), 1);
 
@@ -386,59 +363,6 @@ fn radio_and_peer_callbacks_contain_client_panics_and_release_once() {
     peer.write(&[0.25]).unwrap();
     drop(peer);
     assert_eq!(crate::fixture::PEER_DROPS.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn radio_callbacks_handle_every_host_frame_shape_and_failure() {
-    let _serial = crate::fixture::LIFECYCLE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-
-    let services = host_services(|table| table.radio_ready = Some(ready_true));
-    let mut radio = services.radio("usb", 8).unwrap();
-    assert!(radio.ready().unwrap());
-    drop(radio);
-
-    let services = host_services(|table| table.radio_ready = Some(ready_hangup));
-    let mut radio = services.radio("usb", 8).unwrap();
-    assert_eq!(radio.ready(), Err(Error::Hangup));
-    drop(radio);
-
-    let services = host_services(|table| table.radio_exchange = Some(exchange_empty));
-    let mut radio = services.radio("usb", 8).unwrap();
-    radio
-        .exchange(1, |receiving, samples| {
-            assert!(receiving);
-            assert!(samples.is_empty());
-            true
-        })
-        .unwrap();
-    drop(radio);
-
-    let services = host_services(|table| table.radio_exchange = Some(exchange_null));
-    let mut radio = services.radio("usb", 8).unwrap();
-    let mut called = false;
-    radio
-        .exchange(1, |_, _| {
-            called = true;
-            true
-        })
-        .unwrap();
-    assert!(!called);
-    drop(radio);
-
-    EXCHANGE_PANIC_CLEARED.store(0, Ordering::Relaxed);
-    let services = host_services(|table| table.radio_exchange = Some(exchange_panic));
-    let mut radio = services.radio("usb", 8).unwrap();
-    radio
-        .exchange(1, |_, _| panic!("test render panic"))
-        .unwrap();
-    assert_eq!(EXCHANGE_PANIC_CLEARED.load(Ordering::Relaxed), 1);
-    drop(radio);
-
-    let services = host_services(|table| table.radio_exchange = Some(exchange_failure));
-    let mut radio = services.radio("usb", 8).unwrap();
-    assert_eq!(radio.exchange(1, |_, _| true), Err(Error::Write));
 }
 
 #[test]
