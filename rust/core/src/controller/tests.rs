@@ -313,68 +313,6 @@ fn mix_minus_queues_other_forwarding_peers_but_not_the_destination_itself() {
 }
 
 #[test]
-fn linked_audio_is_not_reflected_to_its_source_by_local_receiver_loopback() {
-    use crate::link::LinkAudio;
-
-    let (peer, mut outbound) = test_audio_peer("200", crate::link::Mode::TRANSCEIVE, Some(0.7), 1);
-    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 1).unwrap();
-    let (mut node, _) = NodeController::new(
-        ControllerSettings {
-            full_duplex: true,
-            ..ControllerSettings::default()
-        },
-        vec![],
-        vec![],
-        CourtesySettings::default(),
-    )
-    .unwrap();
-
-    // The local capture is the linked transmission re-entering the receiver.
-    let mut local = [0.7];
-    links.process(&mut node, true, &mut [0.7]).unwrap();
-    assert_eq!(links.active_count(), 1);
-    assert_eq!(dispatcher.dispatch(1), 1);
-    links.process(&mut node, true, &mut local).unwrap();
-    assert_eq!(dispatcher.dispatch(1), 1);
-
-    let mut sent = [0.0];
-    assert_eq!(outbound.read(&mut sent), 0);
-    assert_eq!(sent, [0.0]);
-    assert_eq!(local, [0.7]);
-}
-
-#[test]
-fn independent_local_audio_is_not_suppressed_by_peer_loopback_guard() {
-    use crate::link::LinkAudio;
-
-    let (peer, mut outbound) = test_audio_peer("200", crate::link::Mode::TRANSCEIVE, Some(0.7), 1);
-    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 1).unwrap();
-    let (mut node, _) = NodeController::new(
-        ControllerSettings {
-            full_duplex: true,
-            ..ControllerSettings::default()
-        },
-        vec![],
-        vec![],
-        CourtesySettings::default(),
-    )
-    .unwrap();
-
-    let mut local = [0.7];
-    links.process(&mut node, true, &mut local).unwrap();
-    assert_eq!(dispatcher.dispatch(1), 1);
-    let mut sent = [0.0];
-    assert_eq!(outbound.read(&mut sent), 0);
-
-    // A distinct local signal must still reach the linked peer.
-    local = [0.2];
-    links.process(&mut node, true, &mut local).unwrap();
-    assert_eq!(dispatcher.dispatch(1), 1);
-    assert_eq!(outbound.read(&mut sent), 0);
-    assert!((sent[0] - 0.2).abs() < 0.000001);
-}
-
-#[test]
 fn loopback_pool_never_allocates_or_drops_owned_buffers_on_audio_full() {
     use crate::{
         audio::LinkAudioQueue,

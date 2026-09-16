@@ -86,7 +86,6 @@ pub struct LinkAudio<P: PeerInput> {
     peers: Vec<AudioPeer<P>>,
     local: Vec<f32>,
     mix: Vec<f32>,
-    remote: Vec<f32>,
     program: Vec<f32>,
     status: LinkAudioStatus,
     destinations: Vec<usize>,
@@ -188,7 +187,6 @@ impl<P: PeerInput> LinkAudio<P> {
                 peers,
                 local: vec![0.0; maximum],
                 mix: vec![0.0; maximum],
-                remote: vec![0.0; maximum],
                 program: vec![0.0; maximum],
                 status,
                 destinations,
@@ -219,7 +217,6 @@ impl<P: PeerInput> LinkAudio<P> {
         }
         self.local[..count].copy_from_slice(audio);
         self.mix[..count].fill(0.0);
-        self.remote[..count].fill(0.0);
         for (index, peer) in self.peers.iter_mut().enumerate() {
             let signal = peer.input.signals();
             let active = peer.receive.should_render(
@@ -239,11 +236,6 @@ impl<P: PeerInput> LinkAudio<P> {
                 for (mixed, input) in self.mix[..count].iter_mut().zip(&peer.audio) {
                     *mixed += input;
                 }
-                if peer.mode.transmits() {
-                    for (mixed, input) in self.remote[..count].iter_mut().zip(&peer.audio) {
-                        *mixed += input;
-                    }
-                }
             } else if peer.active {
                 let mut storage = [0; 64];
                 let signal = peer.input.signals();
@@ -259,27 +251,10 @@ impl<P: PeerInput> LinkAudio<P> {
             peer.active = active;
             peer.input.signals().set_active(active);
         }
-        let linked = self.active_count() != 0;
-        let remote_transmitting = self
-            .peers
-            .iter()
-            .any(|peer| peer.active && peer.mode.transmits());
-        // A full-duplex CM119 can hear a linked transmission through the local
-        // receiver. Do not feed that hardware loopback back to the transmitter
-        // or the peer; linked PCM is already present in `self.mix`.
-        let suppress_local_loopback = receiving
-            && remote_transmitting
-            && self.local[..count]
-                .iter()
-                .zip(&self.remote[..count])
-                .all(|(local, remote)| (local - remote).abs() <= 0.001);
-        if suppress_local_loopback {
-            audio.fill(0.0);
-        }
         let (keyed, program_active) = controller
             .process_audio_with_program(
                 receiving,
-                linked,
+                self.active_count() != 0,
                 &self.mix[..count],
                 audio,
                 &mut self.program[..count],
@@ -294,7 +269,7 @@ impl<P: PeerInput> LinkAudio<P> {
         };
         block.frames = count;
         block.audio[..count].copy_from_slice(&self.program[..count]);
-        if receiving && !suppress_local_loopback {
+        if receiving {
             for (output, local) in block.audio[..count].iter_mut().zip(&self.local) {
                 *output += local;
             }
