@@ -21,6 +21,7 @@ FORBIDDEN_MAKE_TOKENS = (
 )
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
 PRODUCT = "librptadv_product.so.1"
+RING_MINIMUM_VERSION = "2.0.0~alpha2"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
@@ -194,7 +195,7 @@ def staged(
 
 
 def package(control: Path) -> None:
-    """Require the package dependency families without fixing generated versions."""
+    """Require runtime dependencies that provide this product's complete ABI table."""
     contents = control.read_text(encoding="utf-8")
     for token in (
         "Package: rpt-advanced",
@@ -210,6 +211,11 @@ def package(control: Path) -> None:
         "${asterisk:Depends}",
     ):
         assert token in contents, f"missing package dependency: {token}"
+    for token in (
+        f"librate-adjusting-pcm-ring2-dev (>= {RING_MINIMUM_VERSION})",
+        f"librate-adjusting-pcm-ring2 (>= {RING_MINIMUM_VERSION})",
+    ):
+        assert token in contents, f"missing compatible ring provider: {token}"
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 
 

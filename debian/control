@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
  libclang-dev, pkg-config, dh-sequence-asterisk,
- librate-adjusting-pcm-ring2-dev (>= 2.0.0~alpha1),
+ librate-adjusting-pcm-ring2-dev (>= 2.0.0~alpha2),
  librptadv-samplerate-adapter-dev (>= 0.1.0~alpha1), ffmpeg
 Standards-Version: 4.7.2
 Homepage: https://github.com/cpeter1207/rpt_advanced
@@ -13,7 +13,7 @@ Rules-Requires-Root: no
 Package: rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends},
- librate-adjusting-pcm-ring2 (>= 2.0.0~alpha1),
+ librate-adjusting-pcm-ring2 (>= 2.0.0~alpha2),
  librptadv-samplerate-adapter1 (>= 0.1.0~alpha1),
  librptadv-product1 (= ${binary:Version}),
  librptadv-file-adapter1 (= ${binary:Version}),
@@ -28,7 +28,7 @@ Package: librptadv-product1
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
- librate-adjusting-pcm-ring2 (>= 2.0.0~alpha1),
+ librate-adjusting-pcm-ring2 (>= 2.0.0~alpha2),
  librptadv-samplerate-adapter1 (>= 0.1.0~alpha1)
 Description: portable controller product for rpt_advanced
  Versioned Rust C-ABI product that owns configuration, controller policy,
