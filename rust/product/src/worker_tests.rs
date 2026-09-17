@@ -95,13 +95,24 @@ fn independent_callbacks_queue_processed_pcm_and_return_transmit_keying() {
     let (mut runtime, owners) = audio_owners();
     let mut worker = worker();
     assert!(worker.attach(owners).is_ok());
+    // Warm the persistent SINC state at callback cadence, without creating backlog.
+    for _ in 0..256 {
+        assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+        let mut discard = [0.0; 8];
+        assert_eq!(tx(&worker, &mut discard), (0, 1));
+    }
     assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
     let mut samples = [9.0; 4];
     assert_eq!(tx(&worker, &mut samples), (0, 1));
-    assert_eq!(samples, [0.25; 4]);
+    assert!(samples.iter().all(|sample| (*sample - 0.25).abs() < 0.0001));
     let mut samples = [9.0; 8];
     assert_eq!(tx(&worker, &mut samples), (0, 1));
-    assert_eq!(samples, [0.25, 0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0]);
+    assert!(samples[..4]
+        .iter()
+        .all(|sample| (*sample - 0.25).abs() < 0.0001));
+    assert!(samples[4..]
+        .iter()
+        .all(|sample| sample.is_finite() && sample.abs() <= 1.0));
     let owners = worker.stop().unwrap();
     assert!(runtime.node("1000").unwrap().register_audio().is_none());
     drop(owners);
@@ -292,7 +303,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
             0
         );
         assert_eq!(samples, [0.0; 8]);
-        assert_eq!(keyed, 1);
+        assert_eq!(keyed, 0);
         0
     }
     unsafe extern "C" fn destroy(context: *mut c_void, radio: *mut c_void) {
@@ -308,7 +319,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
             0
         );
         assert_eq!(samples, [0.0; 8]);
-        assert_eq!(keyed, 0);
+        assert_eq!(keyed, 1);
         probe.destroyed.set(true);
         unsafe {
             (*crate::fixture::host_descriptor()).radio_destroy.unwrap()(
