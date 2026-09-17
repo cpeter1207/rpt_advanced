@@ -1,6 +1,10 @@
 use super::*;
 use crate::fixture::{host, reset};
 
+const DIRECT_ACK_MISSING: u8 = 41;
+const DIRECT_ACK_WRONG: u8 = 42;
+const DIRECT_OPTION_FAILED: u8 = 43;
+
 #[unsafe(no_mangle)]
 extern "C" fn ast_replace_sigchld() {}
 #[unsafe(no_mangle)]
@@ -27,10 +31,22 @@ unsafe extern "C" fn ast_channel_setoption(
 ) -> i32 {
     assert_eq!(option, 0x52504144);
     assert_eq!(length as usize, size_of::<ffi::urp_ast_direct_callbacks>());
+    // SAFETY: attach_direct supplies exclusive access to this complete live descriptor.
     let descriptor = unsafe { &mut *data.cast::<ffi::urp_ast_direct_callbacks>() };
     assert!(descriptor.receive.is_some() && descriptor.transmit.is_some());
-    assert_eq!(descriptor.abi_version, 1);
-    0
+    assert_eq!(descriptor.abi_version, 2);
+    assert_eq!(descriptor.accepted_abi_version, 0);
+    let failure = host(|state| state.failure);
+    descriptor.accepted_abi_version = match failure {
+        DIRECT_ACK_MISSING => 0,
+        DIRECT_ACK_WRONG => 1,
+        _ => 2,
+    };
+    if failure == DIRECT_OPTION_FAILED {
+        -1
+    } else {
+        0
+    }
 }
 unsafe extern "C" fn event(context: *mut c_void, kind: u32, _: *const c_void, count: usize) {
     unsafe { &mut *context.cast::<Vec<(u32, usize)>>() }.push((kind, count));
@@ -51,6 +67,35 @@ fn radio_activation_accepts_the_installed_direct_callback_abi() {
         assert_eq!(state.calls, 1);
         state.clean();
     });
+}
+
+#[test]
+fn radio_activation_rejects_unacknowledged_direct_callbacks_before_call() {
+    for failure in [DIRECT_ACK_MISSING, DIRECT_ACK_WRONG, DIRECT_OPTION_FAILED] {
+        reset();
+        host(|state| state.failure = failure);
+        let null = ptr::null_mut();
+        // SAFETY: the fixture owns this handle, and callbacks outlive its destroy.
+        unsafe {
+            let mut radio = null;
+            assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+            let result = radio_activate(null, radio, Some(receive), null, Some(transmit), null);
+            let retained_channels = host(|state| state.channels);
+            radio_destroy(null, radio);
+            assert_eq!(
+                result, -1,
+                "direct attachment must be acknowledged: {failure}"
+            );
+            assert_eq!(
+                retained_channels, 0,
+                "failed attachment must hang up before returning"
+            );
+        }
+        host(|state| {
+            assert_eq!(state.calls, 0, "unaccepted callbacks must not start media");
+            state.clean();
+        });
+    }
 }
 
 #[test]
@@ -89,11 +134,9 @@ fn radio_service_validates_handles_and_releases_each_successful_open() {
         let mut radio = ptr::dangling_mut();
         assert_eq!(radio_open(null, ptr::null(), 1, 8, &mut radio), -1);
         assert!(radio.is_null());
-        for failure in [1] {
-            host(|state| state.failure = failure);
-            assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), -1);
-            assert!(radio.is_null());
-        }
+        host(|state| state.failure = 1);
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), -1);
+        assert!(radio.is_null());
         host(|state| state.failure = 0);
         assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
         assert_eq!(

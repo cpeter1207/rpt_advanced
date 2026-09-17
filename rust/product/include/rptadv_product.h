@@ -40,23 +40,27 @@ struct rptadv_local_time_v1 {
 
 /** Serial input endpoint; inactive/gated generations succeed with silence. */
 typedef int (*rptadv_radio_receive_v2)(void *context, uint32_t receiving, float *samples,
-                                      uint32_t sample_count);
+                                       uint32_t sample_count);
 /** Serial output endpoint; inactive/gated generations succeed with silence/unkeyed.
  * Malformed arguments or processing failure return nonzero with silent output. */
 typedef int (*rptadv_radio_transmit_v2)(void *context, float *samples, uint32_t sample_count,
-                                       uint32_t *keyed);
+                                        uint32_t *keyed);
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
 /** Exact direct attachment version, independent of the host-services table. */
-#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 1U
-/** Copied callback registration retained until synchronous channel hangup. */
+#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 2U
+/** Mutable direct registration; the provider copies callbacks before returning.
+ * Initialize accepted_abi_version to zero. Start only when setoption returns zero
+ * and acknowledges this exact ABI. Callback code and contexts remain borrowed
+ * until synchronous channel hangup, including a failed attachment/start. */
 struct urp_ast_direct_callbacks {
-    uint32_t struct_size; /**< Exact readable descriptor size. */
-    uint32_t abi_version; /**< Exact direct attachment revision. */
-    void *receive_context; /**< Stable input owner context. */
-    rptadv_radio_receive_v2 receive; /**< Input endpoint. */
-    void *transmit_context; /**< Stable output owner context. */
+    uint32_t struct_size;              /**< Exact readable/writable descriptor size. */
+    uint32_t abi_version;              /**< Exact direct attachment revision. */
+    void *receive_context;             /**< Stable input owner context. */
+    rptadv_radio_receive_v2 receive;   /**< Input endpoint. */
+    void *transmit_context;            /**< Stable output owner context. */
     rptadv_radio_transmit_v2 transmit; /**< Output endpoint. */
+    uint32_t accepted_abi_version; /**< Provider writes the ABI only after retaining callbacks. */
 };
 /** Current-generation predicate used during one bounded outbound dial. */
 typedef uint32_t (*rptadv_current_v1)(void *context);
@@ -74,9 +78,10 @@ typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t leng
  * on success and nonzero on failure. Provider callbacks never unwind.
  *
  * Borrowed strings/slices and product callbacks are valid only for the synchronous
- * call, except radio endpoints retained from activate through destroy. PCM is aligned normalized F32 with exactly the stated
- * count. Radio transmit returns its key decision through the output pointer. Peer events are 1 text bytes, 2 one
- * DTMF byte, or 3 normalized F32 PCM. Directory methods are 0 both, 1 DNS, 2 file.
+ * call, except radio endpoints retained from activate through destroy. PCM is aligned normalized
+ * F32 with exactly the stated count. Radio transmit returns its key decision through the output
+ * pointer. Peer events are 1 text bytes, 2 one DTMF byte, or 3 normalized F32 PCM. Directory
+ * methods are 0 both, 1 DNS, 2 file.
  */
 struct rptadv_host_services_v2 {
     uint32_t struct_size;   /**< Complete readable table size. */

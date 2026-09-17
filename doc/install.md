@@ -7,9 +7,11 @@ matching public Asterisk development headers (provided through
 `dh-sequence-asterisk`). Source builds need Rust 1.85, Cargo,
 `libclang-dev`, `pkg-config`, `librate-adjusting-pcm-ring2-dev`, and
 `librptadv-samplerate-adapter-dev` in addition to `build-essential`. USBRadioPlus
-must provide the `RadioPlusAdvanced` channel technology; older releases without
-that adapter cannot serve this controller. No radio hardware is required for
-the automated synthetic-radio tests.
+must provide the `RadioPlusAdvanced` channel technology with direct-callback
+attachment ABI 2. Install its matching provider together with this consumer;
+channel availability or alpha18's version alone does not prove support. An
+unacknowledged attachment fails before media starts. No radio hardware is
+required for the automated synthetic-radio tests.
 
 Load the Asterisk codec modules required by the IAX peers you intend to use.
 The local RadioPlusAdvanced exchange is always 48 kHz signed-linear PCM, so it

@@ -195,17 +195,18 @@ unsafe extern "C" fn radio_activate(
         let Some(radio) = reserved.radio.as_mut() else {
             return -1;
         };
-        let direct = ffi::urp_ast_direct_callbacks {
+        let mut direct = ffi::urp_ast_direct_callbacks {
             struct_size: size_of::<ffi::urp_ast_direct_callbacks>() as u32,
             abi_version: ffi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
             receive_context,
             receive,
             transmit_context,
             transmit,
+            accepted_abi_version: 0,
         };
         if receive.is_some()
             && transmit.is_some()
-            && unsafe { radio.attach_direct(&direct) }.is_ok()
+            && unsafe { radio.attach_direct(&mut direct) }.is_ok()
             && radio.start(&reserved.name).is_ok()
         {
             return 0;

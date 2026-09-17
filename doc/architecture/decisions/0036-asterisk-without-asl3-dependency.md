@@ -51,10 +51,28 @@ move ASL3 types or helper calls into a common header or shared library merely
 to make them accessible from both sides.
 
 The project-owned `RadioPlusAdvanced` contract uses ordinary Asterisk channel
-and frame APIs at 48 kHz. It is not an ASL3 hardware API. Its provider must not
-make rpt_advanced transitively require `res_usbradio` after the hardware-adapter
-cutover. Audio and GPIO adapters provide device services independently of
-ASL3; direct hardware ownership does not belong in the ASL3 compatibility code.
+reservation/control APIs with direct 48 kHz PCM callbacks. It is not an ASL3
+hardware API. Its provider must not make rpt_advanced transitively require
+`res_usbradio` after the hardware-adapter cutover. Audio and GPIO adapters provide
+device services independently of ASL3; direct hardware ownership does not belong
+in the ASL3 compatibility code.
+
+Direct attachment uses `URP_AST_OPTION_DIRECT_CALLBACKS` with `block=0` before
+`ast_call`. ABI 2 appends a writable `uint32_t accepted_abi_version` to the
+descriptor. The caller initializes it to zero; the provider writes 2 only after
+retaining both callbacks. The consumer requires both a zero option result and
+acknowledgment 2, then starts the channel. An unknown-option success, missing or
+different acknowledgment, or failed option rejects activation and synchronously
+hangs up before callback storage may be reclaimed. The descriptor itself is
+borrowed only during the option call; callback code and contexts remain live
+through synchronous channel hangup.
+
+This initial-alpha contract replaces ABI 1 without a compatibility path under
+ADR 0040. The product and host-services tables are unchanged, so their ABI and
+SONAME do not change. Deploy the consumer together with an ABI 2 USBRadioPlus
+provider; alpha18 alone is not evidence of support. A minimum package-version
+dependency must name the first actual ABI 2 provider release, not an invented
+future version. Runtime acknowledgment rejects older mixed installations safely.
 
 AllStarLink wire-protocol, directory, topology, and control interoperability
 remain required features. Matching ASL3 behavior on those interfaces is not a
