@@ -117,9 +117,14 @@ generation-tagged lock-free handoff to transmit, not shared detector state or
 a second PTT writer. The two event publishers must not share an SPSC writer.
 Receive qualification must retain its association with processed sample
 positions through buffering and rate correction. A latest decoder snapshot
-alone must not qualify older queued audio or truncate a valid buffered tail.
+alone must not qualify older queued audio. Under ADR 0025's squelch-delay
+policy, current COS/CTCSS loss immediately cancels the unplayed suffix of
+that receive burst, even if those buffered samples were qualified on ingress.
+This deliberate tail suppression takes precedence over playing valid buffered
+tail audio. A later key must not make the cancelled samples eligible again.
 Use bounded generation-tagged timing metadata; do not add another PCM writer
-or require the workers to rendezvous.
+or require the workers to rendezvous. The owner confirmed this exception on
+2026-09-17.
 
 Audio payload does not use a multiple-producer or multiple-consumer queue. A
 bounded non-real-time control queue may have multiple producers, but a full
