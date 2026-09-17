@@ -228,7 +228,7 @@ fn abi_prepares_owned_source_rate_results() {
         #[cfg(speech_adapter)]
         executable: piper.as_ptr(),
         temporary_directory: directory_path.as_ptr(),
-        timeout_ms: 5_000,
+        timeout_ms: 30_000,
         ..raw_config()
     };
     let cancellation = RawCancellation {

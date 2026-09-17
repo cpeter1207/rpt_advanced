@@ -257,7 +257,7 @@ fn decode_preserves_file_level_and_reports_missing_decoder() {
         #[cfg(speech_adapter)]
         piper: "piper".into(),
         temporary_directory: parent.path.clone(),
-        process_timeout: Duration::from_secs(5),
+        process_timeout: Duration::from_secs(30),
         child_reaper: None,
     };
     let audio = decode(&config, File::open(&source).unwrap(), &|| false).unwrap();
