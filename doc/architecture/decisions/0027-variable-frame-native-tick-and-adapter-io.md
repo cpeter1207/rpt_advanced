@@ -78,14 +78,14 @@ measurement are not proof of a shared clock.
 
 For that mode, the adapter may invoke local receive and then transmit
 **back-to-back** in the same callback/readiness turn. Receive publishes the
-current processed samples; transmit immediately consumes those samples through
-the same local receive inbound-ring interface and fills the supplied output
-buffer. Configure that local ring for synchronous unity-rate pass-through:
-no adaptive drift correction, unnecessary unity-ratio resampler, startup
-prefill, target-occupancy delay, or wait for another callback. The worker split
-and local handoff add no buffering latency. This does not claim zero hardware,
-device, DSP/filter, or codec latency, nor remove those algorithms' required
-history or framing.
+current processed samples; transmit consumes them through the same local
+receive inbound-ring interface and fills the supplied output buffer. Configure
+that local ring for unity-rate pass-through with no adaptive drift correction
+or unnecessary unity-ratio resampler. In shared-clock mode, its target reserve
+is exactly zero plus the configured squelch-delay value. With both values at
+zero, it adds no local-ring delay; it still retains the sample-associated
+COS/CTCSS gate. This does not claim zero hardware, device, DSP/filter, or
+codec latency, nor remove those algorithms' required history or framing.
 
 This fast path keeps the receive and transmit DSP owners separate and runs
 only on adapter output demand, not an independent timer. A paired call uses
@@ -137,6 +137,41 @@ Qualification timing remains associated with the buffered receive audio
 through ring conversion, rather than applying the latest decoder state to
 older queued samples. Each worker has its own hazard protection and RF-event
 publisher under ADR 0026.
+
+The local receive inbound ring is the squelch-delay line under ADR 0025. In
+shared-clock mode its target reserve is exactly the configured squelch delay;
+in independent-clock mode that delay supplements the ring's normal reserve.
+The transmit worker gates each rendered local sample using its
+sample-associated configured COS/CTCSS qualification. It must not apply the
+latest receiver state to buffered audio. Thus, delayed samples after a receiver
+unkey are muted before local RF or peer program-audio routing, while the delay
+remains the one existing local inbound ring rather than a second buffering
+stage.
+
+Each linked-peer inbound PCM ring uses the same configured delay as the local
+squelch-delay line for DTMF muting. When the peer's DTMF detector recognizes a
+tone, the transmit worker immediately mutes that ring's rendered output under
+ADR 0023's existing command-lifetime policy. This removes the buffered leading
+DTMF when the configured delay is sufficient; a shorter delay can leave a few
+milliseconds of initial tone audible. The ring remains the sole peer rate and
+clock-recovery owner, and no extra DTMF delay queue is introduced.
+
+The receive worker ends CTCSS decode/qualification immediately when it detects
+a known squelch-tail elimination technique: CTCSS phase shift, removal of the
+tone, or a 55 Hz tail tone. A node whose receive policy requires CTCSS then
+loses qualification immediately, providing an additional tail-elimination
+mechanism alongside the local-ring squelch delay. This detection is part of
+receive signaling state and must remain independent of callback partitioning.
+When the configured CTCSS receive filter is in notch mode and a received tail
+tone has a frequency, the notch retunes to that tail-tone frequency for the
+tail interval. This prevents the received tail tone from entering program
+audio while leaving normal configured-tone notch behavior unchanged.
+
+The per-node active-traffic CTCSS policy in ADR 0025 applies independently to
+encode and decode. The policy window is based on live local/peer traffic and
+the explicitly pending command-response interval, not on PTT or hangtime.
+Thus, IDs and courtesy tones have no CTCSS when enabled, while command-response
+telemetry retains it from command receipt through playout.
 
 All timing is elapsed-audio-time based. Partitioning one PCM sequence into
 different valid frame counts must preserve its DSP and signaling behavior,
@@ -206,9 +241,25 @@ output with correct post-mix signaling; no duplicated or missing output span;
 and safe reload/unload with both workers active. No test may require either
 worker to lock, allocate, or wait for the other worker or control plane.
 
+Local-receive tests additionally prove that configured squelch delay increases
+only the local inbound-ring reserve, shared-clock target reserve equals that
+delay with no added delay at zero, sample-associated COS/CTCSS gating mutes
+the delayed unqualified tail on both local and peer paths, and phase-shift,
+no-tone, and 55 Hz CTCSS-tail detection immediately removes required CTCSS
+qualification. Notch-mode tests additionally prove that a received tail tone
+retunes the notch to its frequency for the tail interval.
+
+Peer-ring tests additionally prove that its DTMF muting delay equals the
+configured squelch delay, detected DTMF immediately gates its ring output, and
+an intentionally insufficient delay can expose only the leading interval.
+CTCSS-policy tests additionally prove independent encode/decode selection;
+live local and peer traffic qualification; no CTCSS during hangtime, IDs, or
+courtesy tones; and continuous CTCSS from command receipt through delayed
+command-response playout.
+
 Shared-clock tests additionally prove receive-before-transmit ordering,
-same-cycle consumption without a ring-added sample/block delay, no correction
-or redundant unity converter, and coherent generation use across a paired
+no correction or redundant unity converter, no latency beyond the required
+local-ring squelch-delay reserve, and coherent generation use across a paired
 call. Account separately for device and required DSP latency. Verify unknown
 clock topology selects asynchronous recovery and that peer/telemetry recovery
-is unaffected by a synchronous local path.
+is unaffected by a shared-clock local path.

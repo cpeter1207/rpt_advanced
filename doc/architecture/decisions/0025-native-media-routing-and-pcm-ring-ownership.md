@@ -30,13 +30,36 @@ second raw-capture converter. Internal PCM is canonical normalized `f32`;
 codec/Asterisk representation conversion remains at the boundary under ADR
 0029. Outbound codec-rate conversion is distinct from inbound conversion.
 
-An adapter-proven shared ADC/DAC clock permits ADR 0027's back-to-back
-receive/transmit fast path. Its local ring uses same-cycle unity-rate
-pass-through without adaptive correction, prefill, or added buffering delay.
-This retains the same routing/ownership graph; independent link and telemetry
-rings still perform their necessary conversion and recovery.
+The local receive inbound ring is also the sole squelch-delay line. In
+independent-clock mode, its normal reserve accounts for unavoidable
+receive-to-transmit delay; the configured squelch-delay value adds reserve to
+that same ring rather than creating another buffer. The receive worker
+publishes processed PCM with sample-associated effective COS/CTCSS
+qualification. When the transmit worker reads delayed local PCM, it mutes
+samples until the configured COS and/or CTCSS requirements are asserted for
+those samples. Once qualification falls, the delayed tail is therefore muted
+before it reaches either the local transmitter or the program-audio loopback
+for connected peers. This removes the available portion of the receiver's
+squelch crash; additional configured delay permits removal of the remaining
+crash without a separate output-stage gate.
 
-The radio-port transmit worker writes one native-rate voice/telemetry PCM block to
+Each linked-peer inbound PCM ring is also a DTMF-muting delay line. It uses the
+same configured delay as the local squelch-delay line, not a separate queue or
+timer. When DTMF is detected for that peer, its ring output is muted
+immediately under ADR 0023's existing command-lifetime policy. The delay gives
+the detector time to gate the buffered leading samples before they reach local
+or peer routing. A delay that is too short may still permit an initial few
+milliseconds of DTMF before the gate takes effect.
+
+An adapter-proven shared ADC/DAC clock permits ADR 0027's back-to-back
+receive/transmit fast path and removes the need for adaptive local drift
+correction. It does not bypass the local ring: its target reserve is exactly
+zero plus the configured squelch-delay value, so a zero delay imposes no
+additional local-ring delay while retaining output gating. This retains the
+same routing/ownership graph; independent link and telemetry rings still
+perform their necessary conversion and recovery.
+
+The radio-port transmit worker writes one native-rate peer-audio PCM block to
 the **program-audio loopback ring** before local CTCSS or DCS generation. The
 **link-audio dispatcher** is the sole consumer of that ring. It fans each block
 into a transmit-program queue for every connected peer. A **linked-peer
@@ -45,11 +68,10 @@ Encoding and network transmission never occur in either radio audio worker.
 The split preserves existing duplex, source qualification, mix-minus, and
 per-link routing; it must not reflect a peer's own audio back to that peer or
 send locally generated CTCSS/DCS onto network links.
-Local courtesy tones and transmitter hang are likewise excluded from peer
-program audio. The dispatcher queues a destination block only for local
-receive, peer-routable status/identifier/announcement telemetry, or another
-active forwarding peer; a destination's own input alone does not qualify its
-mix-minus output.
+All telemetry is local-transmitter-only. The dispatcher queues a destination
+block only for local receive or another active forwarding peer. Local courtesy
+tones and transmitter hang are likewise excluded from peer program audio. A
+destination's own input alone does not qualify its mix-minus output.
 Logical linked-peer workers may run on a common worker pool, but no two receive
 or transmit jobs for the same peer run at once.
 
@@ -80,6 +102,15 @@ boundary. ADR 0027 assigns hardware submission and any backend-specific
 partial-I/O staging to that adapter. ADR 0033 defines the
 appliance direct-codec profile, which uses external discrete CTCSS and therefore
 does not inject a native CTCSS tone.
+
+A per-node active-traffic CTCSS policy may independently restrict CTCSS encode
+and decode. When enabled, a live local-receiver or connected-peer transmission
+qualifies the policy; hangtime alone does not. Identifiers and courtesy tones
+never qualify it. Command-response telemetry qualifies it from command receipt
+through response playout, including any deferred interval before that playout.
+This is source-aware signaling policy, not an inference from physical PTT
+alone, and it applies equally to native generated CTCSS and profile-selected
+external CTCSS enable.
 
 Exactly one reserved station-telemetry audio worker owns speech synthesis
 and sound-file playout, because only one announcement source may play at a

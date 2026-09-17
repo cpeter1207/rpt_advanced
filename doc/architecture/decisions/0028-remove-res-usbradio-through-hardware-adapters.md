@@ -147,12 +147,13 @@ Both callbacks must stop before the ring or device reservation is released.
 
 An adapter with a known common ADC/DAC clock and aligned input/output delivery
 may instead declare ADR 0027's shared-clock capability. It calls receive then
-transmit back-to-back and uses the local ring in same-cycle unity pass-through
-mode, without drift correction, prefill, or additional buffering latency.
-PortAudio may use one full-duplex callback in this mode. A matching nominal
-rate alone does not qualify; unknown or independent clocks retain the separate
-callbacks and adaptive ring. All modes preserve private worker state, safe
-lifecycle, and source-specific recovery on independent inbound rings.
+transmit back-to-back and uses the local ring in unity-rate pass-through mode,
+without adaptive drift correction and with a target reserve equal only to the
+configured squelch delay. PortAudio may use one full-duplex callback in this
+mode. A matching nominal rate alone does not qualify; unknown or independent
+clocks retain the separate callbacks and adaptive ring. All modes preserve
+private worker state, safe lifecycle, and source-specific recovery on
+independent inbound rings.
 
 Migration is staged without changing radio behavior: extract and verify the
 audio/statistics path, then radio-control and GPIO paths, switch the retained
@@ -180,6 +181,28 @@ the device-ownership rule from ADR 0005.
 
 ## Implementation status
 
+The direct-callback proof of concept (2026-09-16) removes the product's
+`rpt-radio` thread and its Asterisk PCM exchange. Host-services ABI 2
+(`rptadv.hst2`) reserves a channel, installs both direct endpoints through
+the version-1 `0x52504144` channel option, and starts it. Product ABI 2
+(`rptadv.prod2`) rejects old host tables; the existing product descriptor
+entry-point symbol and library SONAME remain, with exact admission checks
+preventing mixed-alpha use. Current consumers must be rebuilt together.
+
+Preparation allocates stable inactive callback contexts and one local F32
+SPSC queue with twice the maximum callback count. Successful runtime
+publication installs fixed independent RX/TX generation owners and activates
+the contexts with release/acquire atomics. Failed activation synchronously
+hangs up before returning, while normal quiesce destroys the channel before
+reclaiming contexts or registrations. RX time advances from accumulated
+48 kHz samples; TX consumes local PCM directly into its caller's buffer.
+
+This proof of concept does not claim the later complete asynchronous ring
+design: its local queue has bounded newest-sample drops and zero-fill
+shortfall, with a latest-state receiver snapshot. Adaptive clock correction,
+sample-associated qualification, and generation-tagged local PCM remain the
+separate ADR 0025/0026 migration requirements.
+
 The current USBRadioPlus migration implements independent PortAudio input and
 output callback entry points and runs receive DSP from the input callback.
 It does not yet implement the processed local-receive ring, the complete
@@ -201,10 +224,12 @@ unchanged.
 Released alpha18's hardware cutover removed the duplicate backend and
 resource-module imports before the complete Rust migration. In the current
 migration, Rust owns station composition, callback processing, app_rpt DTMF and
-8 kHz echo state, and native 48 kHz delivery to rpt_advanced. The remaining C
-module integrates Asterisk channel objects, frames, taskprocessor calls, CLI,
-and module registration with the Rust descriptor. Hardware lifecycle teardown
-quiesces callbacks and delivery before releasing device identity. Shared
-parallel-port access retains one physical owner with per-channel signaling
-state. Node installation and full release-gate verification are separate from
-this source-level implementation status.
+8 kHz echo state, native 48 kHz delivery to rpt_advanced, Asterisk channel and
+frame delivery, incoming-link control, transactional reload, CLI commands, and
+the complete module lifecycle. The remaining C entry point only declares
+module metadata, composes the released provider manifest, and forwards load,
+reload, and unload through the versioned Rust loader descriptor. Hardware
+lifecycle teardown quiesces callbacks and delivery before releasing device
+identity. Shared parallel-port access retains one physical owner with
+per-channel signaling state. Node installation and full release-gate
+verification are separate from this source-level implementation status.

@@ -89,9 +89,10 @@ In ADR 0027's verified shared-clock mode, the adapter calls receive then
 transmit back-to-back with one coherent generation protected across the pair.
 The same private owners and hazard protections apply; publication between
 those two calls must not switch the second call to a different generation.
-The local ring is synchronous pass-through with no added buffering latency.
-Changing between paired and independent callback modes is a controlled
-adapter handoff: quiesce both owners before changing ring mode or ownership.
+The local ring is unity-rate pass-through with a target reserve equal only to
+configured squelch delay. Changing between paired and independent callback
+modes is a controlled adapter handoff: quiesce both owners before changing
+ring mode or ownership.
 
 ### Media and event queue ownership
 

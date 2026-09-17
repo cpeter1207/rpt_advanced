@@ -70,9 +70,10 @@ released alpha18.
 
 Where the adapter knows capture and playback share a clock and can present
 aligned frames, it may invoke receive then transmit in the same callback.
-ADR 0027's shared-clock mode retains the local ring as synchronous pass-through
-with no correction, prefill, or added buffering latency. Unknown clock
-relationships keep separate asynchronous callbacks and ring recovery.
+ADR 0027's shared-clock mode retains the local ring as unity-rate pass-through
+with no adaptive correction and a target reserve equal only to configured
+squelch delay. Unknown clock relationships keep separate asynchronous callbacks
+and ring recovery.
 
 One ASL3 compatibility implementation remains over the same shared core after
 the ADR 0028 cutover. It owns Asterisk/`f32` PCM conversion and fixed

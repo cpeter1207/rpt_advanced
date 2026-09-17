@@ -9,6 +9,33 @@ the requirement is implemented.
 
 ## Entries
 
+### Activity-scoped CTCSS encode and decode
+
+**Requirements**
+
+- Add independent per-node controls that restrict CTCSS encode and CTCSS decode
+  to active received traffic from the local receiver or a connected peer.
+- When enabled, hangtime alone must not cause CTCSS encode or decode. IDs and
+  courtesy tones must likewise run without CTCSS.
+- Telemetry that responds to a command must retain CTCSS from command receipt
+  through the response's actual playout, including any waiting interval before
+  that playout begins.
+- Preserve the existing CTCSS behavior when either control is disabled.
+
+**Decisions recorded**
+
+- The controls are per-node and independently enableable for encode and decode.
+- Both controls default disabled, retaining current behavior until enabled.
+- A live local-receiver or connected-peer transmission qualifies the policy;
+  transmitter hangtime by itself does not.
+- A pending command response is a qualifying telemetry interval from accepted
+  command receipt until response playout completes. IDs and courtesy tones are
+  never qualifying intervals when this policy is enabled.
+
+**Material decisions needed before implementation**
+
+None.
+
 ### rpt_advanced parrot with spoken audio-level report
 
 **Requirements**
@@ -117,11 +144,11 @@ None.
   are required by the split. Versioned compatible ABI evolution is required.
 - An adapter that knows ADC/DAC are drift-free and can deliver aligned frames
   may call receive then transmit back-to-back. Use the same local inbound ring
-  in synchronous unity pass-through with no adaptive correction, redundant
-  converter, prefill, target-occupancy delay, or extra callback. Keep one
-  coherent generation across the pair. This adds no handoff buffering latency,
-  not a promise of zero device/DSP latency. Unknown clock relationships remain
-  asynchronous; independent link and telemetry rings keep their recovery.
+  in unity pass-through with no adaptive correction or redundant converter.
+  In shared-clock mode, target reserve equals configured squelch delay, so zero
+  delay adds no local-ring delay. Keep one coherent generation across the pair.
+  This is not a promise of zero device/DSP latency. Unknown clock relationships
+  remain asynchronous; independent link and telemetry rings keep their recovery.
 
 **Material decisions needed before implementation**
 
@@ -599,7 +626,8 @@ None.
 - The real-time callbacks delegate to the shared library's separate receive
   and transmit workers under the pending ADR 0027 amendment.
 - A verified shared-clock adapter may invoke those workers back-to-back in one
-  full-duplex callback without local ring-added latency under ADR 0027.
+  full-duplex callback with a local-ring target reserve equal only to configured
+  squelch delay under ADR 0027.
 
 ### Independently versioned radio components
 
