@@ -32,19 +32,19 @@ impl Radio {
     /// Endpoint code and contexts must remain valid through synchronous channel hangup.
     pub unsafe fn attach_direct(
         &mut self,
-        direct: &mut ffi::urp_ast_direct_callbacks,
+        direct: &ffi::urp_ast_direct_callbacks,
     ) -> Result<(), Error> {
-        // SAFETY: the uniquely owned channel copies this complete descriptor synchronously.
+        // SAFETY: the uniquely owned channel copies this immutable descriptor synchronously.
         let result = unsafe {
             ffi::ast_channel_setoption(
                 self.connection.channel.pointer.as_ptr(),
                 ffi::URP_AST_OPTION_DIRECT_CALLBACKS as i32,
-                std::ptr::from_mut(direct).cast(),
+                std::ptr::from_ref(direct).cast_mut().cast(),
                 std::mem::size_of_val(direct) as i32,
                 0,
             )
         };
-        if result == 0 && direct.accepted_abi_version == direct.abi_version {
+        if result == 0 {
             Ok(())
         } else {
             Err(Error::Call)

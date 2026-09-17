@@ -48,7 +48,7 @@ typedef int (*rptadv_radio_transmit_v2)(void *context, float *samples, uint32_t 
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
 /** Exact direct attachment version, independent of the host-services table. */
-#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 2U
+#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 1U
 /** Copied callback registration retained until synchronous channel hangup. */
 struct urp_ast_direct_callbacks {
     uint32_t struct_size; /**< Exact readable descriptor size. */
@@ -57,7 +57,6 @@ struct urp_ast_direct_callbacks {
     rptadv_radio_receive_v2 receive; /**< Input endpoint. */
     void *transmit_context; /**< Stable output owner context. */
     rptadv_radio_transmit_v2 transmit; /**< Output endpoint. */
-    uint32_t accepted_abi_version; /**< Caller sets zero; provider writes ABI after retention. */
 };
 /** Current-generation predicate used during one bounded outbound dial. */
 typedef uint32_t (*rptadv_current_v1)(void *context);

@@ -2,6 +2,7 @@ use std::{env, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
+    println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_asterisk_adapter.so.1");
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
