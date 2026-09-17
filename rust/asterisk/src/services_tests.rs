@@ -29,11 +29,7 @@ unsafe extern "C" fn ast_channel_setoption(
     assert_eq!(length as usize, size_of::<ffi::urp_ast_direct_callbacks>());
     let descriptor = unsafe { &mut *data.cast::<ffi::urp_ast_direct_callbacks>() };
     assert!(descriptor.receive.is_some() && descriptor.transmit.is_some());
-    assert_eq!(descriptor.abi_version, 2);
-    assert_eq!(descriptor.accepted_abi_version, 0);
-    if host(|state| state.failure != 31) {
-        descriptor.accepted_abi_version = 2;
-    }
+    assert_eq!(descriptor.abi_version, 1);
     0
 }
 unsafe extern "C" fn event(context: *mut c_void, kind: u32, _: *const c_void, count: usize) {
@@ -41,19 +37,18 @@ unsafe extern "C" fn event(context: *mut c_void, kind: u32, _: *const c_void, co
 }
 
 #[test]
-fn radio_activation_rejects_success_without_acknowledgment_before_call() {
+fn radio_activation_accepts_the_installed_direct_callback_abi() {
     reset();
     let null = ptr::null_mut();
     unsafe {
         let mut radio = null;
         assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
-        host(|state| state.failure = 31);
         let result = radio_activate(null, radio, Some(receive), null, Some(transmit), null);
         radio_destroy(null, radio);
-        assert_eq!(result, -1);
+        assert_eq!(result, 0);
     }
     host(|state| {
-        assert_eq!(state.calls, 0);
+        assert_eq!(state.calls, 1);
         state.clean();
     });
 }
