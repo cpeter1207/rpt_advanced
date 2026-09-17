@@ -603,6 +603,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
         device: "usb".into(),
         receive_maximum: MAXIMUM_FRAMES,
         transmit_maximum: MAXIMUM_FRAMES,
+        squelch_delay_ms: 0,
     };
     let mut device = Device {
         lease: first_lease.clone(),

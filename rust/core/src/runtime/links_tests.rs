@@ -8,6 +8,7 @@ fn generation(id: u64) -> RuntimeGeneration<(), ()> {
             device: "radio0".into(),
             receive_maximum: 960,
             transmit_maximum: 960,
+            squelch_delay_ms: 0,
         },
         (),
         (),

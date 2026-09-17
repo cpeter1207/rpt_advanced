@@ -19,6 +19,7 @@ fn generation(id: u64, drops: &Arc<AtomicUsize>) -> RuntimeGeneration<Resource, 
             device: "radio0".into(),
             receive_maximum: 960,
             transmit_maximum: 960,
+            squelch_delay_ms: 0,
         },
         Resource(drops.clone()),
         Resource(drops.clone()),
@@ -92,6 +93,7 @@ fn failed_candidate_retains_live_generation_and_releases_partial_resources() {
             device: "radio0".into(),
             receive_maximum: 0,
             transmit_maximum: 960,
+            squelch_delay_ms: 0,
         },
         Resource(drops.clone()),
         Resource(drops.clone()),
@@ -245,6 +247,7 @@ fn device_open_failure_restores_old_generation_or_leaves_rf_safe() {
                 device: "radio1".into(),
                 receive_maximum: 960,
                 transmit_maximum: 960,
+                squelch_delay_ms: 0,
             },
             Resource(drops.clone()),
             Resource(drops.clone()),
@@ -334,6 +337,7 @@ fn ordinary_reload_cannot_claim_a_different_device() {
             device: "radio1".into(),
             receive_maximum: 960,
             transmit_maximum: 960,
+            squelch_delay_ms: 0,
         },
         Resource(drops.clone()),
         Resource(drops.clone()),
@@ -402,6 +406,7 @@ fn handoff_rejects_every_precondition_without_closing_the_live_lease() {
             device: "radio1".into(),
             receive_maximum: 960,
             transmit_maximum: 960,
+            squelch_delay_ms: 0,
         };
         if case == "node" {
             settings.node = "different".into();
@@ -497,7 +502,8 @@ fn generation_rejects_unusable_identity_and_independent_callback_bounds() {
                     node: node.into(),
                     device: device.into(),
                     receive_maximum,
-                    transmit_maximum
+                    transmit_maximum,
+                    squelch_delay_ms: 0,
                 },
                 (),
                 ()
