@@ -217,8 +217,9 @@ required. Neither worker has an Asterisk or direct device-I/O dependency.
 
 If the adapter knows ADC and DAC share a clock and supplies aligned input and
 output frames, it may call receive then transmit **back-to-back**. The local
-ring then uses same-cycle unity-rate pass-through: no drift correction,
-redundant resampler, prefill, or added handoff latency. Required device/DSP
+ring then uses unity-rate pass-through without adaptive drift correction or a
+redundant resampler, with a target reserve equal only to the configured
+squelch delay. A zero delay adds no local-ring delay. Required device/DSP
 latency remains. Unknown clock relationships use asynchronous ring recovery;
 network and telemetry sources retain their own independent timing. The paired
 call holds one coherent generation across both workers under ADRs 0026/0027.
@@ -340,7 +341,8 @@ defines the full reload, hardware-handoff, and failure policy.
 - Native rate is fixed at 48 kHz for an open stream. Receive follows input
   availability; transmit follows DAC/adapter output demand at that native rate.
   A verified shared-clock adapter may call receive then transmit in one turn
-  without local ring-added latency; equal nominal rates alone are insufficient.
+  without adaptive local drift recovery, with a local-ring target reserve equal
+  only to configured squelch delay; equal nominal rates alone are insufficient.
   The workers support independent bounded frame counts and elapsed-sample
   timing. Source drift is corrected after receive DSP in its inbound ring, not
   by the transmit mixer or a second output queue. Asterisk representation and
@@ -371,6 +373,26 @@ defines the full reload, hardware-handoff, and failure policy.
   Standalone selects a non-Asterisk control backend.
 - Telemetry is serialized. Speech is preferred and falls back to Morse when
   speech cannot be prepared.
+- Configured identifiers are sent only to the local transmitter. Telemetry in
+  response to a command is source-scoped: a local-receiver command is sent to
+  the local transmitter, a linked-peer command is sent only to that peer, and
+  CLI/REST replies remain on the requesting control interface.
+- DTMF muting lasts until unkey, a command terminator, or command timeout.
+  Optional peer regeneration stops as soon as a command is known not to target
+  a peer; `*4` forwards during destination collection, then forwards only to
+  the selected node. Local-transmitter DTMF is unaffected.
+- The local receive inbound ring is also the configured squelch-delay line.
+  Its sample-associated COS/CTCSS gate mutes the delayed unqualified tail
+  before local or peer routing; phase, no-tone, and 55 Hz CTCSS tails end
+  required CTCSS qualification immediately. In CTCSS-notch mode, a received
+  tail tone retunes the notch to that tail frequency for its tail interval.
+- Each inbound peer PCM ring uses that same configured delay for DTMF muting.
+  Detected DTMF immediately gates its delayed output; insufficient delay can
+  leave only the initial few milliseconds audible.
+- Optional per-node CTCSS encode/decode policy is activity-scoped. Live local
+  or peer traffic and pending command-response telemetry qualify it; hangtime,
+  IDs, and courtesy tones do not. The command-response window begins at command
+  receipt and remains active through playout.
 - WebSocket streaming is status-only. CLI, REST, and DTMF use the shared
   controller operation catalog under ADR 0023.
 - Scheduled work is wall-clock control-plane work. A due event queues its

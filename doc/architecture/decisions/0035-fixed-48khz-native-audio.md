@@ -60,10 +60,11 @@ converter or buffering stage.
 
 If the adapter knows ADC and DAC have no relative drift and can deliver
 aligned frames, ADR 0027 permits receive followed immediately by transmit.
-The local inbound ring then provides synchronous unity-rate pass-through,
-without adaptive correction, a unity converter, or prefill delay. This is a
-clock-topology capability, not a new sample rate, and leaves independent
-peer/telemetry conversion and intrinsic device/DSP latency unchanged.
+The local inbound ring then uses unity-rate pass-through without adaptive
+correction or a unity converter, with a target reserve equal only to the
+configured squelch delay. This is a clock-topology capability, not a new
+sample rate, and leaves independent peer/telemetry conversion and intrinsic
+device/DSP latency unchanged.
 
 Private detector decimation is an algorithm detail, not another native PCM
 interface. Existing lower-rate CTCSS/noise analysis does not change the 48 kHz

@@ -39,10 +39,12 @@ line and branch coverage of production code on Debian 13 amd64. Remove
 unreachable or dead code instead of suppressing diagnostics or excluding it
 from coverage.
 
-Update concise Doxygen comments, tests, user documentation, examples, and
-build, install, and package artifacts whenever an interface changes. Consumers
-of a shared project library must use its released, versioned dynamic shared
-object rather than vendor or statically link a duplicate implementation.
+Update concise developer-facing in-source documentation, tests, and affected
+build, install, and package artifacts before every implementation commit.
+Defer user-facing documentation—manuals, examples, and other operator-facing
+material—until immediately before creating a pull request. Consumers of a
+shared project library must use its released, versioned dynamic shared object
+rather than vendor or statically link a duplicate implementation.
 Preserve published ABI/API compatibility whenever practical; when a change is
 necessary, document its compatibility, SONAME/package consequences, and
 migration. Start and clean only project-owned, labeled test containers

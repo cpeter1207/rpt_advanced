@@ -34,6 +34,13 @@ appliance adapter owns only the SAI/PCM stream. The separate GPIO/actuator
 adapter publishes direct COR/CTCSS and hardware-safety snapshots and applies
 prepared PTT/CTCSS-enable actions. Neither adapter owns signaling policy.
 
+ADR 0025's optional active-traffic CTCSS policy applies to this profile too.
+It gates external CTCSS encoder-enable and use of the published decoder status,
+not the adapter's physical status sampling. Therefore hardware CTCSS remains
+available for safety and diagnostics while its controller qualification follows
+the same live-traffic, command-response, hangtime, identifier, and courtesy
+rules as native CTCSS.
+
 Under the pending 2026-09-13 split in ADR 0027, receive DSP/decode executes in
 the input-driven local receive worker, and generated DCS or external CTCSS
 enable executes through the output-clocked transmit owner. The split does not
