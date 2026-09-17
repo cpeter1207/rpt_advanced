@@ -68,10 +68,19 @@ Encoding and network transmission never occur in either radio audio worker.
 The split preserves existing duplex, source qualification, mix-minus, and
 per-link routing; it must not reflect a peer's own audio back to that peer or
 send locally generated CTCSS/DCS onto network links.
-All telemetry is local-transmitter-only. The dispatcher queues a destination
-block only for local receive or another active forwarding peer. Local courtesy
-tones and transmitter hang are likewise excluded from peer program audio. A
-destination's own input alone does not qualify its mix-minus output.
+Telemetry routing follows ADR 0023. Identifiers and local courtesy tones stay
+on the local transmitter. A command response goes only to its command source:
+local receive replies use the local transmitter, linked-peer replies use only
+that peer's egress, and CLI/REST replies stay on the requesting interface.
+Response routing is carried explicitly with the prepared telemetry; it is not
+inferred from whichever peer happens to be active when playout begins.
+The dispatcher queues a destination block for local receive, another active
+forwarding peer, or a command response explicitly addressed to that destination.
+Local transmitter hang is excluded from peer program audio. A destination's
+own input alone does not qualify its mix-minus output.
+
+The former all-local telemetry restriction was an intermediate implementation,
+not a replacement for ADR 0023. The owner reaffirmed ADR 0023 on 2026-09-17.
 Logical linked-peer workers may run on a common worker pool, but no two receive
 or transmit jobs for the same peer run at once.
 
