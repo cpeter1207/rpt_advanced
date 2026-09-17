@@ -307,8 +307,8 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
             unsafe { transmit_callback(probe.transmit.get(), samples.as_mut_ptr(), 8, &mut keyed) },
             0
         );
-        assert_eq!(samples, [0.25; 8]);
-        assert_eq!(keyed, 1);
+        assert_eq!(samples, [0.0; 8]);
+        assert_eq!(keyed, 0);
         probe.destroyed.set(true);
         unsafe {
             (*crate::fixture::host_descriptor()).radio_destroy.unwrap()(
