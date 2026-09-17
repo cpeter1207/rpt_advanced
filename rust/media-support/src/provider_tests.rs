@@ -195,7 +195,9 @@ fn abi_prepares_owned_source_rate_results() {
         std::env::temp_dir().join(format!("rptadv-provider-test-{}", std::process::id()));
     std::fs::create_dir(&directory).unwrap();
     #[cfg(speech_adapter)]
-    let piper_path = directory.join("piper");
+    let piper_path = std::env::current_exe()
+        .unwrap()
+        .with_file_name(format!("rptadv-piper-fixture-{}", std::process::id()));
     #[cfg(speech_adapter)]
     assert!(
         std::process::Command::new("rustc")
