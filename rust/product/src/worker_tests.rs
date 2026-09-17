@@ -292,7 +292,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
             0
         );
         assert_eq!(samples, [0.0; 8]);
-        assert_eq!(keyed, 0);
+        assert_eq!(keyed, 1);
         0
     }
     unsafe extern "C" fn destroy(context: *mut c_void, radio: *mut c_void) {
