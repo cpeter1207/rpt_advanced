@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+Reaffirmed 2026-09-17: this record's source-scoped telemetry routing is the
+required behavior. ADR 0025's earlier all-local restriction was an intermediate
+implementation and does not override this decision.
+
 ## Context
 
 rpt_advanced must expose one supported control and status catalog through the

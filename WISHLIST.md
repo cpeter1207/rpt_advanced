@@ -331,8 +331,10 @@ None.
 - REST URLs and WebSocket streams are versioned from the first release.
 - DTMF retains familiar AllStarLink default commands and permits per-node
   remapping.
-- A DTMF status response is transmitted locally and to all linked peers. It
-  waits for the originating local receiver or originating link peer to unkey.
+- A DTMF status response is sent only to its command source: local-receiver
+  replies use the local transmitter and linked-peer replies use only that peer.
+  It waits for its originating source to unkey. CLI/REST responses remain on
+  the requesting control interface (ADR 0023).
 - The WebSocket status stream includes peak, RMS, clipping, FIFO/ring
   statistics, COR, CTCSS, PTT, and link state at 20 updates per second. Slow
   clients receive the newest sample and stale meter samples are dropped.
@@ -556,7 +558,7 @@ None.
   Only local receiver unkey ends it. It retains the first 127 symbols,
   discards later symbols, and reports the over-limit condition before reading
   back the retained symbols.
-- Pad-test telemetry follows the normal local-and-linked routing policy.
+- Pad-test telemetry follows ADR 0023's source-scoped response policy.
 - Readback announces symbols individually: “star”, “pound”, and letters
   `A`--`D`; an empty capture says “no digits”.
 - DTMF regeneration is configurable for connected peers.
