@@ -13,6 +13,13 @@ mod consumer;
 use consumer::MediaAdapter;
 use std::{fs, path::Path, time::Duration};
 
+#[cfg(speech_adapter)]
+fn fixture_program(name: &str) -> std::path::PathBuf {
+    std::env::current_exe()
+        .unwrap()
+        .with_file_name(format!("rptadv-{name}-{}", std::process::id()))
+}
+
 #[test]
 #[cfg(file_adapter)]
 fn decodes_opened_local_wave_at_source_rate_with_normalized_pcm() {
@@ -57,7 +64,7 @@ fn decodes_opened_local_wave_at_source_rate_with_normalized_pcm() {
 fn synthesizes_literal_text_with_speed_and_speech_only_gain() {
     let directory = std::env::temp_dir().join(format!("rptadv-speech-test-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
-    let program = directory.join("fixture");
+    let program = fixture_program("speech-test");
     assert!(
         std::process::Command::new("rustc")
             .args([
@@ -198,7 +205,7 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
     let directory =
         std::env::temp_dir().join(format!("rptadv-lifecycle-test-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
-    let program = directory.join("fixture");
+    let program = fixture_program("lifecycle-test");
     assert!(
         std::process::Command::new("rustc")
             .args([
@@ -246,7 +253,7 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
         }
         assert_eq!(
             fs::read_dir(&directory).unwrap().count(),
-            1,
+            0,
             "temporary output leaked after {model}"
         );
     }
@@ -273,7 +280,7 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
     );
     assert_reaped(&marker);
     fs::remove_file(&marker).unwrap();
-    assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
     let token = Cancellation::default();
     let cancellation = token.clone();
     let adapter = MediaAdapter::new(Config {
