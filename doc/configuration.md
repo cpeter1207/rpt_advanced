@@ -1,10 +1,9 @@
 # Configuration model
 
 Configuration reading, storage, whole-file validation, node/media-set discovery, and
-settings resolution are implemented. The AllStarLink link controller is also
-implemented locally, but it has not been enabled on a live node and classic
-`app_rpt` interoperability remains to be verified. These are the supported
-settings.
+settings resolution are implemented. The owner confirmed the current audio fixes
+on test node 524950; broader peer interoperability and hardware acceptance remain
+to be verified. These are the supported settings.
 
 The installed example is `share/doc/rpt-advanced/examples/rpt_advanced.conf`
 under the installation prefix. Its example node is disabled and its ID text is
@@ -64,7 +63,8 @@ announcements, courtesy tones, templates, macros, events, permanent links, or sc
 | --- | --- | --- |
 | `node_enabled` | yes | Start the configured node. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
-| `dtmf_muting` | yes | Silence a local received PCM frame when an in-band DTMF digit completes decoding, before it reaches the local controller or link router. DTMF command decoding remains active when disabled. |
+| `dtmf_muting` | yes | Silence qualified local in-band DTMF tone audio before command completion. Qualification adds no lookback, so the initial tone prefix can pass. DTMF command decoding remains active when disabled. |
+| `squelch_delay_ms` | 0 | Delay local receive playout in its PCM ring by this many milliseconds. Immediate receiver unkey cancels the buffered tail; rapid rekey cannot replay the previous burst. Inherits from `[general]` to each node; zero adds no delay. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
 | `transmit_timeout_ms` | 180000 | Maximum keyed interval in milliseconds without an individual local-receiver or direct-link unkey. Each such unkey restarts the watchdog even if hang time or another source keeps PTT asserted. Zero disables it. A source that never unkeys expires; on expiry, PTT releases immediately and remains blocked until the active receiver/link source clears and `timeout_lockout_ms` has elapsed. |
 | `timeout_lockout_ms` | 30000 | Post-watchdog lockout in milliseconds. Zero permits recovery as soon as the timed-out source unkeys. |
@@ -78,6 +78,10 @@ announcements, courtesy tones, templates, macros, events, permanent links, or sc
 | `link_static_directory_file` | empty | Optional local-priority Asterisk-format node directory. `[extnodes]` records use `number=radio@host:port/number,numeric-address`; both `number` fields must be the requested node. A present static record is authoritative. |
 | `link_directory_file` | empty | Optional ASL external `[extnodes]` directory used by `link_lookup_method`. Its records use the same syntax and identity check as the static directory. |
 | `link_lookup_method` | `both` | Selects sources after the static directory: `dns`, `file`, or `both`. `both` checks ASL DNS, then the external directory. |
+
+Identifiers, announcements, courtesy tones, and command/status telemetry play on
+the local RF transmitter only. Linked peers receive eligible program audio;
+transmitter hang time does not generate peer PCM.
 
 Link access and directory settings are validated and inherit from `[general]` to each node. They
 apply to incoming calls and to selecting a direct peer for remote-command mode; explicit denial

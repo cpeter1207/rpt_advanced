@@ -19,21 +19,21 @@ Supported platforms and development requirements are defined in
 [QUALITY.md](QUALITY.md). Contributor and coding-agent instructions are in
 [AGENTS.md](AGENTS.md).
 
-This is development software. The AllStarLink link controller is implemented
-locally but has not been installed or enabled on a live node; interoperability
-with classic `app_rpt` and remaining physical verification are unfinished. Do
-not use it for unattended operation.
+This is development software. The owner confirmed the current local audio fixes
+on test node 524950. Full hardware acceptance and interoperability with every
+supported peer remain unfinished; see [implementation status](doc/implementation-status.md).
+Do not use it for unattended operation.
 
-Install the matching `rate_adjusting_pcm_ring2` and
-`rptadv-samplerate-adapter` shared-library releases before building or
-installing rpt_advanced. They supply the lock-free playout ring and persistent
+Install `rate_adjusting_pcm_ring2` 2.0.0-alpha.3 and
+`rptadv-samplerate-adapter` 0.1.0-alpha.2 or newer matching shared-library releases
+before building or installing rpt_advanced. They supply the lock-free playout ring and persistent
 sample-rate conversion used by the product's media paths and Asterisk edge.
 
 On Debian 13, with the ASL3 package repository configured, install the binary
-package or build from source:
+package set from [the installation guide](doc/install.md) or build from source:
 
 ```sh
-sudo apt-get install ./rpt-advanced_*.deb
+sudo apt-get install ./*.deb
 
 sudo apt-get install build-essential cargo rustc libclang-dev pkg-config dh-sequence-asterisk \
   librate-adjusting-pcm-ring2-dev librptadv-samplerate-adapter-dev ffmpeg

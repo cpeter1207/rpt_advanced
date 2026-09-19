@@ -21,7 +21,7 @@ FORBIDDEN_MAKE_TOKENS = (
 )
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
 PRODUCT = "librptadv_product.so.1"
-RING_MINIMUM_VERSION = "2.0.0~alpha2"
+RING_MINIMUM_VERSION = "2.0.0~alpha3"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,

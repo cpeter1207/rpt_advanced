@@ -10,7 +10,7 @@ libdir := $(prefix)/lib/$(multiarch)/rpt_advanced
 LOADER_RUNPATH = $$ORIGIN/$(shell realpath -m --relative-to="$(asteriskmoddir)" "$(libdir)")
 docdir := $(prefix)/share/doc/rpt-advanced
 DESTDIR ?=
-VERSION ?= 0.1.0
+VERSION ?= 0.1.0-alpha7
 DIST_NAME := rpt_advanced-$(VERSION)
 CFLAGS ?= -O2 -g
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror

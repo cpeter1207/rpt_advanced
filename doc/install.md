@@ -8,7 +8,8 @@ matching public Asterisk development headers (provided through
 `libclang-dev`, `pkg-config`, `librate-adjusting-pcm-ring2-dev`, and
 `librptadv-samplerate-adapter-dev` in addition to `build-essential`. USBRadioPlus
 must provide the `RadioPlusAdvanced` channel technology with direct-callback
-attachment ABI 2. Install its matching provider together with this consumer;
+attachment ABI 2, supplied by USBRadioPlus 0.1.0-alpha19. Install its matching
+provider together with this consumer;
 channel availability or alpha18's version alone does not prove support. An
 unacknowledged attachment fails before media starts. No radio hardware is
 required for the automated synthetic-radio tests.
@@ -31,10 +32,14 @@ See [configuration](configuration.md) for the complete media hierarchy.
 
 ## Build and install
 
-Install the Debian package when it is available:
+Download this release's Debian 13 runtime packages for your architecture into an
+empty directory, together with ring 2.0.0-alpha.3 and samplerate adapter
+0.1.0-alpha.2 runtime packages. The controller and its product, file, speech,
+and control adapters must have the same package version. Install the complete
+set from that directory:
 
 ```sh
-sudo apt-get install ./rpt-advanced_*.deb
+sudo apt-get install ./*.deb
 ```
 
 For a source build, from the source directory:
@@ -111,11 +116,11 @@ ASL lookup before it accepts the channel. See
 [configuration](configuration.md) for the access lists, DTMF mappings, link
 lifetime, status, and topology behavior.
 
-Do not add that dialplan route or enable live linking from the current source
-without explicit approval. The AllStarLink integration has not yet undergone
-live interoperability testing with classic `app_rpt` and has not been deployed
-to 524950. Use the isolated tests in [testing](testing.md) and the limitations
-in [AllStarLink status](allstarlink-status.md) before any approved staging.
+Live linking requires the station owner's approval. The owner has confirmed the
+current audio fixes on 524950; that observation does not complete the broader
+peer interoperability and hardware acceptance cases. Use the isolated tests in
+[testing](testing.md) and the limitations in
+[AllStarLink status](allstarlink-status.md) before approved staging.
 
 ## Reload and rollback
 
@@ -137,7 +142,9 @@ sudo asterisk -rx 'module unload app_rpt_advanced.so'
 ```
 
 Confirm that its radio channels have closed before restoring the previous
-controller. To roll back a module upgrade, unload it, restore the saved module
-and configuration, and load it again. Restore the previous `modules.conf`
+controller. To roll back an upgrade, unload it and restore the complete saved
+package set and configuration, including the matching USBRadioPlus and shared
+libraries, before loading it again. Earlier alpha artifacts are not interchangeable.
+Restore the previous `modules.conf`
 selection if activation was made persistent. Do not overwrite a loaded module
 or use a forced unload as a substitute for orderly shutdown.

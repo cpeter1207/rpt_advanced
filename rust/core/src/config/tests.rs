@@ -479,14 +479,14 @@ fn node_override_precedes_general_and_invalid_node_value_falls_back_to_general()
 #[test]
 fn squelch_delay_inherits_and_defaults_to_zero() {
     let node = NodeId::new("node").unwrap();
-    let defaults = ResolvedNodeSettings::resolve(&ConfigDocument::parse("[node]\n").unwrap(), &node)
-        .unwrap()
-        .value;
+    let defaults =
+        ResolvedNodeSettings::resolve(&ConfigDocument::parse("[node]\n").unwrap(), &node)
+            .unwrap()
+            .value;
     assert_eq!(defaults.squelch_delay_ms, 0);
-    let document = ConfigDocument::parse(
-        "[general]\nsquelch_delay_ms=20\n[node]\nsquelch_delay_ms=40\n",
-    )
-    .unwrap();
+    let document =
+        ConfigDocument::parse("[general]\nsquelch_delay_ms=20\n[node]\nsquelch_delay_ms=40\n")
+            .unwrap();
     assert_eq!(
         ResolvedNodeSettings::resolve(&document, &node)
             .unwrap()

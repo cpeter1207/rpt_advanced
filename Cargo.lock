@@ -187,28 +187,28 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rpt-advanced-core"
-version = "0.1.0"
+version = "0.1.0-alpha7"
 dependencies = [
  "rtrb",
 ]
 
 [[package]]
 name = "rptadv-asterisk-adapter"
-version = "0.1.0"
+version = "0.1.0-alpha7"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "rptadv-control-asterisk-adapter"
-version = "0.1.0"
+version = "0.1.0-alpha7"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "rptadv-file-adapter"
-version = "0.1.0"
+version = "0.1.0-alpha7"
 dependencies = [
  "libc",
  "rpt-advanced-core",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "rptadv-product"
-version = "0.1.0"
+version = "0.1.0-alpha7"
 dependencies = [
  "bindgen",
  "rpt-advanced-core",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "rptadv-speech-adapter"
-version = "0.1.0"
+version = "0.1.0-alpha7"
 dependencies = [
  "libc",
  "rpt-advanced-core",

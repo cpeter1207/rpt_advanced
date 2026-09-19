@@ -1,10 +1,10 @@
 # AllStarLink implementation status
 
-The AllStarLink implementation is present in the local source tree. It is not
-deployment-ready: it has not been installed or enabled on 524950 or any other
-live node, and it has not yet been proven interoperable with a classic
-`app_rpt` peer. This document describes the implemented behavior and the
-remaining validation; it is not authorization to activate a live link.
+The AllStarLink implementation is present in the source tree. The owner confirmed
+the current audio fixes on test node 524950 on 2026-09-19. That observation does
+not complete peer interoperability or hardware acceptance. This document
+describes the implemented behavior and remaining validation; it is not
+authorization to activate a live link.
 
 ## Implemented locally
 

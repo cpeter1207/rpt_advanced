@@ -163,16 +163,25 @@ architecture tranches.
   cases in [testing](testing.md).
 - A fresh complete quality gate and Debian 13 amd64/arm64 matrix for the
   current Rust product.
-- Explicitly approved live interoperability testing with classic `app_rpt` and
-  higher-rate capable peers. The AllStarLink integration has not been deployed
-  on 524950 or any other live node.
+- The remaining explicitly approved interoperability cases with classic
+  `app_rpt` and higher-rate capable peers.
 - Execution verification of the version-tag release workflow. Source archive
-  rebuilding is covered by the platform gate; no project release has been cut.
+  rebuilding is covered by the platform gate. Earlier source releases exist;
+  alpha7 introduces the current Rust Debian package set.
 
 The project provides clean ASL3 and installed-module test images for Debian 13
 amd64/arm64; see [testing](testing.md). The quality images remain
 separate development environments with compilers and analysis tools. Their
 existence is not a quality result for the current working tree.
+
+## Local audio confirmation, 2026-09-19
+
+The owner confirmed that the current audio fixes are healthy on test node
+524950. The Rust controller cancels the buffered local receive tail on unkey,
+prevents rapid rekey from replaying the preceding burst, and exposes ring fault
+counters. These observations are scoped manual evidence; the release still
+requires its complete pull-request gate and remaining hardware/interoperability
+acceptance.
 
 ## Historical local-radio test, 2026-09-07
 
