@@ -485,6 +485,8 @@ fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments
             .all(|(_, status)| status.retiring.is_none())
     });
 
+    // Direct publication needs quiescent audio; keep the peer reader live for the pending ack.
+    assert!(host.leases[0].1.lock().unwrap().quiesce());
     let candidate = prepared("1000", host.runtime.settings("1000").unwrap(), &host.peers).unwrap();
     host.runtime.replace_adapter("1000", candidate, 11).unwrap();
     host.reject_peer("1000", "2000", 12);

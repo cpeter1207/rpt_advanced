@@ -391,19 +391,37 @@ def main():
                     "network-b",
                 ) as second,
             ):
+                for configuration, _ in (first, second):
+                    cli(configuration, "iax2 set debug on")
                 receiver_config = second[0].parent / "rpt_advanced.conf"
                 original = receiver_config.read_text(encoding="utf-8")
                 receiver_config.write_text(
                     original + "link_allow_nodes=524950\nlink_deny_nodes=524950\n",
                     encoding="utf-8",
                 )
-                cli(second[0], "module reload app_rpt_advanced.so")
+                reloaded = cli(second[0], "module reload app_rpt_advanced.so")
+                # Asterisk's CLI exit status does not report module reload failure.
+                assert "reloaded successfully" in reloaded, reloaded
                 rejected = cli(first[0], "rpt_advanced link connect 524950 508422")
                 assert "failed" in rejected, rejected
                 receiver_config.write_text(original, encoding="utf-8")
-                cli(second[0], "module reload app_rpt_advanced.so")
+                reloaded = cli(second[0], "module reload app_rpt_advanced.so")
+                assert "reloaded successfully" in reloaded, reloaded
                 result = cli(first[0], "rpt_advanced link connect 524950 508422")
+                if "completed" not in result:
+                    for configuration, node in (
+                        (first[0], "524950"),
+                        (second[0], "508422"),
+                    ):
+                        for command in (
+                            "core show channels concise",
+                            "iax2 show channels",
+                            f"rpt_advanced link status {node}",
+                        ):
+                            print(configuration, command, cli(configuration, command))
                 assert "completed" in result, result
+                for configuration, _ in (first, second):
+                    cli(configuration, "iax2 set debug off")
                 time.sleep(3)
                 for configuration, _ in (first, second):
                     channels = cli(configuration, "core show channels concise")
