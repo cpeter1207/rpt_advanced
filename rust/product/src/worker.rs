@@ -1,7 +1,9 @@
 //! Fixed direct radio callbacks and control-only reservation lifetime.
 use crate::{
     Error,
-    link::ring::{InboundConsumer, InboundProducer, InboundRing},
+    link::ring::{
+        InboundConsumer, InboundObserver, InboundProducer, InboundRing, Observation, RingError,
+    },
     services::Radio,
 };
 use rpt_advanced_core::{
@@ -13,7 +15,7 @@ use rpt_advanced_core::{
 };
 use std::{
     cell::UnsafeCell,
-    ffi::c_void,
+    ffi::{CString, c_char, c_int, c_void},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
@@ -36,6 +38,8 @@ pub(crate) enum TestFailure {
     ReceivePanic = 2,
     /// Inject a transmit-processing panic for boundary coverage.
     TransmitPanic = 3,
+    /// Fail one consumer reset to exercise fail-closed retry.
+    Reset = 4,
 }
 #[cfg(test)]
 pub(crate) fn take_test_failure(failure: TestFailure) -> bool {
@@ -60,6 +64,19 @@ type TransmitOwner = OwnedTransmitOwner<DtmfWorker, RuntimeTransmit<Audio>>;
 pub struct RadioStatus {
     carrier: Arc<AtomicU64>,
     dtmf: Arc<AtomicBool>,
+    handoff: Arc<LocalHandoff>,
+}
+#[derive(Default)]
+/// RX owns the qualification token; TX acknowledges each completed tail reset.
+/// The low bit is current qualification and the other bits count falling edges,
+/// so a complete unkey/rekey between TX callbacks cannot hide a stale burst.
+struct LocalHandoff {
+    token: AtomicU64,
+    reset_ack: AtomicU64,
+    pending_reset_dropped: AtomicU64,
+    write_failed_samples: AtomicU64,
+    reset_failures: AtomicU64,
+    render_failures: AtomicU64,
 }
 impl RadioStatus {
     /// Current receive state and original transition time.
@@ -69,6 +86,16 @@ impl RadioStatus {
     }
     fn update(&self, receiving: bool, now_ms: u64) {
         if self.carrier.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
+            let previous = self.handoff.token.load(Ordering::Relaxed);
+            // Publish only after the serial RX endpoint finished its previous write.
+            self.handoff.token.store(
+                if receiving {
+                    previous | 1
+                } else {
+                    previous.wrapping_add(1)
+                },
+                Ordering::Release,
+            );
             self.carrier.store(
                 (now_ms.min(u64::MAX >> 1) << 1) | u64::from(receiving),
                 Ordering::Release,
@@ -101,7 +128,6 @@ struct TransmitContext {
     maximum: usize,
     status: RadioStatus,
     squelch_delay_ms: u64,
-    receiving: UnsafeCell<bool>,
 }
 // SAFETY: callbacks are serialized independently by the host. Control writes owner slots
 // only before release-publishing active, and takes them only after synchronous radio destroy.
@@ -183,7 +209,19 @@ unsafe fn receive(context: *mut c_void, receiving: u32, pointer: *mut f32, count
         .status
         .set_dtmf_muted(receiving != 0 && generation.state().suppressing());
     if receiving != 0 {
-        let _ = state.producer.write(samples);
+        let handoff = &context.status.handoff;
+        let epoch = handoff.token.load(Ordering::Acquire) & !1;
+        if epoch != handoff.reset_ack.load(Ordering::Acquire) {
+            // Bound the handoff to one reset acknowledgement. Do not let new audio
+            // enter storage that TX is about to discard with the previous burst.
+            handoff
+                .pending_reset_dropped
+                .fetch_add(u64::from(count), Ordering::Relaxed);
+        } else if state.producer.write(samples).is_err() {
+            handoff
+                .write_failed_samples
+                .fetch_add(u64::from(count), Ordering::Relaxed);
+        }
     }
     0
 }
@@ -236,26 +274,33 @@ unsafe fn transmit(context: *mut c_void, pointer: *mut f32, count: u32, keyed: *
     }
     // SAFETY: only this serial transmit endpoint accesses these cells while active.
     let (owner, consumer) = unsafe { (&mut *context.owner.get(), &mut *context.consumer.get()) };
-    let receiving = context.status.snapshot().0;
-    // Reset on the qualification edge so old tail PCM cannot satisfy the next
-    // burst's priming reserve.
-    let previous = unsafe { &mut *context.receiving.get() };
-    if *previous && !receiving {
-        let _ = consumer.reset();
+    samples.fill(0.0);
+    let handoff = &context.status.handoff;
+    let token = handoff.token.load(Ordering::Acquire);
+    let epoch = token & !1;
+    let mut reset_ok = true;
+    if epoch != handoff.reset_ack.load(Ordering::Acquire) {
+        if reset_local(consumer).is_ok() {
+            handoff.reset_ack.store(epoch, Ordering::Release);
+        } else {
+            // Retry on the next TX callback; never acknowledge a failed reset.
+            handoff.reset_failures.fetch_add(1, Ordering::Relaxed);
+            reset_ok = false;
+        }
     }
-    *previous = receiving;
-    if consumer
-        .render_with_timing(
-            samples,
-            context.squelch_delay_ms,
-            context.squelch_delay_ms,
-        )
-        .is_err()
+    let mut receiving = token & 1 != 0 && reset_ok;
+    // An idle consumer must not drain a newly published burst or synthesize PLC.
+    if receiving
+        && consumer
+            .render_with_timing(samples, context.squelch_delay_ms, context.squelch_delay_ms)
+            .is_err()
     {
+        handoff.render_failures.fetch_add(1, Ordering::Relaxed);
         samples.fill(0.0);
+        receiving = false;
     }
-    // The ring holds the unkey tail until this current qualification snapshot
-    // reaches it, removing squelch crash without adding another PCM buffer.
+    // Cancel the rendered tail if RX unkeyed or changed bursts during this call.
+    receiving &= handoff.token.load(Ordering::Acquire) == token;
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
@@ -285,11 +330,21 @@ unsafe fn transmit(context: *mut c_void, pointer: *mut f32, count: u32, keyed: *
         }
     }
 }
+fn reset_local(consumer: &mut InboundConsumer) -> Result<(), RingError> {
+    #[cfg(test)]
+    if take_test_failure(TestFailure::Reset) {
+        return Err(RingError);
+    }
+    consumer.reset()
+}
 /// Stable preallocated callback contexts; no product audio OS thread is created.
 pub struct RadioWorker {
     radio: Option<Radio>,
     receive: Box<ReceiveContext>,
     transmit: Box<TransmitContext>,
+    observer: InboundObserver,
+    reported_faults: [u64; 6],
+    last_report_ms: u64,
 }
 impl RadioWorker {
     /// Attach both inactive endpoints and start the reserved channel transactionally.
@@ -308,6 +363,7 @@ impl RadioWorker {
         let Ok((producer, consumer)) = InboundRing::open(48_000) else {
             return Err((Error::Allocation, radio));
         };
+        let observer = producer.observer();
         let active = Arc::new(AtomicBool::new(false));
         let receive = Box::new(ReceiveContext {
             active: active.clone(),
@@ -327,7 +383,6 @@ impl RadioWorker {
             maximum,
             status,
             squelch_delay_ms,
-            receiving: UnsafeCell::new(false),
         });
         // SAFETY: boxes have stable addresses and outlive the activated radio. On failure
         // the host must detach both endpoints before returning the still-owned reservation.
@@ -347,7 +402,80 @@ impl RadioWorker {
             radio: Some(radio),
             receive,
             transmit,
+            observer,
+            reported_faults: [0; 6],
+            last_report_ms: 0,
         })
+    }
+    fn fault_counts(&self, ring: &Observation) -> [u64; 6] {
+        let handoff = &self.transmit.status.handoff;
+        [
+            ring.missing_samples,
+            ring.discarded_samples,
+            handoff.pending_reset_dropped.load(Ordering::Relaxed),
+            handoff.write_failed_samples.load(Ordering::Relaxed),
+            handoff.reset_failures.load(Ordering::Relaxed),
+            handoff.render_failures.load(Ordering::Relaxed),
+        ]
+    }
+    fn format_status(&self, ring: &Observation) -> String {
+        let [
+            missing,
+            discarded,
+            pending,
+            write_failed,
+            reset_failed,
+            render_failed,
+        ] = self.fault_counts(ring);
+        format!(
+            "  local-rx: occupancy={}/{}ms reserve={}ms target={}ms configured-delay={}ms ratio={:+}ppm missing={} discarded={} pending-reset-dropped={} write-failed-samples={} reset-failures={} render-failures={}",
+            ring.available_samples / 48,
+            ring.capacity_samples / 48,
+            ring.reserve_samples / 48,
+            ring.target_samples / 48,
+            self.transmit.squelch_delay_ms,
+            ring.ratio_correction_ppm,
+            missing,
+            discarded,
+            pending,
+            write_failed,
+            reset_failed,
+            render_failed
+        )
+    }
+    /// Control-only snapshot of this worker's actual local receive ring.
+    pub(crate) fn local_status_text(&self) -> String {
+        self.observer.observe().map_or_else(
+            |_| "  local-rx: observation failed".to_owned(),
+            |ring| self.format_status(&ring),
+        )
+    }
+    /// Record changed fault counters at most every five seconds, never from audio.
+    /// Syslog retains evidence even when the service discards stdout and stderr.
+    pub(crate) fn report_faults(&mut self, local: &str, now_ms: u64) {
+        if now_ms.saturating_sub(self.last_report_ms) < 5_000 {
+            return;
+        }
+        self.last_report_ms = now_ms;
+        if let Ok(ring) = self.observer.observe() {
+            let counts = self.fault_counts(&ring);
+            if counts != self.reported_faults {
+                self.reported_faults = counts;
+                if let Ok(message) = CString::new(format!(
+                    "rpt_advanced {local} at {now_ms}ms: {}",
+                    self.format_status(&ring)
+                )) {
+                    unsafe extern "C" {
+                        fn syslog(priority: c_int, format: *const c_char, ...);
+                    }
+                    // SAFETY: constant format and live NUL-terminated string match
+                    // the variadic C signature. Priority 5 is LOG_NOTICE.
+                    unsafe {
+                        syslog(5, c"%s".as_ptr(), message.as_ptr());
+                    }
+                }
+            }
+        }
     }
     /// Inject a single preparation/admission failure.
     #[cfg(test)]

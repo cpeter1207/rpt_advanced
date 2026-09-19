@@ -185,6 +185,13 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
             .unwrap()
             .contains("no active links")
     );
+    let local = host.status_text("1000").unwrap();
+    assert!(
+        local.contains("local-rx:"),
+        "status must identify the local receive ring"
+    );
+    assert!(local.contains("reset-failures=0"));
+    assert!(local.contains("pending-reset-dropped=0"));
     assert!(matches!(
         host.status_text("missing"),
         Err(RuntimeError::MissingNode)

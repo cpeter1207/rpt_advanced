@@ -424,6 +424,12 @@ impl Host {
                 if peers.len() == 1 { "link" } else { "links" }
             )
         };
+        if let Some((_, lease)) = self.leases.iter().rev().find(|(name, _)| name == local) {
+            let lease = lease.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(worker) = &lease.worker {
+                let _ = writeln!(result, "{}", worker.local_status_text());
+            }
+        }
         for peer in peers {
             let mode = if peer.mode.transmits() {
                 "transceive"
@@ -544,6 +550,11 @@ impl Host {
     }
     /// Drain bounded dispatcher/control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        for (local, lease) in &self.leases {
+            if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {
+                worker.report_faults(local, clock.now_ms);
+            }
+        }
         let mut events = Vec::new();
         let mut ended = Vec::new();
         for peer in &mut self.peers {

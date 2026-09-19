@@ -107,12 +107,16 @@ fn independent_callbacks_queue_processed_pcm_and_return_transmit_keying() {
     assert!(samples.iter().all(|sample| (*sample - 0.25).abs() < 0.0001));
     let mut samples = [9.0; 8];
     assert_eq!(tx(&worker, &mut samples), (0, 1));
-    assert!(samples[..4]
-        .iter()
-        .all(|sample| (*sample - 0.25).abs() < 0.0001));
-    assert!(samples[4..]
-        .iter()
-        .all(|sample| sample.is_finite() && sample.abs() <= 1.0));
+    assert!(
+        samples[..4]
+            .iter()
+            .all(|sample| (*sample - 0.25).abs() < 0.0001)
+    );
+    assert!(
+        samples[4..]
+            .iter()
+            .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
+    );
     let owners = worker.stop().unwrap();
     assert!(runtime.node("1000").unwrap().register_audio().is_none());
     drop(owners);
@@ -194,6 +198,143 @@ fn radio_status_preserves_the_original_edge_time() {
     assert_eq!(status.snapshot(), (true, 2));
     status.update(false, u64::MAX);
     assert_eq!(status.snapshot(), (false, u64::MAX >> 1));
+}
+
+#[test]
+fn rapid_rekey_cannot_replay_previous_burst() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    for _ in 0..256 {
+        assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+        assert_eq!(tx(&worker, &mut [0.0; 8]), (0, 1));
+    }
+    for _ in 0..4 {
+        assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+    }
+    assert_eq!(rx(&worker, false, &mut [0.0; 8]), 0);
+    assert_eq!(rx(&worker, true, &mut [0.0; 8]), 0);
+    assert!(
+        worker
+            .local_status_text()
+            .contains("pending-reset-dropped=8")
+    );
+    let mut output = [9.0; 8];
+    assert_eq!(tx(&worker, &mut output).0, 0);
+    assert_eq!(
+        output, [0.0; 8],
+        "previous burst must not survive rapid rekey"
+    );
+    drop(worker.stop());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn reset_failure_holds_acknowledgement_and_retries_without_old_audio() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+    assert_eq!(rx(&worker, false, &mut [0.0; 8]), 0);
+    assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
+    RadioWorker::fail_next_for_test(TestFailure::Reset);
+    let mut output = [9.0; 8];
+    assert_eq!(tx(&worker, &mut output).0, 0);
+    assert_eq!(output, [0.0; 8]);
+    assert_eq!(
+        worker
+            .receive
+            .status
+            .handoff
+            .reset_ack
+            .load(Ordering::Acquire),
+        0
+    );
+    assert!(worker.local_status_text().contains("reset-failures=1"));
+    assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
+    assert!(
+        worker
+            .local_status_text()
+            .contains("pending-reset-dropped=16")
+    );
+    assert_eq!(tx(&worker, &mut output).0, 0);
+    assert_eq!(output, [0.0; 8]);
+    assert_eq!(
+        worker
+            .receive
+            .status
+            .handoff
+            .reset_ack
+            .load(Ordering::Acquire),
+        2
+    );
+    for _ in 0..256 {
+        assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
+        assert_eq!(tx(&worker, &mut output).0, 0);
+    }
+    assert!(output.iter().all(|sample| (*sample - 0.5).abs() < 0.0001));
+    worker.report_faults("1000", 4_999);
+    assert_eq!(worker.reported_faults, [0; 6]);
+    worker.report_faults("1000", 5_000);
+    assert_eq!(worker.reported_faults[2], 16);
+    assert_eq!(worker.reported_faults[4], 1);
+    worker.report_faults("1000", 10_000);
+    assert_eq!(worker.last_report_ms, 10_000);
+    drop(worker.stop());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn idle_transmit_does_not_consume_or_conceal_and_new_prefix_is_retained() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    for _ in 0..3 {
+        // All edges fit within one elapsed millisecond and precede a TX callback.
+        assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+        assert_eq!(rx(&worker, false, &mut [0.0; 8]), 0);
+    }
+    assert_eq!(tx(&worker, &mut [9.0; 8]).0, 0);
+    assert_eq!(
+        worker
+            .receive
+            .status
+            .handoff
+            .reset_ack
+            .load(Ordering::Acquire),
+        6
+    );
+    let before = worker.observer.observe().unwrap();
+    for _ in 0..256 {
+        assert_eq!(tx(&worker, &mut [9.0; 8]).0, 0);
+    }
+    let after = worker.observer.observe().unwrap();
+    assert_eq!(after.missing_samples, before.missing_samples);
+    assert_eq!(after.available_samples, 0);
+    assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
+    assert_eq!(worker.observer.observe().unwrap().available_samples, 8);
+    let mut output = [0.0; 8];
+    for _ in 0..256 {
+        assert_eq!(tx(&worker, &mut output).0, 0);
+        assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
+    }
+    assert!(output.iter().all(|sample| (*sample - 0.5).abs() < 0.0001));
+    assert!(
+        worker
+            .local_status_text()
+            .contains("pending-reset-dropped=16")
+    );
+    drop(worker.stop());
+    assert!(runtime.stop(0));
 }
 
 #[test]
