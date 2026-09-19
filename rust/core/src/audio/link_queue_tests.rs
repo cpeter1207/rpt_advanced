@@ -21,17 +21,21 @@ fn queue_endpoints_transfer_samples_between_threads() {
     let (producer, consumer) = LinkAudioQueue::new(16).unwrap().into_endpoints();
     let writer = std::thread::spawn(move || {
         let mut producer = producer;
-        while producer.write(&[1.0, 2.0, 3.0, 4.0]) != 0 {}
+        assert_eq!(producer.write(&[1.0, 2.0, 3.0, 4.0]), 0);
     });
     let reader = std::thread::spawn(move || {
         let mut consumer = consumer;
         let mut output = [0.0; 4];
-        loop {
-            consumer.read(&mut output);
-            if output == [1.0, 2.0, 3.0, 4.0] {
-                return output;
-            }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut received = 0;
+        // Per-sample publication permits valid partial reads; retain each prefix.
+        while received < output.len() {
+            assert!(std::time::Instant::now() < deadline, "PCM handoff stalled");
+            let remaining = &mut output[received..];
+            received += remaining.len() - consumer.read(remaining);
+            std::thread::yield_now();
         }
+        output
     });
     writer.join().unwrap();
     assert_eq!(reader.join().unwrap(), [1.0, 2.0, 3.0, 4.0]);
