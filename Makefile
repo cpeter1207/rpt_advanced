@@ -150,7 +150,7 @@ install-check: artifacts
 	$(MAKE) -o rust-build DESTDIR=$(CURDIR)/build/stage prefix=/usr install
 	python3 tests/test_rust_product_surface.py --stage build/stage --multiarch $(multiarch) --asteriskmoddir "$(asteriskmoddir)"
 
-build/chan_rpt_fixture.so: tests/radio_fixture.c | build
+build/chan_rpt_fixture.so: tests/radio_fixture.c rust/product/include/rptadv_product.h | build
 	$(CC) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@
 
 integration: install-check build/chan_rpt_fixture.so

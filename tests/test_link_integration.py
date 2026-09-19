@@ -317,21 +317,30 @@ def dtmf_links(modules):
                 "network-dtmf",
             ) as first,
         ):
+            completed = "node 524950 link command completed"
+            # Codec offers create provisional channels before controller admission.
             deadline = time.monotonic() + 15
-            while "IAX2/" not in cli(first[0], "core show channels concise"):
+            while completed not in first[1].read_text(encoding="utf-8") or (
+                "508422: transceive"
+                not in cli(first[0], "rpt_advanced link status 524950")
+            ):
                 assert time.monotonic() < deadline, (
                     "received DTMF did not connect the link"
                 )
                 time.sleep(0.1)
+            assert "IAX2/" in cli(first[0], "core show channels concise")
             assert "IAX2/" in cli(second[0], "core show channels concise")
             deadline = time.monotonic() + 15
-            while "IAX2/" in cli(first[0], "core show channels concise"):
+            while first[1].read_text(encoding="utf-8").count(completed) < 2 or any(
+                "IAX2/" in cli(configuration, "core show channels concise")
+                for configuration, _ in (first, second)
+            ):
                 assert time.monotonic() < deadline, (
                     "DTMF timeout did not disconnect the link"
                 )
                 time.sleep(0.1)
             log = first[1].read_text(encoding="utf-8")
-            assert log.count("node 524950 link command completed") == 2, log
+            assert log.count(completed) == 2, log
             print(
                 "received DTMF connect/hash and disconnect/timeout at fixed 48 kHz passed"
             )

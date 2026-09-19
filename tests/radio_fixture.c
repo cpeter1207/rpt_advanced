@@ -2,33 +2,27 @@
 /** @file
  * @brief Test-only hardware-paced Asterisk radio; never installed on a node.
  */
+#include "../rust/product/include/rptadv_product.h"
 #include <asterisk.h>
 #include <asterisk/astobj2.h>
 #include <asterisk/buildopts.h>
 #include <asterisk/channel.h>
-#include <asterisk/format.h>
 #include <asterisk/format_cache.h>
 #include <asterisk/format_cap.h>
-#include <asterisk/frame.h>
 #include <asterisk/logger.h>
 #include <asterisk/module.h>
-#include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <time.h>
-#include <unistd.h>
-#ifdef RA_REAL_ADAPTER
-#include "usbradioplus_rpt_advanced.h"
-#endif
 
 /** @brief Test-device state, retained until the producer thread has joined. */
 struct fixture {
-    int pipe[2];        /**< Readiness events representing hardware intervals. */
     pthread_t thread;   /**< Clock producer. */
-    atomic_bool stop;   /**< Stop producer before closing its descriptors. */
+    atomic_bool stop;   /**< Stop callbacks before releasing their borrowed contexts. */
     bool started;       /**< Thread was created successfully. */
+    bool keyed;         /**< Last physical PTT state. */
     bool carrier;       /**< Current synthetic receiver indication. */
     bool media;         /**< Delay reception so a prepared ID starts first. */
     bool network;       /**< Repeat phased receive bursts during network tests. */
@@ -37,14 +31,15 @@ struct fixture {
     unsigned int remote_blocks; /**< Nonzero transmit blocks while local reception is inactive. */
     unsigned int file_blocks;   /**< Recognizable prepared-file blocks before reception. */
     unsigned int morse_blocks;  /**< Negative Morse samples mixed with positive receive PCM. */
-    unsigned int ticks;         /**< Voice frames consumed by Asterisk. */
+    unsigned int ticks;         /**< Hardware-paced direct receive calls. */
     unsigned int writes;        /**< Transmit blocks received. */
     unsigned int nonzero;       /**< Blocks with nonzero output. */
     unsigned int early;         /**< Nonzero output during initial local reception. */
     unsigned int keys;          /**< PTT assertions. */
-    unsigned int unkeys;        /**< PTT releases. */
-    struct ast_frame frame;     /**< Borrowed read result. */
-    int16_t audio[AST_FRIENDLY_OFFSET / 2 + 960]; /**< Native-rate PCM and headroom. */
+    unsigned int unkeys;        /**< PTT releases observed in callback output. */
+    struct urp_ast_direct_callbacks callbacks; /**< Retained ABI2 endpoints. */
+    struct ast_channel *channel; /**< Borrowed until synchronous hangup joins the clock. */
+    float audio[960];            /**< Normalized native-rate PCM. */
 };
 /** @brief One native signed-linear capability. */
 static struct ast_format_cap *capabilities;
@@ -56,19 +51,10 @@ static struct ast_channel_tech technology;
 /** @brief Produce finite hardware-like ticks without using the controller's clock.
  * @param context Owned device.
  * @return Null after stop or the test interval.
+ * Duplex cases finish at an observed unkey; streaming media/network cases stay live.
+ * A stuck key never produces finite readiness, and teardown adds no counted edge.
  */
-static void *clock_run(void *context) {
-    struct fixture *device = context;
-    const struct timespec interval = {.tv_nsec = 20000000};
-    for (unsigned int tick = 0;
-         tick < (device->network ? 2000U : 100U) && !atomic_load(&device->stop); ++tick) {
-        if (write(device->pipe[1], "x", 1) != 1) {
-            break;
-        }
-        nanosleep(&interval, NULL);
-    }
-    return NULL;
-}
+static void *clock_run(void *context);
 
 /** @brief Reserve a synthetic device through the real Asterisk channel allocator.
  * @param type Requested technology.
@@ -90,10 +76,6 @@ static struct ast_channel *request(const char *type, struct ast_format_cap *cap,
     if (!device) {
         return NULL;
     }
-    if (pipe2(device->pipe, O_CLOEXEC)) {
-        ast_free(device);
-        return NULL;
-    }
     atomic_init(&device->stop, false);
     device->media = !strcmp(data, "media");
     device->network = !strncmp(data, "network-", 8);
@@ -102,8 +84,6 @@ static struct ast_channel *request(const char *type, struct ast_format_cap *cap,
     struct ast_channel *channel = ast_channel_alloc(1, AST_STATE_DOWN, NULL, NULL, "", "", "", ids,
                                                     requestor, 0, "RadioPlusAdvanced/%s", data);
     if (!channel) {
-        close(device->pipe[0]);
-        close(device->pipe[1]);
         ast_free(device);
         return NULL;
     }
@@ -112,7 +92,7 @@ static struct ast_channel *request(const char *type, struct ast_format_cap *cap,
     ast_channel_nativeformats_set(channel, capabilities);
     ast_channel_set_readformat(channel, ast_format_cache_get_slin_by_rate(48000));
     ast_channel_set_writeformat(channel, ast_format_cache_get_slin_by_rate(48000));
-    ast_channel_set_fd(channel, 0, device->pipe[0]);
+    device->channel = channel;
     atomic_fetch_add(&active, 1);
     ast_channel_unlock(channel);
     return channel;
@@ -128,93 +108,63 @@ static int call(struct ast_channel *channel, const char *destination, int timeou
     (void)destination;
     (void)timeout;
     struct fixture *device = ast_channel_tech_pvt(channel);
+    if (!device->callbacks.receive || device->started) {
+        return -1;
+    }
     int result = pthread_create(&device->thread, NULL, clock_run, device);
     device->started = !result;
     ast_setstate(channel, AST_STATE_UP);
     return result;
 }
 
-/** @brief Return carrier transitions without consuming a voice clock tick.
- * @param channel Ready test device.
- * @return Borrowed control or native voice frame.
+/** @brief Produce one native receive interval with its carrier and optional DTMF.
+ * @param device Clock-owned fixture.
  */
-static struct ast_frame *read_frame(struct ast_channel *channel) {
-    struct fixture *device = ast_channel_tech_pvt(channel);
-    device->frame = (struct ast_frame){.src = "rpt-test-radio"};
+static void receive_audio(struct fixture *device) {
     unsigned int begin = device->media ? 10 : 0;
-    bool carrier = device->network ? device->ticks % 100 >= device->phase &&
-                                         device->ticks % 100 < device->phase + 30
-                                   : device->ticks >= begin && device->ticks < begin + 10;
+    device->carrier = device->network ? device->ticks % 100 >= device->phase &&
+                                            device->ticks % 100 < device->phase + 30
+                                      : device->ticks >= begin && device->ticks < begin + 10;
     if (device->dtmf) {
-        carrier = true;
+        device->carrier = true;
     }
-    if (carrier != device->carrier) {
-        device->carrier = !device->carrier;
-        device->frame.frametype = AST_FRAME_CONTROL;
-        device->frame.subclass.integer =
-            device->carrier ? AST_CONTROL_RADIO_KEY : AST_CONTROL_RADIO_UNKEY;
-    } else {
-        char event;
-        if (read(device->pipe[0], &event, 1) != 1) {
-            return NULL;
-        }
-        ++device->ticks;
-        int16_t *audio = device->audio + AST_FRIENDLY_OFFSET / 2;
-        for (size_t i = 0; i < 960; ++i) {
-            audio[i] = device->carrier ? 1000 : 0;
-            if (device->dtmf) {
-                audio[i] = 0;
-                unsigned int start = device->ticks < 400 ? 100 : 400;
-                const char *sequence = device->ticks < 400 ? "*3508422#" : "*1508422";
-                unsigned int elapsed = device->ticks >= start ? device->ticks - start : 1000;
-                if (elapsed / 10 < strlen(sequence) && elapsed % 10 < 6) {
-                    const char *keypad = "123A456B789C*0#D";
-                    size_t key = (size_t)(strchr(keypad, sequence[elapsed / 10]) - keypad);
-                    const double rows[] = {697, 770, 852, 941};
-                    const double columns[] = {1209, 1336, 1477, 1633};
-                    double phase =
-                        2.0 * 3.14159265358979323846 * ((elapsed % 10) * 960 + i) / 48000;
-                    audio[i] = (int16_t)(4000 * (sin(phase * rows[key / 4]) +
-                                                 sin(phase * columns[key % 4])));
-                }
+    ++device->ticks;
+    float *audio = device->audio;
+    for (size_t i = 0; i < 960; ++i) {
+        audio[i] = device->carrier ? 1000.0F / 32768.0F : 0;
+        if (device->dtmf) {
+            audio[i] = 0;
+            unsigned int start = device->ticks < 400 ? 100 : 400;
+            const char *sequence = device->ticks < 400 ? "*3508422#" : "*1508422";
+            unsigned int elapsed = device->ticks >= start ? device->ticks - start : 1000;
+            if (elapsed / 10 < strlen(sequence) && elapsed % 10 < 6) {
+                const char *keypad = "123A456B789C*0#D";
+                size_t key = (size_t)(strchr(keypad, sequence[elapsed / 10]) - keypad);
+                const double rows[] = {697, 770, 852, 941};
+                const double columns[] = {1209, 1336, 1477, 1633};
+                double phase = 2.0 * 3.14159265358979323846 * ((elapsed % 10) * 960 + i) / 48000;
+                audio[i] = (float)(4000.0 / 32768.0 *
+                                   (sin(phase * rows[key / 4]) + sin(phase * columns[key % 4])));
             }
         }
-        device->frame.frametype = AST_FRAME_VOICE;
-        device->frame.subclass.format = ast_format_cache_get_slin_by_rate(48000);
-        device->frame.offset = AST_FRIENDLY_OFFSET;
-        device->frame.samples = 960;
-        device->frame.datalen = 1920;
-        device->frame.data.ptr = audio;
     }
-    return &device->frame;
 }
 
-/** @brief Inspect actual PCM returned through Asterisk's write path.
- * @param channel Device.
- * @param frame Output frame after Asterisk conversion.
- * @return Zero, or minus one for an invalid native format.
+/** @brief Inspect canonical PCM returned directly into the hardware buffer.
+ * @param device Clock-owned fixture.
  */
-static int write_frame(struct ast_channel *channel, struct ast_frame *frame) {
-    struct fixture *device = ast_channel_tech_pvt(channel);
-    if (frame->frametype != AST_FRAME_VOICE || frame->samples <= 0 ||
-        frame->datalen != frame->samples * 2 ||
-        ast_format_get_sample_rate(frame->subclass.format) != 48000) {
-        return -1;
-    }
+static void inspect_audio(struct fixture *device) {
     ++device->writes;
-    if (device->writes == 30) {
-        ast_log(LOG_NOTICE, "rpt_fixture ready %s\n", ast_channel_name(channel));
-    }
-    const int16_t *samples = frame->data.ptr;
+    const float *samples = device->audio;
     bool file = false;
     bool morse = false;
-    for (int i = 0; i < frame->samples; ++i) {
-        file |= !device->carrier && samples[i] == 2345;
+    for (size_t i = 0; i < 960; ++i) {
+        file |= !device->carrier && fabsf(samples[i] - 2345.0F / 32768.0F) < 1.0F / 32768.0F;
         morse |= device->carrier && samples[i] < 0;
     }
     device->file_blocks += file;
     device->morse_blocks += morse;
-    for (int i = 0; i < frame->samples; ++i) {
+    for (size_t i = 0; i < 960; ++i) {
         if (samples[i]) {
             ++device->nonzero;
             device->early += device->carrier;
@@ -222,23 +172,61 @@ static int write_frame(struct ast_channel *channel, struct ast_frame *frame) {
             break;
         }
     }
+}
+
+/** @brief Retain direct endpoints and acknowledge only the implemented ABI.
+ * @param channel Reserved test device.
+ * @param option Direct attachment identifier.
+ * @param data Mutable descriptor.
+ * @param size Exact descriptor size.
+ * @return Zero after retaining callbacks, minus one for an invalid attachment.
+ */
+static int setoption(struct ast_channel *channel, int option, void *data, int size) {
+    struct fixture *device = ast_channel_tech_pvt(channel);
+    if (option != URP_AST_OPTION_DIRECT_CALLBACKS || !data ||
+        size != sizeof(struct urp_ast_direct_callbacks) || device->callbacks.receive) {
+        return -1;
+    }
+    struct urp_ast_direct_callbacks *callbacks = data;
+    callbacks->accepted_abi_version = 0;
+    if (callbacks->struct_size != sizeof(*callbacks) ||
+        callbacks->abi_version != URP_AST_DIRECT_CALLBACKS_ABI_VERSION || !callbacks->receive ||
+        !callbacks->transmit) {
+        return -1;
+    }
+    device->callbacks = *callbacks;
+    callbacks->accepted_abi_version = URP_AST_DIRECT_CALLBACKS_ABI_VERSION;
     return 0;
 }
 
-/** @brief Observe PTT through Asterisk's real indication interface.
- * @param channel Device.
- * @param condition Radio control.
- * @param data Unused payload.
- * @param size Unused payload size.
- * @return Zero.
- */
-static int indicate(struct ast_channel *channel, int condition, const void *data, size_t size) {
-    (void)data;
-    (void)size;
-    struct fixture *device = ast_channel_tech_pvt(channel);
-    device->keys += condition == AST_CONTROL_RADIO_KEY;
-    device->unkeys += condition == AST_CONTROL_RADIO_UNKEY;
-    return 0;
+static void *clock_run(void *context) {
+    struct fixture *device = context;
+    const struct timespec interval = {.tv_nsec = 20000000};
+    for (unsigned int tick = 0;
+         tick < (device->network ? 2000U : 100U) && !atomic_load(&device->stop); ++tick) {
+        receive_audio(device);
+        uint32_t keyed = 0;
+        if (device->callbacks.receive(device->callbacks.receive_context, device->carrier,
+                                      device->audio, 960) ||
+            device->callbacks.transmit(device->callbacks.transmit_context, device->audio, 960,
+                                       &keyed)) {
+            break;
+        }
+        device->keys += keyed && !device->keyed;
+        device->unkeys += !keyed && device->keyed;
+        device->keyed = keyed != 0;
+        inspect_audio(device);
+        if (device->network || device->media ? device->writes == 30
+                                             : device->writes >= 30 && !device->keyed) {
+            ast_log(LOG_NOTICE, "rpt_fixture ready %s\n", ast_channel_name(device->channel));
+            if (!device->network && !device->media) {
+                break;
+            }
+        }
+        nanosleep(&interval, NULL);
+    }
+    device->keyed = false;
+    return NULL;
 }
 
 /** @brief Join producer, report observable audio, and release channel-owned resources.
@@ -261,8 +249,6 @@ static int hangup(struct ast_channel *channel) {
     if (device->network) {
         ast_log(LOG_NOTICE, "rpt_fixture network remote=%u\n", device->remote_blocks);
     }
-    close(device->pipe[0]);
-    close(device->pipe[1]);
     ast_channel_tech_pvt_set(channel, NULL);
     ast_free(device);
     atomic_fetch_sub(&active, 1);
@@ -274,19 +260,8 @@ static struct ast_channel_tech technology = {.type = "RadioPlusAdvanced",
                                              .description = "Test radio",
                                              .requester = request,
                                              .call = call,
-                                             .read = read_frame,
-                                             .write = write_frame,
-                                             .indicate = indicate,
+                                             .setoption = setoption,
                                              .hangup = hangup};
-
-#ifdef RA_REAL_ADAPTER
-/** @brief Synthetic hardware already uses native PCM; verify the adapter's callback.
- * @param channel Exclusively reserved test channel.
- */
-static void configure_native(struct ast_channel *channel) {
-    ast_log(LOG_NOTICE, "rpt_fixture native adapter %s\n", ast_channel_name(channel));
-}
-#endif
 
 /** @brief Register the test-only radio.
  * @return Module load status.
@@ -301,11 +276,7 @@ static int load_module(void) {
         return AST_MODULE_LOAD_DECLINE;
     }
     technology.capabilities = capabilities;
-#ifdef RA_REAL_ADAPTER
-    if (usbradioplus_advanced_register(&technology, configure_native)) {
-#else
     if (ast_channel_register(&technology)) {
-#endif
         ao2_cleanup(capabilities);
         return AST_MODULE_LOAD_DECLINE;
     }
@@ -318,11 +289,7 @@ static int unload_module(void) {
     if (atomic_load(&active)) {
         return -1;
     }
-#ifdef RA_REAL_ADAPTER
-    usbradioplus_advanced_unregister();
-#else
     ast_channel_unregister(&technology);
-#endif
     ao2_cleanup(capabilities);
     return 0;
 }
