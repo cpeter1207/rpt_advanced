@@ -1,0 +1,29 @@
+#!/usr/bin/make -f
+
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+PRIVATE_LIB_DIRS := $(CURDIR)/debian/librptadv-product1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
+PRIVATE_LIB_DIRS := $(PRIVATE_LIB_DIRS):$(CURDIR)/debian/librptadv-file-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
+PRIVATE_LIB_DIRS := $(PRIVATE_LIB_DIRS):$(CURDIR)/debian/librptadv-speech-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
+PRIVATE_LIB_DIRS := $(PRIVATE_LIB_DIRS):$(CURDIR)/debian/librptadv-control-asterisk-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) all
+
+override_dh_auto_test:
+	$(MAKE) check
+
+override_dh_auto_install:
+	$(MAKE) DESTDIR=$(CURDIR)/debian/tmp prefix=/usr \
+		asteriskmoddir=/usr/lib/$(DEB_HOST_MULTIARCH)/asterisk/modules install
+
+override_dh_missing:
+	dh_missing --fail-missing
+
+override_dh_shlibdeps:
+	dh_shlibdeps -l$(PRIVATE_LIB_DIRS)
+
+override_dh_auto_clean:
+	$(MAKE) clean

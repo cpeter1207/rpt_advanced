@@ -27,26 +27,42 @@ def cli(configuration: Path, command: str) -> str:
     ).stdout
 
 
+def assert_asl_modules_absent(configuration: Path) -> None:
+    """! @brief Confirm the generic module starts without known ASL3 resource modules.
+    @param configuration Isolated Asterisk configuration.
+    @return None; assertions reject an unexpected runtime module dependency.
+
+    The test runs before the separate test-only radio fixture is copied into
+    the module directory.  AllStarLink wire compatibility remains covered
+    elsewhere; this only proves that the controller does not load ASL3's
+    repeater/resource modules to start.
+    """
+    for module in (
+        "app_rpt.so",
+        "res_usbradio.so",
+        "chan_usbradio.so",
+        "chan_simpleusb.so",
+        "chan_voter.so",
+    ):
+        listing = cli(configuration, f"module show like {module}")
+        assert "0 modules loaded" in listing, listing
+
+
 def audio_case(
     configuration: Path,
     radio_configuration: Path,
     logfile: Path,
     process: subprocess.Popen,
-    rate: int,
-    codec: str,
 ) -> None:
-    """! @brief Exchange two radios through actual Asterisk converters and reload.
+    """! @brief Exchange direct 48 kHz radios with current fixed-native settings.
     @param configuration Isolated Asterisk configuration.
     @param radio_configuration Controller configuration to replace.
     @param logfile Test-owned diagnostic output.
     @param process Running isolated Asterisk.
-    @param rate Explicit rate or zero for native auto selection.
-    @param codec Requested codec, empty for native linear.
     @return None; assertions verify transport and duplex behavior.
     """
     offset = len(logfile.read_text(encoding="utf-8", errors="replace"))
     radio_configuration.write_text(
-        f"[general]\nsample_rate_hz={rate}\ncodec={codec}\n"
         "[full]\nfull_duplex=yes\n"
         "[half]\nfull_duplex=no\n"
         "[identifier]\ninterval_ms=50\nmorse_text=E\n"
@@ -63,7 +79,7 @@ def audio_case(
         < 2
     ):
         if process.poll() is not None or time.monotonic() >= deadline:
-            raise TimeoutError(f"radio exchange did not complete: {rate=} {codec=}")
+            raise TimeoutError("radio exchange did not complete")
         time.sleep(0.1)
     radio_configuration.write_text("", encoding="utf-8")
     cli(configuration, "module reload app_rpt_advanced.so")
@@ -75,12 +91,10 @@ def audio_case(
     assert len(records) == 2, records
     for name, *values in records:
         ticks, writes, nonzero, early, keys, unkeys = map(int, values)
-        assert writes >= 30 and ticks >= writes, records
-        if not rate:
-            assert ticks == writes, records
+        assert writes >= 30 and ticks == writes, records
         assert nonzero > 0 and keys > 0 and unkeys == keys, records
         assert (early > 0) == (name == "full"), records
-    print(f"Asterisk audio {rate=} {codec=}: {records}")
+    print(f"Asterisk direct 48 kHz audio: {records}")
 
 
 def media_case(configuration, radio_configuration, logfile, process) -> None:
@@ -183,7 +197,7 @@ def main() -> None:
         radio_configuration = directory / "rpt_advanced.conf"
         radio_configuration.write_text(
             Path(
-                "build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf"
+                "build/stage/usr/share/doc/rpt-advanced/examples/rpt_advanced.conf"
             ).read_text(encoding="utf-8"),
             encoding="utf-8",
         )
@@ -221,6 +235,7 @@ def main() -> None:
                     if process.poll() is not None or time.monotonic() >= deadline:
                         raise RuntimeError(f"module did not start: {listing}")
                     time.sleep(0.1)
+                assert_asl_modules_absent(configuration)
                 radio_configuration.write_text(
                     "[usb]\nfull_duplex=yes\n", encoding="utf-8"
                 )
@@ -251,23 +266,7 @@ def main() -> None:
                     module_directory / "chan_rpt_fixture.so",
                 )
                 cli(configuration, "module load chan_rpt_fixture.so")
-                for library in ("codec_resample.so", "codec_ulaw.so"):
-                    candidates = list(
-                        Path("/usr/lib").glob(f"*/asterisk/modules/{library}")
-                    )
-                    candidates += list(Path("/usr/lib/asterisk/modules").glob(library))
-                    assert candidates, f"ASL3 test image is missing {library}"
-                    shutil.copyfile(candidates[0], module_directory / library)
-                    cli(configuration, f"module load {library}")
-                for rate, codec in ((0, ""), (16000, "slin"), (8000, "ulaw")):
-                    audio_case(
-                        configuration,
-                        radio_configuration,
-                        logfile,
-                        process,
-                        rate,
-                        codec,
-                    )
+                audio_case(configuration, radio_configuration, logfile, process)
                 announcement_case(configuration, radio_configuration, logfile, process)
                 media_case(configuration, radio_configuration, logfile, process)
                 cli(configuration, "module unload chan_rpt_fixture.so")

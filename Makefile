@@ -1,280 +1,181 @@
 .DEFAULT_GOAL := all
 CC ?= cc
-AR ?= ar
-CPPFLAGS += -Isrc
-RPCR_SOURCE ?=
-ifneq ($(strip $(RPCR_SOURCE)),)
-RPCR_STAGE ?= $(CURDIR)/build/rpcr-stage
-RPCR_PREFIX := $(RPCR_STAGE)/usr
-RPCR_LIBRARY := $(RPCR_PREFIX)/lib/librate_adjusting_pcm_ring.so
-RPCR_HEADER := $(RPCR_PREFIX)/include/rate_adjusting_pcm_ring/rate_adjusting_pcm_ring.h
-RPCR_CFLAGS := -I$(RPCR_PREFIX)/include/rate_adjusting_pcm_ring
-RPCR_LIBS := -L$(RPCR_PREFIX)/lib -lrate_adjusting_pcm_ring
-RPCR_BUILD_DEP := $(RPCR_LIBRARY)
-else
-RPCR_CFLAGS := $(shell pkg-config --cflags rate_adjusting_pcm_ring)
-RPCR_LIBS := $(shell pkg-config --libs rate_adjusting_pcm_ring)
-endif
-CPPFLAGS += $(RPCR_CFLAGS)
-CFLAGS ?= -O2 -g
-WARNINGS := -std=c11 -Wall -Wextra -Wpedantic -Werror
-SOURCES := $(wildcard src/*.c)
-MODULE_SOURCE := module/app_rpt_advanced.c
-MEDIA_SOURCE := module/media.c
-SPEECH_SOURCE := module/speech.c
-RADIO_SOURCE := module/radio.c
-WORKER_SOURCE := module/worker.c
-CONNECTION_SOURCE := module/connection.c
-RUNTIME_SOURCE := module/runtime.c
-MODULE_HELPERS := $(filter-out $(MODULE_SOURCE),$(wildcard module/*.c))
-MODULE_OBJECTS := $(patsubst module/%.c,build/module/%.o,$(MODULE_HELPERS))
-MODULE_COVERAGE_OBJECTS := $(patsubst module/%.c,build/module-coverage/%.o,$(MODULE_HELPERS))
-MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE_SELF_SYM=ra_module_self -Wall -Wextra -Werror
-SAMPLERATE_LIBS := -lsamplerate $(RPCR_LIBS)
-# The released shared playout ring installs under /usr/lib.  ASL3's module
-# loader does not add that non-multiarch directory to its runtime search path.
-RPCR_RPATH := -Wl,-rpath,/usr/lib
-HEADERS := $(wildcard src/*.h)
-TESTS := $(wildcard tests/test_*.c)
-OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
-COVERAGE_OBJECTS := $(patsubst src/%.c,build/coverage-objects/%.o,$(SOURCES))
-.SECONDARY: $(COVERAGE_OBJECTS)
-TEST_PROGRAMS := $(patsubst tests/%.c,build/%,$(TESTS))
-
-$(MODULE_OBJECTS) $(MODULE_COVERAGE_OBJECTS) build/app_rpt_advanced.o build/module-coverage/app_rpt_advanced.o: $(RPCR_BUILD_DEP)
-prefix ?= /usr/local
+CARGO ?= cargo
+CARGO_TARGET_DIR ?= target
+export CARGO_TARGET_DIR
+prefix ?= /usr
 multiarch := $(shell $(CC) -print-multiarch)
-asteriskmoddir ?= /usr/lib/$(multiarch)/asterisk/modules
+asteriskmoddir ?= $(prefix)/lib/$(multiarch)/asterisk/modules
+libdir := $(prefix)/lib/$(multiarch)/rpt_advanced
+LOADER_RUNPATH = $$ORIGIN/$(shell realpath -m --relative-to="$(asteriskmoddir)" "$(libdir)")
+docdir := $(prefix)/share/doc/rpt-advanced
 DESTDIR ?=
-VERSION := 0.1.0-dev
+VERSION ?= 0.1.0-alpha7
 DIST_NAME := rpt_advanced-$(VERSION)
-DIST_FILES := Makefile COPYING README.md QUALITY.md AGENTS.md Doxyfile .clang-format src module tests examples doc
+CFLAGS ?= -O2 -g
+MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror
+HEADERS := rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
+CPPFLAGS += $(addprefix -I,$(dir $(HEADERS)))
+LOADER := module/app_rpt_advanced_loader.c
+ADAPTERS := asterisk control_asterisk file speech
+LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
+LIBRARIES += build/librptadv_product.so.1
+RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
+TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH"
+MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
+DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c examples doc debian README.md QUALITY.md WISHLIST.md
 
-.PHONY: all quality lint static-analysis docs check coverage install install-check integration dist distcheck platform-verify ci clean
-all: $(RPCR_BUILD_DEP) build/librpt_advanced.a build/app_rpt_advanced.so
+.PHONY: all rust-build artifacts quality lint static-analysis docs dependency-boundary product-surface rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
+# The small loader must reflect directory overrides even when Rust DSOs are unchanged.
+.PHONY: build/app_rpt_advanced.so
+all: build/app_rpt_advanced.so
 
 build:
 	mkdir -p $@
 
-ifneq ($(strip $(RPCR_SOURCE)),)
-$(RPCR_LIBRARY):
-	$(MAKE) -C $(RPCR_SOURCE) DESTDIR=$(RPCR_STAGE) prefix=/usr install
-$(RPCR_HEADER): $(RPCR_LIBRARY)
-endif
-build/%.o: src/%.c $(HEADERS) $(RPCR_BUILD_DEP) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC -c $< -o $@
+# Cargo owns incremental dependency tracking; Make never enumerates Rust source files.
+rust-build: | build
+	$(CARGO) build --locked --release --workspace
+	@set -e; for name in $(ADAPTERS); do \
+		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
+	done
+	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
 
-build/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) $(RPCR_BUILD_DEP) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -c $< -o $@
+$(LIBRARIES): rust-build
+	@test -f $@
 
-build/module:
-	mkdir -p $@
+build/app_rpt_advanced.so: $(LOADER) $(HEADERS) $(LIBRARIES)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) \
+		-Lbuild -Wl,--enable-new-dtags,-rpath,'$(LOADER_RUNPATH)' \
+		$(addprefix -l:,$(notdir $(LIBRARIES))) -o $@
 
-build/module/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) $(RPCR_BUILD_DEP) | build/module
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -fPIC -c $< -o $@
+artifacts: all
+	python3 tests/test_rust_product_surface.py --artifacts build --asteriskmoddir "$(asteriskmoddir)" --libdir "$(libdir)"
+	python3 tests/test_rust_product_surface.py --package debian/control
 
-build/app_rpt_advanced.so: build/app_rpt_advanced.o $(OBJECTS) $(MODULE_OBJECTS)
-	$(CC) -shared $^ -pthread -lm $(SAMPLERATE_LIBS) $(RPCR_RPATH) -o $@
+product-surface:
+	python3 tests/test_rust_product_surface.py
 
-build/librpt_advanced.a: $(OBJECTS)
-	$(AR) rcs $@ $^
-
-quality: $(RPCR_BUILD_DEP) lint static-analysis docs
+dependency-boundary:
+	python3 tests/test_asterisk_independence.py
 
 lint:
-	clang-format --dry-run --Werror $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS) $(wildcard module/*.h) $(HEADERS) $(wildcard tests/*.c tests/*.h)
+	$(CARGO) fmt --all -- --check
+	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
-static-analysis:
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) $(SOURCES) $(MODULE_SOURCE) $(MODULE_HELPERS)
-	clang-tidy $(SOURCES) --warnings-as-errors='*' -- $(CPPFLAGS) -std=c11
-	clang-tidy $(MODULE_SOURCE) $(MODULE_HELPERS) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
+static-analysis: dependency-boundary product-surface
+	# AST_MODULE_INFO is external declaration machinery, not a callable API.
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) '-DAST_MODULE_INFO(key,flags,description,...)=;' $(LOADER)
+	clang-tidy $(LOADER) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
+	$(TEST_ENV) $(CARGO) clippy --locked --workspace --all-targets -- -D warnings
 
-docs: $(RPCR_BUILD_DEP) | build
+rust-quality:
+	$(CARGO) fmt --all -- --check
+	$(TEST_ENV) $(CARGO) clippy --locked --workspace --all-targets -- -D warnings
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --workspace --no-deps
+
+docs: | build
 	doxygen Doxyfile
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --workspace --no-deps
+	python3 tests/test_rust_product_surface.py --rustdoc $(CARGO_TARGET_DIR)/doc
 
-build/coverage-objects:
-	mkdir -p $@
+quality: lint static-analysis docs
 
-build/coverage-objects/%.o: src/%.c $(HEADERS) $(RPCR_BUILD_DEP) | build/coverage-objects
-	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage -fPIC -c $< -o $@
+check: rust-build loader-check
+	$(TEST_ENV) $(CARGO) test --locked --workspace
 
-build/module-coverage:
-	mkdir -p $@
+rust-check: rust-quality check
 
-build/module-coverage/%.o: module/%.c $(wildcard module/*.h) $(HEADERS) $(RPCR_BUILD_DEP) | build/module-coverage
-	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
-
-build/module-coverage/app_rpt_advanced.o: $(MODULE_SOURCE) $(HEADERS) $(RPCR_BUILD_DEP) | build/module-coverage
-	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
-
-build/module-coverage/app_rpt_advanced.so: build/module-coverage/app_rpt_advanced.o $(COVERAGE_OBJECTS)
-	$(CC) --coverage -shared $^ -lm $(SAMPLERATE_LIBS) \
-		-Wl,--wrap=nanosleep,--wrap=pthread_join,--wrap=time -o $@
-
-build/test_asterisk_module: tests/test_asterisk_module.c build/module-coverage/app_rpt_advanced.so | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -DASTMM_LIBC=ASTMM_IGNORE $< -Wl,--export-dynamic -ldl -o $@
-
-build/module-coverage/runtime.o: $(RUNTIME_SOURCE) $(wildcard module/*.h) $(HEADERS) | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
-
-build/test_runtime: tests/test_runtime.c build/module-coverage/runtime.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/runtime.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=calloc,--wrap=clock_gettime,--wrap=time,--wrap=ra_controller_queue_status,--wrap=ra_controller_reclaim_status -o $@
-
-build/module-coverage/assets.o: module/assets.c module/assets.h src/speech.h src/settings.h | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
-
-build/test_assets: tests/test_assets.c build/module-coverage/assets.o | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/assets.o --coverage \
-		-Wl,--wrap=fopen,--wrap=tmpfile,--wrap=mkstemp,--wrap=fseek,--wrap=ftell \
-		-Wl,--wrap=fputs,--wrap=fflush,--wrap=fread,--wrap=nanosleep -lm -o $@
-
-build/module-coverage/media.o: $(MEDIA_SOURCE) module/media.h | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
-
-build/test_asterisk_media: tests/test_asterisk_media.c build/module-coverage/media.o module/media.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/media.o --coverage -o $@
-
-build/module-coverage/radio.o: $(RADIO_SOURCE) module/radio.h | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
-
-build/test_radio: tests/test_radio.c build/module-coverage/radio.o module/radio.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/radio.o --coverage -o $@
-
-build/module-coverage/link_peer.o: module/link_peer.c module/link_peer.h $(HEADERS) | build/module-coverage
-	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -Isrc -DASTMM_LIBC=ASTMM_IGNORE -O0 -g --coverage -fPIC -c $< -o $@
-
-build/test_link_peer: tests/test_link_peer.c build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_peer.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-	$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=calloc,--wrap=rpcr_init,--wrap=rpcr_set_sample_rate -o $@
-
-build/module-coverage/connection.o: $(CONNECTION_SOURCE) module/connection.h module/media.h module/radio.h | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -O0 -g --coverage -fPIC -c $< -o $@
-
-build/test_connection: tests/test_connection.c build/module-coverage/connection.o module/connection.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule $< build/module-coverage/connection.o --coverage -Wl,--wrap=ra_media_select -o $@
-
-build/module-coverage/worker.o: $(WORKER_SOURCE) module/worker.h $(HEADERS) | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
-
-build/worker_routing_fixture.o: tests/worker_routing_fixture.c tests/worker_dtmf_fixture.h module/link_hub.h module/dtmf.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc -c $< -o $@
-
-build/test_link_hub: tests/test_link_hub.c build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) | build
-	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $< build/module-coverage/link_hub.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-		$(SAMPLERATE_LIBS) -Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=nanosleep,--wrap=clock_gettime \
-		-Wl,--wrap=src_new,--wrap=src_process -o $@
-
-build/test_link_directory: tests/test_link_directory.c build/module-coverage/link_directory.o | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -o $@
-
-build/test_dtmf: tests/test_dtmf.c build/module-coverage/dtmf.o | build
-	$(CC) $(MODULE_FLAGS) -DASTMM_LIBC=ASTMM_IGNORE -Imodule -Isrc $^ --coverage -lm \
-		-Wl,--wrap=calloc -o $@
-
-build/test_worker: tests/test_worker.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm \
-		-Wl,--wrap=pthread_create,--wrap=pthread_join,--wrap=clock_gettime,--wrap=nanosleep,--wrap=ra_radio_exchange -o $@
-
-build/test_worker_thread: tests/test_worker_thread.c build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) module/worker.h | build
-	$(CC) $(MODULE_FLAGS) -Imodule -Isrc $< build/worker_routing_fixture.o build/module-coverage/worker.o $(COVERAGE_OBJECTS) --coverage -pthread -lm -Wl,--wrap=ra_radio_exchange -o $@
-
-build/module-coverage/speech.o: $(SPEECH_SOURCE) src/speech.h | build/module-coverage
-	$(CC) $(MODULE_FLAGS) -Isrc -O0 -g --coverage -fPIC -c $< -o $@
-
-build/test_speech: tests/test_speech.c build/module-coverage/speech.o src/speech.h | build
-	$(CC) $(MODULE_FLAGS) -Isrc $< build/module-coverage/speech.o --coverage \
-		-Wl,--wrap=posix_spawn_file_actions_init,--wrap=posix_spawn_file_actions_adddup2 \
-		-Wl,--wrap=posix_spawn_file_actions_addclose,--wrap=posix_spawn_file_actions_destroy \
-		-Wl,--wrap=posix_spawnp,--wrap=waitpid,--wrap=kill -o $@
-
-build/test_speech_process: tests/test_speech_process.c build/module-coverage/speech.o build/module-coverage/assets.o src/speech.h | build
-	$(CC) $(WARNINGS) -Isrc -Imodule $< build/module-coverage/speech.o build/module-coverage/assets.o --coverage -lm -o $@
-
-build/test_%: tests/test_%.c $(COVERAGE_OBJECTS) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -lm -o $@
-
-build/test_document: tests/test_document.c $(COVERAGE_OBJECTS) $(HEADERS) | build
-	$(CC) $(CPPFLAGS) $(WARNINGS) -O0 -g --coverage $< $(COVERAGE_OBJECTS) -Wl,--wrap=strdup,--wrap=reallocarray -lm -o $@
-
-check: $(RPCR_BUILD_DEP) $(TEST_PROGRAMS)
-	find build -name '*.gcda' -delete
-	@set -e; export LD_LIBRARY_PATH=$(RPCR_PREFIX)/lib:$$LD_LIBRARY_PATH; for test in $(TEST_PROGRAMS); do ./$$test; done
-
-coverage: check $(MODULE_COVERAGE_OBJECTS)
+# Missing branch instrumentation is a failure, never an implicit coverage pass.
+COVERAGE_TOOLCHAIN ?= nightly-2025-02-20
+rust-coverage: | build
 	mkdir -p build/coverage
-	gcovr --root . --filter 'src/|module/' --fail-under-line 100 --fail-under-branch 100 --xml-pretty -o build/coverage/coverage.xml --print-summary
+	+@set -e; export RUSTUP_TOOLCHAIN=$(COVERAGE_TOOLCHAIN); \
+		export CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))/llvm-cov-target"; \
+		eval "$$($(CARGO) llvm-cov show-env --branch --export-prefix)"; \
+		$(CARGO) llvm-cov clean --workspace; \
+		$(MAKE) CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" all; \
+		export LIBRARY_PATH="$$CARGO_TARGET_DIR/release:$$LIBRARY_PATH"; \
+		export LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH"; \
+		$(CARGO) test --locked --release --workspace --all-targets; \
+		$(MAKE) -o rust-build CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" integration; \
+		$(CARGO) llvm-cov report --release \
+			--ignore-filename-regex '(/tests[/.]|_tests\.rs$$|/fixture\.rs$$|/build\.rs$$)' \
+			--json --output-path build/coverage/rust.json
+	python3 tests/test_rust_product_surface.py --coverage build/coverage/rust.json
+
+build/loader-coverage.o: $(LOADER) $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g --coverage -c $< -o $@
+
+build/test_loader.o: tests/test_loader.c $(HEADERS) | build
+	$(CC) $(CPPFLAGS) $(MODULE_FLAGS) -O0 -g -c $< -o $@
+
+build/test_loader: build/test_loader.o build/loader-coverage.o
+	$(CC) $^ --coverage -o $@
+
+loader-check: build/test_loader
+	./build/test_loader
+
+loader-coverage: loader-check
+	mkdir -p build/coverage
+	gcovr --root . build --filter 'module/app_rpt_advanced_loader\.c$$' \
+		--fail-under-line 100 --fail-under-branch 100 --xml-pretty \
+		-o build/coverage/loader.xml --print-summary
+
+coverage: rust-coverage loader-coverage
 
 install: all
-	install -d $(DESTDIR)$(asteriskmoddir)
+	install -d $(DESTDIR)$(asteriskmoddir) $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 build/app_rpt_advanced.so $(DESTDIR)$(asteriskmoddir)/
-	install -d $(DESTDIR)$(prefix)/lib $(DESTDIR)$(prefix)/include/rpt_advanced
-	install -d $(DESTDIR)$(prefix)/share/doc/rpt_advanced
-	install -m 0644 COPYING $(DESTDIR)$(prefix)/share/doc/rpt_advanced/copyright
-	install -d $(DESTDIR)$(prefix)/share/doc/rpt_advanced/examples
-	install -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(prefix)/share/doc/rpt_advanced/examples/
-	install -m 0644 build/librpt_advanced.a $(DESTDIR)$(prefix)/lib/
-	install -m 0644 $(HEADERS) $(DESTDIR)$(prefix)/include/rpt_advanced/
+	install -m 0755 $(LIBRARIES) $(DESTDIR)$(libdir)/
+	ln -sfn librptadv_product.so.1 $(DESTDIR)$(libdir)/librptadv_product.so
+	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
+	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
+	ln -sfn librptadv_control_asterisk_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_asterisk_adapter.so
+	install -m 0644 rust/product/include/rptadv_product.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h $(DESTDIR)$(prefix)/include/
+	install -D -m 0644 rust/file-adapter/include/rptadv_file_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_file_adapter.h
+	install -D -m 0644 rust/media-support/include/rptadv_media_types.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_media_types.h
+	install -D -m 0644 rust/speech-adapter/include/rptadv_speech_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/speech/rptadv_speech_adapter.h
+	install -D -m 0644 rust/media-support/include/rptadv_media_types.h $(DESTDIR)$(prefix)/include/rpt_advanced/speech/rptadv_media_types.h
+	@set -e; for file in $(MANUALS); do \
+		install -D -m 0644 "$$file" "$(DESTDIR)$(docdir)/$$file"; \
+	done
+	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
+	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
 
-install-check: all
-	$(MAKE) DESTDIR=$(CURDIR)/build/stage prefix=/usr install
-	cmp build/librpt_advanced.a build/stage/usr/lib/librpt_advanced.a
-	cmp src/identifier.h build/stage/usr/include/rpt_advanced/identifier.h
-	cmp src/duplex.h build/stage/usr/include/rpt_advanced/duplex.h
-	cmp src/controller.h build/stage/usr/include/rpt_advanced/controller.h
-	cmp src/morse.h build/stage/usr/include/rpt_advanced/morse.h
-	cmp src/tone_sequence.h build/stage/usr/include/rpt_advanced/tone_sequence.h
-	cmp src/playback.h build/stage/usr/include/rpt_advanced/playback.h
-	cmp src/config.h build/stage/usr/include/rpt_advanced/config.h
-	cmp src/settings.h build/stage/usr/include/rpt_advanced/settings.h
-	cmp src/message_template.h build/stage/usr/include/rpt_advanced/message_template.h
-	cmp src/scheduled_action.h build/stage/usr/include/rpt_advanced/scheduled_action.h
-	cmp src/scheduled_event.h build/stage/usr/include/rpt_advanced/scheduled_event.h
-	cmp src/link_access.h build/stage/usr/include/rpt_advanced/link_access.h
-	cmp src/link_audio.h build/stage/usr/include/rpt_advanced/link_audio.h
-	cmp src/link_command.h build/stage/usr/include/rpt_advanced/link_command.h
-	cmp src/config_reader.h build/stage/usr/include/rpt_advanced/config_reader.h
-	cmp src/document.h build/stage/usr/include/rpt_advanced/document.h
-	cmp src/schema.h build/stage/usr/include/rpt_advanced/schema.h
-	cmp src/speech.h build/stage/usr/include/rpt_advanced/speech.h
-	cmp COPYING build/stage/usr/share/doc/rpt_advanced/copyright
-	cmp examples/rpt_advanced.conf build/stage/usr/share/doc/rpt_advanced/examples/rpt_advanced.conf
-	cmp build/app_rpt_advanced.so build/stage$(asteriskmoddir)/app_rpt_advanced.so
+install-check: artifacts
+	rm -rf -- $(CURDIR)/build/stage
+	$(MAKE) -o rust-build DESTDIR=$(CURDIR)/build/stage prefix=/usr install
+	python3 tests/test_rust_product_surface.py --stage build/stage --multiarch $(multiarch) --asteriskmoddir "$(asteriskmoddir)"
 
-# Optional cross-project check links the actual adapter; it is never copied into production.
-ifneq ($(USBRADIOPLUS_SOURCE),)
-build/rpt_adapter.o: $(USBRADIOPLUS_SOURCE)/src/usbradioplus_rpt_advanced.c | build
-	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -I$(USBRADIOPLUS_SOURCE)/src -c $< -o $@
-
-build/chan_rpt_fixture.so: tests/radio_fixture.c build/rpt_adapter.o
-	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared -DRA_REAL_ADAPTER \
-		-I$(USBRADIOPLUS_SOURCE)/src $^ -pthread -lm -o $@
-else
-build/chan_rpt_fixture.so: tests/radio_fixture.c | build
-	$(CC) $(MODULE_FLAGS) -O2 -g -fPIC -shared $< -pthread -lm -o $@
-endif
+build/chan_rpt_fixture.so: tests/radio_fixture.c rust/product/include/rptadv_product.h | build
+	$(CC) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@
 
 integration: install-check build/chan_rpt_fixture.so
-	LD_LIBRARY_PATH="$(RPCR_PREFIX)/lib:$$LD_LIBRARY_PATH" \
-		RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py
-	LD_LIBRARY_PATH="$(RPCR_PREFIX)/lib:$$LD_LIBRARY_PATH" \
-		RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_link_integration.py
+	install -m 0755 build/chan_rpt_fixture.so build/stage$(asteriskmoddir)/
+	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_rust_asterisk_lifecycle.py
+	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py
+	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_link_integration.py
 
 dist: | build
 	tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
 		--exclude='__pycache__' --exclude='*.pyc' \
+		--exclude='*.profraw' --exclude='*.profdata' \
 		--transform='s,^,$(DIST_NAME)/,' -czf build/$(DIST_NAME).tar.gz $(DIST_FILES)
 
 distcheck: dist
-	+@set -e; stage=$$(mktemp -d build/dist-check.XXXXXX); \
+	+@set -e; stage=$$(mktemp -d "$(CURDIR)/build/dist-check.XXXXXX"); \
+		trap 'rm -rf -- "$$stage"' EXIT HUP INT TERM; \
 		tar -xzf build/$(DIST_NAME).tar.gz -C "$$stage"; \
-		$(MAKE) -C "$$stage/$(DIST_NAME)" all install-check
+		$(MAKE) -C "$$stage/$(DIST_NAME)" CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))" all install-check product-surface
 
-platform-verify: all coverage install-check integration distcheck
+platform-verify: check install-check integration distcheck
 
 ci: quality platform-verify
+	@if [ "$(multiarch)" = x86_64-linux-gnu ]; then $(MAKE) coverage; fi
 
 clean:
-	rm -f *.gcov
-	rm -rf build
+	rm -rf -- $(CURDIR)/build
+	$(CARGO) clean

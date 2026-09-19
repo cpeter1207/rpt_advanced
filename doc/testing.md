@@ -1,49 +1,44 @@
 # Testing
 
-Run `make ci` in the ASL3 development environment. It runs static checks,
-Doxygen, unit tests, line/branch coverage, staged installation, and an isolated
-Asterisk process. The test-only radio does not access USB devices and is not an
-installed artifact. It verifies two simultaneous nodes, half/full duplex, Morse
-output, PTT cleanup, and native 48 kHz, 16 kHz linear, and 8 kHz mu-law transport.
-An additional native-rate case prepares a WAV identifier through FFmpeg and
-observes its recognizable PCM at the transmitter. The synthetic receiver then
-asserts carrier; negative Morse samples in the otherwise positive receive audio
-verify replacement of the prepared ID by its Morse fallback inside Asterisk.
-Controller sequence tests also cover polite-ID deferral, every-release and
-positive-interval announcements, identifier priority, idle announcement keying,
-and receive-active announcement ducking. The Asterisk integration additionally
-verifies that a periodic announcement waits through synthetic half-duplex
-receive and emits from the hardware-paced idle silent frames after it clears.
-Courtesy tests cover named receiver, generic-link, and permanent-peer routing;
-source-specific rekey cancellation; generic fallback; and pre-rendered mono,
-dual-tone, silence, level, syntax, duration, Nyquist, and bounded-length cases.
-The `integration` portion also starts isolated Asterisk processes and exercises
-the local IAX link implementation. It is a controlled source-level test: it
-does not prove interoperability with a classic `app_rpt` node, authorize live
-link activation, or establish radio hardware behavior. The current AllStarLink
-changes require a fresh complete quality run before a merge or release.
+The Rust product is tested through Cargo. `make check` runs the workspace tests;
+`make rust-check` adds Rustfmt, Clippy, and Rustdoc with warnings denied; and
+`make rust-coverage` produces the Debian 13 amd64 production coverage report.
+`make ci` is the conventional complete local gate. It also runs the narrow C
+shim/header checks, packaging, staged installation, and isolated Asterisk
+integration. No retired C controller suite is part of the product gate.
 
-To exercise USBRadioPlus's actual adapter against the synthetic hardware backend,
-use a clean build directory and run
-`make integration USBRADIOPLUS_SOURCE=/absolute/path/to/USBRadioPlus`.
-The fixture links the adapter as a separate object from that checkout; it does
-not copy it into rpt_advanced or alter USBRadioPlus. Start from a clean build
-when switching fixture modes. This checks the real adapter's reservation and
-audio callbacks, but not the USB hardware backend. Run the same required quality
-gate after changing either project; a historical fixture result is not evidence
-for the current source revision.
+Run `make ci` in the Debian 13 ASL3 development environment. The test-only
+radio does not access USB devices and is not an installed artifact. The gate
+checks Rust controller policy, channel/codec ownership, 48 kHz radio transport,
+media preparation, bounded Asterisk taskprocessor execution, staged package
+contents, and isolated Asterisk lifecycle behavior. Link tests cover
+decoded-rate ingress, persistent egress conversion, queued IAX control,
+generation replacement, mix-minus, and generated-program routing.
+
+The integration gate is a controlled source-level test. It does not prove
+interoperability with a classic `app_rpt` node, authorize live link activation,
+or establish radio-hardware behavior. A release uses the already validated main
+revision and performs only release-artifact checks.
+
+The focused component checks are `cargo test -p rpt-advanced-core --test link`,
+`cargo test -p rptadv-asterisk-adapter`,
+`cargo test -p rptadv-file-adapter -p rptadv-speech-adapter`, and
+`cargo test -p rptadv-control-asterisk-adapter`. The Asterisk adapter loads the
+released `librate_adjusting_pcm_ring2.so.2` and
+`librptadv_samplerate_adapter.so.1`; install their matching development packages
+before building. File tests use FFmpeg; speech tests compile a local Piper fixture
+and verify synthesis without an FFmpeg dependency. They need no voice model or
+network access. Each media descriptor is also exercised independently through
+its public C header and dynamically loaded versioned shared object.
 
 ## Prebuilt test images
 
-Public images are available for Debian 12 and 13, each containing native amd64
-and arm64 variants:
+Public images are available for Debian 13, with native amd64 and arm64 variants:
 
 | Image under `ghcr.io/cpeter1207/` | Purpose |
 | --- | --- |
-| `rpt-advanced-asl3-debian12` | Clean Debian 12 ASL3 installation |
-| `rpt-advanced-asl3-debian13` | Clean Debian 13 ASL3 installation |
-| `rpt-advanced-installed-debian12` | Debian 12 with the tested module and integration fixture |
-| `rpt-advanced-installed-debian13` | Debian 13 with the tested module and integration fixture |
+| `rpt-advanced-test-asl3-debian13` | Clean Debian 13 ASL3 installation |
+| `rpt-advanced-test-installed-debian13` | Debian 13 with the tested module and integration fixture |
 
 Tags are the full production commit hash and `latest`. Use the commit tag for
 reproducible tests. The installed image derives from its clean ASL3 image and
@@ -52,34 +47,14 @@ Its default command runs the isolated Asterisk audio and reload tests:
 
 ```sh
 docker run --rm --label rpt_advanced.test=true \
-  ghcr.io/cpeter1207/rpt-advanced-installed-debian13:latest
+  ghcr.io/cpeter1207/rpt-advanced-test-installed-debian13:latest
 ```
 
 No USB device, host network, or privileged access is needed. Use the host's
 native architecture; the CI matrix uses native runners, not QEMU. Publication
-requires the production quality gate and clean/installed checks on all four
-platforms before creating the multiarch tags. The fixture is only in the test
-image; `make install` does not install it.
-
-## Real Piper voice
-
-The ordinary process tests use a fixture synthesizer and real FFmpeg. To also
-exercise an installed Piper executable and local voice model:
-
-```sh
-make build/test_speech_process
-RPT_TEST_PIPER_MODEL=/path/to/voice.onnx ./build/test_speech_process
-```
-
-Put `piper` on `PATH`, with its model's adjacent `.onnx.json` file available.
-Piper's [installation instructions](https://github.com/OHF-Voice/piper1-gpl)
-describe installation of `piper-tts`. The test restores the original `PATH`
-after its fixture checks, then prepares real speech through the module's media
-preparation code. It checks nonempty 48 kHz PCM and reports sample count and peak.
-
-The existing `en_US-amy-low` model copied read-only from 524950 was tested with
-Piper 1.8.0 on Debian 13 amd64. The phrase “This is the KG0BP repeater.” produced
-136,704 samples at 48 kHz. This test did not change or transmit from the node.
+requires the production quality gate and clean/installed checks on both supported
+platforms before creating multiarch tags. The fixture is only in the test image;
+`make install` does not install it.
 
 Synthetic-radio results do not establish USB hardware performance, radio
 deviation, or on-air audio quality. Those require separately approved hardware
@@ -121,18 +96,36 @@ or service monitor to observe transmitted audio and transmitter release.
    linked receive, and that a positive interval keys from idle before releasing
    with the short natural tail.
 7. Configure named courtesy tones for `input = receiver`, generic `input = link`,
-   and one permanent direct peer. Use a single-tone receiver sequence and a
+   and one exact direct peer. Use a single-tone receiver sequence and a
    link sequence containing a dual tone, pause, and quieter final segment. On a
-   service monitor, verify frequency, duration, and relative level. Verify an
-   unmatched or temporary link uses the generic link tone, while the permanent
-   peer uses its override. Rekey each source before its delay expires and verify
+   service monitor, verify frequency, duration, and relative level. Verify both
+   temporary and permanent matching peers use the override, while an unmatched
+   peer uses the generic link tone. Rekey each source before its delay expires and verify
    that only its own pending courtesy tone is cancelled; rekey during a started
    tone should duck, not interrupt, that playback.
-8. Repeat transport checks with an explicitly supported converted rate and
-   codec. Compare receive and transmitted audio for continuity. Run a sustained
-   receive/repeat test, recording duration and USBRadioPlus queue/error counters
-   before and after. Inspect for underruns, overruns, gaps, and growing latency;
-   shared hardware pacing does not guarantee immunity to scheduling stalls.
+   With three rpt_advanced nodes—origin, direct relay, and keyed downstream—
+   verify the relay replies with its current key state on the ingress peer,
+   forwards a canonical `K?` only to other direct peers, and relays a valid
+   `K` reply toward the requester without returning it to ingress. Verify the
+   direct peer's self-report is ignored and the first valid keyed downstream
+   responder to a successfully sent query selects its own `remote_node` tone.
+   During a sustained transmission, confirm a query at the receive edge and
+   then once per second. With two keyed downstream responders, confirm reader
+   arrival order selects the first reply. Confirm that a later query's first
+   accepted response replaces the prior one, while an absent or malformed later
+   response retains an earlier current-epoch result. An unsolicited reply with
+   no current query must use the direct-peer tone or, if none is configured,
+   the generic link tone. Confirm the receive falling edge cancels an unsent
+   locally originated query and rejects a late reply. Treat a delayed valid
+   reply as advisory because `K` has no serial. Repeat the downstream discovery
+   check with an app_rpt-compatible relay when available.
+8. Repeat IAX-peer transport checks with an explicitly supported converted rate
+   and codec. The local RadioPlusAdvanced exchange remains fixed at 48 kHz
+   signed-linear PCM. Compare receive and transmitted audio for continuity. Run
+   a sustained receive/repeat test, recording duration and USBRadioPlus
+   queue/error counters before and after. Inspect for underruns, overruns, gaps,
+   and growing latency; shared hardware pacing does not guarantee immunity to
+   scheduling stalls.
 9. Reload invalid configuration while active and verify the old settings still
    operate. Restore valid configuration and reload; allow for the documented
    media-preparation pause. Unload normally and verify PTT drops and the radio
@@ -145,12 +138,19 @@ or service monitor to observe transmitted audio and transmitter release.
    local-monitor, permanent-link recovery, disconnect-all/reconnect-all, remote
    `*4<node>` command mode with local `#` exit, allow/deny rejection, and the
    `*70`, `*72`, and `*73` status replies. Confirm that an Asterisk restart
-   removes every link. Treat the CLI/log topology as best-effort: it can be
-   incomplete or stale, and `R000000` means a bounded `L ` advertisement was
+   removes runtime-created links and reissues configuration-owned permanent
+   links according to the current replacement window. Treat the CLI/log
+   topology as best-effort: it can be incomplete or stale, and `R000000` means
+   a bounded `L ` advertisement was
    truncated. Confirm self-links, duplicate direct links, retained permanent
    retries, and targets advertised by an attached peer are rejected with the RF
-   loop-rejection telemetry. Do not perform this test against 524950 or another
-   live node without separate approval.
+   loop-rejection telemetry for interactive requests. Confirm scheduled retries
+   stay silent when topology admission rejects them. Exercise a weekday
+   Monday-through-Friday 11:00--12:00 506315-to-2627 replacement window, its
+   five-minute qualifying-activity hold,
+   and `*806` followed by reload and `*816` during the window; confirm no
+   transient primary attachment occurs after policy reconciliation. Do not perform this test against 524950 or
+   another live node without separate approval.
 
 Record module revisions, OS/architecture, USB interface, radio wiring, selected
 codec/rate, configuration, measurements, and any failed step. These procedures

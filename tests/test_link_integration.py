@@ -33,8 +33,8 @@ def server(
     peer_port,
     codec,
     radio,
-    sample_rate=0,
     load_resample=True,
+    extra_configuration="",
 ):
     """! @brief Own an isolated IAX/radio server and always terminate it.
     @param directory Test-owned configuration directory.
@@ -45,9 +45,11 @@ def server(
     @param peer_port Remote IAX UDP port.
     @param codec Permitted IAX codec.
     @param radio Phased synthetic receiver name.
-    @param sample_rate Requested local PCM rate; zero selects native rate.
     @param load_resample Whether to load Asterisk's rate translator for a control case.
+    @param extra_configuration Node settings present before the first runtime starts.
     @return Context yielding CLI configuration and output log paths.
+    Channel reservation precedes activation and owner publication. Require the
+    fixture's callback-ready marker plus installed-controller status before yielding.
     """
     directory.mkdir()
     configuration = directory / "asterisk.conf"
@@ -100,7 +102,7 @@ def server(
     )
     (directory / "rpt_advanced.conf").write_text(
         f"[{node}]\nradio_channel={radio}\nlink_directory_file={directory_file}\n"
-        f"link_lookup_method=file\nsample_rate_hz={sample_rate}\n",
+        "link_lookup_method=file\n" + extra_configuration,
         encoding="utf-8",
     )
     logfile = directory / "console.log"
@@ -118,8 +120,13 @@ def server(
                     raise RuntimeError("network test Asterisk did not start")
                 if (directory / "asterisk.ctl").exists():
                     try:
-                        if "RadioPlusAdvanced" in cli(
-                            configuration, "core show channels concise"
+                        if (
+                            f"rpt_fixture ready RadioPlusAdvanced/{radio}"
+                            in logfile.read_text(encoding="utf-8", errors="replace")
+                            and "RadioPlusAdvanced"
+                            in cli(configuration, "core show channels concise")
+                            and "local-rx:"
+                            in cli(configuration, f"rpt_advanced link status {node}")
                         ):
                             break
                     except subprocess.CalledProcessError:
@@ -294,51 +301,58 @@ def dtmf_links(modules):
     @param modules Staged module directory.
     @return None; both actions must arise from the synthetic receiver's tones.
     """
-    for rate in (8000, 16000, 48000):
-        with tempfile.TemporaryDirectory(prefix="rpt-advanced-dtmf-") as temporary:
-            directory = Path(temporary)
-            first_port, second_port = port(), port()
-            with (
-                server(
-                    directory / "b",
-                    modules,
-                    "508422",
-                    "524950",
-                    second_port,
-                    first_port,
-                    "ulaw",
-                    "network-b",
-                ) as second,
-                server(
-                    directory / "a",
-                    modules,
-                    "524950",
-                    "508422",
-                    first_port,
-                    second_port,
-                    "ulaw",
-                    "network-dtmf",
-                    rate,
-                ) as first,
+    with tempfile.TemporaryDirectory(prefix="rpt-advanced-dtmf-") as temporary:
+        directory = Path(temporary)
+        first_port, second_port = port(), port()
+        with (
+            server(
+                directory / "b",
+                modules,
+                "508422",
+                "524950",
+                second_port,
+                first_port,
+                "ulaw",
+                "network-b",
+            ) as second,
+            server(
+                directory / "a",
+                modules,
+                "524950",
+                "508422",
+                first_port,
+                second_port,
+                "ulaw",
+                "network-dtmf",
+            ) as first,
+        ):
+            completed = "node 524950 link command completed"
+            # Codec offers create provisional channels before controller admission.
+            deadline = time.monotonic() + 15
+            while completed not in first[1].read_text(encoding="utf-8") or (
+                "508422: transceive"
+                not in cli(first[0], "rpt_advanced link status 524950")
             ):
-                deadline = time.monotonic() + 15
-                while "IAX2/" not in cli(first[0], "core show channels concise"):
-                    assert time.monotonic() < deadline, (
-                        "received DTMF did not connect the link"
-                    )
-                    time.sleep(0.1)
-                assert "IAX2/" in cli(second[0], "core show channels concise")
-                deadline = time.monotonic() + 15
-                while "IAX2/" in cli(first[0], "core show channels concise"):
-                    assert time.monotonic() < deadline, (
-                        "DTMF timeout did not disconnect the link"
-                    )
-                    time.sleep(0.1)
-                log = first[1].read_text(encoding="utf-8")
-                assert log.count("node 524950 link command completed") == 2, log
-                print(
-                    f"received DTMF connect/hash and disconnect/timeout at {rate} Hz passed"
+                assert time.monotonic() < deadline, (
+                    "received DTMF did not connect the link"
                 )
+                time.sleep(0.1)
+            assert "IAX2/" in cli(first[0], "core show channels concise")
+            assert "IAX2/" in cli(second[0], "core show channels concise")
+            deadline = time.monotonic() + 15
+            while first[1].read_text(encoding="utf-8").count(completed) < 2 or any(
+                "IAX2/" in cli(configuration, "core show channels concise")
+                for configuration, _ in (first, second)
+            ):
+                assert time.monotonic() < deadline, (
+                    "DTMF timeout did not disconnect the link"
+                )
+                time.sleep(0.1)
+            log = first[1].read_text(encoding="utf-8")
+            assert log.count(completed) == 2, log
+            print(
+                "received DTMF connect/hash and disconnect/timeout at fixed 48 kHz passed"
+            )
 
 
 def main():
@@ -357,6 +371,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="rpt-advanced-iax-") as temporary:
             directory = Path(temporary)
             first_port, second_port = port(), port()
+            denied_policy = "link_allow_nodes=524950\nlink_deny_nodes=524950\n"
             with (
                 server(
                     directory / "a",
@@ -377,25 +392,48 @@ def main():
                     first_port,
                     codec,
                     "network-b",
+                    extra_configuration=denied_policy,
                 ) as second,
             ):
+                for configuration, _ in (first, second):
+                    cli(configuration, "iax2 set debug on")
                 receiver_config = second[0].parent / "rpt_advanced.conf"
-                original = receiver_config.read_text(encoding="utf-8")
-                receiver_config.write_text(
-                    original + "link_allow_nodes=524950\nlink_deny_nodes=524950\n",
-                    encoding="utf-8",
+                original = receiver_config.read_text(encoding="utf-8").removesuffix(
+                    denied_policy
                 )
-                cli(second[0], "module reload app_rpt_advanced.so")
                 rejected = cli(first[0], "rpt_advanced link connect 524950 508422")
                 assert "failed" in rejected, rejected
                 receiver_config.write_text(original, encoding="utf-8")
-                cli(second[0], "module reload app_rpt_advanced.so")
+                reloaded = cli(second[0], "module reload app_rpt_advanced.so")
+                # Asterisk's CLI exit status does not report module reload failure.
+                assert "reloaded successfully" in reloaded, reloaded
                 result = cli(first[0], "rpt_advanced link connect 524950 508422")
+                if "completed" not in result:
+                    for configuration, node in (
+                        (first[0], "524950"),
+                        (second[0], "508422"),
+                    ):
+                        for command in (
+                            "core show channels concise",
+                            "iax2 show channels",
+                            f"rpt_advanced link status {node}",
+                        ):
+                            print(configuration, command, cli(configuration, command))
                 assert "completed" in result, result
+                for configuration, _ in (first, second):
+                    cli(configuration, "iax2 set debug off")
                 time.sleep(3)
                 for configuration, _ in (first, second):
                     channels = cli(configuration, "core show channels concise")
                     assert "IAX2/" in channels, channels
+                for _ in range(6):
+                    for configuration, _ in (first, second):
+                        cli(configuration, "module reload app_rpt_advanced.so")
+                    time.sleep(0.03)
+                    for configuration, _ in (first, second):
+                        assert "IAX2/" in cli(
+                            configuration, "core show channels concise"
+                        )
                 result = cli(first[0], "rpt_advanced link disconnect 524950 508422")
                 assert "completed" in result, result
                 deadline = time.monotonic() + 5

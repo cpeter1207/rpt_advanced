@@ -1,0 +1,21 @@
+[package]
+name = "rptadv-file-adapter"
+build = "../media-support/build.rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+path = "../media-support/src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = "0.2.189"
+
+[dev-dependencies]
+rpt-advanced-core = { path = "../core" }
+
+[[test]]
+name = "preparation"
+path = "../media-support/tests/preparation.rs"

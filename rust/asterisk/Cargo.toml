@@ -1,0 +1,15 @@
+[package]
+name = "rptadv-asterisk-adapter"
+build = "build.rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.72.1"

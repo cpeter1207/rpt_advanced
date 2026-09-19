@@ -1,0 +1,3 @@
+usr/include/rpt_advanced/file/rptadv_file_adapter.h
+usr/include/rpt_advanced/file/rptadv_media_types.h
+usr/lib/*/rpt_advanced/librptadv_file_adapter.so

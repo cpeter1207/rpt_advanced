@@ -1,0 +1,19 @@
+rpt-advanced (0.1.0~alpha7-1) unstable; urgency=medium
+
+  * Release the Rust controller, versioned adapters, and tested local audio fixes.
+  * Prevent rapid rekey from replaying the previous receive burst; require the
+    matching ring alpha3 and samplerate alpha2 shared-library packages.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Sat, 19 Sep 2026 12:00:00 -0500
+
+rpt-advanced (0.1.0~alpha2-1) unstable; urgency=medium
+
+  * Require the complete alpha2 ring descriptor provider at build and runtime.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Wed, 17 Sep 2026 12:00:00 -0500
+
+rpt-advanced (0.1.0~alpha1-1) unstable; urgency=medium
+
+  * Package the Rust-owned Asterisk controller and its versioned adapters.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Mon, 15 Sep 2026 12:00:00 -0500

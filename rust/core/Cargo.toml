@@ -1,0 +1,9 @@
+[package]
+name = "rpt-advanced-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+rtrb = "0.3.2"

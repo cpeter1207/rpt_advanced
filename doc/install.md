@@ -2,20 +2,28 @@
 
 ## Prerequisites
 
-Supported test targets are Debian 12 and 13 on amd64 and arm64, using ASL3
-Asterisk and matching `asl3-asterisk-dev` headers. Build with `build-essential`.
-USBRadioPlus must provide the `RadioPlusAdvanced` channel technology; older
-releases without that adapter cannot serve this controller. No radio hardware
-is required for the automated synthetic-radio tests.
+Supported targets are Debian 13 on amd64 and arm64, using ASL3 Asterisk and
+matching public Asterisk development headers (provided through
+`dh-sequence-asterisk`). Source builds need Rust 1.85, Cargo,
+`libclang-dev`, `pkg-config`, `librate-adjusting-pcm-ring2-dev`, and
+`librptadv-samplerate-adapter-dev` in addition to `build-essential`. USBRadioPlus
+must provide the `RadioPlusAdvanced` channel technology with direct-callback
+attachment ABI 2, supplied by USBRadioPlus 0.1.0-alpha19. Install its matching
+provider together with this consumer;
+channel availability or alpha18's version alone does not prove support. An
+unacknowledged attachment fails before media starts. No radio hardware is
+required for the automated synthetic-radio tests.
 
-Load Asterisk's `codec_resample.so` when selecting a PCM rate different from the
-radio's native rate, together with the requested codec's module for encoded
-formats. Installed but unloaded converters are not available to negotiation.
-Use `core show translation` to inspect available paths. Native signed-linear
-operation needs no converter; probing other rates may produce Asterisk
-translation warnings when their converters are absent.
+Load the Asterisk codec modules required by the IAX peers you intend to use.
+The local RadioPlusAdvanced exchange is always 48 kHz signed-linear PCM, so it
+does not require `codec_resample.so`. rpt_advanced converts between a
+negotiated peer PCM rate and that fixed local rate at the peer boundary.
+`codec_resample.so` can still be needed by unrelated Asterisk channel or
+dialplan paths. Installed but unloaded codec modules are unavailable to IAX
+negotiation; use `core show translation` to inspect available paths.
 
-FFmpeg prepares sound files and synthesized speech before a radio worker starts.
+FFmpeg prepares sound files before a radio worker starts. The independent speech
+adapter reads Piper's WAV output directly and does not invoke FFmpeg.
 For speech, install an offline Piper executable named `piper` in Asterisk's
 service PATH and configure a local voice model. The service account must be able
 to read the model, its companion JSON file, and all configured sound files.
@@ -24,19 +32,34 @@ See [configuration](configuration.md) for the complete media hierarchy.
 
 ## Build and install
 
-From the source directory:
+Download this release's Debian 13 runtime packages for your architecture into an
+empty directory, together with ring 2.0.0-alpha.3 and samplerate adapter
+0.1.0-alpha.2 runtime packages. The controller and its product, file, speech,
+and control adapters must have the same package version. Install the complete
+set from that directory:
+
+```sh
+sudo apt-get install ./*.deb
+```
+
+For a source build, from the source directory:
 
 ```sh
 make -j2
 sudo make prefix=/usr install
 ```
 
-The module is installed as
+Cargo builds the Rust product; `make` orchestrates the conventional build and
+installation. The installed module is
 `/usr/lib/<Debian multiarch triplet>/asterisk/modules/app_rpt_advanced.so`.
-Set `asteriskmoddir` explicitly if Asterisk uses another module directory.
-Use `DESTDIR` for staging; it prefixes install destinations without changing
-runtime configuration paths. `make install` does not edit `modules.conf`,
-`rpt.conf`, or any active configuration.
+Its versioned Rust adapter DSOs are installed privately under
+`/usr/lib/<Debian multiarch triplet>/rpt_advanced/`:
+`librptadv_asterisk_adapter.so.1`, `librptadv_product.so.1`,
+`librptadv_file_adapter.so.1`, `librptadv_speech_adapter.so.1`, and
+`librptadv_control_asterisk_adapter.so.1`. Set `asteriskmoddir` explicitly if
+Asterisk uses another module directory. Use `DESTDIR` for staging; it prefixes
+install destinations without changing runtime configuration paths. `make
+install` does not edit `modules.conf`, `rpt.conf`, or any active configuration.
 
 `make dist` creates a source tarball under `build/`. Extract it on a machine
 with the prerequisites above and run the same build/install commands there;
@@ -45,9 +68,11 @@ builds and stages installation from the extracted archive. This packaging check
 is part of the required platform gate. No compiled module or voice model is
 included in the source archive.
 
-The current install also provides the controller static archive and headers
-under the selected prefix, the license under `share/doc/rpt_advanced/copyright`,
-and the disabled example under `share/doc/rpt_advanced/examples/`.
+The runtime package provides no static controller archive or legacy controller
+headers. It installs the module, required versioned product and adapter DSOs, license under
+`share/doc/rpt-advanced/copyright`, and the disabled example under
+`share/doc/rpt-advanced/examples/`. The product, file, speech, and control
+development packages separately provide their public C headers and unversioned linker names.
 
 ## Activate a test node
 
@@ -91,11 +116,11 @@ ASL lookup before it accepts the channel. See
 [configuration](configuration.md) for the access lists, DTMF mappings, link
 lifetime, status, and topology behavior.
 
-Do not add that dialplan route or enable live linking from the current source
-without explicit approval. The AllStarLink integration has not yet undergone
-live interoperability testing with classic `app_rpt` and has not been deployed
-to 524950. Use the isolated tests in [testing](testing.md) and the limitations
-in [AllStarLink status](allstarlink-status.md) before any approved staging.
+Live linking requires the station owner's approval. The owner has confirmed the
+current audio fixes on 524950; that observation does not complete the broader
+peer interoperability and hardware acceptance cases. Use the isolated tests in
+[testing](testing.md) and the limitations in
+[AllStarLink status](allstarlink-status.md) before approved staging.
 
 ## Reload and rollback
 
@@ -117,7 +142,9 @@ sudo asterisk -rx 'module unload app_rpt_advanced.so'
 ```
 
 Confirm that its radio channels have closed before restoring the previous
-controller. To roll back a module upgrade, unload it, restore the saved module
-and configuration, and load it again. Restore the previous `modules.conf`
+controller. To roll back an upgrade, unload it and restore the complete saved
+package set and configuration, including the matching USBRadioPlus and shared
+libraries, before loading it again. Earlier alpha artifacts are not interchangeable.
+Restore the previous `modules.conf`
 selection if activation was made persistent. Do not overwrite a loaded module
 or use a forced unload as a substitute for orderly shutdown.

@@ -1,0 +1,5 @@
+[toolchain]
+channel = "1.85.0"
+# Branch coverage uses the separately provisioned nightly LLVM tools.
+components = ["clippy", "rustfmt"]
+profile = "minimal"

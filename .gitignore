@@ -1,8 +1,11 @@
 /build/
+/target/
 /.work/
 /html/
 /latex/
 *.gcda
 *.gcno
 *.gcov
+*.profraw
+*.profdata
 __pycache__/
