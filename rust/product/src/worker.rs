@@ -156,23 +156,21 @@ unsafe extern "C" fn receive_callback(
     pointer: *mut f32,
     count: u32,
 ) -> i32 {
+    // SAFETY: the host lends aligned writable PCM for this complete callback.
+    let Some(samples) = (unsafe { samples(pointer, count) }) else {
+        return -1;
+    };
     match catch_unwind(AssertUnwindSafe(|| unsafe {
-        receive(context, receiving, pointer, count)
+        receive(context, receiving, samples)
     })) {
         Ok(result) => result,
         Err(_) => {
-            // SAFETY: the same host-owned buffer remains borrowed until callback return.
-            if let Some(samples) = unsafe { samples(pointer, count) } {
-                samples.fill(0.0);
-            }
+            samples.fill(0.0);
             -1
         }
     }
 }
-unsafe fn receive(context: *mut c_void, receiving: u32, pointer: *mut f32, count: u32) -> i32 {
-    let Some(samples) = (unsafe { samples(pointer, count) }) else {
-        return -1;
-    };
+unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> i32 {
     // SAFETY: the host retains this context until synchronous destroy returns.
     let Some(context) = (unsafe { context.cast::<ReceiveContext>().as_ref() }) else {
         samples.fill(0.0);
@@ -193,10 +191,11 @@ unsafe fn receive(context: *mut c_void, receiving: u32, pointer: *mut f32, count
     }
     // SAFETY: only this serial receive endpoint accesses these cells while active.
     let (owner, state) = unsafe { (&mut *context.owner.get(), &mut *context.state.get()) };
-    state.elapsed_samples = state.elapsed_samples.saturating_add(u64::from(count));
+    let count = samples.len() as u64;
+    state.elapsed_samples = state.elapsed_samples.saturating_add(count);
     let now_ms = context.origin_ms.saturating_add(state.elapsed_samples / 48);
     context.status.update(receiving != 0, now_ms);
-    let Some(mut generation) = owner.as_mut().and_then(ReceiveOwner::acquire) else {
+    let Some(mut generation) = owner.as_mut().expect("active receive owner").acquire() else {
         samples.fill(0.0);
         return 0;
     };
@@ -205,9 +204,8 @@ unsafe fn receive(context: *mut c_void, receiving: u32, pointer: *mut f32, count
         panic!("injected receive processing panic");
     }
     generation.state().process(receiving != 0, samples, now_ms);
-    context
-        .status
-        .set_dtmf_muted(receiving != 0 && generation.state().suppressing());
+    let muted = receiving != 0 && generation.state().suppressing();
+    context.status.set_dtmf_muted(muted);
     if receiving != 0 {
         let handoff = &context.status.handoff;
         let epoch = handoff.token.load(Ordering::Acquire) & !1;
@@ -216,11 +214,11 @@ unsafe fn receive(context: *mut c_void, receiving: u32, pointer: *mut f32, count
             // enter storage that TX is about to discard with the previous burst.
             handoff
                 .pending_reset_dropped
-                .fetch_add(u64::from(count), Ordering::Relaxed);
+                .fetch_add(count, Ordering::Relaxed);
         } else if state.producer.write(samples).is_err() {
             handoff
                 .write_failed_samples
-                .fetch_add(u64::from(count), Ordering::Relaxed);
+                .fetch_add(count, Ordering::Relaxed);
         }
     }
     0
@@ -232,39 +230,37 @@ unsafe extern "C" fn transmit_callback(
     keyed: *mut u32,
 ) -> i32 {
     // SAFETY: the host supplies writable key storage for this call.
-    if !keyed.is_null() {
-        unsafe {
-            keyed.write(0);
+    let keyed = unsafe { keyed.as_mut() };
+    // SAFETY: the host lends aligned writable PCM for this complete callback.
+    let Some(samples) = (unsafe { samples(pointer, count) }) else {
+        if let Some(keyed) = keyed {
+            *keyed = 0;
         }
-    }
+        return -1;
+    };
+    let Some(keyed) = keyed else {
+        samples.fill(0.0);
+        return -1;
+    };
+    *keyed = 0;
     match catch_unwind(AssertUnwindSafe(|| unsafe {
-        transmit(context, pointer, count, keyed)
+        transmit(context, samples, keyed)
     })) {
         Ok(result) => result,
         Err(_) => {
-            // SAFETY: the borrowed host buffer remains valid through this return.
-            if let Some(samples) = unsafe { samples(pointer, count) } {
-                samples.fill(0.0);
-            }
-            if !keyed.is_null() {
-                unsafe {
-                    keyed.write(0);
-                }
-            }
+            samples.fill(0.0);
+            *keyed = 0;
             -1
         }
     }
 }
-unsafe fn transmit(context: *mut c_void, pointer: *mut f32, count: u32, keyed: *mut u32) -> i32 {
-    let Some(samples) = (unsafe { samples(pointer, count) }) else {
-        return -1;
-    };
+unsafe fn transmit(context: *mut c_void, samples: &mut [f32], keyed: &mut u32) -> i32 {
     // SAFETY: the host retains this context until synchronous destroy returns.
     let Some(context) = (unsafe { context.cast::<TransmitContext>().as_ref() }) else {
         samples.fill(0.0);
         return -1;
     };
-    if keyed.is_null() || samples.len() > context.maximum {
+    if samples.len() > context.maximum {
         samples.fill(0.0);
         return -1;
     }
@@ -304,7 +300,7 @@ unsafe fn transmit(context: *mut c_void, pointer: *mut f32, count: u32, keyed: *
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
-    let Some(mut generation) = owner.as_mut().and_then(TransmitOwner::acquire) else {
+    let Some(mut generation) = owner.as_mut().expect("active transmit owner").acquire() else {
         samples.fill(0.0);
         return 0;
     };
@@ -318,10 +314,7 @@ unsafe fn transmit(context: *mut c_void, pointer: *mut f32, count: u32, keyed: *
         .process(&mut transmit.controller, receiving, samples)
     {
         Ok(value) => {
-            // SAFETY: checked non-null writable result, borrowed for this call.
-            unsafe {
-                keyed.write(u32::from(value));
-            }
+            *keyed = u32::from(value);
             0
         }
         Err(_) => {
@@ -355,12 +348,15 @@ impl RadioWorker {
         status: RadioStatus,
         squelch_delay_ms: u64,
     ) -> Result<Self, (Error, Radio)> {
-        #[cfg(test)]
-        if take_test_failure(TestFailure::Prepare) {
-            return Err((Error::Allocation, radio));
-        }
         let maximum = radio.maximum_frames();
-        let Ok((producer, consumer)) = InboundRing::open(48_000) else {
+        let ring = InboundRing::open(48_000);
+        #[cfg(test)]
+        let ring = if take_test_failure(TestFailure::Prepare) {
+            Err(RingError)
+        } else {
+            ring
+        };
+        let Ok((producer, consumer)) = ring else {
             return Err((Error::Allocation, radio));
         };
         let observer = producer.observer();

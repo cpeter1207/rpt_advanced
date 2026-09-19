@@ -349,6 +349,8 @@ impl Host {
             reader,
             control,
         });
+        #[cfg(test)]
+        crate::fixture::wait_for_peer_end(&self.peers.last().unwrap().reader);
         if let Err(error) = self.refresh(local, clock) {
             self.detach(local, remote, clock.now_ms);
             return Err(error);
@@ -424,12 +426,17 @@ impl Host {
                 if peers.len() == 1 { "link" } else { "links" }
             )
         };
-        if let Some((_, lease)) = self.leases.iter().rev().find(|(name, _)| name == local) {
-            let lease = lease.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(worker) = &lease.worker {
-                let _ = writeln!(result, "{}", worker.local_status_text());
-            }
+        let (_, lease) = self
+            .leases
+            .iter()
+            .rev()
+            .find(|(name, _)| name == local)
+            .expect("runtime node retains its device lease");
+        let lease = lease.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(worker) = &lease.worker {
+            let _ = writeln!(result, "{}", worker.local_status_text());
         }
+        drop(lease);
         for peer in peers {
             let mode = if peer.mode.transmits() {
                 "transceive"

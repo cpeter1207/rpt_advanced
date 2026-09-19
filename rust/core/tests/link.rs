@@ -240,8 +240,7 @@ fn concurrent_advisory_publication_never_exposes_a_torn_identity() {
 }
 
 #[test]
-fn link_admission_and_mix_validation_reject_bad_inputs_without_mutating_output() {
-    use rpt_advanced_core::link::{MixSource, NativeMixer};
+fn link_admission_rejects_bad_inputs() {
     for identity in ["", "node", "20/0"] {
         assert!(Peer::new(identity).is_err());
     }
@@ -255,45 +254,6 @@ fn link_admission_and_mix_validation_reject_bad_inputs_without_mutating_output()
     assert!(!peer.accept_key(epoch, "999", "300", true));
     assert!(!peer.accept_key(epoch, "100", "bad/source", true));
     assert!(peer.accept_key(epoch, "100", "300", true));
-    assert!(NativeMixer::new(0).is_err());
-    let mixer = NativeMixer::new(1).unwrap();
-    let mut output = [0.75];
-    assert!(
-        mixer
-            .destination(0, Mode::TRANSCEIVE, &[], false, &[], &mut output)
-            .is_err()
-    );
-    assert_eq!(output, [0.75]);
-    assert_eq!(
-        mixer.destination(0, Mode::TRANSCEIVE, &[0.5], false, &[], &mut output),
-        Ok(false)
-    );
-    assert_eq!(output, [0.0]);
-    output[0] = 0.75;
-    let inactive = [MixSource {
-        identity: 1,
-        mode: Mode::TRANSCEIVE,
-        active: false,
-        audio: &[0.2],
-    }];
-    assert_eq!(
-        mixer.destination(0, Mode::TRANSCEIVE, &[0.0], false, &inactive, &mut output),
-        Ok(false)
-    );
-    output[0] = 0.75;
-    let sources = [MixSource {
-        identity: 0,
-        mode: Mode::TRANSCEIVE,
-        active: false,
-        audio: &[],
-    }];
-    assert!(mixer.local(&sources, &mut output).is_err());
-    assert!(
-        mixer
-            .destination(0, Mode::TRANSCEIVE, &[0.0], false, &sources, &mut output)
-            .is_err()
-    );
-    assert_eq!(output, [0.75]);
 }
 
 #[test]
@@ -721,55 +681,6 @@ fn keyed_queries_reply_locally_and_relay_without_echoing_ingress_or_source() {
 }
 
 #[test]
-fn mix_minus_preserves_local_monitor_local_receive_and_float_headroom() {
-    use rpt_advanced_core::link::{MixSource, NativeMixer};
-    let mixer = NativeMixer::new(3).unwrap();
-    let sources = [
-        MixSource {
-            identity: 1,
-            mode: Mode::TRANSCEIVE,
-            active: true,
-            audio: &[0.75, 0.5, -0.5],
-        },
-        MixSource {
-            identity: 2,
-            mode: Mode::LOCAL_MONITOR,
-            active: true,
-            audio: &[0.75, 0.5, -0.5],
-        },
-    ];
-    let mut output = [9.0; 3];
-    assert!(mixer.local(&sources, &mut output).unwrap());
-    assert_eq!(output, [1.5, 1.0, -1.0]);
-    assert!(
-        mixer
-            .destination(2, Mode::TRANSCEIVE, &[0.25; 3], true, &sources, &mut output)
-            .unwrap()
-    );
-    assert_eq!(output, [1.0, 0.75, -0.25]);
-    assert!(
-        !mixer
-            .destination(
-                1,
-                Mode::TRANSCEIVE,
-                &[0.25; 3],
-                false,
-                &sources,
-                &mut output
-            )
-            .unwrap()
-    );
-    assert_eq!(output, [0.0; 3]);
-    assert!(
-        !mixer
-            .destination(1, Mode::MONITOR, &[0.25; 3], true, &sources, &mut output)
-            .unwrap()
-    );
-    assert_eq!(output, [0.0; 3]);
-    assert!(mixer.local(&sources, &mut [0.0; 4]).is_err());
-}
-
-#[test]
 fn receive_activity_primes_conceals_brief_gaps_drains_and_honors_eof() {
     use rpt_advanced_core::link::ReceiveState;
     let mut receive = ReceiveState::new(8000).unwrap();
@@ -852,4 +763,26 @@ fn retry_tokens_reject_foreign_serials_and_temporary_failure_drops_intent() {
         .unwrap();
     current.finish_retry(old_generation.take_retry(0).unwrap(), false, 0);
     assert!(!current.reaches("200", true));
+}
+
+#[test]
+fn retry_publication_retains_intent_blocked_by_newly_learned_topology() {
+    let mut hub = LinkManager::new("100").unwrap();
+    hub.retain_retry("200", Mode::TRANSCEIVE, 0).unwrap();
+    let attempt = hub.take_retry(0).unwrap();
+    hub.attach("300", Mode::MONITOR, false).unwrap();
+    hub.update_topology("300", b"L T200").unwrap();
+    assert_eq!(hub.publish_retry(&attempt), Err(AdmissionError::Loop));
+    hub.finish_retry(attempt, false, 0);
+    assert!(
+        hub.snapshot()
+            .iter()
+            .any(|peer| peer.name == "200" && peer.topology_blocked)
+    );
+    assert!(hub.take_retry(1000).is_none());
+    hub.update_topology("300", b"L").unwrap();
+    let retry = hub.take_retry(1000).unwrap();
+    assert_eq!(hub.publish_retry(&retry), Ok(()));
+    hub.finish_retry(retry, true, 1000);
+    assert!(hub.owns_permanent("200"));
 }

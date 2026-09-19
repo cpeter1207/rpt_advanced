@@ -46,7 +46,7 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
             assert!(InboundRing::open(rate).is_err());
         }
         let original = *ffi::rpcr2_descriptor();
-        for case in 0..11 {
+        for case in 0..12 {
             let mut api = original;
             match case {
                 0 => api.struct_size = 8,
@@ -59,7 +59,8 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
                 7 => api.ring_consumer_render = None,
                 8 => api.ring_observe = None,
                 9 => api.ring_create = Some(failed_create),
-                _ => api.ring_create = Some(empty_create),
+                10 => api.ring_create = Some(empty_create),
+                _ => api.ring_consumer_reset = None,
             }
             assert!(InboundRing::from_descriptor(8000, Box::leak(Box::new(api))).is_err());
         }
@@ -85,6 +86,17 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
         let (mut producer, consumer) = InboundRing::open(8000).unwrap();
         assert_eq!(producer.write(&[]), Ok(0));
         assert_eq!(PeerInput::available(&consumer), 0);
+    }
+}
+
+pub(crate) fn failed_endpoints() -> (InboundProducer, InboundConsumer) {
+    // SAFETY: retain a copied released descriptor and its real create/destroy pair.
+    unsafe {
+        let mut api = *ffi::rpcr2_descriptor();
+        api.ring_producer_push = Some(failed_push);
+        api.ring_consumer_render = Some(failed_render);
+        api.ring_observe = Some(failed_observe);
+        InboundRing::from_descriptor(48000, Box::leak(Box::new(api))).unwrap()
     }
 }
 

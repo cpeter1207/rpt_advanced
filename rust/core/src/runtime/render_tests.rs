@@ -34,6 +34,14 @@ fn direct_status_excludes_topology_blocked_automatic_intent() {
     links.attach("2000", Mode::TRANSCEIVE, false).unwrap();
     links.update_topology("2000", b"L T3000").unwrap();
     links.retain_topology_blocked("3000", Mode::TRANSCEIVE);
+    links.retain_topology_blocked("3000", Mode::MONITOR);
+    let retry = links
+        .snapshot()
+        .into_iter()
+        .find(|peer| peer.name == "3000")
+        .unwrap();
+    assert_eq!(retry.mode, Mode::MONITOR);
+    assert!(retry.topology_blocked && retry.permanent && !retry.paused);
     assert_eq!(
         direct_status(&links),
         ("LINK 2000 TRANSCEIVE".into(), "2000".into())

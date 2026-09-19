@@ -95,6 +95,7 @@ fn keypad_frequency_table_and_runtime_muting_switch_match_all_symbols() {
         }
         let mut qualified = tone(DtmfDigit::One, 2 * FRAME);
         detector.process(true, &mut qualified, |_| panic!("early completion"));
+        assert_eq!(detector.suppressing(), muted);
         assert_eq!(qualified.iter().all(|sample| *sample == 0.0), muted);
         let mut release = voice(3 * FRAME);
         detector.process(true, &mut release, |_| panic!("early completion"));

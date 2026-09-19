@@ -337,29 +337,21 @@ impl LinkManager {
     }
     /// Final generation, cancellation, pause, and loop gate before answered-peer publication.
     pub fn publish_retry(&mut self, attempt: &RetryAttempt) -> Result<(), AdmissionError> {
-        if attempt.generation != self.generation
-            || !self.retries.iter().any(|retry| {
-                retry.name == attempt.name && retry.attempt == Some(attempt.serial) && !retry.paused
-            })
-        {
+        if attempt.generation != self.generation {
             return Err(AdmissionError::Stale);
         }
+        let Some(index) = self.retries.iter().position(|retry| {
+            retry.name == attempt.name && retry.attempt == Some(attempt.serial) && !retry.paused
+        }) else {
+            return Err(AdmissionError::Stale);
+        };
         if let Err(error) = self.check(&attempt.name, false) {
-            if error == AdmissionError::Loop {
-                let evidence = self.topology_evidence(&attempt.name);
-                if let Some(retry) = self.retries.iter_mut().find(|retry| {
-                    retry.name == attempt.name && retry.attempt == Some(attempt.serial)
-                }) {
-                    retry.blocked_topology = Some(evidence);
-                }
-            }
+            // Retained retry identities are already validated; only topology can
+            // change admission while this serial control owner holds the token.
+            self.retries[index].blocked_topology = Some(self.topology_evidence(&attempt.name));
             return Err(error);
         }
-        let automatic = self
-            .retries
-            .iter()
-            .find(|retry| retry.name == attempt.name)
-            .is_some_and(|retry| retry.automatic);
+        let automatic = self.retries[index].automatic;
         self.publish(&attempt.name, attempt.mode, automatic);
         Ok(())
     }

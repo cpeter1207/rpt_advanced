@@ -99,6 +99,37 @@ fn radio_activation_rejects_unacknowledged_direct_callbacks_before_call() {
 }
 
 #[test]
+fn missing_direct_callbacks_destroy_channels_and_cannot_reactivate_the_reservation() {
+    for (receive, transmit) in [
+        (
+            None,
+            Some(transmit as unsafe extern "C" fn(_, _, _, _) -> _),
+        ),
+        (Some(receive as unsafe extern "C" fn(_, _, _, _) -> _), None),
+    ] {
+        reset();
+        let null = ptr::null_mut();
+        unsafe {
+            let mut radio = null;
+            assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+            assert_eq!(
+                radio_activate(null, radio, receive, null, transmit, null),
+                -1
+            );
+            assert_eq!(
+                radio_activate(null, radio, receive, null, transmit, null),
+                -1
+            );
+            radio_destroy(null, radio);
+        }
+        host(|state| {
+            assert_eq!(state.calls, 0);
+            state.clean();
+        });
+    }
+}
+
+#[test]
 fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
     let null = ptr::null_mut();
     unsafe {

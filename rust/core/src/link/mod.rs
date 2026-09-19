@@ -3,7 +3,6 @@ mod audio;
 mod hub;
 mod peer;
 mod protocol;
-mod routing;
 mod signals;
 mod topology;
 
@@ -11,7 +10,6 @@ pub use audio::{AudioPeer, LinkAudio, LinkAudioStatus, LinkDispatcher, PeerInput
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use peer::{Peer, ReceiveState};
 pub use protocol::{Protocol, Route};
-pub use routing::{MixSource, NativeMixer};
 pub use signals::PeerSignals;
 pub use topology::TopologyManager;
 

@@ -126,15 +126,19 @@ fn normal_scheduler_request_uses_other_at_zero_priority_and_propagates_errors() 
     assert!(
         set_normal_scheduler(|policy, parameters| {
             request = Some((policy, parameters.sched_priority));
-            Ok(())
+            0
         })
         .is_ok()
     );
     assert_eq!(request, Some((libc::SCHED_OTHER, 0)));
 
-    let error =
-        set_normal_scheduler(|_, _| Err(io::Error::from_raw_os_error(libc::EPERM))).unwrap_err();
-    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    let error = set_normal_scheduler(|_, parameters| unsafe {
+        libc::sched_setscheduler(0, -1, parameters)
+    })
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+    assert!(normal_scheduler().is_ok());
+    assert_eq!(unsafe { libc::sched_getscheduler(0) }, libc::SCHED_OTHER);
 }
 
 #[test]

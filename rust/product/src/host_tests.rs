@@ -803,6 +803,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
         Err(RuntimeError::Restore)
     ));
     assert!(host.runtime.status(10)[0].1.active.is_none());
+    assert!(!host.status_text("1000").unwrap().contains("local-rx:"));
     // A late reader acknowledgment cannot reactivate a failed radio generation.
     let (inbound, _input) = InboundRing::open(48000).unwrap();
     let (_, outbound) = LinkAudioQueue::new(960).unwrap().into_endpoints();
@@ -818,6 +819,46 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     host.pump(clock()).unwrap();
     assert!(host.stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
+fn stopped_host_status_does_not_retain_a_retired_radio_lease() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    assert!(host.stop(20));
+    host.prune_leases();
+    assert!(host.leases.is_empty());
+    assert_eq!(host.status_text("1000"), Err(RuntimeError::MissingNode));
+}
+
+#[test]
+fn peer_ending_before_refresh_is_reaped_without_a_connected_announcement() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let (io, state) = peer(48000);
+    state.lock().unwrap().fail_ready = true;
+    crate::fixture::PEER_WAIT_FOR_END.store(1, std::sync::atomic::Ordering::Release);
+    assert_eq!(
+        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
+        Ok(())
+    );
+    assert!(host.peers.is_empty());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    assert!(!render_queued_telemetry(&mut host, &mut owners));
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(
+        host.status_text("1000")
+            .unwrap()
+            .contains("no active links")
+    );
+    assert!(host.stop(20));
 }
 
 #[test]

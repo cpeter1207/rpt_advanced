@@ -238,4 +238,4 @@ impl Shared {
 
 #[cfg(test)]
 #[path = "ring_tests.rs"]
-mod tests;
+pub(crate) mod tests;

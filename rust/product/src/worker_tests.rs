@@ -31,16 +31,20 @@ impl DeviceHandoff for Device {
     }
 }
 fn audio_owners() -> (Runtime<Audio>, AudioOwners) {
+    audio_owners_with_maximum(8)
+}
+fn audio_owners_with_maximum(maximum: usize) -> (Runtime<Audio>, AudioOwners) {
     let mut runtime = Runtime::start(
         ConfigDocument::parse("[1000]\nradio_channel=usb\nduplex=full\n").unwrap(),
         &Media,
         |_, _| {
-            let (state, _) = Audio::new(Vec::new(), 8).map_err(|_| RuntimeError::Preparation)?;
+            let (state, _) =
+                Audio::new(Vec::new(), maximum).map_err(|_| RuntimeError::Preparation)?;
             Ok(PreparedAdapter {
                 state,
                 control: (),
-                receive_maximum: 8,
-                transmit_maximum: 8,
+                receive_maximum: maximum,
+                transmit_maximum: maximum,
             })
         },
         |_, _| Ok(Box::new(Device) as Box<dyn DeviceHandoff>),
@@ -157,6 +161,112 @@ fn absent_owners_and_invalid_sizes_fail_silent_and_unkeyed() {
     assert_eq!(tx(&worker, &mut samples), (0, 0));
     assert_eq!(samples, [0.0; 8]);
     drop(worker.stop().unwrap());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn malformed_callback_pointers_fail_without_publishing_audio_or_keying() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let worker = worker();
+    let null = std::ptr::null_mut();
+    let receive = std::ptr::from_ref(&*worker.receive).cast_mut().cast();
+    let transmit = std::ptr::from_ref(&*worker.transmit).cast_mut().cast();
+    let mut output = [0.25; 8];
+    let mut keyed = 99;
+    unsafe {
+        assert_eq!(receive_callback(receive, 1, null, 8), -1);
+        assert_eq!(receive_callback(null.cast(), 1, output.as_mut_ptr(), 8), -1);
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(transmit_callback(transmit, null, 8, &mut keyed), -1);
+        assert_eq!(transmit_callback(transmit, null, 8, null.cast()), -1);
+        assert_eq!(keyed, 0);
+        output.fill(0.25);
+        keyed = 99;
+        assert_eq!(
+            transmit_callback(null.cast(), output.as_mut_ptr(), 8, &mut keyed),
+            -1
+        );
+        assert_eq!((output, keyed), ([0.0; 8], 0));
+        output.fill(0.25);
+        assert_eq!(
+            transmit_callback(transmit, output.as_mut_ptr(), 8, null.cast()),
+            -1
+        );
+        assert_eq!(output, [0.0; 8]);
+    }
+}
+
+#[test]
+fn duplicate_attachment_preserves_both_owner_pairs_and_adapter_errors_fail_silent() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners_with_maximum(4);
+    let (mut other_runtime, other_owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    let returned = worker.attach(other_owners).expect_err("already attached");
+    assert!(
+        other_runtime
+            .node("1000")
+            .unwrap()
+            .register_audio()
+            .is_none()
+    );
+    drop(returned);
+    assert!(other_runtime.stop(0));
+    let mut output = [0.25; 8];
+    assert_eq!(tx(&worker, &mut output), (-1, 0));
+    assert_eq!(output, [0.0; 8]);
+    drop(worker.stop());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn provider_failures_remain_silent_and_observable_without_losing_control() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = worker();
+    let (producer, consumer) = crate::link::ring::tests::failed_endpoints();
+    worker.observer = producer.observer();
+    worker.receive.state.get_mut().producer = producer;
+    *worker.transmit.consumer.get_mut() = consumer;
+    assert!(worker.attach(owners).is_ok());
+    assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+    let mut output = [0.25; 8];
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 8]);
+    assert_eq!(
+        worker
+            .receive
+            .status
+            .handoff
+            .write_failed_samples
+            .load(Ordering::Relaxed),
+        8
+    );
+    assert_eq!(
+        worker
+            .receive
+            .status
+            .handoff
+            .render_failures
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(worker.local_status_text(), "  local-rx: observation failed");
+    worker.report_faults("1000", 5_000);
+    assert_eq!(worker.reported_faults, [0; 6]);
+    let (producer, _) = InboundRing::open(48000).unwrap();
+    worker.observer = producer.observer();
+    worker.report_faults("1000\0", 10_000);
+    assert_eq!(worker.reported_faults[3], 8);
+    assert_eq!(worker.reported_faults[5], 1);
+    drop(worker.stop());
     assert!(runtime.stop(0));
 }
 #[test]

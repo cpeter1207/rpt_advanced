@@ -54,6 +54,13 @@ fn windows_accept_midnight_only_as_an_exclusive_end() {
 
     let window = ScheduledWindow::parse(Some("Monday"), None, "23:00", "24:00").unwrap();
     assert!(window.matches(&CivilTime::new(2026, 9, 14, Weekday::Monday, 23, 59).unwrap()));
+    assert_eq!(
+        window.elapsed_after_end(
+            &CivilTime::new(2026, 9, 14, Weekday::Monday, 23, 59).unwrap(),
+            0
+        ),
+        None
+    );
     let midnight = CivilTime::new(2026, 9, 15, Weekday::Tuesday, 0, 0).unwrap();
     assert!(!window.matches(&midnight));
     assert_eq!(window.elapsed_after_end(&midnight, 0), Some(0));
@@ -90,6 +97,28 @@ fn midnight_end_elapsed_time_crosses_calendar_boundaries() {
         let window = ScheduledWindow::parse(days, dates, "23:00", "24:00").unwrap();
         assert_eq!(window.elapsed_after_end(&current, 7), Some(307_000));
     }
+}
+
+#[test]
+fn previous_calendar_day_handles_each_weekday_and_the_minimum_year() {
+    use super::previous_civil_day;
+    for (weekday, previous) in [
+        (Weekday::Sunday, Weekday::Saturday),
+        (Weekday::Monday, Weekday::Sunday),
+        (Weekday::Tuesday, Weekday::Monday),
+        (Weekday::Wednesday, Weekday::Tuesday),
+        (Weekday::Thursday, Weekday::Wednesday),
+        (Weekday::Friday, Weekday::Thursday),
+        (Weekday::Saturday, Weekday::Friday),
+    ] {
+        let day = CivilTime::new(2026, 9, 15, weekday, 0, 0).unwrap();
+        assert_eq!(
+            previous_civil_day(day),
+            Some(CivilTime::new(2026, 9, 14, previous, 23, 59).unwrap())
+        );
+    }
+    let minimum = CivilTime::new(1, 1, 1, Weekday::Monday, 0, 0).unwrap();
+    assert_eq!(previous_civil_day(minimum), None);
 }
 
 #[test]
