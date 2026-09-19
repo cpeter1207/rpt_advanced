@@ -446,7 +446,7 @@ fn dial_retry_background_and_remote_command_paths_are_serialized() {
     else {
         panic!("connect operation must reserve a dial");
     };
-    crate::fixture::PEER_SEND_TEXT_RESULT.store(1, Ordering::Release);
+    crate::fixture::PEER_PREPARE_TEXT_RESULT.store(1, Ordering::Release);
     assert_eq!(
         engine.dial("1000".into(), Dial::Connect(rejected), revision),
         Err(RuntimeError::Preparation)

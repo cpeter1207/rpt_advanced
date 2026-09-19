@@ -68,7 +68,8 @@ pub static LOCAL_TIME_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static NOTICE_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIAL_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIAL_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
-pub static PEER_SEND_TEXT_RESULT: AtomicUsize = AtomicUsize::new(0);
+/// Fail only the next preparation handshake, never an active reader's control text.
+pub static PEER_PREPARE_TEXT_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIGITS: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 pub static RADIO_READY: AtomicUsize = AtomicUsize::new(0);
 
@@ -268,8 +269,19 @@ unsafe extern "C" fn peer_read(
     }
     0
 }
-unsafe extern "C" fn send_text(_: *mut c_void, _: *mut c_void, _: *const c_char, _: usize) -> i32 {
-    -(PEER_SEND_TEXT_RESULT.swap(0, Ordering::AcqRel) as i32)
+unsafe extern "C" fn send_text(
+    _: *mut c_void,
+    _: *mut c_void,
+    text: *const c_char,
+    length: usize,
+) -> i32 {
+    // SAFETY: PeerIo supplies a borrowed CStr's initialized bytes for this call.
+    let text = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) };
+    if text == b"!NEWKEY1!" {
+        -(PEER_PREPARE_TEXT_RESULT.swap(0, Ordering::AcqRel) as i32)
+    } else {
+        0
+    }
 }
 unsafe extern "C" fn send_digit(_: *mut c_void, _: *mut c_void, _: u8) -> i32 {
     0
@@ -381,4 +393,27 @@ pub fn fail_allocation<T>(bytes: usize, operation: impl FnOnce() -> T) -> T {
     let result = operation();
     assert_eq!(FAIL_BYTES.get(), 0, "selected allocation was not reached");
     result
+}
+
+#[test]
+fn peer_prepare_failure_is_not_consumed_by_worker_text() {
+    let _serial = LIFECYCLE.lock().unwrap_or_else(|error| error.into_inner());
+    PEER_PREPARE_TEXT_RESULT.store(1, Ordering::Release);
+    for (text, expected) in [
+        (c"!IAXKEY! 1 1 0 0", 0),
+        (c"!NEWKEY1!", -1),
+        (c"!NEWKEY1!", 0),
+    ] {
+        assert_eq!(
+            unsafe {
+                send_text(
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    text.as_ptr(),
+                    text.to_bytes().len(),
+                )
+            },
+            expected
+        );
+    }
 }
