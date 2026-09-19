@@ -34,6 +34,7 @@ def server(
     codec,
     radio,
     load_resample=True,
+    extra_configuration="",
 ):
     """! @brief Own an isolated IAX/radio server and always terminate it.
     @param directory Test-owned configuration directory.
@@ -45,6 +46,7 @@ def server(
     @param codec Permitted IAX codec.
     @param radio Phased synthetic receiver name.
     @param load_resample Whether to load Asterisk's rate translator for a control case.
+    @param extra_configuration Node settings present before the first runtime starts.
     @return Context yielding CLI configuration and output log paths.
     Channel reservation precedes activation and owner publication. Require the
     fixture's callback-ready marker plus installed-controller status before yielding.
@@ -100,7 +102,7 @@ def server(
     )
     (directory / "rpt_advanced.conf").write_text(
         f"[{node}]\nradio_channel={radio}\nlink_directory_file={directory_file}\n"
-        "link_lookup_method=file\n",
+        "link_lookup_method=file\n" + extra_configuration,
         encoding="utf-8",
     )
     logfile = directory / "console.log"
@@ -369,6 +371,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="rpt-advanced-iax-") as temporary:
             directory = Path(temporary)
             first_port, second_port = port(), port()
+            denied_policy = "link_allow_nodes=524950\nlink_deny_nodes=524950\n"
             with (
                 server(
                     directory / "a",
@@ -389,23 +392,20 @@ def main():
                     first_port,
                     codec,
                     "network-b",
+                    extra_configuration=denied_policy,
                 ) as second,
             ):
                 for configuration, _ in (first, second):
                     cli(configuration, "iax2 set debug on")
                 receiver_config = second[0].parent / "rpt_advanced.conf"
-                original = receiver_config.read_text(encoding="utf-8")
-                receiver_config.write_text(
-                    original + "link_allow_nodes=524950\nlink_deny_nodes=524950\n",
-                    encoding="utf-8",
+                original = receiver_config.read_text(encoding="utf-8").removesuffix(
+                    denied_policy
                 )
-                reloaded = cli(second[0], "module reload app_rpt_advanced.so")
-                # Asterisk's CLI exit status does not report module reload failure.
-                assert "reloaded successfully" in reloaded, reloaded
                 rejected = cli(first[0], "rpt_advanced link connect 524950 508422")
                 assert "failed" in rejected, rejected
                 receiver_config.write_text(original, encoding="utf-8")
                 reloaded = cli(second[0], "module reload app_rpt_advanced.so")
+                # Asterisk's CLI exit status does not report module reload failure.
                 assert "reloaded successfully" in reloaded, reloaded
                 result = cli(first[0], "rpt_advanced link connect 524950 508422")
                 if "completed" not in result:
