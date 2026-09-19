@@ -46,6 +46,8 @@ def server(
     @param radio Phased synthetic receiver name.
     @param load_resample Whether to load Asterisk's rate translator for a control case.
     @return Context yielding CLI configuration and output log paths.
+    Channel reservation precedes activation and owner publication. Require the
+    fixture's callback-ready marker plus installed-controller status before yielding.
     """
     directory.mkdir()
     configuration = directory / "asterisk.conf"
@@ -116,8 +118,13 @@ def server(
                     raise RuntimeError("network test Asterisk did not start")
                 if (directory / "asterisk.ctl").exists():
                     try:
-                        if "RadioPlusAdvanced" in cli(
-                            configuration, "core show channels concise"
+                        if (
+                            f"rpt_fixture ready RadioPlusAdvanced/{radio}"
+                            in logfile.read_text(encoding="utf-8", errors="replace")
+                            and "RadioPlusAdvanced"
+                            in cli(configuration, "core show channels concise")
+                            and "local-rx:"
+                            in cli(configuration, f"rpt_advanced link status {node}")
                         ):
                             break
                     except subprocess.CalledProcessError:
