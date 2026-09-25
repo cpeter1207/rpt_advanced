@@ -20,10 +20,23 @@ pub(crate) struct State {
     pub(crate) fail_read: bool,
     pub(crate) fail_ready: bool,
     pub(crate) fail_write: bool,
+    pub(crate) fail_bind: bool,
+    pub(crate) bound_radio: Option<String>,
     pub(crate) pause: Option<Arc<std::sync::Barrier>>,
     pub(crate) drops: usize,
 }
 type Shared = Arc<Mutex<State>>;
+
+unsafe extern "C" fn bind_radio(_: *mut c_void, peer: *mut c_void, radio: *mut c_void) -> i32 {
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    assert!(state.texts.is_empty() && state.writes.is_empty());
+    if state.fail_bind {
+        -1
+    } else {
+        state.bound_radio = Some(unsafe { crate::fixture::radio_name(radio) });
+        0
+    }
+}
 
 unsafe fn state<'a>(peer: *const c_void) -> &'a Shared {
     unsafe { &*peer.cast::<Shared>() }
@@ -127,6 +140,7 @@ pub(crate) fn peer(rate_hz: u32) -> (PeerIo, Shared) {
     }));
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_rate = Some(rate);
+    table.peer_bind_radio = Some(bind_radio);
     table.peer_ready = Some(ready);
     table.peer_read = Some(read);
     table.peer_send_text = Some(text);

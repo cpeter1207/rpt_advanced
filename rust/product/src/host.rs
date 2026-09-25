@@ -326,15 +326,30 @@ impl Host {
             )
             .map_err(|_| RuntimeError::Rejected)
     }
-    /// Prepare/start one already-authorized answered peer, then publish a state-preserving peer set.
+    /// Bind an authorized peer to its exact radio before media starts, then publish its peer set.
     pub fn attach_peer(
         &mut self,
         local: &str,
         remote: &str,
         mode: Mode,
-        io: PeerIo,
+        mut io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        {
+            let (_, lease) = self
+                .leases
+                .iter()
+                .rev()
+                .find(|(name, _)| name == local)
+                .ok_or(RuntimeError::MissingNode)?;
+            let lease = lease.lock().unwrap_or_else(|e| e.into_inner());
+            lease
+                .worker
+                .as_ref()
+                .ok_or(RuntimeError::Device)?
+                .bind_peer(&mut io)
+                .map_err(|_| RuntimeError::Preparation)?;
+        }
         let (_, outbound) = LinkAudioQueue::new(48000 / 5)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();

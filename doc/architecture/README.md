@@ -17,6 +17,11 @@ telemetry, and AllStarLink peer control; the Asterisk adapter owns channel/frame
 exchange. USBRadioPlus remains the radio channel driver and owns hardware
 access. The separately released `rate_adjusting_pcm_ring3` and samplerate
 adapter DSOs provide playout buffering, clock-rate recovery, and edge conversion.
+Before either incoming or outgoing peer media starts, the product binds it to
+its node's existing radio lease. Host-services ABI 3 forwards this control-only
+operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
+USBRadioPlus retains ownership of the configured per-peer graph and its reload
+lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
 
 Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that

@@ -74,6 +74,32 @@ provider; alpha18 alone is not evidence of support. A minimum package-version
 dependency must name the first actual ABI 2 provider release, not an invented
 future version. Runtime acknowledgment rejects older mixed installations safely.
 
+### Explicit peer link processing (2026-09-25)
+
+Before starting either an incoming or outgoing peer's media owner, the product
+binds that peer to its node's existing radio lease through host-services ABI 3.
+The thin Asterisk adapter calls `ast_channel_setoption` on that exact
+`RadioPlusAdvanced` channel with `URP_AST_OPTION_LINK_ATTACH` and `block=0`.
+The option borrows the peer channel pointer for the synchronous call. Its ABI 1
+payload starts with acknowledgment zero, and the consumer requires both result
+zero and acknowledgment one. Failure rejects peer admission before media starts.
+This does not infer a profile from the node number or the first active radio.
+
+USBRadioPlus owns the same configured per-peer link graph, channel datastore,
+and reload/teardown lifecycle used by its existing link processor. A disabled
+graph retains the explicit radio association so enabling it by reload works.
+No DSP implementation, configuration parser, or Asterisk type enters the core;
+the existing hardware callbacks perform no binding or control synchronization.
+
+The required `peer_bind_radio` host operation changes only the host-services
+table to ABI 3 (`rptadv.hst3`). Old host tables are rejected before any callback,
+and old USBRadioPlus providers fail the option acknowledgment. Product and module
+descriptor layouts and exported symbols remain unchanged, so their ABI revisions
+and DSO SONAMEs are unchanged. Install the matching product and Asterisk adapter
+together with a USBRadioPlus provider implementing this option; the first released
+provider version will determine its package minimum. No guessed release minimum
+or alpha compatibility path is introduced.
+
 AllStarLink wire-protocol, directory, topology, and control interoperability
 remain required features. Matching ASL3 behavior on those interfaces is not a
 software dependency on ASL3. Do not remove that behavior to satisfy a linker

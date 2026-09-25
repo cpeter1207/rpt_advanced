@@ -5,7 +5,7 @@ use crate::{
         InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation,
         RingError,
     },
-    services::Radio,
+    services::{PeerIo, Radio},
 };
 use rpt_advanced_core::{
     link::LinkAudio,
@@ -337,6 +337,11 @@ pub struct RadioWorker {
     last_report_ms: u64,
 }
 impl RadioWorker {
+    /// Bind a peer on control while this worker retains its live radio lease.
+    pub fn bind_peer(&self, peer: &mut PeerIo) -> Result<(), Error> {
+        peer.bind_radio(self.radio.as_ref().expect("live radio reservation"))
+    }
+
     /// Attach both inactive endpoints and start the reserved channel transactionally.
     /// Failed activation synchronously detaches endpoints and returns the reservation.
     pub fn prepare(

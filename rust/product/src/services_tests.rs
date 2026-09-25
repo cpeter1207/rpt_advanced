@@ -21,6 +21,22 @@ fn obsolete_exchange_host_revision_is_rejected_before_callbacks() {
 }
 
 #[test]
+fn host_without_radio_link_binding_is_rejected_before_callbacks() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.abi_version = 2;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+    table.abi_version = 3;
+    table.peer_bind_radio = None;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+}
+
+#[test]
 fn direct_table_requires_both_activation_and_destroy() {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     assert!(unsafe { HostServices::open(crate::fixture::host_descriptor()) }.is_ok());
@@ -37,7 +53,7 @@ fn direct_table_requires_both_activation_and_destroy() {
     ));
 }
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v2)) -> HostServices {
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v3)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -251,19 +267,19 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v2>() as u32;
+    table.struct_size = size_of::<abi::rptadv_host_services_v3>() as u32;
     table.abi_version = 1;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 2;
+    table.abi_version = 3;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.hst2\0";
+    table.capability = *b"rptadv.hst3\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },

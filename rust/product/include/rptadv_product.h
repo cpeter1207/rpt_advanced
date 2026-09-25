@@ -21,9 +21,9 @@ struct rptadv_speech_descriptor;
 /** Product capability name stored in its fixed-width descriptor field. */
 #define RPTADV_PRODUCT_CAPABILITY "rptadv.prod2"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 2U
+#define RPTADV_HOST_ABI_VERSION 3U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst2"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst3"
 
 /** Copied local civil time. Valid is zero when conversion failed. */
 struct rptadv_local_time_v1 {
@@ -62,6 +62,20 @@ struct urp_ast_direct_callbacks {
     rptadv_radio_transmit_v2 transmit; /**< Output endpoint. */
     uint32_t accepted_abi_version; /**< Provider writes the ABI only after retaining callbacks. */
 };
+/** Synchronous RadioPlusAdvanced link-graph attachment; use block=0. */
+#define URP_AST_OPTION_LINK_ATTACH 0x52504C41
+/** Exact link attachment option revision. */
+#define URP_AST_LINK_ATTACH_ABI_VERSION 1U
+/** Bind a peer to this radio's configured link profile before reading media.
+ * The peer channel is borrowed for this call. Its datastore owns the installed
+ * hook through hangup and USBRadioPlus reload. Require zero result and exact
+ * acknowledgment; unknown-option success is not acceptance. */
+struct urp_ast_link_attach {
+    uint32_t struct_size;          /**< Exact readable/writable descriptor size. */
+    uint32_t abi_version;          /**< Exact link attachment revision. */
+    void *peer_channel;            /**< Borrowed public Asterisk channel pointer. */
+    uint32_t accepted_abi_version; /**< Initialize to zero; require ABI 1 on success. */
+};
 /** Current-generation predicate used during one bounded outbound dial. */
 typedef uint32_t (*rptadv_current_v1)(void *context);
 /** One borrowed peer input event: 1 text, 2 digit, 3 native F32 audio. */
@@ -83,7 +97,7 @@ typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t leng
  * pointer. Peer events are 1 text bytes, 2 one DTMF byte, or 3 normalized F32 PCM. Directory
  * methods are 0 both, 1 DNS, 2 file.
  */
-struct rptadv_host_services_v2 {
+struct rptadv_host_services_v3 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -121,6 +135,10 @@ struct rptadv_host_services_v2 {
     int (*peer_dial)(void *context, const char *destination, size_t destination_length,
                      const char *local, size_t local_length, size_t maximum_frames,
                      rptadv_current_v1 current, void *current_context, void **peer);
+    /** Bind one exclusively owned peer to its live radio's link processing before
+     * any peer media operation. Control-only; neither handle transfers ownership.
+     * Nonzero rejects admission, and the caller destroys the peer. */
+    int (*peer_bind_radio)(void *context, void *peer, void *radio);
     /** Return the peer's negotiated linear PCM rate. */
     uint32_t (*peer_rate)(void *context, const void *peer);
     /** Wait briefly for peer input. */
@@ -150,7 +168,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v2 *host,
+    int (*start)(const struct rptadv_host_services_v3 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,

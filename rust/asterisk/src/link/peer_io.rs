@@ -37,7 +37,7 @@ impl Drop for Decoder {
 /// Channel, translation state and bounded PCM storage operated by one media owner.
 /// No method is called from a radio worker; inbound ring consumption is independent.
 pub struct PeerIo {
-    channel: Channel,
+    pub(crate) channel: Channel,
     linear: Format,
     decoder: Option<Decoder>,
     input: Vec<f32>,

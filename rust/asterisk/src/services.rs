@@ -269,6 +269,27 @@ unsafe extern "C" fn peer_rate(_context: *mut c_void, peer: *const c_void) -> u3
         unsafe { peer.cast::<PeerIo>().as_ref() }.map_or(0, PeerIo::rate)
     })
 }
+unsafe extern "C" fn peer_bind_radio(
+    _context: *mut c_void,
+    peer: *mut c_void,
+    radio: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        // SAFETY: the product lends uniquely owned peer/radio handles on control.
+        let (Some(peer), Some(reserved)) = (unsafe {
+            (
+                peer.cast::<PeerIo>().as_mut(),
+                radio.cast::<ReservedRadio>().as_ref(),
+            )
+        }) else {
+            return -1;
+        };
+        reserved
+            .radio
+            .as_ref()
+            .map_or(-1, |radio| radio.bind_peer(peer).map_or(-1, |()| 0))
+    })
+}
 unsafe extern "C" fn peer_ready(_context: *mut c_void, peer: *mut c_void) -> i32 {
     boundary(-1, || {
         let Some(peer) = (unsafe { peer.cast::<PeerIo>().as_mut() }) else {
@@ -358,14 +379,14 @@ unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     });
 }
 
-struct Services(ffi::rptadv_host_services_v2);
+struct Services(ffi::rptadv_host_services_v3);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v2 {
-    struct_size: size_of::<ffi::rptadv_host_services_v2>() as u32,
-    abi_version: 2,
-    capability: *b"rptadv.hst2\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v3 {
+    struct_size: size_of::<ffi::rptadv_host_services_v3>() as u32,
+    abi_version: 3,
+    capability: *b"rptadv.hst3\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -376,6 +397,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v2 {
     radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
     peer_dial: Some(peer_dial),
+    peer_bind_radio: Some(peer_bind_radio),
     peer_rate: Some(peer_rate),
     peer_ready: Some(peer_ready),
     peer_read: Some(peer_read),
@@ -386,7 +408,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v2 {
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v2 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v3 {
     &SERVICES.0
 }
 

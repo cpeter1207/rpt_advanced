@@ -18,7 +18,7 @@ pub(crate) fn incoming_result(result: i32) {
 static DIGITS: Mutex<String> = Mutex::new(String::new());
 
 unsafe extern "C" fn start(
-    _: *const ffi::rptadv_host_services_v2,
+    _: *const ffi::rptadv_host_services_v3,
     _: *const ffi::rptadv_control_descriptor_v1,
     _: *const ffi::rptadv_file_descriptor,
     _: *const ffi::rptadv_speech_descriptor,

@@ -103,6 +103,7 @@ pub struct State {
     tokens: Box<[u64; 4]>,
     pub refs: HashMap<usize, i32>,
     pub channels: usize,
+    pub read_rates: HashMap<usize, u32>,
     pub freed: usize,
     pub writes: Vec<Vec<i16>>,
     pub write_types: Vec<u32>,
@@ -138,6 +139,7 @@ impl Default for State {
             tokens: Box::new([0; 4]),
             refs: HashMap::new(),
             channels: 0,
+            read_rates: HashMap::new(),
             freed: 0,
             writes: vec![],
             write_types: vec![],
@@ -155,7 +157,7 @@ impl State {
     pub fn format(&mut self, index: usize) -> *mut ast_format {
         (&mut self.rates[index] as *mut u32).cast()
     }
-    fn token<T>(&mut self, index: usize) -> *mut T {
+    pub(crate) fn token<T>(&mut self, index: usize) -> *mut T {
         (&mut self.tokens[index] as *mut u64).cast()
     }
     fn reference<T>(&mut self, value: *mut T) -> *mut T {
@@ -350,13 +352,23 @@ unsafe extern "C" fn ast_request(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_hangup(_: *mut ast_channel) {
     host(|s| {
-        assert_eq!(s.channels, 1);
+        assert!(s.channels > 0);
         s.channels -= 1;
     });
 }
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ast_set_read_format(_: *mut ast_channel, _: *mut ast_format) -> i32 {
-    host(|s| if s.failure == 5 { -1 } else { 0 })
+unsafe extern "C" fn ast_set_read_format(
+    channel: *mut ast_channel,
+    format: *mut ast_format,
+) -> i32 {
+    host(|s| {
+        if s.failure == 5 {
+            -1
+        } else {
+            s.read_rates.insert(channel as usize, *format.cast::<u32>());
+            0
+        }
+    })
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_set_write_format(_: *mut ast_channel, _: *mut ast_format) -> i32 {

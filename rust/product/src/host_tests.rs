@@ -33,7 +33,7 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v2 =
+    let mut table: abi::rptadv_host_services_v3 =
         unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -151,11 +151,11 @@ fn peer_attach_and_detach_queue_lifecycle_telemetry() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut host = host();
+    attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let lease = Arc::clone(&host.leases[0].1);
     assert!(lease.lock().unwrap().quiesce());
     let mut owners = lease.lock().unwrap().owners.take().unwrap();
 
-    attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     assert!(render_queued_telemetry(&mut host, &mut owners));
 
     let effect = host
@@ -877,4 +877,109 @@ fn replacement_retry_classification_preserves_non_busy_failures() {
     ] {
         assert_eq!(replacement_completed(Err(error.clone())), Err(error));
     }
+}
+
+#[test]
+fn peer_without_a_live_local_radio_is_rejected_before_starting_media() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for (local, expected) in [
+        ("missing", RuntimeError::MissingNode),
+        ("1000", RuntimeError::Device),
+    ] {
+        let mut host = host();
+        assert!(host.leases[0].1.lock().unwrap().quiesce());
+        let (io, state) = peer(48000);
+        assert_eq!(
+            host.attach_peer(local, "2000", Mode::TRANSCEIVE, io, clock()),
+            Err(expected)
+        );
+        assert!(host.peers.is_empty());
+        let state = state.lock().unwrap();
+        assert!(
+            state.texts.is_empty(),
+            "link setup must not start before radio binding"
+        );
+        assert_eq!(state.drops, 1);
+        assert!(host.stop(20));
+    }
+}
+
+#[test]
+fn rejected_radio_binding_drops_peer_without_starting_media_or_admitting_it() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let (io, state) = peer(8000);
+    {
+        let mut state = state.lock().unwrap();
+        state.fail_bind = true;
+        state.input.push_back(Input::Audio(vec![0.25; 160]));
+    }
+    assert_eq!(
+        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
+        Err(RuntimeError::Preparation)
+    );
+    assert!(host.peers.is_empty());
+    {
+        let state = state.lock().unwrap();
+        assert!(state.texts.is_empty() && state.audio.is_empty());
+        assert_eq!(state.input.len(), 1, "no frame may be read before binding");
+        assert_eq!(state.drops, 1);
+    }
+    assert!(host.stop(20));
+}
+
+#[test]
+fn incoming_and_outgoing_peers_bind_to_their_nodes_existing_radio_leases() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = Host::start(
+        document("west-radio", "[2000]\nradio_channel=east-radio\n"),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let opens = crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed);
+    for (local, remote, radio, incoming) in [
+        ("1000", "3000", "west-radio", true),
+        ("2000", "4000", "east-radio", false),
+    ] {
+        if incoming {
+            host.runtime.incoming(local, remote, true).unwrap();
+        } else {
+            let LinkEffect::Connect(attempt) = host
+                .runtime
+                .command(
+                    local,
+                    operation(LinkAction::Transceive, remote),
+                    clock(),
+                    false,
+                )
+                .unwrap()
+            else {
+                panic!("expected outbound dial");
+            };
+            assert!(
+                host.runtime
+                    .finish_connect(local, attempt, true, clock())
+                    .unwrap()
+            );
+        }
+        let (io, state) = peer(8000);
+        host.attach_peer(local, remote, Mode::TRANSCEIVE, io, clock())
+            .unwrap();
+        assert_eq!(state.lock().unwrap().bound_radio.as_deref(), Some(radio));
+    }
+    assert_eq!(
+        crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed),
+        opens,
+        "binding must reuse existing radio reservations"
+    );
+    assert!(host.stop(20));
 }

@@ -174,15 +174,29 @@ static void inspect_audio(struct fixture *device) {
     }
 }
 
-/** @brief Retain direct endpoints and acknowledge only the implemented ABI.
+/** @brief Acknowledge supported direct endpoints and borrowed link attachments.
  * @param channel Reserved test device.
- * @param option Direct attachment identifier.
+ * @param option Supported attachment identifier.
  * @param data Mutable descriptor.
  * @param size Exact descriptor size.
- * @return Zero after retaining callbacks, minus one for an invalid attachment.
+ * @return Zero after acknowledgment, minus one for an invalid attachment.
  */
 static int setoption(struct ast_channel *channel, int option, void *data, int size) {
     struct fixture *device = ast_channel_tech_pvt(channel);
+    if (option == URP_AST_OPTION_LINK_ATTACH) {
+        if (!data || size != sizeof(struct urp_ast_link_attach)) {
+            return -1;
+        }
+        struct urp_ast_link_attach *attachment = data;
+        attachment->accepted_abi_version = 0;
+        if (attachment->struct_size != sizeof(*attachment) ||
+            attachment->abi_version != URP_AST_LINK_ATTACH_ABI_VERSION ||
+            !attachment->peer_channel) {
+            return -1;
+        }
+        attachment->accepted_abi_version = URP_AST_LINK_ATTACH_ABI_VERSION;
+        return 0;
+    }
     if (option != URP_AST_OPTION_DIRECT_CALLBACKS || !data ||
         size != sizeof(struct urp_ast_direct_callbacks) || device->callbacks.receive) {
         return -1;

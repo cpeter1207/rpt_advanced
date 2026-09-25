@@ -631,7 +631,7 @@ unsafe fn incoming_identity(
 /// # Safety
 /// The complete descriptor/code allocations must remain live through successful stop.
 unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v2,
+    host: *const abi::rptadv_host_services_v3,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
