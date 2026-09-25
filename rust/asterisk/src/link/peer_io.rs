@@ -47,6 +47,7 @@ impl PeerIo {
     /// Try ordered single-codec offers under one shared 20-second dial deadline.
     /// Recheck the runtime token before and after each blocking dial; final admission
     /// remains the serialized core owner's responsibility after reader preparation.
+    /// Use the answered channel's codec rate, not the offer, for PCM exchange.
     pub fn dial(
         destination: &CStr,
         local: &CStr,
@@ -93,22 +94,7 @@ impl PeerIo {
             {
                 continue;
             }
-            // SAFETY: the cached linear format is borrowed; take one owned reference.
-            let linear = unsafe {
-                let linear = ffi::ast_format_cache_get_slin_by_rate(candidate.rate());
-                if linear.is_null() {
-                    return Err(Error::UnsupportedFormat);
-                }
-                ffi::__ao2_ref(
-                    linear.cast(),
-                    1,
-                    ptr::null(),
-                    c"rust/asterisk/link".as_ptr(),
-                    0,
-                    c"dial".as_ptr(),
-                );
-                Format(Object::owned(linear).unwrap())
-            };
+            let linear = channel.linear_format()?;
             std::mem::forget(channel);
             // SAFETY: ownership transfers exactly once, including failed preparation.
             return unsafe { Self::from_owned_channel(pointer.as_ptr().cast(), linear, maximum) };

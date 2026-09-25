@@ -1,10 +1,5 @@
 //! Copied incoming identity and exactly-once public Asterisk channel handoff.
-use crate::{
-    Error, bindings as ffi,
-    codec::{Format, Object},
-    connection::Channel,
-    link::peer_io::PeerIo,
-};
+use crate::{Error, bindings as ffi, connection::Channel, link::peer_io::PeerIo};
 use std::{
     ffi::{CStr, CString, c_void},
     ptr::{self, NonNull},
@@ -155,30 +150,7 @@ impl IncomingIdentity {
         {
             return Err(Error::Admission);
         }
-        let capabilities = unsafe { ffi::ast_channel_nativeformats(pointer.as_ptr()) };
-        if capabilities.is_null() {
-            return Err(Error::MissingFormat);
-        }
-        let native = Format(
-            unsafe { Object::owned(ffi::ast_format_cap_get_format(capabilities, 0)) }
-                .ok_or(Error::MissingFormat)?,
-        );
-        let linear = unsafe { ffi::ast_format_cache_get_slin_by_rate(native.rate()) };
-        if linear.is_null() {
-            return Err(Error::MissingFormat);
-        }
-        unsafe {
-            ffi::__ao2_ref(
-                linear.cast(),
-                1,
-                ptr::null(),
-                c"rust/asterisk/application.rs".as_ptr(),
-                0,
-                c"handoff".as_ptr(),
-            );
-        }
-        let format =
-            Format(unsafe { Object::owned(linear) }.expect("checked cached linear format"));
+        let format = owned.linear_format()?;
         // from_owned_channel assumes ownership even on error; disarm this guard first.
         std::mem::forget(owned);
         unsafe { PeerIo::from_owned_channel(pointer.as_ptr().cast(), format, maximum) }

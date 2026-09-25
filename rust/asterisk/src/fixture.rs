@@ -104,6 +104,7 @@ pub struct State {
     pub refs: HashMap<usize, i32>,
     pub channels: usize,
     pub read_rates: HashMap<usize, u32>,
+    pub write_rates: HashMap<usize, u32>,
     pub freed: usize,
     pub writes: Vec<Vec<i16>>,
     pub write_types: Vec<u32>,
@@ -140,6 +141,7 @@ impl Default for State {
             refs: HashMap::new(),
             channels: 0,
             read_rates: HashMap::new(),
+            write_rates: HashMap::new(),
             freed: 0,
             writes: vec![],
             write_types: vec![],
@@ -263,7 +265,7 @@ unsafe extern "C" fn ast_format_cap_get_format(
     assert_eq!(index, 0);
     host(|s| {
         assert_eq!(cap, s.token(3));
-        assert_eq!(s.channels, 1);
+        assert!(s.channels > 0);
         if s.failure == 2 || s.failure == 26 {
             return ptr::null_mut();
         }
@@ -274,7 +276,7 @@ unsafe extern "C" fn ast_format_cap_get_format(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_channel_nativeformats(_: *const ast_channel) -> *mut ast_format_cap {
     host(|s| {
-        assert_eq!(s.channels, 1);
+        assert!(s.channels > 0);
         if s.failure == 23 {
             ptr::null_mut()
         } else {
@@ -371,8 +373,19 @@ unsafe extern "C" fn ast_set_read_format(
     })
 }
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ast_set_write_format(_: *mut ast_channel, _: *mut ast_format) -> i32 {
-    host(|s| if s.failure == 6 { -1 } else { 0 })
+unsafe extern "C" fn ast_set_write_format(
+    channel: *mut ast_channel,
+    format: *mut ast_format,
+) -> i32 {
+    host(|s| {
+        if s.failure == 6 {
+            -1
+        } else {
+            s.write_rates
+                .insert(channel as usize, *format.cast::<u32>());
+            0
+        }
+    })
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_codec_get_max() -> i32 {

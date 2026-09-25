@@ -21,6 +21,42 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
+    /// Retain signed-linear PCM at this channel's negotiated codec rate.
+    /// The requested offer may differ from the answered format. Decode without
+    /// Asterisk resampling so the peer's shared ring owns inbound conversion.
+    pub(crate) fn linear_format(&self) -> Result<Format, Error> {
+        // SAFETY: this owner retains the live channel and its native capabilities;
+        // get_format returns an owned reference and the cache lends its format.
+        unsafe {
+            let capabilities = ffi::ast_channel_nativeformats(self.pointer.as_ptr());
+            if capabilities.is_null() {
+                return Err(Error::MissingFormat);
+            }
+            let native = Format(
+                Object::owned(ffi::ast_format_cap_get_format(capabilities, 0))
+                    .ok_or(Error::MissingFormat)?,
+            );
+            let linear = ffi::ast_format_cache_get_slin_by_rate(native.rate());
+            if linear.is_null() {
+                return Err(Error::MissingFormat);
+            }
+            if ffi::ast_format_get_sample_rate(linear) != native.rate() {
+                return Err(Error::UnsupportedFormat);
+            }
+            ffi::__ao2_ref(
+                linear.cast(),
+                1,
+                ptr::null(),
+                c"rust/asterisk/connection.rs".as_ptr(),
+                0,
+                c"linear_format".as_ptr(),
+            );
+            Ok(Format(
+                Object::owned(linear).expect("checked cached linear format"),
+            ))
+        }
+    }
+
     pub(crate) fn indicate(&mut self, keyed: bool) -> Result<(), Error> {
         if self.keyed != keyed {
             let condition = if keyed {
