@@ -182,6 +182,52 @@ fn peer_frame_owner_publishes_voice_and_frees_every_frame_and_channel() {
 }
 
 #[test]
+fn peer_loss_markers_keep_the_call_alive_without_publishing_fake_pcm() {
+    use super::peer_io::{Input, PeerIo};
+    use crate::fixture::{host, reset};
+    for (translated, null_data) in [(false, true), (false, false), (true, true)] {
+        reset();
+        host(|state| state.native = 3);
+        let mut peer = PeerIo::dial(c"radio@host/200", c"100", 960, || true).unwrap();
+        host(|state| {
+            if translated {
+                state.failure = 35;
+                state.voice(vec![1; 160], 5);
+            } else {
+                state.voice(vec![1; 160], 3);
+                let format = state.format(3);
+                state.edit_frame(|frame| {
+                    frame.subclass.__bindgen_anon_1.format = format;
+                    if null_data {
+                        frame.data.ptr = std::ptr::null_mut();
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            peer.read(|_| panic!("loss markers must not publish PCM or activity")),
+            Ok(())
+        );
+        host(|state| {
+            state.failure = 0;
+            state.voice(vec![8192; 160], 0);
+            let format = state.format(3);
+            state.edit_frame(|frame| frame.subclass.__bindgen_anon_1.format = format);
+        });
+        let mut received = Vec::new();
+        peer.read(|input| {
+            if let Input::Audio(samples) = input {
+                received.extend_from_slice(samples);
+            }
+        })
+        .unwrap();
+        assert_eq!(received, vec![0.25; 160]);
+        drop(peer);
+        host(|state| state.clean());
+    }
+}
+
+#[test]
 fn dial_uses_negotiated_rate_not_the_higher_offered_rate() {
     use super::peer_io::PeerIo;
     use crate::fixture::{host, reset};
@@ -334,7 +380,7 @@ fn peer_frame_validation_controls_and_output_errors_keep_one_serial_owner() {
     host(|state| state.failure = 8);
     assert_eq!(peer.write(&[0.5]), Err(Error::Write));
     host(|state| state.failure = 0);
-    for malformed in [1, 2, 3, 4, 6] {
+    for malformed in [1, 2, 4, 6] {
         host(|state| state.voice(vec![1; 2], malformed));
         assert_eq!(
             peer.read(|_| panic!("invalid audio")),

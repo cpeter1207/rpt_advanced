@@ -545,8 +545,9 @@ unsafe extern "C" fn ast_translate(
     } else {
         host(|state| match state.failure {
             35 => {
-                (*frame).samples = 0;
+                (*frame).samples = 160;
                 (*frame).datalen = 0;
+                (*frame).data.ptr = ptr::null_mut();
             }
             36 => (*frame).frametype = AST_FRAME_TEXT,
             37 => (*frame).subclass.__bindgen_anon_1.format = state.format(0),

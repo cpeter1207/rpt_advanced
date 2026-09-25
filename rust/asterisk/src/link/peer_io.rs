@@ -164,6 +164,8 @@ impl PeerIo {
         }
     }
     /// Read and dispatch one owned frame, preserving codec buffering as a live session.
+    /// Payload-free IAX/translator loss markers keep the call alive but publish no PCM;
+    /// the shared inbound ring supplies concealment for the missing source samples.
     pub fn read(&mut self, mut dispatch: impl FnMut(Input<'_>)) -> Result<(), Error> {
         // SAFETY: this object is the channel's exclusive I/O owner.
         unsafe {
@@ -193,7 +195,7 @@ impl PeerIo {
                     return Err(Error::Hangup);
                 }
                 ffi::AST_FRAME_VOICE => {
-                    if raw.samples == 0 && raw.datalen == 0 {
+                    if raw.samples >= 0 && raw.datalen == 0 {
                         return Ok(());
                     }
                     let source = raw.subclass.__bindgen_anon_1.format;
@@ -242,7 +244,7 @@ impl PeerIo {
                     };
                     let raw = audio.0.as_ref();
                     let count = usize::try_from(raw.samples).map_err(|_| Error::InvalidFrame)?;
-                    if count == 0 && raw.datalen == 0 {
+                    if raw.frametype == ffi::AST_FRAME_VOICE && raw.datalen == 0 {
                         return Ok(());
                     }
                     if raw.frametype != ffi::AST_FRAME_VOICE
