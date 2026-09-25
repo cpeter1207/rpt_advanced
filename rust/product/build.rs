@@ -8,9 +8,9 @@ fn main() {
         .header("wrapper.h")
         .clang_arg("-I../media-support/include")
         .allowlist_type("rptadv_.*")
-        .allowlist_function("rpcr2_descriptor")
+        .allowlist_function("rpcr3_descriptor")
         .allowlist_function("rptadv_samplerate_adapter_descriptor")
-        .allowlist_var("RPCR2_.*")
+        .allowlist_var("RPCR3_.*")
         .layout_tests(false)
         .generate_comments(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -19,6 +19,6 @@ fn main() {
     bindings
         .write_to_file(PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("abi.rs"))
         .expect("write product ABI bindings");
-    println!("cargo:rustc-link-lib=rate_adjusting_pcm_ring2");
+    println!("cargo:rustc-link-lib=rate_adjusting_pcm_ring3");
     println!("cargo:rustc-link-lib=rptadv_samplerate_adapter");
 }

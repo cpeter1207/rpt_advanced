@@ -196,7 +196,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     session.step(3021).unwrap();
     assert!(matches!(control.event(), Some(Event::Digit('#'))));
     let old = control.observer.clone();
-    let (inbound, input) = InboundRing::open(48000).unwrap();
+    let (inbound, input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     let observer = inbound.observer();
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
         .unwrap()
@@ -357,7 +357,7 @@ fn unkey_between_query_capture_and_send_cancels_the_advisory_request() {
 }
 
 #[test]
-fn sub_codec_frame_buffers_without_sending_an_empty_packet() {
+fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let (io, state) = peer(8000);
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
         .unwrap()
@@ -365,5 +365,12 @@ fn sub_codec_frame_buffers_without_sending_an_empty_packet() {
     let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
     assert_eq!(output.write(&[0.5]), 0);
     session.step(0).unwrap();
-    assert!(state.lock().unwrap().audio.is_empty());
+    // SRC_LINEAR emits its initial interpolation position immediately; the next
+    // source sample cannot advance another 48-to-8 kHz output position.
+    let writes = state.lock().unwrap().writes.clone();
+    assert_eq!(writes, [1]);
+    assert_eq!(output.write(&[0.5]), 0);
+    session.step(20).unwrap();
+    let writes = state.lock().unwrap().writes.clone();
+    assert_eq!(writes, [1]);
 }

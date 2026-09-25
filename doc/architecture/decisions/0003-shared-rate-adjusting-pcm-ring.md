@@ -79,3 +79,32 @@ the ring's public ABI require coordinated consumer builds and releases.
 Local receive inbound, linked-peer receive-program, telemetry-program, and
 program-audio loopback rings require observable occupancy, shortfall, and
 clock-recovery statistics.
+
+## ABI 3 caller policy (2026-09-25)
+
+The product now requires `rate_adjusting_pcm_ring3` 3.0.0-alpha.1 or newer
+with SONAME 3 and samplerate adapter 0.1.0-alpha3 or newer, which implements
+SRC_LINEAR for its existing selectors. There is no ABI-2 compatibility shim.
+The ring fixes conversion to SRC_LINEAR and captures reserve, target, block
+bounds and PLC selection at creation. Changes to these settings require a new
+prepared ring.
+
+Incoming peer rings enable G.711 Appendix I PLC with its separate 3.75 ms
+output delay. Producer and output block maxima are 4096 samples. Reserve is
+the larger of 60 ms of input and one maximum callback's conservative input
+budget, including the linear interpolator successor. The existing 260 ms
+target remains; capacity is the largest of 300 ms of input, 512 samples and
+target plus one maximum producer write. At 8 kHz, reserve/target/capacity are
+685/2080/6176 input samples; at 48 kHz they are 4102/12480/16576.
+
+Local receive disables PLC and retains capacity 14400 and block maxima 4096.
+Reserve and target equal the squelch delay captured when its worker is
+prepared. The existing same-device reload lifetime is unchanged. Offline file
+and speech conversion also disables PLC, with zero reserve and target and a
+preloaded source plus bounded converter padding. It retains only real PCM,
+returns the exact requested duration, and rejects incomplete conversion.
+
+Bindings, descriptor validation and Debian runtime/development dependencies
+move together to ABI 3 so a mixed installation cannot call an incompatible
+function table. This migration changes neither native routing nor signaling,
+generation ownership, or callback pacing.

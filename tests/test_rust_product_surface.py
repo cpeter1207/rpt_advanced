@@ -21,13 +21,14 @@ FORBIDDEN_MAKE_TOKENS = (
 )
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
 PRODUCT = "librptadv_product.so.1"
-RING_MINIMUM_VERSION = "2.0.0~alpha3"
+RING_MINIMUM_VERSION = "3.0.0~alpha1"
+SAMPLERATE_MINIMUM_VERSION = "0.1.0~alpha3"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
     "librptadv_asterisk_adapter.so.1": set(),
     PRODUCT: {
-        "librate_adjusting_pcm_ring2.so.2",
+        "librate_adjusting_pcm_ring3.so.3",
         "librptadv_samplerate_adapter.so.1",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
@@ -98,7 +99,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
         assert needed - system == dependencies, f"incorrect NEEDED for {name}: {needed}"
         symbols = command("nm", "--defined-only", "--demangle", str(path))
         assert not re.search(
-            r"\b(rpcr2_descriptor|rptadv_samplerate_adapter_descriptor)$",
+            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor)$",
             symbols,
             re.MULTILINE,
         ), f"static external adapter in {name}"
@@ -204,7 +205,7 @@ def package(control: Path) -> None:
         "debhelper",
         "pkg-config",
         "dh-sequence-asterisk",
-        "librate-adjusting-pcm-ring2-dev",
+        "librate-adjusting-pcm-ring3-dev",
         "librptadv-samplerate-adapter-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
@@ -212,10 +213,12 @@ def package(control: Path) -> None:
     ):
         assert token in contents, f"missing package dependency: {token}"
     for token in (
-        f"librate-adjusting-pcm-ring2-dev (>= {RING_MINIMUM_VERSION})",
-        f"librate-adjusting-pcm-ring2 (>= {RING_MINIMUM_VERSION})",
+        f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
+        f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
+        f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
+        f"librptadv-samplerate-adapter1 (>= {SAMPLERATE_MINIMUM_VERSION})",
     ):
-        assert token in contents, f"missing compatible ring provider: {token}"
+        assert token in contents, f"missing compatible audio provider: {token}"
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 
 
@@ -381,7 +384,7 @@ def verify_artifact_policy() -> None:
                 rejected()
                 write(root, name)
             for duplicate in (
-                "0000 T rpcr2_descriptor\n",
+                "0000 T rpcr3_descriptor\n",
                 "rpt_advanced_core::controller",
             ):
                 symbols.side_effect = lambda *arguments, value=duplicate: (

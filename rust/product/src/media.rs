@@ -241,7 +241,7 @@ fn native(
     cancellation: &Cancellation,
 ) -> Result<PreparedAudio, MediaError> {
     // SAFETY: the linked provider retains its immutable descriptor and callback code.
-    unsafe { native_with_descriptor(rate, source, cancellation, ffi::rpcr2_descriptor()) }
+    unsafe { native_with_descriptor(rate, source, cancellation, ffi::rpcr3_descriptor()) }
 }
 
 // The provider retains the descriptor and callback code throughout this synchronous conversion.
@@ -249,7 +249,7 @@ unsafe fn native_with_descriptor(
     rate: u32,
     source: &[f32],
     cancellation: &Cancellation,
-    pointer: *const ffi::rpcr2_descriptor,
+    pointer: *const ffi::rpcr3_descriptor,
 ) -> Result<PreparedAudio, MediaError> {
     if cancellation.is_cancelled() {
         return Err(MediaError::Cancelled);
@@ -257,8 +257,8 @@ unsafe fn native_with_descriptor(
     if rate == 0 || source.is_empty() || source.iter().any(|v| !v.is_finite() || v.abs() > 1.0) {
         return Err(MediaError::InvalidOutput);
     }
-    // Finite media has no clock drift. ABI 2 has no EOF flush: provide bounded zero context
-    // (512 source frames per downsampling factor, beyond fastest-sinc support), use target 0,
+    // Finite media has no clock drift. Provide the existing bounded zero context
+    // (512 source frames per downsampling factor), disable PLC and use zero timing,
     // then retain exactly ceil(source_frames * 48000 / source_rate) real output samples.
     // Padding is converter context, never an extra playable tail or a second resampler.
     let padding = u64::from(rate).div_ceil(48000) * 512;
@@ -280,8 +280,8 @@ unsafe fn native_with_descriptor(
         return Err(MediaError::IncompatibleAdapter);
     }
     if unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-        < size_of::<ffi::rpcr2_descriptor>() as u32
-        || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 2
+        < size_of::<ffi::rpcr3_descriptor>() as u32
+        || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != ffi::RPCR3_ABI_VERSION
     {
         return Err(MediaError::IncompatibleAdapter);
     }
@@ -295,7 +295,7 @@ unsafe fn native_with_descriptor(
     {
         return Err(MediaError::IncompatibleAdapter);
     }
-    struct Ring(&'static ffi::rpcr2_descriptor, NonNull<ffi::rpcr2_ring>);
+    struct Ring(&'static ffi::rpcr3_descriptor, NonNull<ffi::rpcr3_ring>);
     impl Drop for Ring {
         fn drop(&mut self) {
             // SAFETY: stopped local ring has no other endpoint owner.
@@ -304,13 +304,17 @@ unsafe fn native_with_descriptor(
             }
         }
     }
-    let config = ffi::rpcr2_config {
-        struct_size: size_of::<ffi::rpcr2_config>() as u32,
-        abi_version: 2,
+    let config = ffi::rpcr3_config {
+        struct_size: size_of::<ffi::rpcr3_config>() as u32,
+        abi_version: ffi::RPCR3_ABI_VERSION,
         capacity_samples: count.max(512),
         input_rate_hz: rate,
         output_rate_hz: 48000,
-        quality: 2,
+        reserve_samples: 0,
+        target_samples: 0,
+        max_producer_samples: count,
+        max_output_samples: 1,
+        plc_mode: 0,
     };
     let mut handle = ptr::null_mut();
     if unsafe { api.ring_create.unwrap()(&config, &mut handle) } != 0 {
@@ -340,7 +344,7 @@ unsafe fn native_with_descriptor(
         let mut sample = 0.0;
         let mut real = false;
         if unsafe {
-            api.ring_consumer_render_sample.unwrap()(ring.1.as_ptr(), &mut sample, 0, &mut real)
+            api.ring_consumer_render_sample.unwrap()(ring.1.as_ptr(), &mut sample, &mut real)
         } != 0
         {
             return Err(MediaError::InvalidOutput);

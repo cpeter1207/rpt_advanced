@@ -216,18 +216,13 @@ thread_local! {
     static RING_FAILURE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     static CANCEL_DURING_RENDER: std::cell::Cell<*const Cancellation> = const { std::cell::Cell::new(ptr::null()) };
 }
-unsafe extern "C" fn ring_create(_: *const ffi::rpcr2_config, _: *mut *mut ffi::rpcr2_ring) -> i32 {
+unsafe extern "C" fn ring_create(_: *const ffi::rpcr3_config, _: *mut *mut ffi::rpcr3_ring) -> i32 {
     if RING_FAILURE.get() == 0 { -1 } else { 0 }
 }
-unsafe extern "C" fn ring_push(_: *mut ffi::rpcr2_ring, _: *const f32, _: u64, _: *mut u64) -> i32 {
+unsafe extern "C" fn ring_push(_: *mut ffi::rpcr3_ring, _: *const f32, _: u64, _: *mut u64) -> i32 {
     if RING_FAILURE.get() == 0 { -1 } else { 0 }
 }
-unsafe extern "C" fn ring_render(
-    _: *mut ffi::rpcr2_ring,
-    _: *mut f32,
-    _: u64,
-    _: *mut bool,
-) -> i32 {
+unsafe extern "C" fn ring_render(_: *mut ffi::rpcr3_ring, _: *mut f32, _: *mut bool) -> i32 {
     let token = CANCEL_DURING_RENDER.get();
     if !token.is_null() {
         // SAFETY: the test keeps this token borrowed until synchronous conversion returns.
@@ -245,12 +240,12 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
     };
     assert_eq!(convert(ptr::null()), Err(MediaError::IncompatibleAdapter));
     // SAFETY: installed immutable descriptor has its complete current ABI layout.
-    let original = unsafe { *ffi::rpcr2_descriptor() };
+    let original = unsafe { *ffi::rpcr3_descriptor() };
     for case in 0..10 {
         let mut api = original;
         match case {
             0 => api.struct_size = 8,
-            1 => api.abi_version = 99,
+            1 => api.abi_version = 2,
             2 => api.capability_name = ptr::null(),
             3 => api.capability_name = c"other".as_ptr(),
             4 => api.ring_create = None,

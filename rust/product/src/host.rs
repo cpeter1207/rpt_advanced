@@ -1,7 +1,7 @@
 //! Concrete public-Asterisk devices and generation-owned link endpoints.
 use crate::{
     link::{
-        ring::InboundRing,
+        ring::{InboundPolicy, InboundRing},
         session::{Command as PeerCommand, Event, PeerControl, PeerReader, PeerSession},
     },
     media::NativeMediaPreparer,
@@ -157,8 +157,8 @@ fn prepared(
         if snapshot.ended {
             continue;
         }
-        let (inbound, input) =
-            InboundRing::open(snapshot.input_rate).map_err(|_| RuntimeError::Preparation)?;
+        let (inbound, input) = InboundRing::open(snapshot.input_rate, InboundPolicy::Peer)
+            .map_err(|_| RuntimeError::Preparation)?;
         let (output, outbound) = LinkAudioQueue::new(48000 / 5)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();

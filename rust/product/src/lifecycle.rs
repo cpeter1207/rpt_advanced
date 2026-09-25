@@ -660,7 +660,10 @@ unsafe extern "C" fn rptadv_product_start(
         }
         .map_err(|_| RuntimeError::Preparation)?;
         // Mandatory released composition is validated even for a disabled configuration.
-        drop(crate::link::ring::InboundRing::open(48000).map_err(|_| RuntimeError::Preparation)?);
+        drop(
+            crate::link::ring::InboundRing::open(48000, crate::link::ring::InboundPolicy::Peer)
+                .map_err(|_| RuntimeError::Preparation)?,
+        );
         drop(crate::link::egress::Egress::new(48000, 960).map_err(|_| RuntimeError::Preparation)?);
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let origin = Instant::now();

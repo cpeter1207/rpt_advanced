@@ -2,7 +2,8 @@
 use crate::{
     Error,
     link::ring::{
-        InboundConsumer, InboundObserver, InboundProducer, InboundRing, Observation, RingError,
+        InboundConsumer, InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation,
+        RingError,
     },
     services::Radio,
 };
@@ -286,11 +287,7 @@ unsafe fn transmit(context: *mut c_void, samples: &mut [f32], keyed: &mut u32) -
     }
     let mut receiving = token & 1 != 0 && reset_ok;
     // An idle consumer must not drain a newly published burst or synthesize PLC.
-    if receiving
-        && consumer
-            .render_with_timing(samples, context.squelch_delay_ms, context.squelch_delay_ms)
-            .is_err()
-    {
+    if receiving && consumer.render(samples).is_err() {
         handoff.render_failures.fetch_add(1, Ordering::Relaxed);
         samples.fill(0.0);
         receiving = false;
@@ -349,7 +346,7 @@ impl RadioWorker {
         squelch_delay_ms: u64,
     ) -> Result<Self, (Error, Radio)> {
         let maximum = radio.maximum_frames();
-        let ring = InboundRing::open(48_000);
+        let ring = InboundRing::open(48_000, InboundPolicy::Local { squelch_delay_ms });
         #[cfg(test)]
         let ring = if take_test_failure(TestFailure::Prepare) {
             Err(RingError)

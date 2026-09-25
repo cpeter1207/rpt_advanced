@@ -37,7 +37,7 @@ Standalone hosts without a competing reaper may omit both callbacks.
 The product-owned `NativeMediaPreparer` validates both readable descriptor
 prefixes and every required slot before creating contexts. A failed second
 creation destroys the first context. Foreign PCM is copied through the released
-ring2 converter into core-owned 48 kHz audio, then released by its originating
+ring3 converter into core-owned 48 kHz audio, then released by its originating
 provider. Finite conversion uses bounded zero context beyond the fastest-sinc
 support, zero occupancy target, and exactly ceil(source_frames × 48000/source_rate)
 output frames. Padding/concealment never extends playable duration.

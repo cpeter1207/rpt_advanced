@@ -15,7 +15,7 @@ external interoperability, and reject incompatible artifact combinations safely.
 The product owns controller configuration, node workers, local radio policy,
 telemetry, and AllStarLink peer control; the Asterisk adapter owns channel/frame
 exchange. USBRadioPlus remains the radio channel driver and owns hardware
-access. The separately released `rate_adjusting_pcm_ring2` and samplerate
+access. The separately released `rate_adjusting_pcm_ring3` and samplerate
 adapter DSOs provide playout buffering, clock-rate recovery, and edge conversion.
 
 Stable reusable functions are progressively extracted as narrow, independently
@@ -81,7 +81,7 @@ The file and speech providers are independently replaceable and expose only
 their own operation. Speech does not invoke FFmpeg; file decoding does not
 invoke Piper. Their private process/WAV source is shared at build time, without
 a support DSO or a duplicate controller core. The product converts their
-source-rate PCM through the released ring2 before prepared playback. Asterisk
+source-rate PCM through the released ring3 before prepared playback. Asterisk
 child-reaper coordination arrives through host callbacks, not product imports.
 Adapter replacement requires quiescence and controlled reload/restart. The
 retired combined media descriptor is not retained for initial-alpha compatibility.

@@ -1,7 +1,7 @@
 //! Serial IAX reader, queued control delivery and native egress composition.
 use super::{
     egress::Egress,
-    ring::{InboundObserver, InboundProducer, InboundRing, Observation, RingError},
+    ring::{InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation, RingError},
 };
 use crate::{
     Error,
@@ -148,7 +148,8 @@ impl PeerSession {
             return Err(Error::Reservation);
         }
         let egress = Egress::new(io.rate(), 960).map_err(|_| Error::Allocation)?;
-        let (inbound, _input) = InboundRing::open(io.rate()).map_err(|_| Error::Allocation)?;
+        let (inbound, _input) =
+            InboundRing::open(io.rate(), InboundPolicy::Peer).map_err(|_| Error::Allocation)?;
         io.send_text(c"!NEWKEY1!")?;
         let (commands, incoming) = RingBuffer::new(64);
         let (events, outgoing) = RingBuffer::new(64);

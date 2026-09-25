@@ -807,7 +807,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     assert!(host.runtime.status(10)[0].1.active.is_none());
     assert!(!host.status_text("1000").unwrap().contains("local-rx:"));
     // A late reader acknowledgment cannot reactivate a failed radio generation.
-    let (inbound, _input) = InboundRing::open(48000).unwrap();
+    let (inbound, _input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     let (_, outbound) = LinkAudioQueue::new(960).unwrap().into_endpoints();
     host.peers[0]
         .control

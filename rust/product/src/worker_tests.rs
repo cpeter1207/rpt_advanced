@@ -69,6 +69,28 @@ fn worker() -> RadioWorker {
     )
     .unwrap_or_else(|_| panic!("prepare callbacks"))
 }
+
+#[test]
+fn local_ring_captures_squelch_delay_before_any_callback() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    for (delay, reserve) in [(0, 0), (150, 7200)] {
+        let worker = RadioWorker::prepare(
+            services.radio("usb", 4096).unwrap(),
+            Instant::now(),
+            RadioStatus::default(),
+            delay,
+        )
+        .unwrap_or_else(|_| panic!("prepare local ring"));
+        let observation = worker.observer.observe().unwrap();
+        assert_eq!(observation.capacity_samples, 14400);
+        assert_eq!(observation.reserve_samples, reserve);
+        assert_eq!(observation.target_samples, reserve);
+        drop(worker.stop());
+    }
+}
 fn rx(worker: &RadioWorker, receiving: bool, samples: &mut [f32]) -> i32 {
     unsafe {
         receive_callback(
@@ -99,7 +121,7 @@ fn independent_callbacks_queue_processed_pcm_and_return_transmit_keying() {
     let (mut runtime, owners) = audio_owners();
     let mut worker = worker();
     assert!(worker.attach(owners).is_ok());
-    // Warm the persistent SINC state at callback cadence, without creating backlog.
+    // Exercise persistent conversion at callback cadence without creating backlog.
     for _ in 0..256 {
         assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
         let mut discard = [0.0; 8];
@@ -261,7 +283,7 @@ fn provider_failures_remain_silent_and_observable_without_losing_control() {
     assert_eq!(worker.local_status_text(), "  local-rx: observation failed");
     worker.report_faults("1000", 5_000);
     assert_eq!(worker.reported_faults, [0; 6]);
-    let (producer, _) = InboundRing::open(48000).unwrap();
+    let (producer, _) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     worker.observer = producer.observer();
     worker.report_faults("1000\0", 10_000);
     assert_eq!(worker.reported_faults[3], 8);
@@ -569,7 +591,8 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
             unsafe { transmit_callback(probe.transmit.get(), samples.as_mut_ptr(), 8, &mut keyed) },
             0
         );
-        assert_eq!(samples, [0.0; 8]);
+        // The live zero-delay local ring passes this callback's PCM immediately.
+        assert_eq!(samples, [0.25; 8]);
         assert_eq!(keyed, 1);
         probe.destroyed.set(true);
         unsafe {
