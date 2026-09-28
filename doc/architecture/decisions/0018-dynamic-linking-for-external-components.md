@@ -19,7 +19,7 @@ minimum compatible ABI/package version and package their runtime dependencies.
 
 This applies equally to project libraries such as the rate-adjusting PCM ring,
 radio and controller components, and to external dependencies such as
-PortAudio, ALSA, FFmpeg, Hamlib, libsamplerate, and Asterisk interfaces.
+PortAudio, ALSA, FFmpeg (including libswresample), Hamlib, and Asterisk interfaces.
 Only their corresponding versioned adapters directly link those external
 dependencies; internal Rust components depend on adapter-neutral ports.
 The adapter is dynamically linked even when an external implementation such as

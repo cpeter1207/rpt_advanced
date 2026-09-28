@@ -1,7 +1,42 @@
 use super::*;
 use std::cell::Cell;
 thread_local! { static MODE: Cell<u8> = const { Cell::new(0) }; }
+
+#[test]
+fn old_unbounded_samplerate_descriptor_is_rejected() {
+    // SAFETY: the installed descriptor is copied into process-lifetime storage.
+    unsafe {
+        let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
+        api.abi_version = 1;
+        assert!(Egress::from_descriptor(8000, 960, Box::leak(Box::new(api))).is_err());
+    }
+}
+
+#[test]
+fn bandlimited_egress_retains_fir_input_without_duplication_across_partitions() {
+    let source: Vec<f32> = (0..4096)
+        .map(|index| (index as f32 * 0.07).sin() * 0.5)
+        .collect();
+    let mut whole = Egress::new(8000, 4096).unwrap();
+    let expected = whole.process(&source).unwrap().to_vec();
+    let mut split = Egress::new(8000, 4096).unwrap();
+    let mut actual = split.process(&source[..1]).unwrap().to_vec();
+    for chunk in source[1..].chunks(17) {
+        actual.extend_from_slice(split.process(chunk).unwrap());
+    }
+    actual.extend_from_slice(split.process(&[]).unwrap());
+    assert!(actual.len() > 600);
+    assert_eq!(actual.len(), expected.len());
+    assert!(
+        actual
+            .iter()
+            .zip(&expected)
+            .all(|(actual, expected)| (actual - expected).abs() < 0.00001)
+    );
+}
 unsafe extern "C" fn failed_create(
+    _: u32,
+    _: u32,
     _: u32,
     _: u32,
     _: *mut *mut ffi::rptadv_samplerate_converter,
@@ -9,6 +44,8 @@ unsafe extern "C" fn failed_create(
     -1
 }
 unsafe extern "C" fn empty_create(
+    _: u32,
+    _: u32,
     _: u32,
     _: u32,
     _: *mut *mut ffi::rptadv_samplerate_converter,
@@ -41,7 +78,7 @@ fn malformed_converter_tables_and_impossible_output_counts_fail_closed() {
             assert!(Egress::new(rate, maximum).is_err());
         }
         let original = *ffi::rptadv_samplerate_adapter_descriptor();
-        for case in 0..9 {
+        for case in 0..12 {
             let mut api = original;
             match case {
                 0 => api.struct_size = 8,
@@ -52,7 +89,10 @@ fn malformed_converter_tables_and_impossible_output_counts_fail_closed() {
                 5 => api.process = None,
                 6 => api.destroy = None,
                 7 => api.create = Some(failed_create),
-                _ => api.create = Some(empty_create),
+                8 => api.create = Some(empty_create),
+                9 => api.reset = None,
+                10 => api.queued_input = None,
+                _ => api.converter_output_delay = None,
             }
             assert!(Egress::from_descriptor(8000, 16, Box::leak(Box::new(api))).is_err());
         }

@@ -21,15 +21,15 @@ FORBIDDEN_MAKE_TOKENS = (
 )
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
 PRODUCT = "librptadv_product.so.1"
-RING_MINIMUM_VERSION = "3.0.0~alpha1"
-SAMPLERATE_MINIMUM_VERSION = "0.1.0~alpha3"
+RING_MINIMUM_VERSION = "3.0.0~alpha2"
+SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
     "librptadv_asterisk_adapter.so.1": set(),
     PRODUCT: {
         "librate_adjusting_pcm_ring3.so.3",
-        "librptadv_samplerate_adapter.so.1",
+        "librptadv_samplerate_adapter.so.2",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
@@ -216,7 +216,7 @@ def package(control: Path) -> None:
         f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
-        f"librptadv-samplerate-adapter1 (>= {SAMPLERATE_MINIMUM_VERSION})",
+        f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",
     ):
         assert token in contents, f"missing compatible audio provider: {token}"
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"

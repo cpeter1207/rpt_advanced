@@ -20,7 +20,7 @@ fn peer_preparation_reserves_one_maximum_callback_and_producer_write() {
 }
 
 #[test]
-fn local_shortfall_is_silence_without_concealment_or_output_delay() {
+fn local_shortfall_is_silence_without_concealment_or_plc_delay() {
     let (mut producer, mut consumer) = InboundRing::open(
         48000,
         InboundPolicy::Local {
@@ -31,7 +31,13 @@ fn local_shortfall_is_silence_without_concealment_or_output_delay() {
     assert_eq!(producer.write(&[0.25; 4096]), Ok(4096));
     let mut output = [0.0; 4096];
     assert_eq!(consumer.render(&mut output), Ok(4096));
-    assert_eq!(output, [0.25; 4096]);
+    // Intrinsic converter history starts at zero, independently of PLC.
+    assert!(output[0].abs() < 0.001);
+    assert!(
+        output[3584..]
+            .iter()
+            .all(|sample| (*sample - 0.25).abs() < 0.001)
+    );
     assert_eq!(consumer.render(&mut output), Ok(0));
     assert_eq!(output, [0.0; 4096]);
 }
@@ -43,8 +49,12 @@ fn peer_playout_has_plc_lookahead_without_counting_it_as_loss() {
     let mut output = [0.0; 960];
     assert_eq!(consumer.render(&mut output), Ok(780));
     assert_eq!(output[..180], [0.0; 180]);
+    // Converter FIR startup is additional to the 180-sample PLC lookahead.
+    // Continue real input long enough to observe settled audio.
+    assert_eq!(consumer.render(&mut output), Ok(960));
+    assert_eq!(consumer.render(&mut output), Ok(960));
     assert!(
-        output[180..]
+        output[832..]
             .iter()
             .all(|sample| (*sample - 0.25).abs() < 0.001)
     );

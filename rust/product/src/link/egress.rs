@@ -43,7 +43,7 @@ impl Egress {
             if pointer.is_null()
                 || ptr::addr_of!((*pointer).struct_size).read()
                     < size_of::<ffi::rptadv_samplerate_adapter_descriptor>() as u32
-                || ptr::addr_of!((*pointer).abi_version).read() != 1
+                || ptr::addr_of!((*pointer).abi_version).read() != 2
             {
                 return Err(EgressError);
             }
@@ -53,11 +53,24 @@ impl Egress {
                 || api.create.is_none()
                 || api.process.is_none()
                 || api.destroy.is_none()
+                || api.reset.is_none()
+                || api.queued_input.is_none()
+                || api.converter_output_delay.is_none()
             {
                 return Err(EgressError);
             }
             let mut converter = ptr::null_mut();
-            if api.create.unwrap()(2, 1, &mut converter) != 0 {
+            if api.create.unwrap()(
+                48000,
+                rate,
+                (maximum * 2) as u32,
+                (maximum * 2 + 64) as u32,
+                &mut converter,
+            ) != 0
+            {
+                if !converter.is_null() {
+                    api.destroy.unwrap()(converter);
+                }
                 return Err(EgressError);
             }
             Ok(Self {
@@ -71,7 +84,10 @@ impl Egress {
             })
         }
     }
-    /// Convert a continuing native block, retaining any unconsumed input tail.
+    /// Convert a continuing native block, retaining only unaccepted input.
+    /// The adapter retains accepted FIR input even when it produces no output;
+    /// it must not be submitted a second time. Empty input drains available
+    /// output without flushing the continuing stream's FIR tail.
     /// The returned slice contains only real generated samples, never padded frames.
     pub fn process(&mut self, input: &[f32]) -> Result<&[f32], EgressError> {
         if input.len() > self.maximum || self.used + input.len() > self.pending.len() {

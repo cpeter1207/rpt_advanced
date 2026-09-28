@@ -82,17 +82,14 @@ clock-recovery statistics.
 
 ## ABI 3 caller policy (2026-09-25)
 
-The product now requires `rate_adjusting_pcm_ring3` 3.0.0-alpha.1 or newer
-with SONAME 3 and samplerate adapter 0.1.0-alpha3 or newer, which implements
-SRC_LINEAR for its existing selectors. There is no ABI-2 compatibility shim.
-The ring fixes conversion to SRC_LINEAR and captures reserve, target, block
-bounds and PLC selection at creation. Changes to these settings require a new
-prepared ring.
+The product requires `rate_adjusting_pcm_ring3` with SONAME 3. There is no
+ABI-2 ring compatibility shim. Reserve, target, block bounds and PLC selection
+are captured at creation. Changes to these settings require a new prepared ring.
 
 Incoming peer rings enable G.711 Appendix I PLC with its separate 3.75 ms
 output delay. Producer and output block maxima are 4096 samples. Reserve is
 the larger of 60 ms of input and one maximum callback's conservative input
-budget, including the linear interpolator successor. The existing 260 ms
+budget, including rate-correction rounding. The existing 260 ms
 target remains; capacity is the largest of 300 ms of input, 512 samples and
 target plus one maximum producer write. At 8 kHz, reserve/target/capacity are
 685/2080/6176 input samples; at 48 kHz they are 4102/12480/16576.
@@ -108,3 +105,29 @@ Bindings, descriptor validation and Debian runtime/development dependencies
 move together to ABI 3 so a mixed installation cannot call an incompatible
 function table. This migration changes neither native routing nor signaling,
 generation ownership, or callback pacing.
+
+## libswresample conversion (2026-09-28)
+
+The ring uses samplerate adapter ABI 2, backed by dynamically linked FFmpeg
+`libswresample`. The adapter is shared with app_rpt and peer egress converters;
+no project-owned conversion uses libsamplerate. Stock distribution libraries
+may independently depend on it; this does not authorize a second owned path.
+
+The filter is fixed to `filter_size=256`, `cutoff=0.985` and
+`SWR_FILTER_TYPE_KAISER`. Persistent soft compensation through
+`swr_set_compensation` follows the ring's existing filtered-occupancy controller,
+including independent clocks with equal nominal rates. No quality selector is
+added. Nominal rates and maximum input/output counts are supplied at creation,
+so filter setup, history and working storage are prepared before callbacks.
+
+Accepted input may remain inside the converter. Its bounded queued-input
+measurement contributes to controller occupancy, excluding the intrinsic FIR
+lookahead; the public FIFO-available statistic still reports the FIFO itself.
+Empty input drains available converted output without flushing end-of-stream.
+Burst reset discards old audio while retaining preallocated converter storage.
+Conversion, compensation and reset remain allocation-free and lock-free.
+
+Filter delay is distinct from jitter reserve and PLC delay. Tests cover startup,
+burst reset, callback partitioning, drift direction, backlog bounds and media
+duration. Adapter ABI/SONAME 2 and all descriptor clients are upgraded together;
+the ring's public ABI remains 3.

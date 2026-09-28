@@ -59,6 +59,7 @@ fn finite_ring_conversion_preserves_duration_and_short_impulse_tail() {
         (48000, vec![0.5; 100], 100),
         (8000, vec![0.5], 6),
         (96000, vec![0.5; 960], 480),
+        (192000, vec![0.5; 1920], 480),
     ] {
         let result = native(rate, &input, &Cancellation::default()).unwrap();
         assert_eq!(result.sample_rate_hz(), 48000);
@@ -241,7 +242,7 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
     assert_eq!(convert(ptr::null()), Err(MediaError::IncompatibleAdapter));
     // SAFETY: installed immutable descriptor has its complete current ABI layout.
     let original = unsafe { *ffi::rpcr3_descriptor() };
-    for case in 0..10 {
+    for case in 0..11 {
         let mut api = original;
         match case {
             0 => api.struct_size = 8,
@@ -252,6 +253,7 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
             5 => api.ring_destroy = None,
             6 => api.ring_producer_push = None,
             7 => api.ring_consumer_render_sample = None,
+            10 => api.ring_output_delay = None,
             _ => {
                 RING_FAILURE.set(case - 8);
                 api.ring_create = Some(ring_create);
@@ -285,16 +287,14 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
         Err(MediaError::Cancelled)
     );
     CANCEL_DURING_RENDER.set(ptr::null());
-    for bytes in [513 * size_of::<f32>(), size_of::<f32>()] {
-        assert_eq!(
-            crate::fixture::fail_allocation(bytes, || native(
-                48000,
-                &[0.5],
-                &Cancellation::default()
-            )),
-            Err(MediaError::Io)
-        );
-    }
+    assert_eq!(
+        crate::fixture::fail_allocation(size_of::<f32>(), || native(
+            48000,
+            &[0.5],
+            &Cancellation::default()
+        )),
+        Err(MediaError::Io)
+    );
 }
 
 #[test]

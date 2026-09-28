@@ -379,12 +379,17 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
     assert_eq!(output.write(&[0.5]), 0);
     session.step(0).unwrap();
-    // SRC_LINEAR emits its initial interpolation position immediately; the next
-    // source sample cannot advance another 48-to-8 kHz output position.
+    // Accepted sub-frame input stays inside the converter until it can produce
+    // an output frame; it must not create an empty network write.
     let writes = state.lock().unwrap().writes.clone();
-    assert_eq!(writes, [1]);
+    assert!(writes.is_empty());
     assert_eq!(output.write(&[0.5]), 0);
     session.step(20).unwrap();
     let writes = state.lock().unwrap().writes.clone();
-    assert_eq!(writes, [1]);
+    assert!(writes.is_empty());
+    assert_eq!(output.write(&[0.5; 960]), 0);
+    session.step(40).unwrap();
+    let writes = state.lock().unwrap().writes.clone();
+    assert!(!writes.is_empty());
+    assert!(writes.iter().all(|count| *count > 0));
 }

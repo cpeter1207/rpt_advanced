@@ -257,25 +257,17 @@ unsafe fn native_with_descriptor(
     if rate == 0 || source.is_empty() || source.iter().any(|v| !v.is_finite() || v.abs() > 1.0) {
         return Err(MediaError::InvalidOutput);
     }
-    // Finite media has no clock drift. Provide the existing bounded zero context
-    // (512 source frames per downsampling factor), disable PLC and use zero timing,
-    // then retain exactly ceil(source_frames * 48000 / source_rate) real output samples.
-    // Padding is converter context, never an extra playable tail or a second resampler.
-    let padding = u64::from(rate).div_ceil(48000) * 512;
-    let count = (source.len() as u64)
-        .checked_add(padding)
-        .filter(|v| *v <= u64::from(u32::MAX))
-        .ok_or(MediaError::InvalidOutput)?;
+    // Finite media has no clock drift or PLC. Preload the real source, then
+    // supply only the zero context required by the provider's intrinsic delay.
+    // Trim that prefix and retain exactly ceil(source_frames * 48000 / source_rate).
+    let count = source.len() as u64;
+    if count > u64::from(u32::MAX) {
+        return Err(MediaError::InvalidOutput);
+    }
     let output_count = (source.len() as u64)
         .checked_mul(48000)
         .ok_or(MediaError::InvalidOutput)?
         .div_ceil(u64::from(rate));
-    let mut input = Vec::new();
-    input
-        .try_reserve_exact(count as usize)
-        .map_err(|_| MediaError::Io)?;
-    input.extend_from_slice(source);
-    input.resize(count as usize, 0.0);
     if pointer.is_null() {
         return Err(MediaError::IncompatibleAdapter);
     }
@@ -292,6 +284,7 @@ unsafe fn native_with_descriptor(
         || api.ring_destroy.is_none()
         || api.ring_producer_push.is_none()
         || api.ring_consumer_render_sample.is_none()
+        || api.ring_output_delay.is_none()
     {
         return Err(MediaError::IncompatibleAdapter);
     }
@@ -312,7 +305,7 @@ unsafe fn native_with_descriptor(
         output_rate_hz: 48000,
         reserve_samples: 0,
         target_samples: 0,
-        max_producer_samples: count,
+        max_producer_samples: count.max(512),
         max_output_samples: 1,
         plc_mode: 0,
     };
@@ -324,9 +317,23 @@ unsafe fn native_with_descriptor(
         api,
         NonNull::new(handle).ok_or(MediaError::IncompatibleAdapter)?,
     );
+    let mut delay = 0;
+    // SAFETY: this local ring is live and delay is writable count storage.
+    if unsafe { api.ring_output_delay.unwrap()(ring.1.as_ptr(), &mut delay) } != 0 {
+        return Err(MediaError::InvalidOutput);
+    }
+    let mut padding = delay
+        .checked_add(1)
+        .and_then(|frames| frames.checked_mul(u64::from(rate)))
+        .ok_or(MediaError::InvalidOutput)?
+        .div_ceil(48000);
+    let render_bound = output_count
+        .checked_add(delay)
+        .and_then(|frames| frames.checked_add(512))
+        .ok_or(MediaError::InvalidOutput)?;
     let mut accepted = 0;
     if unsafe {
-        api.ring_producer_push.unwrap()(ring.1.as_ptr(), input.as_ptr(), count, &mut accepted)
+        api.ring_producer_push.unwrap()(ring.1.as_ptr(), source.as_ptr(), count, &mut accepted)
     } != 0
         || accepted != count
     {
@@ -336,10 +343,30 @@ unsafe fn native_with_descriptor(
     output
         .try_reserve_exact(output_count as usize)
         .map_err(|_| MediaError::Io)?;
-    // Allow bounded converter startup, but never retain ring concealment in a prepared file.
-    for _ in 0..output_count.saturating_add(padding * 48000 / u64::from(rate) + 512) {
+    // Context is not playable PCM. Refill it as space becomes available so
+    // finite conversion needs no second converter or padded source allocation.
+    let zeros = [0.0; 512];
+    for _ in 0..render_bound {
         if cancellation.is_cancelled() {
             return Err(MediaError::Cancelled);
+        }
+        if padding != 0 {
+            let offered = padding.min(zeros.len() as u64);
+            let mut accepted = 0;
+            // SAFETY: the fixed zero block and output count remain live for this call.
+            if unsafe {
+                api.ring_producer_push.unwrap()(
+                    ring.1.as_ptr(),
+                    zeros.as_ptr(),
+                    offered,
+                    &mut accepted,
+                )
+            } != 0
+                || accepted > offered
+            {
+                return Err(MediaError::InvalidOutput);
+            }
+            padding -= accepted;
         }
         let mut sample = 0.0;
         let mut real = false;
@@ -350,7 +377,11 @@ unsafe fn native_with_descriptor(
             return Err(MediaError::InvalidOutput);
         }
         if real {
-            output.push(sample);
+            if delay != 0 {
+                delay -= 1;
+            } else {
+                output.push(sample);
+            }
         }
         if output.len() as u64 == output_count {
             return PreparedAudio::new(48000, output);

@@ -583,16 +583,22 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
         let probe = unsafe { &*context.cast::<Probe>() };
         let mut samples = [0.25; 8];
         let mut keyed = 0;
-        assert_eq!(
-            unsafe { receive_callback(probe.receive.get(), 1, samples.as_mut_ptr(), 8) },
-            0
-        );
-        assert_eq!(
-            unsafe { transmit_callback(probe.transmit.get(), samples.as_mut_ptr(), 8, &mut keyed) },
-            0
-        );
-        // The live zero-delay local ring passes this callback's PCM immediately.
-        assert_eq!(samples, [0.25; 8]);
+        // Both owners remain callable during destruction. Feed real input
+        // through the converter's intrinsic FIR startup before checking PCM.
+        for _ in 0..64 {
+            samples.fill(0.25);
+            assert_eq!(
+                unsafe { receive_callback(probe.receive.get(), 1, samples.as_mut_ptr(), 8) },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    transmit_callback(probe.transmit.get(), samples.as_mut_ptr(), 8, &mut keyed)
+                },
+                0
+            );
+        }
+        assert!(samples.iter().all(|sample| (*sample - 0.25).abs() < 0.001));
         assert_eq!(keyed, 1);
         probe.destroyed.set(true);
         unsafe {
