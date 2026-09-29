@@ -13,6 +13,7 @@ pub mod lifecycle;
 pub mod link;
 pub mod media;
 pub mod services;
+pub(crate) mod status_post;
 pub mod worker;
 
 #[cfg(test)]

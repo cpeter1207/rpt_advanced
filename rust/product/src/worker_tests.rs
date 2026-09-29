@@ -59,15 +59,22 @@ fn audio_owners_with_maximum(maximum: usize) -> (Runtime<Audio>, AudioOwners) {
     (runtime, owners)
 }
 fn worker() -> RadioWorker {
+    worker_with_status(RadioStatus::default())
+}
+fn worker_with_status(status: RadioStatus) -> RadioWorker {
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
-    RadioWorker::prepare(
-        services.radio("usb", 8).unwrap(),
-        Instant::now(),
-        RadioStatus::default(),
-        0,
-    )
-    .unwrap_or_else(|_| panic!("prepare callbacks"))
+    RadioWorker::prepare(services.radio("usb", 8).unwrap(), Instant::now(), status, 0)
+        .unwrap_or_else(|(error, _radio)| panic!("prepare callbacks: {error:?}"))
+}
+
+#[test]
+fn transmit_callback_publishes_ptt_state_for_control_snapshot() {
+    let status = RadioStatus::default();
+    super::publish_transmit_keyed(Some(&status), true);
+    assert!(status.transmit_keyed());
+    super::publish_transmit_keyed(Some(&status), false);
+    assert!(!status.transmit_keyed());
 }
 
 #[test]

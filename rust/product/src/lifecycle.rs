@@ -547,18 +547,29 @@ impl Engine {
                     1 => false,
                     _ => stopped,
                 };
+                let retired_status_posts = if stopped {
+                    host.as_mut().map(Host::take_status_posts)
+                } else {
+                    None
+                };
                 if stopped {
                     *host = None;
                 }
-                let _ = send.send(stopped);
+                let _ = send.send((stopped, retired_status_posts));
             }))
             .is_err()
         {
             return false;
         }
-        if receive.recv() != Ok(true) || self.executor.stop_and_drain().is_err() {
+        let Ok((true, retired_status_posts)) = receive.recv() else {
+            return false;
+        };
+        if self.executor.stop_and_drain().is_err() {
             return false;
         }
+        // The HTTP worker may finish an in-flight request; join it only after leaving the
+        // serialized lifecycle executor so network latency cannot stall control work.
+        drop(retired_status_posts);
         true
     }
 }

@@ -6,6 +6,7 @@ use crate::{
     },
     media::NativeMediaPreparer,
     services::{HostServices, PeerIo},
+    status_post::{PostConfig, StatusPostService},
     worker::{Audio, AudioOwners, RadioWorker},
 };
 use rpt_advanced_core::{
@@ -138,6 +139,7 @@ pub struct Host {
     leases: Vec<(String, Arc<Mutex<Lease>>)>,
     peers: Vec<PeerOwner>,
     operations: Vec<(String, DigitOperation)>,
+    status_post: StatusPostService,
     epoch: Instant,
 }
 
@@ -232,8 +234,10 @@ impl Host {
             leases,
             peers: Vec::new(),
             operations: Vec::new(),
+            status_post: StatusPostService::default(),
             epoch,
         };
+        host.configure_status_posts(clock.now_ms);
         host.attach_workers();
         Ok(host)
     }
@@ -293,6 +297,7 @@ impl Host {
         );
         self.prune_leases();
         result?;
+        self.configure_status_posts(clock.now_ms);
         self.attach_workers();
         let effects = self.runtime.take_effects();
         for (local, effect) in effects {
@@ -637,6 +642,25 @@ impl Host {
         }
         for (local, status) in self.runtime.status(clock.now_ms) {
             if let Some(node) = self.runtime.node(&local) {
+                let keyed = self
+                    .leases
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == &local)
+                    .is_some_and(|(_, lease)| {
+                        lease
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .status
+                            .transmit_keyed()
+                    });
+                self.status_post.observe(
+                    &local,
+                    clock.now_ms,
+                    clock.wall_seconds,
+                    keyed,
+                    node.links().manager().snapshot(),
+                );
                 self.operations.extend(
                     node.drain_digits()
                         .into_iter()
@@ -686,8 +710,24 @@ impl Host {
         self.prune_leases();
         Ok(())
     }
+    fn configure_status_posts(&mut self, now_ms: u64) {
+        let config = self
+            .runtime
+            .status(now_ms)
+            .into_iter()
+            .filter_map(|(node, _)| {
+                self.runtime.settings(&node).map(|settings| PostConfig {
+                    node,
+                    url: settings.statpost_url.clone(),
+                    interval_seconds: settings.statpost_time,
+                })
+            })
+            .collect();
+        self.status_post.configure(config);
+    }
     /// Stop all producers/readers, drain dispatcher blocks, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        self.status_post.request_stop();
         let statuses = self.runtime.status(now_ms);
         self.runtime.stop(now_ms);
         for peer in self.peers.drain(..) {
@@ -707,6 +747,10 @@ impl Host {
             }
         }
         self.runtime.stop(now_ms)
+    }
+
+    pub(crate) fn take_status_posts(&mut self) -> StatusPostService {
+        std::mem::take(&mut self.status_post)
     }
 }
 fn prune_leases(leases: &mut Vec<(String, Arc<Mutex<Lease>>)>) {

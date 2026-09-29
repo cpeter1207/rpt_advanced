@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 rpt-advanced-core = { path = "../core" }
 rtrb = "0.3.2"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+url = "2.5"
 
 [build-dependencies]
 bindgen = "0.72.1"

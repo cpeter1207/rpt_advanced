@@ -65,6 +65,7 @@ type TransmitOwner = OwnedTransmitOwner<DtmfWorker, RuntimeTransmit<Audio>>;
 pub struct RadioStatus {
     carrier: Arc<AtomicU64>,
     dtmf: Arc<AtomicBool>,
+    transmit_keyed: Arc<AtomicBool>,
     handoff: Arc<LocalHandoff>,
 }
 #[derive(Default)]
@@ -84,6 +85,9 @@ impl RadioStatus {
     pub fn snapshot(&self) -> (bool, u64) {
         let value = self.carrier.load(Ordering::Acquire);
         (value & 1 != 0, value >> 1)
+    }
+    pub(crate) fn transmit_keyed(&self) -> bool {
+        self.transmit_keyed.load(Ordering::Acquire)
     }
     fn update(&self, receiving: bool, now_ms: u64) {
         if self.carrier.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
@@ -230,6 +234,9 @@ unsafe extern "C" fn transmit_callback(
     count: u32,
     keyed: *mut u32,
 ) -> i32 {
+    // SAFETY: the host retains this callback context through synchronous destroy.
+    let status =
+        unsafe { context.cast::<TransmitContext>().as_ref() }.map(|context| &context.status);
     // SAFETY: the host supplies writable key storage for this call.
     let keyed = unsafe { keyed.as_mut() };
     // SAFETY: the host lends aligned writable PCM for this complete callback.
@@ -237,14 +244,16 @@ unsafe extern "C" fn transmit_callback(
         if let Some(keyed) = keyed {
             *keyed = 0;
         }
+        publish_transmit_keyed(status, false);
         return -1;
     };
     let Some(keyed) = keyed else {
         samples.fill(0.0);
+        publish_transmit_keyed(status, false);
         return -1;
     };
     *keyed = 0;
-    match catch_unwind(AssertUnwindSafe(|| unsafe {
+    let result = match catch_unwind(AssertUnwindSafe(|| unsafe {
         transmit(context, samples, keyed)
     })) {
         Ok(result) => result,
@@ -253,6 +262,13 @@ unsafe extern "C" fn transmit_callback(
             *keyed = 0;
             -1
         }
+    };
+    publish_transmit_keyed(status, result == 0 && *keyed != 0);
+    result
+}
+fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: bool) {
+    if let Some(status) = status {
+        status.transmit_keyed.store(keyed, Ordering::Release);
     }
 }
 unsafe fn transmit(context: *mut c_void, samples: &mut [f32], keyed: &mut u32) -> i32 {
@@ -498,6 +514,10 @@ impl RadioWorker {
     pub fn stop(mut self) -> Option<AudioOwners> {
         drop(self.radio.take());
         self.receive.active.store(false, Ordering::Release);
+        self.transmit
+            .status
+            .transmit_keyed
+            .store(false, Ordering::Release);
         // SAFETY: synchronous destroy has stopped both callbacks.
         let receive = unsafe { &mut *self.receive.owner.get() }.take();
         let transmit = unsafe { &mut *self.transmit.owner.get() }.take();
@@ -508,6 +528,10 @@ impl Drop for RadioWorker {
     fn drop(&mut self) {
         // Must precede automatic field destruction, including partially activated setup.
         drop(self.radio.take());
+        self.transmit
+            .status
+            .transmit_keyed
+            .store(false, Ordering::Release);
     }
 }
 #[cfg(test)]
