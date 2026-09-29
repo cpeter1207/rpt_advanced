@@ -71,6 +71,57 @@ fn node_directory_access_and_lookup_settings_keep_valid_overrides() {
 }
 
 #[test]
+fn statpost_settings_inherit_global_values_allow_node_overrides_and_clear_url() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatpost_url=https://stats.example/status\nstatpost_time=90\n[1000]\n[2000]\nstatpost_url=http://local.test/report\nstatpost_time=120\n[3000]\nstatpost_url=\n",
+    )
+    .unwrap();
+
+    let inherited = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    assert_eq!(inherited.statpost_url, "https://stats.example/status");
+    assert_eq!(inherited.statpost_time, 90);
+
+    let overridden = ResolvedNodeSettings::resolve(&document, &NodeId::new("2000").unwrap())
+        .unwrap()
+        .value;
+    assert_eq!(overridden.statpost_url, "http://local.test/report");
+    assert_eq!(overridden.statpost_time, 120);
+
+    let cleared = ResolvedNodeSettings::resolve(&document, &NodeId::new("3000").unwrap())
+        .unwrap()
+        .value;
+    assert!(cleared.statpost_url.is_empty());
+    assert_eq!(cleared.statpost_time, 90);
+}
+
+#[test]
+fn statpost_interval_defaults_and_rejects_out_of_range_values() {
+    for (source, expected) in [
+        ("[1000]\n", 60),
+        ("[1000]\nstatpost_time=30\n", 30),
+        ("[1000]\nstatpost_time=600\n", 600),
+    ] {
+        let value = ResolvedNodeSettings::resolve(
+            &ConfigDocument::parse(source).unwrap(),
+            &NodeId::new("1000").unwrap(),
+        )
+        .unwrap()
+        .value;
+        assert_eq!(value.statpost_time, expected);
+    }
+
+    let document =
+        ConfigDocument::parse("[general]\nstatpost_time=90\n[1000]\nstatpost_time=29\n").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
+    assert_eq!(resolved.value.statpost_time, 90);
+    assert!(resolved.warnings.iter().any(|warning| {
+        warning.key == "statpost_time" && warning.message == "invalid option value"
+    }));
+}
+
+#[test]
 fn invalid_optional_node_values_fall_back_and_courtesy_level_inherits() {
     let document = ConfigDocument::parse(&format!(
         "[1000]\ncallsign={}\nlink_allow_nodes=?\nlink_deny_nodes=?\nlink_lookup_method=?\n",

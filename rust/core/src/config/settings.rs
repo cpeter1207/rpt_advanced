@@ -45,6 +45,10 @@ pub struct ResolvedNodeSettings {
     pub channel: String,
     /// Optional callsign.
     pub callsign: String,
+    /// Optional AllStarLink-compatible status reporting URL; empty disables reporting.
+    pub statpost_url: String,
+    /// Status reporting interval in seconds.
+    pub statpost_time: u64,
     /// Incoming allowlist.
     pub link_allow_nodes: String,
     /// Incoming denylist.
@@ -1061,6 +1065,12 @@ impl ResolvedNodeSettings {
             value.telemetry_duck_db = parsed;
         }
         text!(channel, "radio_channel");
+        text!(statpost_url, "statpost_url");
+        if let Some(parsed) = lookup_valid(document, "statpost_time", &scopes, |raw| {
+            parse::unsigned(raw, 30, 600)
+        }) {
+            value.statpost_time = parsed;
+        }
         if let Some(raw) = lookup_valid(document, "callsign", &scopes, |raw| {
             (raw.len() <= 63).then(|| raw.to_owned())
         }) {
@@ -1122,6 +1132,8 @@ impl ResolvedNodeSettings {
             courtesy_delay_ms: 250,
             channel: node.as_str().to_owned(),
             callsign: String::new(),
+            statpost_url: String::new(),
+            statpost_time: 60,
             link_allow_nodes: String::new(),
             link_deny_nodes: String::new(),
             link_static_directory_file: String::new(),

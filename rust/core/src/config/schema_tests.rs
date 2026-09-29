@@ -24,6 +24,49 @@ fn unknown_input_warns_once_with_source_context() {
 }
 
 #[test]
+fn statpost_options_are_recognized_in_global_and_node_sections() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatpost_url=https://stats.example/report?site=main\nstatpost_time=60\n[1000]\nstatpost_url=http://127.0.0.1:8080/status\nstatpost_time=300\n",
+    )
+    .unwrap();
+
+    let result = Schema::validate(&document).unwrap();
+    assert!(
+        result.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn invalid_statpost_values_warn_and_use_inherited_fallback() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatpost_url=https://stats.example/report\nstatpost_time=90\n[1000]\nstatpost_url=ftp://stats.example/report\nstatpost_time=601\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&document).unwrap().warnings;
+
+    assert_eq!(warnings.len(), 2);
+    assert_eq!(warnings[0].key, "statpost_url");
+    assert_eq!(warnings[0].message, "invalid option value");
+    assert_eq!(warnings[0].fallback, "https://stats.example/report");
+    assert_eq!(warnings[1].key, "statpost_time");
+    assert_eq!(warnings[1].fallback, "90");
+
+    let credentials =
+        ConfigDocument::parse("[1000]\nstatpost_url=https://user:password@stats.example/report\n")
+            .unwrap();
+    let warning = Schema::validate(&credentials)
+        .unwrap()
+        .warnings
+        .into_iter()
+        .find(|warning| warning.key == "statpost_url")
+        .unwrap();
+    assert_eq!(warning.value, "<redacted URL>");
+    assert!(!format!("{warning:?}").contains("password"));
+}
+
+#[test]
 fn repeated_default_sections_are_merged_without_duplicate_warnings() {
     let source = "[general]\nfull_duplex=maybe\n[general]\ntransmit_hang_ms=invalid\n";
     let result = Schema::validate(&ConfigDocument::parse(source).unwrap()).unwrap();

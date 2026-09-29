@@ -7,3 +7,4 @@ version.workspace = true
 
 [dependencies]
 rtrb = "0.3.2"
+url = "2.5"

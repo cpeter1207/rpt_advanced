@@ -160,6 +160,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_static_directory_file"
                 | "link_directory_file"
                 | "link_lookup_method"
+                | "statpost_url"
+                | "statpost_time"
                 | "link_command_disconnect"
                 | "link_command_monitor"
                 | "link_command_transceive"
@@ -248,6 +250,18 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
     match key {
+        "statpost_url" => {
+            if value.is_empty() {
+                return true;
+            }
+            url::Url::parse(value).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+            })
+        }
+        "statpost_time" => parse::unsigned(value, 30, 600).is_some(),
         "node_enabled"
         | "full_duplex"
         | "dtmf_muting"
@@ -320,6 +334,8 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "courtesy_delay_ms") => "250",
         (ScopeKind::General | ScopeKind::Node, "squelch_delay_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "link_lookup_method") => "both",
+        (ScopeKind::General | ScopeKind::Node, "statpost_time") => "60",
+        (ScopeKind::General | ScopeKind::Node, "statpost_url") => "",
         (_, "interval_ms")
             if matches!(
                 kind,

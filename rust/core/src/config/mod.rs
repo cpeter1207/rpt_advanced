@@ -57,7 +57,12 @@ impl ConfigWarning {
             line,
             section: section.to_owned(),
             key: key.to_owned(),
-            value: value.to_owned(),
+            // URLs may carry private query parameters; never echo them in diagnostics.
+            value: if key == "statpost_url" {
+                "<redacted URL>".to_owned()
+            } else {
+                value.to_owned()
+            },
             message: message.to_owned(),
             fallback: fallback.to_owned(),
         }
