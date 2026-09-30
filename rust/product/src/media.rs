@@ -26,7 +26,14 @@ pub type SpeechDescriptor = ffi::rptadv_speech_descriptor;
 struct Context {
     handle: NonNull<c_void>,
     destroy: unsafe extern "C" fn(*mut c_void),
-    release_audio: unsafe extern "C" fn(*mut c_void),
+    read_stream: unsafe extern "C" fn(
+        *mut c_void,
+        *const ffi::rptadv_media_cancellation,
+        *mut f32,
+        usize,
+        *mut usize,
+    ) -> i32,
+    close_stream: unsafe extern "C" fn(*mut c_void),
 }
 // SAFETY: each validated ABI permits concurrent independent requests. Context destruction
 // requires exclusive ownership and cannot race a method borrowing this owner.
@@ -55,10 +62,11 @@ impl NativeMediaPreparer {
         }
         // SAFETY: readable prefixes are inspected before either complete table.
         if unsafe { ptr::addr_of!((*file).struct_size).read() } < size_of::<FileDescriptor>() as u32
-            || unsafe { ptr::addr_of!((*file).abi_version).read() } != 1
+            || unsafe { ptr::addr_of!((*file).abi_version).read() } != ffi::RPTADV_MEDIA_ABI_VERSION
             || unsafe { ptr::addr_of!((*speech).struct_size).read() }
                 < size_of::<SpeechDescriptor>() as u32
-            || unsafe { ptr::addr_of!((*speech).abi_version).read() } != 1
+            || unsafe { ptr::addr_of!((*speech).abi_version).read() }
+                != ffi::RPTADV_MEDIA_ABI_VERSION
         {
             return Err(MediaError::IncompatibleAdapter);
         }
@@ -68,13 +76,15 @@ impl NativeMediaPreparer {
         if file_api.capability.map(|v| v as u8) != *b"rptadv.file\0\0\0\0\0"
             || file_api.create.is_none()
             || file_api.destroy.is_none()
-            || file_api.prepare_file.is_none()
-            || file_api.release_audio.is_none()
+            || file_api.open_file.is_none()
+            || file_api.read_stream.is_none()
+            || file_api.close_stream.is_none()
             || speech_api.capability.map(|v| v as u8) != *b"rptadv.speech\0\0\0"
             || speech_api.create.is_none()
             || speech_api.destroy.is_none()
-            || speech_api.prepare_speech.is_none()
-            || speech_api.release_audio.is_none()
+            || speech_api.open_speech.is_none()
+            || speech_api.read_stream.is_none()
+            || speech_api.close_stream.is_none()
         {
             return Err(MediaError::IncompatibleAdapter);
         }
@@ -83,7 +93,7 @@ impl NativeMediaPreparer {
         let directory = path_string(temporary_directory)?;
         let mut config = ffi::rptadv_media_config {
             struct_size: size_of::<ffi::rptadv_media_config>() as u32,
-            abi_version: 1,
+            abi_version: ffi::RPTADV_MEDIA_ABI_VERSION,
             executable: ffmpeg.as_ptr(),
             temporary_directory: directory.as_ptr(),
             timeout_ms,
@@ -96,7 +106,8 @@ impl NativeMediaPreparer {
         let file = Context {
             handle: NonNull::new(handle).ok_or(MediaError::IncompatibleAdapter)?,
             destroy: file_api.destroy.unwrap(),
-            release_audio: file_api.release_audio.unwrap(),
+            read_stream: file_api.read_stream.unwrap(),
+            close_stream: file_api.close_stream.unwrap(),
         };
         config.executable = piper.as_ptr();
         handle = ptr::null_mut();
@@ -105,7 +116,8 @@ impl NativeMediaPreparer {
         let speech = Context {
             handle: NonNull::new(handle).ok_or(MediaError::IncompatibleAdapter)?,
             destroy: speech_api.destroy.unwrap(),
-            release_audio: speech_api.release_audio.unwrap(),
+            read_stream: speech_api.read_stream.unwrap(),
+            close_stream: speech_api.close_stream.unwrap(),
         };
         Ok(Self {
             file_api,
@@ -116,48 +128,57 @@ impl NativeMediaPreparer {
     }
 }
 impl Context {
-    fn receive(
+    fn collect_stream(
         &self,
         cancellation: &Cancellation,
-        call: impl FnOnce(*mut ffi::rptadv_media_audio) -> i32,
+        open: impl FnOnce(*mut ffi::rptadv_media_stream) -> i32,
     ) -> Result<PreparedAudio, MediaError> {
-        let mut output = ffi::rptadv_media_audio {
+        let mut stream = ffi::rptadv_media_stream {
             handle: ptr::null_mut(),
-            samples: ptr::null(),
-            sample_count: 0,
             sample_rate_hz: 0,
         };
-        let code = call(&mut output);
-        struct Release<'a>(&'a Context, *mut c_void);
-        impl Drop for Release<'_> {
+        let code = open(&mut stream);
+        struct Close<'a>(&'a Context, *mut c_void);
+        impl Drop for Close<'_> {
             fn drop(&mut self) {
                 if !self.1.is_null() {
-                    // SAFETY: this guard exclusively owns the returned handle, even on malformed output.
-                    unsafe {
-                        (self.0.release_audio)(self.1);
-                    }
+                    // SAFETY: this guard owns the opened stream and closes it exactly once.
+                    unsafe { (self.0.close_stream)(self.1) };
                 }
             }
         }
-        let _release = Release(self, output.handle);
+        let close = Close(self, stream.handle);
         status(code)?;
-        if !valid_output(&output) {
+        if stream.handle.is_null() || stream.sample_rate_hz == 0 {
             return Err(MediaError::InvalidOutput);
         }
-        // SAFETY: successful validated descriptor output promises this immutable owned view.
-        native(
-            output.sample_rate_hz,
-            unsafe { std::slice::from_raw_parts(output.samples, output.sample_count) },
-            cancellation,
-        )
+        let control = raw_cancellation(cancellation);
+        let mut samples = Vec::new();
+        let mut chunk = [0.0_f32; 2048];
+        loop {
+            let mut count = 0;
+            // SAFETY: stream remains open; chunk and cancellation token remain live for the call.
+            status(unsafe {
+                (self.read_stream)(
+                    stream.handle,
+                    &control,
+                    chunk.as_mut_ptr(),
+                    chunk.len(),
+                    &mut count,
+                )
+            })?;
+            if count > chunk.len() {
+                return Err(MediaError::InvalidOutput);
+            }
+            if count == 0 {
+                break;
+            }
+            samples.try_reserve(count).map_err(|_| MediaError::Io)?;
+            samples.extend_from_slice(&chunk[..count]);
+        }
+        drop(close);
+        native(stream.sample_rate_hz, &samples, cancellation)
     }
-}
-
-fn valid_output(output: &ffi::rptadv_media_audio) -> bool {
-    !output.handle.is_null()
-        && !output.samples.is_null()
-        && output.sample_count != 0
-        && output.sample_count <= isize::MAX as usize / size_of::<f32>()
 }
 impl Drop for Context {
     fn drop(&mut self) {
@@ -171,10 +192,10 @@ impl rpt_advanced_core::runtime::NativeFilePreparer for NativeMediaPreparer {
     fn file(&self, request: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
         let path = path_string(request.path)?;
         let cancellation = raw_cancellation(request.cancellation);
-        self.file.receive(request.cancellation, |output| {
-            // SAFETY: all arguments are borrowed through this synchronous call.
+        self.file.collect_stream(request.cancellation, |output| {
+            // SAFETY: all arguments are borrowed through this synchronous open call.
             unsafe {
-                self.file_api.prepare_file.unwrap()(
+                self.file_api.open_file.unwrap()(
                     self.file.handle.as_ptr(),
                     path.as_ptr(),
                     &cancellation,
@@ -195,10 +216,10 @@ impl rpt_advanced_core::runtime::NativeSpeechPreparer for NativeMediaPreparer {
             level_db: request.level_db,
         };
         let cancellation = raw_cancellation(request.cancellation);
-        self.speech.receive(request.cancellation, |output| {
+        self.speech.collect_stream(request.cancellation, |output| {
             // SAFETY: strings, callback context and request outlive the synchronous operation.
             unsafe {
-                self.speech_api.prepare_speech.unwrap()(
+                self.speech_api.open_speech.unwrap()(
                     self.speech.handle.as_ptr(),
                     &raw,
                     &cancellation,

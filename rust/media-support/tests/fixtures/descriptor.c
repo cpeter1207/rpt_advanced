@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
     assert(table->struct_size == sizeof(*table));
     assert(table->abi_version == RPTADV_MEDIA_ABI_VERSION);
     assert(!memcmp(table->capability, CAPABILITY, 16));
-    assert(table->create && table->destroy && table->release_audio);
+    assert(table->create && table->destroy && table->read_stream && table->close_stream);
     struct rptadv_media_config config = {
         sizeof(config), RPTADV_MEDIA_ABI_VERSION, "unused", "/tmp", 30000, NULL, NULL};
     void *context = (void *)1;
@@ -44,20 +44,20 @@ int main(int argc, char **argv) {
     config.abi_version = RPTADV_MEDIA_ABI_VERSION;
     assert(table->create(&config, &context) == RPTADV_MEDIA_OK && context);
     struct rptadv_media_cancellation cancellation = {NULL, cancelled};
-    struct rptadv_media_audio audio = {(void *)1, (const float *)1, 1, 1};
+    struct rptadv_media_stream stream = {(void *)1, 1};
 #ifdef FILE_ADAPTER
-    assert(table->prepare_file);
-    assert(table->prepare_file(context, "/missing", &cancellation, &audio) ==
+    assert(table->open_file);
+    assert(table->open_file(context, "/missing", &cancellation, &stream) ==
            RPTADV_MEDIA_CANCELLED);
-    assert(!audio.handle && !audio.samples && !audio.sample_count && !audio.sample_rate_hz);
+    assert(!stream.handle && !stream.sample_rate_hz);
 #else
-    assert(table->prepare_speech);
+    assert(table->open_speech);
     struct rptadv_media_speech_request speech = {"hello", "model", 0, 0};
-    assert(table->prepare_speech(context, &speech, &cancellation, &audio) ==
+    assert(table->open_speech(context, &speech, &cancellation, &stream) ==
            RPTADV_MEDIA_INVALID_REQUEST);
-    assert(!audio.handle && !audio.samples && !audio.sample_count && !audio.sample_rate_hz);
+    assert(!stream.handle && !stream.sample_rate_hz);
 #endif
-    table->release_audio(NULL);
+    table->close_stream(NULL);
     table->destroy(context);
     table->destroy(NULL);
     /* Never dlclose a selected adapter; unloading belongs to process teardown. */

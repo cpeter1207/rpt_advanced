@@ -1,4 +1,4 @@
-# Independent file and speech providers (ABI 1)
+# Independent file and speech providers (ABI 2)
 
 This private Rust source set builds two independently replaceable shared objects:
 
@@ -7,9 +7,10 @@ This private Rust source set builds two independently replaceable shared objects
 | Local file decode | `librptadv_file_adapter.so.1` | `rptadv_file_adapter_descriptor`, `rptadv_file_adapter.h` |
 | Speech synthesis | `librptadv_speech_adapter.so.1` | `rptadv_speech_adapter_descriptor`, `rptadv_speech_adapter.h` |
 
-Each table exposes only its own preparation operation. Common ownership layouts
-are in `include/rptadv_media_types.h`; there is no common runtime DSO or provider
-dependency on the controller core. The `rlib` targets support tests only.
+Each table exposes only its own open operation plus shared bounded read and close
+operations. Common ownership layouts are in `include/rptadv_media_types.h`; there
+is no common runtime DSO or provider dependency on the controller core. The `rlib`
+targets support tests only.
 The initial-alpha split replaces the combined media descriptor rather than
 retaining compatibility slots (ADR 0040).
 

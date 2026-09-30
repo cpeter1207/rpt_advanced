@@ -2,7 +2,7 @@
 use std::ffi::{c_char, c_void};
 
 /// Initial media capability ABI; incompatible tables are rejected before creation.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 /// Fixed-width capability identity, including NUL padding.
 #[cfg(file_adapter)]
 pub const CAPABILITY: [u8; 16] = *b"rptadv.file\0\0\0\0\0";
@@ -84,27 +84,25 @@ pub struct RawSpeechRequest {
     pub level_db: i32,
 }
 
-/// Owned result and immutable PCM view; released only by its originating adapter.
+/// Open stream handle and immutable source-rate metadata.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RawAudio {
-    /// Opaque ownership handle passed to release_audio exactly once.
+pub struct RawStream {
+    /// Opaque stream handle passed to close_stream exactly once.
     pub handle: *mut c_void,
-    /// Mono normalized F32 samples valid until release_audio.
-    pub samples: *const f32,
-    /// Nonzero number of mono samples.
-    pub sample_count: usize,
     /// Original decoded source rate; no native-rate conversion occurs here.
     pub sample_rate_hz: u32,
 }
 
-/// Versioned preparation functions. All operations are control-plane-only.
+/// Versioned stream functions. Open/read/close are off the audio callback.
 ///
 /// Status values: 0 success; -1 invalid request; -2 unavailable local resource;
 /// -3 I/O/internal failure; -4 failed subprocess; -5 timeout; -6 cancelled;
-/// -7 invalid output. A context supports concurrent independent preparations.
-/// Destroy requires all calls to have returned. Cancellation callbacks and
-/// host reaper callbacks must remain loaded and valid until their calls end.
+/// -7 invalid output. A context supports concurrent independent streams. Open
+/// creates a stream, read returns samples written (zero means EOF), and close
+/// releases that stream. Read may wait for media and is only for its worker.
+/// Destroy requires all streams and calls to have ended. Cancellation and host
+/// reaper callbacks must remain loaded and valid until their calls end.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Descriptor {
@@ -118,28 +116,38 @@ pub struct Descriptor {
     pub create: Option<unsafe extern "C" fn(*const RawConfig, *mut *mut c_void) -> i32>,
     /// Destroy a context after its users stop; null is harmless.
     pub destroy: Option<unsafe extern "C" fn(*mut c_void)>,
-    /// Decode one opened local file. Failure leaves an empty result.
+    /// Open one local file stream and report its decoded source rate.
     #[cfg(file_adapter)]
-    pub prepare_file: Option<
+    pub open_file: Option<
         unsafe extern "C" fn(
             *const c_void,
             *const c_char,
             *const RawCancellation,
-            *mut RawAudio,
+            *mut RawStream,
         ) -> i32,
     >,
-    /// Synthesize then decode one request. Failure leaves an empty result.
+    /// Open one synthesized speech stream and report its source rate.
     #[cfg(speech_adapter)]
-    pub prepare_speech: Option<
+    pub open_speech: Option<
         unsafe extern "C" fn(
             *const c_void,
             *const RawSpeechRequest,
             *const RawCancellation,
-            *mut RawAudio,
+            *mut RawStream,
         ) -> i32,
     >,
-    /// Free prepared PCM after its consumers stop; null is harmless.
-    pub release_audio: Option<unsafe extern "C" fn(*mut c_void)>,
+    /// Read a bounded chunk; return sample count or zero at EOF.
+    pub read_stream: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const RawCancellation,
+            *mut f32,
+            usize,
+            *mut usize,
+        ) -> i32,
+    >,
+    /// Release a stream exactly once; null is harmless.
+    pub close_stream: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
 impl Descriptor {
@@ -163,7 +171,8 @@ impl Descriptor {
             || self.create.is_none()
             || self.destroy.is_none()
             || self.operation_missing()
-            || self.release_audio.is_none()
+            || self.read_stream.is_none()
+            || self.close_stream.is_none()
         {
             return Err(crate::MediaError::IncompatibleAdapter);
         }
@@ -172,11 +181,11 @@ impl Descriptor {
     fn operation_missing(&self) -> bool {
         #[cfg(file_adapter)]
         {
-            self.prepare_file.is_none()
+            self.open_file.is_none()
         }
         #[cfg(speech_adapter)]
         {
-            self.prepare_speech.is_none()
+            self.open_speech.is_none()
         }
     }
 }

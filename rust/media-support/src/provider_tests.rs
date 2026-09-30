@@ -40,7 +40,7 @@ fn truncated_config_is_rejected_before_full_config_access() {
 }
 
 #[test]
-fn abi_rejects_invalid_creation_and_preparation_arguments() {
+fn abi_rejects_invalid_creation_and_stream_arguments() {
     let mut context = 1_usize as *mut c_void;
     assert_eq!(unsafe { create(std::ptr::null(), &mut context) }, -1);
     assert!(context.is_null());
@@ -70,10 +70,10 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
             context: std::ptr::null(),
             is_cancelled: not_cancelled,
         };
-        let mut audio = empty_audio();
+        let mut audio = empty_stream();
         assert_eq!(
             unsafe {
-                prepare_file(
+                open_file(
                     std::ptr::null(),
                     c"/missing".as_ptr(),
                     &cancellation,
@@ -83,16 +83,16 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
             -1
         );
         assert_eq!(
-            unsafe { prepare_file(context, c"/missing".as_ptr(), std::ptr::null(), &mut audio,) },
+            unsafe { open_file(context, c"/missing".as_ptr(), std::ptr::null(), &mut audio,) },
             -1
         );
         assert_eq!(
-            unsafe { prepare_file(context, std::ptr::null(), &cancellation, &mut audio) },
+            unsafe { open_file(context, std::ptr::null(), &cancellation, &mut audio) },
             -1
         );
         assert_eq!(
             unsafe {
-                prepare_file(
+                open_file(
                     context,
                     c"/missing".as_ptr(),
                     &cancellation,
@@ -103,7 +103,7 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
         );
     }
     unsafe {
-        release_audio(std::ptr::null_mut());
+        close_stream(std::ptr::null_mut());
         destroy(context);
         destroy(std::ptr::null_mut());
     }
@@ -111,7 +111,7 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
 
 #[test]
 #[cfg(speech_adapter)]
-fn abi_rejects_invalid_speech_requests() {
+fn abi_rejects_invalid_speech_streams() {
     let mut context = std::ptr::null_mut();
     let mut config = raw_config();
     config.executable = c"/definitely/missing/piper".as_ptr();
@@ -120,7 +120,7 @@ fn abi_rejects_invalid_speech_requests() {
         context: std::ptr::null(),
         is_cancelled: not_cancelled,
     };
-    let mut audio = empty_audio();
+    let mut audio = empty_stream();
     let valid = RawSpeechRequest {
         text: c"text".as_ptr(),
         model: c"model".as_ptr(),
@@ -128,15 +128,15 @@ fn abi_rejects_invalid_speech_requests() {
         level_db: 0,
     };
     assert_eq!(
-        unsafe { prepare_speech(std::ptr::null(), &valid, &cancellation, &mut audio,) },
+        unsafe { open_speech(std::ptr::null(), &valid, &cancellation, &mut audio,) },
         -1
     );
     assert_eq!(
-        unsafe { prepare_speech(context, &valid, std::ptr::null(), &mut audio) },
+        unsafe { open_speech(context, &valid, std::ptr::null(), &mut audio) },
         -1
     );
     assert_eq!(
-        unsafe { prepare_speech(context, std::ptr::null(), &cancellation, &mut audio) },
+        unsafe { open_speech(context, std::ptr::null(), &cancellation, &mut audio) },
         -1
     );
     let invalid_utf8 = std::ffi::CString::new([0xff]).unwrap();
@@ -147,7 +147,7 @@ fn abi_rejects_invalid_speech_requests() {
         level_db: 0,
     };
     assert_eq!(
-        unsafe { prepare_speech(context, &invalid, &cancellation, &mut audio) },
+        unsafe { open_speech(context, &invalid, &cancellation, &mut audio) },
         -1
     );
     let invalid = RawSpeechRequest {
@@ -157,11 +157,11 @@ fn abi_rejects_invalid_speech_requests() {
         level_db: 0,
     };
     assert_eq!(
-        unsafe { prepare_speech(context, &invalid, &cancellation, &mut audio) },
+        unsafe { open_speech(context, &invalid, &cancellation, &mut audio) },
         -1
     );
     assert_eq!(
-        unsafe { prepare_speech(context, &valid, &cancellation, &mut audio) },
+        unsafe { open_speech(context, &valid, &cancellation, &mut audio) },
         -2
     );
     unsafe { destroy(context) };
@@ -188,7 +188,7 @@ fn boundary_maps_internal_output_and_panic_failures() {
 }
 
 #[test]
-fn abi_prepares_owned_source_rate_results() {
+fn abi_opens_and_streams_source_rate_media() {
     use std::os::unix::ffi::OsStrExt;
 
     let directory =
@@ -239,10 +239,10 @@ fn abi_prepares_owned_source_rate_results() {
     };
     let mut context = std::ptr::null_mut();
     assert_eq!(unsafe { create(&config, &mut context) }, 0);
-    let mut audio = empty_audio();
+    let mut stream = empty_stream();
     #[cfg(file_adapter)]
     assert_eq!(
-        unsafe { prepare_file(context, source_path.as_ptr(), &cancellation, &mut audio) },
+        unsafe { open_file(context, source_path.as_ptr(), &cancellation, &mut stream) },
         0
     );
     #[cfg(speech_adapter)]
@@ -254,12 +254,39 @@ fn abi_prepares_owned_source_rate_results() {
             level_db: 0,
         };
         assert_eq!(
-            unsafe { prepare_speech(context, &request, &cancellation, &mut audio) },
+            unsafe { open_speech(context, &request, &cancellation, &mut stream) },
             0
         );
     }
+    assert_eq!(stream.sample_rate_hz, 22050);
+    let mut samples = Vec::new();
+    let mut chunk = [0.0; 8];
+    loop {
+        let mut count = usize::MAX;
+        assert_eq!(
+            unsafe {
+                read_stream(
+                    stream.handle,
+                    &cancellation,
+                    chunk.as_mut_ptr(),
+                    chunk.len(),
+                    &mut count,
+                )
+            },
+            0
+        );
+        assert!(count <= chunk.len());
+        if count == 0 {
+            break;
+        }
+        samples.extend_from_slice(&chunk[..count]);
+    }
+    #[cfg(file_adapter)]
+    assert_eq!(samples.len(), 2);
+    #[cfg(speech_adapter)]
+    assert_eq!(samples.len(), 2205);
     unsafe {
-        release_audio(audio.handle);
+        close_stream(stream.handle);
         destroy(context);
     }
     std::fs::remove_file(source).unwrap();
@@ -269,7 +296,7 @@ fn abi_prepares_owned_source_rate_results() {
 }
 
 #[test]
-fn cancellation_after_preparation_discards_the_owned_result() {
+fn cancellation_after_stream_open_discards_the_owned_handle() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     extern "C" fn cancel_on_second_call(context: *const c_void) -> u32 {
@@ -291,14 +318,12 @@ fn cancellation_after_preparation_discards_the_owned_result() {
         context: std::ptr::from_ref(&calls).cast(),
         is_cancelled: cancel_on_second_call,
     };
-    let mut output = RawAudio {
+    let mut output = RawStream {
         handle: 1_usize as *mut c_void,
-        samples: 1_usize as *const f32,
-        sample_count: 1,
         sample_rate_hz: 1,
     };
     let (owner, cancellation) = unsafe {
-        prepare_arguments(
+        open_arguments(
             std::ptr::from_ref(&preparation).cast(),
             &cancellation,
             &mut output,
@@ -316,7 +341,6 @@ fn cancellation_after_preparation_discards_the_owned_result() {
     };
     assert_eq!(result, Err(MediaError::Cancelled));
     assert!(output.handle.is_null());
-    assert!(output.samples.is_null());
 
     let cancellation = RawCancellation {
         context: std::ptr::null(),
@@ -331,5 +355,5 @@ fn cancellation_after_preparation_discards_the_owned_result() {
     }
     .unwrap();
     assert!(!output.handle.is_null());
-    unsafe { release_audio(output.handle) };
+    unsafe { close_stream(output.handle) };
 }

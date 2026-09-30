@@ -1,17 +1,12 @@
 use super::*;
-// Only tests link a concrete provider. Production receives its descriptor from the loader.
-#[link(name = "rptadv_file_adapter")]
-unsafe extern "C" {
-    fn rptadv_file_adapter_descriptor() -> *const FileDescriptor;
-}
-#[link(name = "rptadv_speech_adapter")]
-unsafe extern "C" {
-    fn rptadv_speech_adapter_descriptor() -> *const SpeechDescriptor;
-}
 use rpt_advanced_core::{
     media::Cancellation,
     runtime::{NativeFilePreparer as _, NativeSpeechPreparer as _},
 };
+use rptadv_file_adapter::abi as file_abi;
+use rptadv_file_adapter::rptadv_file_adapter_descriptor;
+use rptadv_speech_adapter::abi as speech_abi;
+use rptadv_speech_adapter::rptadv_speech_adapter_descriptor;
 use std::{
     fs,
     path::Path,
@@ -28,8 +23,8 @@ impl NativeMediaPreparer {
         // SAFETY: the linked descriptor has a process-lifetime readable ABI prefix.
         unsafe {
             Self::from_descriptors(
-                rptadv_file_adapter_descriptor(),
-                rptadv_speech_adapter_descriptor(),
+                rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter_descriptor().cast(),
                 ffmpeg,
                 piper,
                 temporary_directory,
@@ -82,10 +77,10 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
     let path = Path::new("unused");
     let file = unsafe { rptadv_file_adapter_descriptor().read() };
     let speech = unsafe { rptadv_speech_adapter_descriptor().read() };
-    let open = |file, speech| unsafe {
+    let open = |file: *const file_abi::Descriptor, speech: *const speech_abi::Descriptor| unsafe {
         NativeMediaPreparer::from_descriptors(
-            file,
-            speech,
+            file.cast(),
+            speech.cast(),
             path,
             path,
             path,
@@ -93,40 +88,42 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
             (ast_replace_sigchld, ast_unreplace_sigchld),
         )
     };
-    let prefix = [8_u32, 1];
+    let prefix = [8_u32, ffi::RPTADV_MEDIA_ABI_VERSION];
     for (f, s) in [
-        (ptr::null(), &speech as *const _),
-        (&file as *const _, ptr::null()),
-        (prefix.as_ptr().cast(), &speech),
-        (&file, prefix.as_ptr().cast()),
+        (ptr::null(), ptr::from_ref(&speech)),
+        (ptr::from_ref(&file), ptr::null()),
+        (prefix.as_ptr().cast(), ptr::from_ref(&speech)),
+        (ptr::from_ref(&file), prefix.as_ptr().cast()),
     ] {
         assert!(matches!(open(f, s), Err(MediaError::IncompatibleAdapter)));
     }
-    let mut invalid = [file; 7];
+    let mut invalid = [file; 8];
     invalid[0].abi_version = 99;
     invalid[1].capability[0] = 0;
     invalid[2].create = None;
     invalid[3].destroy = None;
-    invalid[4].prepare_file = None;
-    invalid[5].release_audio = None;
-    invalid[6].struct_size = 8;
+    invalid[4].open_file = None;
+    invalid[5].read_stream = None;
+    invalid[6].close_stream = None;
+    invalid[7].struct_size = 8;
     for table in invalid {
         assert!(matches!(
-            open(&table, &speech),
+            open(ptr::from_ref(&table), ptr::from_ref(&speech)),
             Err(MediaError::IncompatibleAdapter)
         ));
     }
-    let mut invalid = [speech; 7];
+    let mut invalid = [speech; 8];
     invalid[0].abi_version = 99;
     invalid[1].capability[0] = 0;
     invalid[2].create = None;
     invalid[3].destroy = None;
-    invalid[4].prepare_speech = None;
-    invalid[5].release_audio = None;
-    invalid[6].struct_size = 8;
+    invalid[4].open_speech = None;
+    invalid[5].read_stream = None;
+    invalid[6].close_stream = None;
+    invalid[7].struct_size = 8;
     for table in invalid {
         assert!(matches!(
-            open(&file, &table),
+            open(ptr::from_ref(&file), ptr::from_ref(&table)),
             Err(MediaError::IncompatibleAdapter)
         ));
     }
@@ -141,22 +138,28 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
             Err(MediaError::InvalidRequest)
         ));
     }
-    unsafe extern "C" fn empty_context(
-        _: *const ffi::rptadv_media_config,
+    unsafe extern "C" fn empty_file_context(
+        _: *const file_abi::RawConfig,
+        _: *mut *mut c_void,
+    ) -> i32 {
+        0
+    }
+    unsafe extern "C" fn empty_speech_context(
+        _: *const speech_abi::RawConfig,
         _: *mut *mut c_void,
     ) -> i32 {
         0
     }
     let mut f = file;
-    f.create = Some(empty_context);
+    f.create = Some(empty_file_context);
     assert!(matches!(
-        open(&f, &speech),
+        open(ptr::from_ref(&f), ptr::from_ref(&speech)),
         Err(MediaError::IncompatibleAdapter)
     ));
     let mut s = speech;
-    s.create = Some(empty_context);
+    s.create = Some(empty_speech_context);
     assert!(matches!(
-        open(&file, &s),
+        open(ptr::from_ref(&file), ptr::from_ref(&s)),
         Err(MediaError::IncompatibleAdapter)
     ));
 }
@@ -165,7 +168,7 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
 fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
     static DESTROYED: AtomicUsize = AtomicUsize::new(0);
     unsafe extern "C" fn create(
-        config: *const ffi::rptadv_media_config,
+        config: *const file_abi::RawConfig,
         output: *mut *mut c_void,
     ) -> i32 {
         assert_eq!(
@@ -181,10 +184,7 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
         assert_eq!(context as usize, 1);
         DESTROYED.fetch_add(1, Ordering::Relaxed);
     }
-    unsafe extern "C" fn reject(
-        config: *const ffi::rptadv_media_config,
-        _: *mut *mut c_void,
-    ) -> i32 {
+    unsafe extern "C" fn reject(config: *const speech_abi::RawConfig, _: *mut *mut c_void) -> i32 {
         assert_eq!(
             unsafe { CStr::from_ptr((*config).executable) },
             c"speech-only"
@@ -199,8 +199,8 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
     assert!(matches!(
         unsafe {
             NativeMediaPreparer::from_descriptors(
-                &file,
-                &speech,
+                ptr::from_ref(&file).cast(),
+                ptr::from_ref(&speech).cast(),
                 Path::new("file-only"),
                 Path::new("speech-only"),
                 Path::new("unused"),
@@ -326,13 +326,34 @@ fn invalid_file_and_speech_strings_fail_before_provider_dispatch() {
 #[test]
 fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     static RELEASES: AtomicUsize = AtomicUsize::new(0);
-    unsafe extern "C" fn release(handle: *mut c_void) {
+    unsafe extern "C" fn close(handle: *mut c_void) {
         assert_eq!(handle as usize, 1);
         RELEASES.fetch_add(1, Ordering::Relaxed);
     }
+    unsafe extern "C" fn eof(
+        _: *mut c_void,
+        _: *const ffi::rptadv_media_cancellation,
+        _: *mut f32,
+        _: usize,
+        count: *mut usize,
+    ) -> i32 {
+        unsafe { *count = 0 };
+        0
+    }
+    unsafe extern "C" fn bad_count(
+        _: *mut c_void,
+        _: *const ffi::rptadv_media_cancellation,
+        _: *mut f32,
+        capacity: usize,
+        count: *mut usize,
+    ) -> i32 {
+        unsafe { *count = capacity + 1 };
+        0
+    }
     let path = Path::new("unused");
     let mut adapter = NativeMediaPreparer::new(path, path, path, 1).unwrap();
-    adapter.file.release_audio = release;
+    adapter.file.close_stream = close;
+    adapter.file.read_stream = eof;
     let token = Cancellation::default();
     for (code, expected) in [
         (-1, MediaError::InvalidRequest),
@@ -346,9 +367,10 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         (0, MediaError::InvalidOutput),
     ] {
         assert_eq!(
-            adapter.file.receive(&token, |output| {
+            adapter.file.collect_stream(&token, |output| {
                 unsafe {
                     (*output).handle = 1_usize as *mut c_void;
+                    (*output).sample_rate_hz = 48000;
                 }
                 code
             }),
@@ -357,20 +379,40 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     }
     assert_eq!(RELEASES.load(Ordering::Relaxed), 9);
     assert_eq!(
-        adapter.file.receive(&token, |_| 0),
+        adapter.file.collect_stream(&token, |_| 0),
         Err(MediaError::InvalidOutput)
     );
     assert_eq!(
-        adapter.file.receive(&token, |output| {
+        adapter.file.collect_stream(&token, |output| {
             unsafe {
                 (*output).handle = 1_usize as *mut c_void;
-                (*output).sample_count = 1;
             }
             0
         }),
         Err(MediaError::InvalidOutput)
     );
     assert_eq!(RELEASES.load(Ordering::Relaxed), 10);
+    assert_eq!(
+        adapter.file.collect_stream(&token, |output| {
+            unsafe {
+                (*output).handle = 1_usize as *mut c_void;
+                (*output).sample_rate_hz = 48000;
+            }
+            0
+        }),
+        Err(MediaError::InvalidOutput)
+    );
+    adapter.file.read_stream = bad_count;
+    assert_eq!(
+        adapter.file.collect_stream(&token, |output| {
+            unsafe {
+                (*output).handle = 1_usize as *mut c_void;
+                (*output).sample_rate_hz = 48000;
+            }
+            0
+        }),
+        Err(MediaError::InvalidOutput)
+    );
     for (rate, source) in [
         (0, vec![0.0]),
         (48000, vec![]),
@@ -382,23 +424,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
             Err(MediaError::InvalidOutput)
         );
     }
-    for (count, sample) in [(0, 0.0), (usize::MAX, 0.0), (1, f32::NAN)] {
-        assert_eq!(
-            adapter.file.receive(&token, |output| {
-                unsafe {
-                    *output = ffi::rptadv_media_audio {
-                        handle: 1_usize as *mut c_void,
-                        samples: &sample,
-                        sample_count: count,
-                        sample_rate_hz: 48000,
-                    };
-                }
-                0
-            }),
-            Err(MediaError::InvalidOutput)
-        );
-    }
-    assert_eq!(RELEASES.load(Ordering::Relaxed), 13);
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 12);
 }
 
 #[test]

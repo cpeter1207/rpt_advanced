@@ -417,6 +417,8 @@ version = "0.1.0-alpha7"
 dependencies = [
  "bindgen",
  "rpt-advanced-core",
+ "rptadv-file-adapter",
+ "rptadv-speech-adapter",
  "rtrb",
  "ureq",
  "url",

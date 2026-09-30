@@ -10,15 +10,6 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-#[link(name = "rptadv_file_adapter")]
-unsafe extern "C" {
-    fn rptadv_file_adapter_descriptor() -> *const FileDescriptor;
-}
-#[link(name = "rptadv_speech_adapter")]
-unsafe extern "C" {
-    fn rptadv_speech_adapter_descriptor() -> *const SpeechDescriptor;
-}
-
 fn descriptor() -> &'static abi::rptadv_product_descriptor_v1 {
     unsafe { &*rptadv_product_descriptor_v1() }
 }
@@ -29,8 +20,8 @@ unsafe fn start(configuration: &str) -> i32 {
         api.start.unwrap()(
             crate::fixture::host_descriptor(),
             crate::fixture::control_descriptor(),
-            rptadv_file_adapter_descriptor(),
-            rptadv_speech_adapter_descriptor(),
+            rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+            rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
             configuration.as_ptr().cast(),
             configuration.len(),
         )
@@ -63,8 +54,8 @@ fn descriptor_rejects_bad_composition_and_preserves_reload_state() {
             descriptor().start.unwrap()(
                 ptr::null(),
                 crate::fixture::control_descriptor(),
-                rptadv_file_adapter_descriptor(),
-                rptadv_speech_adapter_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
                 configuration.as_ptr().cast(),
                 configuration.len(),
             )

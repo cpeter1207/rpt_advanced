@@ -9,20 +9,12 @@ use rpt_advanced_core::{
 };
 use std::{ffi::c_void, path::Path, ptr, time::Duration};
 
-#[link(name = "rptadv_file_adapter")]
-unsafe extern "C" {
-    fn rptadv_file_adapter_descriptor() -> *const crate::media::FileDescriptor;
-}
-#[link(name = "rptadv_speech_adapter")]
-unsafe extern "C" {
-    fn rptadv_speech_adapter_descriptor() -> *const crate::media::SpeechDescriptor;
-}
 unsafe extern "C" fn reaper() {}
 fn media() -> NativeMediaPreparer {
     unsafe {
         NativeMediaPreparer::from_descriptors(
-            rptadv_file_adapter_descriptor(),
-            rptadv_speech_adapter_descriptor(),
+            rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+            rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
             Path::new("/usr/bin/ffmpeg"),
             Path::new("/usr/bin/piper"),
             Path::new("/tmp"),

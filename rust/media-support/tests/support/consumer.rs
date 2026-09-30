@@ -87,36 +87,46 @@ impl MediaAdapter {
 
     fn receive(
         &self,
-        call: impl FnOnce(*mut RawAudio) -> i32,
+        control: &RawCancellation,
+        call: impl FnOnce(*mut RawStream) -> i32,
     ) -> Result<PreparedAudio, MediaError> {
-        let mut raw = RawAudio {
+        let mut raw = RawStream {
             handle: ptr::null_mut(),
-            samples: ptr::null(),
-            sample_count: 0,
             sample_rate_hz: 0,
         };
         let result = call(&mut raw);
-        let release = AudioOwner {
+        let close = StreamOwner {
             handle: raw.handle,
-            release: self.descriptor.release_audio.unwrap(),
+            close: self.descriptor.close_stream.unwrap(),
         };
         status(result)?;
-        if raw.handle.is_null()
-            || raw.samples.is_null()
-            || raw.sample_count == 0
-            || raw.sample_count > isize::MAX as usize / size_of::<f32>()
-        {
+        if raw.handle.is_null() || raw.sample_rate_hz == 0 {
             return Err(MediaError::InvalidOutput);
         }
         let mut samples = Vec::new();
-        samples
-            .try_reserve_exact(raw.sample_count)
-            .map_err(|_| MediaError::Io)?;
-        // SAFETY: selected providers promise a valid immutable view until release.
-        samples.extend_from_slice(unsafe {
-            std::slice::from_raw_parts(raw.samples, raw.sample_count)
-        });
-        drop(release);
+        let mut chunk = [0.0; 2048];
+        loop {
+            let mut count = 0;
+            // SAFETY: stream, control, and bounded output remain live for the call.
+            status(unsafe {
+                self.descriptor.read_stream.unwrap()(
+                    raw.handle,
+                    control,
+                    chunk.as_mut_ptr(),
+                    chunk.len(),
+                    &mut count,
+                )
+            })?;
+            if count > chunk.len() {
+                return Err(MediaError::InvalidOutput);
+            }
+            if count == 0 {
+                break;
+            }
+            samples.try_reserve(count).map_err(|_| MediaError::Io)?;
+            samples.extend_from_slice(&chunk[..count]);
+        }
+        drop(close);
         PreparedAudio::new(raw.sample_rate_hz, samples)
     }
 }
@@ -130,15 +140,15 @@ impl Drop for MediaAdapter {
     }
 }
 
-struct AudioOwner {
+struct StreamOwner {
     handle: *mut c_void,
-    release: unsafe extern "C" fn(*mut c_void),
+    close: unsafe extern "C" fn(*mut c_void),
 }
-impl Drop for AudioOwner {
+impl Drop for StreamOwner {
     fn drop(&mut self) {
         // SAFETY: the result is returned to the same provider even on error.
         unsafe {
-            (self.release)(self.handle);
+            (self.close)(self.handle);
         }
     }
 }
@@ -173,8 +183,8 @@ impl FilePreparer for MediaAdapter {
         let path = path_string(request.path)?;
         let control = cancellation(request.cancellation);
         // SAFETY: all borrowed arguments outlive this synchronous call.
-        self.receive(|output| unsafe {
-            self.descriptor.prepare_file.unwrap()(
+        self.receive(&control, |output| unsafe {
+            self.descriptor.open_file.unwrap()(
                 self.context.as_ptr(),
                 path.as_ptr(),
                 &control,
@@ -196,8 +206,8 @@ impl SpeechPreparer for MediaAdapter {
             level_db: request.level_db,
         };
         // SAFETY: all borrowed arguments outlive this synchronous call.
-        self.receive(|output| unsafe {
-            self.descriptor.prepare_speech.unwrap()(self.context.as_ptr(), &raw, &control, output)
+        self.receive(&control, |output| unsafe {
+            self.descriptor.open_speech.unwrap()(self.context.as_ptr(), &raw, &control, output)
         })
     }
 }
