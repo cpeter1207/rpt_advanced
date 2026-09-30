@@ -2,11 +2,11 @@
 
 Status: Accepted
 
-Amended 2026-09-13: the combined native tick is split into input-driven local
-receive and output-clocked transmit workers. The current USBRadioPlus migration
-implements the independent callback entry points. The local/link/telemetry
-inbound-ring topology, shared-clock fast path, and two-owner generational
-lifecycle remain pending; none was shipped in USBRadioPlus alpha18.
+Amended 2026-09-29: Morse and tone telemetry are synthesized directly by the
+transmit worker. Speech and sound-file telemetry are rendered off the real-time
+audio path by the station-telemetry worker and delivered to the transmit worker
+through the telemetry PCM ring. This ADR describes the required ownership;
+implementation status is tracked in `WISHLIST.md`.
 
 Native-rate scope is narrowed to 48 kHz by
 [ADR 0035](0035-fixed-48khz-native-audio.md). The variable-frame and elapsed-sample
@@ -44,8 +44,9 @@ from its corresponding callback.
    by the selected audio adapter. It consumes the outputs of the local receive
    inbound ring, every connected link's inbound PCM ring, and the telemetry
    playout ring, and mixes them under the existing routing and duplex policy.
-   It owns transmit processing, native telemetry generation, PTT timing, and
-   transmit oscillator phase. After the program mix, it adds the selected DCS
+   It owns transmit processing, direct native Morse/tone generation, PTT
+   timing, and transmit oscillator phase. Speech and sound-file PCM comes only
+   from the telemetry ring. After the program mix, it adds the selected DCS
    or CTCSS signal where the hardware profile requires generated signaling
    (ADR 0033), and writes directly into the adapter-supplied output buffer.
    For PortAudio this is PortAudio's output callback buffer, not an
@@ -58,6 +59,23 @@ frames. The receive call independently supplies its available input count;
 there is no requirement that receive and transmit counts or callback times
 match. Neither worker performs device reads/writes, codec or network I/O.
 
+### Telemetry rendering and ownership
+
+The station-control owner serializes telemetry selection and submits prepared
+work to one station-telemetry worker. That worker performs speech synthesis and
+sound-file decoding/rendering outside the radio audio callbacks, then writes
+canonical `f32` samples at their source rate into the telemetry PCM ring. The
+ring alone converts and clocks that media for native-rate playout. It is a PCM
+ring, not the bounded control queue that transfers prepared requests.
+
+Morse and configured tone sequences are generated directly by the transmit
+worker at the native rate; they do not pass through the telemetry PCM ring.
+This includes Morse fallback when received activity interrupts speech or a
+sound file. The station-control owner still decides which one telemetry item
+is active, and the transmit worker owns only its preallocated sample-generation
+state. No speech synthesis, file access, allocation, or blocking work occurs
+there.
+
 All source-to-transmit sample-rate conversion and clock-drift correction
 belong to the inbound rings, including the local receive and telemetry rings.
 The local receive ring corrects capture-to-playback drift **after** receive
@@ -67,7 +85,7 @@ independent timer or output clock-recovery loop. Outbound codec conversion and
 detector-private analysis decimation are distinct boundaries, not additional
 inbound rate converters (ADR 0035).
 
-### Verified shared-clock fast path
+### Shared-clock fast path
 
 An audio adapter that knows ADC and DAC have no relative clock drift may
 declare a shared-clock capability at stream setup. A known common disciplined

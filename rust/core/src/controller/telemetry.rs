@@ -1,6 +1,6 @@
 //! Control-prepared playback and bounded status ownership transfer.
 
-use crate::audio::{MorseRenderer, Playback};
+use crate::audio::{MorseRenderer, Playback, ToneSequence};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
@@ -42,14 +42,25 @@ impl PreparedMedia {
         text: &str,
         settings: MorseSettings,
     ) -> Result<Self, ControllerError> {
+        Self::new_with_tone(audio, None, text, settings)
+    }
+
+    /// Prepare PCM, an optional directly rendered tone, and Morse fallback.
+    pub(crate) fn new_with_tone(
+        audio: Option<Vec<f32>>,
+        tone: Option<ToneSequence>,
+        text: &str,
+        settings: MorseSettings,
+    ) -> Result<Self, ControllerError> {
         if audio.as_ref().is_some_and(|pcm| {
             pcm.is_empty() || pcm.iter().any(|v| !v.is_finite() || v.abs() > 1.0)
         }) {
             return Err(ControllerError);
         }
-        let available = audio.is_some() || !text.is_empty();
-        Playback::new(
+        let available = audio.is_some() || tone.is_some() || !text.is_empty();
+        Playback::new_with_tone(
             audio,
+            tone,
             text,
             settings.speed_wpm,
             settings.frequency_hz,

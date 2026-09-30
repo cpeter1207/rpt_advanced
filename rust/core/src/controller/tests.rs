@@ -551,6 +551,36 @@ fn courtesy_ducks_without_switching_media_and_partitions_match() {
 }
 
 #[test]
+fn transmit_worker_renders_tone_courtesy_directly() {
+    let sequence = "1000/2,1200+1300@-12/2";
+    let mut expected_source = crate::audio::ToneSequence::new(sequence, -6).unwrap();
+    let mut expected = [0.0; 192];
+    assert_eq!(expected_source.render(&mut expected), expected.len());
+    let courtesy = CourtesySettings {
+        link: Some(
+            PreparedMedia::new_with_tone(
+                None,
+                Some(crate::audio::ToneSequence::new(sequence, -6).unwrap()),
+                "",
+                MorseSettings::default(),
+            )
+            .unwrap(),
+        ),
+        ..CourtesySettings::default()
+    };
+    let (mut node, _) =
+        NodeController::new(ControllerSettings::default(), vec![], vec![], courtesy).unwrap();
+    node.link_unkeyed("peer", "", false);
+    node.process_event(false, false);
+    let mut output = [0.0; 192];
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut output);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn every_release_announcements_follow_hang_once_and_ids_satisfy_lower_priority() {
     let ids = vec![
         Identifier {
@@ -843,6 +873,15 @@ fn audio_path_never_allocates_or_reclaims_prepared_media() {
     let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(calls, Some(0));
     assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
+fn tone_configuration_does_not_allocate_duration_sized_pcm() {
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    let tone = crate::audio::ToneSequence::new("1000/60000", -6).unwrap();
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(tone.rendered_samples(), 2_880_000);
+    assert_eq!(calls, Some(3));
 }
 
 #[test]

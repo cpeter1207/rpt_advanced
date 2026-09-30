@@ -17,3 +17,20 @@ pub trait AudioSource {
     /// Render samples into `output`, returning the number actually produced.
     fn render(&mut self, output: &mut [f32]) -> usize;
 }
+
+/// One nonblocking read from a producer-backed native PCM stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcmRead {
+    /// `count` samples were written to the output prefix.
+    Samples(usize),
+    /// No samples are ready yet; the producer is still active.
+    Pending,
+    /// The producer completed and all ring samples have been drained.
+    Finished,
+}
+
+/// Reads already-converted native PCM without waiting or allocating.
+pub trait PcmStreamReader: Send {
+    /// Copy currently available samples into caller-owned storage.
+    fn render(&mut self, output: &mut [f32]) -> PcmRead;
+}

@@ -1,4 +1,61 @@
 use super::Playback;
+use crate::audio::{PcmRead, PcmStreamReader};
+use std::collections::VecDeque;
+
+struct Stream(VecDeque<Option<Vec<f32>>>);
+
+impl PcmStreamReader for Stream {
+    fn render(&mut self, output: &mut [f32]) -> PcmRead {
+        let Some(chunk) = self.0.front_mut() else {
+            return PcmRead::Finished;
+        };
+        let Some(chunk) = chunk else {
+            self.0.pop_front();
+            return PcmRead::Pending;
+        };
+        let count = output.len().min(chunk.len());
+        output[..count].copy_from_slice(&chunk[..count]);
+        if count == chunk.len() {
+            self.0.pop_front();
+        } else {
+            chunk.drain(..count);
+        }
+        PcmRead::Samples(count)
+    }
+}
+
+#[test]
+fn stream_playback_keeps_temporary_empty_reads_distinct_from_eof() {
+    let stream = Stream(VecDeque::from([
+        Some(vec![0.25, 0.5]),
+        None,
+        Some(vec![0.75]),
+    ]));
+    let mut playback = Playback::new_stream(Box::new(stream), "E", 20, 1_000.0, -6, false).unwrap();
+    let mut output = [0.0; 3];
+
+    assert_eq!(playback.render(false, &mut output), 2);
+    assert_eq!(&output[..2], &[0.25, 0.5]);
+    assert!(!playback.is_finished());
+
+    assert_eq!(playback.render(false, &mut output), 0);
+    assert!(!playback.is_finished());
+
+    assert_eq!(playback.render(false, &mut output), 1);
+    assert_eq!(output[0], 0.75);
+    assert!(!playback.is_finished());
+    assert_eq!(playback.render(false, &mut output), 0);
+    assert!(playback.is_finished());
+}
+
+#[test]
+fn stream_playback_can_return_its_reader_for_off_callback_retirement() {
+    let stream = Stream(VecDeque::from([Some(vec![0.25])]));
+    let mut playback = Playback::new_stream(Box::new(stream), "E", 20, 1_000.0, -6, false).unwrap();
+    let mut output = [0.0; 1];
+    assert_eq!(playback.render(true, &mut output), 1);
+    assert!(playback.take_stream().is_some());
+}
 
 #[test]
 fn absent_and_empty_pcm_share_morse_restart_and_trait_rendering() {
@@ -68,4 +125,56 @@ fn playback_restart_resets_morse_without_reconstructing_it() {
     playback.restart(true);
     assert_eq!(playback.render(false, &mut restarted), 48);
     assert_eq!(restarted, first);
+}
+
+#[test]
+fn tone_source_renders_in_blocks_and_restarts_at_the_same_phase() {
+    let sequence = "1000/1,1200+1300@-12/1";
+    let mut expected_source = crate::audio::ToneSequence::new(sequence, -6).unwrap();
+    let mut expected = [0.0; 96];
+    assert_eq!(expected_source.render(&mut expected), expected.len());
+
+    let mut playback = Playback::new_with_tone(
+        None,
+        Some(crate::audio::ToneSequence::new(sequence, -6).unwrap()),
+        "E",
+        20,
+        1_000.0,
+        -6,
+        false,
+    )
+    .unwrap();
+    let mut first = [0.0; 96];
+    assert_eq!(playback.render(false, &mut first), first.len());
+    assert_eq!(first, expected);
+    assert!(playback.is_finished());
+
+    playback.restart(false);
+    let mut restarted = [0.0; 96];
+    assert_eq!(playback.render(false, &mut restarted), restarted.len());
+    assert_eq!(restarted, expected);
+}
+
+#[test]
+fn receiving_interrupts_tone_for_morse_fallback() {
+    let mut playback = Playback::new_with_tone(
+        None,
+        Some(crate::audio::ToneSequence::new("1000/100", -6).unwrap()),
+        "E",
+        20,
+        1_000.0,
+        -6,
+        false,
+    )
+    .unwrap();
+    let mut tone = [0.0; 48];
+    assert_eq!(playback.render(false, &mut tone), tone.len());
+    assert!(tone.iter().any(|sample| *sample != 0.0));
+
+    let mut morse = [1.0; 48];
+    let mut expected = crate::audio::MorseRenderer::new("E", 20, 1_000.0, -6).unwrap();
+    let mut expected_samples = [0.0; 48];
+    expected.render(&mut expected_samples);
+    assert_eq!(playback.render(true, &mut morse), morse.len());
+    assert_eq!(morse, expected_samples);
 }

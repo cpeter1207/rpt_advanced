@@ -16,17 +16,21 @@ struct Segment {
     first_hz: f32,
     second_hz: f32,
     samples: usize,
-    level_db: i8,
+    amplitude: f32,
 }
 
-/// A fully prepared tone sequence whose renderer performs no allocation.
+/// A bounded tone sequence rendered incrementally without allocating PCM storage.
 pub struct ToneSequence {
-    audio: Vec<f32>,
-    offset: usize,
+    segments: Vec<Segment>,
+    rendered_samples: usize,
+    segment_index: usize,
+    segment_offset: usize,
+    first_phase: f32,
+    second_phase: f32,
 }
 
 impl ToneSequence {
-    /// Parse and prepare one bounded tone sequence at the fixed native rate.
+    /// Parse one bounded tone sequence at the fixed native rate.
     pub fn new(text: &str, default_level_db: i8) -> Result<Self, ToneError> {
         if !(-60..=0).contains(&default_level_db) || text.trim().is_empty() {
             return Err(ToneError);
@@ -46,40 +50,64 @@ impl ToneSequence {
                     .filter(|total| *total <= MAX_SAMPLES)
             })
             .ok_or(ToneError)?;
-        let mut audio = Vec::with_capacity(total);
-        let mut first_phase = 0.0;
-        let mut second_phase = 0.0;
-        for segment in segments {
-            let amplitude = 10_f32.powf(f32::from(segment.level_db) / 20.0)
-                / if segment.second_hz == 0.0 { 1.0 } else { 2.0 };
-            for _ in 0..segment.samples {
-                let mut sample = 0.0;
+        Ok(Self {
+            segments,
+            rendered_samples: total,
+            segment_index: 0,
+            segment_offset: 0,
+            first_phase: 0.0,
+            second_phase: 0.0,
+        })
+    }
+
+    /// Return the sequence's total native-rate sample count.
+    pub fn rendered_samples(&self) -> usize {
+        self.rendered_samples
+    }
+
+    /// Render the next samples directly into the transmit worker's output block.
+    pub fn render(&mut self, output: &mut [f32]) -> usize {
+        let mut written = 0;
+        while written < output.len() && self.segment_index < self.segments.len() {
+            let segment = &self.segments[self.segment_index];
+            let count = (segment.samples - self.segment_offset).min(output.len() - written);
+            for sample in &mut output[written..written + count] {
+                *sample = 0.0;
                 if segment.first_hz != 0.0 {
-                    sample += amplitude * (core::f32::consts::TAU * first_phase).sin();
-                    first_phase = (first_phase + segment.first_hz / SAMPLE_RATE_HZ as f32).fract();
+                    *sample +=
+                        segment.amplitude * (core::f32::consts::TAU * self.first_phase).sin();
+                    self.first_phase =
+                        (self.first_phase + segment.first_hz / SAMPLE_RATE_HZ as f32).fract();
                 }
                 if segment.second_hz != 0.0 {
-                    sample += amplitude * (core::f32::consts::TAU * second_phase).sin();
-                    second_phase =
-                        (second_phase + segment.second_hz / SAMPLE_RATE_HZ as f32).fract();
+                    *sample +=
+                        segment.amplitude * (core::f32::consts::TAU * self.second_phase).sin();
+                    self.second_phase =
+                        (self.second_phase + segment.second_hz / SAMPLE_RATE_HZ as f32).fract();
                 }
-                audio.push(sample);
+            }
+            written += count;
+            self.segment_offset += count;
+            if self.segment_offset == segment.samples {
+                self.segment_index += 1;
+                self.segment_offset = 0;
             }
         }
-        Ok(Self { audio, offset: 0 })
+        written
     }
 
-    /// Return the fixed prepared sample count.
-    pub fn rendered_samples(&self) -> usize {
-        self.audio.len()
+    /// Restart the sequence with continuous phase beginning at zero.
+    pub(super) fn restart(&mut self) {
+        self.segment_index = 0;
+        self.segment_offset = 0;
+        self.first_phase = 0.0;
+        self.second_phase = 0.0;
     }
 
-    /// Render as many prepared samples as fit, returning the number written.
-    pub fn render(&mut self, output: &mut [f32]) -> usize {
-        let count = output.len().min(self.audio.len() - self.offset);
-        output[..count].copy_from_slice(&self.audio[self.offset..self.offset + count]);
-        self.offset += count;
-        count
+    /// Return whether every segment has been rendered.
+    #[must_use]
+    pub(super) fn is_finished(&self) -> bool {
+        self.segment_index == self.segments.len()
     }
 }
 
@@ -130,7 +158,8 @@ fn parse_segment(text: &str, default_level_db: i8) -> Result<Segment, ToneError>
         first_hz,
         second_hz,
         samples: duration_ms * 48,
-        level_db,
+        amplitude: 10_f32.powf(f32::from(level_db) / 20.0)
+            / if second_hz == 0.0 { 1.0 } else { 2.0 },
     })
 }
 

@@ -122,6 +122,10 @@ None.
   receive, per-link inbound, and telemetry playout rings; add profile-selected
   DCS or CTCSS; fill the adapter-owned output buffer directly (PortAudio's
   callback output buffer for that adapter).
+- Generate Morse and tone telemetry directly in the transmit worker. Render
+  speech and sound-file telemetry on the separate station-telemetry worker and
+  feed its PCM through the telemetry ring; do not use the control-message
+  queue as an audio ring.
 - Assign all inbound source-rate conversion and drift correction to those
   rings. Do not keep a second raw-capture converter, resample the transmit mix,
   or add a PortAudio output ring/timer. Preserve routing, receive qualification,
@@ -129,12 +133,22 @@ None.
 - Validate unequal RX/TX frame counts, independent clock drift, stalled input
   or output, per-owner DSP/event queues, and coherent generation adoption and
   safe reload/unload across both workers.
+- Verify the optional shared-clock receive-then-transmit path only when the
+  adapter can prove and supply aligned frames; unknown clock relationships
+  remain independently paced.
+- Publish RF edge events immediately and meter/FIFO/status snapshots on the
+  separately configured per-node interval with global fallback, default 50 ms.
 
 **Decisions recorded**
 
-- Accepted design, pending implementation. Released USBRadioPlus alpha18 still
-  uses its playback-driven combined native tick; no deployed behavior changes
-  with this documentation amendment.
+- Accepted design, pending completion. The RPT Advanced product already has
+  independent receive/transmit callbacks, local and per-peer inbound rings,
+  and the program-audio loopback. Its status-media path still hands prepared
+  PCM directly to transmit rather than through a telemetry PCM ring. Morse and
+  tone generation now run directly in the transmit worker.
+- The current RPT Advanced radio adapter does not yet invoke the shared-clock
+  paired-owner path, and the configurable publication interval is not yet
+  implemented.
 - The existing supported native rate remains 48 kHz. The adapter supplies its
   clock/cadence; the transmit worker has no separate pacing source.
 - Outbound codec conversion and detector-private decimation remain separate

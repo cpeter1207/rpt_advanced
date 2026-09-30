@@ -179,20 +179,16 @@ fn courtesy_media(
             *sample *= gain;
         }
     }
-    if !settings.tone_sequence.is_empty() {
-        // Validate even when a higher-priority source succeeded.
-        let mut tones = ToneSequence::new(&settings.tone_sequence, settings.level_db as i8)
-            .map_err(|_| RuntimeError::Preparation)?;
-        if audio.is_none() {
-            let mut pcm = vec![0.0; tones.rendered_samples()];
-            tones.render(&mut pcm);
-            audio = Some(pcm);
-        }
-    }
-    if audio.is_none() && item.morse_text.is_empty() {
+    // Validate even when a higher-priority source succeeded, but render at TX time.
+    let tone = (!settings.tone_sequence.is_empty())
+        .then(|| ToneSequence::new(&settings.tone_sequence, settings.level_db as i8))
+        .transpose()
+        .map_err(|_| RuntimeError::Preparation)?;
+    let tone = tone.filter(|_| audio.is_none());
+    if audio.is_none() && tone.is_none() && item.morse_text.is_empty() {
         return Ok(None);
     }
-    PreparedMedia::new(audio, &item.morse_text, morse(&item))
+    PreparedMedia::new_with_tone(audio, tone, &item.morse_text, morse(&item))
         .map(Some)
         .map_err(|_| RuntimeError::Preparation)
 }
