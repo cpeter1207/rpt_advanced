@@ -14,12 +14,7 @@ use std::{
 };
 
 impl NativeMediaPreparer {
-    fn new(
-        ffmpeg: &Path,
-        piper: &Path,
-        temporary_directory: &Path,
-        timeout_ms: u32,
-    ) -> Result<Self, MediaError> {
+    fn new(ffmpeg: &Path, piper: &Path, timeout_ms: u32) -> Result<Self, MediaError> {
         // SAFETY: the linked descriptor has a process-lifetime readable ABI prefix.
         unsafe {
             Self::from_descriptors(
@@ -27,7 +22,6 @@ impl NativeMediaPreparer {
                 rptadv_speech_adapter_descriptor().cast(),
                 ffmpeg,
                 piper,
-                temporary_directory,
                 timeout_ms,
                 (ast_replace_sigchld, ast_unreplace_sigchld),
             )
@@ -83,7 +77,6 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
             speech.cast(),
             path,
             path,
-            path,
             1,
             (ast_replace_sigchld, ast_unreplace_sigchld),
         )
@@ -127,14 +120,13 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
             Err(MediaError::IncompatibleAdapter)
         ));
     }
-    for (ffmpeg, piper, temporary, timeout) in [
-        (Path::new("bad\0path"), path, path, 1),
-        (path, Path::new("bad\0piper"), path, 1),
-        (path, path, Path::new("bad\0directory"), 1),
-        (path, path, path, 0),
+    for (ffmpeg, piper, timeout) in [
+        (Path::new("bad\0path"), path, 1),
+        (path, Path::new("bad\0piper"), 1),
+        (path, path, 0),
     ] {
         assert!(matches!(
-            NativeMediaPreparer::new(ffmpeg, piper, temporary, timeout),
+            NativeMediaPreparer::new(ffmpeg, piper, timeout),
             Err(MediaError::InvalidRequest)
         ));
     }
@@ -203,7 +195,6 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
                 ptr::from_ref(&speech).cast(),
                 Path::new("file-only"),
                 Path::new("speech-only"),
-                Path::new("unused"),
                 1,
                 (ast_replace_sigchld, ast_unreplace_sigchld),
             )
@@ -300,7 +291,7 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
 #[test]
 fn invalid_file_and_speech_strings_fail_before_provider_dispatch() {
     let path = Path::new("unused");
-    let adapter = NativeMediaPreparer::new(path, path, path, 1).unwrap();
+    let adapter = NativeMediaPreparer::new(path, path, 1).unwrap();
     let cancellation = Cancellation::default();
     assert_eq!(
         adapter.file(&FileRequest {
@@ -351,7 +342,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         0
     }
     let path = Path::new("unused");
-    let mut adapter = NativeMediaPreparer::new(path, path, path, 1).unwrap();
+    let mut adapter = NativeMediaPreparer::new(path, path, 1).unwrap();
     adapter.file.close_stream = close;
     adapter.file.read_stream = eof;
     let token = Cancellation::default();
@@ -438,13 +429,8 @@ fn descriptor_file_decode_uses_host_reaper_and_retains_no_temporary_files() {
         wave.extend_from_slice(&1000_i16.to_le_bytes());
     }
     fs::write(&path, wave).unwrap();
-    let adapter = NativeMediaPreparer::new(
-        Path::new("ffmpeg"),
-        Path::new("missing-piper"),
-        &directory,
-        30000,
-    )
-    .unwrap();
+    let adapter =
+        NativeMediaPreparer::new(Path::new("ffmpeg"), Path::new("missing-piper"), 30000).unwrap();
     let token = Cancellation::default();
     let audio = adapter
         .file(&FileRequest {

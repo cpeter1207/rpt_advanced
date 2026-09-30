@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
     assert(!memcmp(table->capability, CAPABILITY, 16));
     assert(table->create && table->destroy && table->read_stream && table->close_stream);
     struct rptadv_media_config config = {
-        sizeof(config), RPTADV_MEDIA_ABI_VERSION, "unused", "/tmp", 30000, NULL, NULL};
+        sizeof(config), RPTADV_MEDIA_ABI_VERSION, "unused", 30000, NULL, NULL};
     void *context = (void *)1;
     config.abi_version = 99;
     assert(table->create(&config, &context) == RPTADV_MEDIA_INVALID_REQUEST);

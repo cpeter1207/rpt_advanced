@@ -62,7 +62,6 @@ impl MediaAdapter {
         let executable = path_string(&config.ffmpeg)?;
         #[cfg(speech_adapter)]
         let executable = path_string(&config.piper)?;
-        let directory = path_string(&config.temporary_directory)?;
         let timeout_ms = u32::try_from(config.process_timeout.as_millis())
             .ok()
             .filter(|value| *value > 0)
@@ -71,7 +70,6 @@ impl MediaAdapter {
             struct_size: size_of::<RawConfig>() as u32,
             abi_version: ABI_VERSION,
             executable: executable.as_ptr(),
-            temporary_directory: directory.as_ptr(),
             timeout_ms,
             reaper_acquire: config.child_reaper.map(|reaper| reaper.acquire),
             reaper_release: config.child_reaper.map(|reaper| reaper.release),
@@ -243,7 +241,6 @@ mod tests {
                         ffmpeg: "ffmpeg".into(),
                         #[cfg(speech_adapter)]
                         piper: "piper".into(),
-                        temporary_directory: std::env::temp_dir(),
                         process_timeout: std::time::Duration::from_secs(1),
                         child_reaper: None,
                     },

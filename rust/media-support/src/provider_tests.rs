@@ -10,11 +10,73 @@ fn raw_config() -> RawConfig {
         struct_size: size_of::<RawConfig>() as u32,
         abi_version: ABI_VERSION,
         executable: c"ffmpeg".as_ptr(),
-        temporary_directory: c"/tmp".as_ptr(),
         timeout_ms: 100,
         reaper_acquire: None,
         reaper_release: None,
     }
+}
+
+#[cfg(file_adapter)]
+fn test_stream() -> PcmStream {
+    let config = Config {
+        #[cfg(file_adapter)]
+        ffmpeg: "ffmpeg".into(),
+        #[cfg(speech_adapter)]
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    };
+    let mut wave = Vec::from(
+        *b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x03\0\x01\0\x80\xbb\0\0\0\xee\x02\0\x04\0\x20\0data\x04\0\0\0",
+    );
+    wave.extend_from_slice(&0.0_f32.to_le_bytes());
+    let mut command = std::process::Command::new("cat");
+    PcmStream::f32_wave(
+        crate::process::ChildStream::spawn(&config, &mut command, Some(&wave), &|| false).unwrap(),
+        &|| false,
+    )
+    .unwrap()
+}
+
+#[cfg(file_adapter)]
+#[test]
+fn truncated_finite_wave_data_is_rejected_after_complete_samples() {
+    let config = Config {
+        ffmpeg: "ffmpeg".into(),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    };
+    let mut wave = Vec::from(
+        *b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x03\0\x01\0\x80\xbb\0\0\0\xee\x02\0\x04\0\x20\0data\x04\0\0\0",
+    );
+    wave[40..44].copy_from_slice(&8_u32.to_le_bytes());
+    wave.extend_from_slice(&0.0_f32.to_le_bytes());
+    let mut command = std::process::Command::new("cat");
+    let child =
+        crate::process::ChildStream::spawn(&config, &mut command, Some(&wave), &|| false).unwrap();
+    let mut stream = PcmStream::f32_wave(child, &|| false).unwrap();
+    let mut samples = [0.0; 4];
+    assert_eq!(stream.read(&mut samples, &|| false).unwrap(), 1);
+    assert_eq!(
+        stream.read(&mut samples, &|| false),
+        Err(MediaError::InvalidOutput)
+    );
+}
+
+#[cfg(speech_adapter)]
+fn test_stream() -> PcmStream {
+    let config = Config {
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    };
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "printf '\\000\\000'"]);
+    PcmStream::s16_raw(
+        crate::process::ChildStream::spawn(&config, &mut command, None, &|| false).unwrap(),
+        48_000,
+        1.0,
+    )
 }
 
 #[test]
@@ -51,9 +113,6 @@ fn abi_rejects_invalid_creation_and_stream_arguments() {
     assert_eq!(unsafe { create(&invalid, &mut context) }, -1);
     invalid = raw_config();
     invalid.executable = c"".as_ptr();
-    assert_eq!(unsafe { create(&invalid, &mut context) }, -1);
-    invalid = raw_config();
-    invalid.temporary_directory = c"".as_ptr();
     assert_eq!(unsafe { create(&invalid, &mut context) }, -1);
     invalid = raw_config();
     invalid.reaper_acquire = Some(no_op);
@@ -223,13 +282,21 @@ fn abi_opens_and_streams_source_rate_media() {
 
     #[cfg(speech_adapter)]
     let piper = std::ffi::CString::new(piper_path.as_os_str().as_bytes()).unwrap();
-    let directory_path = std::ffi::CString::new(directory.as_os_str().as_bytes()).unwrap();
+    #[cfg(speech_adapter)]
+    let model_path = directory.join("001.000000.onnx");
+    #[cfg(speech_adapter)]
+    let model = std::ffi::CString::new(model_path.as_os_str().as_bytes()).unwrap();
+    #[cfg(speech_adapter)]
+    {
+        let mut model_config = model_path.as_os_str().to_os_string();
+        model_config.push(".json");
+        std::fs::write(model_config, br#"{"audio":{"sample_rate":22050}}"#).unwrap();
+    }
     #[cfg(file_adapter)]
     let source_path = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
     let config = RawConfig {
         #[cfg(speech_adapter)]
         executable: piper.as_ptr(),
-        temporary_directory: directory_path.as_ptr(),
         timeout_ms: 30_000,
         ..raw_config()
     };
@@ -249,7 +316,7 @@ fn abi_opens_and_streams_source_rate_media() {
     {
         let request = RawSpeechRequest {
             text: c"Identifier; $(not a command)\n".as_ptr(),
-            model: c"001.000000".as_ptr(),
+            model: model.as_ptr(),
             speed_percent: 100,
             level_db: 0,
         };
@@ -292,6 +359,12 @@ fn abi_opens_and_streams_source_rate_media() {
     std::fs::remove_file(source).unwrap();
     #[cfg(speech_adapter)]
     std::fs::remove_file(piper_path).unwrap();
+    #[cfg(speech_adapter)]
+    {
+        let mut model_config = model_path.as_os_str().to_os_string();
+        model_config.push(".json");
+        std::fs::remove_file(model_config).unwrap();
+    }
     std::fs::remove_dir(directory).unwrap();
 }
 
@@ -309,7 +382,6 @@ fn cancellation_after_stream_open_discards_the_owned_handle() {
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "piper".into(),
-        temporary_directory: "/tmp".into(),
         process_timeout: Duration::from_millis(100),
         child_reaper: None,
     });
@@ -332,13 +404,7 @@ fn cancellation_after_stream_open_discards_the_owned_handle() {
     .unwrap();
     assert!(std::ptr::eq(owner, &preparation));
     assert_eq!(cancel_on_second_call(cancellation.context), 0);
-    let result = unsafe {
-        publish(
-            cancellation,
-            &mut output,
-            PreparedAudio::new(48_000, vec![0.0]).unwrap(),
-        )
-    };
+    let result = unsafe { publish(cancellation, &mut output, test_stream()) };
     assert_eq!(result, Err(MediaError::Cancelled));
     assert!(output.handle.is_null());
 
@@ -346,14 +412,7 @@ fn cancellation_after_stream_open_discards_the_owned_handle() {
         context: std::ptr::null(),
         is_cancelled: not_cancelled,
     };
-    unsafe {
-        publish(
-            &cancellation,
-            &mut output,
-            PreparedAudio::new(48_000, vec![0.0]).unwrap(),
-        )
-    }
-    .unwrap();
+    unsafe { publish(&cancellation, &mut output, test_stream()) }.unwrap();
     assert!(!output.handle.is_null());
     unsafe { close_stream(output.handle) };
 }

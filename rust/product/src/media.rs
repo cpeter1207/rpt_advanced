@@ -42,7 +42,7 @@ unsafe impl Sync for NativeMediaPreparer {}
 
 impl NativeMediaPreparer {
     /// Compose independent file/speech capabilities and the host's paired child-reaper guard.
-    /// Paths are literal local executable/directory paths; timeout applies to each child.
+    /// Executable paths are literal local paths; timeout applies to each child.
     ///
     /// # Safety
     /// Each non-null pointer must provide a readable size/version prefix and truthfully back
@@ -53,7 +53,6 @@ impl NativeMediaPreparer {
         speech: *const SpeechDescriptor,
         ffmpeg: &Path,
         piper: &Path,
-        temporary_directory: &Path,
         timeout_ms: u32,
         reaper: (unsafe extern "C" fn(), unsafe extern "C" fn()),
     ) -> Result<Self, MediaError> {
@@ -90,12 +89,10 @@ impl NativeMediaPreparer {
         }
         let ffmpeg = path_string(ffmpeg)?;
         let piper = path_string(piper)?;
-        let directory = path_string(temporary_directory)?;
         let mut config = ffi::rptadv_media_config {
             struct_size: size_of::<ffi::rptadv_media_config>() as u32,
             abi_version: ffi::RPTADV_MEDIA_ABI_VERSION,
             executable: ffmpeg.as_ptr(),
-            temporary_directory: directory.as_ptr(),
             timeout_ms,
             reaper_acquire: Some(reaper.0),
             reaper_release: Some(reaper.1),

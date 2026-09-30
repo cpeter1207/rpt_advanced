@@ -1,6 +1,6 @@
 //! C entry points, with panic containment and explicit adapter-side destruction.
 use crate::{ChildReaper, Config, Preparation, abi::*};
-use crate::{MediaError, result::PreparedAudio};
+use crate::{MediaError, process::PcmStream};
 use std::{
     ffi::{CStr, c_char, c_void},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -104,7 +104,6 @@ unsafe extern "C" fn create(config: *const RawConfig, output: *mut *mut c_void) 
                 ffmpeg: path(raw.executable)?,
                 #[cfg(speech_adapter)]
                 piper: path(raw.executable)?,
-                temporary_directory: path(raw.temporary_directory)?,
                 process_timeout: Duration::from_millis(raw.timeout_ms.into()),
                 child_reaper,
             }
@@ -155,18 +154,14 @@ unsafe fn open_arguments<'a>(
 unsafe fn publish(
     cancellation: &RawCancellation,
     output: *mut RawStream,
-    prepared: PreparedAudio,
+    stream: PcmStream,
 ) -> Result<(), MediaError> {
     if cancelled(cancellation) {
         return Err(MediaError::Cancelled);
     }
-    let stream = Box::new(MediaStream {
-        audio: prepared,
-        offset: 0,
-    });
     let view = RawStream {
-        sample_rate_hz: stream.audio.sample_rate_hz(),
-        handle: Box::into_raw(stream).cast(),
+        sample_rate_hz: stream.sample_rate_hz(),
+        handle: Box::into_raw(Box::new(stream)).cast(),
     };
     // SAFETY: output now owns view.handle; samples remain owned by that handle.
     unsafe {
@@ -185,8 +180,8 @@ unsafe extern "C" fn open_file(
     // SAFETY: the foreign caller provides valid arguments; prepare validates nulls.
     boundary(catch_unwind(AssertUnwindSafe(|| unsafe {
         let (preparation, cancellation) = open_arguments(context, cancellation, output)?;
-        let audio = preparation.prepare_file(&path(source)?, &|| cancelled(cancellation))?;
-        publish(cancellation, output, audio)
+        let stream = preparation.open_file(&path(source)?, &|| cancelled(cancellation))?;
+        publish(cancellation, output, stream)
     })))
 }
 
@@ -204,20 +199,15 @@ unsafe extern "C" fn open_speech(
         let Ok(text) = string(request.text)?.to_str() else {
             return Err(MediaError::InvalidRequest);
         };
-        let audio = preparation.prepare_speech(
+        let stream = preparation.open_speech(
             text,
             &path(request.model)?,
             request.speed_percent,
             request.level_db,
             &|| cancelled(cancellation),
         )?;
-        publish(cancellation, output, audio)
+        publish(cancellation, output, stream)
     })))
-}
-
-struct MediaStream {
-    audio: PreparedAudio,
-    offset: usize,
 }
 
 unsafe extern "C" fn read_stream(
@@ -237,16 +227,11 @@ unsafe extern "C" fn read_stream(
             return Err(MediaError::Cancelled);
         }
         let stream = handle
-            .cast::<MediaStream>()
+            .cast::<PcmStream>()
             .as_mut()
             .ok_or(MediaError::InvalidRequest)?;
-        let samples = stream.audio.samples();
-        let count = capacity.min(samples.len() - stream.offset);
-        if count != 0 {
-            std::slice::from_raw_parts_mut(output, capacity)[..count]
-                .copy_from_slice(&samples[stream.offset..stream.offset + count]);
-            stream.offset += count;
-        }
+        let samples = std::slice::from_raw_parts_mut(output, capacity);
+        let count = stream.read(samples, &|| cancelled(cancellation))?;
         *read_count = count;
         Ok(())
     })))
@@ -256,7 +241,7 @@ unsafe extern "C" fn close_stream(handle: *mut c_void) {
     if !handle.is_null() {
         // SAFETY: the caller closes its stream exactly once.
         let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
-            drop(Box::from_raw(handle.cast::<MediaStream>()));
+            drop(Box::from_raw(handle.cast::<PcmStream>()));
         }));
     }
 }

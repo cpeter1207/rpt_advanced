@@ -32,7 +32,6 @@ fn rejects_incompatible_or_incomplete_tables_before_invocation() {
         struct_size: size_of::<RawConfig>() as u32,
         abi_version: ABI_VERSION + 1,
         executable: std::ptr::null(),
-        temporary_directory: std::ptr::null(),
         timeout_ms: 1,
         reaper_acquire: None,
         reaper_release: None,

@@ -43,8 +43,6 @@ pub struct RawConfig {
     pub abi_version: u32,
     /// NUL-terminated native path to this capability's executable.
     pub executable: *const c_char,
-    /// NUL-terminated temporary directory path.
-    pub temporary_directory: *const c_char,
     /// Each subprocess's deadline in milliseconds; nonzero.
     pub timeout_ms: u32,
     /// Optional host reaper acquisition; must be paired with release.

@@ -22,7 +22,7 @@ struct rptadv_file_descriptor {
     int32_t (*open_file)(const void *context, const char *path,
                             const struct rptadv_media_cancellation *cancellation,
                             struct rptadv_media_stream *output);
-    /** @brief Read up to capacity samples; zero samples means end of stream. */
+    /** @brief Read on the media worker; may wait for data, zero count means clean EOF. */
     int32_t (*read_stream)(void *handle,
                            const struct rptadv_media_cancellation *cancellation,
                            float *output, size_t capacity, size_t *read_count);
