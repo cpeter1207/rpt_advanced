@@ -388,7 +388,7 @@ impl NodeController {
         let demand = linked
             || (self.settings.full_duplex && receiving)
             || (self.telemetry.active.is_some() && !active_stream)
-            || self.courtesy.pending()
+            || courtesy_ready
             // A ready status has already become active above when transmission is allowed.
             || (input.is_some() && ready && !selected_stream)
             || (self.release_pending && announcement_due.is_some());
@@ -492,10 +492,8 @@ impl NodeController {
             rendered_source,
             Some(Source::Identifier(_) | Source::Announcement(_))
         );
-        let other = linked
-            || (self.settings.full_duplex && receiving)
-            || self.courtesy.pending()
-            || status_ready;
+        let other =
+            linked || (self.settings.full_duplex && receiving) || courtesy_ready || status_ready;
         let transmit = other
             || telemetry_audio
             || (self.telemetry.active.is_some() && !waiting_for_media && !active_stream);
