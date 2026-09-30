@@ -361,12 +361,36 @@ impl NodeController {
             self.identifiers
                 .select(&self.rules, self.now, receiving, self.settings.full_duplex);
         let mut ready = selected.is_some_and(|id| self.id_ready(id, busy)) && after_hang;
+        let active_stream = match active_before {
+            Some(Source::Status) => self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|m| m.0.is_streaming()),
+            Some(Source::Courtesy(index)) => self
+                .courtesy
+                .media
+                .get(index)
+                .is_some_and(|m| m.0.is_streaming()),
+            Some(Source::Identifier(index)) => self
+                .ids
+                .get(index)
+                .is_some_and(|id| id.media.0.is_streaming()),
+            Some(Source::Announcement(index)) => self
+                .announcements
+                .get(index)
+                .is_some_and(|a| a.announcement.media.0.is_streaming()),
+            None => false,
+        };
+        let selected_stream = selected
+            .and_then(|index| self.ids.get(index))
+            .is_some_and(|id| id.media.0.is_streaming());
         let demand = linked
             || (self.settings.full_duplex && receiving)
-            || self.telemetry.active.is_some()
+            || (self.telemetry.active.is_some() && !active_stream)
             || self.courtesy.pending()
             // A ready status has already become active above when transmission is allowed.
-            || (input.is_some() && ready)
+            || (input.is_some() && ready && !selected_stream)
             || (self.release_pending && announcement_due.is_some());
         if may_transmit && demand && !self.keyed {
             let key_idle = self.key_idle.max(idle);
@@ -416,6 +440,7 @@ impl NodeController {
         };
         let mut telemetry_sample = [0.0];
         let mut made = 0;
+        let mut waiting_for_media = false;
         if let Some(playback) = playback {
             let interrupt = receive
                 && matches!(
@@ -427,6 +452,7 @@ impl NodeController {
             } else {
                 playback.render(interrupt, &mut []);
             }
+            waiting_for_media = playback.waiting_for_stream();
             if playback.is_finished() {
                 self.telemetry.active = None;
                 match rendered_source {
@@ -470,7 +496,9 @@ impl NodeController {
             || (self.settings.full_duplex && receiving)
             || self.courtesy.pending()
             || status_ready;
-        let transmit = other || telemetry_audio || self.telemetry.active.is_some();
+        let transmit = other
+            || telemetry_audio
+            || (self.telemetry.active.is_some() && !waiting_for_media && !active_stream);
         let hang = if short_tail && !other {
             2400
         } else {

@@ -33,6 +33,43 @@ fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
 }
 
+struct PendingMedia;
+
+impl crate::audio::PcmStreamReader for PendingMedia {
+    fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+        crate::audio::PcmRead::Pending
+    }
+}
+
+#[test]
+fn pending_media_does_not_key_transmitter_while_producer_starts() {
+    let media =
+        PreparedMedia::new_stream(Box::new(PendingMedia), "E", MorseSettings::default()).unwrap();
+    let id = Identifier {
+        media,
+        interval_ms: 1,
+        priority: 1,
+        first_key_only: false,
+        regardless_of_activity: true,
+        polite_maximum_wait_ms: None,
+    };
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![id],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    node.process_audio(false, false, &[], &mut [0.0; 64]);
+
+    assert!(matches!(
+        node.telemetry.active,
+        Some(telemetry::Source::Identifier(0))
+    ));
+    assert!(!node.keyed);
+}
+
 struct TestPeerInput {
     signals: crate::link::PeerSignals,
     sample: Option<f32>,

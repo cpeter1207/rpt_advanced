@@ -13,6 +13,8 @@ pub struct Playback {
     tone: Option<ToneSequence>,
     using_prepared: bool,
     using_stream: bool,
+    stream_started: bool,
+    waiting_for_stream: bool,
     using_tone: bool,
     offset: usize,
     morse: MorseRenderer,
@@ -95,6 +97,8 @@ impl Playback {
         Ok(Self {
             using_prepared,
             using_stream,
+            stream_started: false,
+            waiting_for_stream: false,
             using_tone,
             prepared,
             stream,
@@ -111,9 +115,16 @@ impl Playback {
             return 0;
         }
         if receiving {
+            if self.using_stream {
+                if let Some(stream) = &mut self.stream {
+                    stream.cancel();
+                }
+            }
             self.using_prepared = false;
             self.using_stream = false;
+            self.stream_started = false;
             self.using_tone = false;
+            self.waiting_for_stream = false;
         }
         if output.is_empty() {
             return 0;
@@ -126,11 +137,32 @@ impl Playback {
             self.finished = self.offset == prepared.len();
             count
         } else if self.using_stream {
+            if !self.stream_started {
+                if let Some(stream) = &mut self.stream {
+                    stream.start();
+                }
+                self.stream_started = true;
+            }
             match self.stream.as_mut().map(|stream| stream.render(output)) {
-                Some(PcmRead::Samples(count)) => count.min(output.len()),
-                Some(PcmRead::Pending) => 0,
+                Some(PcmRead::Samples(count)) => {
+                    self.waiting_for_stream = false;
+                    count.min(output.len())
+                }
+                Some(PcmRead::Pending) => {
+                    self.waiting_for_stream = true;
+                    0
+                }
+                Some(PcmRead::Failed) => {
+                    self.using_stream = false;
+                    self.stream_started = false;
+                    self.waiting_for_stream = false;
+                    let count = self.morse.render(output);
+                    self.finished = count < output.len();
+                    count
+                }
                 Some(PcmRead::Finished) | None => {
                     self.using_stream = false;
+                    self.waiting_for_stream = false;
                     self.finished = true;
                     0
                 }
@@ -162,8 +194,10 @@ impl Playback {
         }
         self.morse.restart();
         self.finished = false;
-        // A stream is single-pass; its worker must provide a fresh reader for another run.
-        self.using_stream = false;
+        self.waiting_for_stream = false;
+        // The worker reader is reusable; each pass requests a fresh producer stream.
+        self.using_stream = self.stream.is_some() && !receiving;
+        self.stream_started = false;
         self.using_prepared = !self.prepared.is_empty() && !receiving;
         self.using_tone = !self.using_prepared && self.tone.is_some() && !receiving;
     }
@@ -171,7 +205,20 @@ impl Playback {
     /// Return a stream handle for retirement by its non-audio owner.
     pub fn take_stream(&mut self) -> Option<Box<dyn PcmStreamReader>> {
         self.using_stream = false;
+        self.stream_started = false;
         self.stream.take()
+    }
+
+    /// Whether selected streamed audio is waiting for its producer and must not key PTT.
+    #[must_use]
+    pub const fn waiting_for_stream(&self) -> bool {
+        self.waiting_for_stream
+    }
+
+    /// Whether the selected source is streamed PCM rather than generated or prepared audio.
+    #[must_use]
+    pub const fn is_streaming(&self) -> bool {
+        self.using_stream
     }
 
     /// Return whether the current run has reached terminal completion.

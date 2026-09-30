@@ -1,6 +1,12 @@
 use super::Playback;
 use crate::audio::{PcmRead, PcmStreamReader};
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 struct Stream(VecDeque<Option<Vec<f32>>>);
 
@@ -24,6 +30,60 @@ impl PcmStreamReader for Stream {
     }
 }
 
+struct FailedStream(Arc<AtomicBool>);
+
+impl PcmStreamReader for FailedStream {
+    fn render(&mut self, _: &mut [f32]) -> PcmRead {
+        PcmRead::Failed
+    }
+
+    fn cancel(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[test]
+fn failed_stream_uses_the_ready_morse_fallback() {
+    let stream = Stream(VecDeque::from([Some(vec![0.25]), None]));
+    let mut playback = Playback::new_stream(Box::new(stream), "E", 20, 1_000.0, -6, false).unwrap();
+    let failed = Arc::new(AtomicBool::new(false));
+    let mut failed_playback = Playback::new_stream(
+        Box::new(FailedStream(Arc::clone(&failed))),
+        "E",
+        20,
+        1_000.0,
+        -6,
+        false,
+    )
+    .unwrap();
+
+    let mut expected = [0.0; 8];
+    let mut morse = crate::audio::MorseRenderer::new("E", 20, 1_000.0, -6).unwrap();
+    morse.render(&mut expected);
+    let mut actual = [0.0; 8];
+    assert_eq!(failed_playback.render(false, &mut actual), actual.len());
+    assert_eq!(actual, expected);
+    assert!(!failed_playback.is_finished());
+    assert_eq!(playback.render(false, &mut [0.0; 1]), 1);
+    assert!(!failed.load(Ordering::Acquire));
+}
+
+#[test]
+fn receive_interrupt_cancels_stream_before_morse_fallback() {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut playback = Playback::new_stream(
+        Box::new(FailedStream(Arc::clone(&cancelled))),
+        "E",
+        20,
+        1_000.0,
+        -6,
+        false,
+    )
+    .unwrap();
+    playback.render(true, &mut [0.0; 1]);
+    assert!(cancelled.load(Ordering::Acquire));
+}
+
 #[test]
 fn stream_playback_keeps_temporary_empty_reads_distinct_from_eof() {
     let stream = Stream(VecDeque::from([
@@ -40,10 +100,12 @@ fn stream_playback_keeps_temporary_empty_reads_distinct_from_eof() {
 
     assert_eq!(playback.render(false, &mut output), 0);
     assert!(!playback.is_finished());
+    assert!(playback.waiting_for_stream());
 
     assert_eq!(playback.render(false, &mut output), 1);
     assert_eq!(output[0], 0.75);
     assert!(!playback.is_finished());
+    assert!(!playback.waiting_for_stream());
     assert_eq!(playback.render(false, &mut output), 0);
     assert!(playback.is_finished());
 }

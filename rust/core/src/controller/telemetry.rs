@@ -1,6 +1,6 @@
 //! Control-prepared playback and bounded status ownership transfer.
 
-use crate::audio::{MorseRenderer, Playback, ToneSequence};
+use crate::audio::{MorseRenderer, PcmStreamReader, Playback, ToneSequence};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
@@ -43,6 +43,24 @@ impl PreparedMedia {
         settings: MorseSettings,
     ) -> Result<Self, ControllerError> {
         Self::new_with_tone(audio, None, text, settings)
+    }
+
+    /// Prepare streamed PCM with the same Morse fallback and timing policy.
+    pub fn new_stream(
+        stream: Box<dyn PcmStreamReader>,
+        text: &str,
+        settings: MorseSettings,
+    ) -> Result<Self, ControllerError> {
+        Playback::new_stream(
+            stream,
+            text,
+            settings.speed_wpm,
+            settings.frequency_hz,
+            settings.level_db,
+            false,
+        )
+        .map(|playback| Self(playback, true))
+        .map_err(|_| ControllerError)
     }
 
     /// Prepare PCM, an optional directly rendered tone, and Morse fallback.

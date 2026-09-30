@@ -27,10 +27,18 @@ pub enum PcmRead {
     Pending,
     /// The producer completed and all ring samples have been drained.
     Finished,
+    /// The producer failed before yielding playable PCM; use the configured fallback.
+    Failed,
 }
 
 /// Reads already-converted native PCM without waiting or allocating.
 pub trait PcmStreamReader: Send {
+    /// Start one playback pass without waiting or allocating.
+    fn start(&mut self) {}
+
     /// Copy currently available samples into caller-owned storage.
     fn render(&mut self, output: &mut [f32]) -> PcmRead;
+
+    /// Request producer cancellation without waiting; the worker owns cleanup.
+    fn cancel(&mut self) {}
 }
