@@ -17,7 +17,6 @@ fn media() -> NativeMediaPreparer {
             rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
             Path::new("/usr/bin/ffmpeg"),
             Path::new("/usr/bin/piper"),
-            Path::new("/tmp"),
             1000,
             (reaper, reaper),
         )

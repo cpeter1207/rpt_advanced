@@ -22,6 +22,8 @@ pub enum InboundPolicy {
         /// Delay captured at worker construction; changing it requires a new ring.
         squelch_delay_ms: u64,
     },
+    /// Finite file/speech media: immediate playout, no PLC, and no clock target.
+    Media,
 }
 
 /// Individually current released-ring diagnostics; fields are not transactional.
@@ -90,7 +92,11 @@ impl InboundRing {
         policy: InboundPolicy,
         pointer: *const ffi::rpcr3_descriptor,
     ) -> Result<(InboundProducer, InboundConsumer), RingError> {
-        if input_rate == 0 || input_rate > 48000 {
+        let media_rate = matches!(policy, InboundPolicy::Media);
+        if input_rate == 0
+            || (!media_rate && input_rate > 48000)
+            || (media_rate && !(8000..=192000).contains(&input_rate))
+        {
             return Err(RingError);
         }
         // SAFETY: linked released library guarantees a process-lifetime descriptor header.
@@ -112,7 +118,9 @@ impl InboundRing {
                 || api.ring_destroy.is_none()
                 || api.ring_producer_push.is_none()
                 || api.ring_consumer_render.is_none()
+                || api.ring_consumer_render_sample.is_none()
                 || api.ring_consumer_reset.is_none()
+                || api.ring_output_delay.is_none()
                 || api.ring_observe.is_none()
             {
                 return Err(RingError);
@@ -132,6 +140,7 @@ impl InboundRing {
                     let delay = rate.checked_mul(squelch_delay_ms).ok_or(RingError)? / 1000;
                     (delay, delay, 14400, 0)
                 }
+                InboundPolicy::Media => (0, 0, 8192, 0),
             };
             let config = ffi::rpcr3_config {
                 struct_size: size_of::<ffi::rpcr3_config>() as u32,
@@ -193,6 +202,10 @@ impl InboundProducer {
             Err(RingError)
         }
     }
+    /// Intrinsic resampler delay in native output samples for end-padding finite media.
+    pub fn output_delay_samples(&self) -> Result<u64, RingError> {
+        self.0.output_delay_samples()
+    }
 }
 impl Drop for InboundProducer {
     fn drop(&mut self) {
@@ -234,6 +247,24 @@ impl InboundConsumer {
             Err(RingError)
         }
     }
+    /// Render one native sample without creating a synthetic media sample on shortfall.
+    pub fn render_sample(&mut self) -> Result<Option<f32>, RingError> {
+        let mut sample = 0.0;
+        let mut real = false;
+        // SAFETY: this endpoint is the unique consumer and both outputs are writable.
+        let code = unsafe {
+            (self.0.api.ring_consumer_render_sample.unwrap())(
+                self.0.handle.as_ptr(),
+                &mut sample,
+                &mut real,
+            )
+        };
+        if code == 0 {
+            Ok(real.then_some(sample))
+        } else {
+            Err(RingError)
+        }
+    }
     /// Copy current diagnostics without locking either endpoint.
     pub fn observe(&self) -> Result<Observation, RingError> {
         self.0.observe()
@@ -245,6 +276,14 @@ impl InboundConsumer {
     }
 }
 impl Shared {
+    fn output_delay_samples(&self) -> Result<u64, RingError> {
+        let mut delay = 0;
+        // SAFETY: the ring remains live and delay is writable output storage.
+        let code =
+            unsafe { (self.api.ring_output_delay.unwrap())(self.handle.as_ptr(), &mut delay) };
+        (code == 0).then_some(delay).ok_or(RingError)
+    }
+
     fn observe(&self) -> Result<Observation, RingError> {
         // SAFETY: observation is plain integer ABI storage initialized with caller size.
         let mut observation: Observation = unsafe { std::mem::zeroed() };

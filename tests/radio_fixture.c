@@ -27,7 +27,9 @@ struct fixture {
     bool media;         /**< Delay reception so a prepared ID starts first. */
     bool network;       /**< Repeat phased receive bursts during network tests. */
     bool dtmf;          /**< Generate an on-air connect command, then a disconnect command. */
+    bool ready_logged;  /**< Emit the readiness marker once after required observations. */
     unsigned int phase; /**< Receive phase in a 100-frame network test cycle. */
+    unsigned int media_receive_start; /**< Begin media interruption after first file PCM. */
     unsigned int remote_blocks; /**< Nonzero transmit blocks while local reception is inactive. */
     unsigned int file_blocks;   /**< Recognizable prepared-file blocks before reception. */
     unsigned int morse_blocks;  /**< Negative Morse samples mixed with positive receive PCM. */
@@ -121,10 +123,12 @@ static int call(struct ast_channel *channel, const char *destination, int timeou
  * @param device Clock-owned fixture.
  */
 static void receive_audio(struct fixture *device) {
-    unsigned int begin = device->media ? 10 : 0;
-    device->carrier = device->network ? device->ticks % 100 >= device->phase &&
-                                            device->ticks % 100 < device->phase + 30
-                                      : device->ticks >= begin && device->ticks < begin + 10;
+    device->carrier = device->media ? device->media_receive_start != 0 &&
+                                          device->ticks >= device->media_receive_start &&
+                                          device->ticks < device->media_receive_start + 10
+                      : device->network ? device->ticks % 100 >= device->phase &&
+                                              device->ticks % 100 < device->phase + 30
+                                        : device->ticks < 10;
     if (device->dtmf) {
         device->carrier = true;
     }
@@ -230,9 +234,15 @@ static void *clock_run(void *context) {
         device->unkeys += !keyed && device->keyed;
         device->keyed = keyed != 0;
         inspect_audio(device);
-        if (device->network || device->media ? device->writes == 30
-                                             : device->writes >= 30 && !device->keyed) {
+        if (device->media && device->file_blocks != 0 && device->media_receive_start == 0) {
+            device->media_receive_start = device->ticks;
+        }
+        bool ready = device->media     ? device->file_blocks != 0 && device->morse_blocks != 0
+                     : device->network ? device->writes == 30
+                                       : device->writes >= 30 && !device->keyed;
+        if (ready && !device->ready_logged) {
             ast_log(LOG_NOTICE, "rpt_fixture ready %s\n", ast_channel_name(device->channel));
+            device->ready_logged = true;
             if (!device->network && !device->media) {
                 break;
             }

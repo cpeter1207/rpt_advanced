@@ -664,7 +664,6 @@ unsafe extern "C" fn rptadv_product_start(
                 speech,
                 Path::new("/usr/bin/ffmpeg"),
                 Path::new("/usr/bin/piper"),
-                Path::new("/tmp"),
                 30000,
                 (services.reaper_acquire(), services.reaper_release()),
             )

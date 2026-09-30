@@ -341,10 +341,15 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         unsafe { *count = capacity + 1 };
         0
     }
-    let path = Path::new("unused");
-    let mut adapter = NativeMediaPreparer::new(path, path, 1).unwrap();
-    adapter.file.close_stream = close;
-    adapter.file.read_stream = eof;
+    unsafe extern "C" fn destroy(_: *mut c_void) {}
+    let context = Context {
+        handle: NonNull::new(1_usize as *mut c_void).unwrap(),
+        destroy,
+        read_stream: eof,
+        close_stream: close,
+        open_file: None,
+        open_speech: None,
+    };
     let token = Cancellation::default();
     for (code, expected) in [
         (-1, MediaError::InvalidRequest),
@@ -358,7 +363,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         (0, MediaError::InvalidOutput),
     ] {
         assert_eq!(
-            adapter.file.collect_stream(&token, |output| {
+            context.collect_stream(&token, |output| {
                 unsafe {
                     (*output).handle = 1_usize as *mut c_void;
                     (*output).sample_rate_hz = 48000;
@@ -370,11 +375,11 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     }
     assert_eq!(RELEASES.load(Ordering::Relaxed), 9);
     assert_eq!(
-        adapter.file.collect_stream(&token, |_| 0),
+        context.collect_stream(&token, |_| 0),
         Err(MediaError::InvalidOutput)
     );
     assert_eq!(
-        adapter.file.collect_stream(&token, |output| {
+        context.collect_stream(&token, |output| {
             unsafe {
                 (*output).handle = 1_usize as *mut c_void;
             }
@@ -384,7 +389,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     );
     assert_eq!(RELEASES.load(Ordering::Relaxed), 10);
     assert_eq!(
-        adapter.file.collect_stream(&token, |output| {
+        context.collect_stream(&token, |output| {
             unsafe {
                 (*output).handle = 1_usize as *mut c_void;
                 (*output).sample_rate_hz = 48000;
@@ -393,9 +398,12 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         }),
         Err(MediaError::InvalidOutput)
     );
-    adapter.file.read_stream = bad_count;
+    let bad_context = Context {
+        read_stream: bad_count,
+        ..context
+    };
     assert_eq!(
-        adapter.file.collect_stream(&token, |output| {
+        bad_context.collect_stream(&token, |output| {
             unsafe {
                 (*output).handle = 1_usize as *mut c_void;
                 (*output).sample_rate_hz = 48000;
@@ -452,8 +460,8 @@ fn descriptor_file_decode_uses_host_reaper_and_retains_no_temporary_files() {
         }),
         Err(MediaError::Unavailable)
     );
-    assert_eq!(ACQUIRED.load(Ordering::Relaxed), 2);
-    assert_eq!(RELEASED.load(Ordering::Relaxed), 2);
+    assert_eq!(ACQUIRED.load(Ordering::Relaxed), 1);
+    assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
     token.cancel();
     assert_eq!(
         adapter.file(&FileRequest {

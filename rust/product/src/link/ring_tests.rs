@@ -43,6 +43,29 @@ fn local_shortfall_is_silence_without_concealment_or_plc_delay() {
 }
 
 #[test]
+fn finite_media_ring_accepts_source_rates_above_native_without_latency_target_or_plc() {
+    let (mut producer, mut consumer) = InboundRing::open(96000, InboundPolicy::Media).unwrap();
+    let observation = consumer.observe().unwrap();
+    assert_eq!(observation.reserve_samples, 0);
+    assert_eq!(observation.target_samples, 0);
+    assert_eq!(observation.capacity_samples, 8192);
+    assert_eq!(producer.write(&[0.25; 2048]), Ok(2048));
+
+    let mut rendered = Vec::new();
+    for _ in 0..2048 {
+        if let Some(sample) = consumer.render_sample().unwrap() {
+            rendered.push(sample);
+        }
+    }
+    assert!(rendered.len() >= 900);
+    assert!(
+        rendered[256..]
+            .iter()
+            .all(|sample| (*sample - 0.25).abs() < 0.01)
+    );
+}
+
+#[test]
 fn peer_playout_has_plc_lookahead_without_counting_it_as_loss() {
     let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Peer).unwrap();
     assert_eq!(producer.write(&[0.25; 2048]), Ok(2048));
@@ -104,11 +127,14 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
         for rate in [0, 48001] {
             assert!(InboundRing::open(rate, InboundPolicy::Peer).is_err());
         }
+        for rate in [0, 7999, 192001] {
+            assert!(InboundRing::open(rate, InboundPolicy::Media).is_err());
+        }
         for squelch_delay_ms in [301, u64::MAX] {
             assert!(InboundRing::open(48000, InboundPolicy::Local { squelch_delay_ms }).is_err());
         }
         let original = *ffi::rpcr3_descriptor();
-        for case in 0..12 {
+        for case in 0..14 {
             let mut api = original;
             match case {
                 0 => api.struct_size = 8,
@@ -122,7 +148,9 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
                 8 => api.ring_observe = None,
                 9 => api.ring_create = Some(failed_create),
                 10 => api.ring_create = Some(empty_create),
-                _ => api.ring_consumer_reset = None,
+                11 => api.ring_consumer_reset = None,
+                12 => api.ring_consumer_render_sample = None,
+                _ => api.ring_output_delay = None,
             }
             assert!(
                 InboundRing::from_descriptor(8000, InboundPolicy::Peer, Box::leak(Box::new(api)))

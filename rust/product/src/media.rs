@@ -2,21 +2,25 @@
 
 use crate::abi as ffi;
 use rpt_advanced_core::media::{
-    Cancellation, FileRequest, MediaError, PreparedAudio, SpeechRequest,
+    Cancellation, FileRequest, MediaError, PreparedAudio, SpeechRequest, StationMediaSession,
 };
 use std::{
     ffi::{CStr, CString, c_void},
     mem::size_of,
     path::Path,
     ptr::{self, NonNull},
+    sync::Arc,
 };
+
+#[path = "media/worker.rs"]
+mod worker;
 
 /// Independent file and speech owners, composed with the released native-rate converter.
 pub struct NativeMediaPreparer {
     file_api: FileDescriptor,
     speech_api: SpeechDescriptor,
-    file: Context,
-    speech: Context,
+    file: Arc<Context>,
+    speech: Arc<Context>,
 }
 /// File capability descriptor selected by the composition loader.
 pub type FileDescriptor = ffi::rptadv_file_descriptor;
@@ -34,7 +38,27 @@ struct Context {
         *mut usize,
     ) -> i32,
     close_stream: unsafe extern "C" fn(*mut c_void),
+    open_file: Option<
+        unsafe extern "C" fn(
+            *const c_void,
+            *const std::ffi::c_char,
+            *const ffi::rptadv_media_cancellation,
+            *mut ffi::rptadv_media_stream,
+        ) -> i32,
+    >,
+    open_speech: Option<
+        unsafe extern "C" fn(
+            *const c_void,
+            *const ffi::rptadv_media_speech_request,
+            *const ffi::rptadv_media_cancellation,
+            *mut ffi::rptadv_media_stream,
+        ) -> i32,
+    >,
 }
+// SAFETY: descriptor validation guarantees independent streams are concurrency-safe; the
+// context handle is immutable and is destroyed only after all session Arcs are released.
+unsafe impl Send for Context {}
+unsafe impl Sync for Context {}
 // SAFETY: each validated ABI permits concurrent independent requests. Context destruction
 // requires exclusive ownership and cannot race a method borrowing this owner.
 unsafe impl Send for NativeMediaPreparer {}
@@ -105,6 +129,8 @@ impl NativeMediaPreparer {
             destroy: file_api.destroy.unwrap(),
             read_stream: file_api.read_stream.unwrap(),
             close_stream: file_api.close_stream.unwrap(),
+            open_file: file_api.open_file,
+            open_speech: None,
         };
         config.executable = piper.as_ptr();
         handle = ptr::null_mut();
@@ -115,12 +141,14 @@ impl NativeMediaPreparer {
             destroy: speech_api.destroy.unwrap(),
             read_stream: speech_api.read_stream.unwrap(),
             close_stream: speech_api.close_stream.unwrap(),
+            open_file: None,
+            open_speech: speech_api.open_speech,
         };
         Ok(Self {
             file_api,
             speech_api,
-            file,
-            speech,
+            file: Arc::new(file),
+            speech: Arc::new(speech),
         })
     }
 }
@@ -200,6 +228,20 @@ impl rpt_advanced_core::runtime::NativeFilePreparer for NativeMediaPreparer {
                 )
             }
         })
+    }
+
+    fn station(
+        &self,
+        node: &str,
+        generation: u64,
+    ) -> Result<Option<Box<dyn StationMediaSession>>, MediaError> {
+        worker::StationSession::new(
+            node.to_owned(),
+            generation,
+            Arc::clone(&self.file),
+            Arc::clone(&self.speech),
+        )
+        .map(|session| Some(Box::new(session) as Box<dyn StationMediaSession>))
     }
 }
 impl rpt_advanced_core::runtime::NativeSpeechPreparer for NativeMediaPreparer {

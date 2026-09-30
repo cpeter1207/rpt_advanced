@@ -122,11 +122,18 @@ This is source-aware signaling policy, not an inference from physical PTT
 alone, and it applies equally to native generated CTCSS and profile-selected
 external CTCSS enable.
 
-Exactly one reserved station-telemetry audio worker owns speech synthesis
-and sound-file playout, because only one announcement source may play at a
-time. It writes decoded source samples at their original rate to the
-telemetry-program ring after converting its source representation to canonical
-`f32`; that ring produces the native-rate samples used by the mixer.
+One station-telemetry audio worker per node generation owns speech synthesis
+and sound-file decoding, because only one announcement source may play at a
+time. The worker exists only when that generation has streamed media jobs. It
+opens and reads one source at a time, pushing bounded canonical-`f32` chunks to
+the telemetry-program ring as decoding or synthesis proceeds. The ring performs
+source-rate conversion and produces native-rate samples. A bounded,
+generation-tagged handoff publishes its consumer to playback; `Playback::Render`
+reads only available samples and never waits for the producer. Prepared provider
+streams are canceled and retired away from the audio callback. If a source fails
+before producing samples, configured courtesy tone and then Morse fallback
+remain eligible; a failure after audio has started ends that source without
+replaying its fallback.
 
 Each audio worker has an **RF-signaling edge publisher** for its owned state:
 receive qualification/decoder status in local receive, and physical PTT and

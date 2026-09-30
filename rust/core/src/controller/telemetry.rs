@@ -51,8 +51,19 @@ impl PreparedMedia {
         text: &str,
         settings: MorseSettings,
     ) -> Result<Self, ControllerError> {
-        Playback::new_stream(
+        Self::new_stream_with_tone(stream, None, text, settings)
+    }
+
+    /// Prepare streamed PCM with a generated-tone and Morse failure fallback.
+    pub(crate) fn new_stream_with_tone(
+        stream: Box<dyn PcmStreamReader>,
+        tone: Option<ToneSequence>,
+        text: &str,
+        settings: MorseSettings,
+    ) -> Result<Self, ControllerError> {
+        Playback::new_stream_with_tone(
             stream,
+            tone,
             text,
             settings.speed_wpm,
             settings.frequency_hz,

@@ -69,6 +69,51 @@ fn failed_stream_uses_the_ready_morse_fallback() {
 }
 
 #[test]
+fn failed_stream_uses_courtesy_tone_before_morse_fallback() {
+    use crate::audio::ToneSequence;
+
+    let failed = Arc::new(AtomicBool::new(false));
+    let mut tone = ToneSequence::new("500/1", -6).unwrap();
+    let mut expected = [0.0; 8];
+    assert_eq!(tone.render(&mut expected), expected.len());
+    let playback_tone = ToneSequence::new("500/1", -6).unwrap();
+    let mut playback = Playback::new_stream_with_tone(
+        Box::new(FailedStream(failed)),
+        Some(playback_tone),
+        "E",
+        20,
+        1_000.0,
+        -6,
+        false,
+    )
+    .unwrap();
+    let mut output = [0.0; 8];
+
+    assert_eq!(playback.render(false, &mut output), output.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn failed_stream_without_tone_uses_morse_fallback() {
+    let mut playback = Playback::new_stream(
+        Box::new(FailedStream(Arc::new(AtomicBool::new(false)))),
+        "E",
+        20,
+        1_000.0,
+        -6,
+        false,
+    )
+    .unwrap();
+    let mut expected = [0.0; 64];
+    let mut morse = crate::audio::MorseRenderer::new("E", 20, 1_000.0, -6).unwrap();
+    morse.render(&mut expected);
+    let mut actual = [0.0; 64];
+
+    assert_eq!(playback.render(false, &mut actual), actual.len());
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn receive_interrupt_cancels_stream_before_morse_fallback() {
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut playback = Playback::new_stream(

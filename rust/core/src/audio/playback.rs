@@ -71,6 +71,27 @@ impl Playback {
         morse_level_db: i8,
         receiving: bool,
     ) -> Result<Self, PlaybackError> {
+        Self::new_stream_with_tone(
+            stream,
+            None,
+            morse_text,
+            morse_speed_wpm,
+            morse_frequency_hz,
+            morse_level_db,
+            receiving,
+        )
+    }
+
+    /// Construct streamed playback with a generated tone before its Morse fallback.
+    pub(crate) fn new_stream_with_tone(
+        stream: Box<dyn PcmStreamReader>,
+        tone: Option<ToneSequence>,
+        morse_text: &str,
+        morse_speed_wpm: u32,
+        morse_frequency_hz: f32,
+        morse_level_db: i8,
+        receiving: bool,
+    ) -> Result<Self, PlaybackError> {
         let morse = MorseRenderer::new(
             morse_text,
             morse_speed_wpm,
@@ -78,7 +99,7 @@ impl Playback {
             morse_level_db,
         )
         .map_err(|_| PlaybackError)?;
-        Self::new_with_sources(None, Some(stream), None, morse, receiving)
+        Self::new_with_sources(None, Some(stream), tone, morse, receiving)
     }
 
     fn new_with_sources(
@@ -156,9 +177,14 @@ impl Playback {
                     self.using_stream = false;
                     self.stream_started = false;
                     self.waiting_for_stream = false;
-                    let count = self.morse.render(output);
-                    self.finished = count < output.len();
-                    count
+                    self.using_tone = self.tone.is_some();
+                    if self.using_tone {
+                        self.render_tone(output)
+                    } else {
+                        let count = self.morse.render(output);
+                        self.finished = count < output.len();
+                        count
+                    }
                 }
                 Some(PcmRead::Finished) | None => {
                     self.using_stream = false;
@@ -168,22 +194,26 @@ impl Playback {
                 }
             }
         } else if self.using_tone {
-            match self.tone.as_mut() {
-                Some(tone) => {
-                    let count = tone.render(output);
-                    self.finished = tone.is_finished();
-                    count
-                }
-                None => {
-                    self.finished = true;
-                    0
-                }
-            }
+            self.render_tone(output)
         } else {
-            let count = self.morse.render(output);
-            self.finished = count < output.len();
-            count
+            self.render_fallback(output)
         }
+    }
+
+    fn render_tone(&mut self, output: &mut [f32]) -> usize {
+        let tone = self
+            .tone
+            .as_mut()
+            .expect("tone playback requires a configured tone");
+        let count = tone.render(output);
+        self.finished = tone.is_finished();
+        count
+    }
+
+    fn render_fallback(&mut self, output: &mut [f32]) -> usize {
+        let count = self.morse.render(output);
+        self.finished = count < output.len();
+        count
     }
 
     /// Restart this media item without allocating or replacing its fallback.

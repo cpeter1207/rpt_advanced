@@ -19,13 +19,11 @@ struct rptadv_speech_descriptor {
     /** @brief Destroy after all preparations stop; null is harmless. */
     void (*destroy)(void *context);
     /** @brief Open a literal speech stream at source rate. */
-    int32_t (*open_speech)(const void *context,
-                              const struct rptadv_media_speech_request *request,
-                              const struct rptadv_media_cancellation *cancellation,
-                              struct rptadv_media_stream *output);
-    /** @brief Read on the media worker; may wait for data, zero count means clean EOF. */
-    int32_t (*read_stream)(void *handle,
+    int32_t (*open_speech)(const void *context, const struct rptadv_media_speech_request *request,
                            const struct rptadv_media_cancellation *cancellation,
+                           struct rptadv_media_stream *output);
+    /** @brief Read on the media worker; may wait for data, zero count means clean EOF. */
+    int32_t (*read_stream)(void *handle, const struct rptadv_media_cancellation *cancellation,
                            float *output, size_t capacity, size_t *read_count);
     /** @brief Close this provider's stream exactly once; null is harmless. */
     void (*close_stream)(void *handle);

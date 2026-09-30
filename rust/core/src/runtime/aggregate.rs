@@ -66,6 +66,7 @@ struct ControlState<C: Send> {
     adapter: C,
     adapter_exposed: bool,
     telemetry: ControllerControl,
+    media_session: Option<Box<dyn crate::media::StationMediaSession>>,
     digits: DtmfDispatcher,
     activity: ActivitySnapshot,
     started_ms: u64,
@@ -77,6 +78,12 @@ impl<C: Send> ControlState<C> {
             .last_sample()
             .map(|sample| self.started_ms.saturating_add(sample / 48))
             .or(self.prior_activity_ms)
+    }
+}
+impl<C: Send> Drop for ControlState<C> {
+    fn drop(&mut self) {
+        // Sessions join their station producer here, after generation quiescence on control.
+        drop(self.media_session.take());
     }
 }
 /// Stable per-node control identity, retained across successful generation swaps.
@@ -307,6 +314,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             adapter: prepared.control,
             adapter_exposed: false,
             telemetry,
+            media_session: None,
             digits,
             activity,
             started_ms: now_ms,
@@ -449,8 +457,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
             if links.requires_civil_time() && clock.civil.is_none_or(|(_, second)| second >= 60) {
                 return Err(RuntimeError::Clock);
             }
-            let (controller, telemetry, status) =
-                prepare::controller(&document, &id, &settings, media)?;
+            let (controller, telemetry, status, media_session) =
+                prepare::controller(&document, &id, &settings, media, generation_id)?;
             let activity = controller.activity();
             let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting);
             let prepared = adapter(name, &settings)?;
@@ -483,6 +491,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 adapter: prepared.control,
                 adapter_exposed: false,
                 telemetry,
+                media_session,
                 digits,
                 activity,
                 started_ms: clock.now_ms,

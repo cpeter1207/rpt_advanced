@@ -33,12 +33,12 @@ enum rptadv_media_status {
 
 /** @brief Immutable local execution settings copied during create. */
 struct rptadv_media_config {
-    uint32_t struct_size;            /**< Complete structure size. */
-    uint32_t abi_version;            /**< Required ABI version. */
-    const char *executable;          /**< Selected executable name/path; never a shell command. */
-    uint32_t timeout_ms;             /**< Nonzero budget for each child, normally 30000. */
-    void (*reaper_acquire)(void);    /**< Optional host exclusion before spawn. */
-    void (*reaper_release)(void);    /**< Paired restoration after reap/failure. */
+    uint32_t struct_size;         /**< Complete structure size. */
+    uint32_t abi_version;         /**< Required ABI version. */
+    const char *executable;       /**< Selected executable name/path; never a shell command. */
+    uint32_t timeout_ms;          /**< Nonzero budget for each child, normally 30000. */
+    void (*reaper_acquire)(void); /**< Optional host exclusion before spawn. */
+    void (*reaper_release)(void); /**< Paired restoration after reap/failure. */
 };
 
 /** @brief Borrowed request cancellation. Callback must not block or unwind. */

@@ -1,6 +1,7 @@
 //! Offline media preparation port. Selection and fallback belong to the controller.
 
-use std::path::Path;
+use crate::audio::PcmStreamReader;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -41,6 +42,37 @@ pub struct SpeechRequest<'a> {
     pub level_db: i32,
     /// Cancellation scoped to this preparation.
     pub cancellation: &'a Cancellation,
+}
+
+/// Owned source chain registered with a station media worker before it starts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaSource {
+    /// Optional file attempted before speech.
+    pub file: Option<PathBuf>,
+    /// Optional speech fallback after file-open or pre-output failure.
+    pub speech: Option<SpeechSource>,
+}
+
+/// Owned Piper-compatible speech request kept off audio callbacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechSource {
+    /// Literal text.
+    pub text: String,
+    /// Local speech model path.
+    pub model: PathBuf,
+    /// Speed in percent.
+    pub speed_percent: u32,
+    /// Speech gain in dB.
+    pub level_db: i32,
+}
+
+/// Generation-owned builder/control for one serialized station media worker.
+pub trait StationMediaSession: Send {
+    /// Register an immutable source chain and return its callback-safe reader.
+    fn register(&mut self, source: MediaSource) -> Result<Box<dyn PcmStreamReader>, MediaError>;
+
+    /// Start the single worker after all source chains are registered.
+    fn start(&mut self) -> Result<(), MediaError>;
 }
 
 /// Immutable mono normalized F32 PCM at its decoded source rate.
