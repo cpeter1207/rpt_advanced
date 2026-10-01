@@ -70,6 +70,45 @@ fn pending_media_does_not_key_transmitter_while_producer_starts() {
     assert!(!node.keyed);
 }
 
+#[test]
+fn pending_disconnect_status_does_not_hold_ptt_while_courtesy_stream_waits() {
+    let courtesy =
+        PreparedMedia::new_stream(Box::new(PendingMedia), "E", MorseSettings::default()).unwrap();
+    let settings = ControllerSettings {
+        courtesy_delay_ms: 0,
+        ..ControllerSettings::default()
+    };
+    let (mut node, mut control) = NodeController::new(
+        settings,
+        vec![],
+        vec![],
+        CourtesySettings {
+            link: Some(courtesy),
+            ..CourtesySettings::default()
+        },
+    )
+    .unwrap();
+    control.queue_status("DISCONNECTED", None).unwrap();
+    node.link_unkeyed("506316", "", false);
+
+    let mut output = [0.0; 12_001];
+    assert!(!node.process_audio(false, false, &[], &mut output));
+    assert!(output.iter().all(|sample| *sample == 0.0));
+    let diagnostics = node.transmit_diagnostics();
+    assert_eq!(diagnostics.source, TransmitSource::Courtesy);
+    assert!(diagnostics.status_pending);
+    assert!(diagnostics.status_ready);
+    assert!(diagnostics.stream_waiting);
+    assert!(diagnostics.stream_wait_ms >= 249);
+    assert!(!diagnostics.transmit_demand);
+    assert!(!diagnostics.ptt_requested);
+    assert!(!diagnostics.ptt_keyed);
+    assert_eq!(
+        TransmitDiagnostics::decode(diagnostics.encode()),
+        diagnostics
+    );
+}
+
 struct TestPeerInput {
     signals: crate::link::PeerSignals,
     sample: Option<f32>,

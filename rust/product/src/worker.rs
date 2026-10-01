@@ -8,6 +8,7 @@ use crate::{
     services::{PeerIo, Radio},
 };
 use rpt_advanced_core::{
+    controller::TransmitDiagnostics,
     link::LinkAudio,
     runtime::{
         OwnedReceiveOwner, OwnedTransmitOwner, RuntimeAudioOwners, RuntimeTransmit,
@@ -66,6 +67,7 @@ pub struct RadioStatus {
     carrier: Arc<AtomicU64>,
     dtmf: Arc<AtomicBool>,
     transmit_keyed: Arc<AtomicBool>,
+    transmit_diagnostics: Arc<AtomicU64>,
     handoff: Arc<LocalHandoff>,
 }
 #[derive(Default)]
@@ -88,6 +90,41 @@ impl RadioStatus {
     }
     pub(crate) fn transmit_keyed(&self) -> bool {
         self.transmit_keyed.load(Ordering::Acquire)
+    }
+    fn publish_transmit_diagnostics(&self, diagnostics: TransmitDiagnostics) {
+        self.transmit_diagnostics
+            .store(diagnostics.encode(), Ordering::Release);
+    }
+    fn transmit_diagnostics_text(&self) -> String {
+        let diagnostics =
+            TransmitDiagnostics::decode(self.transmit_diagnostics.load(Ordering::Acquire));
+        let cause = if diagnostics.ptt_keyed && diagnostics.transmit_demand {
+            "active"
+        } else if diagnostics.ptt_keyed {
+            "hang"
+        } else if diagnostics.ptt_requested {
+            "timeout"
+        } else if diagnostics.transmit_demand {
+            "blocked"
+        } else {
+            "idle"
+        };
+        format!(
+            "  tx: cause={cause} ptt={} request={} demand={} source={} rx={} link={} stream_wait={} stream_wait_ms={} telemetry_sample={} status_pending={} status_ready={} courtesy_pending={} courtesy_ready={}",
+            u8::from(diagnostics.ptt_keyed),
+            u8::from(diagnostics.ptt_requested),
+            u8::from(diagnostics.transmit_demand),
+            diagnostics.source.label(),
+            u8::from(diagnostics.receiving),
+            u8::from(diagnostics.linked),
+            u8::from(diagnostics.stream_waiting),
+            diagnostics.stream_wait_ms,
+            u8::from(diagnostics.telemetry_sample),
+            u8::from(diagnostics.status_pending),
+            u8::from(diagnostics.status_ready),
+            u8::from(diagnostics.courtesy_pending),
+            u8::from(diagnostics.courtesy_ready),
+        )
     }
     fn update(&self, receiving: bool, now_ms: u64) {
         if self.carrier.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
@@ -328,10 +365,16 @@ unsafe fn transmit(context: *mut c_void, samples: &mut [f32], keyed: &mut u32) -
     {
         Ok(value) => {
             *keyed = u32::from(value);
+            context
+                .status
+                .publish_transmit_diagnostics(transmit.controller.transmit_diagnostics());
             0
         }
         Err(_) => {
             samples.fill(0.0);
+            context
+                .status
+                .publish_transmit_diagnostics(TransmitDiagnostics::default());
             -1
         }
     }
@@ -459,9 +502,13 @@ impl RadioWorker {
     }
     /// Control-only snapshot of this worker's actual local receive ring.
     pub(crate) fn local_status_text(&self) -> String {
-        self.observer.observe().map_or_else(
+        let receive = self.observer.observe().map_or_else(
             |_| "  local-rx: observation failed".to_owned(),
             |ring| self.format_status(&ring),
+        );
+        format!(
+            "{receive}\n{}",
+            self.transmit.status.transmit_diagnostics_text()
         )
     }
     /// Record changed fault counters at most every five seconds, never from audio.

@@ -17,6 +17,112 @@ pub use telemetry::{
 use telemetry::{Source, TelemetryPlanner};
 use timeout::TimeoutPolicy;
 
+/// Playback selected by the last native transmit step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TransmitSource {
+    /// No serialized playback owns the transmitter.
+    #[default]
+    None,
+    /// Command or link-lifecycle status response.
+    Status,
+    /// Receiver or link courtesy media.
+    Courtesy,
+    /// Periodic or first-key identifier.
+    Identifier,
+    /// Scheduled announcement.
+    Announcement,
+}
+
+impl TransmitSource {
+    /// Stable short label for diagnostic output.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Status => "status",
+            Self::Courtesy => "courtesy",
+            Self::Identifier => "identifier",
+            Self::Announcement => "announcement",
+        }
+    }
+}
+
+/// Last transmit decision, packed atomically for control-side diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransmitDiagnostics {
+    /// Local receiver was qualified.
+    pub receiving: bool,
+    /// At least one link peer supplied qualified audio.
+    pub linked: bool,
+    /// A response remains queued.
+    pub status_pending: bool,
+    /// A queued response has passed its unkey delay.
+    pub status_ready: bool,
+    /// A courtesy item remains queued.
+    pub courtesy_pending: bool,
+    /// A courtesy item reached its configured delay.
+    pub courtesy_ready: bool,
+    /// Playback currently selected by the controller.
+    pub source: TransmitSource,
+    /// Selected stream has no PCM available yet.
+    pub stream_waiting: bool,
+    /// Continuous wait for PCM, capped to 65.535 seconds.
+    pub stream_wait_ms: u16,
+    /// This native step produced at least one telemetry sample.
+    pub telemetry_sample: bool,
+    /// A live source or playable media currently requests transmit.
+    pub transmit_demand: bool,
+    /// Duplex/hang-time policy currently requests PTT.
+    pub ptt_requested: bool,
+    /// Final PTT state after transmitter timeout policy.
+    pub ptt_keyed: bool,
+}
+
+impl TransmitDiagnostics {
+    /// Encode this snapshot into one lock-free atomic word.
+    pub const fn encode(self) -> u64 {
+        let flags = (self.receiving as u64)
+            | ((self.linked as u64) << 1)
+            | ((self.status_pending as u64) << 2)
+            | ((self.status_ready as u64) << 3)
+            | ((self.courtesy_pending as u64) << 4)
+            | ((self.courtesy_ready as u64) << 5)
+            | ((self.stream_waiting as u64) << 6)
+            | ((self.telemetry_sample as u64) << 7)
+            | ((self.transmit_demand as u64) << 8)
+            | ((self.ptt_requested as u64) << 9)
+            | ((self.ptt_keyed as u64) << 10);
+        flags | ((self.source as u64) << 16) | ((self.stream_wait_ms as u64) << 24)
+    }
+
+    /// Decode a snapshot published by [`Self::encode`].
+    pub const fn decode(value: u64) -> Self {
+        let flags = value as u16;
+        let source = match ((value >> 16) & 0xff) as u8 {
+            1 => TransmitSource::Status,
+            2 => TransmitSource::Courtesy,
+            3 => TransmitSource::Identifier,
+            4 => TransmitSource::Announcement,
+            _ => TransmitSource::None,
+        };
+        Self {
+            receiving: flags & (1 << 0) != 0,
+            linked: flags & (1 << 1) != 0,
+            status_pending: flags & (1 << 2) != 0,
+            status_ready: flags & (1 << 3) != 0,
+            courtesy_pending: flags & (1 << 4) != 0,
+            courtesy_ready: flags & (1 << 5) != 0,
+            stream_waiting: flags & (1 << 6) != 0,
+            telemetry_sample: flags & (1 << 7) != 0,
+            transmit_demand: flags & (1 << 8) != 0,
+            ptt_requested: flags & (1 << 9) != 0,
+            ptt_keyed: flags & (1 << 10) != 0,
+            source,
+            stream_wait_ms: ((value >> 24) & 0xffff) as u16,
+        }
+    }
+}
+
 fn samples(ms: u64) -> u64 {
     ms.saturating_mul(48)
 }
@@ -87,6 +193,8 @@ pub struct NodeController {
     release_hang: u64,
     release_pending: bool,
     suppress_release: bool,
+    stream_wait_started: Option<u64>,
+    transmit_diagnostics: TransmitDiagnostics,
 }
 
 impl NodeController {
@@ -180,6 +288,8 @@ impl NodeController {
                 release_hang: 0,
                 release_pending: false,
                 suppress_release: false,
+                stream_wait_started: None,
+                transmit_diagnostics: TransmitDiagnostics::default(),
             },
             control,
         ))
@@ -189,6 +299,12 @@ impl NodeController {
     #[must_use]
     pub fn activity(&self) -> ActivitySnapshot {
         self.activity.clone()
+    }
+
+    /// Copy the last transmit decision without entering controller ownership.
+    #[must_use]
+    pub const fn transmit_diagnostics(&self) -> TransmitDiagnostics {
+        self.transmit_diagnostics
     }
 
     /// Cancel only the resumed direct peer's pending courtesy; active playback continues.
@@ -273,6 +389,30 @@ impl NodeController {
             };
             self.now.saturating_sub(due) >= samples(maximum)
         })
+    }
+
+    fn source_is_streaming(&self, source: Option<Source>) -> bool {
+        match source {
+            Some(Source::Status) => self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|media| media.0.is_streaming()),
+            Some(Source::Courtesy(index)) => self
+                .courtesy
+                .media
+                .get(index)
+                .is_some_and(|media| media.0.is_streaming()),
+            Some(Source::Identifier(index)) => self
+                .ids
+                .get(index)
+                .is_some_and(|id| id.media.0.is_streaming()),
+            Some(Source::Announcement(index)) => self
+                .announcements
+                .get(index)
+                .is_some_and(|announcement| announcement.announcement.media.0.is_streaming()),
+            None => false,
+        }
     }
 
     fn step(&mut self, receiving: bool, linked: bool, input: Option<f32>, link_sample: f32) -> f32 {
@@ -361,34 +501,14 @@ impl NodeController {
             self.identifiers
                 .select(&self.rules, self.now, receiving, self.settings.full_duplex);
         let mut ready = selected.is_some_and(|id| self.id_ready(id, busy)) && after_hang;
-        let active_stream = match active_before {
-            Some(Source::Status) => self
-                .telemetry
-                .status
-                .as_ref()
-                .is_some_and(|m| m.0.is_streaming()),
-            Some(Source::Courtesy(index)) => self
-                .courtesy
-                .media
-                .get(index)
-                .is_some_and(|m| m.0.is_streaming()),
-            Some(Source::Identifier(index)) => self
-                .ids
-                .get(index)
-                .is_some_and(|id| id.media.0.is_streaming()),
-            Some(Source::Announcement(index)) => self
-                .announcements
-                .get(index)
-                .is_some_and(|a| a.announcement.media.0.is_streaming()),
-            None => false,
-        };
+        let active_stream = self.source_is_streaming(self.telemetry.active);
         let selected_stream = selected
             .and_then(|index| self.ids.get(index))
             .is_some_and(|id| id.media.0.is_streaming());
         let demand = linked
             || (self.settings.full_duplex && receiving)
             || (self.telemetry.active.is_some() && !active_stream)
-            || courtesy_ready
+            || (courtesy_ready && !active_stream)
             // A ready status has already become active above when transmission is allowed.
             || (input.is_some() && ready && !selected_stream)
             || (self.release_pending && announcement_due.is_some());
@@ -428,6 +548,7 @@ impl NodeController {
             }
         }
         let rendered_source = self.telemetry.active;
+        let active_stream = self.source_is_streaming(rendered_source);
         let playback = match rendered_source {
             Some(Source::Status) => self.telemetry.status.as_mut().map(|m| &mut m.0),
             Some(Source::Courtesy(index)) => self.courtesy.media.get_mut(index).map(|m| &mut m.0),
@@ -488,13 +609,24 @@ impl NodeController {
             self.release_pending = false;
         }
         let telemetry_audio = made != 0;
+        if waiting_for_media {
+            self.stream_wait_started.get_or_insert(self.now);
+        } else {
+            self.stream_wait_started = None;
+        }
+        let stream_wait_ms = self
+            .stream_wait_started
+            .map_or(0, |start| self.now.saturating_sub(start) / 48)
+            .min(u64::from(u16::MAX)) as u16;
         let short_tail = matches!(
             rendered_source,
             Some(Source::Identifier(_) | Source::Announcement(_))
         );
         let other =
             linked || (self.settings.full_duplex && receiving) || courtesy_ready || status_ready;
-        let transmit = other
+        let transmit = linked
+            || (self.settings.full_duplex && receiving)
+            || (courtesy_ready && !active_stream)
             || telemetry_audio
             || (self.telemetry.active.is_some() && !waiting_for_media && !active_stream);
         let hang = if short_tail && !other {
@@ -521,6 +653,27 @@ impl NodeController {
         if !self.keyed {
             self.duplex = DuplexPolicy::default();
         }
+        self.transmit_diagnostics = TransmitDiagnostics {
+            receiving,
+            linked,
+            status_pending: pending_status,
+            status_ready,
+            courtesy_pending: self.courtesy.pending(),
+            courtesy_ready,
+            source: match rendered_source {
+                Some(Source::Status) => TransmitSource::Status,
+                Some(Source::Courtesy(_)) => TransmitSource::Courtesy,
+                Some(Source::Identifier(_)) => TransmitSource::Identifier,
+                Some(Source::Announcement(_)) => TransmitSource::Announcement,
+                None => TransmitSource::None,
+            },
+            stream_waiting: waiting_for_media,
+            stream_wait_ms,
+            telemetry_sample: telemetry_audio,
+            transmit_demand: transmit,
+            ptt_requested: requested,
+            ptt_keyed: self.keyed,
+        };
         if transmit && may_transmit {
             self.last_audio = self.now;
             self.release_hang = hang;
