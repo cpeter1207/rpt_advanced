@@ -2,10 +2,15 @@ use super::*;
 use crate::{
     command::LinkAction,
     config::{ConfigDocument, ResolvedNodeSettings},
-    media::{FileRequest, MediaError, PreparedAudio, SpeechRequest},
+    media::{
+        FileRequest, MediaError, MediaSource, PreparedAudio, SpeechRequest, StationMediaSession,
+    },
     schedule::{CivilTime, Weekday},
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 struct Media;
 impl NativeFilePreparer for Media {
@@ -284,6 +289,79 @@ fn peer_set_publication_preserves_live_controller_and_does_not_force_past_a_haza
     assert_eq!(receive.acquire_pair(&mut transmit).unwrap().id(), 3);
     runtime.detached("1000", 2);
     assert!(runtime.stop(1004));
+}
+
+struct PendingStream;
+impl crate::audio::PcmStreamReader for PendingStream {
+    fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+        crate::audio::PcmRead::Pending
+    }
+}
+
+struct StreamingStation(Arc<AtomicUsize>);
+impl StationMediaSession for StreamingStation {
+    fn register(
+        &mut self,
+        _: MediaSource,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        Ok(Box::new(PendingStream))
+    }
+
+    fn start(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
+impl Drop for StreamingStation {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct StreamingMedia(Arc<AtomicUsize>);
+impl NativeFilePreparer for StreamingMedia {
+    fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+
+    fn station(&self, _: &str, _: u64) -> Result<Option<Box<dyn StationMediaSession>>, MediaError> {
+        Ok(Some(Box::new(StreamingStation(Arc::clone(&self.0)))))
+    }
+}
+impl NativeSpeechPreparer for StreamingMedia {
+    fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+
+#[test]
+fn adapter_replacement_keeps_stream_producer_with_live_controller() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let media = StreamingMedia(Arc::clone(&drops));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[courtesy 1000 link]\ninput=link\nspeech_text=Connected\nmorse_text=L\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    let settings = runtime.settings("1000").unwrap().clone();
+    assert_eq!(
+        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        Ok(2)
+    );
+
+    assert!(runtime.detached("1000", 1));
+    runtime.reclaim();
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert!(runtime.stop(1002));
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
 #[test]

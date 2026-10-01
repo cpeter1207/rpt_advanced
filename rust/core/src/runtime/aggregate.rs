@@ -321,6 +321,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             prior_activity_ms: None,
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
+        std::mem::swap(&mut next.media_session, &mut node.control.media_session);
         std::mem::swap(&mut next.digits, &mut node.control.digits);
         std::mem::swap(&mut next.activity, &mut node.control.activity);
         std::mem::swap(&mut next.started_ms, &mut node.control.started_ms);
