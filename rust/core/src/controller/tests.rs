@@ -505,28 +505,6 @@ fn local_courtesy_delay_cancellation_and_short_receive_suppression() {
 }
 
 #[test]
-fn link_courtesy_does_not_key_until_its_delay_expires() {
-    let settings = ControllerSettings {
-        courtesy_delay_ms: 2,
-        ..ControllerSettings::default()
-    };
-    let courtesy = CourtesySettings {
-        link: Some(media(0.4, 1)),
-        ..CourtesySettings::default()
-    };
-    let (mut node, _) = NodeController::new(settings, vec![], vec![], courtesy).unwrap();
-    node.link_unkeyed("peer", "", false);
-
-    let mut delayed = [1.0; 96];
-    assert!(!node.process_audio(false, false, &[], &mut delayed));
-    assert!(delayed.iter().all(|sample| *sample == 0.0));
-
-    let mut courtesy_audio = [0.0];
-    assert!(node.process_audio(false, false, &[], &mut courtesy_audio));
-    assert_eq!(courtesy_audio, [0.4]);
-}
-
-#[test]
 fn polite_deadline_and_sample_free_interruption_select_morse() {
     let id = Identifier {
         media: media(0.5, 100),

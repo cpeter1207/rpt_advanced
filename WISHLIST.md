@@ -374,6 +374,37 @@ None.
 - Use a maintained Rust code-first OpenAPI generator and schema annotations.
   Tests fail if any routed REST endpoint lacks a documented operation.
 
+### AllStarLink statistics status posting
+
+**Requirements**
+
+- Publish each configured node's live status to the AllStarLink statistics
+  service using the existing ASL3 status-post contract.
+- Configure `statpost_url` per node, with a `[general]` default inherited by
+  named node sections. No configured URL disables reporting; an empty node
+  override clears the inherited URL.
+- Configure `statpost_time` globally or per node, default 60 seconds and valid
+  from 30 through 600 seconds.
+- Report supported link and transmitter-key state promptly on changes and
+  periodically. Publish network requests outside real-time audio callbacks and
+  keep pending status bounded/coalesced.
+- Keep this compatible with standalone operation and reload without requiring
+  Asterisk or ASL3-specific dependencies in the controller.
+
+**Decisions recorded**
+
+- Use the ASL3 GET/query-parameter format rather than defining a new JSON
+  protocol.
+- Use ASL3's `statpost_url` and `statpost_time` names, global defaults, and
+  per-node overrides; an absent URL disables posting.
+- Send prompt coalesced updates for state changes and periodic snapshots;
+  never block audio processing on network I/O.
+- Omit status counters that `rpt_advanced` cannot accurately provide.
+
+**Material decisions needed before implementation**
+
+None.
+
 ### Mode- and frequency-agile remote base
 
 **Requirements**
