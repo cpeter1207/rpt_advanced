@@ -381,9 +381,7 @@ impl Host {
             .find(|peer| peer.local == local && peer.remote == remote)
         {
             peer.announced = true;
-            let _ = self
-                .runtime
-                .queue_link_event(local, remote, true, &self.media);
+            let _ = self.runtime.queue_link_event(local, remote, true);
         }
         Ok(())
     }
@@ -421,9 +419,7 @@ impl Host {
         }
         self.runtime.peer_detached(local, remote, now_ms);
         if announced {
-            let _ = self
-                .runtime
-                .queue_link_event(local, remote, false, &self.media);
+            let _ = self.runtime.queue_link_event(local, remote, false);
         }
     }
     pub(crate) fn reject_peer(&mut self, local: &str, remote: &str, now_ms: u64) {
@@ -551,7 +547,7 @@ impl Host {
                     .and_then(|generation| self.runtime.adapter_control_mut(local, generation))
                     .and_then(|control| control.status.last_keyed().map(str::to_owned));
                 self.runtime
-                    .queue_status(local, action, last.as_deref(), clock, &self.media)
+                    .queue_status(local, action, last.as_deref(), clock)
             }
             LinkEffect::SelectedRemote | LinkEffect::None => Ok(()),
         }

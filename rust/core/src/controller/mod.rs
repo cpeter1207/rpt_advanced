@@ -1,4 +1,4 @@
-//! Node transmit ownership and serialized prepared telemetry at 48 kHz.
+//! Node transmit ownership and serialized producer-backed telemetry at 48 kHz.
 
 mod announcement;
 mod courtesy;

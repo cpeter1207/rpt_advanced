@@ -433,7 +433,7 @@ impl Engine {
                 }
                 let local = event.local().to_owned();
                 let (effect, event) = self.run(move |host| {
-                    host.runtime.queue_event(&event, &host.media)?;
+                    host.runtime.queue_event(&event)?;
                     let effect = host.runtime.event_command(&event, clock);
                     Ok((effect, event))
                 })?;

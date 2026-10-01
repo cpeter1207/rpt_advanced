@@ -122,10 +122,10 @@ None.
   receive, per-link inbound, and telemetry playout rings; add profile-selected
   DCS or CTCSS; fill the adapter-owned output buffer directly (PortAudio's
   callback output buffer for that adapter).
-- Generate Morse and tone telemetry directly in the transmit worker. Render
-  speech and sound-file telemetry on the separate station-telemetry worker and
-  feed its PCM through the telemetry ring; do not use the control-message
-  queue as an audio ring.
+- Render all telemetry—including Morse and tone—on the separate
+  station-telemetry worker and stream its PCM through the telemetry ring. The
+  transmit worker consumes PCM only; the control-message queue is not an audio
+  ring. This telemetry-routing requirement is implemented.
 - Assign all inbound source-rate conversion and drift correction to those
   rings. Do not keep a second raw-capture converter, resample the transmit mix,
   or add a PortAudio output ring/timer. Preserve routing, receive qualification,
@@ -141,11 +141,11 @@ None.
 
 **Decisions recorded**
 
-- Accepted design, pending completion. The RPT Advanced product already has
-  independent receive/transmit callbacks, local and per-peer inbound rings,
-  and the program-audio loopback. Its status-media path still hands prepared
-  PCM directly to transmit rather than through a telemetry PCM ring. Morse and
-  tone generation now run directly in the transmit worker.
+- The RPT Advanced product has independent receive/transmit callbacks, local
+  and per-peer inbound rings, and the program-audio loopback. Status, speech,
+  file, Morse, and tone media now use the station producer and telemetry PCM
+  ring; transmit playback only consumes that ring. Other split-worker items
+  below remain pending.
 - The current RPT Advanced radio adapter does not yet invoke the shared-clock
   paired-owner path, and the configurable publication interval is not yet
   implemented.

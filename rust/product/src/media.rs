@@ -229,19 +229,20 @@ impl rpt_advanced_core::runtime::NativeFilePreparer for NativeMediaPreparer {
             }
         })
     }
-
+}
+impl rpt_advanced_core::runtime::NativeMediaPreparer for NativeMediaPreparer {
     fn station(
         &self,
         node: &str,
         generation: u64,
-    ) -> Result<Option<Box<dyn StationMediaSession>>, MediaError> {
+    ) -> Result<Box<dyn StationMediaSession>, MediaError> {
         worker::StationSession::new(
             node.to_owned(),
             generation,
             Arc::clone(&self.file),
             Arc::clone(&self.speech),
         )
-        .map(|session| Some(Box::new(session) as Box<dyn StationMediaSession>))
+        .map(|session| Box::new(session) as Box<dyn StationMediaSession>)
     }
 }
 impl rpt_advanced_core::runtime::NativeSpeechPreparer for NativeMediaPreparer {

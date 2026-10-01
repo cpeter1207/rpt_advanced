@@ -30,9 +30,9 @@ status. Superseded records remain and point to their replacement.
 | [0022](0022-versioned-external-c-dependency-adapters.md) | Accepted | Stable C contracts isolate replaceable external implementations. |
 | [0023](0023-unified-control-and-dtmf-policy.md) | Accepted | CLI, REST, and DTMF share a controlled operation model. |
 | [0024](0024-voting-receivers-and-simulcast-timing.md) | Accepted | Voting and simulcast use explicit clock and node boundaries. |
-| [0025](0025-native-media-routing-and-pcm-ring-ownership.md) | Accepted | Local receive, peer, and telemetry inbound rings alone own conversion and drift recovery into native transmit mixing. |
+| [0025](0025-native-media-routing-and-pcm-ring-ownership.md) | Accepted | The telemetry producer streams every media type through its PCM ring; transmit only mixes consumed PCM. |
 | [0026](0026-generational-real-time-runtime-lifecycle.md) | Accepted | Station generations provide lock-free real-time ownership and safe reload reclamation. |
-| [0027](0027-variable-frame-native-tick-and-adapter-io.md) | Accepted | Input-driven receive and DAC/adapter-clocked transmit replace the combined tick; verified shared clocks permit back-to-back calls without adaptive local drift recovery, with target reserve equal to configured squelch delay and direct output-buffer rendering (implementation pending). |
+| [0027](0027-variable-frame-native-tick-and-adapter-io.md) | Accepted | Input-driven receive and DAC/adapter-clocked transmit use variable frames; all telemetry is produced off-worker and streamed via its PCM ring. |
 | [0028](0028-remove-res-usbradio-through-hardware-adapters.md) | Accepted | Hardware adapters replace res_usbradio; one ASL3 compatibility implementation replaces its legacy/modern split. |
 | [0029](0029-canonical-f32-internal-pcm.md) | Accepted | Internal PCM is normalized `f32`; Asterisk and hardware convert at their boundaries. |
 | [0030](0030-appliance-update-trust-and-compliance.md) | Accepted | Appliance compliance targets and signed-update roles are explicit. |

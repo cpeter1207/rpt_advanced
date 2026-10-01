@@ -19,10 +19,28 @@ use crate::{
         ResolvedScheduleSettings, ResolvedTemplateSettings, ResolvedTimeSettings, Schema,
     },
     controller::{ActivitySnapshot, ControllerControl, NodeController},
+    media::StationMediaSession,
     schedule::{CivilTime, ScheduledWindow},
     template::MessageTemplate,
     time::{TimeAnnouncement, TimeFormat},
 };
+
+fn queue_status_media(
+    telemetry: &mut ControllerControl,
+    station: &mut Option<Box<dyn StationMediaSession>>,
+    settings: &ResolvedIdentifierSettings,
+    morse: &str,
+    speech: &str,
+) -> Result<(), RuntimeError> {
+    let station = station.as_mut().ok_or(RuntimeError::Preparation)?;
+    let prepared = prepare::streamed_status(station.as_mut(), settings, morse, speech)?;
+    telemetry.reclaim().for_each(drop);
+    if telemetry.queue_prepared_status(prepared) {
+        Ok(())
+    } else {
+        Err(RuntimeError::Rejected)
+    }
+}
 
 /// One externally captured tick; core never reads host clocks or time-zone services.
 #[derive(Clone, Copy)]
@@ -492,7 +510,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 adapter: prepared.control,
                 adapter_exposed: false,
                 telemetry,
-                media_session,
+                media_session: Some(media_session),
                 digits,
                 activity,
                 started_ms: clock.now_ms,
@@ -782,11 +800,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         }))
     }
     /// Queue a reserved event once. Stale reservations cannot synthesize or enqueue into a new node.
-    pub fn queue_event(
-        &mut self,
-        dispatch: &RuntimeDispatch,
-        media: &dyn NativeMediaPreparer,
-    ) -> Result<(), RuntimeError> {
+    pub fn queue_event(&mut self, dispatch: &RuntimeDispatch) -> Result<(), RuntimeError> {
         let scheduler = self.scheduler.as_mut().ok_or(RuntimeError::Rejected)?;
         if !scheduler.current(&dispatch.token) {
             return Err(RuntimeError::Rejected);
@@ -802,12 +816,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .iter_mut()
             .find(|node| node.name == dispatch.local())
             .ok_or(RuntimeError::MissingNode)?;
-        let audio = prepare::speech(media, &node.status, dispatch.speech().unwrap_or(""))?;
-        node.control.telemetry.reclaim().for_each(drop);
-        node.control
-            .telemetry
-            .queue_status(morse, audio)
-            .map_err(|_| RuntimeError::Rejected)?;
+        queue_status_media(
+            &mut node.control.telemetry,
+            &mut node.control.media_session,
+            &node.status,
+            morse,
+            dispatch.speech().unwrap_or(""),
+        )?;
         scheduler.message_queued(&dispatch.token);
         Ok(())
     }
@@ -824,9 +839,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
         action: LinkAction,
         last_keyed: Option<&str>,
         clock: RuntimeClock,
-        media: &dyn NativeMediaPreparer,
     ) -> Result<(), RuntimeError> {
-        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
         let (text, spoken) = match action {
             LinkAction::Time => {
                 let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
@@ -855,12 +873,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 (text, spoken)
             }
         };
-        let audio = prepare::speech(media, &node.status, &spoken)?;
-        node.control.telemetry.reclaim().for_each(drop);
-        node.control
-            .telemetry
-            .queue_status(&text, audio)
-            .map_err(|_| RuntimeError::Rejected)
+        queue_status_media(
+            &mut node.control.telemetry,
+            &mut node.control.media_session,
+            &node.status,
+            &text,
+            &spoken,
+        )
     }
     /// Queue one direct-link lifecycle event from every configured node's perspective.
     ///
@@ -871,7 +890,6 @@ impl<A: Send, C: Send> Runtime<A, C> {
         first: &str,
         second: &str,
         connected: bool,
-        media: &dyn NativeMediaPreparer,
     ) -> Result<(), RuntimeError> {
         let verb = if connected {
             "CONNECTED"
@@ -889,13 +907,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 format!("{first} {verb} {relation} {second}")
             };
             let spoken = render::telemetry_speech(&text, &[first, second]);
-            let queued = prepare::speech(media, &node.status, &spoken).and_then(|audio| {
-                node.control.telemetry.reclaim().for_each(drop);
-                node.control
-                    .telemetry
-                    .queue_status(&text, audio)
-                    .map_err(|_| RuntimeError::Rejected)
-            });
+            let queued = queue_status_media(
+                &mut node.control.telemetry,
+                &mut node.control.media_session,
+                &node.status,
+                &text,
+                &spoken,
+            );
             if let Err(error) = queued {
                 failure = Some(error);
             }

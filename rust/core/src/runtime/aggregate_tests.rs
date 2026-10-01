@@ -13,6 +13,36 @@ use std::sync::{
 };
 
 struct Media;
+struct TestPcm(usize);
+impl crate::audio::PcmStreamReader for TestPcm {
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        let count = output.len().min(20_000_usize.saturating_sub(self.0));
+        output[..count].fill(0.25);
+        self.0 += count;
+        if count == 0 {
+            crate::audio::PcmRead::Finished
+        } else if self.0 == 20_000 {
+            crate::audio::PcmRead::FinalSamples(count)
+        } else {
+            crate::audio::PcmRead::Samples(count)
+        }
+    }
+}
+struct TestStation(Option<Arc<Mutex<Vec<String>>>>);
+impl StationMediaSession for TestStation {
+    fn register(
+        &mut self,
+        source: MediaSource,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        if let (Some(messages), Some(speech)) = (&self.0, source.speech) {
+            messages.lock().unwrap().push(speech.text);
+        }
+        Ok(Box::new(TestPcm(0)))
+    }
+    fn start(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
 impl NativeFilePreparer for Media {
     fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
         Err(MediaError::Unavailable)
@@ -21,6 +51,11 @@ impl NativeFilePreparer for Media {
 impl NativeSpeechPreparer for Media {
     fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
         Err(MediaError::Unavailable)
+    }
+}
+impl NativeMediaPreparer for Media {
+    fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+        Ok(Box::new(TestStation(None)))
     }
 }
 struct Device(Arc<Mutex<Vec<String>>>);
@@ -136,7 +171,7 @@ fn message_only_event_has_no_link_effect_and_unexposed_handoff_reclaims_automati
     .unwrap();
     assert!(runtime.next_link().is_none());
     let event = runtime.next_event(clock()).unwrap().unwrap();
-    runtime.queue_event(&event, &Media).unwrap();
+    runtime.queue_event(&event).unwrap();
     assert!(matches!(
         runtime.event_command(&event, clock()),
         Ok(links::LinkEffect::None)
@@ -322,14 +357,15 @@ impl NativeFilePreparer for StreamingMedia {
     fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
         Err(MediaError::Unavailable)
     }
-
-    fn station(&self, _: &str, _: u64) -> Result<Option<Box<dyn StationMediaSession>>, MediaError> {
-        Ok(Some(Box::new(StreamingStation(Arc::clone(&self.0)))))
-    }
 }
 impl NativeSpeechPreparer for StreamingMedia {
     fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
         Err(MediaError::Unavailable)
+    }
+}
+impl NativeMediaPreparer for StreamingMedia {
+    fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+        Ok(Box::new(StreamingStation(Arc::clone(&self.0))))
     }
 }
 
@@ -416,7 +452,7 @@ fn aggregate_scheduled_template_and_macro_use_trigger_clock_and_current_node() {
     let dispatch = runtime.next_event(clock()).unwrap().unwrap();
     assert_eq!(dispatch.morse(), Some("1000. 9:07 AM"));
     assert!(dispatch.speech().unwrap().starts_with("node,1,0,0,0."));
-    assert!(runtime.queue_event(&dispatch, &Media).is_ok());
+    assert!(runtime.queue_event(&dispatch).is_ok());
     assert!(runtime.complete_event(&dispatch));
     assert!(runtime.next_event(clock()).unwrap().is_none());
     assert!(runtime.stop(clock().now_ms));
@@ -571,7 +607,7 @@ fn scheduled_message_queue_retry_is_once_and_stale_dispatch_does_not_prepare_spe
     .unwrap();
     let dispatch = runtime.next_event(clock()).unwrap().unwrap();
     for _ in 0..10 {
-        assert_eq!(runtime.queue_event(&dispatch, &Media), Ok(()));
+        assert_eq!(runtime.queue_event(&dispatch), Ok(()));
     }
     runtime
         .reload(
@@ -582,16 +618,13 @@ fn scheduled_message_queue_retry_is_once_and_stale_dispatch_does_not_prepare_spe
             clock(),
         )
         .unwrap();
-    assert_eq!(
-        runtime.queue_event(&dispatch, &Media),
-        Err(RuntimeError::Rejected)
-    );
+    assert_eq!(runtime.queue_event(&dispatch), Err(RuntimeError::Rejected));
     assert!(runtime.next_event(clock()).unwrap().is_none());
     assert!(runtime.stop(0));
 }
 
 #[test]
-fn native_media_contract_and_source_fallback_are_enforced_before_device_open() {
+fn telemetry_is_registered_with_station_producer_not_synchronously_prepared() {
     struct Prepared {
         rate: u32,
         file_ok: bool,
@@ -613,34 +646,29 @@ fn native_media_contract_and_source_fallback_are_enforced_before_device_open() {
             PreparedAudio::new(self.rate, vec![0.1; 96])
         }
     }
-    let config =
-        "[1000]\n[identifier 1000 test]\nsound_file=test.wav\nspeech_text=hello\nmorse_text=TEST\n";
-    for (rate, file_ok, expected) in [
-        (48000, true, vec!["file"]),
-        (48000, false, vec!["file", "speech"]),
-        (22050, true, vec!["file"]),
-    ] {
-        let media = Prepared {
-            rate,
-            file_ok,
-            calls: Mutex::new(Vec::new()),
-        };
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let result = Runtime::start(
-            ConfigDocument::parse(config).unwrap(),
-            &media,
-            adapter,
-            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
-            clock(),
-        );
-        assert_eq!(*media.calls.lock().unwrap(), expected);
-        if rate == 48000 {
-            assert!(result.unwrap().stop(0));
-        } else {
-            assert!(matches!(result, Err(RuntimeError::Preparation)));
-            assert!(log.lock().unwrap().is_empty());
+    impl NativeMediaPreparer for Prepared {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(None)))
         }
     }
+    let config =
+        "[1000]\n[identifier 1000 test]\nsound_file=test.wav\nspeech_text=hello\nmorse_text=TEST\n";
+    let media = Prepared {
+        rate: 22050,
+        file_ok: true,
+        calls: Mutex::new(Vec::new()),
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(config).unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert!(media.calls.lock().unwrap().is_empty());
+    assert!(runtime.stop(0));
 }
 
 #[test]
@@ -1217,7 +1245,7 @@ fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
                 Err(RuntimeError::Rejected)
             ));
         }
-        runtime.queue_event(&event, &Media).unwrap();
+        runtime.queue_event(&event).unwrap();
         match runtime.event_command(&event, clock()).unwrap() {
             links::LinkEffect::Connect(attempt) => {
                 assert_eq!(attempt.remote(), "3000");
@@ -1245,16 +1273,13 @@ fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
         runtime.detached("1000", 1);
         assert!(runtime.stop(0));
         assert!(runtime.next_event(clock()).unwrap().is_none());
-        assert_eq!(
-            runtime.queue_event(&event, &Media),
-            Err(RuntimeError::Rejected)
-        );
+        assert_eq!(runtime.queue_event(&event), Err(RuntimeError::Rejected));
     }
 }
 
 #[test]
-fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
-    struct Speech(Mutex<Vec<String>>);
+fn status_actions_register_speech_with_station_and_queue_ring_playback() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
     impl NativeFilePreparer for Speech {
         fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
             Err(MediaError::Unavailable)
@@ -1264,6 +1289,11 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
         fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
             self.0.lock().unwrap().push(request.text.into());
             PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
         }
     }
     for (action, last, expected) in [
@@ -1277,7 +1307,7 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
         (LinkAction::Status, None, "NO LINKS"),
         (LinkAction::FullStatus, None, "NO LINKS"),
     ] {
-        let media = Speech(Mutex::new(Vec::new()));
+        let media = Speech(Arc::new(Mutex::new(Vec::new())));
         let log = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::start(
             ConfigDocument::parse("[1000]\n").unwrap(),
@@ -1287,17 +1317,13 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
             clock(),
         )
         .unwrap();
-        runtime
-            .queue_status("1000", action, last, clock(), &media)
-            .unwrap();
+        runtime.queue_status("1000", action, last, clock()).unwrap();
         assert_eq!(*media.0.lock().unwrap(), [expected]);
         for _ in 0..3 {
-            runtime
-                .queue_status("1000", action, last, clock(), &media)
-                .unwrap();
+            runtime.queue_status("1000", action, last, clock()).unwrap();
         }
         assert_eq!(
-            runtime.queue_status("1000", action, last, clock(), &media),
+            runtime.queue_status("1000", action, last, clock()),
             Err(RuntimeError::Rejected)
         );
         let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
@@ -1315,11 +1341,11 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
         let mut invalid_clock = clock();
         invalid_clock.civil = None;
         assert_eq!(
-            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock, &media),
+            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock),
             Err(RuntimeError::Clock)
         );
         assert_eq!(
-            runtime.queue_status("missing", action, last, clock(), &media),
+            runtime.queue_status("missing", action, last, clock()),
             Err(RuntimeError::MissingNode)
         );
         assert!(runtime.stop(0));
@@ -1327,8 +1353,8 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
 }
 
 #[test]
-fn link_lifecycle_events_prepare_perspective_aware_speech_for_every_node() {
-    struct Speech(Mutex<Vec<String>>);
+fn link_lifecycle_events_register_speech_for_every_node() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
     impl NativeFilePreparer for Speech {
         fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
             Err(MediaError::Unavailable)
@@ -1340,8 +1366,13 @@ fn link_lifecycle_events_prepare_perspective_aware_speech_for_every_node() {
             PreparedAudio::new(48000, vec![0.25; 960])
         }
     }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
 
-    let media = Speech(Mutex::new(Vec::new()));
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
         ConfigDocument::parse(
@@ -1357,12 +1388,8 @@ fn link_lifecycle_events_prepare_perspective_aware_speech_for_every_node() {
     )
     .unwrap();
 
-    runtime
-        .queue_link_event("1000", "2000", true, &media)
-        .unwrap();
-    runtime
-        .queue_link_event("1000", "2000", false, &media)
-        .unwrap();
+    runtime.queue_link_event("1000", "2000", true).unwrap();
+    runtime.queue_link_event("1000", "2000", false).unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         [

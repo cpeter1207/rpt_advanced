@@ -423,10 +423,23 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
 #[test]
 fn generated_status_stays_local_and_never_reaches_a_link() {
     use rpt_advanced_core::{
-        audio::LinkAudioQueue,
-        controller::{ControllerSettings, CourtesySettings, NodeController},
+        audio::{LinkAudioQueue, PcmRead, PcmStreamReader},
+        controller::{ControllerSettings, CourtesySettings, NodeController, PreparedMedia},
         link::{AudioPeer, LinkAudio, PeerInput, PeerSignals},
     };
+    struct StatusStream(usize);
+    impl PcmStreamReader for StatusStream {
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            let count = output.len().min(self.0);
+            output[..count].fill(0.5);
+            self.0 -= count;
+            if self.0 == 0 {
+                PcmRead::FinalSamples(count)
+            } else {
+                PcmRead::Samples(count)
+            }
+        }
+    }
     struct Quiet(PeerSignals);
     impl PeerInput for Quiet {
         fn source_rate(&self) -> u32 {
@@ -461,7 +474,10 @@ fn generated_status_stays_local_and_never_reaches_a_link() {
         CourtesySettings::default(),
     )
     .unwrap();
-    control.queue_status("E", Some(vec![0.5; 240])).unwrap();
+    assert!(
+        control
+            .queue_prepared_status(PreparedMedia::new_stream(Box::new(StatusStream(240))).unwrap())
+    );
     let mut found_local = false;
     for _ in 0..14 {
         let mut rf = [0.0; 960];

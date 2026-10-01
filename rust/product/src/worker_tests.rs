@@ -20,6 +20,33 @@ impl NativeSpeechPreparer for Media {
         Err(MediaError::Unavailable)
     }
 }
+impl rpt_advanced_core::runtime::NativeMediaPreparer for Media {
+    fn station(
+        &self,
+        _: &str,
+        _: u64,
+    ) -> Result<Box<dyn rpt_advanced_core::media::StationMediaSession>, MediaError> {
+        Ok(Box::new(EmptyStation))
+    }
+}
+struct EmptyStation;
+impl rpt_advanced_core::media::StationMediaSession for EmptyStation {
+    fn register(
+        &mut self,
+        _: rpt_advanced_core::media::MediaSource,
+    ) -> Result<Box<dyn rpt_advanced_core::audio::PcmStreamReader>, MediaError> {
+        Ok(Box::new(EmptyStream))
+    }
+    fn start(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
+struct EmptyStream;
+impl rpt_advanced_core::audio::PcmStreamReader for EmptyStream {
+    fn render(&mut self, _: &mut [f32]) -> rpt_advanced_core::audio::PcmRead {
+        rpt_advanced_core::audio::PcmRead::Pending
+    }
+}
 struct Device;
 impl DeviceHandoff for Device {
     fn quiesce(&mut self) -> bool {

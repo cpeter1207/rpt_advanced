@@ -43,8 +43,7 @@ impl crate::audio::PcmStreamReader for PendingMedia {
 
 #[test]
 fn pending_media_does_not_key_transmitter_while_producer_starts() {
-    let media =
-        PreparedMedia::new_stream(Box::new(PendingMedia), "E", MorseSettings::default()).unwrap();
+    let media = PreparedMedia::new_stream(Box::new(PendingMedia)).unwrap();
     let id = Identifier {
         media,
         interval_ms: 1,

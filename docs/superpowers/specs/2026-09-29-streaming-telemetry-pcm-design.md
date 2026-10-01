@@ -2,12 +2,12 @@
 
 ## Goal and scope
 
-Decode sound files and synthesize speech away from the radio transmit worker.
-Stream canonical mono `f32` source-rate chunks through the released
+Render every telemetry source away from the radio transmit worker, including
+Morse and tone sequences. Stream canonical mono `f32` source-rate chunks through the released
 `rate_adjusting_pcm_ring3` into native 48 kHz playback. `Playback::render`
 consumes that ring without waiting. Start feeding the ring as soon as the
-decoder or speech engine supplies usable chunks; do not wait for the complete
-asset. Morse and tone continue to be generated directly by the transmit worker.
+decoder, speech engine, or waveform generator supplies usable chunks; do not
+wait for the complete asset.
 
 Preserve telemetry sequencing/routing, gain and ducking, cancellation on
 interruption, and file-to-speech-to-Morse fallback when a source fails before
@@ -16,9 +16,9 @@ external telemetry wording, or node deployment.
 
 ## Ownership and data flow
 
-One station-telemetry worker per node owns file/speech producer jobs and each
-shared-ring producer endpoint. It executes the replaceable file and speech
-adapter operations serially. A stream job publishes its source rate first; the
+One station-telemetry worker per node owns all telemetry producer jobs and each
+shared-ring producer endpoint. It executes file, speech, Morse, and tone jobs
+serially. A stream job publishes its source rate first; the
 worker creates the shared ring off the audio path and hands its consumer
 endpoint to the active `Playback` through a bounded generation-tagged SPSC
 handoff. It then streams chunks directly into the ring, splitting writes at the
@@ -43,8 +43,7 @@ after worker and callback quiescence. Audio callbacks neither create rings,
 allocate, block, spawn work, nor perform file, process, or speech operations.
 Generation tags and the existing quiescence protocol prevent a producer or
 callback from touching a replaced generation's ring. Interrupting media
-cancels its producer and retains the existing in-transmit-worker Morse fallback
-behavior.
+cancels its producer or asks it to switch to producer-rendered Morse fallback.
 
 ## Streaming adapter contract
 
@@ -66,8 +65,8 @@ finite samples, cancellation, child reaping, subprocess timeout, and error
 mapping remain validated at the adapter boundary. The released shared ring ABI
 does not change.
 
-If a file fails before its first sample, try speech; if speech fails before its
-first sample, use the existing Morse fallback. If a source fails after PCM has
+If a file fails before its first sample, try speech, then a configured tone and
+Morse fallback. If a source fails after PCM has
 already been emitted, drain the accepted samples, terminate that playback, and
 report the producer error; do not restart another source from its beginning
 mid-message. An explicit cancellation discards the remaining stream and follows
@@ -75,19 +74,20 @@ existing interruption behavior.
 
 ## Playback and transmit behavior
 
-`Playback` owns a consumer interface backed by the shared ring for file/speech
-media, while retaining direct Morse and tone renderers. Its render call drains
-the consumer into caller-provided output and performs no allocation, blocking,
-logging, or external calls. Producer-not-ready and temporary ring shortfall
-produce no media sample but do not mark EOF. Transmit demand is asserted only
+`Playback` owns only a consumer interface backed by the shared telemetry ring.
+Its render call drains the consumer into caller-provided output and performs no
+allocation, blocking, logging, or media generation. Producer-not-ready and
+temporary ring shortfall produce no media sample but do not mark EOF. Final
+samples carry terminal state so source transitions do not add avoidable
+callback silence. Transmit demand is asserted only
 when samples are available, avoiding keying a silent transmitter while a
 subprocess initializes; the controller may still retain the selected telemetry
 item while the producer prepares its first chunk.
 
 The media worker exposes producer completion/error through generation-owned
 atomics or bounded SPSC events. It does not write controller policy or PTT
-state. The transmit worker remains the sole owner of media mixing, PTT, tone,
-and Morse rendering.
+state. The transmit worker remains the sole owner of media mixing and PTT; all
+telemetry waveform generation belongs to the producer.
 
 ## Validation
 

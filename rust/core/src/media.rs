@@ -44,13 +44,41 @@ pub struct SpeechRequest<'a> {
     pub cancellation: &'a Cancellation,
 }
 
-/// Owned source chain registered with a station media worker before it starts.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Owned source chain queued for off-callback station rendering.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaSource {
     /// Optional file attempted before speech.
     pub file: Option<PathBuf>,
     /// Optional speech fallback after file-open or pre-output failure.
     pub speech: Option<SpeechSource>,
+    /// Gain applied only to decoded file/speech output before generated fallbacks.
+    pub provider_gain_db: i8,
+    /// Optional tone source after file/speech failure, before Morse fallback.
+    pub tone: Option<ToneSource>,
+    /// Optional Morse source after all higher-priority sources fail.
+    pub morse: Option<MorseSource>,
+}
+
+/// Generated tone sequence rendered by the station-telemetry producer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToneSource {
+    /// Validated tone-sequence text.
+    pub sequence: String,
+    /// Tone level relative to full scale.
+    pub level_db: i8,
+}
+
+/// Morse message rendered by the station-telemetry producer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MorseSource {
+    /// Text encoded as Morse.
+    pub text: String,
+    /// Sending speed in words per minute.
+    pub speed_wpm: u32,
+    /// Sidetone frequency in Hz.
+    pub frequency_hz: f32,
+    /// Morse level relative to full scale.
+    pub level_db: i8,
 }
 
 /// Owned Piper-compatible speech request kept off audio callbacks.
@@ -70,6 +98,14 @@ pub struct SpeechSource {
 pub trait StationMediaSession: Send {
     /// Register an immutable source chain and return its callback-safe reader.
     fn register(&mut self, source: MediaSource) -> Result<Box<dyn PcmStreamReader>, MediaError>;
+
+    /// Register one-shot telemetry generated after the station worker starts.
+    fn register_once(
+        &mut self,
+        source: MediaSource,
+    ) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+        self.register(source)
+    }
 
     /// Start the single worker after all source chains are registered.
     fn start(&mut self) -> Result<(), MediaError>;
@@ -122,6 +158,8 @@ pub enum MediaError {
     InvalidOutput,
     /// Required adapter descriptor failed composition validation.
     IncompatibleAdapter,
+    /// The bounded station-producer request queue has no available slot.
+    QueueFull,
 }
 
 /// Independently replaceable control-plane local-file decoding capability.

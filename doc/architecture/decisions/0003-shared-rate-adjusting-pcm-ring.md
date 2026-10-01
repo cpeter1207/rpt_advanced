@@ -30,7 +30,7 @@ additional converter precedes receive DSP. Each connected peer has a
 **receive-program ring** after its receive worker has passed packets through its
 jitter buffer and decoder. The ring converts decoded peer program audio to the
 node's native radio-port rate. One serialized **station-telemetry audio
-worker** writes speech and sound-file samples at their source rate to a
+worker** writes speech, sound-file, Morse, and tone samples at their source rate to a
 **telemetry-program ring**, which likewise produces native-rate audio for
 the native transmit mixer. The telemetry-program ring is also called the
 telemetry playout ring; these names do not describe two buffering stages.
@@ -51,8 +51,8 @@ Neither radio-port worker waits for peer transmission work or manages
 peer-specific block ownership.
 
 Network jitter buffering happens before decode and is not a replacement for
-rate recovery. Native-rate Morse and tone generation within the radio-port
-transmit worker does not need a ring. The ring never owns codec packetization,
+rate recovery. All telemetry, including native-rate Morse and tone, traverses
+the telemetry ring. The ring never owns codec packetization,
 jitter policy, RF signaling, or hardware I/O.
 
 The DAC/adapter-clocked transmit worker requests a setup-bounded native frame count.

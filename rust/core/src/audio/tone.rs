@@ -65,7 +65,7 @@ impl ToneSequence {
         self.rendered_samples
     }
 
-    /// Render the next samples directly into the transmit worker's output block.
+    /// Render the next samples into the telemetry producer's bounded PCM chunk.
     pub fn render(&mut self, output: &mut [f32]) -> usize {
         let mut written = 0;
         while written < output.len() && self.segment_index < self.segments.len() {
@@ -94,20 +94,6 @@ impl ToneSequence {
             }
         }
         written
-    }
-
-    /// Restart the sequence with continuous phase beginning at zero.
-    pub(super) fn restart(&mut self) {
-        self.segment_index = 0;
-        self.segment_offset = 0;
-        self.first_phase = 0.0;
-        self.second_phase = 0.0;
-    }
-
-    /// Return whether every segment has been rendered.
-    #[must_use]
-    pub(super) fn is_finished(&self) -> bool {
-        self.segment_index == self.segments.len()
     }
 }
 
