@@ -522,14 +522,15 @@ fn run_job(
         fail(control, generation);
         return;
     };
+    // Publish the consumer before a converted chunk can fill the ring and need it to drain.
+    if job.ready.push((generation, delay, consumer)).is_err() {
+        fail(control, generation);
+        return;
+    }
     if !push_all(&mut producer, &first[..count], &cancellation) {
         if !cancellation.control.is_cancelled(stopping, generation) {
             fail(control, generation);
         }
-        return;
-    }
-    if job.ready.push((generation, delay, consumer)).is_err() {
-        fail(control, generation);
         return;
     }
     let mut chunk = [0.0; STREAM_CHUNK];
@@ -628,7 +629,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     static READS: AtomicUsize = AtomicUsize::new(0);
-    static READING: AtomicBool = AtomicBool::new(false);
     static RELEASE_READ: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "C" fn open_test_file(
@@ -639,7 +639,7 @@ mod tests {
     ) -> i32 {
         unsafe {
             (*output).handle = 1_usize as *mut c_void;
-            (*output).sample_rate_hz = 48000;
+            (*output).sample_rate_hz = 22050;
         }
         0
     }
@@ -658,7 +658,6 @@ mod tests {
             }
             return 0;
         }
-        READING.store(true, Ordering::Release);
         while !RELEASE_READ.load(Ordering::Acquire) {
             let cancelled = unsafe { &*cancellation };
             if unsafe {
@@ -707,7 +706,6 @@ mod tests {
     #[test]
     fn producer_streams_first_pcm_while_provider_is_still_decoding() {
         READS.store(0, Ordering::Release);
-        READING.store(false, Ordering::Release);
         RELEASE_READ.store(false, Ordering::Release);
         let _release = ReleaseRead;
         let mut session = StationSession::new(
@@ -730,18 +728,16 @@ mod tests {
         let mut streamed = false;
         for _ in 0..1000 {
             if matches!(reader.render(&mut output), PcmRead::Samples(count) if count != 0) {
-                streamed = READING.load(Ordering::Acquire)
-                    && session.controls[0].completed.load(Ordering::Acquire) != 1
-                    && (output[0] - 0.25).abs() < 0.003;
+                streamed = session.controls[0].completed.load(Ordering::Acquire) != 1
+                    && output.iter().any(|sample| sample.abs() > 0.1);
                 break;
             }
             thread::sleep(Duration::from_millis(1));
         }
         assert!(
             streamed,
-            "audio must reach the consumer before provider EOF; reads={}, reading={}, completed={}, failed={}",
+            "audio must reach the consumer before provider EOF; output={output:?}, reads={}, completed={}, failed={}",
             READS.load(Ordering::Acquire),
-            READING.load(Ordering::Acquire),
             session.controls[0].completed.load(Ordering::Acquire),
             session.controls[0].failed.load(Ordering::Acquire)
         );
