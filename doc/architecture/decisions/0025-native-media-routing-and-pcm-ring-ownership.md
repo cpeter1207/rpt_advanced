@@ -113,15 +113,6 @@ partial-I/O staging to that adapter. ADR 0033 defines the
 appliance direct-codec profile, which uses external discrete CTCSS and therefore
 does not inject a native CTCSS tone.
 
-PTT demand follows an active source, not queue readiness. A due courtesy or
-status item waiting behind another source cannot independently assert or hold
-PTT. Prepared/generated playback may request PTT when it becomes active;
-streamed playback requests it only after PCM is available. This prevents a
-starved speech/file producer or blocked status item from leaving a keyed carrier
-with no program audio. The control-side node status reports the active source,
-pending/ready telemetry, stream-wait duration, transmit demand, duplex PTT
-request, and final keyed state from one lock-free snapshot.
-
 A per-node active-traffic CTCSS policy may independently restrict CTCSS encode
 and decode. When enabled, a live local-receiver or connected-peer transmission
 qualifies the policy; hangtime alone does not. Identifiers and courtesy tones

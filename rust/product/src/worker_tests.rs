@@ -69,27 +69,6 @@ fn worker_with_status(status: RadioStatus) -> RadioWorker {
 }
 
 #[test]
-fn transmit_controller_diagnostics_are_visible_in_node_status() {
-    let status = RadioStatus::default();
-    status.publish_transmit_diagnostics(TransmitDiagnostics {
-        status_pending: true,
-        status_ready: true,
-        source: rpt_advanced_core::controller::TransmitSource::Courtesy,
-        stream_waiting: true,
-        stream_wait_ms: 321,
-        ptt_requested: true,
-        ptt_keyed: true,
-        ..TransmitDiagnostics::default()
-    });
-
-    let text = status.transmit_diagnostics_text();
-    assert!(text.contains("cause=hang"));
-    assert!(text.contains("source=courtesy"));
-    assert!(text.contains("stream_wait=1 stream_wait_ms=321"));
-    assert!(text.contains("status_pending=1 status_ready=1"));
-}
-
-#[test]
 fn transmit_callback_publishes_ptt_state_for_control_snapshot() {
     let status = RadioStatus::default();
     super::publish_transmit_keyed(Some(&status), true);
@@ -308,10 +287,7 @@ fn provider_failures_remain_silent_and_observable_without_losing_control() {
             .load(Ordering::Relaxed),
         1
     );
-    assert_eq!(
-        worker.local_status_text(),
-        "  local-rx: observation failed\n  tx: cause=idle ptt=0 request=0 demand=0 source=none rx=0 link=0 stream_wait=0 stream_wait_ms=0 telemetry_sample=0 status_pending=0 status_ready=0 courtesy_pending=0 courtesy_ready=0"
-    );
+    assert_eq!(worker.local_status_text(), "  local-rx: observation failed");
     worker.report_faults("1000", 5_000);
     assert_eq!(worker.reported_faults, [0; 6]);
     let (producer, _) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();

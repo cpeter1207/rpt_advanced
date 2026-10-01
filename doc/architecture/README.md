@@ -382,10 +382,7 @@ defines the full reload, hardware-handoff, and failure policy.
   ADR 0038; other necessary Asterisk API thread handling stays in its adapter.
   Standalone selects a non-Asterisk control backend.
 - Telemetry is serialized. Speech is preferred and falls back to Morse when
-  speech cannot be prepared. Queue readiness alone never asserts or holds PTT:
-  streamed media must have PCM available, and node status exposes the active
-  source, pending/ready telemetry, stream-wait duration, transmit demand, PTT
-  request, and final keyed state.
+  speech cannot be prepared.
 - Configured identifiers are sent only to the local transmitter. Telemetry in
   response to a command is source-scoped: a local-receiver command is sent to
   the local transmitter, a linked-peer command is sent only to that peer, and
