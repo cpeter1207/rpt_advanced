@@ -62,6 +62,7 @@ announcements, courtesy tones, templates, macros, events, permanent links, or sc
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `node_enabled` | yes | Start the configured node. |
+| `language` | `en-US` | Select built-in RF wording from a Fluent locale catalog. `[general]` supplies the shared default; a node section may override it. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `dtmf_muting` | yes | Silence qualified local in-band DTMF tone audio before command completion. Qualification adds no lookback, so the initial tone prefix can pass. DTMF command decoding remains active when disabled. |
 | `squelch_delay_ms` | 0 | Delay local receive playout in its PCM ring by this many milliseconds. Immediate receiver unkey cancels the buffered tail; rapid rekey cannot replay the previous burst. Inherits from `[general]` to each node; zero adds no delay. |
@@ -433,7 +434,18 @@ active.
 
 | Option | Required | Meaning |
 | --- | --- | --- |
-| `remote_node` | yes | Decimal identity of the permanent direct peer. It must not be the local node or duplicate any configured permanent or schedule route for that node. |
+| `remote_node` | yes | One decimal node identity, or a comma-separated priority list of permanent group members. Each must differ from the local node and every other configured permanent or schedule route for that node. The first reachable member has highest priority. |
+| `group_name` | empty | Optional display name for a priority group, used in its selection/unavailable telemetry. |
+
+When `remote_node` has multiple members, rpt_advanced keeps each member
+connected independently. Only the highest-priority reachable member is
+transceive; all other group members are receive-only and their audio is not
+forwarded. A recovered higher-priority member takes over once local and linked
+inputs are idle; the former winner then becomes receive-only. Retries continue
+silently. The group is announced only when a member is first selected or when
+all members become unavailable—not for retries, standby connections, or later
+winner changes. A one-member list is valid and behaves as an ordinary permanent
+link.
 
 `[schedule node label]` temporarily replaces one same-node configured
 permanent peer with another direct peer during a bounded local-time window. It
@@ -455,6 +467,17 @@ later reload.
 | `start_time` | required | Exact 24-hour local `HH:MM` inclusive window start. |
 | `end_time` | required | Exact 24-hour local `HH:MM` exclusive window end, later than `start_time` on the same date. `24:00` is accepted only here to mean the end of the selected date. Overnight windows are invalid. |
 | `end_inactivity_ms` | `0` | Post-window quiet interval in milliseconds. Zero restores the replaced permanent peer when the window ends. A nonzero value keeps the replacement after observed local-receiver or linked-peer activity until that activity has been quiet for this interval. |
+| `warning_before_start_ms` | absent | Optional comma-separated positive millisecond lead times for warnings before each start. The configured order is retained. |
+| `warning_before_end_ms` | absent | Optional comma-separated positive millisecond lead times before the expected disconnect. For inactivity-based disconnects, each warning is based on the current expected inactivity deadline. |
+| `warning_message_id` | absent | Fluent catalog message ID for warnings. Required with any valid warning lead; currently `scheduled-link-change`. Warnings remain disabled when omitted. |
+
+Warnings use the localized message selected by `warning_message_id`, with
+`${time_remaining}` formatted from the remaining time. Due warnings are skipped
+while the local receiver or any linked peer is active. A qualifying activity
+reset starts a new inactivity period, making that period's warnings eligible
+again. A warning at or after its related start/disconnect deadline is skipped.
+Warnings enter the same serialized telemetry queue as other status messages;
+they do not interrupt active audio.
 
 When a window becomes active, rpt_advanced detaches its named permanent peer
 before attaching the replacement. When the window ends, it detaches the
@@ -488,6 +511,7 @@ conflict gate, so do not rely on an overlap to select one replacement route.
 ```ini
 [permanent 524950 primary]
 remote_node = 506315
+group_name = The Blind Hams Network
 
 [schedule 524950 weekday_net]
 remote_node = 2627
@@ -496,7 +520,30 @@ days = Monday-Friday
 start_time = 11:00
 end_time = 12:00
 end_inactivity_ms = 300000
+warning_before_start_ms = 3600000,1800000,900000,600000,300000,60000
+warning_before_end_ms = 600000,300000,60000
+warning_message_id = scheduled-link-change
 ```
+
+For a single permanent peer, use a one-entry `remote_node` value; `group_name`
+is optional. For example:
+
+```ini
+[permanent 524950 primary]
+remote_node = 506315
+```
+
+## Localized built-in messages
+
+`[general] language` selects the shared message locale and a node's `language`
+overrides it. The package ships English at
+`/usr/share/asterisk/rpt_advanced/messages/en-US.ftl`; administrator catalogs
+may be installed under `/etc/asterisk/rpt_advanced/messages/<locale>.ftl`.
+An absent translation falls back to English independently for text, speech,
+and Morse. An invalid localized entry also falls back for that entry. Invalid
+required English content rejects a candidate reload, preserving the active
+configuration and catalog. Built-in wording is edited in the selected FTL
+bundle, not embedded in source or copied into each node section.
 
 ## Link lifetime, recovery, and duplex
 

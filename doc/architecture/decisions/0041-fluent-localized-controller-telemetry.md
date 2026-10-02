@@ -18,6 +18,11 @@ global setting. Optional translations fall back independently per message
 attribute to English; malformed or incomplete required English rejects the
 candidate configuration generation and leaves the active generation unchanged.
 
+Install packaged catalogs under
+`/usr/share/asterisk/rpt_advanced/messages/<locale>.ftl`. Administrator
+overrides use `/etc/asterisk/rpt_advanced/messages/<locale>.ftl` and take
+precedence over packaged catalogs for the same locale.
+
 Load, validate, and format catalogs on the serialized control plane. Audio
 callbacks receive only already-prepared telemetry media; they never access the
 filesystem, Fluent bundles, or translation locks. Custom event templates and

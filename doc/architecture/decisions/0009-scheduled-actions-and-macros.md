@@ -45,15 +45,17 @@ section label, and trigger, so changing message text or a macro does not make an
 already-fired event eligible again. The civil-time discontinuity policy is
 defined by [ADR 0017](0017-scheduler-route-lifecycle-and-civil-time.md).
 
-Each scheduled event may have multiple configurable warning lead times before
-its start and before its end or disconnect. One event-local warning template
-uses `time_remaining` as a natural-language remaining duration. For an
+Each scheduled event may configure multiple positive-millisecond warning
+leads before its start and before its end or disconnect. It selects a built-in
+Fluent warning message by `warning_message_id`; the control plane supplies
+`time_remaining` as a localized natural-language duration. For an
 inactivity-based event, warning times are derived from the expected inactivity
 deadline and reset whenever qualifying local-receiver or linked-peer activity
 resets that deadline. A warning due during qualifying activity is skipped, not
 delayed; warnings sent in a preceding quiet interval become eligible again
 after activity resets it. A warning due at or after its associated start, end,
-or inactivity deadline is skipped.
+or inactivity deadline is skipped. Warnings use the serialized telemetry
+queue and do not interrupt active input.
 
 ## Consequences
 

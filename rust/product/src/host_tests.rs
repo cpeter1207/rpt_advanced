@@ -132,6 +132,7 @@ fn render_queued_telemetry(host: &mut Host, owners: &mut AudioOwners) -> bool {
         if heard && !keyed {
             return true;
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
     false
 }

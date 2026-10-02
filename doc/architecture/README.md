@@ -189,8 +189,11 @@ Controller-owned RF wording is stored in the packaged Fluent catalogs, with
 separate text, TTS, and Morse forms. The configuration generation validates its
 catalog before publication; built-in message formatting stays on the control
 plane, and optional translation attributes fall back to English independently.
-Operator-authored event templates remain unchanged. See
-[ADR 0041](decisions/0041-fluent-localized-controller-telemetry.md).
+The package provides `en-US.ftl` under `/usr/share/asterisk/rpt_advanced/messages/`;
+administrator locale overlays live under `/etc/asterisk/rpt_advanced/messages/`.
+Operator-authored event templates remain unchanged. Scheduled warnings are
+localized by catalog ID, then queued through the same serialized telemetry path.
+See [ADR 0041](decisions/0041-fluent-localized-controller-telemetry.md).
 
 ### Radio-port audio ownership and lifecycle
 
@@ -312,7 +315,11 @@ defines the full reload, hardware-handoff, and failure policy.
   link groups connect and recover each member independently, select the
   highest-priority reachable peer for transceive, and keep other group members
   receive-only. A winner change is atomically committed only while local and
-  linked inputs are idle; transmitter PTT alone does not block it.
+  linked inputs are idle; transmitter PTT alone does not block it. Only initial
+  selection and total group unavailability are announced; retries, standby
+  changes, and subsequent winner handoffs are silent. Scheduled warnings use
+  the expected start/end or inactivity deadline, skip active input, and remain
+  serialized with other telemetry.
 - `rust/core/src/link/`, `rust/product/src/link/`, and `rust/asterisk/src/link/` implement
   AllStarLink admission, peer media, topology, advisory keyed-source queries,
   and permitted DTMF control. A direct receive edge starts the canonical
