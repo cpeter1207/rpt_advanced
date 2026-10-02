@@ -12,7 +12,7 @@ use crate::{
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
     config::{ConfigDocument, LinkLookupMethod, ResolvedNodeSettings},
-    link::{AudioPeer, LinkAudio, LinkAudioStatus, LinkDispatcher, Mode},
+    link::{AudioPeer, GroupMemberSelection, LinkAudio, LinkAudioStatus, LinkDispatcher, Mode},
     runtime::{
         DeviceHandoff, GenerationSettings, PreparedAdapter, Runtime, RuntimeClock, RuntimeError,
         dtmf::DigitOperation, links::LinkEffect,
@@ -125,6 +125,7 @@ struct PeerOwner {
     local: String,
     remote: String,
     mode: Mode,
+    group: Option<GroupMemberSelection>,
     announced: bool,
     reader: PeerReader,
     control: PeerControl,
@@ -165,17 +166,19 @@ fn prepared(
         let (output, outbound) = LinkAudioQueue::new(48000 / 5)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
-        audio.push(
-            AudioPeer::new(
-                &peer.remote,
-                peer.mode,
-                input,
-                output,
-                MAXIMUM_FRAMES,
-                u32::try_from(settings.kerchunk_max_ms).map_err(|_| RuntimeError::Preparation)?,
-            )
-            .map_err(|_| RuntimeError::Preparation)?,
-        );
+        let prepared_peer = AudioPeer::new(
+            &peer.remote,
+            peer.mode,
+            input,
+            output,
+            MAXIMUM_FRAMES,
+            u32::try_from(settings.kerchunk_max_ms).map_err(|_| RuntimeError::Preparation)?,
+        )
+        .map_err(|_| RuntimeError::Preparation)?;
+        audio.push(match &peer.group {
+            Some(group) => prepared_peer.with_group_member(group.clone()),
+            None => prepared_peer,
+        });
         awaiting.push((peer.remote.clone(), inbound.observer()));
         redirects.push((
             peer.remote.clone(),
@@ -362,10 +365,17 @@ impl Host {
         let (session, control) = PeerSession::prepare(io, outbound, local, remote)
             .map_err(|_| RuntimeError::Preparation)?;
         let reader = session.start().map_err(|_| RuntimeError::Preparation)?;
+        let group = self
+            .runtime
+            .node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .links()
+            .group_member(remote);
         self.peers.push(PeerOwner {
             local: local.into(),
             remote: remote.into(),
             mode,
+            group,
             announced: false,
             reader,
             control,

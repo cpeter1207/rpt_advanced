@@ -72,6 +72,7 @@ fn pending_media_does_not_key_transmitter_while_producer_starts() {
 struct TestPeerInput {
     signals: crate::link::PeerSignals,
     sample: Option<f32>,
+    enabled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TestPeerInput {
@@ -80,7 +81,11 @@ impl TestPeerInput {
         if sample.is_some() {
             signals.publish_pcm();
         }
-        Self { signals, sample }
+        Self {
+            signals,
+            sample,
+            enabled: None,
+        }
     }
 }
 
@@ -98,12 +103,239 @@ impl crate::link::PeerInput for TestPeerInput {
     }
 
     fn render(&mut self, output: &mut [f32]) -> bool {
-        let Some(sample) = self.sample else {
+        let Some(sample) = self.sample.filter(|_| {
+            self.enabled
+                .as_ref()
+                .is_none_or(|enabled| enabled.load(std::sync::atomic::Ordering::Acquire))
+        }) else {
             return false;
         };
         output.fill(sample);
         true
     }
+}
+
+fn grouped_test_audio_peer(
+    direct: &str,
+    slot: std::num::NonZeroUsize,
+    selection: crate::link::GroupSelection,
+    input: TestPeerInput,
+    maximum: usize,
+) -> (
+    crate::link::AudioPeer<TestPeerInput>,
+    crate::audio::LinkAudioConsumer,
+) {
+    let (outbound, consumer) = crate::audio::LinkAudioQueue::new(maximum * 2)
+        .unwrap()
+        .into_endpoints();
+    let peer = crate::link::AudioPeer::new(
+        direct,
+        crate::link::Mode::TRANSCEIVE,
+        input,
+        outbound,
+        maximum,
+        0,
+    )
+    .unwrap()
+    .with_group(selection, slot);
+    (peer, consumer)
+}
+
+#[test]
+fn standby_group_audio_never_reaches_rf_or_any_peer() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let (selected, mut selected_out) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        TestPeerInput::new(None),
+        1,
+    );
+    let standby_enabled = Arc::new(AtomicBool::new(false));
+    let mut standby_input = TestPeerInput::new(Some(0.7));
+    standby_input.enabled = Some(Arc::clone(&standby_enabled));
+    let (standby, mut standby_out) = grouped_test_audio_peer(
+        "201",
+        NonZeroUsize::new(2).unwrap(),
+        selection,
+        standby_input,
+        1,
+    );
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![selected, standby], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut rf = [0.0];
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+    standby_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+    let mut sent = [0.0];
+    assert_eq!(rf, [0.0]);
+    assert_eq!(selected_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+    assert_eq!(standby_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+}
+
+#[test]
+fn selected_group_audio_reaches_rf_but_not_a_standby_peer() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let selected_enabled = Arc::new(AtomicBool::new(false));
+    let mut selected_input = TestPeerInput::new(Some(0.25));
+    selected_input.enabled = Some(Arc::clone(&selected_enabled));
+    let (selected, mut selected_out) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        selected_input,
+        1,
+    );
+    let standby_enabled = Arc::new(AtomicBool::new(false));
+    let mut standby = TestPeerInput::new(Some(0.7));
+    standby.enabled = Some(standby_enabled);
+    let (standby, mut standby_out) =
+        grouped_test_audio_peer("201", NonZeroUsize::new(2).unwrap(), selection, standby, 1);
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![selected, standby], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut rf = [0.0];
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+    selected_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+
+    assert_eq!(rf, [0.25]);
+    let mut sent = [0.0];
+    assert_eq!(selected_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+    assert_eq!(standby_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+}
+
+#[test]
+fn group_winner_change_waits_for_all_inputs_to_be_idle() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let selected_enabled = Arc::new(AtomicBool::new(false));
+    let mut selected_input = TestPeerInput::new(Some(0.2));
+    selected_input.enabled = Some(Arc::clone(&selected_enabled));
+    let (selected, _) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        selected_input,
+        1,
+    );
+    let standby_enabled = Arc::new(AtomicBool::new(false));
+    let mut standby_input = TestPeerInput::new(Some(0.4));
+    standby_input.enabled = Some(Arc::clone(&standby_enabled));
+    let (standby, _) = grouped_test_audio_peer(
+        "201",
+        NonZeroUsize::new(2).unwrap(),
+        selection.clone(),
+        standby_input,
+        1,
+    );
+    let (mut links, _) = LinkAudio::new(vec![selected, standby], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut rf = [0.0];
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    links.process(&mut node, true, &mut rf).unwrap();
+    selection.publish_desired(NonZeroUsize::new(2));
+    links.process(&mut node, true, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+
+    selected_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    selected_enabled.store(false, std::sync::atomic::Ordering::Release);
+    standby_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    standby_enabled.store(false, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(2));
+}
+
+#[test]
+fn group_winner_can_change_while_transmitter_is_keyed_without_input_activity() {
+    use crate::link::LinkAudio;
+    use std::num::NonZeroUsize;
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let (first, _) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        TestPeerInput::new(None),
+        1,
+    );
+    let (second, _) = grouped_test_audio_peer(
+        "201",
+        NonZeroUsize::new(2).unwrap(),
+        selection.clone(),
+        TestPeerInput::new(None),
+        1,
+    );
+    let (mut links, _) = LinkAudio::new(vec![first, second], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.keyed = true;
+    let mut rf = [0.0];
+
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    selection.publish_desired(NonZeroUsize::new(2));
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(2));
 }
 
 fn test_audio_peer(

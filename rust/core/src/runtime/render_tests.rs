@@ -33,8 +33,8 @@ fn direct_status_excludes_topology_blocked_automatic_intent() {
     let mut links = LinkManager::new("1000").unwrap();
     links.attach("2000", Mode::TRANSCEIVE, false).unwrap();
     links.update_topology("2000", b"L T3000").unwrap();
-    links.retain_topology_blocked_group("3000", Mode::TRANSCEIVE, None);
-    links.retain_topology_blocked_group("3000", Mode::MONITOR, None);
+    links.retain_topology_blocked_group("3000", Mode::TRANSCEIVE, None, None);
+    links.retain_topology_blocked_group("3000", Mode::MONITOR, None, None);
     let retry = links
         .snapshot()
         .into_iter()

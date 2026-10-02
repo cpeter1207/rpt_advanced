@@ -368,6 +368,55 @@ fn status_reports_modes_permanent_retries_and_failed_resource_preparation() {
 }
 
 #[test]
+fn host_audio_owner_publishes_one_configured_group_winner_to_status() {
+    use std::num::NonZeroUsize;
+
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let config = ConfigDocument::parse(
+        "[1000]\nradio_channel=usb\nduplex=full\n\
+         [permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
+    )
+    .unwrap();
+    let mut host = Host::start(config, media(), services(), Instant::now(), clock()).unwrap();
+    let mut states = Vec::new();
+    for remote in ["2000", "3000"] {
+        host.runtime.incoming("1000", remote, true).unwrap();
+        let (io, state) = peer(48000);
+        host.attach_peer("1000", remote, Mode::TRANSCEIVE, io, clock())
+            .unwrap();
+        states.push(state);
+        pump_until(&mut host, |host| {
+            host.runtime
+                .status(10)
+                .iter()
+                .all(|(_, status)| status.retiring.is_none())
+        });
+    }
+    let selection = host.peers[0].group.as_ref().unwrap().selection().clone();
+
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let mut audio = [0.0; 960];
+    owners
+        .0
+        .acquire()
+        .unwrap()
+        .state()
+        .process(false, &mut audio, 0);
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    let status = host.status_text("1000").unwrap();
+    assert!(status.contains("2000: transceive"));
+    assert!(status.contains("3000: monitor"));
+
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(30));
+    drop(states);
+}
+
+#[test]
 fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

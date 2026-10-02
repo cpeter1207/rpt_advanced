@@ -495,6 +495,76 @@ fn group_member_is_not_topology_blocked_but_other_routes_are() {
         Err(AdmissionError::Loop)
     );
 }
+
+#[test]
+fn callback_group_selection_republishes_topology_immediately() {
+    use super::super::link_schedule::RouteSpec;
+    use crate::schedule::Weekday;
+
+    let routes = [("3000", 0), ("4000", 1)]
+        .into_iter()
+        .map(|(remote, priority)| RouteSpec {
+            local: "524950".into(),
+            remote: remote.into(),
+            permanent: true,
+            group_label: Some("network".into()),
+            group_name: Some("Network".into()),
+            group_priority: Some(priority),
+        })
+        .collect();
+    let schedule = LinkScheduler::new(1, routes, vec![], None).unwrap();
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule),
+    )
+    .unwrap();
+    let mut host = NodeHost::new(generation(1));
+    let (control, _, _) = host.split();
+    links.tick(
+        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 0).unwrap(),
+        0,
+        0,
+        |_| None,
+    );
+    for _ in 0..2 {
+        let LinkEffect::Connect(attempt) = links.next_scheduled(control.work().unwrap()).unwrap()
+        else {
+            panic!("permanent group dial")
+        };
+        assert!(
+            links
+                .finish_connect_at(attempt, true, 1, None, |_| None)
+                .unwrap()
+        );
+    }
+
+    let member = links.group_member("3000").unwrap();
+    assert!(
+        links
+            .due_topology(2)
+            .iter()
+            .any(|(peer, text)| peer == "4000" && text == "L R3000")
+    );
+
+    assert_eq!(member.selection().callback_slot(true), 1);
+    assert!(
+        links
+            .due_topology(3)
+            .iter()
+            .any(|(peer, text)| peer == "4000" && text == "L T3000")
+    );
+
+    let modes = links
+        .manager()
+        .snapshot()
+        .into_iter()
+        .map(|peer| (peer.name, peer.mode.transmits()))
+        .collect::<Vec<_>>();
+    assert_eq!(modes, [("3000".into(), true), ("4000".into(), false)]);
+}
+
 #[test]
 fn incoming_and_remote_selection_use_current_deny_first_policy() {
     let mut host = NodeHost::new(generation(1));

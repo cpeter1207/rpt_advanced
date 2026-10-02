@@ -1,5 +1,5 @@
 //! Serial control-plane ownership of peers, admission and reconnect intent.
-use super::{Protocol, Route, decimal_identity, identity, valid_digit};
+use super::{GroupMemberSelection, Protocol, Route, decimal_identity, identity, valid_digit};
 use crate::access::AccessPolicy;
 
 /// Link setup or publication rejection.
@@ -56,6 +56,15 @@ pub(super) struct Attached {
     pub ended: bool,
     pub routes: Vec<Route>,
     pub group: Option<String>,
+    pub group_member: Option<GroupMemberSelection>,
+}
+impl Attached {
+    pub(super) fn effective_mode(&self) -> Mode {
+        match &self.group_member {
+            Some(member) if member.selection().active() != Some(member.slot()) => Mode::MONITOR,
+            _ => self.mode,
+        }
+    }
 }
 struct Retry {
     name: String,
@@ -67,6 +76,7 @@ struct Retry {
     attempt: Option<u64>,
     blocked_topology: Option<TopologyEvidence>,
     group: Option<String>,
+    group_member: Option<GroupMemberSelection>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,10 +198,30 @@ impl LinkManager {
         group: Option<&str>,
     ) -> Result<(), AdmissionError> {
         self.check_group(name, true, group)?;
-        self.publish(name, mode, permanent, group.map(str::to_owned));
+        self.publish(name, mode, permanent, group.map(str::to_owned), None);
         Ok(())
     }
-    fn publish(&mut self, name: &str, mode: Mode, permanent: bool, group: Option<String>) {
+    /// Attach a configured priority member and publish its shared callback selection.
+    pub fn attach_member(
+        &mut self,
+        name: &str,
+        mode: Mode,
+        permanent: bool,
+        member: Option<GroupMemberSelection>,
+    ) -> Result<(), AdmissionError> {
+        self.check_group(name, true, member.as_ref().map(GroupMemberSelection::label))?;
+        let label = member.as_ref().map(|member| member.label().to_owned());
+        self.publish(name, mode, permanent, label, member);
+        Ok(())
+    }
+    fn publish(
+        &mut self,
+        name: &str,
+        mode: Mode,
+        permanent: bool,
+        group: Option<String>,
+        group_member: Option<GroupMemberSelection>,
+    ) {
         self.peers.push(Attached {
             name: name.into(),
             mode,
@@ -199,8 +229,38 @@ impl LinkManager {
             ended: false,
             routes: Vec::new(),
             group,
+            group_member,
         });
         self.revision = self.revision.wrapping_add(1);
+        self.refresh_group_selections();
+    }
+    fn refresh_group_selections(&self) {
+        let mut groups = Vec::<(String, GroupMemberSelection)>::new();
+        for member in self
+            .peers
+            .iter()
+            .filter_map(|peer| peer.group_member.as_ref())
+            .chain(
+                self.retries
+                    .iter()
+                    .filter_map(|retry| retry.group_member.as_ref()),
+            )
+        {
+            if !groups.iter().any(|(label, _)| label == member.label()) {
+                groups.push((member.label().to_owned(), member.clone()));
+            }
+        }
+        for (label, member) in groups {
+            let desired = self
+                .peers
+                .iter()
+                .filter(|peer| !peer.ended)
+                .filter_map(|peer| peer.group_member.as_ref())
+                .filter(|peer| peer.label() == label)
+                .map(GroupMemberSelection::slot)
+                .min();
+            member.selection().publish_desired(desired);
+        }
     }
     /// Apply directory verification and deny-first access before accepting incoming IAX.
     pub fn authorize_incoming(
@@ -214,6 +274,19 @@ impl LinkManager {
         }
         self.check(name, true)
     }
+    /// Authorize a configured group member while retaining normal direct-identity checks.
+    pub fn authorize_incoming_member(
+        &self,
+        name: &str,
+        verified: bool,
+        policy: &AccessPolicy,
+        member: Option<&GroupMemberSelection>,
+    ) -> Result<(), AdmissionError> {
+        if !policy.allows(name, verified) {
+            return Err(AdmissionError::Denied);
+        }
+        self.check_group(name, true, member.map(GroupMemberSelection::label))
+    }
     /// Recheck and publish an authorized incoming IAX peer.
     pub fn admit_incoming(
         &mut self,
@@ -223,6 +296,19 @@ impl LinkManager {
     ) -> Result<(), AdmissionError> {
         self.authorize_incoming(name, verified, policy)?;
         self.attach(name, Mode::TRANSCEIVE, false)
+    }
+    /// Admit an incoming configured member with the group's topology exception and selection.
+    pub fn admit_incoming_member(
+        &mut self,
+        name: &str,
+        verified: bool,
+        policy: &AccessPolicy,
+        member: Option<GroupMemberSelection>,
+    ) -> Result<(), AdmissionError> {
+        if !policy.allows(name, verified) {
+            return Err(AdmissionError::Denied);
+        }
+        self.attach_member(name, Mode::TRANSCEIVE, false, member)
     }
     /// Recheck current inbound control permissions, independently of outbound audio intent.
     pub fn remote_digit(&self, name: &str, digit: char, policy: &AccessPolicy) -> bool {
@@ -276,6 +362,7 @@ impl LinkManager {
         if let Some(peer) = self.peers.iter_mut().find(|peer| peer.name == name) {
             peer.ended = true;
             self.revision = self.revision.wrapping_add(1);
+            self.refresh_group_selections();
         }
     }
     /// Reject a proven topology loop without scheduling permanent recovery into it.
@@ -305,9 +392,11 @@ impl LinkManager {
                     attempt: None,
                     blocked_topology: None,
                     group: peer.group,
+                    group_member: peer.group_member,
                 });
             }
             self.revision = self.revision.wrapping_add(1);
+            self.refresh_group_selections();
         }
     }
     /// Retain the first failed permanent dial even when no channel was published.
@@ -338,7 +427,32 @@ impl LinkManager {
             attempt: None,
             blocked_topology: None,
             group: group.map(str::to_owned),
+            group_member: None,
         });
+        Ok(())
+    }
+    /// Retain independent retry intent for a configured priority-group member.
+    pub fn retain_retry_member(
+        &mut self,
+        name: &str,
+        mode: Mode,
+        now_ms: u64,
+        member: Option<GroupMemberSelection>,
+    ) -> Result<(), AdmissionError> {
+        self.check_group(name, true, member.as_ref().map(GroupMemberSelection::label))?;
+        self.retries.push(Retry {
+            name: name.into(),
+            mode,
+            automatic: true,
+            paused: false,
+            due: now_ms,
+            delay: 0,
+            attempt: None,
+            blocked_topology: None,
+            group: member.as_ref().map(|member| member.label().to_owned()),
+            group_member: member,
+        });
+        self.refresh_group_selections();
         Ok(())
     }
     /// Retain loop-blocked group recovery while tracking direct identity conflicts.
@@ -347,6 +461,7 @@ impl LinkManager {
         name: &str,
         mode: Mode,
         group: Option<&str>,
+        group_member: Option<GroupMemberSelection>,
     ) {
         let evidence = self.topology_evidence(name, group);
         if let Some(retry) = self.retries.iter_mut().find(|retry| retry.name == name) {
@@ -356,6 +471,7 @@ impl LinkManager {
             retry.attempt = None;
             retry.blocked_topology = Some(evidence);
             retry.group = group.map(str::to_owned);
+            retry.group_member = group_member;
             return;
         }
         self.retries.push(Retry {
@@ -368,7 +484,9 @@ impl LinkManager {
             attempt: None,
             blocked_topology: Some(evidence),
             group: group.map(str::to_owned),
+            group_member,
         });
+        self.refresh_group_selections();
     }
     /// Acquire one due dial token, keeping external I/O outside control ownership.
     pub fn take_retry(&mut self, now_ms: u64) -> Option<RetryAttempt> {
@@ -408,7 +526,8 @@ impl LinkManager {
         }
         let automatic = self.retries[index].automatic;
         let group = self.retries[index].group.clone();
-        self.publish(&attempt.name, attempt.mode, automatic, group);
+        let member = self.retries[index].group_member.clone();
+        self.publish(&attempt.name, attempt.mode, automatic, group, member);
         Ok(())
     }
     /// Release a dial token, retrying failures at 1, 2, 4...300 seconds.
@@ -491,7 +610,12 @@ impl LinkManager {
         let count = self.retries.len();
         self.retries
             .retain(|retry| retry.name != name || !retry.automatic);
-        self.disconnect_mode(name, true) || count != self.retries.len()
+        let changed_retry = count != self.retries.len();
+        let changed_peer = self.disconnect_mode(name, true);
+        if changed_retry {
+            self.refresh_group_selections();
+        }
+        changed_peer || changed_retry
     }
 
     fn disconnect_mode(&mut self, name: &str, permanent: bool) -> bool {
@@ -501,6 +625,7 @@ impl LinkManager {
         let changed = before != self.peers.len();
         if changed {
             self.revision = self.revision.wrapping_add(1);
+            self.refresh_group_selections();
         }
         changed
     }
@@ -511,7 +636,7 @@ impl LinkManager {
             .iter()
             .map(|peer| LinkStatus {
                 name: peer.name.clone(),
-                mode: peer.mode,
+                mode: peer.effective_mode(),
                 permanent: peer.permanent,
                 ended: peer.ended,
                 retrying: false,
@@ -525,7 +650,11 @@ impl LinkManager {
                     .filter(|retry| !self.peers.iter().any(|peer| peer.name == retry.name))
                     .map(|retry| LinkStatus {
                         name: retry.name.clone(),
-                        mode: retry.mode,
+                        mode: if retry.group_member.is_some() {
+                            Mode::MONITOR
+                        } else {
+                            retry.mode
+                        },
                         permanent: retry.automatic,
                         ended: false,
                         retrying: true,
@@ -547,6 +676,7 @@ impl LinkManager {
             .collect();
         self.peers.retain(|peer| peer.permanent);
         self.revision = self.revision.wrapping_add(1);
+        self.refresh_group_selections();
         removed
     }
 
@@ -566,9 +696,11 @@ impl LinkManager {
                 attempt: None,
                 blocked_topology: None,
                 group: peer.group,
+                group_member: peer.group_member,
             });
         }
         self.revision = self.revision.wrapping_add(1);
+        self.refresh_group_selections();
         removed
     }
 
@@ -578,7 +710,9 @@ impl LinkManager {
         self.invalidate_generation();
         self.retries.clear();
         self.revision = self.revision.wrapping_add(1);
-        self.peers.drain(..).map(|peer| peer.name).collect()
+        let removed = self.peers.drain(..).map(|peer| peer.name).collect();
+        self.refresh_group_selections();
+        removed
     }
 
     /// Route advisory key messages, reporting only local receiver carrier state.

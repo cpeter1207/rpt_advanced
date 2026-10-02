@@ -6,7 +6,10 @@ mod protocol;
 mod signals;
 mod topology;
 
-pub use audio::{AudioPeer, LinkAudio, LinkAudioStatus, LinkDispatcher, PeerInput};
+pub use audio::{
+    AudioPeer, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus, LinkDispatcher,
+    PeerInput,
+};
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use peer::{Peer, ReceiveState};
 pub use protocol::{Protocol, Route};

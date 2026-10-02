@@ -8,7 +8,10 @@ use super::{
 use crate::{
     access::AccessPolicy,
     command::{DtmfCommandMap, LinkAction},
-    link::{AdmissionError, LinkManager, Mode, Protocol, RetryAttempt, TopologyManager},
+    link::{
+        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, Protocol,
+        RetryAttempt, TopologyManager,
+    },
     schedule::CivilTime,
 };
 
@@ -17,7 +20,7 @@ pub struct ConnectAttempt {
     remote: String,
     mode: Mode,
     permanent: bool,
-    group: Option<String>,
+    group: Option<Box<GroupMemberSelection>>,
     work: GenerationWork,
     scheduled: Option<LinkReservation>,
 }
@@ -90,8 +93,48 @@ pub struct NodeLinkControl {
     policy: AccessPolicy,
     commands: DtmfCommands,
     schedule: Option<LinkScheduler>,
+    groups: Vec<ConfiguredGroup>,
     topology: TopologyManager,
     admitting: bool,
+}
+struct ConfiguredGroup {
+    label: String,
+    members: Vec<String>,
+    selection: GroupSelection,
+}
+fn configured_groups(
+    schedule: Option<&LinkScheduler>,
+    previous: &[ConfiguredGroup],
+) -> Vec<ConfiguredGroup> {
+    let mut groups = Vec::<ConfiguredGroup>::new();
+    if let Some(schedule) = schedule {
+        for route in schedule.route_specs() {
+            let Some(label) = route.group_label else {
+                continue;
+            };
+            let index = groups
+                .iter()
+                .position(|group| group.label == label)
+                .unwrap_or_else(|| {
+                    groups.push(ConfiguredGroup {
+                        label: label.clone(),
+                        members: Vec::new(),
+                        selection: GroupSelection::new(),
+                    });
+                    groups.len() - 1
+                });
+            groups[index].members.push(route.remote);
+        }
+    }
+    for group in &mut groups {
+        if let Some(old) = previous
+            .iter()
+            .find(|old| old.label == group.label && old.members == group.members)
+        {
+            group.selection = old.selection.clone();
+        }
+    }
+    groups
 }
 impl NodeLinkControl {
     /// Compose validated node policy before registering any external callbacks.
@@ -101,12 +144,14 @@ impl NodeLinkControl {
         commands: DtmfCommandMap,
         schedule: Option<LinkScheduler>,
     ) -> Result<Self, AdmissionError> {
+        let groups = configured_groups(schedule.as_ref(), &[]);
         Ok(Self {
             local: local.into(),
             manager: LinkManager::new(local)?,
             policy,
             commands: DtmfCommands::new(commands),
             schedule,
+            groups,
             topology: TopologyManager::default(),
             admitting: true,
         })
@@ -119,6 +164,7 @@ impl NodeLinkControl {
         commands: DtmfCommandMap,
         schedule: Option<LinkScheduler>,
     ) {
+        self.groups = configured_groups(schedule.as_ref(), &self.groups);
         self.manager.invalidate_generation();
         self.policy = policy;
         self.commands = DtmfCommands::new(commands);
@@ -133,6 +179,23 @@ impl NodeLinkControl {
         self.schedule
             .as_ref()
             .is_some_and(|schedule| schedule.is_group_member(remote))
+    }
+    /// Resolve a configured peer's stable group slot and lock-free callback selection.
+    pub fn group_member(&self, remote: &str) -> Option<GroupMemberSelection> {
+        let route = self
+            .schedule
+            .as_ref()?
+            .route_specs()
+            .into_iter()
+            .find(|route| route.remote == remote && route.group_label.is_some())?;
+        let label = route.group_label?;
+        let group = self.groups.iter().find(|group| group.label == label)?;
+        let slot = std::num::NonZeroUsize::new(route.group_priority?.saturating_add(1))?;
+        Some(GroupMemberSelection::new(
+            &label,
+            slot,
+            group.selection.clone(),
+        ))
     }
     /// Prepare changed or thirty-second topology messages; these are not key advice.
     pub fn due_topology(&mut self, now_ms: u64) -> Vec<(String, String)> {
@@ -192,13 +255,22 @@ impl NodeLinkControl {
         if !self.admitting {
             return Err(AdmissionError::Stale);
         }
-        self.manager
-            .authorize_incoming(remote, verified, &self.policy)
+        self.manager.authorize_incoming_member(
+            remote,
+            verified,
+            &self.policy,
+            self.group_member(remote).as_ref(),
+        )
     }
     /// Recheck and publish a directory-verified incoming peer.
     pub fn accept(&mut self, remote: &str, verified: bool) -> Result<(), AdmissionError> {
         self.authorize(remote, verified)?;
-        self.manager.admit_incoming(remote, verified, &self.policy)
+        self.manager.admit_incoming_member(
+            remote,
+            verified,
+            &self.policy,
+            self.group_member(remote),
+        )
     }
     pub(super) fn schedule(&self) -> Option<&LinkScheduler> {
         self.schedule.as_ref()
@@ -387,18 +459,19 @@ impl NodeLinkControl {
         } else if !self.policy.allows(&attempt.remote, true) {
             Err(AdmissionError::Denied)
         } else if answered {
-            match self.manager.attach_group(
+            match self.manager.attach_member(
                 &attempt.remote,
                 attempt.mode,
                 attempt.permanent,
-                attempt.group.as_deref(),
+                attempt.group.as_deref().cloned(),
             ) {
                 Ok(()) => Ok(true),
                 Err(AdmissionError::Loop) if attempt.permanent => {
                     self.manager.retain_topology_blocked_group(
                         &attempt.remote,
                         attempt.mode,
-                        attempt.group.as_deref(),
+                        attempt.group.as_deref().map(GroupMemberSelection::label),
+                        attempt.group.as_deref().cloned(),
                     );
                     topology_blocked = true;
                     Err(AdmissionError::Loop)
@@ -407,11 +480,11 @@ impl NodeLinkControl {
             }
         } else if attempt.permanent {
             self.manager
-                .retain_retry_group(
+                .retain_retry_member(
                     &attempt.remote,
                     attempt.mode,
                     now_ms,
-                    attempt.group.as_deref(),
+                    attempt.group.as_deref().cloned(),
                 )
                 .map(|()| false)
         } else {
@@ -487,7 +560,10 @@ impl NodeLinkControl {
             remote: reservation.remote().into(),
             mode: Mode::TRANSCEIVE,
             permanent: true,
-            group: reservation.group_label().map(str::to_owned),
+            group: reservation
+                .group_label()
+                .and_then(|_| self.group_member(reservation.remote()))
+                .map(Box::new),
             work,
             scheduled: Some(reservation),
         }))
