@@ -91,6 +91,51 @@ fn adapter(_: &str, _: &ResolvedNodeSettings) -> Result<PreparedAdapter<()>, Run
     })
 }
 
+struct SnapshotDevice {
+    node: String,
+    snapshots: Arc<Mutex<Vec<(String, u64)>>>,
+}
+impl DeviceHandoff for SnapshotDevice {
+    fn quiesce(&mut self) -> bool {
+        true
+    }
+    fn close(&mut self) {}
+    fn open(&mut self, settings: &GenerationSettings) -> bool {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .push((self.node.clone(), settings.status_snapshot_interval_ms));
+        true
+    }
+}
+
+#[test]
+fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
+    let snapshots = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[general]\nstatus_snapshot_interval_ms=80\n[1000]\n[2000]\nstatus_snapshot_interval_ms=25\n",
+        )
+        .unwrap(),
+        &Media,
+        adapter,
+        |name, _| {
+            Ok(Box::new(SnapshotDevice {
+                node: name.to_owned(),
+                snapshots: snapshots.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        },
+        clock(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        *snapshots.lock().unwrap(),
+        vec![("1000".to_owned(), 80), ("2000".to_owned(), 25)]
+    );
+    assert!(runtime.stop(0));
+}
+
 #[test]
 fn admission_loss_discards_partial_commands_on_every_active_node() {
     use crate::runtime::dtmf::DigitEvent;

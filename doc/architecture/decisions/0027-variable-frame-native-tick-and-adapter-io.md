@@ -230,11 +230,16 @@ output queue. Actual device I/O errors retain their normal safe recovery path.
 COR, CTCSS, DCS, PTT, and GPIO edge notifications publish immediately after
 the receive or transmit call that detects them. Each publisher has its own
 bounded SPSC event queue to the control owner. Meter, FIFO, and periodic status
-snapshots use a separately configured per-node interval with a global fallback;
-the default is 50 ms. Each worker accumulates its elapsed samples and publishes
-its own fields on the first call ending at or after its deadline. Control
-combines timestamped snapshots; it must not mistake independent receive and
-transmit publications for simultaneous observations.
+snapshots use `status_snapshot_interval_ms`, configured per node with a
+`[general]` fallback and a 50 ms default. Values must be positive integers.
+Each independently paced worker accumulates its own elapsed samples and
+publishes on the first call ending at or after its deadline. Control drains the
+bounded queues and retains the latest RX and TX snapshots separately; their
+timestamps are not presented as simultaneous observations. A full queue drops
+the new snapshot and increments an observable counter rather than blocking an
+audio callback. CLI status includes the latest RX/TX peak, RMS, clipping count,
+and available local-ring occupancy, reserve, target, capacity, ratio, shortfall,
+and discard statistics.
 
 ## Consequences
 

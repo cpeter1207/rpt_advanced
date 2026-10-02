@@ -14,6 +14,7 @@ use rpt_advanced_core::{
         dtmf::DtmfWorker,
     },
 };
+use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     cell::UnsafeCell,
     ffi::{CString, c_char, c_int, c_void},
@@ -24,6 +25,144 @@ use std::{
     },
     time::Instant,
 };
+
+const SNAPSHOT_QUEUE_CAPACITY: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct RingSnapshot {
+    occupancy: u64,
+    reserve: u64,
+    target: u64,
+    capacity: u64,
+    ratio_ppm: i32,
+    missing_samples: u64,
+    discarded_samples: u64,
+}
+
+impl From<&Observation> for RingSnapshot {
+    fn from(ring: &Observation) -> Self {
+        Self {
+            occupancy: ring.available_samples,
+            reserve: ring.reserve_samples,
+            target: ring.target_samples,
+            capacity: ring.capacity_samples,
+            ratio_ppm: ring.ratio_correction_ppm,
+            missing_samples: ring.missing_samples,
+            discarded_samples: ring.discarded_samples,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct MeterSnapshot {
+    timestamp_ms: u64,
+    samples: u64,
+    peak: f32,
+    rms: f32,
+    clipped_samples: u64,
+    dropped_snapshots: u64,
+    ring: Option<RingSnapshot>,
+}
+
+struct MeterWindow {
+    interval_samples: u64,
+    next_snapshot_sample: u64,
+    elapsed_samples: u64,
+    samples: u64,
+    sum_squares: f64,
+    peak: f32,
+    clipped_samples: u64,
+    origin_ms: u64,
+}
+
+impl MeterWindow {
+    fn new(interval_ms: u64, origin_ms: u64) -> Self {
+        let interval_samples = interval_ms.saturating_mul(48).max(1);
+        Self {
+            interval_samples,
+            next_snapshot_sample: interval_samples,
+            elapsed_samples: 0,
+            samples: 0,
+            sum_squares: 0.0,
+            peak: 0.0,
+            clipped_samples: 0,
+            origin_ms,
+        }
+    }
+
+    fn observe(&mut self, audio: &[f32]) -> Option<MeterSnapshot> {
+        if audio.is_empty() {
+            return None;
+        }
+        for sample in audio {
+            let value = if sample.is_finite() { *sample } else { 0.0 };
+            let magnitude = value.abs();
+            self.peak = self.peak.max(magnitude);
+            self.sum_squares += f64::from(value) * f64::from(value);
+            self.clipped_samples = self
+                .clipped_samples
+                .saturating_add(u64::from(magnitude >= 1.0));
+        }
+        self.samples = self.samples.saturating_add(audio.len() as u64);
+        self.elapsed_samples = self.elapsed_samples.saturating_add(audio.len() as u64);
+        if self.elapsed_samples < self.next_snapshot_sample {
+            return None;
+        }
+
+        let snapshot = MeterSnapshot {
+            timestamp_ms: self.origin_ms.saturating_add(self.elapsed_samples / 48),
+            samples: self.samples,
+            peak: self.peak,
+            rms: (self.sum_squares / self.samples as f64).sqrt() as f32,
+            clipped_samples: self.clipped_samples,
+            ..MeterSnapshot::default()
+        };
+        self.samples = 0;
+        self.sum_squares = 0.0;
+        self.peak = 0.0;
+        self.clipped_samples = 0;
+        while self.next_snapshot_sample <= self.elapsed_samples {
+            let next = self
+                .next_snapshot_sample
+                .saturating_add(self.interval_samples);
+            if next == self.next_snapshot_sample {
+                break;
+            }
+            self.next_snapshot_sample = next;
+        }
+        Some(snapshot)
+    }
+}
+
+struct MeterPublisher {
+    window: MeterWindow,
+    snapshots: Producer<MeterSnapshot>,
+    dropped_snapshots: u64,
+}
+
+impl MeterPublisher {
+    fn publish(&mut self, audio: &[f32], observer: Option<&InboundObserver>) {
+        let Some(mut snapshot) = self.window.observe(audio) else {
+            return;
+        };
+        snapshot.dropped_snapshots = self.dropped_snapshots;
+        if let Some(observer) = observer {
+            // The observer copies lock-free ring counters; it does not consume PCM.
+            snapshot.ring = observer.observe().ok().as_ref().map(RingSnapshot::from);
+        }
+        if let Err(rtrb::PushError::Full(_)) = self.snapshots.push(snapshot) {
+            self.dropped_snapshots = self.dropped_snapshots.saturating_add(1);
+        }
+    }
+}
+
+fn dbfs(value: f32) -> f32 {
+    if value > 0.0 {
+        20.0 * value.log10()
+    } else {
+        f32::NEG_INFINITY
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -117,6 +256,7 @@ impl RadioStatus {
 struct ReceiveState {
     producer: InboundProducer,
     elapsed_samples: u64,
+    meter: MeterPublisher,
 }
 struct ReceiveContext {
     active: Arc<AtomicBool>,
@@ -133,6 +273,8 @@ struct TransmitContext {
     maximum: usize,
     status: RadioStatus,
     squelch_delay_ms: u64,
+    observer: InboundObserver,
+    meter: UnsafeCell<MeterPublisher>,
 }
 // SAFETY: callbacks are serialized independently by the host. Control writes owner slots
 // only before release-publishing active, and takes them only after synchronous radio destroy.
@@ -165,7 +307,7 @@ unsafe extern "C" fn receive_callback(
     let Some(samples) = (unsafe { samples(pointer, count) }) else {
         return -1;
     };
-    match catch_unwind(AssertUnwindSafe(|| unsafe {
+    let result = match catch_unwind(AssertUnwindSafe(|| unsafe {
         receive(context, receiving, samples)
     })) {
         Ok(result) => result,
@@ -173,7 +315,15 @@ unsafe extern "C" fn receive_callback(
             samples.fill(0.0);
             -1
         }
+    };
+    // SAFETY: receive() and its panic boundary have returned; this serial callback
+    // is now the sole access to its meter publisher.
+    if let Some(context) = unsafe { context.cast::<ReceiveContext>().as_ref() } {
+        unsafe { &mut *context.state.get() }
+            .meter
+            .publish(samples, None);
     }
+    result
 }
 unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> i32 {
     // SAFETY: the host retains this context until synchronous destroy returns.
@@ -235,8 +385,8 @@ unsafe extern "C" fn transmit_callback(
     keyed: *mut u32,
 ) -> i32 {
     // SAFETY: the host retains this callback context through synchronous destroy.
-    let status =
-        unsafe { context.cast::<TransmitContext>().as_ref() }.map(|context| &context.status);
+    let callback_context = unsafe { context.cast::<TransmitContext>().as_ref() };
+    let status = callback_context.map(|context| &context.status);
     // SAFETY: the host supplies writable key storage for this call.
     let keyed = unsafe { keyed.as_mut() };
     // SAFETY: the host lends aligned writable PCM for this complete callback.
@@ -250,6 +400,7 @@ unsafe extern "C" fn transmit_callback(
     let Some(keyed) = keyed else {
         samples.fill(0.0);
         publish_transmit_keyed(status, false);
+        publish_transmit_samples(callback_context, samples);
         return -1;
     };
     *keyed = 0;
@@ -264,7 +415,14 @@ unsafe extern "C" fn transmit_callback(
         }
     };
     publish_transmit_keyed(status, result == 0 && *keyed != 0);
+    publish_transmit_samples(callback_context, samples);
     result
+}
+fn publish_transmit_samples(context: Option<&TransmitContext>, samples: &[f32]) {
+    if let Some(context) = context {
+        // SAFETY: the serialized TX callback is the sole writer of this publisher.
+        unsafe { &mut *context.meter.get() }.publish(samples, Some(&context.observer));
+    }
 }
 fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: bool) {
     if let Some(status) = status {
@@ -349,6 +507,10 @@ pub struct RadioWorker {
     receive: Box<ReceiveContext>,
     transmit: Box<TransmitContext>,
     observer: InboundObserver,
+    receive_snapshots: Consumer<MeterSnapshot>,
+    transmit_snapshots: Consumer<MeterSnapshot>,
+    latest_receive: Option<MeterSnapshot>,
+    latest_transmit: Option<MeterSnapshot>,
     reported_faults: [u64; 6],
     last_report_ms: u64,
 }
@@ -365,6 +527,7 @@ impl RadioWorker {
         epoch: Instant,
         status: RadioStatus,
         squelch_delay_ms: u64,
+        status_snapshot_interval_ms: u64,
     ) -> Result<Self, (Error, Radio)> {
         let maximum = radio.maximum_frames();
         let ring = InboundRing::open(48_000, InboundPolicy::Local { squelch_delay_ms });
@@ -378,6 +541,9 @@ impl RadioWorker {
             return Err((Error::Allocation, radio));
         };
         let observer = producer.observer();
+        let origin_ms = epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let (receive_publisher, receive_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
+        let (transmit_publisher, transmit_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
         let active = Arc::new(AtomicBool::new(false));
         let receive = Box::new(ReceiveContext {
             active: active.clone(),
@@ -385,9 +551,14 @@ impl RadioWorker {
             state: UnsafeCell::new(ReceiveState {
                 producer,
                 elapsed_samples: 0,
+                meter: MeterPublisher {
+                    window: MeterWindow::new(status_snapshot_interval_ms, origin_ms),
+                    snapshots: receive_publisher,
+                    dropped_snapshots: 0,
+                },
             }),
             maximum,
-            origin_ms: epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            origin_ms,
             status: status.clone(),
         });
         let transmit = Box::new(TransmitContext {
@@ -397,6 +568,12 @@ impl RadioWorker {
             maximum,
             status,
             squelch_delay_ms,
+            observer: observer.clone(),
+            meter: UnsafeCell::new(MeterPublisher {
+                window: MeterWindow::new(status_snapshot_interval_ms, origin_ms),
+                snapshots: transmit_publisher,
+                dropped_snapshots: 0,
+            }),
         });
         // SAFETY: boxes have stable addresses and outlive the activated radio. On failure
         // the host must detach both endpoints before returning the still-owned reservation.
@@ -417,6 +594,10 @@ impl RadioWorker {
             receive,
             transmit,
             observer,
+            receive_snapshots,
+            transmit_snapshots,
+            latest_receive: None,
+            latest_transmit: None,
             reported_faults: [0; 6],
             last_report_ms: 0,
         })
@@ -457,12 +638,56 @@ impl RadioWorker {
             render_failed
         )
     }
+    fn format_meter(label: &str, snapshot: Option<MeterSnapshot>) -> String {
+        let Some(snapshot) = snapshot else {
+            return format!("  {label}: awaiting first snapshot");
+        };
+        format!(
+            "  {label}: at={}ms samples={} peak={:.1}dBFS rms={:.1}dBFS clipped-samples={} dropped-snapshots={}",
+            snapshot.timestamp_ms,
+            snapshot.samples,
+            dbfs(snapshot.peak),
+            dbfs(snapshot.rms),
+            snapshot.clipped_samples,
+            snapshot.dropped_snapshots
+        )
+    }
+    fn format_ring_snapshot(ring: RingSnapshot) -> String {
+        format!(
+            "  local-rx-ring-snapshot: occupancy={}ms reserve={}ms target={}ms capacity={}ms ratio={:+}ppm missing={} discarded={}",
+            ring.occupancy / 48,
+            ring.reserve / 48,
+            ring.target / 48,
+            ring.capacity / 48,
+            ring.ratio_ppm,
+            ring.missing_samples,
+            ring.discarded_samples
+        )
+    }
     /// Control-only snapshot of this worker's actual local receive ring.
     pub(crate) fn local_status_text(&self) -> String {
-        self.observer.observe().map_or_else(
+        let mut text = self.observer.observe().map_or_else(
             |_| "  local-rx: observation failed".to_owned(),
             |ring| self.format_status(&ring),
-        )
+        );
+        text.push('\n');
+        text.push_str(&Self::format_meter("local-rx-audio", self.latest_receive));
+        text.push('\n');
+        text.push_str(&Self::format_meter("transmit-audio", self.latest_transmit));
+        if let Some(ring) = self.latest_transmit.and_then(|snapshot| snapshot.ring) {
+            text.push('\n');
+            text.push_str(&Self::format_ring_snapshot(ring));
+        }
+        text
+    }
+    /// Drain bounded callback snapshots and retain only each direction's latest window.
+    pub(crate) fn collect_snapshots(&mut self) {
+        while let Ok(snapshot) = self.receive_snapshots.pop() {
+            self.latest_receive = Some(snapshot);
+        }
+        while let Ok(snapshot) = self.transmit_snapshots.pop() {
+            self.latest_transmit = Some(snapshot);
+        }
     }
     /// Record changed fault counters at most every five seconds, never from audio.
     /// Syslog retains evidence even when the service discards stdout and stderr.

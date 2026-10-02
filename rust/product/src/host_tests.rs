@@ -604,6 +604,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
         receive_maximum: MAXIMUM_FRAMES,
         transmit_maximum: MAXIMUM_FRAMES,
         squelch_delay_ms: 0,
+        status_snapshot_interval_ms: 50,
     };
     let mut device = Device {
         lease: first_lease.clone(),

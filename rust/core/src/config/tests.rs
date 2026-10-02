@@ -122,6 +122,34 @@ fn statpost_interval_defaults_and_rejects_out_of_range_values() {
 }
 
 #[test]
+fn status_snapshot_interval_inherits_node_override_and_default() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatus_snapshot_interval_ms=80\n[1000]\n[2000]\nstatus_snapshot_interval_ms=25\n[3000]\nstatus_snapshot_interval_ms=0\n",
+    )
+    .unwrap();
+
+    let resolve = |node| {
+        ResolvedNodeSettings::resolve(&document, &NodeId::new(node).unwrap())
+            .unwrap()
+            .value
+            .status_snapshot_interval_ms
+    };
+    assert_eq!(resolve("1000"), 80);
+    assert_eq!(resolve("2000"), 25);
+    assert_eq!(resolve("3000"), 80);
+    assert_eq!(
+        ResolvedNodeSettings::resolve(
+            &ConfigDocument::parse("[4000]\n").unwrap(),
+            &NodeId::new("4000").unwrap()
+        )
+        .unwrap()
+        .value
+        .status_snapshot_interval_ms,
+        50
+    );
+}
+
+#[test]
 fn invalid_optional_node_values_fall_back_and_courtesy_level_inherits() {
     let document = ConfigDocument::parse(&format!(
         "[1000]\ncallsign={}\nlink_allow_nodes=?\nlink_deny_nodes=?\nlink_lookup_method=?\n",

@@ -39,6 +39,21 @@ fn statpost_options_are_recognized_in_global_and_node_sections() {
 }
 
 #[test]
+fn status_snapshot_interval_is_recognized_in_global_and_node_sections() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatus_snapshot_interval_ms=80\n[1000]\nstatus_snapshot_interval_ms=25\n",
+    )
+    .unwrap();
+
+    let result = Schema::validate(&document).unwrap();
+    assert!(
+        result.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
 fn invalid_statpost_values_warn_and_use_inherited_fallback() {
     let document = ConfigDocument::parse(
         "[general]\nstatpost_url=https://stats.example/report\nstatpost_time=90\n[1000]\nstatpost_url=ftp://stats.example/report\nstatpost_time=601\n",

@@ -20,6 +20,7 @@ fn generation(id: u64, drops: &Arc<AtomicUsize>) -> RuntimeGeneration<Resource, 
             receive_maximum: 960,
             transmit_maximum: 960,
             squelch_delay_ms: 0,
+            status_snapshot_interval_ms: 50,
         },
         Resource(drops.clone()),
         Resource(drops.clone()),
@@ -94,6 +95,7 @@ fn failed_candidate_retains_live_generation_and_releases_partial_resources() {
             receive_maximum: 0,
             transmit_maximum: 960,
             squelch_delay_ms: 0,
+            status_snapshot_interval_ms: 50,
         },
         Resource(drops.clone()),
         Resource(drops.clone()),
@@ -248,6 +250,7 @@ fn device_open_failure_restores_old_generation_or_leaves_rf_safe() {
                 receive_maximum: 960,
                 transmit_maximum: 960,
                 squelch_delay_ms: 0,
+                status_snapshot_interval_ms: 50,
             },
             Resource(drops.clone()),
             Resource(drops.clone()),
@@ -338,6 +341,7 @@ fn ordinary_reload_cannot_claim_a_different_device() {
             receive_maximum: 960,
             transmit_maximum: 960,
             squelch_delay_ms: 0,
+            status_snapshot_interval_ms: 50,
         },
         Resource(drops.clone()),
         Resource(drops.clone()),
@@ -407,6 +411,7 @@ fn handoff_rejects_every_precondition_without_closing_the_live_lease() {
             receive_maximum: 960,
             transmit_maximum: 960,
             squelch_delay_ms: 0,
+            status_snapshot_interval_ms: 50,
         };
         if case == "node" {
             settings.node = "different".into();
@@ -504,6 +509,7 @@ fn generation_rejects_unusable_identity_and_independent_callback_bounds() {
                     receive_maximum,
                     transmit_maximum,
                     squelch_delay_ms: 0,
+                    status_snapshot_interval_ms: 50,
                 },
                 (),
                 ()

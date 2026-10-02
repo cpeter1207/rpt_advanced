@@ -147,6 +147,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "full_duplex"
                 | "dtmf_muting"
                 | "squelch_delay_ms"
+                | "status_snapshot_interval_ms"
                 | "transmit_hang_ms"
                 | "transmit_timeout_ms"
                 | "timeout_lockout_ms"
@@ -275,6 +276,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "courtesy_delay_ms"
         | "squelch_delay_ms"
         | "end_inactivity_ms" => parse::unsigned(value, 0, u64::MAX).is_some(),
+        "status_snapshot_interval_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "polite_maximum_wait_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "interval_ms" => parse::unsigned(
             value,
@@ -333,6 +335,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "telemetry_duck_db") => "-20",
         (ScopeKind::General | ScopeKind::Node, "courtesy_delay_ms") => "250",
         (ScopeKind::General | ScopeKind::Node, "squelch_delay_ms") => "0",
+        (ScopeKind::General | ScopeKind::Node, "status_snapshot_interval_ms") => "50",
         (ScopeKind::General | ScopeKind::Node, "link_lookup_method") => "both",
         (ScopeKind::General | ScopeKind::Node, "statpost_time") => "60",
         (ScopeKind::General | ScopeKind::Node, "statpost_url") => "",

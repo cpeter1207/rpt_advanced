@@ -91,6 +91,7 @@ impl DeviceHandoff for Device {
             lease.epoch,
             lease.status.clone(),
             settings.squelch_delay_ms,
+            settings.status_snapshot_interval_ms,
         ) {
             Ok(worker) => {
                 lease.worker = Some(worker);
@@ -576,6 +577,7 @@ impl Host {
         for (local, lease) in &self.leases {
             if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {
                 worker.report_faults(local, clock.now_ms);
+                worker.collect_snapshots();
             }
         }
         let mut events = Vec::new();

@@ -89,10 +89,19 @@ fn worker() -> RadioWorker {
     worker_with_status(RadioStatus::default())
 }
 fn worker_with_status(status: RadioStatus) -> RadioWorker {
+    worker_with_interval(status, 50)
+}
+fn worker_with_interval(status: RadioStatus, interval_ms: u64) -> RadioWorker {
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
-    RadioWorker::prepare(services.radio("usb", 8).unwrap(), Instant::now(), status, 0)
-        .unwrap_or_else(|(error, _radio)| panic!("prepare callbacks: {error:?}"))
+    RadioWorker::prepare(
+        services.radio("usb", 8).unwrap(),
+        Instant::now(),
+        status,
+        0,
+        interval_ms,
+    )
+    .unwrap_or_else(|(error, _radio)| panic!("prepare callbacks: {error:?}"))
 }
 
 #[test]
@@ -116,6 +125,7 @@ fn local_ring_captures_squelch_delay_before_any_callback() {
             Instant::now(),
             RadioStatus::default(),
             delay,
+            50,
         )
         .unwrap_or_else(|_| panic!("prepare local ring"));
         let observation = worker.observer.observe().unwrap();
@@ -314,7 +324,9 @@ fn provider_failures_remain_silent_and_observable_without_losing_control() {
             .load(Ordering::Relaxed),
         1
     );
-    assert_eq!(worker.local_status_text(), "  local-rx: observation failed");
+    let status = worker.local_status_text();
+    assert!(status.starts_with("  local-rx: observation failed"));
+    assert!(status.contains("local-rx-audio: awaiting first snapshot"));
     worker.report_faults("1000", 5_000);
     assert_eq!(worker.reported_faults, [0; 6]);
     let (producer, _) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
@@ -338,6 +350,7 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
         Instant::now(),
         RadioStatus::default(),
         0,
+        50,
     ) else {
         panic!("expected failure")
     };
@@ -364,6 +377,61 @@ fn radio_status_preserves_the_original_edge_time() {
     assert_eq!(status.snapshot(), (true, 2));
     status.update(false, u64::MAX);
     assert_eq!(status.snapshot(), (false, u64::MAX >> 1));
+}
+
+#[test]
+fn meter_snapshots_follow_elapsed_samples_and_round_to_callback_end() {
+    let mut meter = MeterWindow::new(50, 1_000);
+    assert!(meter.observe(&[0.5; 960]).is_none());
+    assert!(meter.observe(&[0.5; 960]).is_none());
+    let snapshot = meter.observe(&[1.0; 960]).unwrap();
+    assert_eq!(snapshot.timestamp_ms, 1_060);
+    assert_eq!(snapshot.samples, 2_880);
+    assert_eq!(snapshot.peak, 1.0);
+    assert_eq!(snapshot.clipped_samples, 960);
+    assert!((snapshot.rms - 0.5_f32.sqrt()).abs() < 0.0001);
+
+    assert!(meter.observe(&[0.25; 960]).is_none());
+    let next = meter.observe(&[0.25; 960]).unwrap();
+    assert_eq!(next.timestamp_ms, 1_100);
+    assert_eq!(next.samples, 1_920);
+    assert_eq!(next.peak, 0.25);
+    assert_eq!(next.clipped_samples, 0);
+}
+
+#[test]
+fn callback_meter_snapshots_are_bounded_and_control_keeps_latest() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut worker = worker_with_interval(RadioStatus::default(), 1);
+    let mut receive = [0.5; 8];
+    let mut transmit = [0.5; 8];
+    for _ in 0..6 {
+        for _ in 0..6 {
+            assert_eq!(rx(&worker, false, &mut receive), 0);
+            assert_eq!(tx(&worker, &mut transmit).0, 0);
+        }
+    }
+    worker.collect_snapshots();
+    assert!(worker.local_status_text().contains("local-rx-audio: at="));
+    assert!(worker.local_status_text().contains("transmit-audio: at="));
+    assert!(
+        worker
+            .local_status_text()
+            .contains("local-rx-ring-snapshot: occupancy=")
+    );
+
+    for _ in 0..6 {
+        assert_eq!(rx(&worker, false, &mut receive), 0);
+        assert_eq!(tx(&worker, &mut transmit).0, 0);
+    }
+    worker.collect_snapshots();
+    let status = worker.local_status_text();
+    assert!(status.contains("local-rx-audio: at="));
+    assert!(status.contains("transmit-audio: at="));
+    assert!(status.contains("dropped-snapshots=2"));
+    drop(worker.stop());
 }
 
 #[test]
@@ -565,11 +633,12 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
         Instant::now(),
         RadioStatus::default(),
         0,
+        50,
     ) else {
         panic!("activation must fail")
     };
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
-    let mut worker = RadioWorker::prepare(radio, Instant::now(), RadioStatus::default(), 0)
+    let mut worker = RadioWorker::prepare(radio, Instant::now(), RadioStatus::default(), 0, 50)
         .unwrap_or_else(|_| panic!("reservation retry"));
     assert!(worker.attach(owners).is_ok());
     drop(worker.stop().unwrap());
@@ -661,6 +730,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
         Instant::now(),
         RadioStatus::default(),
         0,
+        50,
     )
     .unwrap_or_else(|_| panic!("prepare"));
     assert!(worker.attach(owners).is_ok());

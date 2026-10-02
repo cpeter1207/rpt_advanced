@@ -147,8 +147,12 @@ None.
   ring; transmit playback only consumes that ring. Other split-worker items
   below remain pending.
 - The current RPT Advanced radio adapter does not yet invoke the shared-clock
-  paired-owner path, and the configurable publication interval is not yet
-  implemented.
+  paired-owner path. The configurable snapshot interval is implemented as
+  `status_snapshot_interval_ms`, with per-node override, `[general]` fallback,
+  and a 50 ms default. RX and TX publish independently on the first callback
+  ending at or after each sample-count deadline; control retains each latest
+  snapshot for CLI status. The optional shared-clock paired-owner path remains
+  pending.
 - The existing supported native rate remains 48 kHz. The adapter supplies its
   clock/cadence; the transmit worker has no separate pacing source.
 - Outbound codec conversion and detector-private decimation remain separate

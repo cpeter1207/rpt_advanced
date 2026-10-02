@@ -357,7 +357,9 @@ defines the full reload, hardware-handoff, and failure policy.
   by the transmit mixer or a second output queue. Asterisk representation and
   egress conversion plus partial device I/O remain adapter responsibilities.
   Edge events publish after their detecting worker call; meter/FIFO snapshots
-  default to a 50 ms per-node interval with global fallback. See
+  use `status_snapshot_interval_ms` with per-node override, `[general]`
+  fallback, and a 50 ms default. RX/TX cadence is independently rounded up to
+  each worker's first callback ending at or after its sample deadline. See
   [ADR 0027](decisions/0027-variable-frame-native-tick-and-adapter-io.md).
 - A valid configuration reload replaces workers without restarting Asterisk;
   invalid configuration leaves the running configuration intact.

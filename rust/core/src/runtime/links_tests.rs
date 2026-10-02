@@ -9,6 +9,7 @@ fn generation(id: u64) -> RuntimeGeneration<(), ()> {
             receive_maximum: 960,
             transmit_maximum: 960,
             squelch_delay_ms: 0,
+            status_snapshot_interval_ms: 50,
         },
         (),
         (),

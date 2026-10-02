@@ -487,6 +487,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 receive_maximum: prepared.receive_maximum,
                 transmit_maximum: prepared.transmit_maximum,
                 squelch_delay_ms: settings.squelch_delay_ms,
+                status_snapshot_interval_ms: settings.status_snapshot_interval_ms,
             };
             let generation = RuntimeGeneration::prepare(
                 generation_id,
