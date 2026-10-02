@@ -45,6 +45,8 @@ pub struct ResolvedNodeSettings {
     pub courtesy_delay_ms: u64,
     /// Node radio channel.
     pub channel: String,
+    /// Selected Fluent locale, inherited from general settings.
+    pub language: String,
     /// Optional callsign.
     pub callsign: String,
     /// Optional AllStarLink-compatible status reporting URL; empty disables reporting.
@@ -1084,6 +1086,11 @@ impl ResolvedNodeSettings {
             value.telemetry_duck_db = parsed;
         }
         text!(channel, "radio_channel");
+        if let Some(language) = lookup_valid(document, "language", &scopes, |raw| {
+            raw.parse::<unic_langid::LanguageIdentifier>().ok()
+        }) {
+            value.language = language.to_string();
+        }
         text!(statpost_url, "statpost_url");
         if let Some(parsed) = lookup_valid(document, "statpost_time", &scopes, |raw| {
             parse::unsigned(raw, 30, 600)
@@ -1151,6 +1158,7 @@ impl ResolvedNodeSettings {
             telemetry_duck_db: -20,
             courtesy_delay_ms: 250,
             channel: node.as_str().to_owned(),
+            language: "en-US".to_owned(),
             callsign: String::new(),
             statpost_url: String::new(),
             statpost_time: 60,

@@ -185,6 +185,13 @@ sources, including file, speech, Morse, and tone, and streams bounded PCM chunks
 into that ring. `Playback::Render` only consumes ready samples; the transmit
 worker never synthesizes telemetry.
 
+Controller-owned RF wording is stored in the packaged Fluent catalogs, with
+separate text, TTS, and Morse forms. The configuration generation validates its
+catalog before publication; built-in message formatting stays on the control
+plane, and optional translation attributes fall back to English independently.
+Operator-authored event templates remain unchanged. See
+[ADR 0041](decisions/0041-fluent-localized-controller-telemetry.md).
+
 ### Radio-port audio ownership and lifecycle
 
 ```text

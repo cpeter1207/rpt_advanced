@@ -20,6 +20,7 @@ use crate::{
     },
     controller::{ActivitySnapshot, ControllerControl, NodeController},
     media::StationMediaSession,
+    messages::{Message, MessageCatalog},
     schedule::{CivilTime, ScheduledWindow},
     template::MessageTemplate,
     time::{TimeAnnouncement, TimeFormat},
@@ -89,6 +90,13 @@ struct ControlState<C: Send> {
     activity: ActivitySnapshot,
     started_ms: u64,
     prior_activity_ms: Option<u64>,
+    catalog: MessageCatalog,
+}
+struct GroupAnnouncement {
+    label: String,
+    name: String,
+    members: Vec<String>,
+    available: bool,
 }
 impl<C: Send> ControlState<C> {
     fn activity_ms(&self) -> Option<u64> {
@@ -118,6 +126,7 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     retired_control: Option<ControlState<C>>,
     status: ResolvedIdentifierSettings,
     time_format: u64,
+    group_announcements: Vec<GroupAnnouncement>,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
     /// Borrow a current/retiring adapter dispatcher only on control. Once exposed, its generation
@@ -337,6 +346,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
             activity,
             started_ms: now_ms,
             prior_activity_ms: None,
+            catalog: MessageCatalog::load(&node.settings.language)
+                .map_err(|_| RuntimeError::Preparation)?,
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
         std::mem::swap(&mut next.media_session, &mut node.control.media_session);
@@ -457,7 +468,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .generation
             .checked_add(1)
             .ok_or(RuntimeError::Preparation)?;
-        let warnings = Schema::validate(&document)?.warnings;
+        let mut warnings = Schema::validate(&document)?.warnings;
         let mut candidates = Vec::new();
         let mut events = Vec::new();
         for name in document.nodes() {
@@ -465,6 +476,18 @@ impl<A: Send, C: Send> Runtime<A, C> {
             let settings = ResolvedNodeSettings::resolve(&document, &id)?.value;
             if !settings.enabled {
                 continue;
+            }
+            let catalog =
+                MessageCatalog::load(&settings.language).map_err(|_| RuntimeError::Preparation)?;
+            for issue in catalog.translation_warnings() {
+                warnings.push(ConfigWarning::new(
+                    0,
+                    name,
+                    "language",
+                    &settings.language,
+                    issue,
+                    "en-US",
+                ));
             }
             let existing = self.nodes.iter().find(|node| node.name == name);
             let links = prepare_links(
@@ -516,6 +539,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 activity,
                 started_ms: clock.now_ms,
                 prior_activity_ms: existing.and_then(|node| node.control.activity_ms()),
+                catalog,
             };
             candidates.push(Candidate {
                 name: name.into(),
@@ -654,6 +678,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     retired_control: None,
                     status: candidate.status,
                     time_format: candidate.time_format,
+                    group_announcements: Vec::new(),
                 });
             }
         }
@@ -770,6 +795,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                             &node.name,
                             &node.settings.callsign,
                             node.links.manager(),
+                            &node.control.catalog,
                         )
                     })
                     .transpose()
@@ -788,7 +814,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .iter()
             .find(|node| node.name == token.local())
             .ok_or(RuntimeError::MissingNode)?;
-        let (_, peer) = render::direct_status(node.links.manager());
+        let (_, peer) = render::direct_status(node.links.manager(), &node.control.catalog)?;
         let morse = token.content.message.as_deref().and_then(render::morse);
         let speech =
             token.content.message.as_deref().map(|text| {
@@ -855,23 +881,32 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     minute.into(),
                     TimeFormat::try_from(node.time_format)
                         .map_err(|_| RuntimeError::Preparation)?,
+                    &node.control.catalog,
                 )
                 .map_err(|_| RuntimeError::Preparation)?;
                 (time.morse().to_owned(), time.speech().to_owned())
             }
             LinkAction::LastKeyed => {
-                let text = last_keyed.map_or_else(
-                    || "NO LAST KEYED".into(),
-                    |peer| format!("LAST KEYED {peer}"),
+                let message = match last_keyed {
+                    Some(peer) => Message::LastKeyed { peer },
+                    None => Message::LastKeyedNone,
+                };
+                let forms = node
+                    .control
+                    .catalog
+                    .format(&message)
+                    .map_err(|_| RuntimeError::Preparation)?;
+                let spoken = render::telemetry_speech(
+                    &forms.tts,
+                    &last_keyed.into_iter().collect::<Vec<_>>(),
                 );
-                let spoken =
-                    render::telemetry_speech(&text, &last_keyed.into_iter().collect::<Vec<_>>());
-                (text, spoken)
+                (forms.morse, spoken)
             }
             _ => {
-                let (text, identity) = render::direct_status(node.links.manager());
-                let spoken = render::telemetry_speech(&text, &[&identity]);
-                (text, spoken)
+                let (forms, identity) =
+                    render::direct_status(node.links.manager(), &node.control.catalog)?;
+                let spoken = render::telemetry_speech(&forms.tts, &[&identity]);
+                (forms.morse, spoken)
             }
         };
         queue_status_media(
@@ -879,6 +914,27 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &mut node.control.media_session,
             &node.status,
             &text,
+            &spoken,
+        )
+    }
+    /// Queue a topology-loop explanation to the local transmitter for a local RF command.
+    pub fn queue_loop_rejected(&mut self, local: &str, peer: &str) -> Result<(), RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let forms = node
+            .control
+            .catalog
+            .format(&Message::LoopRejected { node: peer })
+            .map_err(|_| RuntimeError::Preparation)?;
+        let spoken = render::telemetry_speech(&forms.tts, &[peer]);
+        queue_status_media(
+            &mut node.control.telemetry,
+            &mut node.control.media_session,
+            &node.status,
+            &forms.morse,
             &spoken,
         )
     }
@@ -892,37 +948,120 @@ impl<A: Send, C: Send> Runtime<A, C> {
         second: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
-        if self.nodes.iter().any(|node| {
-            (node.name == first && node.links.is_group_member(second))
-                || (node.name == second && node.links.is_group_member(first))
-        }) {
-            return Ok(());
-        }
-        let verb = if connected {
-            "CONNECTED"
-        } else {
-            "DISCONNECTED"
-        };
-        let relation = if connected { "TO" } else { "FROM" };
         let mut failure = None;
         for node in &mut self.nodes {
-            let text = if node.name == first {
-                format!("{second} {verb}")
+            if (node.name == first && node.links.is_group_member(second))
+                || (node.name == second && node.links.is_group_member(first))
+            {
+                continue;
+            }
+            let message = if node.name == first {
+                if connected {
+                    Message::PeerConnectedLocal { peer: second }
+                } else {
+                    Message::PeerDisconnectedLocal { peer: second }
+                }
             } else if node.name == second {
-                format!("{first} {verb}")
+                if connected {
+                    Message::PeerConnectedLocal { peer: first }
+                } else {
+                    Message::PeerDisconnectedLocal { peer: first }
+                }
+            } else if connected {
+                Message::PeerConnectedThirdParty { first, second }
             } else {
-                format!("{first} {verb} {relation} {second}")
+                Message::PeerDisconnectedThirdParty { first, second }
             };
-            let spoken = render::telemetry_speech(&text, &[first, second]);
-            let queued = queue_status_media(
-                &mut node.control.telemetry,
-                &mut node.control.media_session,
-                &node.status,
-                &text,
-                &spoken,
-            );
+            let queued = node
+                .control
+                .catalog
+                .format(&message)
+                .map_err(|_| RuntimeError::Preparation)
+                .and_then(|forms| {
+                    let spoken = render::telemetry_speech(&forms.tts, &[first, second]);
+                    queue_status_media(
+                        &mut node.control.telemetry,
+                        &mut node.control.media_session,
+                        &node.status,
+                        &forms.morse,
+                        &spoken,
+                    )
+                });
             if let Err(error) = queued {
                 failure = Some(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+    /// Queue only a group's first active selection and transitions to complete unavailability.
+    /// Member connects, recovery attempts, and later winner changes stay silent.
+    pub fn queue_priority_group_events(&mut self) -> Result<(), RuntimeError> {
+        let mut failure = None;
+        for node in &mut self.nodes {
+            let groups = node.links.priority_groups();
+            node.group_announcements
+                .retain(|previous| groups.iter().any(|group| group.label == previous.label));
+            for group in groups {
+                let previous = node
+                    .group_announcements
+                    .iter()
+                    .find(|previous| previous.label == group.label);
+                let same_configuration = previous.is_some_and(|previous| {
+                    previous.name == group.name && previous.members == group.members
+                });
+                let previously_available =
+                    same_configuration && previous.is_some_and(|previous| previous.available);
+                let message = if group.selected.is_some() && !same_configuration {
+                    Some(Message::PriorityGroupSelected {
+                        group: &group.name,
+                        peer: group.selected.as_deref().expect("selected group member"),
+                    })
+                } else if group.unavailable && (!same_configuration || previously_available) {
+                    Some(Message::PriorityGroupUnavailable { group: &group.name })
+                } else {
+                    None
+                };
+                if let Some(message) = message {
+                    let queued = node
+                        .control
+                        .catalog
+                        .format(&message)
+                        .map_err(|_| RuntimeError::Preparation)
+                        .and_then(|forms| {
+                            let spoken =
+                                group.selected.as_deref().map_or(forms.tts.clone(), |peer| {
+                                    render::telemetry_speech(&forms.tts, &[peer])
+                                });
+                            queue_status_media(
+                                &mut node.control.telemetry,
+                                &mut node.control.media_session,
+                                &node.status,
+                                &forms.morse,
+                                &spoken,
+                            )
+                        });
+                    if let Err(error) = queued {
+                        failure = Some(error);
+                        continue;
+                    }
+                } else if group.selected.is_none() && !group.unavailable {
+                    continue;
+                }
+                let state = GroupAnnouncement {
+                    label: group.label,
+                    name: group.name,
+                    members: group.members,
+                    available: group.selected.is_some(),
+                };
+                if let Some(previous) = node
+                    .group_announcements
+                    .iter_mut()
+                    .find(|previous| previous.label == state.label)
+                {
+                    *previous = state;
+                } else {
+                    node.group_announcements.push(state);
+                }
             }
         }
         failure.map_or(Ok(()), Err)

@@ -46,3 +46,4 @@ status. Superseded records remain and point to their replacement.
 | [0038](0038-replaceable-control-path-adapter.md) | Accepted | Control execution uses a replaceable adapter, initially backed by the Asterisk taskprocessor. |
 | [0039](0039-retire-usbradioplus-native-mode.md) | Accepted | Remove USBRadioPlus native software-repeat and native parrot modes; preserve shared native DSP and controller transport (candidate under verification). |
 | [0040](0040-initial-alpha-compatibility-policy.md) | Accepted | Initial-alpha project interfaces do not require backward compatibility; remove compatibility-only code while rejecting mismatched artifacts safely. |
+| [0041](0041-fluent-localized-controller-telemetry.md) | Accepted | Built-in RF telemetry uses validated Fluent catalogs with independent text, speech, and Morse forms. |

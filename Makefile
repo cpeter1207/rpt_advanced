@@ -23,7 +23,7 @@ LIBRARIES += build/librptadv_product.so.1
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
-DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c examples doc debian README.md QUALITY.md WISHLIST.md
+DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c examples doc debian messages README.md QUALITY.md WISHLIST.md
 
 .PHONY: all rust-build artifacts quality lint static-analysis docs dependency-boundary product-surface rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
@@ -144,6 +144,7 @@ install: all
 	done
 	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
 	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
+	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/asterisk/rpt_advanced/messages/en-US.ftl
 
 install-check: artifacts
 	rm -rf -- $(CURDIR)/build/stage

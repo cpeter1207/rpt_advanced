@@ -99,9 +99,21 @@ pub struct NodeLinkControl {
 }
 struct ConfiguredGroup {
     label: String,
-    members: Vec<String>,
+    name: String,
+    members: Vec<(usize, String)>,
     selection: GroupSelection,
 }
+
+/// Control-plane view of one immutable priority group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PriorityGroupStatus {
+    pub label: String,
+    pub name: String,
+    pub members: Vec<String>,
+    pub selected: Option<String>,
+    pub unavailable: bool,
+}
+
 fn configured_groups(
     schedule: Option<&LinkScheduler>,
     previous: &[ConfiguredGroup],
@@ -118,15 +130,19 @@ fn configured_groups(
                 .unwrap_or_else(|| {
                     groups.push(ConfiguredGroup {
                         label: label.clone(),
+                        name: route.group_name.clone().unwrap_or_else(|| label.clone()),
                         members: Vec::new(),
                         selection: GroupSelection::new(),
                     });
                     groups.len() - 1
                 });
-            groups[index].members.push(route.remote);
+            groups[index]
+                .members
+                .push((route.group_priority.unwrap_or(usize::MAX), route.remote));
         }
     }
     for group in &mut groups {
+        group.members.sort_by_key(|(priority, _)| *priority);
         if let Some(old) = previous
             .iter()
             .find(|old| old.label == group.label && old.members == group.members)
@@ -196,6 +212,42 @@ impl NodeLinkControl {
             slot,
             group.selection.clone(),
         ))
+    }
+    /// Snapshot callback-active group selection for local telemetry on the control plane.
+    pub(crate) fn priority_groups(&self) -> Vec<PriorityGroupStatus> {
+        let peers = self.manager.snapshot();
+        self.groups
+            .iter()
+            .map(|group| {
+                let selected = group.selection.active().and_then(|slot| {
+                    group
+                        .members
+                        .iter()
+                        .find(|(priority, _)| priority.saturating_add(1) == slot.get())
+                        .map(|(_, peer)| peer.clone())
+                });
+                let any_reachable = group.members.iter().any(|(_, remote)| {
+                    peers
+                        .iter()
+                        .any(|peer| peer.name == *remote && !peer.ended && !peer.retrying)
+                });
+                let all_attempted = group
+                    .members
+                    .iter()
+                    .all(|(_, remote)| peers.iter().any(|peer| peer.name == *remote));
+                PriorityGroupStatus {
+                    label: group.label.clone(),
+                    name: group.name.clone(),
+                    members: group
+                        .members
+                        .iter()
+                        .map(|(_, remote)| remote.clone())
+                        .collect(),
+                    selected,
+                    unavailable: all_attempted && !any_reachable,
+                }
+            })
+            .collect()
     }
     /// Prepare changed or thirty-second topology messages; these are not key advice.
     pub fn due_topology(&mut self, now_ms: u64) -> Vec<(String, String)> {

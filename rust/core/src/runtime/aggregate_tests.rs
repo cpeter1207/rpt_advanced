@@ -1398,6 +1398,45 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
 }
 
 #[test]
+fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
+    impl NativeFilePreparer for Speech {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Speech {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            self.0.lock().unwrap().push(request.text.into());
+            PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
+
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+
+    runtime.queue_loop_rejected("1000", "2000").unwrap();
+    assert_eq!(
+        *media.0.lock().unwrap(),
+        ["Connection to node,2,0,0,0 rejected because it would create a link loop"]
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn link_lifecycle_events_register_speech_for_every_node() {
     struct Speech(Arc<Mutex<Vec<String>>>);
     impl NativeFilePreparer for Speech {
@@ -1438,12 +1477,12 @@ fn link_lifecycle_events_register_speech_for_every_node() {
     assert_eq!(
         *media.0.lock().unwrap(),
         [
-            "node,2,0,0,0 CONNECTED",
-            "node,1,0,0,0 CONNECTED",
-            "node,1,0,0,0 CONNECTED TO node,2,0,0,0",
-            "node,2,0,0,0 DISCONNECTED",
-            "node,1,0,0,0 DISCONNECTED",
-            "node,1,0,0,0 DISCONNECTED FROM node,2,0,0,0",
+            "node,2,0,0,0 connected",
+            "node,1,0,0,0 connected",
+            "node,1,0,0,0 connected to node,2,0,0,0",
+            "node,2,0,0,0 disconnected",
+            "node,1,0,0,0 disconnected",
+            "node,1,0,0,0 disconnected from node,2,0,0,0",
         ]
     );
     assert!(runtime.stop(0));
@@ -1472,7 +1511,7 @@ fn permanent_group_member_connections_do_not_generate_per_peer_telemetry() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
         ConfigDocument::parse(
-            "[1000]\nradio_channel=first\n[permanent 1000 network]\nremote_node=2000,3000\n",
+            "[1000]\nradio_channel=first\n[permanent 1000 network]\nremote_node=2000,3000\n[4000]\n",
         )
         .unwrap(),
         &media,
@@ -1484,8 +1523,91 @@ fn permanent_group_member_connections_do_not_generate_per_peer_telemetry() {
 
     runtime.queue_link_event("1000", "2000", true).unwrap();
     runtime.queue_link_event("1000", "2000", false).unwrap();
-    assert!(media.0.lock().unwrap().is_empty());
+    assert_eq!(
+        *media.0.lock().unwrap(),
+        [
+            "node,1,0,0,0 connected to node,2,0,0,0",
+            "node,1,0,0,0 disconnected from node,2,0,0,0",
+        ]
+    );
     assert!(runtime.stop(0));
+}
+
+#[test]
+fn priority_group_announces_initial_selection_and_total_outage_only() {
+    use super::links::LinkEffect;
+    struct Speech(Arc<Mutex<Vec<String>>>);
+    impl NativeFilePreparer for Speech {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Speech {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            self.0.lock().unwrap().push(request.text.into());
+            PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Blind Hams Network\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let group = runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .group_member("2000")
+        .unwrap();
+    for remote in ["2000", "3000"] {
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("group dial")
+        };
+        assert_eq!(attempt.remote(), remote);
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, true, clock()),
+            Ok(true)
+        );
+    }
+
+    assert_eq!(group.selection().callback_slot(true), 1);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(
+        *media.0.lock().unwrap(),
+        ["Blind Hams Network. node,2,0,0,0 selected"]
+    );
+    group
+        .selection()
+        .publish_desired(std::num::NonZeroUsize::new(2));
+    assert_eq!(group.selection().callback_slot(true), 2);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(media.0.lock().unwrap().len(), 1);
+
+    for remote in ["2000", "3000"] {
+        let node = runtime.node("1000").unwrap();
+        node.links().ended(remote);
+        node.links().reclaimed(remote, clock().now_ms);
+    }
+    assert_eq!(group.selection().callback_slot(true), 0);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(
+        media.0.lock().unwrap().last().unwrap(),
+        "Blind Hams Network is unavailable"
+    );
+    runtime.stop(0);
 }
 
 #[test]

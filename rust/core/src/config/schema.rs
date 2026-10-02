@@ -155,6 +155,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "telemetry_duck_db"
                 | "courtesy_delay_ms"
                 | "radio_channel"
+                | "language"
                 | "callsign"
                 | "link_allow_nodes"
                 | "link_deny_nodes"
@@ -266,6 +267,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             })
         }
         "statpost_time" => parse::unsigned(value, 30, 600).is_some(),
+        "language" => value.parse::<unic_langid::LanguageIdentifier>().is_ok(),
         "node_enabled"
         | "full_duplex"
         | "dtmf_muting"
@@ -352,6 +354,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "link_lookup_method") => "both",
         (ScopeKind::General | ScopeKind::Node, "statpost_time") => "60",
         (ScopeKind::General | ScopeKind::Node, "statpost_url") => "",
+        (ScopeKind::General | ScopeKind::Node, "language") => "en-US",
         (_, "interval_ms")
             if matches!(
                 kind,

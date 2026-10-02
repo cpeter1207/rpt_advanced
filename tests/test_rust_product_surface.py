@@ -169,6 +169,9 @@ def staged(
         assert (stage / destination).read_bytes() == source.read_bytes(), str(
             destination
         )
+    catalog = Path("usr/share/asterisk/rpt_advanced/messages/en-US.ftl")
+    expected.add(catalog)
+    assert (stage / catalog).read_bytes() == (root / "messages/en-US.ftl").read_bytes()
     found = {
         path.relative_to(stage)
         for path in stage.rglob("*")
@@ -577,6 +580,8 @@ def verify_stage_policy() -> None:
         ):
             write(root, source)
             write(stage, f"usr/share/doc/rpt-advanced/{destination}")
+        write(root, "messages/en-US.ftl")
+        write(stage, "usr/share/asterisk/rpt_advanced/messages/en-US.ftl")
         resolved = "\n".join(
             f"{name} => {stage / library / name}" for name in LIBRARIES
         )

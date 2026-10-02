@@ -714,6 +714,7 @@ impl Host {
                 }
             }
         }
+        let _ = self.runtime.queue_priority_group_events();
         self.runtime.reclaim();
         self.prune_leases();
         Ok(())

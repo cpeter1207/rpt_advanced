@@ -1,4 +1,10 @@
+use rpt_advanced_core::messages::MessageCatalog;
 use rpt_advanced_core::time::{TimeAnnouncement, TimeAnnouncementError, TimeFormat};
+
+fn catalog() -> MessageCatalog {
+    MessageCatalog::from_sources("en-US", include_str!("../../../messages/en-US.ftl"), None)
+        .unwrap()
+}
 
 #[test]
 fn formats_greeting_boundaries_in_both_clock_modes() {
@@ -41,7 +47,7 @@ fn formats_greeting_boundaries_in_both_clock_modes() {
     ];
 
     for (hour, minute, format, speech, morse) in cases {
-        let announcement = TimeAnnouncement::format(hour, minute, format).unwrap();
+        let announcement = TimeAnnouncement::format(hour, minute, format, &catalog()).unwrap();
         assert_eq!(announcement.speech(), speech);
         assert_eq!(announcement.morse(), morse);
     }
@@ -51,7 +57,7 @@ fn formats_greeting_boundaries_in_both_clock_modes() {
 fn rejects_out_of_range_civil_time() {
     for (hour, minute) in [(-1, 2), (24, 2), (1, -1), (1, 60)] {
         assert_eq!(
-            TimeAnnouncement::format(hour, minute, TimeFormat::TwelveHour),
+            TimeAnnouncement::format(hour, minute, TimeFormat::TwelveHour, &catalog()),
             Err(TimeAnnouncementError::InvalidTime)
         );
     }

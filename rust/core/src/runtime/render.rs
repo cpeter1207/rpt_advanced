@@ -3,33 +3,42 @@
 use super::prepare::RuntimeError;
 use crate::{
     link::LinkManager,
+    messages::{Daypart, LinkDisplayMode, Message, MessageCatalog, MessageForms},
     schedule::CivilTime,
     template::{MessageTemplate, TemplateValues},
     time::{TimeAnnouncement, TimeFormat},
 };
 
-pub(super) fn direct_status(manager: &LinkManager) -> (String, String) {
+pub(super) fn direct_status(
+    manager: &LinkManager,
+    catalog: &MessageCatalog,
+) -> Result<(MessageForms, String), RuntimeError> {
     let peers: Vec<_> = manager
         .snapshot()
         .into_iter()
         .filter(|peer| !peer.ended && !peer.retrying)
         .collect();
     let Some(peer) = peers.first() else {
-        return ("NO LINKS".into(), String::new());
+        return catalog
+            .format(&Message::NoLinks)
+            .map(|forms| (forms, String::new()))
+            .map_err(|_| RuntimeError::Preparation);
     };
     let mode = if peer.mode.transmits() {
-        "TRANSCEIVE"
+        LinkDisplayMode::Transceive
     } else if peer.mode.forwards() {
-        "MONITOR"
+        LinkDisplayMode::Monitor
     } else {
-        "LOCAL"
+        LinkDisplayMode::Local
     };
-    let prefix = if peers.len() == 1 {
-        "LINK".into()
-    } else {
-        format!("{} LINKS", peers.len())
-    };
-    (format!("{prefix} {} {mode}", peer.name), peer.name.clone())
+    catalog
+        .format(&Message::LinkStatus {
+            count: peers.len(),
+            peer: &peer.name,
+            mode,
+        })
+        .map(|forms| (forms, peer.name.clone()))
+        .map_err(|_| RuntimeError::Preparation)
 }
 
 pub(super) fn message(
@@ -39,37 +48,36 @@ pub(super) fn message(
     node: &str,
     callsign: &str,
     links: &LinkManager,
+    catalog: &MessageCatalog,
 ) -> Result<String, RuntimeError> {
     let (year, month, day, weekday, hour, minute) = clock.components();
-    let day_name = [
-        "Sunday",
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-    ][weekday as usize];
+    let day_name = catalog
+        .format(&Message::DayOfWeek { day: weekday })
+        .map_err(|_| RuntimeError::Preparation)?;
     let date = format!("{year:04}-{month:02}-{day:02}");
     let time = TimeAnnouncement::format(
         hour.into(),
         minute.into(),
         TimeFormat::try_from(format).map_err(|_| RuntimeError::Preparation)?,
+        catalog,
     )
     .map_err(|_| RuntimeError::Preparation)?;
-    let greeting = match hour {
-        0..=11 => "Good Morning",
-        12..=16 => "Good Afternoon",
-        _ => "Good Evening",
+    let daypart = match hour {
+        0..=11 => Daypart::Morning,
+        12..=16 => Daypart::Afternoon,
+        _ => Daypart::Evening,
     };
-    let (status, _) = direct_status(links);
+    let greeting = catalog
+        .format(&Message::Greeting { daypart })
+        .map_err(|_| RuntimeError::Preparation)?;
+    let (status, _) = direct_status(links, catalog)?;
     template
         .render(&TemplateValues {
-            day_of_week: day_name,
+            day_of_week: &day_name.text,
             date: &date,
             time: time.morse(),
-            greeting,
-            link_status: &status,
+            greeting: &greeting.text,
+            link_status: &status.text,
             node,
             callsign,
         })

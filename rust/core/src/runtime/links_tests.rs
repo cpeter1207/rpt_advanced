@@ -497,6 +497,65 @@ fn group_member_is_not_topology_blocked_but_other_routes_are() {
 }
 
 #[test]
+fn priority_group_status_reports_only_callback_active_peer_and_complete_outage() {
+    use super::super::link_schedule::RouteSpec;
+    let schedule = || {
+        LinkScheduler::new(
+            1,
+            ["2000", "3000"]
+                .into_iter()
+                .enumerate()
+                .map(|(priority, remote)| RouteSpec {
+                    local: "524950".into(),
+                    remote: remote.into(),
+                    permanent: true,
+                    group_label: Some("network".into()),
+                    group_name: Some("Blind Hams Network".into()),
+                    group_priority: Some(priority),
+                })
+                .collect(),
+            vec![],
+            None,
+        )
+        .unwrap()
+    };
+    let mut unavailable = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule()),
+    )
+    .unwrap();
+    assert!(!unavailable.priority_groups()[0].unavailable);
+    for remote in ["2000", "3000"] {
+        unavailable
+            .manager
+            .retain_retry_member(remote, Mode::MONITOR, 0, unavailable.group_member(remote))
+            .unwrap();
+    }
+    let status = unavailable.priority_groups();
+    assert!(status[0].unavailable);
+    assert_eq!(status[0].name, "Blind Hams Network");
+
+    let mut selected = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule()),
+    )
+    .unwrap();
+    let group = selected.group_member("2000").unwrap();
+    selected
+        .manager
+        .attach_member("2000", Mode::TRANSCEIVE, true, Some(group.clone()))
+        .unwrap();
+    assert_eq!(group.selection().callback_slot(true), 1);
+    let status = selected.priority_groups();
+    assert_eq!(status[0].selected.as_deref(), Some("2000"));
+    assert!(!status[0].unavailable);
+}
+
+#[test]
 fn callback_group_selection_republishes_topology_immediately() {
     use super::super::link_schedule::RouteSpec;
     use crate::schedule::Weekday;

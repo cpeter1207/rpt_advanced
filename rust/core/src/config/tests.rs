@@ -97,6 +97,26 @@ fn statpost_settings_inherit_global_values_allow_node_overrides_and_clear_url() 
 }
 
 #[test]
+fn language_setting_inherits_global_and_invalid_node_override_with_warning() {
+    let document = ConfigDocument::parse(
+        "[general]\nlanguage=fr-CA\n[1000]\n[2000]\nlanguage=de-DE\n[3000]\nlanguage=not_a_locale\n",
+    )
+    .unwrap();
+    let resolve =
+        |node| ResolvedNodeSettings::resolve(&document, &NodeId::new(node).unwrap()).unwrap();
+    assert_eq!(resolve("1000").value.language, "fr-CA");
+    assert_eq!(resolve("2000").value.language, "de-DE");
+    let invalid = resolve("3000");
+    assert_eq!(invalid.value.language, "fr-CA");
+    assert!(
+        invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.key == "language")
+    );
+}
+
+#[test]
 fn statpost_interval_defaults_and_rejects_out_of_range_values() {
     for (source, expected) in [
         ("[1000]\n", 60),

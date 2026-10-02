@@ -109,9 +109,32 @@ impl Engine {
         local: String,
         operation: DigitOperation,
     ) -> Result<(), RuntimeError> {
+        self.execute_with_source(local, operation, false)
+    }
+    fn execute_digit(
+        self: &Arc<Self>,
+        local: String,
+        operation: DigitOperation,
+    ) -> Result<(), RuntimeError> {
+        self.execute_with_source(local, operation, true)
+    }
+    fn execute_with_source(
+        self: &Arc<Self>,
+        local: String,
+        operation: DigitOperation,
+        local_rf_source: bool,
+    ) -> Result<(), RuntimeError> {
         let revision = self.revision.load(Ordering::Acquire);
-        let effect = self.operation(&local, operation)?;
-        self.effect(local, effect, revision)
+        let peer = operation.command.node.clone();
+        match self.operation(&local, operation) {
+            Ok(effect) => self.effect(local, effect, revision),
+            Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
+                if local_rf_source =>
+            {
+                self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer))
+            }
+            Err(error) => Err(error),
+        }
     }
     fn operation(
         self: &Arc<Self>,
@@ -925,7 +948,7 @@ unsafe extern "C" fn rptadv_product_digit(
             ))
         })?;
         let value = if let Some(operation) = operation {
-            engine.execute(local, operation)?;
+            engine.execute_digit(local, operation)?;
             1
         } else {
             0

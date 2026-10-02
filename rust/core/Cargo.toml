@@ -8,3 +8,5 @@ version.workspace = true
 [dependencies]
 rtrb = "0.3.2"
 url = "2.5"
+fluent-bundle = "0.16"
+unic-langid = "0.9"

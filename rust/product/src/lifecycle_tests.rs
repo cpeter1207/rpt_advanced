@@ -256,6 +256,27 @@ fn failed_dial_thread_runs_reserved_attempt_synchronously() {
 }
 
 #[test]
+fn local_rf_loop_rejection_is_a_completed_command_with_queued_telemetry() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+
+    for (index, digit) in b"*31000#".iter().enumerate() {
+        let mut completed = 99;
+        assert_eq!(
+            unsafe { descriptor().digit.unwrap()(c"1000".as_ptr(), 4, *digit, &mut completed) },
+            0,
+            "digit index {index}"
+        );
+        assert_eq!(completed, u32::from(index == 6));
+    }
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
 fn failed_start_drains_or_retains_the_executor_owner() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
