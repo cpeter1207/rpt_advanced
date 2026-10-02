@@ -1,4 +1,4 @@
-# Ordered fallback links and translated telemetry
+# Priority link groups and translated telemetry
 
 ## Status
 
@@ -7,8 +7,9 @@ authorized by this document alone.
 
 ## Goals
 
-- Configure an ordered fallback list for a permanent peer and recover to the
-  primary without ever connecting the primary and fallback simultaneously.
+- Configure a named, ordered group of permanent peers. Keep every reachable
+  member connected, while selecting only the highest-priority reachable member
+  for local transmit audio.
 - Implement the scheduled-link warnings already specified by WISHLIST.md and
   ADR 0009.
 - Move built-in controller-generated RF messages out of Rust source and into
@@ -43,11 +44,12 @@ existing telemetry policy selects the localized Morse variant.
 
 The catalog covers built-in connect/disconnect messages (including direct and
 third-party wording), rejected-loop explanations, `*722` time replies, status
-and command replies, and scheduled-link warnings. Stable IDs and argument
-names are code-owned; message wording is bundle-owned. No built-in RF message
-wording is embedded in Rust source. Unsolicited event messages and warnings go
-only to the local transmitter; command replies retain ADR 0023's
-source-specific routing.
+and command replies, and scheduled-link warnings. It also includes named-link-
+group selection/unavailability messages. Stable IDs and argument names are
+code-owned; message wording is bundle-owned. No built-in RF message wording
+is embedded in Rust source. Unsolicited event messages and warnings go only to
+the local transmitter; command replies retain ADR 0023's source-specific
+routing.
 
 For example, a catalog entry may express all three variants:
 
@@ -106,28 +108,59 @@ plural forms in the bundle without inventing a second template language.
   per-event `warning_message_id`; `${time_remaining}` becomes the typed
   `time_remaining` argument supplied to Fluent.
 
-### Ordered permanent-link fallback
+### Named priority link group
 
-Use the existing `[permanent node label]` route and `fallback_nodes` field from
-ADR 0010. The example for the requested node is:
+Use the existing `[permanent node label]` declaration with an ordered
+`fallback_nodes` list. `remote_node` is priority 1; entries in
+`fallback_nodes` follow in priority order. The complete group stays configured
+as a permanent route. Add a display `group_name`; for the requested node:
 
 ```ini
 [permanent 524950 main]
 remote_node = 506315
 fallback_nodes = 506312,506310,506311,506313,506314
+group_name = The Blind Hams Network
 ```
 
-The runtime tries the primary first. Only when its normal connection attempt
-cannot establish/re-establish the primary does it try fallback nodes, one at a
-time and in listed order. A fallback is considered active only after normal
-link admission succeeds. The route owns at most one peer at a time. When the
-primary becomes available, disconnect the active fallback, then reconnect the
-primary; never overlap them. Existing retry/backoff and explicit disconnect
-semantics remain authoritative. Reload invalidates stale route work using the
-existing route generation/reservation mechanism. Duplicate/self/invalid peer
-entries are configuration errors consistent with ADR 0010. A schedule that
-replaces this permanent route suppresses the entire route, including its
-fallbacks; fallback policy applies only when the permanent route is desired.
+Connect every group member independently using normal link admission and
+automatic permanent-link recovery. An unavailable member is retried in the
+background using existing backoff, without per-attempt RF telemetry. A
+schedule replacing this permanent route suppresses the entire group, including
+its retries, until that scheduled replacement ends.
+
+This uses ASL3's documented monitor-only and transceive link modes: monitor
+means receive without sending audio to that peer, while transceive enables
+bidirectional audio. Those documents do not define automatic priority groups
+or an atomic no-reconnect handoff, and the official open-issue search found no
+proposal for those behaviors. Therefore the group-selection policy is owned by
+`rpt_advanced`; it reuses the documented modes, not an upstream failover
+design.
+
+Every member is receive-only unless selected. Select the first reachable member
+in configured order as the sole transceive member; lower-priority members remain
+connected receive-only. Audio from unselected group members is never mixed to
+the local transmitter. Recompute priority when a peer connects or disconnects.
+Continue consuming each connected member's inbound media while it is
+unselected, so its receive path stays current and can be promoted without
+repriming or replaying buffered backlog. Topology-loop rejection remains
+subject to ADR 0017's topology-blocked recovery; it is retried when relevant
+topology evidence changes, not in a rapid loop.
+Do not switch away from a selected source during an active transmission.
+Publish a changed winner only when the current transmission has ended and at
+an audio-callback boundary. If the selected member disappears, promote the
+next reachable member at the next safe callback boundary. Store the selected
+member as one atomic group selection, read once per audio callback; do not
+independently toggle peer mode flags where an intermediate state could make
+two members transceive or none selected. Thus an ordinary priority handoff
+has no dial, disconnect, or buffer reprime. The shared topology admission
+rules remain in force for every member.
+
+Group event telemetry uses `group_name`, not a sequence of member-level
+connect/disconnect announcements: announce which group member is selected
+when the winner changes, using the group name and selected node; announce the
+group unavailable only when no member is reachable. Background retry attempts
+and standby member connection changes are silent. Local transmitter routing
+and localization follow the message-catalog rules above.
 
 ### Scheduled-link warnings
 
@@ -160,12 +193,13 @@ these settings are absent. Keep ADR 0009 semantics:
 [general]
 language = en-US
 
-[node 524950]
+[524950]
 language = en-US
 
 [permanent 524950 main]
 remote_node = 506315
 fallback_nodes = 506312,506310,506311,506313,506314
+group_name = The Blind Hams Network
 
 [schedule 524950 weekday-net]
 warning_before_start_ms = 3600000,1800000,900000,600000,300000,60000
@@ -178,9 +212,8 @@ duration fields and makes the list unambiguous.
 
 ## Compatibility and dependencies
 
-- This is a new alpha feature; no migration from older alpha config syntax is
-  required. Existing permanent routes without `fallback_nodes` continue to
-  behave as single-primary routes.
+- A permanent route without `fallback_nodes` remains a one-member group. A
+  group with more members connects all of them and applies priority selection.
 - Existing inline custom event templates keep their current syntax and
   behavior; only built-in controller-generated RF messages and selected
   scheduled warning messages use Fluent.
@@ -192,11 +225,13 @@ duration fields and makes the list unambiguous.
 
 ## Verification
 
-- Fallback route tests: primary success; ordered fallback attempts; primary
-  failure then fallback success; all fallbacks fail; fallback drops then
-  retries; recovered primary disconnects fallback before reconnect; reload
-  rejects stale work; no primary/fallback overlap; duplicate/self entries
-  rejected.
+- Group tests: all members connect independently; each unreachable member
+  retries while other members continue; priority winner selection; a better
+  priority appears during a keyed transmission and takes over only at the next
+  safe callback boundary; selected peer disconnect promotes the next reachable
+  member; no callback observes two transceive members; standby audio never
+  reaches the local transmitter; schedule suppression/re-enable and reload
+  reject stale work; duplicate/self members rejected.
 - Schedule warning tests: lead-time ordering; start/end; inactivity reset and
   warning eligibility; skip while active; skip at/after deadline; message
   argument reflects the expected remaining interval; serialization prevents
@@ -206,16 +241,16 @@ duration fields and makes the list unambiguous.
   rejection; locale override/inheritance; exact message arguments; output
   bounds; Morse fallback if TTS cannot be prepared.
 - No tests should require attached RF hardware. Add a node procedure for
-  checking primary recovery/fallback switching and hearing each warning in
+  checking priority recovery/handoff and hearing each warning in
   English, then in one translated bundle.
 
 ## Open implementation details
 
-The implementation plan must verify how permanent route retry state currently
-represents “primary unavailable,” how configured warning duration values are
-parsed, and the complete inventory of controller-generated RF strings and
-their arguments. It must not widen the work into translation of diagnostics or
-other wishlist capabilities.
+The implementation plan must verify how a callback-safe atomic group selection
+can drive the current `LinkAudio` path, how `LinkManager` exposes peer mode in
+status, how configured warning duration values are parsed, and the complete
+inventory of controller-generated RF strings and their arguments. It must not
+widen the work into translation of diagnostics or other wishlist capabilities.
 
 ## References
 
@@ -223,5 +258,8 @@ other wishlist capabilities.
 - [ADR 0010: Permanent links and replacement windows](../../../doc/architecture/decisions/0010-configured-permanent-links-and-replacement-windows.md)
 - [ADR 0017: Scheduler route lifecycle and civil time](../../../doc/architecture/decisions/0017-scheduler-route-lifecycle-and-civil-time.md)
 - [ADR 0023: Unified control and DTMF policy](../../../doc/architecture/decisions/0023-unified-control-and-dtmf-policy.md)
+- [ASL3 standard link commands](https://allstarlink.github.io/basics/standardcommands/)
+- [ASL3 `rpt.conf` link modes](https://allstarlink.github.io/config/rpt_conf/)
+- [AllStarLink `app_rpt` open issues](https://github.com/AllStarLink/app_rpt/issues)
 - [Project Fluent Rust crates](https://docs.rs/fluent/latest/fluent/)
 - [Project Fluent source and language implementations](https://github.com/projectfluent/fluent)
