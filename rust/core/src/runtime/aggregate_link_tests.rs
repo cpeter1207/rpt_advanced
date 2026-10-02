@@ -30,3 +30,15 @@ fn permanent_group_config_is_expanded_into_ordered_routes() {
         (0..6).map(Some).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn scheduled_replacement_names_every_member_of_its_permanent_group() {
+    let document = ConfigDocument::parse(
+        "[524950]\n[permanent 524950 blind-hams]\nremote_node=506315,506312,506310\n\
+         [schedule 524950 daytime]\nremote_node=2627\nreplace_permanent=blind-hams\n\
+         start_time=11:00\nend_time=12:00\n",
+    )
+    .unwrap();
+    let schedule = prepare_links(&document, &NodeId::new("524950").unwrap(), 1, None).unwrap();
+    assert_eq!(schedule.window_specs()[0].replaced, [0, 1, 2]);
+}

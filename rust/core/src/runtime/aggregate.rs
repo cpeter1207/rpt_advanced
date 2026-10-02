@@ -892,6 +892,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
         second: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
+        if self.nodes.iter().any(|node| {
+            (node.name == first && node.links.is_group_member(second))
+                || (node.name == second && node.links.is_group_member(first))
+        }) {
+            return Ok(());
+        }
         let verb = if connected {
             "CONNECTED"
         } else {
@@ -1160,7 +1166,7 @@ fn prepare_links(
     let mut windows = Vec::new();
     for label in prepare::labels(document, "permanent", node.as_str()) {
         let settings = ResolvedPermanentLinkSettings::resolve(document, node, label)?.value;
-        permanent.push((label.to_owned(), routes.len()));
+        let start = routes.len();
         for (priority, remote) in settings.remote_nodes.into_iter().enumerate() {
             routes.push(RouteSpec {
                 local: node.as_str().into(),
@@ -1171,13 +1177,14 @@ fn prepare_links(
                 group_priority: Some(priority),
             });
         }
+        permanent.push((label.to_owned(), (start..routes.len()).collect::<Vec<_>>()));
     }
     for label in prepare::labels(document, "schedule", node.as_str()) {
         let settings = ResolvedScheduleSettings::resolve(document, node, label)?.value;
         let replaced = permanent
             .iter()
             .find(|(label, _)| label == &settings.replace_permanent)
-            .map(|(_, index)| *index)
+            .map(|(_, indices)| indices.clone())
             .ok_or(RuntimeError::Preparation)?;
         // Schema validation rejects duplicate remotes across permanent links and windows.
         let route = routes.len();

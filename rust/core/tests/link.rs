@@ -158,6 +158,18 @@ fn hub_checks_exact_local_transitive_paused_and_ended_admission_states() {
 }
 
 #[test]
+fn configured_group_members_allow_advertised_topology_overlap() {
+    let mut hub = LinkManager::new("1000").unwrap();
+    hub.attach_group("2000", Mode::MONITOR, true, Some("network"))
+        .unwrap();
+    hub.attach_group("3000", Mode::MONITOR, true, Some("network"))
+        .unwrap();
+    assert_eq!(hub.update_topology("2000", b"L T3000"), Ok(false));
+    assert_eq!(hub.update_topology("3000", b"L T2000"), Ok(false));
+    assert_eq!(hub.snapshot().len(), 2);
+}
+
+#[test]
 fn key_advice_falls_back_to_eligible_flood_without_echoing_ingress_source_or_local() {
     let mut hub = LinkManager::new("1000").unwrap();
     for remote in ["2000", "3000", "4000", "5000"] {

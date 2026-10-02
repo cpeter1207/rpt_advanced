@@ -26,7 +26,7 @@ fn scheduler() -> LinkScheduler {
         ],
         vec![ReplacementSpec {
             route: 1,
-            replaced: 0,
+            replaced: vec![0],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 60000,
         }],
@@ -254,8 +254,8 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
         let mut routes = old.route_specs();
         let mut windows = old.window_specs();
         match invalid {
-            "same" => windows[0].route = windows[0].replaced,
-            "missing_primary" => windows[0].replaced = 2,
+            "same" => windows[0].route = windows[0].replaced[0],
+            "missing_primary" => windows[0].replaced = vec![2],
             "missing_replacement" => windows[0].route = 2,
             "temporary_primary" => routes[0].permanent = false,
             _ => routes[1].local = "other".into(),
@@ -293,6 +293,100 @@ fn route_removal_and_lost_ownership_only_reissue_exact_configured_intent() {
     assert_eq!(redial.remote(), "2000");
     assert!(schedule.complete(&redial, false));
     assert!(schedule.next_operation().is_some());
+}
+
+#[test]
+fn permanent_group_members_are_desired_and_retried_independently() {
+    let mut routes = (0..3)
+        .map(|priority| RouteSpec {
+            local: "524950".into(),
+            remote: format!("{}", 2000 + priority),
+            permanent: true,
+            group_label: Some("network".into()),
+            group_name: Some("Network".into()),
+            group_priority: Some(priority),
+        })
+        .collect::<Vec<_>>();
+    let mut schedule = LinkScheduler::new(1, std::mem::take(&mut routes), vec![], None).unwrap();
+    schedule.tick(civil(11, 0), 0, 0, |_| None, |_| false);
+    let reservations = (0..3)
+        .map(|_| schedule.next_operation().unwrap())
+        .collect::<Vec<_>>();
+    for reservation in reservations.into_iter().rev() {
+        assert!(schedule.complete(&reservation, true));
+    }
+    assert!(schedule.next_operation().is_none());
+
+    schedule.tick(civil(11, 1), 0, 1, |_| None, |route| route.remote != "2001");
+    let retry = schedule.next_operation().unwrap();
+    assert_eq!(retry.remote(), "2001");
+    assert!(schedule.complete(&retry, true));
+    assert!(schedule.next_operation().is_none());
+}
+
+#[test]
+fn scheduled_replacement_suppresses_and_restores_every_group_member() {
+    let mut routes = (0..3)
+        .map(|priority| RouteSpec {
+            local: "524950".into(),
+            remote: format!("{}", 2000 + priority),
+            permanent: true,
+            group_label: Some("network".into()),
+            group_name: Some("Network".into()),
+            group_priority: Some(priority),
+        })
+        .collect::<Vec<_>>();
+    routes.push(RouteSpec {
+        local: "524950".into(),
+        remote: "3000".into(),
+        permanent: false,
+        group_label: None,
+        group_name: None,
+        group_priority: None,
+    });
+    let mut schedule = LinkScheduler::new(
+        1,
+        routes,
+        vec![ReplacementSpec {
+            route: 3,
+            replaced: vec![0, 1, 2],
+            window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
+            end_inactivity_ms: 0,
+        }],
+        None,
+    )
+    .unwrap();
+    schedule.tick(civil(11, 59), 0, 0, |_| None, |_| false);
+    for remote in ["2000", "2001", "2002"] {
+        let attach = schedule.next_operation().unwrap();
+        assert_eq!(attach.remote(), remote);
+        assert!(schedule.complete(&attach, true));
+    }
+    assert!(schedule.next_operation().is_none());
+
+    schedule.tick(civil(12, 0), 0, 1, |_| None, |_| true);
+    for remote in ["2000", "2001", "2002"] {
+        let detach = schedule.next_operation().unwrap();
+        assert_eq!(detach.action(), LinkTransition::Detach);
+        assert_eq!(detach.remote(), remote);
+        assert!(schedule.complete(&detach, true));
+    }
+    let replacement = schedule.next_operation().unwrap();
+    assert_eq!(replacement.action(), LinkTransition::Attach);
+    assert_eq!(replacement.remote(), "3000");
+    assert!(schedule.complete(&replacement, true));
+
+    schedule.tick(civil(13, 0), 0, 2, |_| None, |_| true);
+    let detach = schedule.next_operation().unwrap();
+    assert_eq!(detach.action(), LinkTransition::Detach);
+    assert_eq!(detach.remote(), "3000");
+    assert!(schedule.complete(&detach, true));
+    for remote in ["2000", "2001", "2002"] {
+        let restore = schedule.next_operation().unwrap();
+        assert_eq!(restore.action(), LinkTransition::Attach);
+        assert_eq!(restore.remote(), remote);
+        assert!(schedule.complete(&restore, true));
+    }
 }
 
 #[test]

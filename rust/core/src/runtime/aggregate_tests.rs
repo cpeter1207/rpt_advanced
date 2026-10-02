@@ -1450,6 +1450,45 @@ fn link_lifecycle_events_register_speech_for_every_node() {
 }
 
 #[test]
+fn permanent_group_member_connections_do_not_generate_per_peer_telemetry() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
+    impl NativeFilePreparer for Speech {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Speech {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            self.0.lock().unwrap().push(request.text.into());
+            PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\nradio_channel=first\n[permanent 1000 network]\nremote_node=2000,3000\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+
+    runtime.queue_link_event("1000", "2000", true).unwrap();
+    runtime.queue_link_event("1000", "2000", false).unwrap();
+    assert!(media.0.lock().unwrap().is_empty());
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct PausingDevice(Arc<AtomicBool>);

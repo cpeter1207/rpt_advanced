@@ -73,8 +73,8 @@ and a replacement that names its permanent peer again. Multiple matching
 replacement windows intentionally form a union: every matching or deferred
 replacement is requested and every named primary is suppressed. They have no
 exclusive arbitration beyond normal direct-link topology admission; an overlap
-must not be used to select one replacement route. Group members remain subject
-to ordinary direct-link self/duplicate and allow/deny policy. Their planned
-topology may overlap within the same group so the reachable priority member can
-be selected; other topology-loop checks remain in force. Warning timing and
-civil-time behavior are defined by ADRs 0009 and 0017.
+must not be used to select one replacement route. Group members bypass
+advertised-topology loop rejection so every configured member can remain
+available for priority selection. Direct self/duplicate identity checks and
+allow/deny policy remain in force. Warning timing and civil-time behavior are
+defined by ADRs 0009 and 0017.

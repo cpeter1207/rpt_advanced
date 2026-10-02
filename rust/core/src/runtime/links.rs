@@ -17,6 +17,7 @@ pub struct ConnectAttempt {
     remote: String,
     mode: Mode,
     permanent: bool,
+    group: Option<String>,
     work: GenerationWork,
     scheduled: Option<LinkReservation>,
 }
@@ -126,6 +127,12 @@ impl NodeLinkControl {
     /// Immutable current hub view for status/topology publication.
     pub fn manager(&self) -> &LinkManager {
         &self.manager
+    }
+    /// Whether an exact peer belongs to a configured permanent group.
+    pub fn is_group_member(&self, remote: &str) -> bool {
+        self.schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.is_group_member(remote))
     }
     /// Prepare changed or thirty-second topology messages; these are not key advice.
     pub fn due_topology(&mut self, now_ms: u64) -> Vec<(String, String)> {
@@ -265,6 +272,7 @@ impl NodeLinkControl {
                     remote,
                     mode,
                     permanent,
+                    group: None,
                     work,
                     scheduled: None,
                 })
@@ -379,14 +387,19 @@ impl NodeLinkControl {
         } else if !self.policy.allows(&attempt.remote, true) {
             Err(AdmissionError::Denied)
         } else if answered {
-            match self
-                .manager
-                .attach(&attempt.remote, attempt.mode, attempt.permanent)
-            {
+            match self.manager.attach_group(
+                &attempt.remote,
+                attempt.mode,
+                attempt.permanent,
+                attempt.group.as_deref(),
+            ) {
                 Ok(()) => Ok(true),
                 Err(AdmissionError::Loop) if attempt.permanent => {
-                    self.manager
-                        .retain_topology_blocked(&attempt.remote, attempt.mode);
+                    self.manager.retain_topology_blocked_group(
+                        &attempt.remote,
+                        attempt.mode,
+                        attempt.group.as_deref(),
+                    );
                     topology_blocked = true;
                     Err(AdmissionError::Loop)
                 }
@@ -394,7 +407,12 @@ impl NodeLinkControl {
             }
         } else if attempt.permanent {
             self.manager
-                .retain_retry(&attempt.remote, attempt.mode, now_ms)
+                .retain_retry_group(
+                    &attempt.remote,
+                    attempt.mode,
+                    now_ms,
+                    attempt.group.as_deref(),
+                )
                 .map(|()| false)
         } else {
             Ok(false)
@@ -469,6 +487,7 @@ impl NodeLinkControl {
             remote: reservation.remote().into(),
             mode: Mode::TRANSCEIVE,
             permanent: true,
+            group: reservation.group_label().map(str::to_owned),
             work,
             scheduled: Some(reservation),
         }))

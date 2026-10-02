@@ -400,6 +400,101 @@ fn topology_blocked_automatic_route_retries_only_after_explicit_evidence_change(
     assert!(!status.topology_blocked);
     assert_eq!(status.due_ms, Some(1005));
 }
+
+#[test]
+fn group_member_is_not_topology_blocked_but_other_routes_are() {
+    use super::super::link_schedule::RouteSpec;
+    use crate::schedule::Weekday;
+    let mut host = NodeHost::new(generation(1));
+    let (control, _, _) = host.split();
+    let schedule = LinkScheduler::new(
+        1,
+        vec![
+            RouteSpec {
+                local: "524950".into(),
+                remote: "3000".into(),
+                permanent: true,
+                group_label: Some("network".into()),
+                group_name: Some("Network".into()),
+                group_priority: Some(0),
+            },
+            RouteSpec {
+                local: "524950".into(),
+                remote: "4000".into(),
+                permanent: true,
+                group_label: Some("network".into()),
+                group_name: Some("Network".into()),
+                group_priority: Some(1),
+            },
+            RouteSpec {
+                local: "524950".into(),
+                remote: "5000".into(),
+                permanent: true,
+                group_label: None,
+                group_name: None,
+                group_priority: None,
+            },
+        ],
+        vec![],
+        None,
+    )
+    .unwrap();
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule),
+    )
+    .unwrap();
+    links.accept("2000", true).unwrap();
+    links
+        .peer_text("2000", b"L T3000,T4000,T5000", false, 0, 1)
+        .unwrap();
+    let civil = CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 0).unwrap();
+    links.tick(civil, 0, 1, |_| None);
+
+    let LinkEffect::Connect(group) = links.next_scheduled(control.work().unwrap()).unwrap() else {
+        panic!("group member dial")
+    };
+    assert_eq!(group.remote(), "3000");
+    assert_eq!(
+        links.finish_connect_at(group, true, 2, None, |_| None),
+        Ok(true)
+    );
+    assert!(matches!(
+        links.peer_text("3000", b"L T2000", false, 0, 2),
+        Ok(LinkEffect::None)
+    ));
+    links.ended("3000");
+    links.reclaimed("3000", 3);
+    let retry = links.take_retry(3, control.work().unwrap()).unwrap();
+    assert_eq!(links.finish_retry(retry, true, 4), Ok(true));
+    assert!(
+        links
+            .manager()
+            .snapshot()
+            .iter()
+            .any(|peer| peer.name == "3000" && !peer.topology_blocked)
+    );
+
+    let LinkEffect::Connect(group) = links.next_scheduled(control.work().unwrap()).unwrap() else {
+        panic!("second group member dial")
+    };
+    assert_eq!(group.remote(), "4000");
+    assert_eq!(
+        links.finish_connect_at(group, true, 3, None, |_| None),
+        Ok(true)
+    );
+
+    let LinkEffect::Connect(other) = links.next_scheduled(control.work().unwrap()).unwrap() else {
+        panic!("other permanent dial")
+    };
+    assert_eq!(other.remote(), "5000");
+    assert_eq!(
+        links.finish_connect_at(other, true, 4, None, |_| None),
+        Err(AdmissionError::Loop)
+    );
+}
 #[test]
 fn incoming_and_remote_selection_use_current_deny_first_policy() {
     let mut host = NodeHost::new(generation(1));
@@ -463,7 +558,7 @@ fn configured_dial_rechecks_window_boundary_and_requires_clock_only_for_windows(
         let windows = if window {
             vec![ReplacementSpec {
                 route: 1,
-                replaced: 0,
+                replaced: vec![0],
                 window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
                 end_inactivity_ms: 0,
             }]
@@ -724,7 +819,7 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
         ],
         vec![ReplacementSpec {
             route: 1,
-            replaced: 0,
+            replaced: vec![0],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 0,
         }],

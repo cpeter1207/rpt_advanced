@@ -24,8 +24,8 @@ pub struct RouteSpec {
 pub struct ReplacementSpec {
     /// Replacement route index in this schedule.
     pub route: usize,
-    /// Permanent route index suppressed while this window requests its route.
-    pub replaced: usize,
+    /// Permanent route indices suppressed while this window requests its route.
+    pub replaced: Vec<usize>,
     /// Validated local date/time selection.
     pub window: ScheduledWindow,
     /// Required receive-idle time after the window; zero ends immediately.
@@ -78,6 +78,10 @@ impl LinkReservation {
     pub fn action(&self) -> LinkTransition {
         self.action
     }
+    /// Configured group identity used by final topology admission.
+    pub fn group_label(&self) -> Option<&str> {
+        self.spec.group_label.as_deref()
+    }
 }
 
 /// Serialized permanent-link intent; independent of dialing and taskprocessor mechanics.
@@ -110,13 +114,31 @@ impl LinkScheduler {
                         .any(|other| other.local == route.local && other.remote == route.remote)
             })
             || windows.iter().any(|window| {
-                window.route == window.replaced
-                    || !routes.get(window.replaced).is_some_and(|replaced| {
-                        replaced.permanent
-                            && routes
-                                .get(window.route)
-                                .is_some_and(|route| route.local == replaced.local)
+                window.replaced.is_empty()
+                    || window.replaced.contains(&window.route)
+                    || window
+                        .replaced
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != window.replaced.len()
+                    || !routes.get(window.route).is_some_and(|route| {
+                        window.replaced.iter().all(|index| {
+                            routes.get(*index).is_some_and(|replaced| {
+                                replaced.permanent && route.local == replaced.local
+                            })
+                        })
                     })
+                    || window
+                        .replaced
+                        .first()
+                        .and_then(|index| routes.get(*index))
+                        .is_none_or(|first| {
+                            window
+                                .replaced
+                                .iter()
+                                .any(|index| routes[*index].group_label != first.group_label)
+                        })
             })
         {
             return Err(SchedulerError::Invalid);
@@ -124,12 +146,17 @@ impl LinkScheduler {
         let window_states = windows
             .into_iter()
             .map(|spec| {
-                let old = previous.and_then(|old| {
-                    old.windows.iter().find(|window| {
+                let old = previous.and_then(|previous| {
+                    previous.windows.iter().find(|window| {
                         window.spec.window == spec.window
                             && window.spec.end_inactivity_ms == spec.end_inactivity_ms
-                            && old.routes[window.spec.route].spec == routes[spec.route]
-                            && old.routes[window.spec.replaced].spec == routes[spec.replaced]
+                            && previous.routes[window.spec.route].spec == routes[spec.route]
+                            && window.spec.replaced.len() == spec.replaced.len()
+                            && window.spec.replaced.iter().zip(&spec.replaced).all(
+                                |(old_index, new_index)| {
+                                    previous.routes[*old_index].spec == routes[*new_index]
+                                },
+                            )
                     })
                 });
                 // Changed windows still inherit node receive activity, never silently resetting idle.
@@ -180,6 +207,12 @@ impl LinkScheduler {
     /// Current immutable endpoint declarations, useful for building a reload candidate.
     pub fn route_specs(&self) -> Vec<RouteSpec> {
         self.routes.iter().map(|route| route.spec.clone()).collect()
+    }
+    /// Whether a direct peer is managed as a member of any permanent group.
+    pub fn is_group_member(&self, remote: &str) -> bool {
+        self.routes
+            .iter()
+            .any(|route| route.spec.remote == remote && route.spec.group_label.is_some())
     }
     /// Current immutable window declarations.
     pub fn window_specs(&self) -> Vec<ReplacementSpec> {
@@ -268,7 +301,9 @@ impl LinkScheduler {
             }
             if active || window.waiting {
                 self.routes[window.spec.route].desired = true;
-                self.routes[window.spec.replaced].desired = false;
+                for index in &window.spec.replaced {
+                    self.routes[*index].desired = false;
+                }
             }
         }
     }

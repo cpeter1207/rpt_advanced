@@ -271,10 +271,10 @@ None.
 
 **Decisions recorded**
 
-- Group members may overlap in planned topology with other members of the same
-  group so recovery and priority selection can proceed. Preserve self-link,
-  direct-duplicate, allow/deny, and final current-policy checks; topology-loop
-  blocking must not suppress background retry among members of one group.
+- Group members bypass advertised-topology loop rejection so recovery and
+  priority selection can proceed. Preserve self-link, direct-duplicate,
+  allow/deny, and final current-policy checks; the exception applies only to
+  configured permanent-group routes.
 - Only the highest-priority reachable member is transceive at a time. A
   returning higher-priority member takes over at the next input-idle boundary;
   the previous winner becomes receive-only atomically.
