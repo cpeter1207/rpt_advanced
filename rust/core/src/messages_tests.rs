@@ -114,6 +114,20 @@ fn message_catalog_formats_status_rejection_groups_and_schedule_warnings() {
 }
 
 #[test]
+fn schedule_warning_uses_the_matching_localized_duration_form() {
+    let french = "duration-seconds =\n    .text = texte { $seconds }\n    .tts = voix { $seconds }\n    .morse = morse { $seconds }\nscheduled-link-change =\n    .text = texte changement { $time_remaining }\n    .tts = voix changement { $time_remaining }\n    .morse = morse changement { $time_remaining }\n";
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, Some(french)).unwrap();
+    assert_eq!(
+        catalog.format_schedule_warning(60).unwrap(),
+        super::messages::MessageForms {
+            text: "texte changement texte 60".into(),
+            tts: "voix changement voix 60".into(),
+            morse: "morse changement morse 60".into(),
+        }
+    );
+}
+
+#[test]
 fn message_catalog_falls_back_per_attribute_and_ignores_bad_translation_entries() {
     let french =
         "peer-connected-local =\n    .text = { $wrong }\n    .tts = Noeud { $peer } connecte\n";

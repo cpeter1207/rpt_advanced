@@ -128,6 +128,42 @@ impl Schema {
             }
         }
 
+        for section in unique_sections(document) {
+            let parsed = scope::parse_scope(section).expect("section grammar checked");
+            if parsed.kind != ScopeKind::ScheduleNode {
+                continue;
+            }
+            let has_warning_leads = ["warning_before_start_ms", "warning_before_end_ms"]
+                .iter()
+                .any(|key| {
+                    document
+                        .lookup(key, &[section])
+                        .and_then(parse::positive_milliseconds)
+                        .is_some()
+                });
+            if has_warning_leads
+                && document
+                    .lookup("warning_message_id", &[section])
+                    .filter(|value| value_valid(parsed.kind, "warning_message_id", value))
+                    .is_none()
+            {
+                warnings.push(ConfigWarning::new(
+                    document.section_line(
+                        document
+                            .sections()
+                            .iter()
+                            .position(|candidate| *candidate == section)
+                            .expect("known section"),
+                    ),
+                    section,
+                    "warning_message_id",
+                    "",
+                    "required when a schedule warning lead is configured",
+                    "warnings disabled",
+                ));
+            }
+        }
+
         validate_courtesies(document)?;
         validate_templates_and_macros(document)?;
         validate_events(document)?;
@@ -246,6 +282,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "start_time"
                 | "end_time"
                 | "end_inactivity_ms"
+                | "warning_before_start_ms"
+                | "warning_before_end_ms"
+                | "warning_message_id"
         ),
     }
 }
@@ -267,6 +306,10 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             })
         }
         "statpost_time" => parse::unsigned(value, 30, 600).is_some(),
+        "warning_before_start_ms" | "warning_before_end_ms" => {
+            parse::positive_milliseconds(value).is_some()
+        }
+        "warning_message_id" => value == "scheduled-link-change",
         "language" => value.parse::<unic_langid::LanguageIdentifier>().is_ok(),
         "node_enabled"
         | "full_duplex"

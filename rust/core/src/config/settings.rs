@@ -243,6 +243,12 @@ pub struct ResolvedScheduleSettings {
     pub end_time: String,
     /// Post-window inactivity grace in milliseconds.
     pub end_inactivity_ms: u64,
+    /// Optional ordered warning leads before each occurrence starts.
+    pub warning_before_start_ms: Vec<u64>,
+    /// Optional ordered warning leads before the link is expected to disconnect.
+    pub warning_before_end_ms: Vec<u64>,
+    /// Stable Fluent message ID used when either warning list is configured.
+    pub warning_message_id: Option<String>,
 }
 
 fn scoped<'a>(
@@ -670,6 +676,18 @@ impl ResolvedScheduleSettings {
                 .lookup("end_inactivity_ms", &[section.as_str()])
                 .and_then(|raw| parse::unsigned(raw, 0, u64::MAX))
                 .unwrap_or(0),
+            warning_before_start_ms: document
+                .lookup("warning_before_start_ms", &[section.as_str()])
+                .and_then(parse::positive_milliseconds)
+                .unwrap_or_default(),
+            warning_before_end_ms: document
+                .lookup("warning_before_end_ms", &[section.as_str()])
+                .and_then(parse::positive_milliseconds)
+                .unwrap_or_default(),
+            warning_message_id: document
+                .lookup("warning_message_id", &[section.as_str()])
+                .filter(|value| *value == "scheduled-link-change")
+                .map(str::to_owned),
         };
         if value.remote_node.is_empty() {
             return Err(ConfigError::structure(

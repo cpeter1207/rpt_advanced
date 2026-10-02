@@ -58,6 +58,22 @@ impl NativeMediaPreparer for Media {
         Ok(Box::new(TestStation(None)))
     }
 }
+struct CapturingMedia(Arc<Mutex<Vec<String>>>);
+impl NativeFilePreparer for CapturingMedia {
+    fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+impl NativeSpeechPreparer for CapturingMedia {
+    fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+impl NativeMediaPreparer for CapturingMedia {
+    fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+        Ok(Box::new(TestStation(Some(self.0.clone()))))
+    }
+}
 struct Device(Arc<Mutex<Vec<String>>>);
 impl DeviceHandoff for Device {
     fn quiesce(&mut self) -> bool {
@@ -841,6 +857,35 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
 }
 
 #[test]
+fn aggregate_schedule_warning_queues_one_localized_status_message() {
+    let config = "[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 weekday]\nremote_node=3000\nreplace_permanent=main\ndays=Monday-Friday\nstart_time=12:00\nend_time=13:00\nwarning_before_start_ms=60000\nwarning_message_id=scheduled-link-change\n";
+    let clock = RuntimeClock {
+        now_ms: 1_000,
+        wall_seconds: 0,
+        civil: Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 59).unwrap(),
+            0,
+        )),
+    };
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let devices = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(config).unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(devices.clone())) as Box<dyn DeviceHandoff>),
+        clock,
+    )
+    .unwrap();
+    runtime.tick_links(clock);
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["This connection will change in 60 seconds"]
+    );
+    assert!(runtime.stop(clock.now_ms));
+}
+
+#[test]
 fn render_preserves_c_scheduled_identity_and_ordinary_speech_rules() {
     assert_eq!(
         telemetry_speech("COUNT 42 AB1CD 1000", &["1000"]),
@@ -1343,14 +1388,14 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
     }
     for (action, last, expected) in [
         (LinkAction::Time, None, "Good Morning. The time is 9:07 AM."),
-        (LinkAction::LastKeyed, None, "NO LAST KEYED"),
+        (LinkAction::LastKeyed, None, "No last keyed station"),
         (
             LinkAction::LastKeyed,
             Some("2000"),
-            "LAST KEYED node,2,0,0,0",
+            "Last keyed node node,2,0,0,0",
         ),
-        (LinkAction::Status, None, "NO LINKS"),
-        (LinkAction::FullStatus, None, "NO LINKS"),
+        (LinkAction::Status, None, "No links"),
+        (LinkAction::FullStatus, None, "No links"),
     ] {
         let media = Speech(Arc::new(Mutex::new(Vec::new())));
         let log = Arc::new(Mutex::new(Vec::new()));

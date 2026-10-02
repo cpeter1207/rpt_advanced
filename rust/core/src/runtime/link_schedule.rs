@@ -30,6 +30,23 @@ pub struct ReplacementSpec {
     pub window: ScheduledWindow,
     /// Required receive-idle time after the window; zero ends immediately.
     pub end_inactivity_ms: u64,
+    /// Ordered warning leads before the next window start.
+    pub warning_before_start_ms: Vec<u64>,
+    /// Ordered warning leads before expected schedule disconnection.
+    pub warning_before_end_ms: Vec<u64>,
+    /// Stable catalog message selected for warnings.
+    pub warning_message_id: Option<String>,
+}
+
+/// One due schedule warning, ready for control-plane localization and queuing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScheduleWarning {
+    /// Stable catalog message ID.
+    pub message_id: String,
+    /// Expected time until the related boundary, rounded only during formatting.
+    pub remaining_ms: u64,
+    /// Deadline after which this warning must no longer be queued.
+    pub deadline_ms: u64,
 }
 /// Physical configured-route transition, performed outside the scheduler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +71,15 @@ struct Window {
     was_active: bool,
     waiting: bool,
     initial_deadline: Option<u64>,
+    start_occurrence: Option<u64>,
+    start_warned: Vec<u64>,
+    end_deadline: Option<(u64, u64)>,
+    end_warned: Vec<u64>,
+}
+
+pub(super) struct WarningGate<F> {
+    pub(super) source_active: F,
+    pub(super) capacity: bool,
 }
 
 /// Copied admission token. Its private nonce prevents stale dialing from claiming a new request.
@@ -150,6 +176,9 @@ impl LinkScheduler {
                     previous.windows.iter().find(|window| {
                         window.spec.window == spec.window
                             && window.spec.end_inactivity_ms == spec.end_inactivity_ms
+                            && window.spec.warning_before_start_ms == spec.warning_before_start_ms
+                            && window.spec.warning_before_end_ms == spec.warning_before_end_ms
+                            && window.spec.warning_message_id == spec.warning_message_id
                             && previous.routes[window.spec.route].spec == routes[spec.route]
                             && window.spec.replaced.len() == spec.replaced.len()
                             && window.spec.replaced.iter().zip(&spec.replaced).all(
@@ -176,6 +205,10 @@ impl LinkScheduler {
                     was_active: old.is_some_and(|old| old.was_active),
                     waiting: old.is_some_and(|old| old.waiting),
                     initial_deadline: old.and_then(|old| old.initial_deadline),
+                    start_occurrence: old.and_then(|old| old.start_occurrence),
+                    start_warned: old.map_or_else(Vec::new, |old| old.start_warned.clone()),
+                    end_deadline: old.and_then(|old| old.end_deadline),
+                    end_warned: old.map_or_else(Vec::new, |old| old.end_warned.clone()),
                 }
             })
             .collect();
@@ -242,9 +275,33 @@ impl LinkScheduler {
         local: CivilTime,
         second: u8,
         now_ms: u64,
+        activity: impl FnMut(&str) -> Option<u64>,
+        owns: impl FnMut(&RouteSpec) -> bool,
+    ) {
+        let _ = self.tick_with_warnings(
+            local,
+            second,
+            now_ms,
+            activity,
+            owns,
+            WarningGate {
+                source_active: |_: &str| false,
+                capacity: false,
+            },
+        );
+    }
+
+    /// Evaluate policy and return at most one idle-only warning per control tick.
+    pub(super) fn tick_with_warnings(
+        &mut self,
+        local: CivilTime,
+        second: u8,
+        now_ms: u64,
         mut activity: impl FnMut(&str) -> Option<u64>,
         mut owns: impl FnMut(&RouteSpec) -> bool,
-    ) {
+        mut warning_gate: WarningGate<impl FnMut(&str) -> bool>,
+    ) -> Option<ScheduleWarning> {
+        let mut due_warning = None;
         for route in &mut self.routes {
             route.desired = route.spec.permanent;
             if route.issued && !owns(&route.spec) {
@@ -258,11 +315,15 @@ impl LinkScheduler {
             {
                 window.last_activity = observed;
                 window.initial_deadline = None;
+                if window.waiting {
+                    window.end_deadline = None;
+                    window.end_warned.clear();
+                }
             }
-            let active = window.spec.window.matches(&local);
+            let window_active = window.spec.window.matches(&local);
             if !window.initialized {
                 window.initialized = true;
-                if !active && window.spec.end_inactivity_ms != 0 {
+                if !window_active && window.spec.end_inactivity_ms != 0 {
                     if let Some(elapsed) = window.spec.window.elapsed_after_end(&local, second) {
                         if window.last_activity.is_some() {
                             window.waiting = true;
@@ -275,7 +336,7 @@ impl LinkScheduler {
                     }
                 }
             }
-            if active {
+            if window_active {
                 window.was_active = true;
                 window.waiting = false;
                 window.initial_deadline = None;
@@ -299,13 +360,24 @@ impl LinkScheduler {
                     window.initial_deadline = None;
                 }
             }
-            if active || window.waiting {
+            if window_active || window.waiting {
                 self.routes[window.spec.route].desired = true;
                 for index in &window.spec.replaced {
                     self.routes[*index].desired = false;
                 }
             }
+            if due_warning.is_none() {
+                due_warning = next_warning(
+                    window,
+                    local,
+                    second,
+                    now_ms,
+                    (warning_gate.source_active)(&self.routes[window.spec.route].spec.local),
+                    warning_gate.capacity,
+                );
+            }
         }
+        due_warning
     }
 
     /// Reserve withdrawals first. Pending withdrawal must settle before any new attachment.
@@ -399,6 +471,94 @@ impl LinkScheduler {
             })
             .collect()
     }
+}
+
+fn next_warning(
+    window: &mut Window,
+    local: CivilTime,
+    second: u8,
+    now_ms: u64,
+    active: bool,
+    capacity: bool,
+) -> Option<ScheduleWarning> {
+    let message_id = window.spec.warning_message_id.as_deref()?;
+    if !capacity {
+        return None;
+    }
+    if !window.spec.warning_before_start_ms.is_empty() {
+        let (occurrence, remaining_ms) = window.spec.window.next_start(&local, second)?;
+        if window.start_occurrence != Some(occurrence) {
+            window.start_occurrence = Some(occurrence);
+            window.start_warned.clear();
+        }
+        if remaining_ms > 0 {
+            if let Some(lead) = window
+                .spec
+                .warning_before_start_ms
+                .iter()
+                .find(|lead| **lead >= remaining_ms && !window.start_warned.contains(lead))
+                .copied()
+            {
+                if active {
+                    window.start_warned.push(lead);
+                    return None;
+                }
+                window.start_warned.push(lead);
+                return Some(ScheduleWarning {
+                    message_id: message_id.to_owned(),
+                    remaining_ms,
+                    deadline_ms: now_ms.saturating_add(remaining_ms),
+                });
+            }
+        }
+    }
+    if window.spec.warning_before_end_ms.is_empty() {
+        return None;
+    }
+    let (end_identity, end_ms) = if window.spec.window.matches(&local) {
+        let (identity, remaining) = window.spec.window.next_end(&local, second)?;
+        (identity, now_ms.saturating_add(remaining))
+    } else if let Some(elapsed) = window.spec.window.elapsed_after_end(&local, second) {
+        (
+            now_ms.saturating_sub(elapsed),
+            now_ms.saturating_sub(elapsed),
+        )
+    } else {
+        let (identity, remaining) = window.spec.window.next_end(&local, second)?;
+        (identity, now_ms.saturating_add(remaining))
+    };
+    let deadline = if window.spec.end_inactivity_ms == 0 {
+        end_ms
+    } else if let Some(last) = window.last_activity {
+        end_ms.max(last.saturating_add(window.spec.end_inactivity_ms))
+    } else {
+        end_ms.saturating_add(window.spec.end_inactivity_ms)
+    };
+    let identity = (end_identity, deadline);
+    if window.end_deadline != Some(identity) {
+        window.end_deadline = Some(identity);
+        window.end_warned.clear();
+    }
+    let remaining_ms = deadline.saturating_sub(now_ms);
+    if remaining_ms == 0 {
+        return None;
+    }
+    let lead = window
+        .spec
+        .warning_before_end_ms
+        .iter()
+        .find(|lead| **lead >= remaining_ms && !window.end_warned.contains(lead))
+        .copied()?;
+    if active {
+        window.end_warned.push(lead);
+        return None;
+    }
+    window.end_warned.push(lead);
+    Some(ScheduleWarning {
+        message_id: message_id.to_owned(),
+        remaining_ms,
+        deadline_ms: deadline,
+    })
 }
 
 #[cfg(test)]

@@ -69,6 +69,28 @@ fn pending_media_does_not_key_transmitter_while_producer_starts() {
     assert!(!node.keyed);
 }
 
+#[test]
+fn activity_snapshot_exposes_current_receive_state_and_bounded_status_capacity() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let activity = node.activity();
+    assert!(!activity.is_active());
+    assert!(control.can_queue_status());
+    node.process_event(true, false);
+    assert!(activity.is_active());
+    node.process_event(false, false);
+    assert!(!activity.is_active());
+    for _ in 0..4 {
+        assert!(control.queue_prepared_status(media(0.1, 8)));
+    }
+    assert!(!control.can_queue_status());
+}
+
 struct TestPeerInput {
     signals: crate::link::PeerSignals,
     sample: Option<f32>,

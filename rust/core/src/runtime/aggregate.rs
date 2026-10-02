@@ -736,7 +736,37 @@ impl<A: Send, C: Send> Runtime<A, C> {
         if let Some((civil, second)) = clock.civil.filter(|(_, second)| *second < 60) {
             for node in &mut self.nodes {
                 let activity = node.control.activity_ms();
-                node.links.tick(civil, second, clock.now_ms, |_| activity);
+                node.control.telemetry.reclaim().for_each(drop);
+                let warning = node.links.tick_with_warnings(
+                    civil,
+                    second,
+                    clock.now_ms,
+                    |_| activity,
+                    node.control.activity.is_active(),
+                    node.control.telemetry.can_queue_status(),
+                );
+                if let Some(warning) = warning.filter(|warning| clock.now_ms < warning.deadline_ms)
+                {
+                    let seconds = warning.remaining_ms.div_ceil(1000);
+                    let forms = if warning.message_id == "scheduled-link-change" {
+                        node.control.catalog.format_schedule_warning(seconds)
+                    } else {
+                        Err(crate::messages::CatalogError::InvalidEnglish)
+                    };
+                    let queued = forms
+                        .map_err(|_| RuntimeError::Preparation)
+                        .and_then(|forms| {
+                            let spoken = render::telemetry_speech(&forms.tts, &[]);
+                            queue_status_media(
+                                &mut node.control.telemetry,
+                                &mut node.control.media_session,
+                                &node.status,
+                                &forms.morse,
+                                &spoken,
+                            )
+                        });
+                    let _ = queued;
+                }
             }
         }
     }
@@ -1346,6 +1376,17 @@ fn prepare_links(
             )
             .map_err(|_| RuntimeError::Preparation)?,
             end_inactivity_ms: settings.end_inactivity_ms,
+            warning_before_start_ms: if settings.warning_message_id.is_some() {
+                settings.warning_before_start_ms
+            } else {
+                Vec::new()
+            },
+            warning_before_end_ms: if settings.warning_message_id.is_some() {
+                settings.warning_before_end_ms
+            } else {
+                Vec::new()
+            },
+            warning_message_id: settings.warning_message_id,
         });
     }
     LinkScheduler::new(generation, routes, windows, previous).map_err(|_| RuntimeError::Preparation)

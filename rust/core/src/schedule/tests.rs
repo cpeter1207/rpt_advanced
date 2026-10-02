@@ -223,6 +223,50 @@ fn immutable_windows_validate_selectors_once_and_match_every_weekday_boundary() 
     }
     assert!(ScheduledWindow::parse(Some("Monday-Tuesday-Friday"), None, "11:00", "12:00").is_err());
 }
+
+#[test]
+fn window_warning_boundaries_respect_weekdays_dates_and_midnight_end() {
+    let weekday = ScheduledWindow::parse(Some("Monday-Friday"), None, "12:00", "13:00").unwrap();
+    assert_eq!(
+        weekday
+            .next_start(
+                &CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 58).unwrap(),
+                0,
+            )
+            .map(|(_, remaining)| remaining),
+        Some(120_000)
+    );
+    assert_eq!(
+        weekday
+            .next_start(
+                &CivilTime::new(2026, 9, 18, Weekday::Friday, 12, 1).unwrap(),
+                0,
+            )
+            .map(|(_, remaining)| remaining),
+        Some(3 * 86_400_000 - 60_000)
+    );
+
+    let date = ScheduledWindow::parse(None, Some("2026-09-18"), "12:00", "13:00").unwrap();
+    assert_eq!(
+        date.next_start(
+            &CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 0).unwrap(),
+            0,
+        )
+        .map(|(_, remaining)| remaining),
+        Some(3 * 86_400_000 + 60 * 60_000)
+    );
+
+    let midnight = ScheduledWindow::parse(Some("Monday"), None, "23:00", "24:00").unwrap();
+    assert_eq!(
+        midnight
+            .next_end(
+                &CivilTime::new(2026, 9, 14, Weekday::Monday, 23, 59).unwrap(),
+                0,
+            )
+            .map(|(_, remaining)| remaining),
+        Some(60_000)
+    );
+}
 #[test]
 fn civil_validation_and_occurrence_comparison_check_each_calendar_component() {
     assert!(CivilTime::new(2026, 9, 15, Weekday::Tuesday, 24, 0).is_err());

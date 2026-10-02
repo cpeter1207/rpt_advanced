@@ -6,7 +6,7 @@ use crate::audio::{PcmStreamReader, Playback};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// Settings shared by control-prepared Morse fallbacks.
@@ -96,19 +96,34 @@ pub struct StatusRejected {
 
 /// Lock-free qualifying-receive snapshot shared with the control owner.
 #[derive(Clone)]
-pub struct ActivitySnapshot(Arc<AtomicU64>);
+pub struct ActivitySnapshot {
+    last_sample: Arc<AtomicU64>,
+    active: Arc<AtomicBool>,
+}
 
 impl ActivitySnapshot {
     pub(super) fn new() -> Self {
-        Self(Arc::new(AtomicU64::new(0)))
+        Self {
+            last_sample: Arc::new(AtomicU64::new(0)),
+            active: Arc::new(AtomicBool::new(false)),
+        }
     }
     pub(super) fn publish(&self, sample: u64) {
-        self.0.store(sample.saturating_add(1), Ordering::Release);
+        self.last_sample
+            .store(sample.saturating_add(1), Ordering::Release);
+    }
+    pub(super) fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Release);
     }
     /// Last local or linked receive sample since startup; telemetry never updates it.
     #[must_use]
     pub fn last_sample(&self) -> Option<u64> {
-        self.0.load(Ordering::Acquire).checked_sub(1)
+        self.last_sample.load(Ordering::Acquire).checked_sub(1)
+    }
+    /// Whether a local-receiver or linked-peer signal is active in the current callback.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
     }
 }
 
@@ -132,6 +147,12 @@ impl ControllerControl {
         }
         self.outstanding += 1;
         true
+    }
+
+    /// Whether another prepared status can be queued without exceeding the bounded ring.
+    #[must_use]
+    pub fn can_queue_status(&self) -> bool {
+        self.outstanding < 4
     }
 
     /// Prepare and enqueue printable status, retaining input ownership on failure.

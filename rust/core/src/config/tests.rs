@@ -806,6 +806,26 @@ fn schedule_resolution_retains_selectors_and_inactivity_grace() {
     assert!(value.dates.is_empty());
     assert_eq!(value.end_time, "23:59");
     assert_eq!(value.end_inactivity_ms, 300_000);
+    assert!(value.warning_before_start_ms.is_empty());
+    assert!(value.warning_before_end_ms.is_empty());
+    assert_eq!(value.warning_message_id, None);
+}
+
+#[test]
+fn schedule_resolution_preserves_ordered_warning_leads_and_message_id() {
+    let document = ConfigDocument::parse(
+        "[node]\n[permanent node primary]\nremote_node=123\n[schedule node net]\nremote_node=456\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\nwarning_before_start_ms=3600000,60000\nwarning_before_end_ms=60000,30000\nwarning_message_id=scheduled-link-change\n",
+    )
+    .unwrap();
+    let value = ResolvedScheduleSettings::resolve(&document, &NodeId::new("node").unwrap(), "net")
+        .unwrap()
+        .value;
+    assert_eq!(value.warning_before_start_ms, [3_600_000, 60_000]);
+    assert_eq!(value.warning_before_end_ms, [60_000, 30_000]);
+    assert_eq!(
+        value.warning_message_id.as_deref(),
+        Some("scheduled-link-change")
+    );
 }
 
 #[test]

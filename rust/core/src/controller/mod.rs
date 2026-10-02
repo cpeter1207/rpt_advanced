@@ -215,6 +215,7 @@ impl NodeController {
 
     /// Apply a sample-free receive edge without advancing playback or elapsed time.
     pub fn process_event(&mut self, receiving: bool, linked: bool) -> bool {
+        self.activity.set_active(receiving || linked);
         self.step(receiving, linked, None, 0.0);
         self.keyed
     }
@@ -244,6 +245,7 @@ impl NodeController {
         if audio.is_empty() {
             return self.process_event(receiving, linked);
         }
+        self.activity.set_active(receiving || linked);
         for (offset, sample) in audio.iter_mut().enumerate() {
             let rf = self.step(
                 receiving,

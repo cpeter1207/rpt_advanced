@@ -262,6 +262,27 @@ impl MessageCatalog {
             morse: output.next().expect("three requested attributes"),
         })
     }
+
+    /// Format a schedule warning with locale-specific duration forms for text, speech and Morse.
+    pub fn format_schedule_warning(&self, seconds: u64) -> Result<MessageForms, CatalogError> {
+        let duration = self.format(&Message::DurationSeconds { seconds })?;
+        let text = self
+            .format(&Message::ScheduledLinkChange {
+                time_remaining: &duration.text,
+            })?
+            .text;
+        let tts = self
+            .format(&Message::ScheduledLinkChange {
+                time_remaining: &duration.tts,
+            })?
+            .tts;
+        let morse = self
+            .format(&Message::ScheduledLinkChange {
+                time_remaining: &duration.morse,
+            })?
+            .morse;
+        Ok(MessageForms { text, tts, morse })
+    }
 }
 
 impl Message<'_> {

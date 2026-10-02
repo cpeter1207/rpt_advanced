@@ -107,6 +107,15 @@ impl CivilTime {
             * 60)
             + u64::from(self.minute)
     }
+
+    fn date_ordinal(self) -> u64 {
+        CivilDate {
+            year: self.year,
+            month: self.month,
+            day: self.day,
+        }
+        .ordinal()
+    }
 }
 
 /// Operations permitted in a named scheduler macro.
@@ -243,6 +252,54 @@ pub struct ScheduledWindow {
 }
 
 impl ScheduledWindow {
+    /// Milliseconds until the next selected inclusive start and its date identity.
+    pub(crate) fn next_start(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
+        self.next_boundary(local, second, u64::from(self.start_minute) * 60)
+    }
+
+    /// Milliseconds until the next selected exclusive end and its date identity.
+    pub(crate) fn next_end(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
+        self.next_boundary(local, second, u64::from(self.end_minute) * 60)
+    }
+
+    fn next_boundary(
+        &self,
+        local: &CivilTime,
+        second: u8,
+        target_second: u64,
+    ) -> Option<(u64, u64)> {
+        if second >= 60 {
+            return None;
+        }
+        let today = local.date_ordinal();
+        let current_second = u64::from(local.minute_of_day()) * 60 + u64::from(second);
+        if !self.dates.is_empty() {
+            return self
+                .dates
+                .iter()
+                .filter_map(|date| {
+                    let date = date.ordinal();
+                    let days = date.checked_sub(today)?;
+                    let remaining = days
+                        .checked_mul(86_400)?
+                        .checked_add(target_second)?
+                        .checked_sub(current_second)?;
+                    Some((date, remaining))
+                })
+                .filter(|(_, remaining)| *remaining > 0)
+                .min_by_key(|(_, remaining)| *remaining)
+                .map(|(date, remaining)| (date, remaining * 1000));
+        }
+        (0..=7).find_map(|days| {
+            let weekday = (local.weekday as u8 + days) % 7;
+            if self.weekday_mask != 0 && self.weekday_mask & (1 << weekday) == 0 {
+                return None;
+            }
+            let remaining = (days as u64 * 86_400 + target_second).checked_sub(current_second)?;
+            (remaining > 0).then_some((today + days as u64, remaining * 1000))
+        })
+    }
+
     /// Elapsed wall-clock milliseconds after this selected date's window end.
     /// Returns `None` before the end, on another selected date, or for invalid seconds.
     pub fn elapsed_after_end(&self, local: &CivilTime, second: u8) -> Option<u64> {
@@ -332,6 +389,15 @@ impl CivilDate {
             && self.month <= 12
             && self.day >= 1
             && self.day <= month_days(self.year, self.month)
+    }
+
+    fn ordinal(&self) -> u64 {
+        let year = u64::from(self.year - 1);
+        let leap_days = year / 4 - year / 100 + year / 400;
+        let month_days: u64 = (1..self.month)
+            .map(|month| u64::from(month_days(self.year, month)))
+            .sum();
+        365 * year + leap_days + month_days + u64::from(self.day - 1)
     }
 }
 

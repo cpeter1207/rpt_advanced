@@ -3,7 +3,7 @@
 use super::{
     GenerationWork,
     dtmf::{DigitEvent, DigitOperation, DtmfCommands},
-    link_schedule::{LinkReservation, LinkScheduler, LinkTransition},
+    link_schedule::{LinkReservation, LinkScheduler, LinkTransition, ScheduleWarning, WarningGate},
 };
 use crate::{
     access::AccessPolicy,
@@ -593,6 +593,28 @@ impl NodeLinkControl {
                 self.manager.owns_permanent(&route.remote)
             });
         }
+    }
+    /// Refresh route policy and reserve one due warning only when its local queue has room.
+    pub(super) fn tick_with_warnings(
+        &mut self,
+        local: CivilTime,
+        second: u8,
+        now_ms: u64,
+        activity: impl FnMut(&str) -> Option<u64>,
+        active: bool,
+        warning_capacity: bool,
+    ) -> Option<ScheduleWarning> {
+        self.schedule.as_mut()?.tick_with_warnings(
+            local,
+            second,
+            now_ms,
+            activity,
+            |route| self.manager.owns_permanent(&route.remote),
+            WarningGate {
+                source_active: |_: &str| active,
+                capacity: warning_capacity,
+            },
+        )
     }
     /// Reserve a configured attach, or unpublish a withdrawal before allowing replacements.
     pub fn next_scheduled(&mut self, work: GenerationWork) -> Option<LinkEffect> {

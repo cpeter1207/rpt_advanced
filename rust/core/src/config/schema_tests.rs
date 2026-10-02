@@ -248,6 +248,46 @@ fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
 }
 
 #[test]
+fn scheduled_link_warnings_are_validated_as_positive_ordered_millisecond_lists() {
+    let source = "[524950]\n[permanent 524950 primary]\nremote_node=506315\n[schedule 524950 weekday-net]\nremote_node=2627\nreplace_permanent=primary\ndays=Monday-Friday\nstart_time=11:00\nend_time=12:00\nwarning_before_start_ms=3600000,1800000,900000,600000,300000,60000\nwarning_before_end_ms=600000,300000,60000\nwarning_message_id=scheduled-link-change\n";
+    assert!(
+        Schema::validate(&ConfigDocument::parse(source).unwrap())
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
+}
+
+#[test]
+fn invalid_or_incomplete_scheduled_link_warnings_are_reported_without_rejecting_config() {
+    let base = "[524950]\n[permanent 524950 primary]\nremote_node=506315\n[schedule 524950 weekday-net]\nremote_node=2627\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n";
+    for (extra, expected_key) in [
+        (
+            "warning_before_start_ms=60000,0\nwarning_message_id=scheduled-link-change\n",
+            "warning_before_start_ms",
+        ),
+        (
+            "warning_before_end_ms=60000,,30000\nwarning_message_id=scheduled-link-change\n",
+            "warning_before_end_ms",
+        ),
+        ("warning_before_start_ms=60000\n", "warning_message_id"),
+        (
+            "warning_before_start_ms=60000\nwarning_message_id=unknown\n",
+            "warning_message_id",
+        ),
+    ] {
+        let document = ConfigDocument::parse(&format!("{base}{extra}")).unwrap();
+        assert!(
+            Schema::validate(&document)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|warning| warning.key == expected_key)
+        );
+    }
+}
+
+#[test]
 fn permanent_remote_node_list_is_accepted_without_config_warnings() {
     let source = "[524950]\n[permanent 524950 blind-hams]\nremote_node=506315, 506312,506310,506311,506313,506314\ngroup_name=The Blind Hams Network\n";
     let validation = Schema::validate(&ConfigDocument::parse(source).unwrap()).unwrap();

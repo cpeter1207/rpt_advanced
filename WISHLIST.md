@@ -287,39 +287,6 @@ None.
 
 None.
 
-### Scheduled-link warnings
-
-**Requirements**
-
-- Allow each scheduled event to configure one or more warnings before its start
-  and before its end or disconnect.
-- Warning lead times are individually configurable, allowing patterns such as
-  60, 30, 15, 10, 5, and 1 minute before start and 10, 5, and 1 minute before
-  disconnect.
-- Each event provides its own configurable warning message.
-- For inactivity-based schedules, calculate warnings from the expected
-  inactivity-timer expiration. Reset the pending warning schedule whenever
-  qualifying activity resets that inactivity timer.
-
-**Decisions recorded**
-
-- Warnings are required before scheduled event starts and before scheduled
-  event ends.
-- Inactivity-based warnings follow the expected inactivity deadline rather
-  than a fixed calendar end.
-- Each event uses one configurable warning-message template. `${time_remaining}`
-  is replaced with the natural-language time remaining for the warning.
-- A warning that becomes due during local-receiver or linked-peer activity is
-  skipped rather than delayed or transmitted over the activity.
-- A qualifying activity reset begins a new inactivity interval; warnings that
-  played during the preceding quiet interval are eligible again.
-- A warning due at or after its related start, end, or inactivity deadline is
-  skipped.
-
-**Material decisions needed before implementation**
-
-None.
-
 ### Complete control and status interfaces
 
 **Requirements**

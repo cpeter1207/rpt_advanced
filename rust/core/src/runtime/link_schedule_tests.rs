@@ -29,10 +29,152 @@ fn scheduler() -> LinkScheduler {
             replaced: vec![0],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 60000,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
         }],
         None,
     )
     .unwrap()
+}
+
+fn warning_scheduler(start: &[u64], end: &[u64]) -> LinkScheduler {
+    let mut schedule = scheduler();
+    schedule.windows[0].spec.warning_before_start_ms = start.to_vec();
+    schedule.windows[0].spec.warning_before_end_ms = end.to_vec();
+    schedule.windows[0].spec.warning_message_id = Some("scheduled-link-change".into());
+    schedule
+}
+
+fn tick_warnings(
+    schedule: &mut LinkScheduler,
+    time: CivilTime,
+    second: u8,
+    now_ms: u64,
+    activity: impl FnMut(&str) -> Option<u64>,
+    active: impl FnMut(&str) -> bool,
+) -> Option<super::ScheduleWarning> {
+    schedule.tick_with_warnings(
+        time,
+        second,
+        now_ms,
+        activity,
+        |_| false,
+        WarningGate {
+            source_active: active,
+            capacity: true,
+        },
+    )
+}
+
+#[test]
+fn schedule_warning_start_leads_are_ordered_and_not_repeated() {
+    let mut schedule = warning_scheduler(&[120_000, 60_000], &[]);
+    let first = tick_warnings(&mut schedule, civil(11, 58), 0, 1_000, |_| None, |_| false);
+    assert_eq!(first.unwrap().remaining_ms, 120_000);
+    let second = tick_warnings(&mut schedule, civil(11, 59), 0, 61_000, |_| None, |_| false);
+    assert_eq!(second.unwrap().remaining_ms, 60_000);
+    assert!(
+        tick_warnings(
+            &mut schedule,
+            civil(11, 59),
+            30,
+            91_000,
+            |_| None,
+            |_| false
+        )
+        .is_none()
+    );
+    assert!(tick_warnings(&mut schedule, civil(12, 0), 0, 121_000, |_| None, |_| false).is_none());
+}
+
+#[test]
+fn schedule_warning_end_uses_expected_inactivity_deadline() {
+    let mut schedule = warning_scheduler(&[], &[60_000]);
+    assert!(tick_warnings(&mut schedule, civil(12, 59), 0, 1_000, |_| None, |_| false).is_none());
+    let due = tick_warnings(&mut schedule, civil(13, 0), 0, 61_000, |_| None, |_| false).unwrap();
+    assert_eq!(due.remaining_ms, 60_000);
+    assert!(tick_warnings(&mut schedule, civil(13, 1), 0, 121_000, |_| None, |_| false).is_none());
+}
+
+#[test]
+fn schedule_warning_skips_active_input_and_reenables_after_inactivity_reset() {
+    let mut schedule = warning_scheduler(&[], &[60_000]);
+    schedule.tick(civil(12, 59), 0, 1_000, |_| None, |_| false);
+    assert!(tick_warnings(&mut schedule, civil(13, 0), 0, 61_000, |_| None, |_| true).is_none());
+    let due_after_reset = tick_warnings(
+        &mut schedule,
+        civil(13, 0),
+        10,
+        71_000,
+        |_| Some(71_000),
+        |_| false,
+    )
+    .unwrap();
+    assert_eq!(due_after_reset.remaining_ms, 60_000);
+}
+
+#[test]
+fn schedule_start_warning_is_skipped_during_activity_without_later_deferral() {
+    let mut schedule = warning_scheduler(&[60_000], &[]);
+    assert!(tick_warnings(&mut schedule, civil(11, 59), 0, 1_000, |_| None, |_| true,).is_none());
+    assert!(
+        tick_warnings(
+            &mut schedule,
+            civil(11, 59),
+            30,
+            31_000,
+            |_| None,
+            |_| false,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn schedule_warning_is_skipped_at_or_after_deadline() {
+    let mut starts = warning_scheduler(&[1], &[]);
+    assert!(tick_warnings(&mut starts, civil(12, 0), 0, 1_000, |_| None, |_| false).is_none());
+    let mut ends = warning_scheduler(&[], &[1]);
+    ends.tick(civil(12, 59), 0, 1_000, |_| None, |_| false);
+    assert!(tick_warnings(&mut ends, civil(13, 1), 0, 121_000, |_| None, |_| false).is_none());
+}
+
+#[test]
+fn schedule_warning_waits_for_bounded_status_queue_capacity() {
+    let mut schedule = warning_scheduler(&[60_000], &[]);
+    assert!(
+        schedule
+            .tick_with_warnings(
+                civil(11, 59),
+                0,
+                1_000,
+                |_| None,
+                |_| false,
+                WarningGate {
+                    source_active: |_: &str| false,
+                    capacity: false,
+                }
+            )
+            .is_none()
+    );
+    assert_eq!(
+        schedule
+            .tick_with_warnings(
+                civil(11, 59),
+                1,
+                2_000,
+                |_| None,
+                |_| false,
+                WarningGate {
+                    source_active: |_: &str| false,
+                    capacity: true,
+                }
+            )
+            .unwrap()
+            .remaining_ms,
+        59_000
+    );
 }
 
 #[test]
@@ -352,6 +494,9 @@ fn scheduled_replacement_suppresses_and_restores_every_group_member() {
             replaced: vec![0, 1, 2],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
         }],
         None,
     )

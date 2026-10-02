@@ -42,6 +42,15 @@ pub(crate) fn unsigned(text: &str, min: u64, max: u64) -> Option<u64> {
     (min..=max).contains(&value).then_some(value)
 }
 
+/// Parse a nonempty comma-separated list of positive decimal durations.
+pub(crate) fn positive_milliseconds(text: &str) -> Option<Vec<u64>> {
+    let values = text
+        .split(',')
+        .map(|value| unsigned(value.trim(), 1, u64::MAX))
+        .collect::<Option<Vec<_>>>()?;
+    (!values.is_empty()).then_some(values)
+}
+
 /// Parse a signed decimal value with inclusive bounds.
 pub(crate) fn signed(text: &str, min: i64, max: i64) -> Option<i64> {
     let digits = text.strip_prefix('-').unwrap_or(text);
