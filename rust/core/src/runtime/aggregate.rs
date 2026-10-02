@@ -1161,11 +1161,16 @@ fn prepare_links(
     for label in prepare::labels(document, "permanent", node.as_str()) {
         let settings = ResolvedPermanentLinkSettings::resolve(document, node, label)?.value;
         permanent.push((label.to_owned(), routes.len()));
-        routes.push(RouteSpec {
-            local: node.as_str().into(),
-            remote: settings.remote_node,
-            permanent: true,
-        });
+        for (priority, remote) in settings.remote_nodes.into_iter().enumerate() {
+            routes.push(RouteSpec {
+                local: node.as_str().into(),
+                remote,
+                permanent: true,
+                group_label: Some(settings.name.clone()),
+                group_name: settings.group_name.clone(),
+                group_priority: Some(priority),
+            });
+        }
     }
     for label in prepare::labels(document, "schedule", node.as_str()) {
         let settings = ResolvedScheduleSettings::resolve(document, node, label)?.value;
@@ -1180,6 +1185,9 @@ fn prepare_links(
             local: node.as_str().into(),
             remote: settings.remote_node,
             permanent: false,
+            group_label: None,
+            group_name: None,
+            group_priority: None,
         });
         windows.push(ReplacementSpec {
             route,
@@ -1196,3 +1204,7 @@ fn prepare_links(
     }
     LinkScheduler::new(generation, routes, windows, previous).map_err(|_| RuntimeError::Preparation)
 }
+
+#[cfg(test)]
+#[path = "aggregate_link_tests.rs"]
+mod link_tests;

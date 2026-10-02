@@ -37,7 +37,12 @@ rather than an ordinary rapid retry state. It remains blocked until fresh
 peer-advertised topology changes the relevant topology generation, a
 configuration reload changes the route policy, or an operator explicitly
 retries it. Locally generated lifecycle changes alone must not repeatedly
-unblock the route.
+unblock the route. Members of one configured permanent link group are the
+specific exception: each member remains eligible for silent background retry
+and priority selection despite overlap among that group's planned peer
+topologies. This exception does not bypass self-link checks, direct duplicate
+checks, allow/deny policy, or final current-policy validation, and does not
+apply to routes outside the same group.
 
 Hub-visible local identity is stable hub-owned storage or is published through
 the hub routing synchronization. A reload may not update a pointer observed by

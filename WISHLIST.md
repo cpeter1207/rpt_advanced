@@ -253,21 +253,31 @@ None.
 
 None.
 
-### Fallback links and remaining scheduled-link policy
+### Ordered permanent link groups and remaining scheduled-link policy
 
 **Requirements**
 
-- Allow a primary permanent link to name an ordered set of fallback links. A
-  fallback is attempted when the primary link cannot be reconnected.
+- Allow a permanent link group to name ordered members. Connect each member
+  independently, retry unavailable members silently, and make only the
+  highest-priority reachable member transceive; all other members remain
+  receive-only. The group has a name for telemetry, defaulting to its section
+  label when omitted.
+- Switch the transceive member atomically only while no local-receiver or
+  linked-peer input is active. Transmitter PTT/hangtime alone does not defer a
+  switch. Only the active member's audio is passed to the transmitter.
 - At a scheduled link-window start, allow configuration to disconnect all links,
   temporary links only, permanent links only, or no existing links before it
   connects the scheduled peer.
 
 **Decisions recorded**
 
-- Fallback links are used only when the primary link cannot be reconnected.
-- When a primary becomes available, disconnect its active fallback before
-  reconnecting the primary to avoid network topology loops.
+- Group members may overlap in planned topology with other members of the same
+  group so recovery and priority selection can proceed. Preserve self-link,
+  direct-duplicate, allow/deny, and final current-policy checks; topology-loop
+  blocking must not suppress background retry among members of one group.
+- Only the highest-priority reachable member is transceive at a time. A
+  returning higher-priority member takes over at the next input-idle boundary;
+  the previous winner becomes receive-only atomically.
 - Future permanent-only semantics: `*806` will disconnect only permanent links
   so any permitted peer can be linked manually, and `*816` will disconnect and
   then reconnect only permanent links. Current all-link disconnect/reconnect

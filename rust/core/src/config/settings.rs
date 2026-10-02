@@ -217,8 +217,10 @@ pub struct ResolvedEventSettings {
 pub struct ResolvedPermanentLinkSettings {
     /// Link label.
     pub name: String,
-    /// Remote decimal node.
-    pub remote_node: String,
+    /// Ordered remote decimal nodes, with index zero at highest priority.
+    pub remote_nodes: Vec<String>,
+    /// Optional display name for this permanent-link group.
+    pub group_name: Option<String>,
 }
 /// Resolved replacement-window declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -604,10 +606,10 @@ impl ResolvedPermanentLinkSettings {
     ) -> Result<Resolution<Self>, ConfigError> {
         let warnings = Schema::validate(document)?.warnings;
         let section = format!("permanent {} {label}", node.as_str());
-        let remote = document
+        let remote_nodes = document
             .lookup("remote_node", &[section.as_str()])
             .unwrap_or("");
-        if remote.is_empty() {
+        if remote_nodes.trim().is_empty() {
             return Err(ConfigError::structure(
                 &section,
                 "permanent remote node is required",
@@ -616,7 +618,15 @@ impl ResolvedPermanentLinkSettings {
         Ok(Resolution {
             value: Self {
                 name: label.to_owned(),
-                remote_node: remote.to_owned(),
+                remote_nodes: remote_nodes
+                    .split(',')
+                    .map(str::trim)
+                    .map(str::to_owned)
+                    .collect(),
+                group_name: document
+                    .lookup("group_name", &[section.as_str()])
+                    .filter(|value| !value.trim().is_empty() && value.len() <= 63)
+                    .map(str::to_owned),
             },
             warnings,
         })

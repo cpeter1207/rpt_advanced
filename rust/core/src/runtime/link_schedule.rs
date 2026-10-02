@@ -12,6 +12,12 @@ pub struct RouteSpec {
     pub remote: String,
     /// Desired outside a replacement window.
     pub permanent: bool,
+    /// Owning permanent-group section label, absent for scheduled routes.
+    pub group_label: Option<String>,
+    /// Operator-facing group name, absent when not configured.
+    pub group_name: Option<String>,
+    /// Zero-based order within the group, absent for scheduled routes.
+    pub group_priority: Option<usize>,
 }
 /// One same-node replacement window with existing post-window inactivity behavior.
 #[derive(Clone, Debug, PartialEq, Eq)]

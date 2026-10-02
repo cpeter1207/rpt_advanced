@@ -248,6 +248,51 @@ fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
 }
 
 #[test]
+fn permanent_remote_node_list_is_accepted_without_config_warnings() {
+    let source = "[524950]\n[permanent 524950 blind-hams]\nremote_node=506315, 506312,506310,506311,506313,506314\ngroup_name=The Blind Hams Network\n";
+    let validation = Schema::validate(&ConfigDocument::parse(source).unwrap()).unwrap();
+    assert!(
+        validation.warnings.is_empty(),
+        "remote_node lists are valid"
+    );
+}
+
+#[test]
+fn unnamed_single_member_permanent_group_remains_valid() {
+    let source = "[524950]\n[permanent 524950 home]\nremote_node=506315\n";
+    assert!(
+        Schema::validate(&ConfigDocument::parse(source).unwrap())
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
+}
+
+#[test]
+fn malformed_or_conflicting_permanent_node_lists_report_specific_errors() {
+    for remote in ["506315,", "506315,,506312", "506315,not-a-node"] {
+        let source = format!("[524950]\n[permanent 524950 group]\nremote_node={remote}\n");
+        assert_eq!(
+            structure_error(&source).1,
+            "permanent remote node list is invalid",
+            "{remote}"
+        );
+    }
+    for (source, expected) in [
+        (
+            "[524950]\n[permanent 524950 group]\nremote_node=506315,524950\n",
+            "configured link cannot target its local node",
+        ),
+        (
+            "[524950]\n[permanent 524950 one]\nremote_node=506315,506312\n[permanent 524950 two]\nremote_node=506314,506312\n",
+            "duplicate configured link remote node",
+        ),
+    ] {
+        assert_eq!(structure_error(source).1, expected, "{source}");
+    }
+}
+
+#[test]
 fn invalid_typed_options_report_exact_builtin_fallbacks() {
     for (section, key, expected) in [
         ("general", "transmit_timeout_ms", "180000"),

@@ -301,7 +301,11 @@ defines the full reload, hardware-handoff, and failure policy.
 - `rust/core/src/runtime/` materializes configuration-owned permanent-link
   intent and local-time replacement windows. It snapshots lock-free local/link
   receive activity and returns ordinary attach or detach work to the serialized
-  control plane; it never changes a peer from a radio worker.
+  control plane; it never changes a peer from a radio worker. Ordered permanent
+  link groups connect and recover each member independently, select the
+  highest-priority reachable peer for transceive, and keep other group members
+  receive-only. A winner change is atomically committed only while local and
+  linked inputs are idle; transmitter PTT alone does not block it.
 - `rust/core/src/link/`, `rust/product/src/link/`, and `rust/asterisk/src/link/` implement
   AllStarLink admission, peer media, topology, advisory keyed-source queries,
   and permitted DTMF control. A direct receive edge starts the canonical

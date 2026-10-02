@@ -235,7 +235,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         KnownScope::Template => key == "text",
         KnownScope::Macro => matches!(key, "action" | "target_node"),
         KnownScope::Event => matches!(key, "at" | "template" | "message" | "macro"),
-        KnownScope::Permanent => key == "remote_node",
+        KnownScope::Permanent => matches!(key, "remote_node" | "group_name"),
         KnownScope::Schedule => matches!(
             key,
             "remote_node"
@@ -250,6 +250,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if key == "remote_node" && matches!(kind, ScopeKind::PermanentNode) {
+        return permanent_node_list(value).is_some();
+    }
     match key {
         "statpost_url" => {
             if value.is_empty() {
@@ -302,6 +305,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         }
         "format" => matches!(value, "12" | "24"),
         "callsign" => value.len() <= 63,
+        "group_name" => !value.trim().is_empty() && value.len() <= 63,
         "link_allow_nodes" | "link_deny_nodes" => AccessPolicy::list_valid(value),
         "link_lookup_method" => matches!(value, "both" | "dns" | "file"),
         "input" => matches!(value, "receiver" | "link"),
@@ -321,6 +325,15 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
 
 fn node_value_valid(value: &str) -> bool {
     value.len() <= 63 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn permanent_node_list(value: &str) -> Option<Vec<&str>> {
+    let nodes: Vec<_> = value.split(',').map(str::trim).collect();
+    (nodes
+        .iter()
+        .all(|node| !node.is_empty() && node_value_valid(node))
+        && nodes.iter().copied().collect::<BTreeSet<_>>().len() == nodes.len())
+    .then_some(nodes)
 }
 
 fn default_value(kind: ScopeKind, key: &str) -> String {
@@ -623,37 +636,45 @@ fn named_visible(document: &ConfigDocument, family: &str, node: &str, label: &st
 }
 
 fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
-    let mut permanent: BTreeMap<&str, BTreeMap<&str, (&str, &str)>> = BTreeMap::new();
+    let mut permanent: BTreeMap<&str, BTreeMap<&str, BTreeSet<&str>>> = BTreeMap::new();
     let mut remotes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for section in unique_sections(document) {
         let parsed = scope::parse_scope(section).expect("section grammar checked");
         if parsed.kind != ScopeKind::PermanentNode {
             continue;
         }
-        let remote = valid_value(document, section, parsed.kind, "remote_node").unwrap_or_default();
-        if remote.is_empty() {
+        let value = document.lookup("remote_node", &[section]).unwrap_or("");
+        if value.trim().is_empty() {
             return Err(ConfigError::structure(
                 section,
                 "permanent remote node is required",
             ));
         }
+        let Some(group_nodes) = permanent_node_list(value) else {
+            return Err(ConfigError::structure(
+                section,
+                "permanent remote node list is invalid",
+            ));
+        };
         let node = parsed.node.unwrap();
-        if remote == node {
-            return Err(ConfigError::structure(
-                section,
-                "configured link cannot target its local node",
-            ));
-        }
-        if !remotes.entry(node).or_default().insert(remote) {
-            return Err(ConfigError::structure(
-                section,
-                "duplicate configured link remote node",
-            ));
+        for remote in &group_nodes {
+            if *remote == node {
+                return Err(ConfigError::structure(
+                    section,
+                    "configured link cannot target its local node",
+                ));
+            }
+            if !remotes.entry(node).or_default().insert(remote) {
+                return Err(ConfigError::structure(
+                    section,
+                    "duplicate configured link remote node",
+                ));
+            }
         }
         permanent
             .entry(node)
             .or_default()
-            .insert(parsed.label.unwrap(), (remote, section));
+            .insert(parsed.label.unwrap(), group_nodes.into_iter().collect());
     }
 
     for section in unique_sections(document) {
@@ -679,15 +700,13 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
                 "configured link cannot target its local node",
             ));
         }
-        let Some((primary_remote, _)) =
-            permanent.get(node).and_then(|links| links.get(replacement))
-        else {
+        let Some(group_nodes) = permanent.get(node).and_then(|links| links.get(replacement)) else {
             return Err(ConfigError::structure(
                 section,
                 "schedule references an unknown permanent link",
             ));
         };
-        if remote == *primary_remote {
+        if group_nodes.contains(remote) {
             return Err(ConfigError::structure(
                 section,
                 "schedule replacement must select another node",

@@ -11,14 +11,18 @@ path, or make link state depend on an Asterisk restart.
 
 ## Decision
 
-Use `[permanent node label]` with one required `remote_node` for each
-configuration-owned permanent direct peer. On module start and a successful
-configuration reload, runtime derives the desired permanent-peer operations
-from those sections and uses the existing permanent link recovery behavior. A
-permanent route may name an ordered fallback list. Runtime attempts a fallback
-only when the primary cannot be reconnected, and withdraws an active fallback
-before reconnecting a recovered primary so the two never create a topology
-overlap.
+Use `[permanent node label]` with one required `remote_node` for a single
+permanent peer, or an ordered comma-separated `remote_nodes` list for a
+permanent link group. A group may have a `group_name`; unnamed groups use their
+section label. On module start and a successful configuration reload, runtime
+derives the desired permanent-peer operations from those sections and uses the
+existing permanent link recovery behavior. All group members are connected
+independently and retried silently. Members are receive-only except for the
+highest-priority reachable member, which is transceive. The active member may
+change atomically only while no local-receiver or linked-peer input is active;
+transmitter PTT state alone does not prevent a change. Switching never waits
+for hangtime or transmitter unkey. Group member media is admitted to the
+transmit mix only from the active member.
 
 Use `[schedule node label]` to replace one same-node permanent link during a
 bounded local-time window. Its settings are `remote_node`,
@@ -63,10 +67,14 @@ route and window model.
 
 Configuration reload reevaluates current local-time membership without
 redialing an unchanged issued route. Configuration errors reject self-links,
-duplicate configured remote identities for a node, unknown replacement labels,
+duplicate configured remote identities for a node (including duplicates
+across groups), empty or malformed group members, unknown replacement labels,
 and a replacement that names its permanent peer again. Multiple matching
 replacement windows intentionally form a union: every matching or deferred
 replacement is requested and every named primary is suppressed. They have no
 exclusive arbitration beyond normal direct-link topology admission; an overlap
-must not be used to select one replacement route. Warning timing and civil-time
-behavior are defined by ADRs 0009 and 0017.
+must not be used to select one replacement route. Group members remain subject
+to ordinary direct-link self/duplicate and allow/deny policy. Their planned
+topology may overlap within the same group so the reachable priority member can
+be selected; other topology-loop checks remain in force. Warning timing and
+civil-time behavior are defined by ADRs 0009 and 0017.

@@ -11,11 +11,17 @@ fn scheduler() -> LinkScheduler {
                 local: "524950".into(),
                 remote: "2000".into(),
                 permanent: true,
+                group_label: None,
+                group_name: None,
+                group_priority: None,
             },
             RouteSpec {
                 local: "524950".into(),
                 remote: "3000".into(),
                 permanent: false,
+                group_label: None,
+                group_name: None,
+                group_priority: None,
             },
         ],
         vec![ReplacementSpec {

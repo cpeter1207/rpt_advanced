@@ -740,7 +740,7 @@ fn event_permanent_and_schedule_resolve_required_declarations() {
         ResolvedPermanentLinkSettings::resolve(&document, &node, "primary")
             .unwrap()
             .value
-            .remote_node,
+            .remote_nodes[0],
         "123"
     );
     assert_eq!(
@@ -749,6 +749,27 @@ fn event_permanent_and_schedule_resolve_required_declarations() {
             .value
             .replace_permanent,
         "primary"
+    );
+}
+
+#[test]
+fn permanent_group_resolution_preserves_the_configured_priority_order() {
+    let source = "[524950]\n[permanent 524950 blind-hams]\nremote_node=506315,506312,506310,506311,506313,506314\ngroup_name=The Blind Hams Network\n";
+    let document = ConfigDocument::parse(source).unwrap();
+    let resolved = ResolvedPermanentLinkSettings::resolve(
+        &document,
+        &NodeId::new("524950").unwrap(),
+        "blind-hams",
+    )
+    .unwrap();
+    assert!(resolved.warnings.is_empty());
+    assert_eq!(
+        resolved.value.remote_nodes,
+        ["506315", "506312", "506310", "506311", "506313", "506314"]
+    );
+    assert_eq!(
+        resolved.value.group_name.as_deref(),
+        Some("The Blind Hams Network")
     );
 }
 
