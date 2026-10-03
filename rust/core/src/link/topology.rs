@@ -47,7 +47,7 @@ impl TopologyManager {
     }
 }
 impl LinkManager {
-    /// Complete bounded forwarding topology for status, using the same wire mode rules.
+    /// Complete bounded published topology for status.
     pub fn full_topology(&self) -> String {
         self.topology_for(None)
     }
@@ -56,16 +56,24 @@ impl LinkManager {
         let mut tokens = Vec::new();
         let mut seen = HashSet::new();
         let mut length = 2;
-        'peers: for peer in self.peers.iter().filter(|peer| {
-            !peer.ended && Some(peer.name.as_str()) != recipient && peer.effective_mode().forwards()
-        }) {
-            let direct = if peer.effective_mode().transmits() {
+        'peers: for peer in self
+            .peers
+            .iter()
+            .filter(|peer| !peer.ended && Some(peer.name.as_str()) != recipient)
+        {
+            let (mode, local_only) = peer.reporting_state();
+            if !local_only && !mode.forwards() {
+                continue;
+            }
+            let direct = if local_only {
+                'L'
+            } else if mode.transmits() {
                 'T'
             } else {
                 'R'
             };
-            for (mode, node) in std::iter::once((direct, peer.name.as_str())).chain(
-                peer.routes.iter().map(|route| {
+            for (wire_mode, node) in std::iter::once((direct, peer.name.as_str())).chain(
+                peer.routes.iter().filter(|_| !local_only).map(|route| {
                     (
                         if direct == 'R' && route.mode == 'T' {
                             'R'
@@ -84,7 +92,7 @@ impl LinkManager {
                     break 'peers;
                 }
                 length += node.len() + 2;
-                tokens.push(format!("{mode}{node}"));
+                tokens.push(format!("{wire_mode}{node}"));
             }
         }
         tokens.join(",")

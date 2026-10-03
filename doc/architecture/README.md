@@ -314,8 +314,11 @@ defines the full reload, hardware-handoff, and failure policy.
   control plane; it never changes a peer from a radio worker. Ordered permanent
   link groups connect and recover each member independently, select the
   highest-priority reachable peer for transceive, and keep other group members
-  receive-only. A winner change is atomically committed only while local and
-  linked inputs are idle; transmitter PTT alone does not block it. Only initial
+  receive-only. Connected non-selected members are advertised as direct
+  local-only (`L`) peers in topology and stats, with no routes claimed through
+  them; disconnected retries remain `C`. This is reporting-only and does not
+  change media routing. A winner change is atomically committed only while
+  local and linked inputs are idle; transmitter PTT alone does not block it. Only initial
   selection and total group unavailability are announced; retries, standby
   changes, and subsequent winner handoffs are silent. Scheduled warnings use
   the expected start/end or inactivity deadline, skip active input, and remain

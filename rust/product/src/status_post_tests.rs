@@ -11,6 +11,7 @@ fn link(name: &str, mode: Mode, connected: bool) -> LinkStatus {
     LinkStatus {
         name: name.to_owned(),
         mode,
+        local_only: false,
         permanent: false,
         ended: !connected,
         retrying: false,
@@ -18,6 +19,30 @@ fn link(name: &str, mode: Mode, connected: bool) -> LinkStatus {
         due_ms: None,
         topology_blocked: false,
     }
+}
+
+#[test]
+fn request_marks_connected_fallback_standby_as_local_only() {
+    let mut standby = link("3000", Mode::MONITOR, true);
+    standby.local_only = true;
+    let snapshot = StatusSnapshot::new(
+        "1000",
+        42,
+        9,
+        false,
+        vec![
+            link("2000", Mode::TRANSCEIVE, true),
+            standby,
+            link("4000", Mode::MONITOR, true),
+            link("5000", Mode::MONITOR, false),
+        ],
+    );
+    let url = request_url("https://stats.example/uhandler", &snapshot).unwrap();
+
+    assert!(
+        url.query_pairs()
+            .any(|(key, value)| key == "nodes" && value == "T2000,L3000,R4000,C5000")
+    );
 }
 
 #[test]

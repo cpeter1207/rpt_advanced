@@ -362,6 +362,8 @@ pub(crate) fn request_url(
             let connected = !link.ended && !link.retrying;
             let state = if !connected {
                 'C'
+            } else if link.local_only {
+                'L'
             } else if link.mode.transmits() {
                 'T'
             } else if link.mode.forwards() {

@@ -24,6 +24,12 @@ transmitter PTT state alone does not prevent a change. Switching never waits
 for hangtime or transmitter unkey. Group member media is admitted to the
 transmit mix only from the active member.
 
+In status publication, a connected non-selected group member is reported as
+local-only (`L`), while the active member retains its configured mode. The
+topology advertisement lists that standby as a direct `L` peer and does not
+claim routes through it. Disconnected retry entries remain `C`. These are
+reporting labels only; they do not change runtime media routing or retry policy.
+
 Use `[schedule node label]` to replace one same-node permanent link during a
 bounded local-time window. Its settings are `remote_node`,
 `replace_permanent`, `days`, `dates`, `start_time`, `end_time`, and
@@ -83,7 +89,8 @@ defined by ADRs 0009 and 0017.
 ## Implementation status — 2026-10-03
 
 Ordered permanent groups, independent retries, silent standby membership,
-atomic input-idle winner selection, schedule replacement, and configured
+atomic input-idle winner selection, local-only topology/status reporting for
+connected standby members, schedule replacement, and configured
 disconnect-mode choices are implemented. The wishlist tracks the separate
 request for `*806`/`*816` to affect only permanent links; current all-link
 disconnect/reconnect behavior above remains in effect until that work is

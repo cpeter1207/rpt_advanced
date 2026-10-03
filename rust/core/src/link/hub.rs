@@ -59,10 +59,15 @@ pub(super) struct Attached {
     pub group_member: Option<GroupMemberSelection>,
 }
 impl Attached {
-    pub(super) fn effective_mode(&self) -> Mode {
-        match &self.group_member {
-            Some(member) if member.selection().active() != Some(member.slot()) => Mode::MONITOR,
-            _ => self.mode,
+    pub(super) fn reporting_state(&self) -> (Mode, bool) {
+        if self
+            .group_member
+            .as_ref()
+            .is_some_and(|member| member.selection().active() != Some(member.slot()))
+        {
+            (Mode::MONITOR, true)
+        } else {
+            (self.mode, false)
         }
     }
 }
@@ -98,6 +103,8 @@ pub struct LinkStatus {
     pub name: String,
     /// Preserved send and source-forwarding behavior.
     pub mode: Mode,
+    /// Report this connected standby group member as AllStarLink local-only.
+    pub local_only: bool,
     /// Automatic permanent-link intent.
     pub permanent: bool,
     /// Transport has ended but readers have not been reclaimed.
@@ -634,15 +641,19 @@ impl LinkManager {
     pub fn snapshot(&self) -> Vec<LinkStatus> {
         self.peers
             .iter()
-            .map(|peer| LinkStatus {
-                name: peer.name.clone(),
-                mode: peer.effective_mode(),
-                permanent: peer.permanent,
-                ended: peer.ended,
-                retrying: false,
-                paused: false,
-                due_ms: None,
-                topology_blocked: false,
+            .map(|peer| {
+                let (mode, local_only) = peer.reporting_state();
+                LinkStatus {
+                    name: peer.name.clone(),
+                    mode,
+                    local_only,
+                    permanent: peer.permanent,
+                    ended: peer.ended,
+                    retrying: false,
+                    paused: false,
+                    due_ms: None,
+                    topology_blocked: false,
+                }
             })
             .chain(
                 self.retries
@@ -655,6 +666,7 @@ impl LinkManager {
                         } else {
                             retry.mode
                         },
+                        local_only: false,
                         permanent: retry.automatic,
                         ended: false,
                         retrying: true,

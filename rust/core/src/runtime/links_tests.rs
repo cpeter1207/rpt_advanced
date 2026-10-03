@@ -676,7 +676,7 @@ fn callback_group_selection_republishes_topology_immediately() {
         links
             .due_topology(2)
             .iter()
-            .any(|(peer, text)| peer == "4000" && text == "L R3000")
+            .any(|(peer, text)| peer == "4000" && text == "L L3000")
     );
 
     assert_eq!(member.selection().callback_slot(true), 1);
