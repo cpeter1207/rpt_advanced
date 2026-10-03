@@ -325,3 +325,7 @@ fn render_source(source: &mut impl crate::audio::AudioSource) -> Result<Vec<f32>
         }
     }
 }
+
+#[cfg(test)]
+#[path = "telemetry_tests.rs"]
+mod tests;

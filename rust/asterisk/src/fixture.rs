@@ -191,6 +191,7 @@ impl State {
             4 => frame.datalen -= 1,
             5 => frame.subclass.__bindgen_anon_1.format = self.format(1),
             6 => frame.samples = -1,
+            7 => frame.datalen = -1,
             _ => (),
         }
         self.queue.push_back(Pending {

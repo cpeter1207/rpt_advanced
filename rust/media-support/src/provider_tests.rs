@@ -416,3 +416,67 @@ fn cancellation_after_stream_open_discards_the_owned_handle() {
     assert!(!output.handle.is_null());
     unsafe { close_stream(output.handle) };
 }
+
+#[test]
+fn read_stream_rejects_invalid_output_and_cancellation_arguments() {
+    let cancellation = RawCancellation {
+        context: std::ptr::null(),
+        is_cancelled: not_cancelled,
+    };
+    let mut stream = test_stream();
+    let handle = std::ptr::from_mut(&mut stream).cast();
+    let mut output = [0.0_f32; 2];
+    let mut count = usize::MAX;
+
+    assert_eq!(
+        unsafe {
+            read_stream(
+                handle,
+                &cancellation,
+                output.as_mut_ptr(),
+                2,
+                std::ptr::null_mut(),
+            )
+        },
+        -1
+    );
+    assert_eq!(
+        unsafe { read_stream(handle, &cancellation, std::ptr::null_mut(), 2, &mut count) },
+        -1
+    );
+    assert_eq!(
+        unsafe { read_stream(handle, &cancellation, output.as_mut_ptr(), 0, &mut count) },
+        -1
+    );
+    assert_eq!(
+        unsafe { read_stream(handle, std::ptr::null(), output.as_mut_ptr(), 2, &mut count) },
+        -1
+    );
+
+    extern "C" fn cancelled(_: *const c_void) -> u32 {
+        1
+    }
+    let cancellation = RawCancellation {
+        context: std::ptr::null(),
+        is_cancelled: cancelled,
+    };
+    assert_eq!(
+        unsafe { read_stream(handle, &cancellation, output.as_mut_ptr(), 2, &mut count) },
+        -6
+    );
+    assert_eq!(
+        unsafe {
+            read_stream(
+                std::ptr::null_mut(),
+                &RawCancellation {
+                    context: std::ptr::null(),
+                    is_cancelled: not_cancelled,
+                },
+                output.as_mut_ptr(),
+                2,
+                &mut count,
+            )
+        },
+        -1
+    );
+}

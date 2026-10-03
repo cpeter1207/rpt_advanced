@@ -131,6 +131,14 @@ impl PcmStreamReader for StreamReader {
             return PcmRead::Pending;
         }
         self.acquire_consumer();
+        if self
+            .consumer
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation != self.generation)
+        {
+            self.retire_consumer();
+            return PcmRead::Pending;
+        }
         if self.consumer.is_none() {
             if self.control.failed.load(Ordering::Acquire) == self.generation {
                 return PcmRead::Failed;
@@ -428,19 +436,10 @@ fn worker_loop(
             let requested = job.control.requested.load(Ordering::Acquire);
             if requested != 0 && requested != job.handled {
                 job.handled = requested;
-                run_job(job, requested, &file, &speech, &stopping);
+                run_job(job, requested, &file, &speech, &stopping, InboundRing::open);
                 worked = true;
             }
-            let done = job.one_shot
-                && if job.handled == 0 {
-                    job.control.abandoned.load(Ordering::Acquire)
-                } else {
-                    job.control.requested.load(Ordering::Acquire) == job.handled
-                        && (job.control.completed.load(Ordering::Acquire) == job.handled
-                            || job.control.cancelled.load(Ordering::Acquire) == job.handled)
-                        && !job.control.consumer_outstanding.load(Ordering::Acquire)
-                };
-            if done {
+            if one_shot_done(job) {
                 jobs.swap_remove(index);
             } else {
                 index += 1;
@@ -580,7 +579,7 @@ fn open_file<'a>(
         rate: stream.sample_rate_hz,
     };
     result?;
-    if opened.handle.is_null() || !(8000..=192000).contains(&opened.rate) {
+    if !valid_stream(opened.handle, opened.rate) {
         return Err(MediaError::InvalidOutput);
     }
     Ok(opened)
@@ -613,10 +612,15 @@ fn open_speech<'a>(
         rate: stream.sample_rate_hz,
     };
     result?;
-    if opened.handle.is_null() || !(8000..=192000).contains(&opened.rate) {
+    if !valid_stream(opened.handle, opened.rate) {
         return Err(MediaError::InvalidOutput);
     }
     Ok(opened)
+}
+
+/// Enforce the shared handle and source-rate contract for file and speech streams.
+fn valid_stream(handle: *mut c_void, rate: u32) -> bool {
+    !handle.is_null() && (8000..=192000).contains(&rate)
 }
 
 fn run_job(
@@ -625,6 +629,10 @@ fn run_job(
     file: &Context,
     speech: &Context,
     stopping: &AtomicBool,
+    open_ring: fn(
+        u32,
+        InboundPolicy,
+    ) -> Result<(InboundProducer, InboundConsumer), crate::link::ring::RingError>,
 ) {
     let control = &job.control;
     control.failed.store(0, Ordering::Release);
@@ -676,26 +684,24 @@ fn run_job(
         && !cancellation.control.is_cancelled(stopping, generation)
     {
         if let Some(source) = &job.source.tone {
-            if let Ok(mut renderer) = ToneSequence::new(&source.sequence, source.level_db) {
-                let count = renderer.render(&mut first);
-                if count != 0 {
-                    source_stream = Some((WorkerStream::Tone(renderer), count));
-                }
-            }
+            let mut renderer = ToneSequence::new(&source.sequence, source.level_db)
+                .expect("tone source was validated at registration");
+            let count = renderer.render(&mut first);
+            source_stream = Some((WorkerStream::Tone(renderer), count));
         }
     }
     if source_stream.is_none() && !cancellation.control.is_cancelled(stopping, generation) {
         if let Some(source) = &job.source.morse {
-            if let Ok(mut renderer) = MorseRenderer::new(
+            let mut renderer = MorseRenderer::new(
                 &source.text,
                 source.speed_wpm,
                 source.frequency_hz,
                 source.level_db,
-            ) {
-                let count = renderer.render(&mut first);
-                if count != 0 {
-                    source_stream = Some((WorkerStream::Morse(renderer), count));
-                }
+            )
+            .expect("Morse source was validated at registration");
+            let count = renderer.render(&mut first);
+            if count != 0 {
+                source_stream = Some((WorkerStream::Morse(renderer), count));
             }
         }
     }
@@ -710,8 +716,7 @@ fn run_job(
             *sample *= *gain;
         }
     }
-    let Ok((mut producer, consumer)) = InboundRing::open(stream.rate(), InboundPolicy::Media)
-    else {
+    let Ok((mut producer, consumer)) = open_ring(stream.rate(), InboundPolicy::Media) else {
         fail(control, generation);
         return;
     };
@@ -800,6 +805,18 @@ fn run_job(
     }
 }
 
+fn one_shot_done(job: &WorkerJob) -> bool {
+    job.one_shot
+        && if job.handled == 0 {
+            job.control.abandoned.load(Ordering::Acquire)
+        } else {
+            job.control.requested.load(Ordering::Acquire) == job.handled
+                && (job.control.completed.load(Ordering::Acquire) == job.handled
+                    || job.control.cancelled.load(Ordering::Acquire) == job.handled)
+                && !job.control.consumer_outstanding.load(Ordering::Acquire)
+        }
+}
+
 fn fail(control: &JobControl, generation: u64) {
     control.failed.store(generation, Ordering::Release);
     control.completed.store(generation, Ordering::Release);
@@ -827,313 +844,5 @@ fn push_all(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicUsize;
-
-    static READS: AtomicUsize = AtomicUsize::new(0);
-    static READING: AtomicBool = AtomicBool::new(false);
-    static RELEASE_READ: AtomicBool = AtomicBool::new(false);
-
-    unsafe extern "C" fn open_test_file(
-        _: *const c_void,
-        _: *const std::ffi::c_char,
-        _: *const ffi::rptadv_media_cancellation,
-        output: *mut ffi::rptadv_media_stream,
-    ) -> i32 {
-        unsafe {
-            (*output).handle = 1_usize as *mut c_void;
-            (*output).sample_rate_hz = 48000;
-        }
-        0
-    }
-
-    unsafe extern "C" fn read_test_file(
-        _: *mut c_void,
-        cancellation: *const ffi::rptadv_media_cancellation,
-        output: *mut f32,
-        capacity: usize,
-        count: *mut usize,
-    ) -> i32 {
-        if READS.fetch_add(1, Ordering::AcqRel) == 0 {
-            unsafe {
-                std::slice::from_raw_parts_mut(output, capacity).fill(0.25);
-                *count = capacity;
-            }
-            return 0;
-        }
-        READING.store(true, Ordering::Release);
-        while !RELEASE_READ.load(Ordering::Acquire) {
-            let cancelled = unsafe { &*cancellation };
-            if unsafe {
-                cancelled
-                    .is_cancelled
-                    .is_some_and(|check| check(cancelled.context) != 0)
-            } {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        unsafe { *count = 0 };
-        0
-    }
-
-    unsafe extern "C" fn close_test_stream(_: *mut c_void) {}
-    unsafe extern "C" fn destroy_test_context(_: *mut c_void) {}
-
-    struct ReleaseRead;
-    impl Drop for ReleaseRead {
-        fn drop(&mut self) {
-            RELEASE_READ.store(true, Ordering::Release);
-        }
-    }
-
-    fn context(
-        open_file: Option<
-            unsafe extern "C" fn(
-                *const c_void,
-                *const std::ffi::c_char,
-                *const ffi::rptadv_media_cancellation,
-                *mut ffi::rptadv_media_stream,
-            ) -> i32,
-        >,
-    ) -> Arc<Context> {
-        Arc::new(Context {
-            handle: std::ptr::NonNull::new(1_usize as *mut c_void).unwrap(),
-            destroy: destroy_test_context,
-            read_stream: read_test_file,
-            close_stream: close_test_stream,
-            open_file,
-            open_speech: None,
-        })
-    }
-
-    #[test]
-    fn producer_streams_first_pcm_while_provider_is_still_decoding() {
-        READS.store(0, Ordering::Release);
-        READING.store(false, Ordering::Release);
-        RELEASE_READ.store(false, Ordering::Release);
-        let _release = ReleaseRead;
-        let mut session = StationSession::new(
-            "1000".into(),
-            1,
-            context(Some(open_test_file)),
-            context(None),
-        )
-        .unwrap();
-        let mut reader = session
-            .register(MediaSource {
-                file: Some("memory.wav".into()),
-                ..MediaSource::default()
-            })
-            .unwrap();
-        session.start().unwrap();
-        reader.start();
-
-        let mut output = [0.0; 64];
-        let mut streamed = false;
-        for _ in 0..1000 {
-            if matches!(reader.render(&mut output), PcmRead::Samples(count) if count != 0) {
-                streamed = READING.load(Ordering::Acquire) && (output[0] - 0.25).abs() < 0.003;
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(
-            streamed,
-            "audio must reach the consumer before provider EOF; reads={}, reading={}",
-            READS.load(Ordering::Acquire),
-            READING.load(Ordering::Acquire)
-        );
-        RELEASE_READ.store(true, Ordering::Release);
-        let mut finished = false;
-        for _ in 0..1000 {
-            match reader.render(&mut output) {
-                PcmRead::Samples(_) | PcmRead::FinalSamples(_) | PcmRead::Pending => {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                PcmRead::Finished => {
-                    finished = true;
-                    break;
-                }
-                PcmRead::Failed => panic!("valid streamed media failed"),
-            }
-        }
-        assert!(
-            finished,
-            "stream must finish after source EOF and ring drain"
-        );
-    }
-
-    #[test]
-    fn station_worker_starts_even_without_preconfigured_media() {
-        let mut session = StationSession::new(
-            "1000".into(),
-            1,
-            context(Some(open_test_file)),
-            context(None),
-        )
-        .unwrap();
-
-        session.start().unwrap();
-
-        assert!(session.worker.is_some());
-    }
-
-    #[test]
-    fn startup_source_count_is_not_limited_by_live_status_capacity() {
-        let mut session = StationSession::new(
-            "1000".into(),
-            1,
-            context(Some(open_test_file)),
-            context(None),
-        )
-        .unwrap();
-        let readers = (0..17)
-            .map(|_| {
-                session
-                    .register(MediaSource {
-                        file: Some("memory.wav".into()),
-                        ..MediaSource::default()
-                    })
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(readers.len(), 17);
-    }
-
-    #[test]
-    fn active_producer_streams_tone_and_morse_fallback() {
-        let mut session = StationSession::new(
-            "1000".into(),
-            1,
-            context(Some(open_test_file)),
-            context(None),
-        )
-        .unwrap();
-        session.start().unwrap();
-        let mut reader = session
-            .register_once(MediaSource {
-                tone: Some(rpt_advanced_core::media::ToneSource {
-                    sequence: "500/100".into(),
-                    level_db: -6,
-                }),
-                morse: Some(rpt_advanced_core::media::MorseSource {
-                    text: "E".into(),
-                    speed_wpm: 20,
-                    frequency_hz: 800.0,
-                    level_db: -6,
-                }),
-                ..MediaSource::default()
-            })
-            .expect("runtime telemetry can be submitted to the active producer");
-        reader.start();
-
-        let mut output = [0.0; 64];
-        assert!((4_800..=4_802).contains(&collect_stream(reader.as_mut(), &mut output)));
-        assert!(reader.select_morse_fallback());
-        assert!((2_880..=2_882).contains(&collect_stream(reader.as_mut(), &mut output)));
-    }
-
-    #[test]
-    fn receive_present_before_first_playback_selects_morse_fallback() {
-        let mut session = StationSession::new(
-            "1000".into(),
-            1,
-            context(Some(open_test_file)),
-            context(None),
-        )
-        .unwrap();
-        session.start().unwrap();
-        let mut reader = session
-            .register_once(MediaSource {
-                tone: Some(rpt_advanced_core::media::ToneSource {
-                    sequence: "500/100".into(),
-                    level_db: -6,
-                }),
-                morse: Some(rpt_advanced_core::media::MorseSource {
-                    text: "E".into(),
-                    speed_wpm: 20,
-                    frequency_hz: 800.0,
-                    level_db: -6,
-                }),
-                ..MediaSource::default()
-            })
-            .unwrap();
-
-        assert!(reader.select_morse_fallback());
-        reader.start();
-
-        let mut output = [0.0; 64];
-        assert!((2_880..=2_882).contains(&collect_stream(reader.as_mut(), &mut output)));
-    }
-
-    fn collect_stream(reader: &mut dyn PcmStreamReader, output: &mut [f32]) -> usize {
-        let mut total = 0;
-        for _ in 0..10_000 {
-            match reader.render(output) {
-                PcmRead::Samples(count) | PcmRead::FinalSamples(count) => total += count,
-                PcmRead::Pending => thread::sleep(Duration::from_millis(1)),
-                PcmRead::Finished => return total,
-                PcmRead::Failed => panic!("configured producer source failed"),
-            }
-        }
-        panic!("stream did not finish");
-    }
-
-    #[test]
-    fn reader_fills_requested_output_from_available_ring_samples() {
-        let (mut producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
-        assert_eq!(producer.write(&[0.25; 4096]).unwrap(), 4096);
-        let delay = producer.output_delay_samples().unwrap();
-        let control = Arc::new(JobControl::default());
-        control.requested.store(1, Ordering::Release);
-        control.completed.store(1, Ordering::Release);
-        let (_ready, ready_rx) = RingBuffer::new(1);
-        let (retired, _retired_rx) = RingBuffer::new(1);
-        let mut reader = StreamReader {
-            control,
-            ready: ready_rx,
-            retired,
-            generation: 1,
-            delay_remaining: delay,
-            consumer: Some((1, consumer)),
-            emitted_audio: false,
-            morse_available: false,
-            fallback_morse_pending: false,
-        };
-        let mut output = [0.0; 4];
-
-        assert_eq!(reader.render(&mut output), PcmRead::Samples(4));
-        assert!(
-            output.iter().all(|sample| (*sample - 0.25).abs() < 0.003),
-            "delay={delay}; output={output:?}"
-        );
-    }
-
-    #[test]
-    fn cancel_retires_a_consumer_published_before_callback_acquired_it() {
-        let (_producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
-        let control = Arc::new(JobControl::default());
-        control.requested.store(1, Ordering::Release);
-        let (mut ready, ready_rx) = RingBuffer::new(1);
-        let (retired, mut retired_rx) = RingBuffer::new(1);
-        ready.push((1, 0, consumer)).unwrap();
-        let mut reader = StreamReader {
-            control,
-            ready: ready_rx,
-            retired,
-            generation: 1,
-            delay_remaining: 0,
-            consumer: None,
-            emitted_audio: false,
-            morse_available: false,
-            fallback_morse_pending: false,
-        };
-
-        reader.cancel();
-
-        assert_eq!(retired_rx.pop().unwrap().0, 1);
-    }
-}
+#[path = "worker_tests.rs"]
+mod tests;

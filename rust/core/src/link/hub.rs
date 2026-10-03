@@ -838,3 +838,7 @@ impl LinkManager {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "hub_tests.rs"]
+mod tests;

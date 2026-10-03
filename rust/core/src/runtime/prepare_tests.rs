@@ -140,6 +140,29 @@ fn every_telemetry_source_is_registered_with_the_station_pcm_producer() {
 }
 
 #[test]
+fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
+    let config = ConfigDocument::parse(
+        "[1000]\n\
+         [identifier 1000 empty]\n\
+         [announcement 1000 empty]\n\
+         [courtesy 1000 empty]\ninput=link\n\
+         [courtesy 1000 receiver]\ninput=receiver\nmorse_text=R\n\
+         [courtesy 1000 peer]\ninput=link\nremote_node=2000\nmorse_text=P\n",
+    )
+    .unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    let media = media(false, false);
+
+    controller(&config, &node, &resolved, &media, 7).unwrap();
+
+    let sources = media.sources.lock().unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].morse.as_ref().unwrap().text, "R");
+    assert_eq!(sources[1].morse.as_ref().unwrap().text, "P");
+}
+
+#[test]
 fn status_speech_and_morse_are_registered_as_one_producer_owned_chain() {
     let media = media(false, false);
     streamed_status(

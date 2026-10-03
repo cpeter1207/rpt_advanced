@@ -122,3 +122,67 @@ fn stream_can_be_retired_by_its_non_audio_owner() {
     assert!(playback.take_stream().is_some());
     assert!(playback.is_finished());
 }
+
+#[test]
+fn receive_without_a_fallback_stops_and_restart_keeps_that_policy() {
+    let mut playback = Playback::new_stream(Box::new(Stream(VecDeque::new())));
+    let mut output = [0.0; 4];
+
+    assert_eq!(playback.render(true, &mut output), 0);
+    assert!(playback.is_finished());
+    assert_eq!(playback.render(false, &mut output), 0);
+
+    playback.restart(true);
+    assert!(playback.is_finished());
+    assert_eq!(playback.render(false, &mut output), 0);
+}
+
+#[test]
+fn restart_without_receive_starts_a_new_stream_pass() {
+    let stream = Stream(VecDeque::from([Some(vec![0.5]), Some(vec![0.75])]));
+    let mut playback = Playback::new_stream(Box::new(stream));
+    let mut output = [0.0; 1];
+
+    assert_eq!(playback.render(false, &mut output), 1);
+    assert_eq!(output, [0.5]);
+    playback.restart(false);
+    assert_eq!(playback.render(false, &mut output), 1);
+    assert_eq!(output, [0.75]);
+}
+
+#[test]
+fn removed_stream_stays_silent_after_restart_and_receive_interruption() {
+    let mut playback = Playback::new_stream(Box::new(Stream(VecDeque::new())));
+    assert!(playback.take_stream().is_some());
+    playback.restart(false);
+    let mut output = [0.0; 2];
+    assert_eq!(playback.render(true, &mut output), 0);
+    assert!(playback.is_finished());
+}
+
+#[test]
+fn audio_source_trait_delegates_to_stream_playback() {
+    let mut playback = Playback::new_stream(Box::new(Stream(VecDeque::from([Some(vec![0.25])]))));
+    let mut output = [0.0; 1];
+    assert_eq!(
+        crate::audio::AudioSource::render(&mut playback, &mut output),
+        1
+    );
+    assert_eq!(output, [0.25]);
+}
+
+#[test]
+fn absent_stream_is_started_as_finished_without_a_cancel_callback() {
+    let mut playback = Playback {
+        stream: None,
+        stream_started: false,
+        stream_fallback: false,
+        waiting_for_stream: false,
+        finished: false,
+    };
+    let mut output = [1.0; 2];
+
+    assert_eq!(playback.render(false, &mut output), 0);
+    assert!(playback.is_finished());
+    assert_eq!(output, [1.0; 2]);
+}

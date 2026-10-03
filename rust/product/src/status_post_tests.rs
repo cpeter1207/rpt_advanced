@@ -159,6 +159,24 @@ fn state_changes_coalesce_for_200_ms_and_keyed_refreshes_every_30_seconds() {
 }
 
 #[test]
+fn unkeyed_status_refresh_uses_the_configured_interval() {
+    let mut schedule = super::Schedule::with_sequence(2, 0);
+    let initial = schedule.snapshot("1000", 0, 1, false, Vec::new()).unwrap();
+    schedule.sent(0, &initial);
+
+    assert!(
+        schedule
+            .snapshot("1000", 1_999, 2, false, Vec::new())
+            .is_none()
+    );
+    assert!(
+        schedule
+            .snapshot("1000", 2_000, 3, false, Vec::new())
+            .is_some()
+    );
+}
+
+#[test]
 fn worker_posts_to_a_local_http_endpoint() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -220,6 +238,160 @@ fn submit_drops_when_mailbox_is_busy_instead_of_blocking_the_pump() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     assert!(!worker.submit(1, &StatusSnapshot::new("1000", 123, 1, false, Vec::new()),));
+}
+
+#[test]
+fn submit_recovers_a_poisoned_mailbox_without_losing_current_generation() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let worker = super::StatusPostWorker {
+        mailbox: Arc::new((Mutex::new(super::Mailbox::default()), Condvar::new())),
+        thread: None,
+    };
+    worker.replace(
+        1,
+        vec![super::PostConfig {
+            node: "1000".into(),
+            url: "http://127.0.0.1:1/status".into(),
+            interval_seconds: 60,
+        }],
+    );
+    let mailbox = worker.mailbox.clone();
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = mailbox.0.lock().unwrap();
+            panic!("poison the isolated test mailbox");
+        })
+        .join()
+        .is_err()
+    );
+
+    assert!(worker.submit(1, &StatusSnapshot::new("1000", 123, 1, false, Vec::new())));
+}
+
+#[test]
+fn status_service_stop_without_a_worker_is_a_noop() {
+    super::StatusPostService::default().request_stop();
+}
+
+#[test]
+fn status_service_stops_a_live_worker() {
+    let mut service = super::StatusPostService::default();
+    service.configure(vec![super::PostConfig {
+        node: "1000".into(),
+        url: "http://127.0.0.1:1/status".into(),
+        interval_seconds: 60,
+    }]);
+    let worker = service.worker.as_ref().unwrap();
+
+    service.request_stop();
+
+    assert!(
+        worker
+            .mailbox
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .stopping
+    );
+}
+
+#[test]
+fn service_does_not_advance_a_snapshot_when_worker_creation_is_unavailable() {
+    let mut service = super::StatusPostService {
+        worker_creation_unavailable: true,
+        ..super::StatusPostService::default()
+    };
+    service.configure(vec![super::PostConfig {
+        node: "1000".into(),
+        url: "http://127.0.0.1:1/status".into(),
+        interval_seconds: 60,
+    }]);
+
+    service.observe("1000", 0, 10, false, Vec::new());
+
+    assert!(service.worker.is_none());
+    assert!(!service.sequences.contains_key("1000"));
+}
+
+#[test]
+fn post_loop_discards_a_snapshot_without_a_current_destination() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let state = super::Mailbox {
+        pending: [(
+            "1000".into(),
+            (1, StatusSnapshot::new("1000", 123, 1, false, Vec::new())),
+        )]
+        .into_iter()
+        .collect(),
+        ..super::Mailbox::default()
+    };
+    let mailbox = Arc::new((Mutex::new(state), Condvar::new()));
+    let worker_mailbox = Arc::clone(&mailbox);
+    let thread = std::thread::spawn(move || super::post_loop(worker_mailbox));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        if mailbox
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending
+            .is_empty()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not take pending post"
+        );
+        std::thread::yield_now();
+    }
+    {
+        let mut state = mailbox.0.lock().unwrap_or_else(|error| error.into_inner());
+        state.stopping = true;
+        mailbox.1.notify_one();
+    }
+    thread.join().unwrap();
+}
+
+#[test]
+fn endpoint_lookup_requires_the_current_destination_generation_and_live_worker() {
+    let mut state = super::Mailbox::default();
+    state.destinations.insert(
+        "1000".into(),
+        super::Destination {
+            generation: 2,
+            url: "http://127.0.0.1/status".into(),
+        },
+    );
+
+    assert_eq!(super::current_endpoint(&state, "1000", 1), None);
+    assert_eq!(
+        super::current_endpoint(&state, "1000", 2).as_deref(),
+        Some("http://127.0.0.1/status")
+    );
+    state.stopping = true;
+    assert_eq!(super::current_endpoint(&state, "1000", 2), None);
+    assert_eq!(super::current_endpoint(&state, "2000", 2), None);
+}
+
+#[test]
+fn idle_post_worker_waits_and_skips_malformed_endpoints() {
+    let worker = super::StatusPostWorker::new().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    worker.replace(
+        1,
+        vec![super::PostConfig {
+            node: "1000".into(),
+            url: "not a URL".into(),
+            interval_seconds: 60,
+        }],
+    );
+    assert!(worker.submit(1, &StatusSnapshot::new("1000", 123, 1, false, Vec::new())));
+    std::thread::sleep(Duration::from_millis(20));
+    drop(worker);
 }
 
 #[test]

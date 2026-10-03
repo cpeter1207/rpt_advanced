@@ -51,3 +51,7 @@ pub trait PcmStreamReader: Send {
     /// Request producer cancellation without waiting; the worker owns cleanup.
     fn cancel(&mut self) {}
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

@@ -263,6 +263,110 @@ fn selected_group_audio_reaches_rf_but_not_a_standby_peer() {
 }
 
 #[test]
+fn peer_transmit_is_subtracted_from_its_own_outbound_audio() {
+    use crate::link::LinkAudio;
+
+    let (outbound, mut peer_out) = crate::audio::LinkAudioQueue::new(4)
+        .unwrap()
+        .into_endpoints();
+    let peer = crate::link::AudioPeer::new(
+        "200",
+        crate::link::Mode::TRANSCEIVE,
+        TestPeerInput::new(Some(0.25)),
+        outbound,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    dispatcher.dispatch(1);
+    let mut outbound = [1.0; 1];
+    assert_eq!(peer_out.read(&mut outbound), 1);
+    assert_eq!(outbound, [0.0]);
+    let mut rf = [0.5];
+    links.process(&mut node, true, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+
+    assert!((rf[0] - 0.75).abs() < 0.001);
+    outbound.fill(0.0);
+    assert_eq!(peer_out.read(&mut outbound), 0);
+    assert_eq!(outbound, [0.5]);
+}
+
+#[test]
+fn monitor_destinations_are_prepared_only_when_they_belong_to_a_group() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let grouped_enabled = Arc::new(AtomicBool::new(false));
+    let mut grouped_input = TestPeerInput::new(Some(0.25));
+    grouped_input.enabled = Some(Arc::clone(&grouped_enabled));
+    let (grouped_outbound, _) = crate::audio::LinkAudioQueue::new(2)
+        .unwrap()
+        .into_endpoints();
+    let grouped_monitor = crate::link::AudioPeer::new(
+        "200",
+        crate::link::Mode::LOCAL_MONITOR,
+        grouped_input,
+        grouped_outbound,
+        1,
+        0,
+    )
+    .unwrap()
+    .with_group(selection.clone(), NonZeroUsize::new(1).unwrap());
+    let plain_enabled = Arc::new(AtomicBool::new(false));
+    let mut plain_input = TestPeerInput::new(Some(0.5));
+    plain_input.enabled = Some(plain_enabled);
+    let (plain_outbound, _) = crate::audio::LinkAudioQueue::new(2)
+        .unwrap()
+        .into_endpoints();
+    let plain_monitor = crate::link::AudioPeer::new(
+        "201",
+        crate::link::Mode::MONITOR,
+        plain_input,
+        plain_outbound,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, mut dispatcher) =
+        LinkAudio::new(vec![grouped_monitor, plain_monitor], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    assert_eq!(dispatcher.dispatch(1), 1);
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    grouped_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, true, &mut [0.1]).unwrap();
+
+    assert_eq!(links.active_count(), 1);
+    assert_eq!(dispatcher.dispatch(1), 1);
+}
+
+#[test]
 fn group_winner_change_waits_for_all_inputs_to_be_idle() {
     use crate::link::LinkAudio;
     use std::{
@@ -1172,6 +1276,24 @@ fn tone_configuration_does_not_allocate_duration_sized_pcm() {
     let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(tone.rendered_samples(), 2_880_000);
     assert_eq!(calls, Some(3));
+}
+
+#[test]
+fn half_duplex_link_audio_during_local_receive_does_not_advance_transmit_hang() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio(false, false, &[], &mut [0.0]);
+    node.process_audio(false, true, &[], &mut [0.0]);
+    assert_eq!(node.last_audio, 1);
+
+    node.process_audio(true, true, &[], &mut [0.0]);
+
+    assert_eq!(node.last_audio, 1);
 }
 
 #[test]

@@ -1,4 +1,13 @@
 use super::*;
+use std::sync::OnceLock;
+
+type PushCallback = unsafe extern "C" fn(*mut ffi::rpcr3_ring, *const f32, u64, *mut u64) -> i32;
+static PUSH_CALLBACK: OnceLock<PushCallback> = OnceLock::new();
+thread_local! {
+    static PUSH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PUSH_SCRIPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PUSH_CANCEL: std::cell::Cell<Option<(*const std::sync::atomic::AtomicU64, u64, usize)>> = const { std::cell::Cell::new(None) };
+}
 
 #[test]
 fn peer_preparation_reserves_one_maximum_callback_and_producer_write() {
@@ -112,11 +121,101 @@ unsafe extern "C" fn failed_render(
 ) -> i32 {
     -1
 }
+unsafe extern "C" fn failed_render_sample(
+    _: *mut ffi::rpcr3_ring,
+    _: *mut f32,
+    _: *mut bool,
+) -> i32 {
+    -1
+}
+
+static SAMPLE_THEN_FAIL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+unsafe extern "C" fn sample_then_fail_render(
+    _: *mut ffi::rpcr3_ring,
+    sample: *mut f32,
+    real: *mut bool,
+) -> i32 {
+    if SAMPLE_THEN_FAIL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+        unsafe {
+            *sample = 0.25;
+            *real = true;
+        }
+        0
+    } else {
+        -1
+    }
+}
 unsafe extern "C" fn failed_observe(
     _: *const ffi::rpcr3_ring,
     _: *mut ffi::rpcr3_observation,
 ) -> i32 {
     -1
+}
+unsafe extern "C" fn failed_output_delay(_: *const ffi::rpcr3_ring, _: *mut u64) -> i32 {
+    -1
+}
+unsafe extern "C" fn scripted_push(
+    ring: *mut ffi::rpcr3_ring,
+    samples: *const f32,
+    count: u64,
+    accepted: *mut u64,
+) -> i32 {
+    let call = PUSH_CALLS.with(|calls| {
+        let call = calls.get();
+        calls.set(call + 1);
+        call
+    });
+    let mode = PUSH_SCRIPT.with(std::cell::Cell::get);
+    let code = match (mode, call) {
+        (1, 0) => {
+            unsafe { *accepted = 0 };
+            0
+        }
+        (2, 0) => unsafe { PUSH_CALLBACK.get().unwrap()(ring, samples, count / 2, accepted) },
+        (3, 1) => -1,
+        (5, 1) => unsafe { PUSH_CALLBACK.get().unwrap()(ring, samples, count / 2, accepted) },
+        _ => unsafe { PUSH_CALLBACK.get().unwrap()(ring, samples, count, accepted) },
+    };
+    PUSH_CANCEL.with(|cancel| {
+        if let Some((target, generation, target_call)) = cancel.get() {
+            if target_call == call {
+                // SAFETY: the test installs this pointer for a synchronous run_job call and clears it here.
+                unsafe { (*target).store(generation, std::sync::atomic::Ordering::Release) };
+                cancel.set(None);
+            }
+        }
+    });
+    code
+}
+
+pub(crate) fn cancel_on_push_open(
+    _: u32,
+    _: InboundPolicy,
+) -> Result<(InboundProducer, InboundConsumer), RingError> {
+    scripted_cancel_on_push_endpoints()
+}
+
+pub(crate) fn set_cancel_on_push(
+    cancelled: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    call: usize,
+    partial: bool,
+) {
+    let mode = if partial { 5 } else { 4 };
+    PUSH_CALLS.with(|calls| calls.set(0));
+    PUSH_SCRIPT.with(|script| script.set(mode));
+    PUSH_CANCEL.with(|cancel| cancel.set(Some((cancelled, generation, call))));
+}
+
+fn scripted_cancel_on_push_endpoints() -> Result<(InboundProducer, InboundConsumer), RingError> {
+    // SAFETY: install a copied immutable descriptor; the thread-local cancellation target remains
+    // valid for the synchronous producer callback in the owning worker test.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        let _ = PUSH_CALLBACK.set(api.ring_producer_push.unwrap());
+        api.ring_producer_push = Some(scripted_push);
+        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api)))
+    }
 }
 
 #[test]
@@ -194,6 +293,62 @@ pub(crate) fn failed_endpoints() -> (InboundProducer, InboundConsumer) {
     }
 }
 
+pub(crate) fn failed_output_delay_endpoints() -> (InboundProducer, InboundConsumer) {
+    // SAFETY: retain a copied descriptor and its real allocation lifecycle for this test.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_output_delay = Some(failed_output_delay);
+        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api))).unwrap()
+    }
+}
+
+fn scripted_push_endpoints(mode: usize) -> (InboundProducer, InboundConsumer) {
+    // SAFETY: copy the process-lifetime provider table and delegate successful writes to it.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        let _ = PUSH_CALLBACK.set(api.ring_producer_push.unwrap());
+        PUSH_CALLS.with(|calls| calls.set(0));
+        PUSH_SCRIPT.with(|script| script.set(mode));
+        api.ring_producer_push = Some(scripted_push);
+        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api))).unwrap()
+    }
+}
+
+pub(crate) fn zero_then_push_endpoints() -> (InboundProducer, InboundConsumer) {
+    scripted_push_endpoints(1)
+}
+
+pub(crate) fn partial_then_push_endpoints() -> (InboundProducer, InboundConsumer) {
+    scripted_push_endpoints(2)
+}
+
+pub(crate) fn fail_after_initial_push_endpoints() -> (InboundProducer, InboundConsumer) {
+    scripted_push_endpoints(3)
+}
+
+pub(crate) fn sample_then_fail_consumer() -> InboundConsumer {
+    // SAFETY: retain the descriptor and use its real allocation lifecycle around the test callback.
+    unsafe {
+        SAMPLE_THEN_FAIL.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_consumer_render_sample = Some(sample_then_fail_render);
+        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api)))
+            .unwrap()
+            .1
+    }
+}
+
+pub(crate) fn failed_sample_consumer() -> InboundConsumer {
+    // SAFETY: retain a copied released descriptor and its real create/destroy pair.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_consumer_render_sample = Some(failed_render_sample);
+        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api)))
+            .unwrap()
+            .1
+    }
+}
+
 #[test]
 fn released_ring_endpoints_publish_render_and_report_their_generation() {
     let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Peer).unwrap();
@@ -209,4 +364,17 @@ fn released_ring_endpoints_publish_render_and_report_their_generation() {
     assert_eq!(producer.write(&[0.25; 160]), Ok(160));
     let mut output = [0.0; 960];
     assert!(consumer.render(&mut output).is_ok());
+}
+
+#[test]
+fn sample_render_reports_shared_ring_failure() {
+    // SAFETY: the copied descriptor and its callback remain alive through the endpoint drop.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_consumer_render_sample = Some(failed_render_sample);
+        let (_, mut consumer) =
+            InboundRing::from_descriptor(48000, InboundPolicy::Peer, Box::leak(Box::new(api)))
+                .unwrap();
+        assert!(consumer.render_sample().is_err());
+    }
 }

@@ -98,6 +98,23 @@ struct GroupAnnouncement {
     members: Vec<String>,
     available: bool,
 }
+
+fn same_group_configuration(
+    previous: Option<&GroupAnnouncement>,
+    group: &crate::runtime::links::PriorityGroupStatus,
+) -> bool {
+    previous
+        .is_some_and(|previous| previous.name == group.name && previous.members == group.members)
+}
+
+fn announce_unavailable_group(
+    group_unavailable: bool,
+    same_configuration: bool,
+    previously_available: bool,
+) -> bool {
+    group_unavailable && (!same_configuration || previously_available)
+}
+
 impl<C: Send> ControlState<C> {
     fn activity_ms(&self) -> Option<u64> {
         self.activity
@@ -748,11 +765,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 if let Some(warning) = warning.filter(|warning| clock.now_ms < warning.deadline_ms)
                 {
                     let seconds = warning.remaining_ms.div_ceil(1000);
-                    let forms = if warning.message_id == "scheduled-link-change" {
-                        node.control.catalog.format_schedule_warning(seconds)
-                    } else {
-                        Err(crate::messages::CatalogError::InvalidEnglish)
-                    };
+                    let forms = node.control.catalog.format_schedule_warning(seconds);
                     let queued = forms
                         .map_err(|_| RuntimeError::Preparation)
                         .and_then(|forms| {
@@ -1036,9 +1049,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .group_announcements
                     .iter()
                     .find(|previous| previous.label == group.label);
-                let same_configuration = previous.is_some_and(|previous| {
-                    previous.name == group.name && previous.members == group.members
-                });
+                let same_configuration = same_group_configuration(previous, &group);
                 let previously_available =
                     same_configuration && previous.is_some_and(|previous| previous.available);
                 let message = if group.selected.is_some() && !same_configuration {
@@ -1046,7 +1057,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
                         group: &group.name,
                         peer: group.selected.as_deref().expect("selected group member"),
                     })
-                } else if group.unavailable && (!same_configuration || previously_available) {
+                } else if announce_unavailable_group(
+                    group.unavailable,
+                    same_configuration,
+                    previously_available,
+                ) {
                     Some(Message::PriorityGroupUnavailable { group: &group.name })
                 } else {
                     None
@@ -1395,3 +1410,45 @@ fn prepare_links(
 #[cfg(test)]
 #[path = "aggregate_link_tests.rs"]
 mod link_tests;
+
+#[cfg(test)]
+mod group_announcement_tests {
+    use super::*;
+
+    fn group(
+        name: &str,
+        members: &[&str],
+        unavailable: bool,
+    ) -> crate::runtime::links::PriorityGroupStatus {
+        crate::runtime::links::PriorityGroupStatus {
+            label: "network".into(),
+            name: name.into(),
+            members: members.iter().map(|member| (*member).into()).collect(),
+            selected: None,
+            unavailable,
+        }
+    }
+
+    #[test]
+    fn group_change_and_outage_rules_cover_first_changed_recovered_and_repeated_states() {
+        let current = group("Blind Hams", &["2000", "3000"], true);
+        assert!(!same_group_configuration(None, &current));
+        let previous = GroupAnnouncement {
+            label: "network".into(),
+            name: "Blind Hams".into(),
+            members: vec!["2000".into(), "3000".into()],
+            available: false,
+        };
+        assert!(same_group_configuration(Some(&previous), &current));
+
+        let renamed = group("Old Network", &["2000", "3000"], true);
+        assert!(!same_group_configuration(Some(&previous), &renamed));
+        let changed_members = group("Blind Hams", &["2000", "4000"], true);
+        assert!(!same_group_configuration(Some(&previous), &changed_members));
+
+        assert!(announce_unavailable_group(true, false, false));
+        assert!(announce_unavailable_group(true, true, true));
+        assert!(!announce_unavailable_group(true, true, false));
+        assert!(!announce_unavailable_group(false, false, false));
+    }
+}

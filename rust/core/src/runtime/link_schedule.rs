@@ -491,25 +491,23 @@ fn next_warning(
             window.start_occurrence = Some(occurrence);
             window.start_warned.clear();
         }
-        if remaining_ms > 0 {
-            if let Some(lead) = window
-                .spec
-                .warning_before_start_ms
-                .iter()
-                .find(|lead| **lead >= remaining_ms && !window.start_warned.contains(lead))
-                .copied()
-            {
-                if active {
-                    window.start_warned.push(lead);
-                    return None;
-                }
+        if let Some(lead) = window
+            .spec
+            .warning_before_start_ms
+            .iter()
+            .find(|lead| **lead >= remaining_ms && !window.start_warned.contains(lead))
+            .copied()
+        {
+            if active {
                 window.start_warned.push(lead);
-                return Some(ScheduleWarning {
-                    message_id: message_id.to_owned(),
-                    remaining_ms,
-                    deadline_ms: now_ms.saturating_add(remaining_ms),
-                });
+                return None;
             }
+            window.start_warned.push(lead);
+            return Some(ScheduleWarning {
+                message_id: message_id.to_owned(),
+                remaining_ms,
+                deadline_ms: now_ms.saturating_add(remaining_ms),
+            });
         }
     }
     if window.spec.warning_before_end_ms.is_empty() {

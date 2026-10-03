@@ -267,6 +267,14 @@ fn window_warning_boundaries_respect_weekdays_dates_and_midnight_end() {
         Some(60_000)
     );
 }
+
+#[test]
+fn scheduled_window_rejects_seconds_outside_a_civil_minute() {
+    let window = ScheduledWindow::parse(Some("Monday-Friday"), None, "12:00", "13:00").unwrap();
+    let local = CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 58).unwrap();
+    assert_eq!(window.next_start(&local, 60), None);
+    assert_eq!(window.next_end(&local, 60), None);
+}
 #[test]
 fn civil_validation_and_occurrence_comparison_check_each_calendar_component() {
     assert!(CivilTime::new(2026, 9, 15, Weekday::Tuesday, 24, 0).is_err());

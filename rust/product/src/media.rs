@@ -322,9 +322,7 @@ unsafe fn native_with_descriptor(
     // supply only the zero context required by the provider's intrinsic delay.
     // Trim that prefix and retain exactly ceil(source_frames * 48000 / source_rate).
     let count = source.len() as u64;
-    if count > u64::from(u32::MAX) {
-        return Err(MediaError::InvalidOutput);
-    }
+    validate_source_count(count)?;
     let output_count = (source.len() as u64)
         .checked_mul(48000)
         .ok_or(MediaError::InvalidOutput)?
@@ -449,6 +447,14 @@ unsafe fn native_with_descriptor(
         }
     }
     Err(MediaError::InvalidOutput)
+}
+
+fn validate_source_count(count: u64) -> Result<(), MediaError> {
+    if count <= u64::from(u32::MAX) {
+        Ok(())
+    } else {
+        Err(MediaError::InvalidOutput)
+    }
 }
 
 #[cfg(test)]

@@ -61,6 +61,15 @@ fn poll_child(
     }
 }
 
+fn read_retry_interrupted<T>(mut read: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    loop {
+        match read() {
+            Err(error) if retry_interrupted(&error) => continue,
+            result => return result,
+        }
+    }
+}
+
 struct ReaperGuard(Option<crate::ChildReaper>);
 impl Drop for ReaperGuard {
     fn drop(&mut self) {
@@ -125,9 +134,12 @@ impl ChildStream {
         let stdout = stream.stdout.as_ref().ok_or(MediaError::Io)?;
         set_nonblocking(stdout).map_err(io_error)?;
         if let Some(input) = input {
-            let Some(mut stdin) = stream.child.0.stdin.take() else {
-                return Err(MediaError::Io);
-            };
+            let mut stdin = stream
+                .child
+                .0
+                .stdin
+                .take()
+                .expect("stdin is piped whenever input is provided");
             stdin.write_all(input).map_err(io_error)?;
         }
         Ok(stream)
@@ -141,10 +153,10 @@ impl ChildStream {
     ) -> Result<usize, MediaError> {
         loop {
             self.check_cancel_and_timeout(cancelled)?;
-            match self.stdout.as_mut().ok_or(MediaError::Io)?.read(output) {
+            let stdout = self.stdout.as_mut().ok_or(MediaError::Io)?;
+            match read_retry_interrupted(|| stdout.read(output)) {
                 Ok(0) => return self.finish(cancelled),
                 Ok(count) => return Ok(count),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     let _ = self.try_wait()?;
                     std::thread::sleep(Duration::from_millis(2));
@@ -191,6 +203,10 @@ impl ChildStream {
     }
 }
 
+fn retry_interrupted(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Interrupted
+}
+
 impl Drop for ChildStream {
     fn drop(&mut self) {
         // Close the pipe first so a child blocked writing can be killed and reaped.
@@ -202,15 +218,24 @@ fn set_nonblocking(stdout: &ChildStdout) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        // SAFETY: fcntl only observes and updates flags on the owned pipe descriptor.
-        let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
-        if flags == -1
+        set_nonblocking_fd(stdout.as_raw_fd())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = stdout;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn set_nonblocking_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+    // SAFETY: fcntl only observes and updates flags on the owned pipe descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1
             // SAFETY: the descriptor remains owned by stdout during this call.
-            || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
-                == -1
-        {
-            return Err(io::Error::last_os_error());
-        }
+            || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -390,9 +415,6 @@ impl PcmStream {
                 .remaining_bytes
                 .map(|remaining| remaining.min(capacity as u64) as usize)
                 .unwrap_or(capacity);
-            if limit == 0 {
-                return self.fail_or_return(written, MediaError::InvalidOutput);
-            }
             let count = match self.child.read(
                 &mut self.input[self.carry_len..self.carry_len + limit],
                 cancelled,

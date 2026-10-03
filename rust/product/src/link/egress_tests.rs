@@ -1,6 +1,8 @@
 use super::*;
 use std::cell::Cell;
 thread_local! { static MODE: Cell<u8> = const { Cell::new(0) }; }
+static DESTROYED_FAILED_CONVERTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[test]
 fn old_unbounded_samplerate_descriptor_is_rejected() {
@@ -51,6 +53,20 @@ unsafe extern "C" fn empty_create(
     _: *mut *mut ffi::rptadv_samplerate_converter,
 ) -> i32 {
     0
+}
+unsafe extern "C" fn failed_create_with_converter(
+    _: u32,
+    _: u32,
+    _: u32,
+    _: u32,
+    converter: *mut *mut ffi::rptadv_samplerate_converter,
+) -> i32 {
+    unsafe { *converter = 1_usize as *mut ffi::rptadv_samplerate_converter };
+    -1
+}
+unsafe extern "C" fn destroy_failed_converter(converter: *mut ffi::rptadv_samplerate_converter) {
+    assert_eq!(converter as usize, 1);
+    DESTROYED_FAILED_CONVERTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 unsafe extern "C" fn process(
     _: *mut ffi::rptadv_samplerate_converter,
@@ -118,4 +134,20 @@ fn native_rate_is_copied_without_conversion_and_oversize_input_is_rejected() {
     let mut converter = Egress::new(48000, 4).unwrap();
     assert_eq!(converter.process(&[0.25, -0.25]).unwrap(), &[0.25, -0.25]);
     assert!(converter.process(&[0.0; 5]).is_err());
+}
+
+#[test]
+fn failed_creation_releases_a_converter_returned_alongside_an_error() {
+    // SAFETY: descriptor callback storage remains live until validation returns.
+    unsafe {
+        let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
+        api.create = Some(failed_create_with_converter);
+        api.destroy = Some(destroy_failed_converter);
+        let before = DESTROYED_FAILED_CONVERTER.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(Egress::from_descriptor(8000, 16, Box::leak(Box::new(api))).is_err());
+        assert_eq!(
+            DESTROYED_FAILED_CONVERTER.load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+    }
 }

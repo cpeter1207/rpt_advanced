@@ -400,6 +400,26 @@ fn meter_snapshots_follow_elapsed_samples_and_round_to_callback_end() {
 }
 
 #[test]
+fn meter_ignores_empty_calls_sanitizes_nonfinite_samples_and_saturates_deadlines() {
+    let mut meter = MeterWindow::new(1, 0);
+    meter.next_snapshot_sample = 2;
+    assert!(meter.observe(&[]).is_none());
+    assert!(meter.observe(&[f32::NAN]).is_none());
+    let snapshot = meter.observe(&[1.0]).unwrap();
+    assert_eq!(snapshot.samples, 2);
+    assert_eq!(snapshot.peak, 1.0);
+    assert_eq!(snapshot.clipped_samples, 1);
+    assert!((snapshot.rms - 0.5_f32.sqrt()).abs() < 0.0001);
+
+    let mut saturated = MeterWindow::new(1, u64::MAX);
+    saturated.elapsed_samples = u64::MAX - 1;
+    saturated.next_snapshot_sample = u64::MAX;
+    saturated.samples = u64::MAX - 1;
+    assert!(saturated.observe(&[0.0]).is_some());
+    assert_eq!(saturated.next_snapshot_sample, u64::MAX);
+}
+
+#[test]
 fn callback_meter_snapshots_are_bounded_and_control_keeps_latest() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

@@ -22,3 +22,6 @@ pub mod time;
 
 #[cfg(test)]
 mod messages_tests;
+
+#[cfg(test)]
+mod time_tests;

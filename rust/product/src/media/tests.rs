@@ -13,6 +13,15 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[test]
+fn finite_source_count_preserves_the_shared_ring_api_limit() {
+    assert_eq!(super::validate_source_count(u64::from(u32::MAX)), Ok(()));
+    assert_eq!(
+        super::validate_source_count(u64::from(u32::MAX) + 1),
+        Err(MediaError::InvalidOutput)
+    );
+}
+
 impl NativeMediaPreparer {
     fn new(ffmpeg: &Path, piper: &Path, timeout_ms: u32) -> Result<Self, MediaError> {
         // SAFETY: the linked descriptor has a process-lifetime readable ABI prefix.
@@ -206,6 +215,7 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
 
 thread_local! {
     static RING_FAILURE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static PUSH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CANCEL_DURING_RENDER: std::cell::Cell<*const Cancellation> = const { std::cell::Cell::new(ptr::null()) };
 }
 unsafe extern "C" fn ring_create(_: *const ffi::rpcr3_config, _: *mut *mut ffi::rpcr3_ring) -> i32 {
@@ -221,6 +231,31 @@ unsafe extern "C" fn ring_render(_: *mut ffi::rpcr3_ring, _: *mut f32, _: *mut b
         unsafe { &*token }.cancel();
     }
     if RING_FAILURE.get() == 0 { -1 } else { 0 }
+}
+unsafe extern "C" fn failed_output_delay(_: *const ffi::rpcr3_ring, _: *mut u64) -> i32 {
+    -1
+}
+unsafe extern "C" fn fail_padding_push(
+    _: *mut ffi::rpcr3_ring,
+    _: *const f32,
+    frames: u64,
+    accepted: *mut u64,
+) -> i32 {
+    let call = PUSH_CALLS.get();
+    PUSH_CALLS.set(call + 1);
+    unsafe { *accepted = frames };
+    if call == 0 { 0 } else { -1 }
+}
+unsafe extern "C" fn overaccept_padding_push(
+    _: *mut ffi::rpcr3_ring,
+    _: *const f32,
+    frames: u64,
+    accepted: *mut u64,
+) -> i32 {
+    let call = PUSH_CALLS.get();
+    PUSH_CALLS.set(call + 1);
+    unsafe { *accepted = if call == 0 { frames } else { frames + 1 } };
+    0
 }
 
 #[test]
@@ -286,6 +321,31 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
         )),
         Err(MediaError::Io)
     );
+}
+
+#[test]
+fn finite_conversion_rejects_delay_and_context_refill_failures() {
+    let token = Cancellation::default();
+    let convert = |api| unsafe { native_with_descriptor(48000, &[0.5], &token, api) };
+    let original = unsafe { *ffi::rpcr3_descriptor() };
+
+    let mut api = original;
+    api.ring_output_delay = Some(failed_output_delay);
+    assert_eq!(
+        convert(Box::leak(Box::new(api))),
+        Err(MediaError::InvalidOutput)
+    );
+
+    for callback in [fail_padding_push as _, overaccept_padding_push as _] {
+        PUSH_CALLS.set(0);
+        let mut api = original;
+        api.ring_producer_push = Some(callback);
+        assert_eq!(
+            convert(Box::leak(Box::new(api))),
+            Err(MediaError::InvalidOutput)
+        );
+        assert!(PUSH_CALLS.get() >= 2);
+    }
 }
 
 #[test]

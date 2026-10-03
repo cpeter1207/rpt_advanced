@@ -178,6 +178,58 @@ fn schedule_warning_waits_for_bounded_status_queue_capacity() {
 }
 
 #[test]
+fn end_warning_can_target_a_future_window_with_and_without_inactivity() {
+    let mut before_window = warning_scheduler(&[], &[u64::MAX]);
+    assert!(tick_warnings(&mut before_window, civil(10, 0), 0, 0, |_| None, |_| false,).is_some());
+
+    let mut immediate = warning_scheduler(&[], &[60_000]);
+    immediate.windows[0].spec.end_inactivity_ms = 0;
+    assert!(tick_warnings(&mut immediate, civil(12, 59), 0, 1_000, |_| None, |_| false,).is_some());
+}
+
+#[test]
+fn due_warning_is_selected_once_across_multiple_windows() {
+    let old = warning_scheduler(&[60_000], &[]);
+    let mut windows = old.window_specs();
+    windows.push(windows[0].clone());
+    let mut schedule =
+        LinkScheduler::new(2, old.route_specs(), windows, None).expect("two valid windows");
+
+    assert!(tick_warnings(&mut schedule, civil(11, 59), 0, 1_000, |_| None, |_| false,).is_some());
+}
+
+#[test]
+fn reload_matching_checks_replacement_route_identity_and_members() {
+    let old = warning_scheduler(&[120_000], &[60_000]);
+    let add_primary = |routes: &mut Vec<RouteSpec>| {
+        routes.push(RouteSpec {
+            local: "524950".into(),
+            remote: "4000".into(),
+            permanent: true,
+            group_label: None,
+            group_name: None,
+            group_priority: None,
+        });
+    };
+
+    let mut routes = old.route_specs();
+    routes[1].remote = "4000".into();
+    assert!(LinkScheduler::new(2, routes, old.window_specs(), Some(&old)).is_ok());
+
+    let mut routes = old.route_specs();
+    add_primary(&mut routes);
+    let mut windows = old.window_specs();
+    windows[0].replaced.push(2);
+    assert!(LinkScheduler::new(2, routes, windows, Some(&old)).is_ok());
+
+    let mut routes = old.route_specs();
+    add_primary(&mut routes);
+    let mut windows = old.window_specs();
+    windows[0].replaced[0] = 2;
+    assert!(LinkScheduler::new(2, routes, windows, Some(&old)).is_ok());
+}
+
+#[test]
 fn quiet_window_exit_and_cold_start_after_grace_restore_primary_immediately() {
     let mut cold = scheduler();
     cold.tick(civil(13, 2), 0, 1, |_| None, |_| false);
@@ -387,6 +439,8 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
         );
     }
     for invalid in [
+        "empty_replaced",
+        "duplicate_replaced",
         "same",
         "missing_primary",
         "missing_replacement",
@@ -396,6 +450,8 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
         let mut routes = old.route_specs();
         let mut windows = old.window_specs();
         match invalid {
+            "empty_replaced" => windows[0].replaced.clear(),
+            "duplicate_replaced" => windows[0].replaced.push(0),
             "same" => windows[0].route = windows[0].replaced[0],
             "missing_primary" => windows[0].replaced = vec![2],
             "missing_replacement" => windows[0].route = 2,
@@ -565,4 +621,22 @@ fn changed_windows_preserve_activity_but_not_previous_window_state() {
     let empty = LinkScheduler::new(1, vec![], vec![], None).unwrap();
     let fresh = LinkScheduler::new(2, old.route_specs(), old.window_specs(), Some(&empty)).unwrap();
     assert_eq!(fresh.windows[0].last_activity, None);
+}
+
+#[test]
+fn changed_warning_configuration_does_not_reuse_a_previous_window() {
+    for change in ["start", "end", "message"] {
+        let mut old = warning_scheduler(&[120_000], &[60_000]);
+        old.tick(civil(11, 0), 0, 1, |_| None, |_| false);
+        let mut window = old.window_specs();
+        match change {
+            "start" => window[0].warning_before_start_ms.push(30_000),
+            "end" => window[0].warning_before_end_ms.push(30_000),
+            _ => window[0].warning_message_id = Some("another-message".into()),
+        }
+        let next = LinkScheduler::new(2, old.route_specs(), window, Some(&old)).unwrap();
+        assert!(!next.windows[0].initialized, "{change}");
+        assert_eq!(next.windows[0].start_warned, Vec::<u64>::new());
+        assert_eq!(next.windows[0].end_warned, Vec::<u64>::new());
+    }
 }

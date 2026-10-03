@@ -39,6 +39,30 @@ fn statpost_options_are_recognized_in_global_and_node_sections() {
 }
 
 #[test]
+fn statpost_url_without_host_and_blank_or_oversized_group_names_are_invalid() {
+    let source = format!(
+        "[1000]\nstatpost_url=http://\n[permanent 1000 net]\nremote_node=2000\ngroup_name=   \n[permanent 1000 long]\nremote_node=3000\ngroup_name={}\n",
+        "x".repeat(64)
+    );
+    let document = ConfigDocument::parse(&source).unwrap();
+    let warnings = Schema::validate(&document).unwrap().warnings;
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning.key == "statpost_url")
+            .count(),
+        1
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning.key == "group_name")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn status_snapshot_interval_is_recognized_in_global_and_node_sections() {
     let document = ConfigDocument::parse(
         "[general]\nstatus_snapshot_interval_ms=80\n[1000]\nstatus_snapshot_interval_ms=25\n",

@@ -277,6 +277,21 @@ fn local_rf_loop_rejection_is_a_completed_command_with_queued_telemetry() {
 }
 
 #[test]
+fn non_rf_loop_rejection_is_returned_without_local_rf_telemetry() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+
+    assert_eq!(
+        unsafe { descriptor().link_command.unwrap()(c"1000".as_ptr(), 4, c"1000".as_ptr(), 4, 1,) },
+        -1
+    );
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
 fn failed_start_drains_or_retains_the_executor_owner() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

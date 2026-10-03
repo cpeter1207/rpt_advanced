@@ -300,7 +300,6 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             }
             url::Url::parse(value).is_ok_and(|url| {
                 matches!(url.scheme(), "http" | "https")
-                    && url.host_str().is_some()
                     && url.username().is_empty()
                     && url.password().is_none()
             })

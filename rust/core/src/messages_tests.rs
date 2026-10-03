@@ -179,3 +179,70 @@ fn message_catalog_requires_every_builtin_id_and_attribute() {
         CatalogError::InvalidEnglish
     );
 }
+
+#[test]
+fn catalog_debug_and_optional_translation_failures_are_readable() {
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, None).unwrap();
+    assert_eq!(format!("{catalog:?}"), "MessageCatalog");
+    assert_eq!(catalog.translation_warnings(), &["catalog unavailable"]);
+
+    let malformed = MessageCatalog::from_sources("fr-CA", ENGLISH, Some("!!!")).unwrap();
+    assert_eq!(malformed.translation_warnings(), &["catalog is malformed"]);
+}
+
+#[test]
+fn weekday_message_uses_each_localized_weekday_key() {
+    use crate::schedule::Weekday;
+
+    let weekdays = [
+        Weekday::Sunday,
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+    ];
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (day, name) in weekdays.into_iter().zip([
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ]) {
+        assert_eq!(
+            catalog.format(&Message::DayOfWeek { day }).unwrap().text,
+            name
+        );
+    }
+}
+
+#[test]
+fn english_catalog_rejects_oversized_builtin_output() {
+    let oversized = ENGLISH.replace(
+        "    .text = NO LINKS\n",
+        &format!("    .text = {}\n", "x".repeat(128)),
+    );
+    assert_eq!(
+        MessageCatalog::from_sources("en-US", &oversized, None).unwrap_err(),
+        CatalogError::InvalidEnglish
+    );
+}
+
+#[test]
+fn english_catalog_rejects_fluent_format_errors() {
+    let invalid = ENGLISH.replace("    .text = NO LINKS\n", "    .text = { $missing }\n");
+    assert_eq!(
+        MessageCatalog::from_sources("en-US", &invalid, None).unwrap_err(),
+        CatalogError::InvalidEnglish
+    );
+}
+
+#[test]
+fn catalog_load_uses_missing_locale_fallback() {
+    let catalog = MessageCatalog::load("fr-CA").unwrap();
+    assert!(catalog.format(&Message::NoLinks).is_ok());
+}

@@ -2,7 +2,10 @@
 
 use crate::schedule::Weekday;
 use fluent_bundle::{FluentArgs, FluentResource, concurrent::FluentBundle};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
@@ -194,16 +197,24 @@ impl MessageCatalog {
     /// Missing translations use English. A malformed English source rejects the candidate
     /// generation, so the caller can keep the currently active catalog.
     pub fn load(locale: &str) -> Result<Self, CatalogError> {
-        let english_admin = catalog_path(ADMIN_DIR, "en-US");
-        let english_package = catalog_path(PACKAGE_DIR, "en-US");
+        Self::load_from_dirs(locale, Path::new(ADMIN_DIR), Path::new(PACKAGE_DIR))
+    }
+
+    fn load_from_dirs(
+        locale: &str,
+        admin_dir: &Path,
+        package_dir: &Path,
+    ) -> Result<Self, CatalogError> {
+        let english_admin = catalog_path(admin_dir, "en-US");
+        let english_package = catalog_path(package_dir, "en-US");
         let english = read_optional(&english_admin)
             .or_else(|| read_optional(&english_package))
             .unwrap_or_else(|| ENGLISH.to_owned());
         let translation = if locale == "en-US" {
             read_optional(&english_admin).or_else(|| read_optional(&english_package))
         } else {
-            read_optional(&catalog_path(ADMIN_DIR, locale))
-                .or_else(|| read_optional(&catalog_path(PACKAGE_DIR, locale)))
+            read_optional(&catalog_path(admin_dir, locale))
+                .or_else(|| read_optional(&catalog_path(package_dir, locale)))
         };
         Self::from_sources(locale, &english, translation.as_deref())
     }
@@ -466,10 +477,14 @@ fn format_attribute(
     errors.is_empty().then(|| rendered.into_owned())
 }
 
-fn catalog_path(directory: &str, locale: &str) -> String {
-    format!("{directory}/{locale}.ftl")
+fn catalog_path(directory: &Path, locale: &str) -> PathBuf {
+    directory.join(format!("{locale}.ftl"))
 }
 
-fn read_optional(path: &str) -> Option<String> {
-    fs::read_to_string(Path::new(path)).ok()
+fn read_optional(path: &Path) -> Option<String> {
+    fs::read_to_string(path).ok()
 }
+
+#[cfg(test)]
+#[path = "messages_file_tests.rs"]
+mod file_tests;

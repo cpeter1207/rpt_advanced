@@ -60,6 +60,78 @@ fn reconnecting_an_empty_configured_schedule_has_no_detach_effect() {
 }
 
 #[test]
+fn reconfiguration_preserves_callback_selection_for_an_unchanged_group() {
+    use super::super::link_schedule::RouteSpec;
+    let routes = || {
+        ["2000", "3000"]
+            .into_iter()
+            .enumerate()
+            .map(|(priority, remote)| RouteSpec {
+                local: "524950".into(),
+                remote: remote.into(),
+                permanent: true,
+                group_label: Some("north".into()),
+                group_name: Some("North network".into()),
+                group_priority: Some(priority),
+            })
+            .collect()
+    };
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(LinkScheduler::new(1, routes(), vec![], None).unwrap()),
+    )
+    .unwrap();
+    let member = links.group_member("2000").unwrap();
+    member
+        .selection()
+        .publish_desired(std::num::NonZeroUsize::new(1));
+    assert_eq!(member.selection().callback_slot(true), 1);
+
+    links.reconfigure(
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(LinkScheduler::new(2, routes(), vec![], None).unwrap()),
+    );
+
+    let retained = links.group_member("2000").unwrap();
+    assert_eq!(retained.selection().active(), Some(retained.slot()));
+}
+
+#[test]
+fn priority_status_distinguishes_unattempted_reachable_and_ended_members() {
+    use super::super::link_schedule::RouteSpec;
+    let schedule = LinkScheduler::new(
+        1,
+        vec![RouteSpec {
+            local: "524950".into(),
+            remote: "2000".into(),
+            permanent: true,
+            group_label: Some("north".into()),
+            group_name: Some("North".into()),
+            group_priority: Some(0),
+        }],
+        vec![],
+        None,
+    )
+    .unwrap();
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule),
+    )
+    .unwrap();
+
+    assert!(!links.priority_groups()[0].unavailable);
+    links.accept("2000", true).unwrap();
+    assert!(!links.priority_groups()[0].unavailable);
+    links.ended("2000");
+    assert!(links.priority_groups()[0].unavailable);
+}
+
+#[test]
 fn unconfigured_schedule_and_closed_or_stale_admission_do_not_reserve_work() {
     let mut links = links();
     let mut host = NodeHost::new(generation(1));

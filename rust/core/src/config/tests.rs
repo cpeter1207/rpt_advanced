@@ -794,6 +794,30 @@ fn permanent_group_resolution_preserves_the_configured_priority_order() {
 }
 
 #[test]
+fn invalid_optional_permanent_group_name_resolves_as_unset() {
+    let source = format!(
+        "[1000]\n[permanent 1000 net]\nremote_node=2000\ngroup_name={}\n",
+        "x".repeat(64)
+    );
+    let document = ConfigDocument::parse(&source).unwrap();
+    let resolved =
+        ResolvedPermanentLinkSettings::resolve(&document, &NodeId::new("1000").unwrap(), "net")
+            .unwrap();
+    assert_eq!(resolved.value.group_name, None);
+}
+
+#[test]
+fn blank_optional_permanent_group_name_resolves_as_unset() {
+    let document =
+        ConfigDocument::parse("[1000]\n[permanent 1000 net]\nremote_node=2000\ngroup_name=   \n")
+            .unwrap();
+    let resolved =
+        ResolvedPermanentLinkSettings::resolve(&document, &NodeId::new("1000").unwrap(), "net")
+            .unwrap();
+    assert_eq!(resolved.value.group_name, None);
+}
+
+#[test]
 fn schedule_resolution_retains_selectors_and_inactivity_grace() {
     let document = ConfigDocument::parse(
         "[node]\n[permanent node primary]\nremote_node=123\n[schedule node net]\nremote_node=456\nreplace_permanent=primary\ndays=Monday-Friday\ndates=\nstart_time=11:00\nend_time=23:59\nend_inactivity_ms=300000\n",

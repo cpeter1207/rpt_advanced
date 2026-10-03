@@ -103,6 +103,8 @@ pub(crate) struct StatusPostService {
     sequences: HashMap<String, u64>,
     destinations: Vec<PostConfig>,
     worker: Option<StatusPostWorker>,
+    #[cfg(test)]
+    worker_creation_unavailable: bool,
 }
 
 impl StatusPostService {
@@ -153,21 +155,32 @@ impl StatusPostService {
         self.ensure_worker();
         if let Some(worker) = &self.worker {
             if worker.submit(self.generation, &snapshot) {
-                if let Some(schedule) = self.schedules.get_mut(node) {
-                    schedule.sent(now_ms, &snapshot);
-                    self.sequences.insert(node.to_owned(), snapshot.sequence);
-                }
+                // `snapshot` was obtained from this node's schedule above; submission does not
+                // mutate the control-owned map, so this entry cannot disappear here.
+                self.schedules
+                    .get_mut(node)
+                    .expect("observed status retains its schedule")
+                    .sent(now_ms, &snapshot);
+                self.sequences.insert(node.to_owned(), snapshot.sequence);
             }
         }
     }
 
     fn ensure_worker(&mut self) {
         if self.worker.is_none() {
-            self.worker = StatusPostWorker::new();
+            self.worker = self.create_worker();
             if let Some(worker) = &self.worker {
                 worker.replace(self.generation, self.destinations.clone());
             }
         }
+    }
+
+    fn create_worker(&self) -> Option<StatusPostWorker> {
+        #[cfg(test)]
+        if self.worker_creation_unavailable {
+            return None;
+        }
+        StatusPostWorker::new()
     }
 
     /// Stop accepting work without waiting for an in-flight HTTP request.
@@ -291,11 +304,7 @@ fn post_loop(mailbox: Arc<(Mutex<Mailbox>, Condvar)>) {
             let endpoint = {
                 let (lock, _) = &*mailbox;
                 let state = lock.lock().unwrap_or_else(|error| error.into_inner());
-                state
-                    .destinations
-                    .get(&node)
-                    .filter(|destination| !state.stopping && destination.generation == generation)
-                    .map(|destination| destination.url.clone())
+                current_endpoint(&state, &node, generation)
             };
             if let Some(endpoint) = endpoint {
                 if let Ok(url) = request_url(&endpoint, &snapshot) {
@@ -307,6 +316,14 @@ fn post_loop(mailbox: Arc<(Mutex<Mailbox>, Condvar)>) {
             }
         }
     }
+}
+
+fn current_endpoint(state: &Mailbox, node: &str, generation: u64) -> Option<String> {
+    state
+        .destinations
+        .get(node)
+        .filter(|destination| !state.stopping && destination.generation == generation)
+        .map(|destination| destination.url.clone())
 }
 
 impl StatusSnapshot {

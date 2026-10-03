@@ -858,7 +858,7 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
 
 #[test]
 fn aggregate_schedule_warning_queues_one_localized_status_message() {
-    let config = "[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 weekday]\nremote_node=3000\nreplace_permanent=main\ndays=Monday-Friday\nstart_time=12:00\nend_time=13:00\nwarning_before_start_ms=60000\nwarning_message_id=scheduled-link-change\n";
+    let config = "[general]\nlanguage=fr-CA\n[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 weekday]\nremote_node=3000\nreplace_permanent=main\ndays=Monday-Friday\nstart_time=12:00\nend_time=13:00\nwarning_before_start_ms=60000\nwarning_message_id=scheduled-link-change\n";
     let clock = RuntimeClock {
         now_ms: 1_000,
         wall_seconds: 0,
@@ -877,6 +877,12 @@ fn aggregate_schedule_warning_queues_one_localized_status_message() {
         clock,
     )
     .unwrap();
+    assert!(
+        runtime
+            .warnings()
+            .iter()
+            .any(|warning| warning.key == "language")
+    );
     runtime.tick_links(clock);
     assert_eq!(
         *messages.lock().unwrap(),
@@ -1534,7 +1540,7 @@ fn link_lifecycle_events_register_speech_for_every_node() {
 }
 
 #[test]
-fn permanent_group_member_connections_do_not_generate_per_peer_telemetry() {
+fn group_members_skip_direct_events_but_unrelated_nodes_hear_pair_events() {
     struct Speech(Arc<Mutex<Vec<String>>>);
     impl NativeFilePreparer for Speech {
         fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
@@ -1568,11 +1574,15 @@ fn permanent_group_member_connections_do_not_generate_per_peer_telemetry() {
 
     runtime.queue_link_event("1000", "2000", true).unwrap();
     runtime.queue_link_event("1000", "2000", false).unwrap();
+    runtime.queue_link_event("2000", "1000", true).unwrap();
+    runtime.queue_link_event("2000", "1000", false).unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         [
             "node,1,0,0,0 connected to node,2,0,0,0",
             "node,1,0,0,0 disconnected from node,2,0,0,0",
+            "node,2,0,0,0 connected to node,1,0,0,0",
+            "node,2,0,0,0 disconnected from node,1,0,0,0",
         ]
     );
     assert!(runtime.stop(0));
@@ -1611,6 +1621,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
         clock(),
     )
     .unwrap();
+    runtime.queue_priority_group_events().unwrap();
     let group = runtime
         .node("1000")
         .unwrap()
@@ -1651,6 +1662,82 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     assert_eq!(
         media.0.lock().unwrap().last().unwrap(),
         "Blind Hams Network is unavailable"
+    );
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(
+        media.0.lock().unwrap().last().unwrap(),
+        "Blind Hams Network is unavailable"
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn priority_group_media_failure_is_reported_after_recording_the_transition() {
+    struct RejectingMedia;
+    struct RejectingStation;
+    impl StationMediaSession for RejectingStation {
+        fn register(
+            &mut self,
+            _: MediaSource,
+        ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+            Err(MediaError::Io)
+        }
+        fn start(&mut self) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+    impl NativeFilePreparer for RejectingMedia {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for RejectingMedia {
+        fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeMediaPreparer for RejectingMedia {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(RejectingStation))
+        }
+    }
+
+    use super::links::LinkEffect;
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
+        )
+        .unwrap(),
+        &RejectingMedia,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let group = runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .group_member("2000")
+        .unwrap();
+    for _ in 0..2 {
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("group dial")
+        };
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, true, clock()),
+            Ok(true)
+        );
+    }
+    assert_eq!(group.selection().callback_slot(true), 1);
+    assert_eq!(
+        runtime.node("1000").unwrap().links().priority_groups()[0].selected,
+        Some("2000".to_owned())
+    );
+
+    assert_eq!(
+        runtime.queue_priority_group_events(),
+        Err(RuntimeError::Preparation)
     );
     runtime.stop(0);
 }

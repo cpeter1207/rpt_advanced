@@ -380,7 +380,7 @@ fn peer_frame_validation_controls_and_output_errors_keep_one_serial_owner() {
     host(|state| state.failure = 8);
     assert_eq!(peer.write(&[0.5]), Err(Error::Write));
     host(|state| state.failure = 0);
-    for malformed in [1, 2, 4, 6] {
+    for malformed in [1, 2, 4, 6, 7] {
         host(|state| state.voice(vec![1; 2], malformed));
         assert_eq!(
             peer.read(|_| panic!("invalid audio")),
