@@ -35,3 +35,10 @@ catalog and is included in the installed product package. New built-in RF
 wording belongs in the English catalog and is covered by its completeness and
 formatting tests. Locale errors are reported as configuration warnings when an
 English fallback is possible.
+
+## Implementation status — 2026-10-03
+
+The packaged `en-US` catalog, per-node/global locale selection, administrator
+overrides, per-attribute English fallback, built-in RF message migration, and
+serialized warning delivery are implemented. Catalog preparation and
+formatting remain outside audio callbacks.

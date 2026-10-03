@@ -11,10 +11,10 @@ path, or make link state depend on an Asterisk restart.
 
 ## Decision
 
-Use `[permanent node label]` with one required `remote_node` for a single
-permanent peer, or an ordered comma-separated `remote_nodes` list for a
-permanent link group. A group may have a `group_name`; unnamed groups use their
-section label. On module start and a successful configuration reload, runtime
+Use `[permanent node label]` with `remote_node` containing one decimal peer or
+an ordered comma-separated list for a permanent link group. A group may have a
+`group_name`; unnamed groups use their section label. On module start and a
+successful configuration reload, runtime
 derives the desired permanent-peer operations from those sections and uses the
 existing permanent link recovery behavior. All group members are connected
 independently and retried silently. Members are receive-only except for the
@@ -48,9 +48,10 @@ remaining; later qualifying activity replaces that conservative estimate.
 
 Each copied configured-link transition carries its schedule generation, route
 slot, and one-use reservation nonce. The runtime validates that identity before
-preparing, attaching, retaining, or withdrawing a link. `*806` disconnects and
-holds permanent links only, allowing permitted manual links to remain usable.
-`*816` withdraws, re-evaluates, and reconnects permanent links only. A
+preparing, attaching, retaining, or withdrawing a link. `*806` disconnects all
+current links and holds configuration-owned routes; permitted manual links may
+still be connected while that hold is active. `*816` re-evaluates current
+configured-link policy and restores links saved by disconnect-all. A
 replacement configuration can still withdraw an issued route its current
 policy suppresses. This protects scheduler transitions from stale operations.
 The final hub-retry gate and continuous route-ownership rule are defined by
@@ -78,3 +79,12 @@ advertised-topology loop rejection so every configured member can remain
 available for priority selection. Direct self/duplicate identity checks and
 allow/deny policy remain in force. Warning timing and civil-time behavior are
 defined by ADRs 0009 and 0017.
+
+## Implementation status — 2026-10-03
+
+Ordered permanent groups, independent retries, silent standby membership,
+atomic input-idle winner selection, schedule replacement, and configured
+disconnect-mode choices are implemented. The wishlist tracks the separate
+request for `*806`/`*816` to affect only permanent links; current all-link
+disconnect/reconnect behavior above remains in effect until that work is
+implemented.

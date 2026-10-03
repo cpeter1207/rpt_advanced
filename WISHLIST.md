@@ -253,35 +253,20 @@ None.
 
 None.
 
-### Ordered permanent link groups and remaining scheduled-link policy
+### Permanent-link-only DTMF disconnect and reconnect
 
 **Requirements**
 
-- Allow a permanent link group to name ordered members. Connect each member
-  independently, retry unavailable members silently, and make only the
-  highest-priority reachable member transceive; all other members remain
-  receive-only. The group has a name for telemetry, defaulting to its section
-  label when omitted.
-- Switch the transceive member atomically only while no local-receiver or
-  linked-peer input is active. Transmitter PTT/hangtime alone does not defer a
-  switch. Only the active member's audio is passed to the transmitter.
-- At a scheduled link-window start, allow configuration to disconnect all links,
-  temporary links only, permanent links only, or no existing links before it
-  connects the scheduled peer.
+- `*806` disconnects permanent links without disconnecting temporary links, so
+  another permitted peer can be linked manually.
+- `*816` disconnects and re-evaluates only permanent links.
 
 **Decisions recorded**
 
-- Group members bypass advertised-topology loop rejection so recovery and
-  priority selection can proceed. Preserve self-link, direct-duplicate,
-  allow/deny, and final current-policy checks; the exception applies only to
-  configured permanent-group routes.
-- Only the highest-priority reachable member is transceive at a time. A
-  returning higher-priority member takes over at the next input-idle boundary;
-  the previous winner becomes receive-only atomically.
-- Future permanent-only semantics: `*806` will disconnect only permanent links
-  so any permitted peer can be linked manually, and `*816` will disconnect and
-  then reconnect only permanent links. Current all-link disconnect/reconnect
-  behavior remains documented in the configuration manual.
+- Current behavior is broader: `*806` disconnects all current links and holds
+  configuration-owned routes; `*816` re-evaluates configured routes and
+  restores links saved by disconnect-all. This permanent-only behavior remains
+  unimplemented.
 
 **Material decisions needed before implementation**
 

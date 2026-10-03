@@ -64,3 +64,10 @@ template expansion, message preparation, and macro dispatch cannot occur in an
 audio callback. A bounded IAX dial may delay later serialized control work but
 cannot delay audio; scheduler health and control-queue delay remain observable.
 Additional triggers or substitutions require a new requirement and ADR update.
+
+## Implementation status — 2026-10-03
+
+Scheduled-link start/end and inactivity-deadline warnings are implemented with
+localized Fluent messages, skip/reset behavior, and serialized telemetry
+delivery. Configuration, scheduler, message-catalog, and integration coverage
+exercise these paths.

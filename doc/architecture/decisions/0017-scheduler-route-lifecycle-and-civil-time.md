@@ -107,3 +107,10 @@ than host timezone assumptions.
 These rules deliberately favor predictable current-time behavior over replaying
 past RF or link operations. Persistent once-ever events, overnight windows, and
 durable telemetry delivery are separate requirements.
+
+## Implementation status — 2026-10-03
+
+The group-specific topology exception, final current-policy gate, continuous
+route ownership, topology-blocked retry, input-activity idle handoff, and
+scheduled replacement lifecycle are implemented and covered by runtime and
+integration tests.
