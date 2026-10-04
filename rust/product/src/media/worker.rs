@@ -7,7 +7,7 @@ use crate::{
 };
 use rpt_advanced_core::{
     audio::{MorseRenderer, PcmRead, PcmStreamReader, ToneSequence},
-    media::{MediaError, MediaSource, StationMediaSession},
+    media::{MediaError, MediaSource, PreparedAudio, StationMediaSession},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
@@ -44,12 +44,17 @@ impl JobControl {
 }
 
 struct WorkerJob {
-    source: MediaSource,
+    source: WorkerSource,
     control: Arc<JobControl>,
     ready: Producer<(u64, u64, InboundConsumer)>,
     retired: Consumer<(u64, InboundConsumer)>,
     handled: u64,
     one_shot: bool,
+}
+
+enum WorkerSource {
+    Chain(MediaSource),
+    Prepared(PreparedAudio),
 }
 
 /// Callback-side handle; endpoint transfer prevents ring destruction on audio.
@@ -306,6 +311,42 @@ impl StationMediaSession for StationSession {
         self.register_source(source, true)
     }
 
+    fn register_prepared(
+        &mut self,
+        audio: PreparedAudio,
+    ) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+        if self.worker.is_none()
+            || self.stopping.load(Ordering::Acquire)
+            || !(8_000..=192_000).contains(&audio.sample_rate_hz())
+        {
+            return Err(MediaError::InvalidRequest);
+        }
+        let (ready, reader_ready) = RingBuffer::new(1);
+        let (reader_retired, retired) = RingBuffer::new(1);
+        let control = Arc::new(JobControl::default());
+        self.pending
+            .push(WorkerJob {
+                source: WorkerSource::Prepared(audio),
+                control: Arc::clone(&control),
+                ready,
+                retired,
+                handled: 0,
+                one_shot: true,
+            })
+            .map_err(|_| MediaError::QueueFull)?;
+        Ok(Box::new(StreamReader {
+            control,
+            ready: reader_ready,
+            retired: reader_retired,
+            generation: 0,
+            delay_remaining: 0,
+            consumer: None,
+            emitted_audio: false,
+            morse_available: false,
+            fallback_morse_pending: false,
+        }))
+    }
+
     fn start(&mut self) -> Result<(), MediaError> {
         if self.worker.is_some() {
             return Err(MediaError::InvalidRequest);
@@ -373,7 +414,7 @@ impl StationSession {
         let control = Arc::new(JobControl::default());
         let morse_available = source.morse.is_some();
         let job = WorkerJob {
-            source,
+            source: WorkerSource::Chain(source),
             control: Arc::clone(&control),
             ready,
             retired,
@@ -528,6 +569,7 @@ impl OpenStream<'_> {
 
 enum WorkerStream<'a> {
     Provider(OpenStream<'a>, f32),
+    Prepared(PreparedAudio, usize),
     Tone(ToneSequence),
     Morse(MorseRenderer),
 }
@@ -536,6 +578,7 @@ impl WorkerStream<'_> {
     fn rate(&self) -> u32 {
         match self {
             Self::Provider(stream, _) => stream.rate,
+            Self::Prepared(audio, _) => audio.sample_rate_hz(),
             Self::Tone(_) | Self::Morse(_) => 48_000,
         }
     }
@@ -551,6 +594,14 @@ impl WorkerStream<'_> {
                 for sample in &mut output[..count] {
                     *sample *= *gain;
                 }
+                Ok(count)
+            }
+            Self::Prepared(audio, offset) => {
+                let count = output
+                    .len()
+                    .min(audio.samples().len().saturating_sub(*offset));
+                output[..count].copy_from_slice(&audio.samples()[*offset..*offset + count]);
+                *offset += count;
                 Ok(count)
             }
             Self::Tone(source) => Ok(source.render(output)),
@@ -643,33 +694,25 @@ fn run_job(
         generation,
     };
     let mut first = [0.0; STREAM_CHUNK];
-    let mut source_stream = None;
-    let fallback_morse = control.fallback_morse.load(Ordering::Acquire) == generation;
-    if !fallback_morse {
-        if let Some(path) = &job.source.file {
-            if let Ok(mut stream) = open_file(file, path, &cancellation) {
-                if let Ok(count) = stream.read(&mut first, &cancellation) {
-                    if count != 0 {
-                        source_stream = Some((
-                            WorkerStream::Provider(
-                                stream,
-                                10_f32.powf(f32::from(job.source.provider_gain_db) / 20.0),
-                            ),
-                            count,
-                        ));
-                    }
-                }
-            }
+    let mut source_stream = match &job.source {
+        WorkerSource::Prepared(audio) => {
+            let mut stream = WorkerStream::Prepared(audio.clone(), 0);
+            let count = stream.read(&mut first, &cancellation).unwrap_or(0);
+            (count != 0).then_some((stream, count))
         }
-        if source_stream.is_none() && !cancellation.control.is_cancelled(stopping, generation) {
-            if let Some(source) = &job.source.speech {
-                if let Ok(mut stream) = open_speech(speech, source, &cancellation) {
+        WorkerSource::Chain(_) => None,
+    };
+    let fallback_morse = control.fallback_morse.load(Ordering::Acquire) == generation;
+    if let WorkerSource::Chain(source) = &job.source {
+        if !fallback_morse {
+            if let Some(path) = &source.file {
+                if let Ok(mut stream) = open_file(file, path, &cancellation) {
                     if let Ok(count) = stream.read(&mut first, &cancellation) {
                         if count != 0 {
                             source_stream = Some((
                                 WorkerStream::Provider(
                                     stream,
-                                    10_f32.powf(f32::from(job.source.provider_gain_db) / 20.0),
+                                    10_f32.powf(f32::from(source.provider_gain_db) / 20.0),
                                 ),
                                 count,
                             ));
@@ -677,31 +720,48 @@ fn run_job(
                     }
                 }
             }
+            if source_stream.is_none() && !cancellation.control.is_cancelled(stopping, generation) {
+                if let Some(request) = &source.speech {
+                    if let Ok(mut stream) = open_speech(speech, request, &cancellation) {
+                        if let Ok(count) = stream.read(&mut first, &cancellation) {
+                            if count != 0 {
+                                source_stream = Some((
+                                    WorkerStream::Provider(
+                                        stream,
+                                        10_f32.powf(f32::from(source.provider_gain_db) / 20.0),
+                                    ),
+                                    count,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
         }
-    }
-    if source_stream.is_none()
-        && !fallback_morse
-        && !cancellation.control.is_cancelled(stopping, generation)
-    {
-        if let Some(source) = &job.source.tone {
-            let mut renderer = ToneSequence::new(&source.sequence, source.level_db)
-                .expect("tone source was validated at registration");
-            let count = renderer.render(&mut first);
-            source_stream = Some((WorkerStream::Tone(renderer), count));
+        if source_stream.is_none()
+            && !fallback_morse
+            && !cancellation.control.is_cancelled(stopping, generation)
+        {
+            if let Some(tone) = &source.tone {
+                let mut renderer = ToneSequence::new(&tone.sequence, tone.level_db)
+                    .expect("tone source was validated at registration");
+                let count = renderer.render(&mut first);
+                source_stream = Some((WorkerStream::Tone(renderer), count));
+            }
         }
-    }
-    if source_stream.is_none() && !cancellation.control.is_cancelled(stopping, generation) {
-        if let Some(source) = &job.source.morse {
-            let mut renderer = MorseRenderer::new(
-                &source.text,
-                source.speed_wpm,
-                source.frequency_hz,
-                source.level_db,
-            )
-            .expect("Morse source was validated at registration");
-            let count = renderer.render(&mut first);
-            if count != 0 {
-                source_stream = Some((WorkerStream::Morse(renderer), count));
+        if source_stream.is_none() && !cancellation.control.is_cancelled(stopping, generation) {
+            if let Some(morse) = &source.morse {
+                let mut renderer = MorseRenderer::new(
+                    &morse.text,
+                    morse.speed_wpm,
+                    morse.frequency_hz,
+                    morse.level_db,
+                )
+                .expect("Morse source was validated at registration");
+                let count = renderer.render(&mut first);
+                if count != 0 {
+                    source_stream = Some((WorkerStream::Morse(renderer), count));
+                }
             }
         }
     }

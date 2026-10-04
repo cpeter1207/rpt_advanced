@@ -36,51 +36,6 @@ the requirement is implemented.
 
 None.
 
-### rpt_advanced parrot with spoken audio-level report
-
-**Requirements**
-
-- Add an enableable parrot mode owned by rpt_advanced. While enabled, record
-  received audio from the local receiver or any connected peer.
-- When the originating source unkeys (local receiver or linked peer), play a
-  spoken message reporting the recording's peak and RMS audio levels, followed
-  by the recorded audio. Send both the message and recording through the local
-  transmitter and to all connected peers, including the originating peer if
-  it remains connected.
-- Record PCM at the node's native sample rate (currently 48 kHz). Keep that
-  native-rate recording for local playout; convert to each peer's negotiated
-  sample rate at send time through its media egress, not by storing a separate
-  lower-rate recording for each peer.
-- Limit each recording to 30 seconds or less. Reaching the recording limit
-  does not replace the source-unkey trigger for the response.
-- Preserve the established lock-free audio, bounded storage, serialized
-  telemetry, RF-safety, and generation-safe reload/teardown contracts. Speech
-  preparation and peer encoding/sending remain outside the real-time workers.
-
-**Decisions recorded**
-
-- Requested feature, not implemented. No code, installed configuration, or
-  running node changes are part of adding this wishlist item.
-- This is controller-owned rpt_advanced functionality, not reinstatement of
-  the USBRadioPlus native software-repeat or native parrot modes retired by
-  [ADR 0039](doc/architecture/decisions/0039-retire-usbradioplus-native-mode.md).
-- Playback order is spoken peak/RMS statistics first, recording second. The
-  30-second maximum applies to the recording.
-
-**Material decisions needed before implementation**
-
-- How simultaneous local/peer transmissions are recorded and sequenced, and
-  whether a new signal interrupts, queues behind, or is ignored during replay.
-- The recording/measurement tap relative to receive processing and gain;
-  spoken units and precision; and whether reported statistics cover only the
-  retained recording or the entire transmission when it exceeds the limit.
-- The duration setting/default within the 30-second cap, whether over-limit
-  audio retains the beginning or end, and whether truncation is announced.
-- How the mode is enabled/disabled and scoped, how a disconnected or stuck-keyed
-  source is handled, and how replay recapture/peer echo loops are prevented.
-- What happens if the spoken statistics cannot be prepared; do not silently
-  substitute a different response for the requested spoken report.
-
 ### Split native receive and transmit workers
 
 **Requirements**

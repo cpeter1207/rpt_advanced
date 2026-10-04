@@ -1,5 +1,6 @@
 //! Control-prepared playback and bounded status ownership transfer.
 
+use super::parrot::{CapturedParrot, ParrotCaptureControl};
 #[cfg(test)]
 use crate::audio::{MorseRenderer, PcmRead, ToneSequence};
 use crate::audio::{PcmStreamReader, Playback};
@@ -35,12 +36,32 @@ impl Default for MorseSettings {
 pub struct ControllerError;
 
 /// Media validated and allocated exclusively by the control owner.
-pub struct PreparedMedia(pub(super) Playback, pub(super) bool);
+pub struct PreparedMedia(pub(super) Playback, pub(super) bool, pub(super) MediaKind);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+/// Output routing behavior attached to prepared playback.
+pub(super) enum MediaKind {
+    Status,
+    Parrot,
+}
 
 impl PreparedMedia {
     /// Attach a producer-backed native PCM stream to controller playback.
     pub fn new_stream(stream: Box<dyn PcmStreamReader>) -> Result<Self, ControllerError> {
-        Ok(Self(Playback::new_stream(stream), true))
+        Ok(Self(Playback::new_stream(stream), true, MediaKind::Status))
+    }
+
+    /// Construct the spoken-report then recording sequence for local parrot playback.
+    pub fn new_parrot_stream(
+        report: Option<Box<dyn PcmStreamReader>>,
+        recording: Box<dyn PcmStreamReader>,
+    ) -> Result<Self, ControllerError> {
+        let stream = ParrotSequence::new(report, recording);
+        Ok(Self(
+            Playback::new_stream(Box::new(stream)),
+            true,
+            MediaKind::Parrot,
+        ))
     }
 
     /// Build deterministic in-memory media for controller unit tests only.
@@ -83,6 +104,7 @@ impl PreparedMedia {
                 use_fallback: false,
             })),
             available,
+            MediaKind::Status,
         ))
     }
 }
@@ -134,9 +156,26 @@ pub struct ControllerControl {
     #[cfg(test)]
     settings: MorseSettings,
     outstanding: usize,
+    pub(super) parrot: Option<ParrotCaptureControl>,
+    parrot_pending: Producer<PreparedMedia>,
+    parrot_completed: Consumer<PreparedMedia>,
+    parrot_busy: Arc<AtomicBool>,
+    pub(super) parrot_enabled: bool,
 }
 
 impl ControllerControl {
+    /// Take a completed parrot burst without entering the callback owner.
+    pub fn take_parrot_capture(&mut self) -> Option<CapturedParrot> {
+        self.parrot.as_mut()?.take_completed()
+    }
+
+    /// Recycle a capture slot after control/media has finished with its samples.
+    pub fn recycle_parrot_capture(&mut self, clip: CapturedParrot) {
+        if let Some(parrot) = &mut self.parrot {
+            parrot.recycle(clip);
+        }
+    }
+
     /// Enqueue producer-backed status media prepared by the station owner.
     pub fn queue_prepared_status(&mut self, media: PreparedMedia) -> bool {
         if self.outstanding == 4 {
@@ -146,6 +185,24 @@ impl ControllerControl {
             return false;
         }
         self.outstanding += 1;
+        true
+    }
+
+    /// Queue one completed recording for serialized parrot playback.
+    pub fn queue_prepared_parrot(&mut self, media: PreparedMedia) -> bool {
+        if !self.parrot_enabled
+            || media.2 != MediaKind::Parrot
+            || self
+                .parrot_busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        if self.parrot_pending.push(media).is_err() {
+            self.parrot_busy.store(false, Ordering::Release);
+            return false;
+        }
         true
     }
 
@@ -187,16 +244,93 @@ impl ControllerControl {
     /// Reclaim completed media on the control owner; dropping each item releases its PCM.
     pub fn reclaim(&mut self) -> impl Iterator<Item = PreparedMedia> + '_ {
         std::iter::from_fn(|| {
-            let media = self.completed.pop().ok()?;
-            self.outstanding -= 1;
+            if let Ok(media) = self.completed.pop() {
+                self.outstanding -= 1;
+                return Some(media);
+            }
+            let media = self.parrot_completed.pop().ok()?;
+            self.parrot_busy.store(false, Ordering::Release);
             Some(media)
         })
+    }
+}
+
+/// Optional speech prefix followed by the captured native-rate recording.
+struct ParrotSequence {
+    report: Option<Box<dyn PcmStreamReader>>,
+    recording: Box<dyn PcmStreamReader>,
+    report_started: bool,
+    recording_started: bool,
+}
+
+impl ParrotSequence {
+    fn new(report: Option<Box<dyn PcmStreamReader>>, recording: Box<dyn PcmStreamReader>) -> Self {
+        Self {
+            report,
+            recording,
+            report_started: false,
+            recording_started: false,
+        }
+    }
+
+    fn start_recording(&mut self) {
+        if !self.recording_started {
+            self.recording.start();
+            self.recording_started = true;
+        }
+    }
+}
+
+impl PcmStreamReader for ParrotSequence {
+    fn start(&mut self) {
+        self.report_started = false;
+        self.recording_started = false;
+        if let Some(report) = &mut self.report {
+            report.start();
+            self.report_started = true;
+        } else {
+            self.start_recording();
+        }
+    }
+
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        if output.is_empty() {
+            return crate::audio::PcmRead::Pending;
+        }
+        if self.report_started {
+            match self
+                .report
+                .as_mut()
+                .expect("started report exists")
+                .render(output)
+            {
+                crate::audio::PcmRead::Samples(count)
+                | crate::audio::PcmRead::FinalSamples(count) => {
+                    if count != 0 {
+                        return crate::audio::PcmRead::Samples(count.min(output.len()));
+                    }
+                }
+                crate::audio::PcmRead::Pending => return crate::audio::PcmRead::Pending,
+                crate::audio::PcmRead::Finished | crate::audio::PcmRead::Failed => {}
+            }
+            self.report_started = false;
+            self.start_recording();
+        }
+        self.recording.render(output)
+    }
+
+    fn cancel(&mut self) {
+        if let Some(report) = &mut self.report {
+            report.cancel();
+        }
+        self.recording.cancel();
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Source {
     Status,
+    Parrot,
     Courtesy(usize),
     Identifier(usize),
     Announcement(usize),
@@ -207,6 +341,9 @@ pub(super) struct TelemetryPlanner {
     pub status: Option<PreparedMedia>,
     pending: Consumer<PreparedMedia>,
     completed: Producer<PreparedMedia>,
+    parrot_pending: Consumer<PreparedMedia>,
+    parrot_completed: Producer<PreparedMedia>,
+    pub parrot: Option<PreparedMedia>,
     pub gain: f32,
     duck_gain: f32,
 }
@@ -217,12 +354,18 @@ impl TelemetryPlanner {
         let _ = settings;
         let (producer, pending) = RingBuffer::new(4);
         let (completed, consumer) = RingBuffer::new(4);
+        let (parrot_pending, parrot_consumer) = RingBuffer::new(1);
+        let (parrot_completed, parrot_reclaimer) = RingBuffer::new(1);
+        let parrot_busy = Arc::new(AtomicBool::new(false));
         (
             Self {
                 active: None,
                 status: None,
                 pending,
                 completed,
+                parrot_pending: parrot_consumer,
+                parrot_completed,
+                parrot: None,
                 gain: 1.0,
                 duck_gain: 10_f32.powf(f32::from(duck_db) / 20.0),
             },
@@ -232,11 +375,35 @@ impl TelemetryPlanner {
                 #[cfg(test)]
                 settings,
                 outstanding: 0,
+                parrot: None,
+                parrot_pending,
+                parrot_completed: parrot_reclaimer,
+                parrot_busy,
+                parrot_enabled: false,
             },
         )
     }
     pub fn status_pending(&self) -> bool {
         self.status.is_some() || !self.pending.is_empty()
+    }
+    pub fn parrot_pending(&self) -> bool {
+        self.parrot.is_some() || !self.parrot_pending.is_empty()
+    }
+    pub fn start_parrot(&mut self) {
+        self.parrot = self.parrot_pending.pop().ok();
+        if let Some(media) = &mut self.parrot {
+            media.0.restart(false);
+        }
+    }
+    pub fn discard_pending_parrot(&mut self) {
+        if let Ok(media) = self.parrot_pending.pop() {
+            let _ = self.parrot_completed.push(media);
+        }
+    }
+    pub fn finish_parrot(&mut self) {
+        if let Some(media) = self.parrot.take() {
+            let _ = self.parrot_completed.push(media);
+        }
     }
     pub fn start_status(&mut self) {
         self.status = self.pending.pop().ok();

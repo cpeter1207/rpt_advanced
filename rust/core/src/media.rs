@@ -107,6 +107,14 @@ pub trait StationMediaSession: Send {
         self.register(source)
     }
 
+    /// Stream already validated PCM through the same station ring used for decoded media.
+    fn register_prepared(
+        &mut self,
+        _audio: PreparedAudio,
+    ) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+        Err(MediaError::IncompatibleAdapter)
+    }
+
     /// Start the single worker after all source chains are registered.
     fn start(&mut self) -> Result<(), MediaError>;
 }

@@ -1,6 +1,9 @@
 //! Generation-owned peer audio composition; no channel operations or locks.
 use super::{AdmissionError, Mode, PeerSignals, ReceiveState};
-use crate::{audio::LinkAudioProducer, controller::NodeController};
+use crate::{
+    audio::LinkAudioProducer,
+    controller::{NodeController, ParrotOutput},
+};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
@@ -172,6 +175,8 @@ pub struct LinkAudio<P: PeerInput> {
     peers: Vec<AudioPeer<P>>,
     local: Vec<f32>,
     mix: Vec<f32>,
+    parrot_mix: Vec<f32>,
+    parrot_output: Vec<f32>,
     status: LinkAudioStatus,
     destinations: Vec<usize>,
     groups: Vec<GroupSelection>,
@@ -258,10 +263,8 @@ impl<P: PeerInput> LinkAudio<P> {
         for (index, peer) in peers.iter_mut().enumerate() {
             // Control-only construction consumes each freshly prepared peer exactly once.
             let producer = peer.outbound.take().expect("prepared outbound owner");
-            if peer.mode.transmits() || peer.group.is_some() {
-                destinations.push(index);
-                outbound.push(producer);
-            }
+            destinations.push(index);
+            outbound.push(producer);
         }
         let samples = maximum
             .checked_mul(destinations.len() + 1)
@@ -289,6 +292,8 @@ impl<P: PeerInput> LinkAudio<P> {
                 peers,
                 local: vec![0.0; maximum],
                 mix: vec![0.0; maximum],
+                parrot_mix: vec![0.0; maximum],
+                parrot_output: vec![0.0; maximum],
                 status,
                 destinations,
                 groups,
@@ -378,7 +383,37 @@ impl<P: PeerInput> LinkAudio<P> {
                         .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
                 })
         });
-        let keyed = controller.process_audio(receiving, linked_active, &self.mix[..count], audio);
+        let any_peer_active = self.peers.iter().any(|peer| peer.active);
+        self.parrot_mix[..count].fill(0.0);
+        if receiving {
+            self.parrot_mix[..count].copy_from_slice(&self.local[..count]);
+        }
+        for peer in &self.peers {
+            if peer.active {
+                for (mixed, input) in self.parrot_mix[..count]
+                    .iter_mut()
+                    .zip(&peer.audio[..count])
+                {
+                    *mixed += input;
+                }
+            }
+        }
+        for sample in &mut self.parrot_mix[..count] {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        controller.observe_parrot(receiving || any_peer_active, &self.parrot_mix[..count]);
+        let mut parrot_active = false;
+        let keyed = controller.process_audio_with_parrot(
+            receiving,
+            linked_active,
+            receiving || any_peer_active,
+            &self.mix[..count],
+            audio,
+            ParrotOutput {
+                samples: &mut self.parrot_output[..count],
+                active: &mut parrot_active,
+            },
+        );
         if count == 0 || self.destinations.is_empty() {
             return Ok(keyed);
         }
@@ -407,6 +442,12 @@ impl<P: PeerInput> LinkAudio<P> {
                 }
             }
         }
+        for (output, parrot) in block.audio[..count]
+            .iter_mut()
+            .zip(&self.parrot_output[..count])
+        {
+            *output += parrot;
+        }
         let forwarding_sources = self
             .peers
             .iter()
@@ -428,9 +469,14 @@ impl<P: PeerInput> LinkAudio<P> {
                     .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
             });
             let own_source = usize::from(peer.active && peer.mode.forwards() && selected);
-            block.enabled[destination] = selected
-                && !peer.input.signals().ended()
-                && (receiving || forwarding_sources > own_source);
+            block.enabled[destination] = !peer.input.signals().ended()
+                && if parrot_active {
+                    true
+                } else {
+                    (peer.mode.transmits() || peer.group.is_some())
+                        && selected
+                        && (receiving || forwarding_sources > own_source)
+                };
             let offset = (destination + 1) * self.local.len();
             let own = &mut block.audio[offset..offset + count];
             // Every transmitting mode forwards; preparation excludes monitor destinations.

@@ -684,6 +684,20 @@ fn collect_stream(reader: &mut dyn PcmStreamReader, output: &mut [f32]) -> usize
 }
 
 #[test]
+fn prepared_native_parrot_recording_uses_the_station_media_ring() {
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    session.start().unwrap();
+    let mut reader = session
+        .register_prepared(PreparedAudio::new(48_000, vec![0.25; 512]).unwrap())
+        .unwrap();
+    reader.start();
+
+    let samples = collect_samples(reader.as_mut(), &mut [0.0; 64]);
+    assert!(samples.len() >= 512);
+    assert!(samples.iter().any(|sample| (*sample - 0.25).abs() < 0.003));
+}
+
+#[test]
 fn reader_fills_requested_output_from_available_ring_samples() {
     let (mut producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     assert_eq!(producer.write(&[0.25; 4096]).unwrap(), 4096);

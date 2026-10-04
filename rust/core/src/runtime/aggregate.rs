@@ -18,8 +18,8 @@ use crate::{
         ResolvedMacroSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
         ResolvedScheduleSettings, ResolvedTemplateSettings, ResolvedTimeSettings, Schema,
     },
-    controller::{ActivitySnapshot, ControllerControl, NodeController},
-    media::StationMediaSession,
+    controller::{ActivitySnapshot, ControllerControl, NodeController, ParrotLevels},
+    media::{PreparedAudio, StationMediaSession},
     messages::{Message, MessageCatalog},
     schedule::{CivilTime, ScheduledWindow},
     template::MessageTemplate,
@@ -750,36 +750,72 @@ impl<A: Send, C: Send> Runtime<A, C> {
 
     /// Capture current receive-only activity and reconcile window policy before reserving work.
     pub fn tick_links(&mut self, clock: RuntimeClock) {
-        if let Some((civil, second)) = clock.civil.filter(|(_, second)| *second < 60) {
-            for node in &mut self.nodes {
-                let activity = node.control.activity_ms();
-                node.control.telemetry.reclaim().for_each(drop);
-                let warning = node.links.tick_with_warnings(
-                    civil,
-                    second,
-                    clock.now_ms,
-                    |_| activity,
-                    node.control.activity.is_active(),
-                    node.control.telemetry.can_queue_status(),
-                );
-                if let Some(warning) = warning.filter(|warning| clock.now_ms < warning.deadline_ms)
-                {
-                    let seconds = warning.remaining_ms.div_ceil(1000);
-                    let forms = node.control.catalog.format_schedule_warning(seconds);
-                    let queued = forms
-                        .map_err(|_| RuntimeError::Preparation)
+        for node in &mut self.nodes {
+            node.control.telemetry.reclaim().for_each(drop);
+            if node.settings.parrot_enabled {
+                while let Some(clip) = node.control.telemetry.take_parrot_capture() {
+                    if node.control.activity.is_active() {
+                        node.control.telemetry.recycle_parrot_capture(clip);
+                        continue;
+                    }
+                    let queued = ParrotLevels::measure(clip.samples())
+                        .and_then(|levels| {
+                            node.control
+                                .catalog
+                                .format(&Message::ParrotLevels {
+                                    peak_dbfs: levels.peak_dbfs,
+                                    rms_dbfs: levels.rms_dbfs,
+                                })
+                                .ok()
+                        })
                         .and_then(|forms| {
-                            let spoken = render::telemetry_speech(&forms.tts, &[]);
-                            queue_status_media(
-                                &mut node.control.telemetry,
-                                &mut node.control.media_session,
-                                &node.status,
-                                &forms.morse,
-                                &spoken,
-                            )
+                            PreparedAudio::new(48_000, clip.samples().to_vec())
+                                .ok()
+                                .and_then(|recording| {
+                                    prepare::streamed_parrot(
+                                        node.control.media_session.as_deref_mut()?,
+                                        &node.status,
+                                        &forms.tts,
+                                        recording,
+                                    )
+                                    .ok()
+                                })
+                        })
+                        .is_some_and(|prepared| {
+                            node.control.telemetry.queue_prepared_parrot(prepared)
                         });
                     let _ = queued;
+                    node.control.telemetry.recycle_parrot_capture(clip);
                 }
+            }
+            let Some((civil, second)) = clock.civil.filter(|(_, second)| *second < 60) else {
+                continue;
+            };
+            let activity = node.control.activity_ms();
+            let warning = node.links.tick_with_warnings(
+                civil,
+                second,
+                clock.now_ms,
+                |_| activity,
+                node.control.activity.is_active(),
+                node.control.telemetry.can_queue_status(),
+            );
+            if let Some(warning) = warning.filter(|warning| clock.now_ms < warning.deadline_ms) {
+                let seconds = warning.remaining_ms.div_ceil(1000);
+                let forms = node.control.catalog.format_schedule_warning(seconds);
+                let queued = forms
+                    .map_err(|_| RuntimeError::Preparation)
+                    .and_then(|forms| {
+                        let spoken = render::telemetry_speech(&forms.tts, &[]);
+                        queue_status_media(
+                            &mut node.control.telemetry,
+                            &mut node.control.media_session,
+                            &node.status,
+                            &forms.morse,
+                            &spoken,
+                        )
+                    });
+                let _ = queued;
             }
         }
     }

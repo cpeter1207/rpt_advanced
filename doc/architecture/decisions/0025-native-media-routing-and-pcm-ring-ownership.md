@@ -74,6 +74,23 @@ local receive replies use the local transmitter, linked-peer replies use only
 that peer's egress, and CLI/REST replies stay on the requesting interface.
 Response routing is carried explicitly with the prepared telemetry; it is not
 inferred from whichever peer happens to be active when playout begins.
+
+The optional rpt_advanced parrot is a separate, explicitly tagged exception to
+ordinary telemetry routing. When enabled for a node, the radio worker captures
+one mixed burst from processed local receive and every active linked-peer
+input, retains at most the first 30 seconds at 48 kHz, and publishes the
+preallocated clip to the control owner only after all inputs unkey. Control
+measures the retained samples and queues a localized spoken peak/RMS report
+followed by the recording through the station-media producer and telemetry
+playout ring. Missing speech skips the report, not the recording. A new
+receive discards a queued response or interrupts an active one; its remainder
+is not replayed. The tagged parrot bus reaches the local transmitter and every
+still-connected outbound peer, including the originating peer and monitor or
+fallback destinations. It is kept separate from ordinary telemetry, so ADR
+0023's source-scoped command/status routing is unchanged. Parrot output is
+excluded from receive capture, preventing local recapture. A remote parrot-
+enabled node cannot identify this audio as a parrot transmission, so remote
+parrot replay loops remain possible.
 The dispatcher queues a destination block for local receive, another active
 forwarding peer, or a command response explicitly addressed to that destination.
 Local transmitter hang is excluded from peer program audio. A destination's
@@ -157,6 +174,8 @@ Queue ownership is fixed:
 | Linked-peer transmit-program queue | Link-audio dispatcher | That peer's transmit worker |
 | Receive RF-signaling event queue | Receive edge publisher | Station-control event dispatcher |
 | Transmit RF-signaling event queue | Transmit edge publisher | Station-control event dispatcher |
+| Parrot capture completion/recycle queues | Radio-port transmit worker / station-control thread | Station-control thread / radio-port transmit worker |
+| Prepared parrot playback queue | Station-control thread | Radio-port transmit worker |
 
 ## Consequences
 

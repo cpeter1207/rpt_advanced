@@ -263,6 +263,254 @@ fn selected_group_audio_reaches_rf_but_not_a_standby_peer() {
 }
 
 #[test]
+fn parrot_capture_includes_local_and_receive_active_nonforwarded_peer_audio() {
+    use crate::link::{AudioPeer, LinkAudio, Mode};
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    let peer_enabled = Arc::new(AtomicBool::new(true));
+    let mut input = TestPeerInput::new(Some(0.2));
+    input.enabled = Some(Arc::clone(&peer_enabled));
+    let (local_out, _) = crate::audio::LinkAudioQueue::new(4)
+        .unwrap()
+        .into_endpoints();
+    let local_monitor = AudioPeer::new("100", Mode::LOCAL_MONITOR, input, local_out, 2, 0).unwrap();
+    let (mut links, _) = LinkAudio::new(vec![local_monitor], 2).unwrap();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    links.process(&mut node, true, &mut [0.1, 0.1]).unwrap();
+    assert_eq!(links.active_count(), 1);
+    peer_enabled.store(false, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut [0.0, 0.0]).unwrap();
+    assert_eq!(links.active_count(), 0);
+
+    let clip = control.take_parrot_capture().unwrap();
+    assert_eq!(clip.samples(), &[0.3, 0.3]);
+}
+
+struct ParrotSamples {
+    offset: usize,
+}
+
+impl crate::audio::PcmStreamReader for ParrotSamples {
+    fn start(&mut self) {
+        self.offset = 0;
+    }
+
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        if self.offset == 2 {
+            return crate::audio::PcmRead::Finished;
+        }
+        output[0] = [0.4, 0.5][self.offset];
+        self.offset += 1;
+        crate::audio::PcmRead::Samples(1)
+    }
+}
+
+#[test]
+fn parrot_bypasses_monitor_and_fallback_peer_routing_only_for_its_audio() {
+    use crate::link::{AudioPeer, LinkAudio, Mode};
+
+    let (to_transceiver, mut from_transceiver) = crate::audio::LinkAudioQueue::new(8)
+        .unwrap()
+        .into_endpoints();
+    let (to_monitor, mut from_monitor) = crate::audio::LinkAudioQueue::new(8)
+        .unwrap()
+        .into_endpoints();
+    let peers = vec![
+        AudioPeer::new(
+            "200",
+            Mode::TRANSCEIVE,
+            TestPeerInput::new(None),
+            to_transceiver,
+            4,
+            0,
+        )
+        .unwrap(),
+        AudioPeer::new(
+            "201",
+            Mode::LOCAL_MONITOR,
+            TestPeerInput::new(None),
+            to_monitor,
+            4,
+            0,
+        )
+        .unwrap(),
+    ];
+    let (mut links, mut dispatcher) = LinkAudio::new(peers, 4).unwrap();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let media =
+        PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 })).unwrap();
+    assert!(control.queue_prepared_parrot(media));
+
+    let mut local = [0.0; 2];
+    links.process(&mut node, false, &mut local).unwrap();
+    assert_eq!(local, [0.4, 0.5]);
+    assert!(node.parrot_playback_active());
+    assert_eq!(dispatcher.dispatch(1), 1);
+    let mut sent = [0.0; 2];
+    assert_eq!(from_transceiver.read(&mut sent), 0);
+    assert_eq!(sent, [0.4, 0.5]);
+    assert_eq!(from_monitor.read(&mut sent), 0);
+    assert_eq!(sent, [0.4, 0.5]);
+}
+
+struct OneSampleParrot;
+
+impl crate::audio::PcmStreamReader for OneSampleParrot {
+    fn start(&mut self) {}
+
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        output[0] = 0.4;
+        crate::audio::PcmRead::FinalSamples(1)
+    }
+}
+
+#[test]
+fn parrot_final_callback_block_reaches_every_peer() {
+    use crate::link::{AudioPeer, LinkAudio, Mode};
+
+    let (outbound, mut peer_output) = crate::audio::LinkAudioQueue::new(4)
+        .unwrap()
+        .into_endpoints();
+    let peer = AudioPeer::new(
+        "200",
+        Mode::TRANSCEIVE,
+        TestPeerInput::new(None),
+        outbound,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 1).unwrap();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.queue_prepared_parrot(
+        PreparedMedia::new_parrot_stream(None, Box::new(OneSampleParrot)).unwrap()
+    ));
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    assert!(!node.parrot_playback_active());
+    assert_eq!(dispatcher.dispatch(1), 1);
+    let mut sent = [0.0];
+    assert_eq!(peer_output.read(&mut sent), 0);
+    assert_eq!(sent, [0.4]);
+}
+
+fn queued_parrot() -> PreparedMedia {
+    PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 })).unwrap()
+}
+
+#[test]
+fn receive_activity_discards_a_queued_parrot_before_playback() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.queue_prepared_parrot(queued_parrot()));
+    let mut audio = [0.0; 1];
+    let mut parrot = [0.0; 1];
+    let mut parrot_active = false;
+
+    node.process_audio_with_parrot(
+        false,
+        false,
+        true,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+        },
+    );
+
+    assert_eq!(parrot, [0.0]);
+    assert!(!parrot_active);
+    assert!(!node.parrot_playback_active());
+    control.reclaim().for_each(drop);
+}
+
+#[test]
+fn receive_activity_interrupts_and_discards_active_parrot_audio() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.queue_prepared_parrot(queued_parrot()));
+    let mut audio = [0.0; 1];
+    let mut parrot = [0.0; 1];
+    let mut parrot_active = false;
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+        },
+    );
+    assert_eq!(parrot, [0.4]);
+    assert!(node.parrot_playback_active());
+
+    node.process_audio_with_parrot(
+        false,
+        false,
+        true,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+        },
+    );
+
+    assert_eq!(parrot, [0.0]);
+    assert!(!parrot_active);
+    assert!(!node.parrot_playback_active());
+    control.reclaim().for_each(drop);
+}
+
+#[test]
 fn peer_transmit_is_subtracted_from_its_own_outbound_audio() {
     use crate::link::LinkAudio;
 

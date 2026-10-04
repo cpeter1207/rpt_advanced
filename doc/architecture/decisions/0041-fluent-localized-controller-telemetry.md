@@ -36,9 +36,11 @@ wording belongs in the English catalog and is covered by its completeness and
 formatting tests. Locale errors are reported as configuration warnings when an
 English fallback is possible.
 
-## Implementation status — 2026-10-03
+## Implementation status — 2026-10-04
 
 The packaged `en-US` catalog, per-node/global locale selection, administrator
 overrides, per-attribute English fallback, built-in RF message migration, and
-serialized warning delivery are implemented. Catalog preparation and
-formatting remain outside audio callbacks.
+serialized warning delivery are implemented. The native parrot's peak/RMS
+report is a typed catalog message with text, speech, and Morse forms; speech
+playback uses the resolved per-node voice, speed, and level. Catalog
+preparation and formatting remain outside audio callbacks.

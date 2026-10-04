@@ -134,7 +134,7 @@ never from a real-time tick. See
 station's `NodeController`, link and schedule policy, adapter control, and
 generation-scoped resources. `NodeController` is the bounded audio and
 transmit-policy aggregate for duplex, hang time, identifiers, announcements,
-courtesy tones, timeout, and telemetry sequencing. `RadioCore` remains the
+courtesy tones, optional parrot capture/playback, timeout, and telemetry sequencing. `RadioCore` remains the
 real-time aggregate; none of these ownership names permits control work in an
 audio worker.
 
@@ -184,6 +184,14 @@ One serialized station-media worker per node generation renders all telemetry
 sources, including file, speech, Morse, and tone, and streams bounded PCM chunks
 into that ring. `Playback::Render` only consumes ready samples; the transmit
 worker never synthesizes telemetry.
+
+When enabled, the native-rate parrot captures the processed local and active
+peer mix in fixed buffers, then hands completed audio to station control for
+level measurement and speech preparation. Its tagged playback bus is routed to
+the local transmitter and all connected peers without changing ordinary
+telemetry routing. New receive interrupts replay; only the retained first 30
+seconds are measured and played. Local recapture is suppressed; remote parrot
+loops cannot be identified by the current peer protocol.
 
 Controller-owned RF wording is stored in the packaged Fluent catalogs, with
 separate text, TTS, and Morse forms. The configuration generation validates its

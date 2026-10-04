@@ -606,8 +606,12 @@ fn parrot_enabled_defaults_off_and_inherits_with_node_precedence() {
     };
     assert!(!resolved("[1000]\n"));
     assert!(resolved("[general]\nparrot_enabled=yes\n[1000]\n"));
-    assert!(!resolved("[general]\nparrot_enabled=yes\n[1000]\nparrot_enabled=no\n"));
-    assert!(resolved("[general]\nparrot_enabled=yes\n[1000]\nparrot_enabled=invalid\n"));
+    assert!(!resolved(
+        "[general]\nparrot_enabled=yes\n[1000]\nparrot_enabled=no\n"
+    ));
+    assert!(resolved(
+        "[general]\nparrot_enabled=yes\n[1000]\nparrot_enabled=invalid\n"
+    ));
 }
 
 #[test]

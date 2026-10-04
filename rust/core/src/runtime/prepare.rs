@@ -133,6 +133,37 @@ pub(super) fn streamed_status(
     PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
 }
 
+/// Prepare an optional streamed level report followed by native-rate retained receive PCM.
+pub(super) fn streamed_parrot(
+    station: &mut dyn StationMediaSession,
+    settings: &ResolvedIdentifierSettings,
+    speech_text: &str,
+    recording: PreparedAudio,
+) -> Result<PreparedMedia, RuntimeError> {
+    let report = if speech_text.is_empty() || settings.speech_model.is_empty() {
+        None
+    } else {
+        station
+            .register_once(MediaSource {
+                file: None,
+                speech: Some(SpeechSource {
+                    text: speech_text.to_owned(),
+                    model: settings.speech_model.clone().into(),
+                    speed_percent: settings.speech_speed_percent as u32,
+                    level_db: settings.speech_level_db as i32,
+                }),
+                provider_gain_db: 0,
+                tone: None,
+                morse: None,
+            })
+            .ok()
+    };
+    let recording = station
+        .register_prepared(recording)
+        .map_err(|_| RuntimeError::Preparation)?;
+    PreparedMedia::new_parrot_stream(report, recording).map_err(|_| RuntimeError::Preparation)
+}
+
 fn source_with_station(
     station: &mut Box<dyn StationMediaSession>,
     settings: &ResolvedIdentifierSettings,
@@ -259,6 +290,7 @@ pub(super) fn controller(
     }
     let (controller, control) = NodeController::new(
         ControllerSettings {
+            parrot_enabled: settings.parrot_enabled,
             full_duplex: settings.full_duplex,
             hang_ms: settings.hang_ms,
             transmit_timeout_ms: settings.transmit_timeout_ms,
