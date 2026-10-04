@@ -81,35 +81,6 @@ None.
 - What happens if the spoken statistics cannot be prepared; do not silently
   substitute a different response for the requested spoken report.
 
-### Remove USBRadioPlus native mode and native parrot
-
-**Requirements**
-
-- Implement [ADR 0039](doc/architecture/decisions/0039-retire-usbradioplus-native-mode.md):
-  remove driver-native software local repeat and native parrot, including their
-  mode-specific state, routes, controls, and obsolete tests. Neither mode is
-  required by rpt_advanced or retained as a supported ASL3 option.
-- Preserve ordinary app_rpt/legacy echo, hardware local repeat, shared native
-  DSP/audio adapters, diagnostics, and the distinct controller transport.
-- Silently ignore `duplexmode` and the retired `duplex_local_repeat_mode`
-  selection. Keep `duplex3` hardware-only at its configured level, including
-  load, reload, and tuning persistence; do not retain a software-mode selector.
-  Update documentation and tests with the implementation. Under ADR 0040,
-  remove unused shared operations rather than retaining alpha compatibility
-  shims; version/package checks must reject mismatched artifacts safely.
-
-**Decisions recorded**
-
-- Candidate source removal is under verification. Keep this item until the
-  matching shared-library/driver integration is verified. Alpha18 and all
-  running nodes are unchanged.
-- This does not remove rpt_advanced's native receive/transmit workers or the
-  verified shared-clock fast path. Appliance native PCM/hardware is unaffected.
-
-**Material decisions needed before implementation**
-
-None.
-
 ### Split native receive and transmit workers
 
 **Requirements**

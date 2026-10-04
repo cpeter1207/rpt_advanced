@@ -113,7 +113,7 @@ The ring uses samplerate adapter ABI 2, backed by dynamically linked FFmpeg
 no project-owned conversion uses libsamplerate. Stock distribution libraries
 may independently depend on it; this does not authorize a second owned path.
 
-The filter is fixed to `filter_size=256`, `cutoff=0.985` and
+The filter is fixed to `filter_size=16`, `cutoff=0.985` and
 `SWR_FILTER_TYPE_KAISER`. Persistent soft compensation through
 `swr_set_compensation` follows the ring's existing filtered-occupancy controller,
 including independent clocks with equal nominal rates. No quality selector is

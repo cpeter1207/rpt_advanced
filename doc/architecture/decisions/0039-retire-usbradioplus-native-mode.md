@@ -1,6 +1,6 @@
 # ADR 0039: Retire USBRadioPlus native mode and native parrot
 
-Status: Accepted — candidate implementation under verification (2026-09-13)
+Status: Accepted — implemented in the alpha19 candidate; source audit confirmed 2026-10-04
 
 ## Context
 
