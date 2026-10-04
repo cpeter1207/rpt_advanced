@@ -836,6 +836,19 @@ fn schedule_resolution_retains_selectors_and_inactivity_grace() {
 }
 
 #[test]
+fn schedule_resolution_preserves_group_name_and_remote_priority() {
+    let document = ConfigDocument::parse(
+        "[node]\n[permanent node primary]\nremote_node=123\n[schedule node net]\nremote_node=456, 789\ngroup_name=Regional Net\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n",
+    )
+    .unwrap();
+    let value = ResolvedScheduleSettings::resolve(&document, &NodeId::new("node").unwrap(), "net")
+        .unwrap()
+        .value;
+    assert_eq!(value.remote_nodes, ["456", "789"]);
+    assert_eq!(value.group_name.as_deref(), Some("Regional Net"));
+}
+
+#[test]
 fn schedule_resolution_preserves_ordered_warning_leads_and_message_id() {
     let document = ConfigDocument::parse(
         "[node]\n[permanent node primary]\nremote_node=123\n[schedule node net]\nremote_node=456\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\nwarning_before_start_ms=3600000,60000\nwarning_before_end_ms=60000,30000\nwarning_message_id=scheduled-link-change\n",

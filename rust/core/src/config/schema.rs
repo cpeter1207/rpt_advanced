@@ -276,6 +276,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         KnownScope::Schedule => matches!(
             key,
             "remote_node"
+                | "group_name"
                 | "replace_permanent"
                 | "days"
                 | "dates"
@@ -290,8 +291,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
-    if key == "remote_node" && matches!(kind, ScopeKind::PermanentNode) {
-        return permanent_node_list(value).is_some();
+    if key == "remote_node" && matches!(kind, ScopeKind::PermanentNode | ScopeKind::ScheduleNode) {
+        return configured_node_list(value).is_some();
     }
     match key {
         "statpost_url" => {
@@ -371,7 +372,7 @@ fn node_value_valid(value: &str) -> bool {
     value.len() <= 63 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn permanent_node_list(value: &str) -> Option<Vec<&str>> {
+fn configured_node_list(value: &str) -> Option<Vec<&str>> {
     let nodes: Vec<_> = value.split(',').map(str::trim).collect();
     (nodes
         .iter()
@@ -695,7 +696,7 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
                 "permanent remote node is required",
             ));
         }
-        let Some(group_nodes) = permanent_node_list(value) else {
+        let Some(group_nodes) = configured_node_list(value) else {
             return Err(ConfigError::structure(
                 section,
                 "permanent remote node list is invalid",
@@ -728,7 +729,7 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
             continue;
         }
         let required = |key| valid_value(document, section, parsed.kind, key).unwrap_or_default();
-        let remote = required("remote_node");
+        let remote = document.lookup("remote_node", &[section]).unwrap_or("");
         let replacement = required("replace_permanent");
         let start = required("start_time");
         let end = required("end_time");
@@ -739,7 +740,13 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
             ));
         }
         let node = parsed.node.unwrap();
-        if remote == node {
+        let Some(schedule_nodes) = configured_node_list(remote) else {
+            return Err(ConfigError::structure(
+                section,
+                "schedule remote node list is invalid",
+            ));
+        };
+        if schedule_nodes.iter().any(|remote| *remote == node) {
             return Err(ConfigError::structure(
                 section,
                 "configured link cannot target its local node",
@@ -751,7 +758,10 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
                 "schedule references an unknown permanent link",
             ));
         };
-        if group_nodes.contains(remote) {
+        if schedule_nodes
+            .iter()
+            .any(|remote| group_nodes.contains(remote))
+        {
             return Err(ConfigError::structure(
                 section,
                 "schedule replacement must select another node",
@@ -769,11 +779,13 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
         {
             return Err(ConfigError::structure(section, "invalid schedule window"));
         }
-        if !remotes.entry(node).or_default().insert(remote) {
-            return Err(ConfigError::structure(
-                section,
-                "duplicate configured link remote node",
-            ));
+        for remote in schedule_nodes {
+            if !remotes.entry(node).or_default().insert(remote) {
+                return Err(ConfigError::structure(
+                    section,
+                    "duplicate configured link remote node",
+                ));
+            }
         }
     }
     Ok(())

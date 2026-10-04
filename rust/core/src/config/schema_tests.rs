@@ -322,6 +322,17 @@ fn permanent_remote_node_list_is_accepted_without_config_warnings() {
 }
 
 #[test]
+fn scheduled_remote_node_list_and_group_name_are_accepted_without_warnings() {
+    let source = "[524950]\n[permanent 524950 blind-hams]\nremote_node=506315,506312\n[schedule 524950 weekday-net]\nremote_node=2627,2628\ngroup_name=The Blind Hams Network\nreplace_permanent=blind-hams\nstart_time=11:00\nend_time=12:00\n";
+    let result = Schema::validate(&ConfigDocument::parse(source).unwrap());
+    assert!(
+        result.is_ok(),
+        "scheduled link groups should validate: {result:?}"
+    );
+    assert!(result.unwrap().warnings.is_empty());
+}
+
+#[test]
 fn unnamed_single_member_permanent_group_remains_valid() {
     let source = "[524950]\n[permanent 524950 home]\nremote_node=506315\n";
     assert!(
@@ -353,6 +364,16 @@ fn malformed_or_conflicting_permanent_node_lists_report_specific_errors() {
         ),
     ] {
         assert_eq!(structure_error(source).1, expected, "{source}");
+    }
+    for remote in ["2627,", "2627,,2628", "2627,not-a-node"] {
+        let source = format!(
+            "[524950]\n[permanent 524950 group]\nremote_node=506315\n[schedule 524950 net]\nremote_node={remote}\nreplace_permanent=group\nstart_time=11:00\nend_time=12:00\n"
+        );
+        assert_eq!(
+            structure_error(&source).1,
+            "schedule remote node list is invalid",
+            "{remote}"
+        );
     }
 }
 

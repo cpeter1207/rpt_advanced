@@ -12,19 +12,19 @@ pub struct RouteSpec {
     pub remote: String,
     /// Desired outside a replacement window.
     pub permanent: bool,
-    /// Owning permanent-group section label, absent for scheduled routes.
+    /// Owning configured-group identity, absent for standalone routes.
     pub group_label: Option<String>,
     /// Operator-facing group name, absent when not configured.
     pub group_name: Option<String>,
-    /// Zero-based order within the group, absent for scheduled routes.
+    /// Zero-based order within the configured group, absent for standalone routes.
     pub group_priority: Option<usize>,
 }
 /// One same-node replacement window with existing post-window inactivity behavior.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplacementSpec {
-    /// Replacement route index in this schedule.
-    pub route: usize,
-    /// Permanent route indices suppressed while this window requests its route.
+    /// Ordered replacement group route indices.
+    pub routes: Vec<usize>,
+    /// Permanent route indices suppressed while this window requests its group.
     pub replaced: Vec<usize>,
     /// Validated local date/time selection.
     pub window: ScheduledWindow,
@@ -140,21 +140,49 @@ impl LinkScheduler {
                         .any(|other| other.local == route.local && other.remote == route.remote)
             })
             || windows.iter().any(|window| {
-                window.replaced.is_empty()
-                    || window.replaced.contains(&window.route)
+                let invalid = window.routes.is_empty()
+                    || window.replaced.is_empty()
+                    || window
+                        .routes
+                        .iter()
+                        .any(|route| window.replaced.contains(route))
+                    || window
+                        .routes
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != window.routes.len()
                     || window
                         .replaced
                         .iter()
                         .collect::<std::collections::BTreeSet<_>>()
                         .len()
                         != window.replaced.len()
-                    || !routes.get(window.route).is_some_and(|route| {
-                        window.replaced.iter().all(|index| {
-                            routes.get(*index).is_some_and(|replaced| {
-                                replaced.permanent && route.local == replaced.local
-                            })
+                    || window
+                        .routes
+                        .first()
+                        .and_then(|index| routes.get(*index))
+                        .is_none_or(|first| {
+                            first.permanent
+                                || window.replaced.iter().any(|index| {
+                                    !routes.get(*index).is_some_and(|replaced| {
+                                        replaced.permanent && first.local == replaced.local
+                                    })
+                                })
+                                || (window.routes.len() > 1
+                                    && (first.group_label.is_none()
+                                        || window.routes.iter().enumerate().any(
+                                            |(priority, index)| {
+                                                !routes.get(*index).is_some_and(|route| {
+                                                    !route.permanent
+                                                        && route.local == first.local
+                                                        && route.group_label == first.group_label
+                                                        && route.group_name == first.group_name
+                                                        && route.group_priority == Some(priority)
+                                                })
+                                            },
+                                        )))
                         })
-                    })
                     || window
                         .replaced
                         .first()
@@ -164,7 +192,8 @@ impl LinkScheduler {
                                 .replaced
                                 .iter()
                                 .any(|index| routes[*index].group_label != first.group_label)
-                        })
+                        });
+                invalid
             })
         {
             return Err(SchedulerError::Invalid);
@@ -179,7 +208,13 @@ impl LinkScheduler {
                             && window.spec.warning_before_start_ms == spec.warning_before_start_ms
                             && window.spec.warning_before_end_ms == spec.warning_before_end_ms
                             && window.spec.warning_message_id == spec.warning_message_id
-                            && previous.routes[window.spec.route].spec == routes[spec.route]
+                            && window.spec.routes.len() == spec.routes.len()
+                            && window
+                                .spec
+                                .routes
+                                .iter()
+                                .zip(&spec.routes)
+                                .all(|(old, new)| previous.routes[*old].spec == routes[*new])
                             && window.spec.replaced.len() == spec.replaced.len()
                             && window.spec.replaced.iter().zip(&spec.replaced).all(
                                 |(old_index, new_index)| {
@@ -193,7 +228,8 @@ impl LinkScheduler {
                     old.windows
                         .iter()
                         .filter(|window| {
-                            old.routes[window.spec.route].spec.local == routes[spec.route].local
+                            old.routes[window.spec.routes[0]].spec.local
+                                == routes[spec.routes[0]].local
                         })
                         .filter_map(|window| window.last_activity)
                         .max()
@@ -309,7 +345,7 @@ impl LinkScheduler {
             }
         }
         for window in &mut self.windows {
-            let observed = activity(&self.routes[window.spec.route].spec.local);
+            let observed = activity(&self.routes[window.spec.routes[0]].spec.local);
             if observed
                 .is_some_and(|observed| window.last_activity.is_none_or(|last| observed > last))
             {
@@ -361,7 +397,9 @@ impl LinkScheduler {
                 }
             }
             if window_active || window.waiting {
-                self.routes[window.spec.route].desired = true;
+                for index in &window.spec.routes {
+                    self.routes[*index].desired = true;
+                }
                 for index in &window.spec.replaced {
                     self.routes[*index].desired = false;
                 }
@@ -372,7 +410,7 @@ impl LinkScheduler {
                     local,
                     second,
                     now_ms,
-                    (warning_gate.source_active)(&self.routes[window.spec.route].spec.local),
+                    (warning_gate.source_active)(&self.routes[window.spec.routes[0]].spec.local),
                     warning_gate.capacity,
                 );
             }

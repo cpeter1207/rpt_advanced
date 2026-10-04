@@ -37,8 +37,8 @@ rather than an ordinary rapid retry state. It remains blocked until fresh
 peer-advertised topology changes the relevant topology generation, a
 configuration reload changes the route policy, or an operator explicitly
 retries it. Locally generated lifecycle changes alone must not repeatedly
-unblock the route. Members of a configured permanent link group are the
-specific exception: group-owned routes bypass advertised-topology loop
+unblock the route. Members of a configured priority group are the specific
+exception: permanent and scheduled-group routes bypass advertised-topology loop
 rejection and remain eligible for silent background retry and priority
 selection. This exception does not bypass self-link checks, direct duplicate
 checks, allow/deny policy, or final current-policy validation, and does not

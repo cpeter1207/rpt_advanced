@@ -758,7 +758,7 @@ fn configured_dial_rechecks_window_boundary_and_requires_clock_only_for_windows(
         ];
         let windows = if window {
             vec![ReplacementSpec {
-                route: 1,
+                routes: vec![1],
                 replaced: vec![0],
                 window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
                 end_inactivity_ms: 0,
@@ -1022,7 +1022,7 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
             },
         ],
         vec![ReplacementSpec {
-            route: 1,
+            routes: vec![1],
             replaced: vec![0],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 0,

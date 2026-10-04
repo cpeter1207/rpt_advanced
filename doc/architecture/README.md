@@ -312,9 +312,10 @@ defines the full reload, hardware-handoff, and failure policy.
   intent and local-time replacement windows. It snapshots lock-free local/link
   receive activity and returns ordinary attach or detach work to the serialized
   control plane; it never changes a peer from a radio worker. Ordered permanent
-  link groups connect and recover each member independently, select the
-  highest-priority reachable peer for transceive, and keep other group members
-  receive-only. Connected non-selected members are advertised as direct
+  and scheduled link groups connect and recover each member independently,
+  select the highest-priority reachable peer for transceive, and keep other
+  group members receive-only. A schedule replaces the whole named permanent
+  group. Connected non-selected members are advertised as direct
   local-only (`L`) peers in topology and stats, with no routes claimed through
   them; disconnected retries remain `C`. This is reporting-only and does not
   change media routing. A winner change is atomically committed only while
@@ -439,9 +440,9 @@ defines the full reload, hardware-handoff, and failure policy.
   policy or a media queue. Its Asterisk taskprocessor backend preserves current
   FIFO execution and failure/reload behavior. Standalone media fan-in under
   ADR 0037 remains separate from that control executor.
-- A configured replacement window withdraws its named permanent route before it
-  attaches the replacement, and withdraws the replacement before restoring the
-  permanent route. Post-window quiet-time decisions use only local or linked
+- A configured replacement window withdraws its named permanent group before
+  attaching the scheduled group, and withdraws the scheduled group before
+  restoring the permanent group. Post-window quiet-time decisions use only local or linked
   receive activity. Matching replacement windows intentionally form a union;
   topology admission is their only conflict gate. ADR 0017 defines the required
   continuous route-ownership, retry-gating, and activity-presence semantics for

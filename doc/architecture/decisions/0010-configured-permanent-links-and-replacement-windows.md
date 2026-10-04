@@ -30,23 +30,31 @@ topology advertisement lists that standby as a direct `L` peer and does not
 claim routes through it. Disconnected retry entries remain `C`. These are
 reporting labels only; they do not change runtime media routing or retry policy.
 
-Use `[schedule node label]` to replace one same-node permanent link during a
-bounded local-time window. Its settings are `remote_node`,
-`replace_permanent`, `days`, `dates`, `start_time`, `end_time`, and
-`end_inactivity_ms`. The schedule names an existing same-node permanent label,
-uses an inclusive-start/exclusive-end same-day local window, and may select
-either weekdays or explicit Gregorian dates, not both.
+Use `[schedule node label]` to replace one same-node permanent link group during
+a bounded local-time window. Its `remote_node` accepts one decimal peer or an
+ordered comma-separated list, and an optional `group_name` identifies the
+scheduled group. The remaining settings are `replace_permanent`, `days`,
+`dates`, `start_time`, `end_time`, and `end_inactivity_ms`. The schedule names
+an existing same-node permanent label, uses an inclusive-start/exclusive-end
+same-day local window, and may select either weekdays or explicit Gregorian
+dates, not both.
+
+Each scheduled-group member connects and retries independently. The highest-
+priority reachable member is transceive; all other connected members are
+receive-only. A scheduled group replaces every member of the named permanent
+group as one policy transition. Its operator-facing name defaults to the
+schedule section label when `group_name` is omitted.
 
 At a window start, a schedule may first disconnect all links, temporary links,
-permanent links, or no existing links before it attaches its scheduled peer.
+permanent links, or no existing links before it attaches its scheduled group.
 Normal topology admission remains the final conflict gate.
 
-While a window is active, runtime first withdraws the named permanent route and
-then attaches the replacement. At the end, it withdraws the replacement before
-restoring the named permanent route. Zero `end_inactivity_ms` restores at the
-window end. A nonzero value means the window has stopped requiring the
-replacement, but it remains connected after local or linked receive activity
-until the configured quiet interval expires. The runtime
+While a window is active, runtime first withdraws the named permanent group and
+then attaches the scheduled group. At the end, it withdraws the scheduled group
+before restoring the named permanent group. Zero `end_inactivity_ms` restores
+at the window end. A nonzero value means the window has stopped requiring the
+replacement, but its group remains connected after local or linked receive
+activity until the configured quiet interval expires. The runtime
 reads that activity lock-free and performs all time evaluation and link work on
 the serialized control plane. A cold start within the quiet interval after a
 selected window retains the replacement for only the wall-clock interval still
@@ -76,9 +84,10 @@ Configuration reload reevaluates current local-time membership without
 redialing an unchanged issued route. Configuration errors reject self-links,
 duplicate configured remote identities for a node (including duplicates
 across groups), empty or malformed group members, unknown replacement labels,
-and a replacement that names its permanent peer again. Multiple matching
-replacement windows intentionally form a union: every matching or deferred
-replacement is requested and every named primary is suppressed. They have no
+and a replacement group that contains a member of its permanent group.
+Multiple matching replacement windows intentionally form a union: every
+matching or deferred replacement is requested and every named primary is
+suppressed. They have no
 exclusive arbitration beyond normal direct-link topology admission; an overlap
 must not be used to select one replacement route. Group members bypass
 advertised-topology loop rejection so every configured member can remain
@@ -86,12 +95,12 @@ available for priority selection. Direct self/duplicate identity checks and
 allow/deny policy remain in force. Warning timing and civil-time behavior are
 defined by ADRs 0009 and 0017.
 
-## Implementation status — 2026-10-03
+## Implementation status — 2026-10-04
 
-Ordered permanent groups, independent retries, silent standby membership,
-atomic input-idle winner selection, local-only topology/status reporting for
-connected standby members, schedule replacement, and configured
-disconnect-mode choices are implemented. The wishlist tracks the separate
-request for `*806`/`*816` to affect only permanent links; current all-link
+Ordered permanent and scheduled groups, independent retries, silent standby
+membership, atomic input-idle winner selection, local-only topology/status
+reporting for connected standby members, full-group schedule replacement, and
+configured disconnect-mode choices are implemented. The wishlist tracks the
+separate request for `*806`/`*816` to affect only permanent links; current all-link
 disconnect/reconnect behavior above remains in effect until that work is
 implemented.

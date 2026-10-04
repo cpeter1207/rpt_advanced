@@ -25,7 +25,7 @@ fn scheduler() -> LinkScheduler {
             },
         ],
         vec![ReplacementSpec {
-            route: 1,
+            routes: vec![1],
             replaced: vec![0],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 60000,
@@ -439,6 +439,8 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
         );
     }
     for invalid in [
+        "empty_routes",
+        "duplicate_routes",
         "empty_replaced",
         "duplicate_replaced",
         "same",
@@ -450,16 +452,79 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
         let mut routes = old.route_specs();
         let mut windows = old.window_specs();
         match invalid {
+            "empty_routes" => windows[0].routes.clear(),
+            "duplicate_routes" => {
+                let route = windows[0].routes[0];
+                windows[0].routes.push(route);
+            }
             "empty_replaced" => windows[0].replaced.clear(),
             "duplicate_replaced" => windows[0].replaced.push(0),
-            "same" => windows[0].route = windows[0].replaced[0],
+            "same" => windows[0].routes[0] = windows[0].replaced[0],
             "missing_primary" => windows[0].replaced = vec![2],
-            "missing_replacement" => windows[0].route = 2,
+            "missing_replacement" => windows[0].routes[0] = 2,
             "temporary_primary" => routes[0].permanent = false,
             _ => routes[1].local = "other".into(),
         }
         assert!(
             LinkScheduler::new(2, routes, windows, Some(&old)).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn candidate_validation_requires_scheduled_lists_to_be_one_ordered_group() {
+    for invalid in [
+        "missing_group",
+        "wrong_priority",
+        "different_name",
+        "different_group",
+        "different_local",
+    ] {
+        let mut routes = vec![
+            RouteSpec {
+                local: "524950".into(),
+                remote: "2000".into(),
+                permanent: true,
+                group_label: Some("primary".into()),
+                group_name: None,
+                group_priority: Some(0),
+            },
+            RouteSpec {
+                local: "524950".into(),
+                remote: "3000".into(),
+                permanent: false,
+                group_label: Some("schedule:net".into()),
+                group_name: Some("Net".into()),
+                group_priority: Some(0),
+            },
+            RouteSpec {
+                local: "524950".into(),
+                remote: "4000".into(),
+                permanent: false,
+                group_label: Some("schedule:net".into()),
+                group_name: Some("Net".into()),
+                group_priority: Some(1),
+            },
+        ];
+        match invalid {
+            "missing_group" => routes[1].group_label = None,
+            "wrong_priority" => routes[2].group_priority = Some(2),
+            "different_name" => routes[2].group_name = Some("Other".into()),
+            "different_group" => routes[2].group_label = Some("schedule:other".into()),
+            _ => routes[2].local = "other".into(),
+        }
+        let windows = vec![ReplacementSpec {
+            routes: vec![1, 2],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        }];
+        assert!(
+            LinkScheduler::new(1, routes, windows, None).is_err(),
             "{invalid}"
         );
     }
@@ -546,7 +611,7 @@ fn scheduled_replacement_suppresses_and_restores_every_group_member() {
         1,
         routes,
         vec![ReplacementSpec {
-            route: 3,
+            routes: vec![3],
             replaced: vec![0, 1, 2],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 0,

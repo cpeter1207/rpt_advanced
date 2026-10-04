@@ -1371,17 +1371,22 @@ fn prepare_links(
             .map(|(_, indices)| indices.clone())
             .ok_or(RuntimeError::Preparation)?;
         // Schema validation rejects duplicate remotes across permanent links and windows.
-        let route = routes.len();
-        routes.push(RouteSpec {
-            local: node.as_str().into(),
-            remote: settings.remote_node,
-            permanent: false,
-            group_label: None,
-            group_name: None,
-            group_priority: None,
-        });
+        let first_route = routes.len();
+        let group_label = format!("schedule:{}", settings.name);
+        let group_name = Some(settings.group_name.unwrap_or_else(|| settings.name.clone()));
+        for (priority, remote) in settings.remote_nodes.into_iter().enumerate() {
+            routes.push(RouteSpec {
+                local: node.as_str().into(),
+                remote,
+                permanent: false,
+                group_label: Some(group_label.clone()),
+                group_name: group_name.clone(),
+                group_priority: Some(priority),
+            });
+        }
+        let scheduled_routes = (first_route..routes.len()).collect();
         windows.push(ReplacementSpec {
-            route,
+            routes: scheduled_routes,
             replaced,
             window: ScheduledWindow::parse(
                 Some(&settings.days),

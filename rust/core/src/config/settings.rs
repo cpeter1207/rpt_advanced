@@ -229,8 +229,10 @@ pub struct ResolvedPermanentLinkSettings {
 pub struct ResolvedScheduleSettings {
     /// Window label.
     pub name: String,
-    /// Replacement remote node.
-    pub remote_node: String,
+    /// Ordered replacement nodes, with index zero at highest priority.
+    pub remote_nodes: Vec<String>,
+    /// Optional display name for this scheduled-link group.
+    pub group_name: Option<String>,
     /// Permanent label replaced by the window.
     pub replace_permanent: String,
     /// Optional weekday selector.
@@ -658,7 +660,15 @@ impl ResolvedScheduleSettings {
         };
         let value = Self {
             name: label.to_owned(),
-            remote_node: get("remote_node"),
+            remote_nodes: get("remote_node")
+                .split(',')
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect(),
+            group_name: document
+                .lookup("group_name", &[section.as_str()])
+                .filter(|value| !value.trim().is_empty() && value.len() <= 63)
+                .map(str::to_owned),
             replace_permanent: get("replace_permanent"),
             days: document
                 .lookup("days", &[section.as_str()])
@@ -689,7 +699,7 @@ impl ResolvedScheduleSettings {
                 .filter(|value| *value == "scheduled-link-change")
                 .map(str::to_owned),
         };
-        if value.remote_node.is_empty() {
+        if value.remote_nodes.is_empty() || value.remote_nodes.iter().any(String::is_empty) {
             return Err(ConfigError::structure(
                 &section,
                 "schedule remote node, replacement, start time, and end time are required",
