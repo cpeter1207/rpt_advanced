@@ -137,6 +137,32 @@ fn windows_support_date_selectors_and_inclusive_start_exclusive_end() {
 }
 
 #[test]
+fn scheduled_windows_detect_time_and_calendar_overlap() {
+    let coffee = ScheduledWindow::parse(Some("Monday-Friday"), None, "09:30", "11:00").unwrap();
+    let monday_evening = ScheduledWindow::parse(Some("Monday"), None, "20:00", "21:30").unwrap();
+    let weekday_lunch =
+        ScheduledWindow::parse(Some("Monday-Friday"), None, "11:00", "12:00").unwrap();
+    let explicit_monday =
+        ScheduledWindow::parse(None, Some("2026-10-05"), "10:00", "10:30").unwrap();
+    let explicit_sunday =
+        ScheduledWindow::parse(None, Some("2026-10-04"), "10:00", "10:30").unwrap();
+    let explicit_monday_again =
+        ScheduledWindow::parse(None, Some("2026-10-05"), "10:15", "10:45").unwrap();
+    let daily = ScheduledWindow::parse(None, None, "10:00", "10:30").unwrap();
+    let saturday = ScheduledWindow::parse(Some("Saturday"), None, "10:00", "10:30").unwrap();
+
+    assert!(!coffee.overlaps(&monday_evening));
+    assert!(!coffee.overlaps(&weekday_lunch));
+    assert!(coffee.overlaps(&explicit_monday));
+    assert!(explicit_monday.overlaps(&coffee));
+    assert!(!coffee.overlaps(&explicit_sunday));
+    assert!(explicit_monday.overlaps(&explicit_monday_again));
+    assert!(!explicit_monday.overlaps(&explicit_sunday));
+    assert!(daily.overlaps(&coffee));
+    assert!(!coffee.overlaps(&saturday));
+}
+
+#[test]
 fn windows_accept_case_insensitive_wrapping_weekday_ranges_and_reject_malformed_selectors() {
     let window = ScheduledWindow::parse(Some(" Friday - Monday "), None, "00:00", "00:01").unwrap();
     for weekday in [

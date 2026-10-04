@@ -252,6 +252,31 @@ pub struct ScheduledWindow {
 }
 
 impl ScheduledWindow {
+    /// Whether two bounded same-date windows can be active at the same local civil minute.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        if self.start_minute >= other.end_minute || other.start_minute >= self.end_minute {
+            return false;
+        }
+        match (self.dates.is_empty(), other.dates.is_empty()) {
+            (false, false) => self.dates.iter().any(|date| other.dates.contains(date)),
+            (false, true) => self
+                .dates
+                .iter()
+                .any(|date| other.matches_date_weekday(*date)),
+            (true, false) => other
+                .dates
+                .iter()
+                .any(|date| self.matches_date_weekday(*date)),
+            (true, true) => {
+                selected_weekdays(self.weekday_mask) & selected_weekdays(other.weekday_mask) != 0
+            }
+        }
+    }
+
+    fn matches_date_weekday(&self, date: CivilDate) -> bool {
+        self.weekday_mask == 0 || self.weekday_mask & (1 << date.weekday()) != 0
+    }
+
     /// Milliseconds until the next selected inclusive start and its date identity.
     pub(crate) fn next_start(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
         self.next_boundary(local, second, u64::from(self.start_minute) * 60)
@@ -399,6 +424,14 @@ impl CivilDate {
             .sum();
         365 * year + leap_days + month_days + u64::from(self.day - 1)
     }
+
+    fn weekday(&self) -> u8 {
+        ((self.ordinal() + 1) % 7) as u8
+    }
+}
+
+fn selected_weekdays(mask: u8) -> u8 {
+    if mask == 0 { 0x7f } else { mask }
 }
 
 fn parse_clock(text: &str) -> Result<(u8, u8), ScheduleError> {

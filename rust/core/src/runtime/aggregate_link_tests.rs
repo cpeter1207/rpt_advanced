@@ -94,3 +94,42 @@ fn scheduled_link_group_expands_ordered_members_and_replaces_the_primary_group()
     }
     assert!(schedule.next_operation().is_none());
 }
+
+#[test]
+fn named_nets_can_reuse_peers_in_separate_local_time_windows() {
+    let document = ConfigDocument::parse(
+        "[524950]\n[permanent 524950 blind-hams]\n\
+         remote_node=506315,506312,506310,506311,506313,506314\n\
+         group_name=The Blind Hams Network\n\
+         [schedule 524950 coffeebreak_net]\nremote_node=51018\n\
+         group_name=Coffeebreak Net\nreplace_permanent=blind-hams\n\
+         days=Monday-Friday\nstart_time=09:30\nend_time=11:00\n\
+         [schedule 524950 handiham_radio_club_net]\nremote_node=2627\n\
+         group_name=Handiham Radio Club Net\nreplace_permanent=blind-hams\n\
+         days=Monday-Friday\nstart_time=11:00\nend_time=12:00\n\
+         [schedule 524950 all_nodes_net]\nremote_node=51018\n\
+         group_name=All Nodes Net\nreplace_permanent=blind-hams\n\
+         days=Monday\nstart_time=20:00\nend_time=21:30\n\
+         [schedule 524950 science_net]\nremote_node=517300\n\
+         group_name=Science Net\nreplace_permanent=blind-hams\n\
+         days=Saturday\nstart_time=20:00\nend_time=22:00\n\
+         [schedule 524950 handiham_trivia_net]\nremote_node=2627\n\
+         group_name=Handiham Trivia Net\nreplace_permanent=blind-hams\n\
+         days=Wednesday\nstart_time=19:00\nend_time=20:30\n",
+    )
+    .unwrap();
+
+    let scheduler = prepare_links(&document, &NodeId::new("524950").unwrap(), 1, None).unwrap();
+    assert_eq!(scheduler.window_specs().len(), 5);
+    assert_eq!(
+        scheduler
+            .route_specs()
+            .iter()
+            .map(|route| route.remote.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "506315", "506312", "506310", "506311", "506313", "506314", "51018", "2627", "51018",
+            "517300", "2627"
+        ]
+    );
+}

@@ -1370,7 +1370,7 @@ fn prepare_links(
             .find(|(label, _)| label == &settings.replace_permanent)
             .map(|(_, indices)| indices.clone())
             .ok_or(RuntimeError::Preparation)?;
-        // Schema validation rejects duplicate remotes across permanent links and windows.
+        // Schema validation rejects permanent conflicts and overlapping scheduled peers.
         let first_route = routes.len();
         let group_label = format!("schedule:{}", settings.name);
         let group_name = Some(settings.group_name.unwrap_or_else(|| settings.name.clone()));

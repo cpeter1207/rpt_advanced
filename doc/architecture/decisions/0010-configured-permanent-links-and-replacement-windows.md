@@ -82,9 +82,11 @@ route and window model.
 
 Configuration reload reevaluates current local-time membership without
 redialing an unchanged issued route. Configuration errors reject self-links,
-duplicate configured remote identities for a node (including duplicates
-across groups), empty or malformed group members, unknown replacement labels,
-and a replacement group that contains a member of its permanent group.
+permanent-link duplicates, a scheduled peer that duplicates a permanent peer,
+and a scheduled peer repeated in overlapping windows. The same scheduled peer
+may be reused by distinct non-overlapping windows. Empty or malformed group
+members, unknown replacement labels, and a replacement group that contains a
+member of its permanent group are also rejected.
 Multiple matching replacement windows intentionally form a union: every
 matching or deferred replacement is requested and every named primary is
 suppressed. They have no

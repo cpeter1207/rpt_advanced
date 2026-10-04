@@ -117,6 +117,44 @@ pub struct LinkScheduler {
     routes: Vec<Route>,
     windows: Vec<Window>,
 }
+
+fn same_route_identity(left: &RouteSpec, right: &RouteSpec) -> bool {
+    left.local == right.local
+        && left.remote == right.remote
+        && left.permanent == right.permanent
+        && left.group_label == right.group_label
+}
+
+fn duplicate_routes_overlap(routes: &[RouteSpec], windows: &[ReplacementSpec]) -> bool {
+    for (index, route) in routes.iter().enumerate() {
+        for (other_index, other) in routes[..index].iter().enumerate() {
+            if route.local != other.local || route.remote != other.remote {
+                continue;
+            }
+            if route.permanent || other.permanent || route.group_label == other.group_label {
+                return true;
+            }
+            let route_windows = windows
+                .iter()
+                .filter(|window| window.routes.contains(&index));
+            let other_windows = windows
+                .iter()
+                .filter(|window| window.routes.contains(&other_index));
+            let route_windows: Vec<_> = route_windows.map(|window| &window.window).collect();
+            let other_windows: Vec<_> = other_windows.map(|window| &window.window).collect();
+            if route_windows.is_empty()
+                || other_windows.is_empty()
+                || route_windows
+                    .iter()
+                    .any(|window| other_windows.iter().any(|other| window.overlaps(other)))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl LinkScheduler {
     /// Whether final link publication must refresh civil-time window policy.
     pub fn requires_civil_time(&self) -> bool {
@@ -131,13 +169,9 @@ impl LinkScheduler {
     ) -> Result<Self, SchedulerError> {
         if generation == 0
             || previous.is_some_and(|old| generation <= old.generation)
-            || routes.iter().enumerate().any(|(index, route)| {
-                route.local.is_empty()
-                    || route.remote.is_empty()
-                    || route.local == route.remote
-                    || routes[..index]
-                        .iter()
-                        .any(|other| other.local == route.local && other.remote == route.remote)
+            || duplicate_routes_overlap(&routes, &windows)
+            || routes.iter().any(|route| {
+                route.local.is_empty() || route.remote.is_empty() || route.local == route.remote
             })
             || windows.iter().any(|window| {
                 let invalid = window.routes.is_empty()
@@ -252,9 +286,9 @@ impl LinkScheduler {
             .into_iter()
             .map(|spec| {
                 let old = previous.and_then(|old| {
-                    old.routes.iter().find(|route| {
-                        route.spec.local == spec.local && route.spec.remote == spec.remote
-                    })
+                    old.routes
+                        .iter()
+                        .find(|route| same_route_identity(&route.spec, &spec))
                 });
                 Route {
                     desired: spec.permanent,
@@ -296,9 +330,10 @@ impl LinkScheduler {
             .iter()
             .filter(|old| {
                 old.issued
-                    && !candidate.routes.iter().any(|new| {
-                        new.spec.local == old.spec.local && new.spec.remote == old.spec.remote
-                    })
+                    && !candidate
+                        .routes
+                        .iter()
+                        .any(|new| same_route_identity(&new.spec, &old.spec))
             })
             .map(|old| old.spec.clone())
             .collect()

@@ -683,7 +683,8 @@ fn named_visible(document: &ConfigDocument, family: &str, node: &str, label: &st
 
 fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
     let mut permanent: BTreeMap<&str, BTreeMap<&str, BTreeSet<&str>>> = BTreeMap::new();
-    let mut remotes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut permanent_remotes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut scheduled_remotes: BTreeMap<&str, Vec<(String, ScheduledWindow)>> = BTreeMap::new();
     for section in unique_sections(document) {
         let parsed = scope::parse_scope(section).expect("section grammar checked");
         if parsed.kind != ScopeKind::PermanentNode {
@@ -710,7 +711,7 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
                     "configured link cannot target its local node",
                 ));
             }
-            if !remotes.entry(node).or_default().insert(remote) {
+            if !permanent_remotes.entry(node).or_default().insert(remote) {
                 return Err(ConfigError::structure(
                     section,
                     "duplicate configured link remote node",
@@ -769,23 +770,29 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
         }
         let days = valid_value(document, section, parsed.kind, "days").unwrap_or_default();
         let dates = valid_value(document, section, parsed.kind, "dates").unwrap_or_default();
-        if ScheduledWindow::parse(
+        let Ok(window) = ScheduledWindow::parse(
             (!days.is_empty()).then_some(days),
             (!dates.is_empty()).then_some(dates),
             start,
             end,
-        )
-        .is_err()
-        {
+        ) else {
             return Err(ConfigError::structure(section, "invalid schedule window"));
-        }
+        };
+        let scheduled_for_node = scheduled_remotes.entry(node).or_default();
         for remote in schedule_nodes {
-            if !remotes.entry(node).or_default().insert(remote) {
+            if permanent_remotes
+                .get(node)
+                .is_some_and(|configured| configured.contains(remote))
+                || scheduled_for_node.iter().any(|(configured, previous)| {
+                    configured == remote && previous.overlaps(&window)
+                })
+            {
                 return Err(ConfigError::structure(
                     section,
                     "duplicate configured link remote node",
                 ));
             }
+            scheduled_for_node.push((remote.to_owned(), window.clone()));
         }
     }
     Ok(())

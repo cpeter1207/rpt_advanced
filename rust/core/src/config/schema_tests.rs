@@ -497,6 +497,11 @@ fn structural_errors_cover_bounded_labels_missing_macros_and_colliding_schedules
         .1,
         "duplicate configured link remote node"
     );
+    let repeated_peer = format!(
+        "{primary}[schedule 1000 morning]\nremote_node=3000\nreplace_permanent=primary\ndays=Monday-Friday\nstart_time=09:30\nend_time=11:00\n\
+         [schedule 1000 evening]\nremote_node=3000\nreplace_permanent=primary\ndays=Monday\nstart_time=20:00\nend_time=21:30\n"
+    );
+    assert!(ConfigDocument::parse(&repeated_peer).is_ok());
     for missing in ["remote_node", "replace_permanent", "start_time", "end_time"] {
         let complete = schedule("incomplete", "3000");
         let incomplete = complete

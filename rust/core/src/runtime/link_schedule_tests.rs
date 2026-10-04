@@ -38,6 +38,63 @@ fn scheduler() -> LinkScheduler {
     .unwrap()
 }
 
+#[test]
+fn separate_nonoverlapping_windows_may_share_a_scheduled_peer() {
+    let routes = vec![
+        RouteSpec {
+            local: "524950".into(),
+            remote: "2000".into(),
+            permanent: true,
+            group_label: Some("blind-hams".into()),
+            group_name: None,
+            group_priority: Some(0),
+        },
+        RouteSpec {
+            local: "524950".into(),
+            remote: "3000".into(),
+            permanent: false,
+            group_label: Some("schedule:morning".into()),
+            group_name: Some("Morning".into()),
+            group_priority: Some(0),
+        },
+        RouteSpec {
+            local: "524950".into(),
+            remote: "3000".into(),
+            permanent: false,
+            group_label: Some("schedule:evening".into()),
+            group_name: Some("Evening".into()),
+            group_priority: Some(0),
+        },
+    ];
+    let windows = vec![
+        ReplacementSpec {
+            routes: vec![1],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(Some("Monday-Friday"), None, "09:30", "11:00").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        },
+        ReplacementSpec {
+            routes: vec![2],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(Some("Monday"), None, "20:00", "21:30").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        },
+    ];
+
+    assert!(LinkScheduler::new(1, routes.clone(), windows.clone(), None).is_ok());
+
+    let mut overlapping = windows;
+    overlapping[1].window =
+        ScheduledWindow::parse(Some("Monday-Friday"), None, "10:00", "11:30").unwrap();
+    assert!(LinkScheduler::new(1, routes, overlapping, None).is_err());
+}
+
 fn warning_scheduler(start: &[u64], end: &[u64]) -> LinkScheduler {
     let mut schedule = scheduler();
     schedule.windows[0].spec.warning_before_start_ms = start.to_vec();
