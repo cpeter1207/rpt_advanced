@@ -27,6 +27,8 @@ pub struct ResolvedNodeSettings {
     pub full_duplex: bool,
     /// Whether completed local DTMF frames are muted.
     pub dtmf_muting: bool,
+    /// Whether this node records and replays receive bursts after unkey.
+    pub parrot_enabled: bool,
     /// Extra receive-to-transmit delay used for squelch-tail and DTMF lookback.
     pub squelch_delay_ms: u64,
     /// Interval for publishing receive/transmit meter snapshots.
@@ -1095,6 +1097,7 @@ impl ResolvedNodeSettings {
         boolean!(enabled, "node_enabled");
         boolean!(full_duplex, "full_duplex");
         boolean!(dtmf_muting, "dtmf_muting");
+        boolean!(parrot_enabled, "parrot_enabled");
         number!(squelch_delay_ms, "squelch_delay_ms");
         if let Some(parsed) =
             lookup_valid(document, "status_snapshot_interval_ms", &scopes, |raw| {
@@ -1177,6 +1180,7 @@ impl ResolvedNodeSettings {
             enabled: true,
             full_duplex: true,
             dtmf_muting: true,
+            parrot_enabled: false,
             squelch_delay_ms: 0,
             status_snapshot_interval_ms: 50,
             hang_ms: 0,

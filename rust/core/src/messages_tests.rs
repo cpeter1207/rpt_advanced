@@ -14,6 +14,20 @@ fn message_catalog_formats_all_variants_with_typed_arguments() {
 }
 
 #[test]
+fn message_catalog_formats_parrot_level_report_in_all_required_forms() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let forms = catalog
+        .format(&Message::ParrotLevels {
+            peak_dbfs: -3,
+            rms_dbfs: -18,
+        })
+        .unwrap();
+    assert_eq!(forms.text, "Peak level -3 dBFS. RMS level -18 dBFS.");
+    assert_eq!(forms.tts, "Peak level -3 dBFS. RMS level -18 dBFS.");
+    assert_eq!(forms.morse, "PEAK -3 DBFS RMS -18 DBFS");
+}
+
+#[test]
 fn message_catalog_formats_third_party_link_wording_and_link_status_arguments() {
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
     let connected = catalog

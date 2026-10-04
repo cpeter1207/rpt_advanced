@@ -32,6 +32,7 @@ const REQUIRED_IDS: &[&str] = &[
     "priority-group-unavailable",
     "scheduled-link-change",
     "duration-seconds",
+    "parrot-levels",
 ];
 
 /// A typed built-in RF message request; callers cannot select arbitrary Fluent IDs.
@@ -124,6 +125,13 @@ pub enum Message<'a> {
     DurationSeconds {
         /// Rounded-up remaining seconds.
         seconds: u64,
+    },
+    /// Report the retained receive burst's peak and RMS levels.
+    ParrotLevels {
+        /// Peak dBFS rounded to the nearest integer.
+        peak_dbfs: i32,
+        /// RMS dBFS rounded to the nearest integer.
+        rms_dbfs: i32,
     },
 }
 
@@ -323,6 +331,7 @@ impl Message<'_> {
             Self::PriorityGroupUnavailable { .. } => "priority-group-unavailable",
             Self::ScheduledLinkChange { .. } => "scheduled-link-change",
             Self::DurationSeconds { .. } => "duration-seconds",
+            Self::ParrotLevels { .. } => "parrot-levels",
         }
     }
 
@@ -381,6 +390,13 @@ impl Message<'_> {
                 args.set("time_remaining", *time_remaining);
             }
             Self::DurationSeconds { seconds } => args.set("seconds", *seconds as i64),
+            Self::ParrotLevels {
+                peak_dbfs,
+                rms_dbfs,
+            } => {
+                args.set("peak_dbfs", i64::from(*peak_dbfs));
+                args.set("rms_dbfs", i64::from(*rms_dbfs));
+            }
         }
         args
     }
@@ -459,6 +475,10 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
         "priority-group-unavailable" => args.set("group", "test group"),
         "scheduled-link-change" => args.set("time_remaining", "60 seconds"),
         "duration-seconds" => args.set("seconds", 60),
+        "parrot-levels" => {
+            args.set("peak_dbfs", -3);
+            args.set("rms_dbfs", -18);
+        }
         _ => {}
     }
     args

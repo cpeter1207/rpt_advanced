@@ -596,6 +596,21 @@ fn squelch_delay_inherits_and_defaults_to_zero() {
 }
 
 #[test]
+fn parrot_enabled_defaults_off_and_inherits_with_node_precedence() {
+    let node = NodeId::new("1000").unwrap();
+    let resolved = |text: &str| {
+        ResolvedNodeSettings::resolve(&ConfigDocument::parse(text).unwrap(), &node)
+            .unwrap()
+            .value
+            .parrot_enabled
+    };
+    assert!(!resolved("[1000]\n"));
+    assert!(resolved("[general]\nparrot_enabled=yes\n[1000]\n"));
+    assert!(!resolved("[general]\nparrot_enabled=yes\n[1000]\nparrot_enabled=no\n"));
+    assert!(resolved("[general]\nparrot_enabled=yes\n[1000]\nparrot_enabled=invalid\n"));
+}
+
+#[test]
 fn identifier_set_overrides_node_and_flat_defaults_including_empty_media() {
     let document = ConfigDocument::parse(
         "[node]\n[identifier]\ninterval_ms=600000\nsound_file=flat.wav\n[identifier node]\ninterval_ms=120000\nsound_file=node.wav\n[identifier node id]\ninterval_ms=60000\nsound_file=\n",

@@ -1,7 +1,6 @@
 # RPT Advanced parrot with level report
 
-Status: Design approved by the product owner on 2026-10-04; awaiting written
-spec review before implementation planning.
+Status: Approved by the product owner on 2026-10-04.
 
 ## Purpose and scope
 
@@ -26,7 +25,8 @@ new link protocol.
 - When every input source unkeys, queue one response. A peer disconnect is
   equivalent to that peer unkeying. Retain the first 30 seconds; continue
   tracking the burst until all sources unkey. Calculate peak and RMS over the
-  retained samples only, in dBFS, rounded to the nearest integer.
+  retained samples only, in dBFS, rounded to the nearest integer. Report a
+  digital-silence measurement as -120 dBFS so the spoken value remains finite.
 - Play an i18n-backed spoken peak/RMS report followed by the retained audio.
   Use the node's resolved speech voice, speed, and level. If speech cannot be
   synthesized, play the recording alone.
@@ -78,10 +78,11 @@ slice is zero for every non-parrot media source. No direct peer queue writes
 are introduced in the radio callback.
 
 Allocate two fixed 30-second capture buffers per node generation: one may be
-recorded while the other is owned by control/media preparation. This bounds
-memory to approximately 11 MiB per node and allows an interrupted response to
-be replaced without callback allocation. The no-free-slot policy is the
-bounded discard rule above.
+recorded while the other is owned by control/media preparation. The capture
+pool uses approximately 11 MiB per node; at most one additional 5.5 MiB
+prepared playback copy is retained. This bounds parrot storage to about 17 MiB
+per node and allows an interrupted response to be replaced without callback
+allocation. The no-free-slot policy is the bounded discard rule above.
 
 ## Localization and level reporting
 

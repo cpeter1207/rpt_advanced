@@ -144,3 +144,8 @@ duration-seconds =
     .text = { $seconds } seconds
     .tts = { $seconds } seconds
     .morse = { $seconds } SECONDS
+
+parrot-levels =
+    .text = Peak level { $peak_dbfs } dBFS. RMS level { $rms_dbfs } dBFS.
+    .tts = Peak level { $peak_dbfs } dBFS. RMS level { $rms_dbfs } dBFS.
+    .morse = PEAK { $peak_dbfs } DBFS RMS { $rms_dbfs } DBFS

@@ -2,6 +2,7 @@
 
 mod announcement;
 mod courtesy;
+mod parrot;
 mod telemetry;
 mod timeout;
 
@@ -10,6 +11,7 @@ pub use announcement::Announcement;
 use announcement::AnnouncementState;
 use courtesy::CourtesyPlanner;
 pub use courtesy::CourtesySettings;
+pub use parrot::ParrotLevels;
 pub use telemetry::{
     ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PreparedMedia,
     StatusRejected,

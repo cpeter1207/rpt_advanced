@@ -182,6 +182,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
             "node_enabled"
                 | "full_duplex"
                 | "dtmf_muting"
+                | "parrot_enabled"
                 | "squelch_delay_ms"
                 | "status_snapshot_interval_ms"
                 | "transmit_hang_ms"
@@ -314,6 +315,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "node_enabled"
         | "full_duplex"
         | "dtmf_muting"
+        | "parrot_enabled"
         | "first_key_only"
         | "regardless_of_activity"
         | "polite" => parse::boolean(value).is_some(),
@@ -386,6 +388,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "node_enabled" | "full_duplex" | "dtmf_muting") => {
             "yes"
         }
+        (ScopeKind::General | ScopeKind::Node, "parrot_enabled") => "no",
         (ScopeKind::General | ScopeKind::Node, "transmit_hang_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "transmit_timeout_ms") => "180000",
         (ScopeKind::General | ScopeKind::Node, "timeout_lockout_ms") => "30000",
