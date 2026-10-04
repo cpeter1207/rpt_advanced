@@ -102,7 +102,12 @@ defined by ADRs 0009 and 0017.
 Ordered permanent and scheduled groups, independent retries, silent standby
 membership, atomic input-idle winner selection, local-only topology/status
 reporting for connected standby members, full-group schedule replacement, and
-configured disconnect-mode choices are implemented. The wishlist tracks the
-separate request for `*806`/`*816` to affect only permanent links; current all-link
+configured disconnect-mode choices are implemented. The same scheduled peer
+is accepted in multiple windows only when those windows are disjoint; duplicate
+peer routes in overlapping windows remain invalid. Schema, scheduler, and
+configuration-integration tests cover that distinction. Five disjoint net
+windows are configured on node 524950, including the adjacent weekday
+Coffee Break and Handiham windows. The wishlist tracks the separate request for
+`*806`/`*816` to affect only permanent links; current all-link
 disconnect/reconnect behavior above remains in effect until that work is
 implemented.

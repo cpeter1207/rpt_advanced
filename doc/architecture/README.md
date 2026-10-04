@@ -323,7 +323,9 @@ defines the full reload, hardware-handoff, and failure policy.
   selection and total group unavailability are announced; retries, standby
   changes, and subsequent winner handoffs are silent. Scheduled warnings use
   the expected start/end or inactivity deadline, skip active input, and remain
-  serialized with other telemetry.
+  serialized with other telemetry. The same peer may appear in multiple
+  schedules only when their local-time windows do not overlap; overlapping
+  duplicate peer routes are rejected during validation.
 - `rust/core/src/link/`, `rust/product/src/link/`, and `rust/asterisk/src/link/` implement
   AllStarLink admission, peer media, topology, advisory keyed-source queries,
   and permitted DTMF control. A direct receive edge starts the canonical

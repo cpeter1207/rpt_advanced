@@ -263,10 +263,14 @@ None.
 
 **Decisions recorded**
 
-- Current behavior is broader: `*806` disconnects all current links and holds
-  configuration-owned routes; `*816` re-evaluates configured routes and
-  restores links saved by disconnect-all. This permanent-only behavior remains
-  unimplemented.
+- Configured permanent links, priority failover groups, and scheduled
+  replacement groups are implemented under ADR 0010. A scheduled peer may be
+  reused in disjoint windows; overlapping windows for the same peer are
+  rejected.
+- The remaining gap is narrower than the original request: `*806` still
+  disconnects all current links and holds configuration-owned routes, while
+  `*816` re-evaluates configured routes and restores links saved by
+  disconnect-all. Permanent-only `*806`/`*816` behavior remains unimplemented.
 
 **Material decisions needed before implementation**
 
