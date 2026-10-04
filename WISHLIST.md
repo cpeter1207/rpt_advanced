@@ -184,6 +184,11 @@ None.
 
 - Use the adapter's per-callback scheduling and xrun statistics when comparing
   quiescent and loaded operation; do not infer a cause from an xrun alone.
+- Implementation status — 2026-10-04: callback duration, late-start, and
+  separate capture/playback xrun timestamp observability is implemented in the
+  PortAudio/ALSA adapter. The controlled quiescent-versus-CPU/I/O-load
+  comparison has not been documented as completed, so that diagnostic study
+  remains open.
 
 **Material decisions needed before implementation**
 
@@ -343,37 +348,6 @@ None.
   authentication, matching read-only status access.
 - Use a maintained Rust code-first OpenAPI generator and schema annotations.
   Tests fail if any routed REST endpoint lacks a documented operation.
-
-### AllStarLink statistics status posting
-
-**Requirements**
-
-- Publish each configured node's live status to the AllStarLink statistics
-  service using the existing ASL3 status-post contract.
-- Configure `statpost_url` per node, with a `[general]` default inherited by
-  named node sections. No configured URL disables reporting; an empty node
-  override clears the inherited URL.
-- Configure `statpost_time` globally or per node, default 60 seconds and valid
-  from 30 through 600 seconds.
-- Report supported link and transmitter-key state promptly on changes and
-  periodically. Publish network requests outside real-time audio callbacks and
-  keep pending status bounded/coalesced.
-- Keep this compatible with standalone operation and reload without requiring
-  Asterisk or ASL3-specific dependencies in the controller.
-
-**Decisions recorded**
-
-- Use the ASL3 GET/query-parameter format rather than defining a new JSON
-  protocol.
-- Use ASL3's `statpost_url` and `statpost_time` names, global defaults, and
-  per-node overrides; an absent URL disables posting.
-- Send prompt coalesced updates for state changes and periodic snapshots;
-  never block audio processing on network I/O.
-- Omit status counters that `rpt_advanced` cannot accurately provide.
-
-**Material decisions needed before implementation**
-
-None.
 
 ### Mode- and frequency-agile remote base
 
@@ -645,6 +619,12 @@ None.
 - A verified shared-clock adapter may invoke those workers back-to-back in one
   full-duplex callback with a local-ring target reserve equal only to configured
   squelch delay under ADR 0027.
+- Implementation status — 2026-10-04: `librptadvradio` and the versioned
+  PortAudio/ALSA adapter exist as separately packaged shared objects, and
+  USBRadioPlus dynamically links them. `rpt_advanced` still integrates with
+  USBRadioPlus through the `RadioPlusAdvanced` Asterisk channel and does not
+  directly link/use those two components. This entry remains partial until
+  that adapter boundary is implemented and verified.
 
 ### Independently versioned radio components
 
@@ -682,6 +662,12 @@ None.
   adapter-supplied pin I/O, rather than direct Linux device access.
 - Extraction order is squelch, CTCSS, DCS, then GPIO/parallel-port control.
   Audio-device control remains deferred until its boundary is defined.
+- Implementation status — 2026-10-04: independently released PCM-ring,
+  samplerate, FFmpeg, RNNoise, GPIO/parallel, PortAudio/ALSA, and portable radio
+  core components are present. Squelch, CTCSS encode/decode, and DCS
+  encode/decode remain implemented inside `librptadvradio`. The generic
+  audio-device control component remains deferred under ADR 0011. Keep this
+  entry open for those boundaries only.
 
 ### Independently versioned controller components
 
@@ -717,63 +703,11 @@ None.
   values.
 - Extraction order is tone generation, Morse, DTMF, message templating, then
   scheduling.
-
-### Rust-owned implementation migration
-
-**Requirements**
-
-- Migrate all substantive owned implementation in USBRadioPlus,
-  `rate_adjusting_pcm_ring`, `librptadvradio`, rpt_advanced, and future
-  extracted components to Rust.
-- Preserve stable C ABI entry points and shared-library SONAME compatibility
-  where existing adapters or released packages consume them.
-- Use Rust FFI for external C APIs, including Asterisk, PortAudio, ALSA,
-  FFmpeg, Hamlib, and Piper, only through versioned adapter shared objects.
-- Do not retain duplicate C implementations of controller, radio, audio, or
-  policy logic after a component is migrated.
-
-**Decisions recorded**
-
-- Deliberately separated private rpt_advanced components are Rust `dylib`s.
-  Their Rust ABI is private to project-owned Rust callers built with compatible
-  pinned Rust inputs.
-- Every Rust--C boundary is a separate versioned Rust `dylib` adapter shared
-  object with only the smallest required stable C-compatible
-  descriptor/function-table interface. A tiny C Asterisk loader is permitted
-  when macro-generated module metadata or loader ABI requires it; an
-  equivalent adapter may serve a PortAudio callback when necessary. The
-  adapter forwards to Rust and contains no substantive application logic.
-- Internal Rust components use adapter-neutral ports and do not expose external
-  C types or adapter-specific policy. An adapter can be removed without
-  modifying internal Rust component code.
-- Every outbound call to an external C implementation uses its own removable,
-  versioned adapter shared object. FFmpeg graph, sample-rate conversion,
-  Hamlib, speech synthesis, PortAudio/ALSA, control-path execution, and similar
-  dependencies are not imported by internal Rust components or combined into
-  one aggregate adapter.
-  The Asterisk entry adapter is independently versioned under the same
-  capability-per-adapter rule. The generic speech adapter hides whether Piper
-  uses a library or a subprocess.
-- Each selected product composition has a complete required-adapter manifest.
-  Startup and reload reject a missing or ABI-incompatible listed adapter rather
-  than offering a reduced feature set or direct fallback. A standalone
-  composition does not list the Asterisk entry adapter or an Asterisk-backed
-  control-path adapter.
-- Adapter replacement occurs only during a controlled module reload or process
-  restart after all related callbacks and contexts stop. Runtime hot
-  replacement and code loading or unloading from a real-time tick are not
-  supported.
-- Every real-time-capable adapter separates setup/control from a preallocated,
-  lock-free tick that never allocates, blocks, logs, runs a process, loads code,
-  or takes a lock.
-- Standalone binaries have no project C implementation or Asterisk shim.
-- Rust audio ticks preserve the lock-free real-time restrictions and never
-  allow a panic to cross an FFI boundary.
-- Rust formatting, Clippy, Rustdoc, coverage, and the existing native Debian
-  matrix become part of the component quality gate during migration.
-- Every external/system dependency and separately released project component
-  is dynamically linked and packaged. Rust leaf implementation crates that are
-  not deliberately separated components may compile into their owning artifact.
+- Implementation status — 2026-10-04: these functions currently remain Rust
+  modules within `rpt_advanced`; none is an independently versioned shared
+  component. The component-extraction work has not started. Keep this entry
+  open for the requested separations, not for the already implemented
+  controller behavior.
 
 ### Standalone lock-free controller
 
