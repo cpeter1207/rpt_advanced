@@ -890,13 +890,13 @@ unsafe extern "C" fn rptadv_product_link_command(
         let (engine, _call) = selected()?;
         engine.execute(
             unsafe { input(local, local_length) }?.to_owned(),
-            DigitOperation {
-                command: rpt_advanced_core::command::Command {
+            DigitOperation::new(
+                rpt_advanced_core::command::Command {
                     action,
                     node: unsafe { input(remote, remote_length) }?.to_owned(),
                 },
-                digit: None,
-            },
+                None,
+            ),
         )
     }))
     .ok()

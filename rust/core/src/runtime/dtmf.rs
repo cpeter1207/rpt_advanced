@@ -191,6 +191,18 @@ pub struct DigitOperation {
     pub command: Command,
     /// Remote-command symbol, absent for ordinary link operations.
     pub digit: Option<char>,
+    pub(crate) admin_authorized: bool,
+}
+
+impl DigitOperation {
+    /// Construct a non-administrative typed operation for trusted control interfaces.
+    pub fn new(command: Command, digit: Option<char>) -> Self {
+        Self {
+            command,
+            digit,
+            admin_authorized: false,
+        }
+    }
 }
 
 /// Serialized command collection; authorization/peer availability stays with link control.
@@ -199,6 +211,10 @@ pub struct DtmfCommands {
     collector: CommandCollector,
     last_node: String,
     remote: String,
+    admin_unlock_hash: String,
+    admin_lock_hash: String,
+    admin_timeout_ms: u64,
+    admin_until_ms: u64,
 }
 impl DtmfCommands {
     /// Start with the resolved current command map.
@@ -209,7 +225,23 @@ impl DtmfCommands {
             collector,
             last_node: String::new(),
             remote: String::new(),
+            admin_unlock_hash: String::new(),
+            admin_lock_hash: String::new(),
+            admin_timeout_ms: 300_000,
+            admin_until_ms: 0,
         }
+    }
+    /// Install hashed DTMF credentials on control; administration stays unavailable unless both
+    /// credential digests are valid Argon2id PHC strings.
+    pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
+        self.admin_unlock_hash.clear();
+        self.admin_lock_hash.clear();
+        if valid_hash(unlock_hash) && valid_hash(lock_hash) && timeout_ms > 0 {
+            self.admin_unlock_hash.push_str(unlock_hash);
+            self.admin_lock_hash.push_str(lock_hash);
+            self.admin_timeout_ms = timeout_ms;
+        }
+        self.admin_until_ms = 0;
     }
     /// Select an independently authorized direct peer after the link owner validates it.
     pub fn select_remote(&mut self, remote: &str) {
@@ -238,27 +270,107 @@ impl DtmfCommands {
                     node: self.remote.clone(),
                 },
                 digit: Some(digit),
+                admin_authorized: false,
             });
+        }
+        if now_ms >= self.admin_until_ms {
+            self.admin_until_ms = 0;
         }
         let text = self.collector.feed(digit, now_ms)?;
         let mut command = self.map.parse(&text)?;
-        if command.node == "0" {
+        let mut admin_authorized = false;
+        if command.node.len() >= 64 {
+            return None;
+        }
+        match command.action {
+            LinkAction::AdminUnlock => {
+                self.admin_until_ms = if self.credentials_configured()
+                    && verify_hash(&self.admin_unlock_hash, &command.node)
+                {
+                    now_ms.saturating_add(self.admin_timeout_ms)
+                } else {
+                    0
+                };
+                return None;
+            }
+            LinkAction::AdminLock => {
+                if self.credentials_configured()
+                    && verify_hash(&self.admin_lock_hash, &command.node)
+                {
+                    self.admin_until_ms = 0;
+                }
+                return None;
+            }
+            LinkAction::ParrotEnable | LinkAction::ParrotDisable => {
+                if self.admin_until_ms == 0 || now_ms >= self.admin_until_ms {
+                    return None;
+                }
+                admin_authorized = true;
+            }
+            _ => {}
+        }
+        if command.node == "0"
+            && !matches!(
+                command.action,
+                LinkAction::AdminUnlock | LinkAction::AdminLock
+            )
+        {
             if self.last_node.is_empty() {
                 return None;
             }
             command.node = self.last_node.clone();
         }
-        if command.node.len() >= 64 {
-            return None;
-        }
-        if !command.node.is_empty() {
+        if !command.node.is_empty()
+            && !matches!(
+                command.action,
+                LinkAction::AdminUnlock | LinkAction::AdminLock
+            )
+        {
             self.last_node.clone_from(&command.node);
         }
         Some(DigitOperation {
             command,
             digit: None,
+            admin_authorized,
         })
     }
+
+    /// Consume the one DTMF authorization issued for a parrot action before link control applies it.
+    pub(crate) fn consume_parrot_authorization(&mut self, authorized: bool, now_ms: u64) -> bool {
+        let authorized = authorized && self.admin_until_ms != 0 && now_ms < self.admin_until_ms;
+        if !authorized && now_ms >= self.admin_until_ms {
+            self.admin_until_ms = 0;
+        }
+        authorized
+    }
+
+    /// Reset the inactivity deadline only after link and parrot-control owners accept the action.
+    pub(crate) fn confirm_parrot_action(&mut self, action: LinkAction, now_ms: u64) {
+        if matches!(action, LinkAction::ParrotEnable | LinkAction::ParrotDisable)
+            && self.admin_until_ms != 0
+            && now_ms < self.admin_until_ms
+        {
+            self.admin_until_ms = now_ms.saturating_add(self.admin_timeout_ms);
+        }
+    }
+
+    fn credentials_configured(&self) -> bool {
+        !self.admin_unlock_hash.is_empty() && !self.admin_lock_hash.is_empty()
+    }
+}
+
+fn valid_hash(value: &str) -> bool {
+    use argon2::password_hash::PasswordHash;
+    PasswordHash::new(value).is_ok_and(|hash| hash.algorithm.as_str() == "argon2id")
+}
+
+fn verify_hash(hash: &str, code: &str) -> bool {
+    use argon2::{Argon2, PasswordVerifier, password_hash::PasswordHash};
+    PasswordHash::new(hash).is_ok_and(|parsed| {
+        Argon2::default()
+            .verify_password(code.as_bytes(), &parsed)
+            .is_ok()
+    })
 }
 
 #[cfg(test)]

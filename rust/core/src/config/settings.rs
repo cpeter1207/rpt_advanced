@@ -67,6 +67,12 @@ pub struct ResolvedNodeSettings {
     pub link_lookup_method: LinkLookupMethod,
     /// Configured DTMF command prefixes by option name.
     pub link_commands: BTreeMap<String, String>,
+    /// Optional PHC-encoded Argon2id digest required to unlock DTMF administration.
+    pub dtmf_admin_unlock_hash: String,
+    /// Optional PHC-encoded Argon2id digest required to lock DTMF administration.
+    pub dtmf_admin_lock_hash: String,
+    /// Idle timeout for an unlocked DTMF administration session.
+    pub dtmf_admin_timeout_ms: u64,
 }
 
 /// Owned identifier media and scheduling defaults after scope resolution.
@@ -1098,6 +1104,11 @@ impl ResolvedNodeSettings {
         boolean!(full_duplex, "full_duplex");
         boolean!(dtmf_muting, "dtmf_muting");
         boolean!(parrot_enabled, "parrot_enabled");
+        if let Some(parsed) = lookup_valid(document, "dtmf_admin_timeout_ms", &scopes, |raw| {
+            parse::unsigned(raw, 1, u64::MAX)
+        }) {
+            value.dtmf_admin_timeout_ms = parsed;
+        }
         number!(squelch_delay_ms, "squelch_delay_ms");
         if let Some(parsed) =
             lookup_valid(document, "status_snapshot_interval_ms", &scopes, |raw| {
@@ -1166,6 +1177,15 @@ impl ResolvedNodeSettings {
                 value.link_commands.insert(key.to_owned(), raw);
             }
         }
+        if let Some(hash) =
+            lookup_valid(document, "dtmf_admin_unlock_hash", &scopes, valid_argon2id)
+        {
+            value.dtmf_admin_unlock_hash = hash;
+        }
+        if let Some(hash) = lookup_valid(document, "dtmf_admin_lock_hash", &scopes, valid_argon2id)
+        {
+            value.dtmf_admin_lock_hash = hash;
+        }
         value
             .command_map()
             .map_err(|error| ConfigError::structure(node.as_str(), &error.to_string()))?;
@@ -1203,6 +1223,9 @@ impl ResolvedNodeSettings {
                 .into_iter()
                 .map(|key| (key.to_owned(), default_command(key)))
                 .collect(),
+            dtmf_admin_unlock_hash: String::new(),
+            dtmf_admin_lock_hash: String::new(),
+            dtmf_admin_timeout_ms: 300_000,
         }
     }
 }
@@ -1227,7 +1250,7 @@ fn lookup_valid<T>(
     None
 }
 
-fn command_keys() -> [&'static str; 16] {
+fn command_keys() -> [&'static str; 20] {
     [
         "link_command_disconnect",
         "link_command_monitor",
@@ -1245,6 +1268,10 @@ fn command_keys() -> [&'static str; 16] {
         "link_command_permanent_local_monitor",
         "fixed_10",
         "fixed_722",
+        "link_command_admin_unlock",
+        "link_command_admin_lock",
+        "link_command_parrot_enable",
+        "link_command_parrot_disable",
     ]
 }
 
@@ -1265,9 +1292,20 @@ fn default_command(key: &str) -> String {
         "link_command_reconnect_all" => "816",
         "link_command_permanent_local_monitor" => "818",
         "fixed_10" => "10",
-        _ => "722",
+        "fixed_722" => "722",
+        "link_command_admin_unlock" => "800",
+        "link_command_admin_lock" => "801",
+        "link_command_parrot_enable" => "804",
+        "link_command_parrot_disable" => "805",
+        _ => "",
     }
     .to_owned()
+}
+
+fn valid_argon2id(value: &str) -> Option<String> {
+    use argon2::password_hash::PasswordHash;
+    let hash = PasswordHash::new(value).ok()?;
+    (hash.algorithm.as_str() == "argon2id").then(|| value.to_owned())
 }
 
 fn command_action(key: &str) -> Option<LinkAction> {
@@ -1288,6 +1326,10 @@ fn command_action(key: &str) -> Option<LinkAction> {
         "link_command_permanent_local_monitor" => LinkAction::PermanentLocalMonitor,
         "fixed_10" => LinkAction::DisconnectNonPermanentAll,
         "fixed_722" => LinkAction::Time,
+        "link_command_admin_unlock" => LinkAction::AdminUnlock,
+        "link_command_admin_lock" => LinkAction::AdminLock,
+        "link_command_parrot_enable" => LinkAction::ParrotEnable,
+        "link_command_parrot_disable" => LinkAction::ParrotDisable,
         _ => return None,
     })
 }

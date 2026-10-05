@@ -183,6 +183,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "full_duplex"
                 | "dtmf_muting"
                 | "parrot_enabled"
+                | "dtmf_admin_unlock_hash"
+                | "dtmf_admin_lock_hash"
+                | "dtmf_admin_timeout_ms"
                 | "squelch_delay_ms"
                 | "status_snapshot_interval_ms"
                 | "transmit_hang_ms"
@@ -215,6 +218,10 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_full_status"
                 | "link_command_reconnect_all"
                 | "link_command_permanent_local_monitor"
+                | "link_command_admin_unlock"
+                | "link_command_admin_lock"
+                | "link_command_parrot_enable"
+                | "link_command_parrot_disable"
         ),
         KnownScope::Identifier => {
             matches!(
@@ -307,6 +314,10 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             })
         }
         "statpost_time" => parse::unsigned(value, 30, 600).is_some(),
+        "dtmf_admin_unlock_hash" | "dtmf_admin_lock_hash" => {
+            argon2::password_hash::PasswordHash::new(value)
+                .is_ok_and(|hash| hash.algorithm.as_str() == "argon2id")
+        }
         "warning_before_start_ms" | "warning_before_end_ms" => {
             parse::positive_milliseconds(value).is_some()
         }
@@ -326,6 +337,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "courtesy_delay_ms"
         | "squelch_delay_ms"
         | "end_inactivity_ms" => parse::unsigned(value, 0, u64::MAX).is_some(),
+        "dtmf_admin_timeout_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "status_snapshot_interval_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "polite_maximum_wait_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "interval_ms" => parse::unsigned(
@@ -389,6 +401,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
             "yes"
         }
         (ScopeKind::General | ScopeKind::Node, "parrot_enabled") => "no",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_admin_timeout_ms") => "300000",
         (ScopeKind::General | ScopeKind::Node, "transmit_hang_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "transmit_timeout_ms") => "180000",
         (ScopeKind::General | ScopeKind::Node, "timeout_lockout_ms") => "30000",
@@ -453,6 +466,10 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_full_status" => "73",
         "link_command_reconnect_all" => "816",
         "link_command_permanent_local_monitor" => "818",
+        "link_command_admin_unlock" => "800",
+        "link_command_admin_lock" => "801",
+        "link_command_parrot_enable" => "804",
+        "link_command_parrot_disable" => "805",
         _ => return None,
     })
 }

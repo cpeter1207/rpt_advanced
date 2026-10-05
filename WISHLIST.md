@@ -7,6 +7,9 @@ for it, and unresolved decisions needed before implementation. Ask for the
 unresolved material decisions before starting the work. Remove the entry when
 the requirement is implemented.
 
+DTMF parrot enable/disable controls are implemented per ADRs 0023 and 0025 and
+are intentionally absent from the open entries below.
+
 ## Entries
 
 ### Activity-scoped CTCSS encode and decode

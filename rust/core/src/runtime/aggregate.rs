@@ -673,15 +673,25 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 old.retired_control = Some(std::mem::replace(&mut old.control, candidate.control));
                 old.links
                     .reconfigure(policy, commands, Some(candidate.links));
+                old.links.configure_admin(
+                    &candidate.settings.dtmf_admin_unlock_hash,
+                    &candidate.settings.dtmf_admin_lock_hash,
+                    candidate.settings.dtmf_admin_timeout_ms,
+                );
                 old.settings = candidate.settings;
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
                 old.time_format = candidate.time_format;
                 next.push(old);
             } else {
-                let links =
+                let mut links =
                     NodeLinkControl::new(&candidate.name, policy, commands, Some(candidate.links))
                         .expect("validated node identity");
+                links.configure_admin(
+                    &candidate.settings.dtmf_admin_unlock_hash,
+                    &candidate.settings.dtmf_admin_lock_hash,
+                    candidate.settings.dtmf_admin_timeout_ms,
+                );
                 next.push(RuntimeNode {
                     name: candidate.name,
                     settings: candidate.settings,
@@ -752,7 +762,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
     pub fn tick_links(&mut self, clock: RuntimeClock) {
         for node in &mut self.nodes {
             node.control.telemetry.reclaim().for_each(drop);
-            if node.settings.parrot_enabled {
+            if node.control.telemetry.parrot_enabled() {
                 while let Some(clip) = node.control.telemetry.take_parrot_capture() {
                     if node.control.activity.is_active() {
                         node.control.telemetry.recycle_parrot_capture(clip);
@@ -1190,6 +1200,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .links
             .command(operation, work, clock.now_ms, directory_verified)
             .map_err(RuntimeError::Link)?;
+        if let LinkEffect::ParrotEnabled(enabled) = &effect {
+            if !node.control.telemetry.set_parrot_enabled(*enabled) {
+                return Err(RuntimeError::Rejected);
+            }
+            node.links.confirm_parrot_command(*enabled, clock.now_ms);
+        }
         self.track_detach(local, &effect);
         Ok(effect)
     }
@@ -1236,10 +1252,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         };
         self.command(
             dispatch.local(),
-            DigitOperation {
-                command,
-                digit: None,
-            },
+            DigitOperation::new(command, None),
             clock,
             false,
         )

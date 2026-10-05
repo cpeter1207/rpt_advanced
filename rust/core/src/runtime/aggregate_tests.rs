@@ -298,13 +298,13 @@ fn repeated_detach_tracking_is_idempotent_and_unrelated_acknowledgments_preserve
         runtime
             .command(
                 "1000",
-                dtmf::DigitOperation {
-                    command: crate::command::Command {
+                dtmf::DigitOperation::new(
+                    crate::command::Command {
                         action: LinkAction::Disconnect,
                         node: "2000".into(),
                     },
-                    digit: None,
-                },
+                    None,
+                ),
                 clock(),
                 true,
             )
@@ -754,12 +754,14 @@ fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
             .finish_connect("1000", attempt, false, clock())
             .unwrap()
     );
-    let operation = |action| DigitOperation {
-        command: Command {
-            action,
-            node: String::new(),
-        },
-        digit: None,
+    let operation = |action| {
+        DigitOperation::new(
+            Command {
+                action,
+                node: String::new(),
+            },
+            None,
+        )
     };
     for civil in [None, Some((clock().civil.unwrap().0, 60))] {
         let mut invalid_clock = clock();

@@ -560,7 +560,7 @@ impl Host {
                 self.runtime
                     .queue_status(local, action, last.as_deref(), clock)
             }
-            LinkEffect::SelectedRemote | LinkEffect::None => Ok(()),
+            LinkEffect::SelectedRemote | LinkEffect::ParrotEnabled(_) | LinkEffect::None => Ok(()),
         }
     }
     fn text(

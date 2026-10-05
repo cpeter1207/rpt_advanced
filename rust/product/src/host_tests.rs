@@ -63,6 +63,16 @@ fn host() -> Host {
     )
     .unwrap()
 }
+
+#[test]
+fn parrot_live_state_effect_needs_no_external_host_action() {
+    let mut host = host();
+    assert!(
+        host.immediate("1000", LinkEffect::ParrotEnabled(true), clock())
+            .is_ok()
+    );
+}
+
 fn pump_until(host: &mut Host, mut condition: impl FnMut(&mut Host) -> bool) {
     for _ in 0..200 {
         host.pump(clock()).unwrap();
@@ -74,13 +84,13 @@ fn pump_until(host: &mut Host, mut condition: impl FnMut(&mut Host) -> bool) {
     panic!("host did not reach expected state");
 }
 fn operation(action: LinkAction, remote: &str) -> DigitOperation {
-    DigitOperation {
-        command: Command {
+    DigitOperation::new(
+        Command {
             action,
             node: remote.into(),
         },
-        digit: None,
-    }
+        None,
+    )
 }
 fn attach(
     host: &mut Host,

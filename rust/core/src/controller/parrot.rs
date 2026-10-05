@@ -69,6 +69,28 @@ pub(crate) struct ParrotCaptureControl {
     recycled: Producer<Vec<f32>>,
 }
 
+/// Lock-free live buffer lifecycle requests, produced by control and consumed by audio.
+pub(crate) enum ParrotRequest {
+    /// Transfer newly allocated bounded recording buffers to the callback owner.
+    Enable(ParrotCapture),
+    /// Return callback-owned recording buffers for control-side reclamation.
+    Disable,
+}
+
+/// Callback acknowledgement; returned buffers are dropped only on the control owner.
+pub(crate) enum ParrotAck {
+    /// The callback has installed the capture owner.
+    Enabled,
+    /// The callback has stopped capture and returned its allocated buffers.
+    Disabled(ParrotCapture),
+}
+
+/// Callback-side half of the live lifecycle queues.
+pub(crate) struct ParrotLifecycle {
+    pub requests: Consumer<ParrotRequest>,
+    pub acknowledgements: Producer<ParrotAck>,
+}
+
 impl ParrotCapture {
     /// Allocate the fixed buffers and bounded cross-owner queues before callbacks start.
     pub(crate) fn new() -> (Self, ParrotCaptureControl) {
@@ -90,6 +112,24 @@ impl ParrotCapture {
             ParrotCaptureControl {
                 completed: take_completed,
                 recycled: recycle,
+            },
+        )
+    }
+
+    /// Create the bounded lock-free transfer queues for live enable/disable operations.
+    pub(crate) fn lifecycle() -> (
+        Producer<ParrotRequest>,
+        Consumer<ParrotAck>,
+        ParrotLifecycle,
+    ) {
+        let (requests, take_requests) = RingBuffer::new(1);
+        let (acknowledgements, take_acknowledgements) = RingBuffer::new(1);
+        (
+            requests,
+            take_acknowledgements,
+            ParrotLifecycle {
+                requests: take_requests,
+                acknowledgements,
             },
         )
     }

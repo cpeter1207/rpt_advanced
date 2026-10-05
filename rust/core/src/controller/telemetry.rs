@@ -1,6 +1,8 @@
 //! Control-prepared playback and bounded status ownership transfer.
 
-use super::parrot::{CapturedParrot, ParrotCaptureControl};
+use super::parrot::{
+    CapturedParrot, ParrotAck, ParrotCapture, ParrotCaptureControl, ParrotRequest,
+};
 #[cfg(test)]
 use crate::audio::{MorseRenderer, PcmRead, ToneSequence};
 use crate::audio::{PcmStreamReader, Playback};
@@ -161,9 +163,80 @@ pub struct ControllerControl {
     parrot_completed: Consumer<PreparedMedia>,
     parrot_busy: Arc<AtomicBool>,
     pub(super) parrot_enabled: bool,
+    parrot_requests: Option<Producer<ParrotRequest>>,
+    parrot_acknowledgements: Option<Consumer<ParrotAck>>,
+    pending_parrot_control: Option<ParrotCaptureControl>,
+    parrot_lifecycle_pending: bool,
+    parrot_flag: Option<Arc<AtomicBool>>,
 }
 
 impl ControllerControl {
+    pub(super) fn configure_parrot_lifecycle(
+        &mut self,
+        requests: Producer<ParrotRequest>,
+        acknowledgements: Consumer<ParrotAck>,
+        flag: Arc<AtomicBool>,
+    ) {
+        self.parrot_requests = Some(requests);
+        self.parrot_acknowledgements = Some(acknowledgements);
+        self.parrot_flag = Some(flag);
+    }
+
+    /// Request live capture allocation or reclamation without work or ownership changes on audio.
+    pub fn set_parrot_enabled(&mut self, enabled: bool) -> bool {
+        self.reclaim_parrot_lifecycle();
+        if enabled == self.parrot_enabled {
+            return true;
+        }
+        if self.parrot_lifecycle_pending {
+            return false;
+        }
+        let Some(requests) = &mut self.parrot_requests else {
+            return false;
+        };
+        if enabled {
+            let (capture, control) = ParrotCapture::new();
+            if let Err(rtrb::PushError::Full(ParrotRequest::Enable(_))) =
+                requests.push(ParrotRequest::Enable(capture))
+            {
+                return false;
+            }
+            self.pending_parrot_control = Some(control);
+        } else if requests.push(ParrotRequest::Disable).is_err() {
+            return false;
+        }
+        self.parrot_enabled = enabled;
+        if let Some(flag) = &self.parrot_flag {
+            flag.store(enabled, Ordering::Release);
+        }
+        self.parrot_lifecycle_pending = true;
+        true
+    }
+
+    fn reclaim_parrot_lifecycle(&mut self) {
+        while let Some(acknowledgements) = &mut self.parrot_acknowledgements {
+            let Ok(acknowledgement) = acknowledgements.pop() else {
+                break;
+            };
+            match acknowledgement {
+                ParrotAck::Enabled => {
+                    self.parrot = self.pending_parrot_control.take();
+                }
+                ParrotAck::Disabled(capture) => {
+                    self.parrot.take();
+                    drop(capture);
+                }
+            }
+            self.parrot_lifecycle_pending = false;
+        }
+    }
+
+    /// Current live switch state (separate from the file value restored on reload).
+    #[must_use]
+    pub fn parrot_enabled(&self) -> bool {
+        self.parrot_enabled
+    }
+
     /// Take a completed parrot burst without entering the callback owner.
     pub fn take_parrot_capture(&mut self) -> Option<CapturedParrot> {
         self.parrot.as_mut()?.take_completed()
@@ -243,6 +316,7 @@ impl ControllerControl {
 
     /// Reclaim completed media on the control owner; dropping each item releases its PCM.
     pub fn reclaim(&mut self) -> impl Iterator<Item = PreparedMedia> + '_ {
+        self.reclaim_parrot_lifecycle();
         std::iter::from_fn(|| {
             if let Ok(media) = self.completed.pop() {
                 self.outstanding -= 1;
@@ -380,6 +454,11 @@ impl TelemetryPlanner {
                 parrot_completed: parrot_reclaimer,
                 parrot_busy,
                 parrot_enabled: false,
+                parrot_requests: None,
+                parrot_acknowledgements: None,
+                pending_parrot_control: None,
+                parrot_lifecycle_pending: false,
+                parrot_flag: None,
             },
         )
     }
@@ -398,6 +477,14 @@ impl TelemetryPlanner {
     pub fn discard_pending_parrot(&mut self) {
         if let Ok(media) = self.parrot_pending.pop() {
             let _ = self.parrot_completed.push(media);
+        }
+    }
+    /// Interrupt live parrot playback and return queued media to control for reclamation.
+    pub fn disable_parrot(&mut self) {
+        self.discard_pending_parrot();
+        if self.active == Some(Source::Parrot) {
+            self.active = None;
+            self.finish_parrot();
         }
     }
     pub fn finish_parrot(&mut self) {

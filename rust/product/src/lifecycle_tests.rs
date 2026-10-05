@@ -33,13 +33,13 @@ fn active_configuration(extra: &str) -> String {
 }
 
 fn operation(action: LinkAction, node: &str) -> DigitOperation {
-    DigitOperation {
-        command: Command {
+    DigitOperation::new(
+        Command {
             action,
             node: node.into(),
         },
-        digit: None,
-    }
+        None,
+    )
 }
 
 #[test]
@@ -223,13 +223,13 @@ fn failed_dial_thread_runs_reserved_attempt_synchronously() {
         let effect = engine
             .operation(
                 "1000",
-                DigitOperation {
-                    command: Command {
+                DigitOperation::new(
+                    Command {
                         action: LinkAction::Transceive,
                         node: "2000".into(),
                     },
-                    digit: None,
-                },
+                    None,
+                ),
             )
             .unwrap();
         let LinkEffect::Connect(attempt) = effect else {

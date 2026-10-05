@@ -200,3 +200,46 @@ fn lost_work_invalidates_prefix_and_remote_hash_ends_forwarding() {
     }
     assert_eq!(result.unwrap().command.node, "524950");
 }
+
+#[test]
+fn parrot_dtmf_requires_both_argon2id_codes_and_expires_after_idle_timeout() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let hash = |code: &[u8], salt: &str| {
+        Argon2::default()
+            .hash_password(code, &SaltString::from_b64(salt).unwrap())
+            .unwrap()
+            .to_string()
+    };
+    let unlock_hash = hash(b"123456", "c29tZXNhbHQ");
+    let lock_hash = hash(b"654321", "bG9ja3NhbHQ");
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    commands.configure_admin(&unlock_hash, "", 1000);
+    assert!(enter(&mut commands, "*800123456#", 1).is_none());
+    assert!(enter(&mut commands, "*804", 2).is_none());
+
+    commands.configure_admin(&unlock_hash, &lock_hash, 1000);
+    assert!(enter(&mut commands, "*800000000#", 3).is_none());
+    assert!(enter(&mut commands, "*804", 4).is_none());
+    assert!(enter(&mut commands, "*800123456#", 5).is_none());
+    let enabled = enter(&mut commands, "*804", 6).unwrap();
+    assert_eq!(enabled.command.action, LinkAction::ParrotEnable);
+    assert!(commands.consume_parrot_authorization(enabled.admin_authorized, 6));
+    assert!(!commands.consume_parrot_authorization(false, 6));
+    assert!(enter(&mut commands, "*805", 1005).is_none());
+    assert!(enter(&mut commands, "*800123456#", 1006).is_none());
+    assert!(enter(&mut commands, "*801000000#", 1007).is_none());
+    assert!(enter(&mut commands, "*805", 1008).is_some());
+    assert!(enter(&mut commands, "*801654321#", 1009).is_none());
+    assert!(enter(&mut commands, "*804", 1010).is_none());
+}
+
+fn enter(commands: &mut DtmfCommands, input: &str, now_ms: u64) -> Option<DigitOperation> {
+    let mut result = None;
+    for digit in input.chars() {
+        result = commands
+            .feed(DigitEvent::Digit { digit, now_ms })
+            .or(result);
+    }
+    result
+}

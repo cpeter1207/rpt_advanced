@@ -35,6 +35,10 @@ fn mappings() -> Vec<CommandMapping> {
         ("818", LinkAction::PermanentLocalMonitor),
         ("10", LinkAction::DisconnectNonPermanentAll),
         ("722", LinkAction::Time),
+        ("800", LinkAction::AdminUnlock),
+        ("801", LinkAction::AdminLock),
+        ("804", LinkAction::ParrotEnable),
+        ("805", LinkAction::ParrotDisable),
     ]
     .into_iter()
     .map(|(digits, action)| CommandMapping::new(digits, action))
@@ -99,6 +103,10 @@ fn parses_node_and_node_free_actions_without_mutating_failed_results() {
         ("816", LinkAction::ReconnectAll, ""),
         ("818524950", LinkAction::PermanentLocalMonitor, "524950"),
         ("722", LinkAction::Time, ""),
+        ("800123456", LinkAction::AdminUnlock, "123456"),
+        ("801654321", LinkAction::AdminLock, "654321"),
+        ("804", LinkAction::ParrotEnable, ""),
+        ("805", LinkAction::ParrotDisable, ""),
     ];
     for (digits, action, node) in cases {
         let command = map.parse(digits).unwrap();

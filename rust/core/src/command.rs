@@ -37,10 +37,18 @@ pub enum LinkAction {
     DisconnectNonPermanentAll,
     /// Announce the local time.
     Time,
+    /// Unlock DTMF administration using the configured code.
+    AdminUnlock,
+    /// Lock DTMF administration using the configured code.
+    AdminLock,
+    /// Enable the native-rate parrot for this node.
+    ParrotEnable,
+    /// Disable the native-rate parrot for this node.
+    ParrotDisable,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 16;
+pub const ACTION_COUNT: usize = 20;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,11 +198,11 @@ impl DtmfCommandMap {
         }
     }
 
-    /// Build the standard 16-action command map.
+    /// Build the standard AllStar-compatible and local administration command map.
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722",
+            "10", "722", "800", "801", "804", "805",
         ];
         let mappings = prefixes
             .into_iter()
@@ -279,6 +287,10 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::PermanentLocalMonitor,
         LinkAction::DisconnectNonPermanentAll,
         LinkAction::Time,
+        LinkAction::AdminUnlock,
+        LinkAction::AdminLock,
+        LinkAction::ParrotEnable,
+        LinkAction::ParrotDisable,
     ]
 }
 
@@ -292,6 +304,8 @@ fn takes_node(action: LinkAction) -> bool {
             | LinkAction::ReconnectAll
             | LinkAction::DisconnectNonPermanentAll
             | LinkAction::Time
+            | LinkAction::ParrotEnable
+            | LinkAction::ParrotDisable
     )
 }
 

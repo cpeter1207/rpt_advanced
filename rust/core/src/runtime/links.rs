@@ -82,6 +82,8 @@ pub enum LinkEffect {
     SelectedRemote,
     /// Prepare existing status/topology/time telemetry outside audio.
     Telemetry(LinkAction),
+    /// Change the live node's parrot state; apply buffer lifecycle work on control.
+    ParrotEnabled(bool),
     /// No physical operation is needed (for example resumed retry intent).
     None,
 }
@@ -185,6 +187,22 @@ impl NodeLinkControl {
         self.policy = policy;
         self.commands = DtmfCommands::new(commands);
         self.schedule = schedule;
+    }
+    /// Configure per-node Argon2id credentials; missing either digest disables admin DTMF.
+    pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
+        self.commands
+            .configure_admin(unlock_hash, lock_hash, timeout_ms);
+    }
+    /// Renew the DTMF administration window only after the parrot toggle is accepted.
+    pub(crate) fn confirm_parrot_command(&mut self, enabled: bool, now_ms: u64) {
+        self.commands.confirm_parrot_action(
+            if enabled {
+                LinkAction::ParrotEnable
+            } else {
+                LinkAction::ParrotDisable
+            },
+            now_ms,
+        );
     }
     /// Immutable current hub view for status/topology publication.
     pub fn manager(&self) -> &LinkManager {
@@ -365,6 +383,23 @@ impl NodeLinkControl {
         if !self.admitting || !work.is_current() {
             return Err(AdmissionError::Stale);
         }
+        match operation.command.action {
+            action @ (LinkAction::ParrotEnable | LinkAction::ParrotDisable) => {
+                if !self
+                    .commands
+                    .consume_parrot_authorization(operation.admin_authorized, now_ms)
+                {
+                    return Err(AdmissionError::Denied);
+                }
+                return Ok(LinkEffect::ParrotEnabled(
+                    action == LinkAction::ParrotEnable,
+                ));
+            }
+            LinkAction::AdminUnlock | LinkAction::AdminLock => {
+                return Err(AdmissionError::Denied);
+            }
+            _ => {}
+        }
         let remote = operation.command.node;
         let effect = match operation.command.action {
             LinkAction::Monitor
@@ -463,6 +498,11 @@ impl NodeLinkControl {
             | LinkAction::LastKeyed
             | LinkAction::FullStatus
             | LinkAction::Time) => LinkEffect::Telemetry(action),
+            LinkAction::ParrotEnable => LinkEffect::ParrotEnabled(true),
+            LinkAction::ParrotDisable => LinkEffect::ParrotEnabled(false),
+            LinkAction::AdminUnlock | LinkAction::AdminLock => {
+                return Err(AdmissionError::Denied);
+            }
         };
         Ok(effect)
     }

@@ -17,13 +17,13 @@ fn generation(id: u64) -> RuntimeGeneration<(), ()> {
     .unwrap()
 }
 fn operation(action: LinkAction, remote: &str) -> DigitOperation {
-    DigitOperation {
-        command: crate::command::Command {
+    DigitOperation::new(
+        crate::command::Command {
             action,
             node: remote.into(),
         },
-        digit: None,
-    }
+        None,
+    )
 }
 fn links() -> NodeLinkControl {
     NodeLinkControl::new(
@@ -33,6 +33,88 @@ fn links() -> NodeLinkControl {
         None,
     )
     .unwrap()
+}
+
+#[test]
+fn parrot_actions_require_a_valid_admin_unlock_and_use_live_typed_effects() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let digest = |code: &[u8], salt: &str| {
+        Argon2::default()
+            .hash_password(code, &SaltString::from_b64(salt).unwrap())
+            .unwrap()
+            .to_string()
+    };
+    let mut links = links();
+    links.configure_admin(
+        &digest(b"1234", "c29tZXNhbHQ"),
+        &digest(b"5678", "bG9ja3NhbHQ"),
+        60_000,
+    );
+    let mut host = NodeHost::new(generation(1));
+    assert!(
+        links
+            .digit(DigitEvent::Digit {
+                digit: '*',
+                now_ms: 1
+            })
+            .is_none()
+    );
+    for digit in "8009999#".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 2 })
+                .is_none()
+        );
+    }
+    for digit in "*804".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 3 })
+                .is_none()
+        );
+    }
+    for digit in "*8001234#".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 4 })
+                .is_none()
+        );
+    }
+    let mut enabled = None;
+    for digit in "*804".chars() {
+        enabled = links
+            .digit(DigitEvent::Digit { digit, now_ms: 5 })
+            .or(enabled);
+    }
+    assert!(matches!(
+        links.command(enabled.unwrap(), host.control().work().unwrap(), 6, false),
+        Ok(LinkEffect::ParrotEnabled(true))
+    ));
+    links.confirm_parrot_command(true, 6);
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::ParrotDisable, ""),
+            host.control().work().unwrap(),
+            7,
+            false,
+        ),
+        Err(AdmissionError::Denied)
+    ));
+    for digit in "*8015678#".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 8 })
+                .is_none()
+        );
+    }
+    for digit in "*805".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 9 })
+                .is_none()
+        );
+    }
 }
 
 #[test]

@@ -91,6 +91,22 @@ fallback destinations. It is kept separate from ordinary telemetry, so ADR
 excluded from receive capture, preventing local recapture. A remote parrot-
 enabled node cannot identify this audio as a parrot transmission, so remote
 parrot replay loops remain possible.
+
+`parrot_enabled` controls startup/reload state. The DTMF enable and disable
+commands change that state live without rebuilding the node generation. Capture
+storage is allocated by the station-control owner only when enabled and is
+transferred to the radio worker through a bounded SPSC lifecycle queue. On
+disable, capture and queued/active parrot playback stop at the next callback
+boundary. The worker returns the two bounded capture buffers through a second
+SPSC queue; control frees them only after receiving that acknowledgement.
+Playback media interrupted this way follows the existing completed-media
+handoff and is reclaimed off the callback. Thus the callback neither allocates
+nor frees parrot storage.
+
+Implementation status — 2026-10-05: live DTMF parrot controls and the bounded
+control/audio-owner buffer lifecycle are implemented. Remote parrot replay
+loops remain the documented limitation above.
+
 The dispatcher queues a destination block for local receive, another active
 forwarding peer, or a command response explicitly addressed to that destination.
 Local transmitter hang is excluded from peer program audio. A destination's

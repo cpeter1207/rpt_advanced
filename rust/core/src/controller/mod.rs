@@ -12,6 +12,11 @@ use announcement::AnnouncementState;
 use courtesy::CourtesyPlanner;
 pub use courtesy::CourtesySettings;
 pub use parrot::{CapturedParrot, ParrotLevels};
+use parrot::{ParrotAck, ParrotCapture, ParrotLifecycle, ParrotRequest};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 pub use telemetry::{
     ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PreparedMedia,
     StatusRejected,
@@ -98,6 +103,9 @@ pub struct NodeController {
     release_pending: bool,
     suppress_release: bool,
     parrot_capture: Option<parrot::ParrotCapture>,
+    parrot_lifecycle: ParrotLifecycle,
+    parrot_enabled_flag: Arc<AtomicBool>,
+    parrot_pending_ack: Option<ParrotAck>,
 }
 
 impl NodeController {
@@ -158,6 +166,14 @@ impl NodeController {
         let first_due = vec![0; ids.len()];
         let (telemetry, mut control) =
             TelemetryPlanner::new(settings.status_morse, settings.telemetry_duck_db);
+        let (parrot_requests, parrot_acknowledgements, parrot_lifecycle) =
+            ParrotCapture::lifecycle();
+        let parrot_enabled_flag = Arc::new(AtomicBool::new(settings.parrot_enabled));
+        control.configure_parrot_lifecycle(
+            parrot_requests,
+            parrot_acknowledgements,
+            parrot_enabled_flag.clone(),
+        );
         let parrot_capture = if settings.parrot_enabled {
             let (capture, capture_control) = parrot::ParrotCapture::new();
             control.parrot = Some(capture_control);
@@ -200,6 +216,9 @@ impl NodeController {
                 release_pending: false,
                 suppress_release: false,
                 parrot_capture,
+                parrot_lifecycle,
+                parrot_enabled_flag,
+                parrot_pending_ack: None,
             },
             control,
         ))
@@ -213,6 +232,7 @@ impl NodeController {
 
     /// Feed the already mixed receive tap to the preallocated parrot capture owner.
     pub fn observe_parrot(&mut self, active: bool, samples: &[f32]) {
+        self.sync_parrot_lifecycle();
         if let Some(capture) = &mut self.parrot_capture {
             capture.observe(active, samples);
         }
@@ -257,6 +277,8 @@ impl NodeController {
         linked: bool,
         source_activity: bool,
     ) -> bool {
+        self.sync_parrot_lifecycle();
+        self.apply_parrot_disable();
         self.activity.set_active(source_activity);
         self.step(receiving, linked, source_activity, None, 0.0, None);
         self.keyed
@@ -313,6 +335,8 @@ impl NodeController {
         audio: &mut [f32],
         mut parrot_output: Option<ParrotOutput<'_>>,
     ) -> bool {
+        self.sync_parrot_lifecycle();
+        self.apply_parrot_disable();
         if let Some(output) = &mut parrot_output {
             *output.active = false;
         }
@@ -345,6 +369,43 @@ impl NodeController {
             self.now = self.now.saturating_add(1);
         }
         self.keyed
+    }
+
+    fn sync_parrot_lifecycle(&mut self) {
+        if let Some(acknowledgement) = self.parrot_pending_ack.take() {
+            if let Err(rtrb::PushError::Full(acknowledgement)) =
+                self.parrot_lifecycle.acknowledgements.push(acknowledgement)
+            {
+                self.parrot_pending_ack = Some(acknowledgement);
+                return;
+            }
+        }
+        match self.parrot_lifecycle.requests.pop() {
+            Ok(ParrotRequest::Enable(capture)) => {
+                self.parrot_capture = Some(capture);
+                self.parrot_pending_ack = Some(ParrotAck::Enabled);
+            }
+            Ok(ParrotRequest::Disable) => {
+                self.telemetry.disable_parrot();
+                if let Some(capture) = self.parrot_capture.take() {
+                    self.parrot_pending_ack = Some(ParrotAck::Disabled(capture));
+                }
+            }
+            Err(_) => return,
+        }
+        if let Some(acknowledgement) = self.parrot_pending_ack.take() {
+            if let Err(rtrb::PushError::Full(acknowledgement)) =
+                self.parrot_lifecycle.acknowledgements.push(acknowledgement)
+            {
+                self.parrot_pending_ack = Some(acknowledgement);
+            }
+        }
+    }
+
+    fn apply_parrot_disable(&mut self) {
+        if !self.parrot_enabled_flag.load(Ordering::Acquire) {
+            self.telemetry.disable_parrot();
+        }
     }
 
     fn id_ready(&self, selected: usize, busy: bool) -> bool {

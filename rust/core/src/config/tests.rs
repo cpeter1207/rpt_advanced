@@ -615,6 +615,61 @@ fn parrot_enabled_defaults_off_and_inherits_with_node_precedence() {
 }
 
 #[test]
+fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let hash = Argon2::default()
+        .hash_password(b"test-code", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let node = NodeId::new("1000").unwrap();
+    let inherited = ResolvedNodeSettings::resolve(
+        &ConfigDocument::parse(&format!(
+            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\n"
+        ))
+        .unwrap(),
+        &node,
+    )
+    .unwrap()
+    .value;
+    assert_eq!(inherited.dtmf_admin_unlock_hash, hash);
+    assert_eq!(inherited.dtmf_admin_lock_hash, hash);
+    assert_eq!(inherited.dtmf_admin_timeout_ms, 300_000);
+    let mappings = inherited.command_map().unwrap();
+    for (prefix, action) in [
+        ("800", crate::command::LinkAction::AdminUnlock),
+        ("801", crate::command::LinkAction::AdminLock),
+        ("804", crate::command::LinkAction::ParrotEnable),
+        ("805", crate::command::LinkAction::ParrotDisable),
+    ] {
+        assert!(
+            mappings
+                .mappings()
+                .iter()
+                .any(|mapping| { mapping.digits == prefix && mapping.action == action })
+        );
+    }
+    let overridden = ResolvedNodeSettings::resolve(
+        &ConfigDocument::parse(&format!(
+            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=77\n"
+        ))
+        .unwrap(),
+        &node,
+    )
+    .unwrap()
+    .value;
+    assert_eq!(overridden.dtmf_admin_timeout_ms, 1234);
+    assert!(
+        overridden
+            .command_map()
+            .unwrap()
+            .mappings()
+            .iter()
+            .any(|mapping| mapping.digits == "77")
+    );
+}
+
+#[test]
 fn identifier_set_overrides_node_and_flat_defaults_including_empty_media() {
     let document = ConfigDocument::parse(
         "[node]\n[identifier]\ninterval_ms=600000\nsound_file=flat.wav\n[identifier node]\ninterval_ms=120000\nsound_file=node.wav\n[identifier node id]\ninterval_ms=60000\nsound_file=\n",
@@ -902,7 +957,7 @@ fn schedule_resolution_uses_empty_defaults_for_invalid_optional_selectors() {
 fn command_map_has_all_defaults_and_rejects_node_taking_prefix_collisions() {
     let document = ConfigDocument::parse("[node]\n").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&document, &NodeId::new("node").unwrap()).unwrap();
-    assert_eq!(resolved.value.link_commands.len(), 16);
+    assert_eq!(resolved.value.link_commands.len(), 20);
     assert_eq!(resolved.value.link_commands["fixed_10"], "10");
     assert_eq!(resolved.value.link_commands["fixed_722"], "722");
     let conflict = ConfigDocument::parse("[node]\nlink_command_disconnect=3\n").unwrap();

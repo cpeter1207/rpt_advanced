@@ -91,6 +91,43 @@ fn activity_snapshot_exposes_current_receive_state_and_bounded_status_capacity()
     assert!(!control.can_queue_status());
 }
 
+#[test]
+fn parrot_buffers_are_allocated_and_freed_on_control_around_lock_free_handoff() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    assert!(control.set_parrot_enabled(true));
+    let allocations = AUDIO_ALLOCATIONS.with(|count| count.get().unwrap());
+    assert!(
+        allocations >= 4,
+        "capture buffers and queues allocate on control"
+    );
+
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_event(false, false);
+    assert_eq!(AUDIO_ALLOCATIONS.with(|count| count.get().unwrap()), 0);
+    control.reclaim().for_each(drop);
+    assert!(control.parrot_enabled());
+    assert!(control.parrot.is_some());
+    node.observe_parrot(true, &[0.25]);
+
+    assert!(control.set_parrot_enabled(false));
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_event(false, false);
+    assert_eq!(AUDIO_ALLOCATIONS.with(|count| count.get().unwrap()), 0);
+    control.reclaim().for_each(drop);
+    assert!(!control.parrot_enabled());
+    assert!(control.parrot.is_none());
+    assert!(control.take_parrot_capture().is_none());
+    assert!(AUDIO_ALLOCATIONS.with(|count| count.get().unwrap()) >= 4);
+    AUDIO_ALLOCATIONS.with(|count| count.set(None));
+}
+
 struct TestPeerInput {
     signals: crate::link::PeerSignals,
     sample: Option<f32>,
@@ -508,6 +545,54 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
     assert!(!parrot_active);
     assert!(!node.parrot_playback_active());
     control.reclaim().for_each(drop);
+}
+
+#[test]
+fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.queue_prepared_parrot(queued_parrot()));
+    let mut rf = [0.0];
+    let mut parrot = [0.0];
+    let mut active = false;
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut rf,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+        },
+    );
+    assert_eq!(parrot, [0.4]);
+    assert!(active);
+    assert!(control.set_parrot_enabled(false));
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut rf,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+        },
+    );
+    assert_eq!(parrot, [0.0]);
+    assert!(!active);
+    control.reclaim().for_each(drop);
+    assert!(!control.parrot_enabled());
+    assert!(control.parrot.is_none());
 }
 
 #[test]
