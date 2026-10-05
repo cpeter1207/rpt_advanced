@@ -97,7 +97,7 @@ available for priority selection. Direct self/duplicate identity checks and
 allow/deny policy remain in force. Warning timing and civil-time behavior are
 defined by ADRs 0009 and 0017.
 
-## Implementation status — 2026-10-04
+## Implementation status — 2026-10-05
 
 Ordered permanent and scheduled groups, independent retries, silent standby
 membership, atomic input-idle winner selection, local-only topology/status
@@ -107,7 +107,9 @@ is accepted in multiple windows only when those windows are disjoint; duplicate
 peer routes in overlapping windows remain invalid. Schema, scheduler, and
 configuration-integration tests cover that distinction. Five disjoint net
 windows are configured on node 524950, including the adjacent weekday
-Coffee Break and Handiham windows. The wishlist tracks the separate request for
-`*806`/`*816` to affect only permanent links; current all-link
-disconnect/reconnect behavior above remains in effect until that work is
-implemented.
+Coffee Break and Handiham windows. DTMF `*806` pauses and disconnects permanent
+links while leaving temporary links connected. `*816` re-evaluates configured
+link policy and resumes only permanent retry intent; temporary links and
+retries are unchanged. `*813 <node>` can resume one permanent retry paused by
+`*806` without resuming other permanent routes. Scheduled `disconnect_all`
+retains its separate all-link behavior.

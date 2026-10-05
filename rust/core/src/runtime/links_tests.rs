@@ -446,6 +446,123 @@ fn permanent_failure_retains_retry_and_operator_disconnect_cancels_it() {
 }
 
 #[test]
+fn disconnect_all_and_reconnect_all_only_change_permanent_links() {
+    let mut host = NodeHost::new(generation(1));
+    let mut links = links();
+    for (action, remote) in [
+        (LinkAction::PermanentTransceive, "2000"),
+        (LinkAction::Transceive, "3000"),
+    ] {
+        let LinkEffect::Connect(attempt) = links
+            .command(
+                operation(action, remote),
+                host.control().work().unwrap(),
+                0,
+                false,
+            )
+            .unwrap()
+        else {
+            panic!("expected dial for {remote}");
+        };
+        assert!(
+            links
+                .finish_connect_at(attempt, true, 0, None, |_| None)
+                .unwrap()
+        );
+    }
+
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::DisconnectPermanentAll, ""),
+            host.control().work().unwrap(),
+            1,
+            false,
+        ),
+        Ok(LinkEffect::Detach(names)) if names == ["2000"]
+    ));
+    let status = links.manager().snapshot();
+    assert!(
+        status
+            .iter()
+            .any(|peer| peer.name == "3000" && !peer.permanent)
+    );
+    assert!(status.iter().any(|peer| peer.name == "2000" && peer.paused));
+
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::ReconnectPermanentAll, ""),
+            host.control().work().unwrap(),
+            2,
+            false,
+        ),
+        Ok(LinkEffect::None)
+    ));
+    let retry = links.take_retry(2, host.control().work().unwrap()).unwrap();
+    assert_eq!(retry.remote(), "2000");
+    assert!(links.finish_retry(retry, true, 3).unwrap());
+    let status = links.manager().snapshot();
+    assert!(
+        status
+            .iter()
+            .any(|peer| peer.name == "3000" && !peer.permanent)
+    );
+    assert!(
+        status
+            .iter()
+            .any(|peer| peer.name == "2000" && peer.permanent)
+    );
+}
+
+#[test]
+fn permanent_transceive_command_resumes_one_disconnect_all_paused_node() {
+    let mut host = NodeHost::new(generation(1));
+    let mut links = links();
+    let LinkEffect::Connect(attempt) = links
+        .command(
+            operation(LinkAction::PermanentTransceive, "2000"),
+            host.control().work().unwrap(),
+            0,
+            false,
+        )
+        .unwrap()
+    else {
+        panic!("expected initial dial");
+    };
+    links
+        .finish_connect_at(attempt, true, 0, None, |_| None)
+        .unwrap();
+    links
+        .command(
+            operation(LinkAction::DisconnectPermanentAll, ""),
+            host.control().work().unwrap(),
+            1,
+            false,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::PermanentTransceive, "2000"),
+            host.control().work().unwrap(),
+            2,
+            false,
+        ),
+        Ok(LinkEffect::None)
+    ));
+    let retry = links.take_retry(2, host.control().work().unwrap()).unwrap();
+    assert_eq!(retry.remote(), "2000");
+    assert!(retry.mode().transmits());
+    assert!(links.finish_retry(retry, true, 3).unwrap());
+    assert!(
+        links
+            .manager()
+            .snapshot()
+            .iter()
+            .any(|peer| peer.name == "2000" && peer.permanent && !peer.retrying && !peer.paused)
+    );
+}
+
+#[test]
 fn topology_blocked_automatic_route_retries_only_after_explicit_evidence_change() {
     use super::super::link_schedule::RouteSpec;
     let schedule = |generation| {

@@ -411,7 +411,7 @@ impl NodeLinkControl {
                 if !self.policy.allows(&remote, true) {
                     return Err(AdmissionError::Denied);
                 }
-                if remote == self.local || self.manager.reaches(&remote, true) {
+                if remote == self.local {
                     return Err(AdmissionError::Loop);
                 }
                 let mode = match operation.command.action {
@@ -427,6 +427,15 @@ impl NodeLinkControl {
                         | LinkAction::PermanentLocalMonitor
                         | LinkAction::PermanentTransceive
                 );
+                if permanent
+                    && !self.manager.reaches(&remote, false)
+                    && self.manager.resume_permanent_retry(&remote, mode, now_ms)
+                {
+                    return Ok(LinkEffect::None);
+                }
+                if remote == self.local || self.manager.reaches(&remote, true) {
+                    return Err(AdmissionError::Loop);
+                }
                 LinkEffect::Connect(ConnectAttempt {
                     remote,
                     mode,
@@ -457,6 +466,16 @@ impl NodeLinkControl {
                 }
                 LinkEffect::Detach(removed)
             }
+            LinkAction::DisconnectPermanentAll => {
+                if let Some(schedule) = &mut self.schedule {
+                    schedule.pause(&self.local);
+                }
+                let removed = self.manager.disconnect_permanent_all();
+                for remote in &removed {
+                    self.commands.disconnect(remote);
+                }
+                LinkEffect::Detach(removed)
+            }
             LinkAction::DisconnectNonPermanentAll => {
                 let removed = self.manager.disconnect_temporary();
                 for remote in &removed {
@@ -475,6 +494,23 @@ impl NodeLinkControl {
                     }
                 }
                 self.manager.resume_retries(now_ms);
+                if removed.is_empty() {
+                    LinkEffect::None
+                } else {
+                    LinkEffect::Detach(removed)
+                }
+            }
+            LinkAction::ReconnectPermanentAll => {
+                let mut removed = Vec::new();
+                if let Some(schedule) = &mut self.schedule {
+                    schedule.resume(&self.local);
+                    removed = schedule.withdraw_undesired();
+                    for remote in &removed {
+                        self.manager.disconnect_permanent(remote);
+                        self.commands.disconnect(remote);
+                    }
+                }
+                self.manager.resume_permanent_retries(now_ms);
                 if removed.is_empty() {
                     LinkEffect::None
                 } else {

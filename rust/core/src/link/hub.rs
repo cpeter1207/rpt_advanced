@@ -585,6 +585,34 @@ impl LinkManager {
         }
     }
 
+    /// Resume one paused permanent retry after an explicit per-node reconnect.
+    pub fn resume_permanent_retry(&mut self, name: &str, mode: Mode, now_ms: u64) -> bool {
+        let Some(retry) = self
+            .retries
+            .iter_mut()
+            .find(|retry| retry.name == name && retry.automatic && retry.paused)
+        else {
+            return false;
+        };
+        retry.mode = mode;
+        retry.paused = false;
+        retry.due = now_ms;
+        retry.delay = 0;
+        retry.attempt = None;
+        retry.blocked_topology = None;
+        true
+    }
+
+    /// Resume only automatic permanent recovery records.
+    pub fn resume_permanent_retries(&mut self, now_ms: u64) {
+        for retry in self.retries.iter_mut().filter(|retry| retry.automatic) {
+            retry.paused = false;
+            retry.delay = 0;
+            retry.due = now_ms;
+            retry.blocked_topology = None;
+        }
+    }
+
     /// Invalidate pending asynchronous work when the owning runtime changes.
     pub fn invalidate_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
@@ -687,6 +715,39 @@ impl LinkManager {
             .map(|peer| peer.name.clone())
             .collect();
         self.peers.retain(|peer| peer.permanent);
+        self.revision = self.revision.wrapping_add(1);
+        self.refresh_group_selections();
+        removed
+    }
+
+    /// Unpublish permanent links and pause their retry intent, preserving temporary links.
+    pub fn disconnect_permanent_all(&mut self) -> Vec<String> {
+        for retry in self.retries.iter_mut().filter(|retry| retry.automatic) {
+            retry.paused = true;
+            retry.attempt = None;
+        }
+        let mut removed = Vec::new();
+        let mut retained = Vec::with_capacity(self.peers.len());
+        for peer in std::mem::take(&mut self.peers) {
+            if !peer.permanent {
+                retained.push(peer);
+                continue;
+            }
+            removed.push(peer.name.clone());
+            self.retries.push(Retry {
+                name: peer.name,
+                mode: peer.mode,
+                automatic: true,
+                paused: true,
+                due: 0,
+                delay: 0,
+                attempt: None,
+                blocked_topology: None,
+                group: peer.group,
+                group_member: peer.group_member,
+            });
+        }
+        self.peers = retained;
         self.revision = self.revision.wrapping_add(1);
         self.refresh_group_selections();
         removed

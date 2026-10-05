@@ -187,29 +187,6 @@ None.
 
 None.
 
-### Permanent-link-only DTMF disconnect and reconnect
-
-**Requirements**
-
-- `*806` disconnects permanent links without disconnecting temporary links, so
-  another permitted peer can be linked manually.
-- `*816` disconnects and re-evaluates only permanent links.
-
-**Decisions recorded**
-
-- Configured permanent links, priority failover groups, and scheduled
-  replacement groups are implemented under ADR 0010. A scheduled peer may be
-  reused in disjoint windows; overlapping windows for the same peer are
-  rejected.
-- The remaining gap is narrower than the original request: `*806` still
-  disconnects all current links and holds configuration-owned routes, while
-  `*816` re-evaluates configured routes and restores links saved by
-  disconnect-all. Permanent-only `*806`/`*816` behavior remains unimplemented.
-
-**Material decisions needed before implementation**
-
-None.
-
 ### Complete control and status interfaces
 
 **Requirements**

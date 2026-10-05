@@ -17,6 +17,8 @@ pub enum LinkAction {
     Status,
     /// Disconnect all links while retaining reconnect information.
     DisconnectAll,
+    /// Disconnect and pause permanent links while leaving temporary links active.
+    DisconnectPermanentAll,
     /// Report the last transmitting node.
     LastKeyed,
     /// Monitor one remote node locally without forwarding audio.
@@ -31,6 +33,8 @@ pub enum LinkAction {
     FullStatus,
     /// Restore links saved by disconnect-all.
     ReconnectAll,
+    /// Re-evaluate and restore only permanent links saved by disconnect-all.
+    ReconnectPermanentAll,
     /// Maintain one permanent local-monitor link.
     PermanentLocalMonitor,
     /// Disconnect every active nonpermanent link.
@@ -276,14 +280,14 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::Transceive,
         LinkAction::Command,
         LinkAction::Status,
-        LinkAction::DisconnectAll,
+        LinkAction::DisconnectPermanentAll,
         LinkAction::LastKeyed,
         LinkAction::LocalMonitor,
         LinkAction::DisconnectPermanent,
         LinkAction::PermanentMonitor,
         LinkAction::PermanentTransceive,
         LinkAction::FullStatus,
-        LinkAction::ReconnectAll,
+        LinkAction::ReconnectPermanentAll,
         LinkAction::PermanentLocalMonitor,
         LinkAction::DisconnectNonPermanentAll,
         LinkAction::Time,
@@ -299,9 +303,11 @@ fn takes_node(action: LinkAction) -> bool {
         action,
         LinkAction::Status
             | LinkAction::DisconnectAll
+            | LinkAction::DisconnectPermanentAll
             | LinkAction::LastKeyed
             | LinkAction::FullStatus
             | LinkAction::ReconnectAll
+            | LinkAction::ReconnectPermanentAll
             | LinkAction::DisconnectNonPermanentAll
             | LinkAction::Time
             | LinkAction::ParrotEnable

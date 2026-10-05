@@ -343,7 +343,7 @@ fn status_reports_modes_permanent_retries_and_failed_resource_preparation() {
         .runtime
         .command(
             "1000",
-            operation(LinkAction::DisconnectAll, ""),
+            operation(LinkAction::DisconnectPermanentAll, ""),
             clock(),
             false,
         )

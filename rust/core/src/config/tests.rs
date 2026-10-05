@@ -1049,4 +1049,12 @@ fn resolved_command_map_preserves_configured_and_fixed_actions() {
         map.parse("722").unwrap().action,
         crate::command::LinkAction::Time
     );
+    assert_eq!(
+        map.parse("806").unwrap().action,
+        crate::command::LinkAction::DisconnectPermanentAll
+    );
+    assert_eq!(
+        map.parse("816").unwrap().action,
+        crate::command::LinkAction::ReconnectPermanentAll
+    );
 }
