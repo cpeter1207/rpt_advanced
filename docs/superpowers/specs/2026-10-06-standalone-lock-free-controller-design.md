@@ -121,11 +121,10 @@ separate from runtime packages where headers/linker names are published.
    unchanged. USBRadioPlus installs and functions without the standalone
    service.
 
-## Assumption for review
+## Approved assumption
 
 “Install the standalone controller without the adapters” means without the
 optional ASL3 adapters (`app_rpt_advanced.so`, `chan_usbradioplus.so`). A
 functional standalone node still installs its selected PortAudio/ALSA and
-radio-control adapter packages. If “adapters” was intended to include those
-native hardware providers, that would conflict with the approved PortAudio
-hardware path and needs correction before planning.
+radio-control adapter packages. The user approved this interpretation for
+implementation planning.

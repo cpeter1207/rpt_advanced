@@ -14,10 +14,11 @@ VERSION ?= 0.1.0-alpha7
 DIST_NAME := rpt_advanced-$(VERSION)
 CFLAGS ?= -O2 -g
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror
-HEADERS := rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
+HEADERS := rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
 CPPFLAGS += $(addprefix -I,$(dir $(HEADERS)))
 LOADER := module/app_rpt_advanced_loader.c
 ADAPTERS := asterisk control_asterisk file speech
+STANDALONE_ADAPTERS := control_standalone
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
 LIBRARIES += build/librptadv_product.so.1
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
@@ -37,6 +38,9 @@ build:
 rust-build: | build
 	$(CARGO) build --locked --release --workspace
 	@set -e; for name in $(ADAPTERS); do \
+		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
+	done
+	@set -e; for name in $(STANDALONE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
@@ -134,7 +138,7 @@ install: all
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
 	ln -sfn librptadv_control_asterisk_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_asterisk_adapter.so
-	install -m 0644 rust/product/include/rptadv_product.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h $(DESTDIR)$(prefix)/include/
+	install -m 0644 rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h $(DESTDIR)$(prefix)/include/
 	install -D -m 0644 rust/file-adapter/include/rptadv_file_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_file_adapter.h
 	install -D -m 0644 rust/media-support/include/rptadv_media_types.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_media_types.h
 	install -D -m 0644 rust/speech-adapter/include/rptadv_speech_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/speech/rptadv_speech_adapter.h

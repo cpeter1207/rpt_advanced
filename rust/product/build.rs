@@ -3,10 +3,12 @@ use std::{env, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=include/rptadv_product.h");
+    println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
     println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_product.so.1");
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg("-I../media-support/include")
+        .clang_arg("-I../control-abi/include")
         .allowlist_type("rptadv_.*")
         .allowlist_function("rpcr3_descriptor")
         .allowlist_function("rptadv_samplerate_adapter_descriptor")

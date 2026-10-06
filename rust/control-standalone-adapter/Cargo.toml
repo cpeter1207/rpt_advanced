@@ -1,0 +1,12 @@
+[package]
+name = "rptadv-control-standalone-adapter"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crossbeam-queue = "0.3.12"

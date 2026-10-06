@@ -125,6 +125,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -560,6 +575,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rptadv-control-standalone-adapter"
+version = "0.1.0-alpha7"
+dependencies = [
+ "crossbeam-queue",
+]
+
+[[package]]
 name = "rptadv-file-adapter"
 version = "0.1.0-alpha7"
 dependencies = [
@@ -573,6 +595,7 @@ version = "0.1.0-alpha7"
 dependencies = [
  "bindgen",
  "rpt-advanced-core",
+ "rptadv-control-standalone-adapter",
  "rptadv-file-adapter",
  "rptadv-speech-adapter",
  "rtrb",

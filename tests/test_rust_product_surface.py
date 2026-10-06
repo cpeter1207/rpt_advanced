@@ -20,6 +20,7 @@ FORBIDDEN_MAKE_TOKENS = (
     "$(wildcard src/*.c)",
 )
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
+STANDALONE_CONTROL = "librptadv_control_standalone_adapter.so.1"
 PRODUCT = "librptadv_product.so.1"
 RING_MINIMUM_VERSION = "3.0.0~alpha2"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha1"
@@ -34,6 +35,7 @@ ELF_DEPENDENCIES = {
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
     "librptadv_speech_adapter.so.1": set(),
+    STANDALONE_CONTROL: set(),
 }
 EXPORTS = {
     "librptadv_asterisk_adapter.so.1": "rptadv_asterisk_descriptor_v1",
@@ -41,6 +43,7 @@ EXPORTS = {
     "librptadv_control_asterisk_adapter.so.1": "rptadv_control_descriptor_v1",
     "librptadv_file_adapter.so.1": "rptadv_file_adapter_descriptor",
     "librptadv_speech_adapter.so.1": "rptadv_speech_adapter_descriptor",
+    STANDALONE_CONTROL: "rptadv_control_standalone_descriptor_v1",
 }
 MANUALS = (
     "README.md",
@@ -84,7 +87,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     for name, dependencies in ELF_DEPENDENCIES.items():
         path = directory / name
         assert path.is_file(), f"missing artifact: {path}"
-        if name in LIBRARIES:
+        if name in LIBRARIES or name == STANDALONE_CONTROL:
             assert dynamic(path, "SONAME") == {name}, f"incorrect SONAME: {name}"
             exports = {
                 line.split()[-1]
@@ -129,6 +132,11 @@ def staged(
     expected.add(header)
     assert (stage / header).read_bytes() == (
         root / "rust/product/include/rptadv_product.h"
+    ).read_bytes()
+    header = Path("usr/include/rptadv_control_adapter.h")
+    expected.add(header)
+    assert (stage / header).read_bytes() == (
+        root / "rust/control-abi/include/rptadv_control_adapter.h"
     ).read_bytes()
     for name, crate in (("control_asterisk", "control-asterisk-adapter"),):
         link = library / f"librptadv_{name}_adapter.so"
@@ -347,7 +355,7 @@ def verify_artifact_policy() -> None:
         for name, dependencies in ELF_DEPENDENCIES.items():
             write(root, name)
             tables[name] = {"NEEDED": set(dependencies)}
-            if name in LIBRARIES:
+            if name in LIBRARIES or name == STANDALONE_CONTROL:
                 tables[name]["SONAME"] = {name}
         tables["app_rpt_advanced.so"]["RUNPATH"] = {"$ORIGIN/../../rpt_advanced"}
 
@@ -556,6 +564,8 @@ def verify_stage_policy() -> None:
         write(stage, "usr/lib/test-linux-gnu/asterisk/modules/app_rpt_advanced.so")
         write(root, "rust/product/include/rptadv_product.h")
         write(stage, "usr/include/rptadv_product.h")
+        write(root, "rust/control-abi/include/rptadv_control_adapter.h")
+        write(stage, "usr/include/rptadv_control_adapter.h")
         (stage / library / "librptadv_product.so").symlink_to(PRODUCT)
         for name, crate in (("control_asterisk", "control-asterisk-adapter"),):
             header = f"rptadv_{name}_adapter.h"
@@ -657,6 +667,7 @@ def main() -> None:
             "rptadv_product",
             "rptadv_asterisk_adapter",
             "rptadv_control_asterisk_adapter",
+            "rptadv_control_standalone_adapter",
             "rptadv_file_adapter",
             "rptadv_speech_adapter",
         ):

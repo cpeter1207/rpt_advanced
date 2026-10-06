@@ -18,6 +18,7 @@ url = "2.5"
 [dev-dependencies]
 rptadv-file-adapter = { path = "../file-adapter" }
 rptadv-speech-adapter = { path = "../speech-adapter" }
+rptadv-control-standalone-adapter = { path = "../control-standalone-adapter" }
 
 [build-dependencies]
 bindgen = "0.72.1"
