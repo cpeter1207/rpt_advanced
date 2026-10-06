@@ -109,9 +109,10 @@ separate from runtime packages where headers/linker names are published.
 3. Standalone startup, configured local radio, incoming/outgoing IAX2 media,
    DTMF controls currently in scope, link status/topology behavior, shutdown,
    and reload are exercised without an Asterisk process.
-4. Tests prove bounded SPSC ingress, single-owner peer state, rejection on full
-   queues, per-producer ordering, fairness with a stalled producer, and no
-   locks or blocking operations on native audio callbacks.
+4. Tests and dependency-boundary checks prove bounded SPSC ingress,
+   single-owner peer state, rejection on full queues, per-producer ordering,
+   fairness with a stalled producer, and no locks, spin gates, blocking I/O,
+   or allocation on native audio callbacks or lock-free inter-thread handoffs.
 5. Tests install and inspect each package combination above, including dynamic
    ABI resolution and absence of unrelated product dependencies.
 6. Debian 13 amd64 and arm64 build/test/install checks pass; production line
