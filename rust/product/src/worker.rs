@@ -383,34 +383,49 @@ unsafe extern "C" fn transmit_callback(
     pointer: *mut f32,
     count: u32,
     keyed: *mut u32,
+    ctcss_enabled: *mut u32,
 ) -> i32 {
     // SAFETY: the host retains this callback context through synchronous destroy.
     let callback_context = unsafe { context.cast::<TransmitContext>().as_ref() };
     let status = callback_context.map(|context| &context.status);
     // SAFETY: the host supplies writable key storage for this call.
     let keyed = unsafe { keyed.as_mut() };
+    // SAFETY: the host supplies writable CTCSS state storage for this call.
+    let ctcss_enabled = unsafe { ctcss_enabled.as_mut() };
     // SAFETY: the host lends aligned writable PCM for this complete callback.
     let Some(samples) = (unsafe { samples(pointer, count) }) else {
         if let Some(keyed) = keyed {
             *keyed = 0;
         }
+        if let Some(ctcss_enabled) = ctcss_enabled {
+            *ctcss_enabled = 0;
+        }
         publish_transmit_keyed(status, false);
         return -1;
     };
-    let Some(keyed) = keyed else {
+    if keyed.is_none() || ctcss_enabled.is_none() {
         samples.fill(0.0);
+        if let Some(keyed) = keyed {
+            *keyed = 0;
+        }
+        if let Some(ctcss_enabled) = ctcss_enabled {
+            *ctcss_enabled = 0;
+        }
         publish_transmit_keyed(status, false);
         publish_transmit_samples(callback_context, samples);
         return -1;
-    };
+    }
+    let keyed = keyed.expect("validated PTT output");
+    let ctcss_enabled = ctcss_enabled.expect("validated CTCSS output");
     *keyed = 0;
     let result = match catch_unwind(AssertUnwindSafe(|| unsafe {
-        transmit(context, samples, keyed)
+        transmit(context, samples, keyed, ctcss_enabled)
     })) {
         Ok(result) => result,
         Err(_) => {
             samples.fill(0.0);
             *keyed = 0;
+            *ctcss_enabled = 0;
             -1
         }
     };
@@ -429,18 +444,29 @@ fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: bool) {
         status.transmit_keyed.store(keyed, Ordering::Release);
     }
 }
-unsafe fn transmit(context: *mut c_void, samples: &mut [f32], keyed: &mut u32) -> i32 {
+unsafe fn transmit(
+    context: *mut c_void,
+    samples: &mut [f32],
+    keyed: &mut u32,
+    ctcss_enabled: &mut u32,
+) -> i32 {
     // SAFETY: the host retains this context until synchronous destroy returns.
     let Some(context) = (unsafe { context.cast::<TransmitContext>().as_ref() }) else {
         samples.fill(0.0);
+        *keyed = 0;
+        *ctcss_enabled = 0;
         return -1;
     };
     if samples.len() > context.maximum {
         samples.fill(0.0);
+        *keyed = 0;
+        *ctcss_enabled = 0;
         return -1;
     }
     if !context.active.load(Ordering::Acquire) {
         samples.fill(0.0);
+        *keyed = 0;
+        *ctcss_enabled = 0;
         return 0;
     }
     // SAFETY: only this serial transmit endpoint accesses these cells while active.
@@ -486,10 +512,13 @@ unsafe fn transmit(context: *mut c_void, samples: &mut [f32], keyed: &mut u32) -
     {
         Ok(value) => {
             *keyed = u32::from(value);
+            *ctcss_enabled = u32::from(transmit.controller.ctcss_enabled());
             0
         }
         Err(_) => {
             samples.fill(0.0);
+            *keyed = 0;
+            *ctcss_enabled = 0;
             -1
         }
     }

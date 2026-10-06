@@ -28,7 +28,7 @@ fn host_without_radio_link_binding_is_rejected_before_callbacks() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 3;
+    table.abi_version = 4;
     table.peer_bind_radio = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -53,7 +53,7 @@ fn direct_table_requires_both_activation_and_destroy() {
     ));
 }
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v3)) -> HostServices {
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v4)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -267,19 +267,19 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v3>() as u32;
+    table.struct_size = size_of::<abi::rptadv_host_services_v4>() as u32;
     table.abi_version = 1;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 3;
+    table.abi_version = 4;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.hst3\0";
+    table.capability = *b"rptadv.hst4\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },

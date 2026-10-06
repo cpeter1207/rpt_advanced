@@ -224,10 +224,11 @@ static void *clock_run(void *context) {
          tick < (device->network ? 2000U : 100U) && !atomic_load(&device->stop); ++tick) {
         receive_audio(device);
         uint32_t keyed = 0;
+        uint32_t ctcss_enabled = 0;
         if (device->callbacks.receive(device->callbacks.receive_context, device->carrier,
                                       device->audio, 960) ||
             device->callbacks.transmit(device->callbacks.transmit_context, device->audio, 960,
-                                       &keyed)) {
+                                       &keyed, &ctcss_enabled)) {
             break;
         }
         device->keys += keyed && !device->keyed;

@@ -201,7 +201,7 @@ unsafe extern "C" fn radio_activate(
     handle: *mut c_void,
     receive: crate::abi::rptadv_radio_receive_v2,
     receive_context: *mut c_void,
-    transmit: crate::abi::rptadv_radio_transmit_v2,
+    transmit: crate::abi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
 ) -> i32 {
     if RADIO_ACTIVATE_RESULT.swap(0, Ordering::AcqRel) != 0 {
@@ -219,6 +219,7 @@ unsafe extern "C" fn radio_activate(
             if always || RADIO_READY.load(Ordering::Acquire) != 0 {
                 let mut samples = [0.0; 8];
                 let mut keyed = 0;
+                let mut ctcss_enabled = 0;
                 unsafe {
                     receive(contexts.0 as *mut c_void, 0, samples.as_mut_ptr(), 8);
                     transmit(
@@ -226,6 +227,7 @@ unsafe extern "C" fn radio_activate(
                         samples.as_mut_ptr(),
                         8,
                         &mut keyed,
+                        &mut ctcss_enabled,
                     );
                 }
             }
@@ -322,10 +324,10 @@ unsafe extern "C" fn peer_destroy(_: *mut c_void, handle: *mut c_void) {
     }
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v3 = crate::abi::rptadv_host_services_v3 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v3>() as u32,
-    abi_version: 3,
-    capability: *b"rptadv.hst3\0",
+static mut HOST: crate::abi::rptadv_host_services_v4 = crate::abi::rptadv_host_services_v4 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v4>() as u32,
+    abi_version: 4,
+    capability: *b"rptadv.hst4\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -346,7 +348,7 @@ static mut HOST: crate::abi::rptadv_host_services_v3 = crate::abi::rptadv_host_s
     peer_destroy: Some(peer_destroy),
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v3 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v4 {
     &raw const HOST
 }
 

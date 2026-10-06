@@ -47,3 +47,4 @@ status. Superseded records remain and point to their replacement.
 | [0039](0039-retire-usbradioplus-native-mode.md) | Accepted | Remove USBRadioPlus native software-repeat and native parrot modes; preserve shared native DSP and controller transport (implemented; source-audited 2026-10-04). |
 | [0040](0040-initial-alpha-compatibility-policy.md) | Accepted | Initial-alpha project interfaces do not require backward compatibility; remove compatibility-only code while rejecting mismatched artifacts safely. |
 | [0041](0041-fluent-localized-controller-telemetry.md) | Accepted | Built-in RF telemetry uses validated Fluent catalogs with independent text, speech, and Morse forms. |
+| [0042](0042-activity-scoped-ctcss-encode.md) | Accepted | Activity-scoped CTCSS transmit control is returned independently from PTT by the native radio callback. |

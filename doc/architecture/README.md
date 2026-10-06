@@ -17,8 +17,11 @@ telemetry, and AllStarLink peer control; the Asterisk adapter owns channel/frame
 exchange. USBRadioPlus remains the radio channel driver and owns hardware
 access. The separately released `rate_adjusting_pcm_ring3` and samplerate
 adapter DSOs provide playout buffering, clock-rate recovery, and edge conversion.
+The native radio transmit callback returns PTT and CTCSS enable separately; its
+activity policy remains in the controller, as specified by
+[ADR 0042](decisions/0042-activity-scoped-ctcss-encode.md).
 Before either incoming or outgoing peer media starts, the product binds it to
-its node's existing radio lease. Host-services ABI 3 forwards this control-only
+its node's existing radio lease. Host-services ABI 4 forwards this control-only
 operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
 USBRadioPlus retains ownership of the configured per-peer graph and its reload
 lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
@@ -432,10 +435,11 @@ defines the full reload, hardware-handoff, and failure policy.
 - Each inbound peer PCM ring uses that same configured delay for DTMF muting.
   Detected DTMF immediately gates its delayed output; insufficient delay can
   leave only the initial few milliseconds audible.
-- Optional per-node CTCSS encode/decode policy is activity-scoped. Live local
-  or peer traffic and pending command-response telemetry qualify it; hangtime,
-  IDs, and courtesy tones do not. The command-response window begins at command
-  receipt and remains active through playout.
+- Optional per-node transmit CTCSS restriction is independent of PTT. When
+  enabled, live local/peer traffic, its separate CTCSS hang, and pending
+  command-response telemetry qualify it; transmitter hang alone, IDs, and
+  courtesy tones do not. The response window begins at command receipt and
+  remains active through playout.
 - WebSocket streaming is status-only. CLI, REST, and DTMF use the shared
   controller operation catalog under ADR 0023.
 - Scheduled work is wall-clock control-plane work. A due event queues its

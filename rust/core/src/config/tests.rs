@@ -596,6 +596,32 @@ fn squelch_delay_inherits_and_defaults_to_zero() {
 }
 
 #[test]
+fn activity_ctcss_defaults_off_and_bounds_its_hang_to_transmit_hang() {
+    let node = NodeId::new("node").unwrap();
+    let defaults =
+        ResolvedNodeSettings::resolve(&ConfigDocument::parse("[node]\n").unwrap(), &node)
+            .unwrap()
+            .value;
+    assert!(!defaults.ctcss_encode_on_input);
+    assert_eq!(defaults.ctcss_hang_ms, 0);
+
+    let document = ConfigDocument::parse(
+        "[general]\ntransmit_hang_ms=500\nctcss_encode_on_input=yes\nctcss_hang_ms=600\n[node]\ntransmit_hang_ms=250\n",
+    )
+    .unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&document, &node).unwrap();
+    assert!(resolved.value.ctcss_encode_on_input);
+    assert_eq!(resolved.value.hang_ms, 250);
+    assert_eq!(resolved.value.ctcss_hang_ms, 0);
+    assert!(
+        resolved
+            .warnings
+            .iter()
+            .any(|warning| { warning.key == "ctcss_hang_ms" && warning.fallback == "0" })
+    );
+}
+
+#[test]
 fn parrot_enabled_defaults_off_and_inherits_with_node_precedence() {
     let node = NodeId::new("1000").unwrap();
     let resolved = |text: &str| {

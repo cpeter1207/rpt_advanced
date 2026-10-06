@@ -21,7 +21,13 @@ unsafe extern "C" fn current(_: *mut c_void) -> u32 {
 unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
     0
 }
-unsafe extern "C" fn transmit(_: *mut c_void, _: *mut f32, _: u32, _: *mut u32) -> i32 {
+unsafe extern "C" fn transmit(
+    _: *mut c_void,
+    _: *mut f32,
+    _: u32,
+    _: *mut u32,
+    _: *mut u32,
+) -> i32 {
     0
 }
 #[unsafe(no_mangle)]
@@ -60,13 +66,13 @@ unsafe extern "C" fn ast_channel_setoption(
     // SAFETY: attach_direct supplies exclusive access to this complete live descriptor.
     let descriptor = unsafe { &mut *data.cast::<ffi::urp_ast_direct_callbacks>() };
     assert!(descriptor.receive.is_some() && descriptor.transmit.is_some());
-    assert_eq!(descriptor.abi_version, 2);
+    assert_eq!(descriptor.abi_version, 3);
     assert_eq!(descriptor.accepted_abi_version, 0);
     let failure = host(|state| state.failure);
     descriptor.accepted_abi_version = match failure {
         DIRECT_ACK_MISSING => 0,
         DIRECT_ACK_WRONG => 1,
-        _ => 2,
+        _ => 3,
     };
     if failure == DIRECT_OPTION_FAILED {
         -1
@@ -129,7 +135,7 @@ fn missing_direct_callbacks_destroy_channels_and_cannot_reactivate_the_reservati
     for (receive, transmit) in [
         (
             None,
-            Some(transmit as unsafe extern "C" fn(_, _, _, _) -> _),
+            Some(transmit as unsafe extern "C" fn(_, _, _, _, _) -> _),
         ),
         (Some(receive as unsafe extern "C" fn(_, _, _, _) -> _), None),
     ] {
@@ -179,7 +185,7 @@ fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
         command_notice(null, c"100".as_ptr(), 3, 0);
     }
     assert_eq!(boundary(-1, || panic!("callback fault")), -1);
-    assert_eq!(descriptor().abi_version, 3);
+    assert_eq!(descriptor().abi_version, 4);
 }
 
 #[test]

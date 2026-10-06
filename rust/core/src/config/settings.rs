@@ -35,6 +35,10 @@ pub struct ResolvedNodeSettings {
     pub status_snapshot_interval_ms: u64,
     /// Transmit hang duration in milliseconds.
     pub hang_ms: u64,
+    /// Enable CTCSS only for received traffic or command-response telemetry.
+    pub ctcss_encode_on_input: bool,
+    /// Received-traffic CTCSS hang in milliseconds, no longer than transmit hang.
+    pub ctcss_hang_ms: u64,
     /// Continuous-source watchdog duration; zero disables it.
     pub transmit_timeout_ms: u64,
     /// Post-watchdog lockout duration.
@@ -1074,7 +1078,7 @@ impl ResolvedNodeSettings {
         document: &ConfigDocument,
         node: &NodeId,
     ) -> Result<Resolution<Self>, ConfigError> {
-        let schema = Schema::validate(document)?;
+        let mut schema = Schema::validate(document)?;
         let mut value = Self::defaults(node);
         let scopes = [node.as_str().to_owned(), "general".to_owned()];
         macro_rules! text {
@@ -1118,6 +1122,33 @@ impl ResolvedNodeSettings {
             value.status_snapshot_interval_ms = parsed;
         }
         number!(hang_ms, "transmit_hang_ms");
+        boolean!(ctcss_encode_on_input, "ctcss_encode_on_input");
+        for scope in &scopes {
+            let Some(raw) = document.lookup("ctcss_hang_ms", &[scope.as_str()]) else {
+                continue;
+            };
+            let Some(parsed) = parse::unsigned(raw, 0, u64::MAX) else {
+                continue;
+            };
+            if parsed > value.hang_ms {
+                let line = document
+                    .sections()
+                    .iter()
+                    .position(|section| section == scope)
+                    .map_or(1, |index| document.section_line(index));
+                schema.warnings.push(crate::config::ConfigWarning::new(
+                    line,
+                    scope,
+                    "ctcss_hang_ms",
+                    raw,
+                    "exceeds transmit hang time",
+                    "0",
+                ));
+            } else {
+                value.ctcss_hang_ms = parsed;
+                break;
+            }
+        }
         number!(transmit_timeout_ms, "transmit_timeout_ms");
         number!(timeout_lockout_ms, "timeout_lockout_ms");
         number!(kerchunk_max_ms, "kerchunk_max_ms");
@@ -1204,6 +1235,8 @@ impl ResolvedNodeSettings {
             squelch_delay_ms: 0,
             status_snapshot_interval_ms: 50,
             hang_ms: 0,
+            ctcss_encode_on_input: false,
+            ctcss_hang_ms: 0,
             transmit_timeout_ms: 180_000,
             timeout_lockout_ms: 30_000,
             kerchunk_max_ms: 500,

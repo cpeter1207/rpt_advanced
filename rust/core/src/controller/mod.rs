@@ -53,6 +53,10 @@ pub struct ControllerSettings {
     pub full_duplex: bool,
     /// Ordinary transmitter hang time.
     pub hang_ms: u64,
+    /// Restrict transmitted CTCSS to received traffic and command responses.
+    pub ctcss_encode_on_input: bool,
+    /// Retain received-traffic CTCSS after unkey, bounded by transmitter hang.
+    pub ctcss_hang_ms: u64,
     /// Maximum continuous keyed interval without any source unkey; zero disables.
     pub transmit_timeout_ms: u64,
     /// Post-timeout lockout; recovery additionally requires receive inactivity.
@@ -100,6 +104,8 @@ pub struct NodeController {
     keyed: bool,
     last_audio: u64,
     release_hang: u64,
+    ctcss_hang_until: u64,
+    ctcss_enabled: bool,
     release_pending: bool,
     suppress_release: bool,
     parrot_capture: Option<parrot::ParrotCapture>,
@@ -124,12 +130,14 @@ impl NodeController {
         }
         let durations = [
             settings.hang_ms,
+            settings.ctcss_hang_ms,
             settings.transmit_timeout_ms,
             settings.timeout_lockout_ms,
             settings.kerchunk_max_ms,
             settings.courtesy_delay_ms,
         ];
         if !(-60..=0).contains(&settings.telemetry_duck_db)
+            || settings.ctcss_hang_ms > settings.hang_ms
             || durations.iter().any(|d| *d > u64::MAX / 48)
             || ids.iter().any(|id| {
                 id.interval_ms > u64::MAX / 48
@@ -181,6 +189,7 @@ impl NodeController {
         } else {
             None
         };
+        let ctcss_enabled = !settings.ctcss_encode_on_input;
         control.parrot_enabled = settings.parrot_enabled;
         Ok((
             Self {
@@ -213,6 +222,8 @@ impl NodeController {
                 keyed: false,
                 last_audio: 0,
                 release_hang: 0,
+                ctcss_hang_until: 0,
+                ctcss_enabled,
                 release_pending: false,
                 suppress_release: false,
                 parrot_capture,
@@ -269,6 +280,14 @@ impl NodeController {
     /// Apply a sample-free receive edge without advancing playback or elapsed time.
     pub fn process_event(&mut self, receiving: bool, linked: bool) -> bool {
         self.process_event_with_activity(receiving, linked, receiving || linked)
+    }
+
+    /// Whether the current native output tick should transmit the configured CTCSS tone.
+    ///
+    /// Disabled activity scoping preserves the radio's existing tone behavior.
+    #[must_use]
+    pub fn ctcss_enabled(&self) -> bool {
+        self.ctcss_enabled
     }
 
     fn process_event_with_activity(
@@ -438,6 +457,10 @@ impl NodeController {
         let receive = receiving || linked;
         let idle = self.now.saturating_sub(self.last_activity);
         if receive {
+            self.ctcss_hang_until = self
+                .now
+                .saturating_add(1)
+                .saturating_add(samples(self.settings.ctcss_hang_ms));
             if !self.receiver && !self.linked {
                 self.key_idle = idle;
                 self.suppress_release = false;
@@ -603,6 +626,15 @@ impl NodeController {
             }
         }
         let rendered_source = self.telemetry.active;
+        self.ctcss_enabled = if !self.settings.ctcss_encode_on_input {
+            true
+        } else {
+            match rendered_source {
+                Some(Source::Status) => true,
+                Some(_) => false,
+                None => pending_status || receive || self.now < self.ctcss_hang_until,
+            }
+        };
         let playback = match rendered_source {
             Some(Source::Status) => self.telemetry.status.as_mut().map(|m| &mut m.0),
             Some(Source::Parrot) => self.telemetry.parrot.as_mut().map(|m| &mut m.0),

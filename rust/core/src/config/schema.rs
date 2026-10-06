@@ -189,6 +189,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "squelch_delay_ms"
                 | "status_snapshot_interval_ms"
                 | "transmit_hang_ms"
+                | "ctcss_encode_on_input"
+                | "ctcss_hang_ms"
                 | "transmit_timeout_ms"
                 | "timeout_lockout_ms"
                 | "kerchunk_max_ms"
@@ -327,6 +329,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "full_duplex"
         | "dtmf_muting"
         | "parrot_enabled"
+        | "ctcss_encode_on_input"
         | "first_key_only"
         | "regardless_of_activity"
         | "polite" => parse::boolean(value).is_some(),
@@ -336,6 +339,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "kerchunk_max_ms"
         | "courtesy_delay_ms"
         | "squelch_delay_ms"
+        | "ctcss_hang_ms"
         | "end_inactivity_ms" => parse::unsigned(value, 0, u64::MAX).is_some(),
         "dtmf_admin_timeout_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "status_snapshot_interval_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
@@ -403,6 +407,8 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "parrot_enabled") => "no",
         (ScopeKind::General | ScopeKind::Node, "dtmf_admin_timeout_ms") => "300000",
         (ScopeKind::General | ScopeKind::Node, "transmit_hang_ms") => "0",
+        (ScopeKind::General | ScopeKind::Node, "ctcss_encode_on_input") => "no",
+        (ScopeKind::General | ScopeKind::Node, "ctcss_hang_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "transmit_timeout_ms") => "180000",
         (ScopeKind::General | ScopeKind::Node, "timeout_lockout_ms") => "30000",
         (ScopeKind::General | ScopeKind::Node, "kerchunk_max_ms") => "500",

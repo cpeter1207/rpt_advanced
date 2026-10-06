@@ -197,6 +197,11 @@ hangs up before returning, while normal quiesce destroys the channel before
 reclaiming contexts or registrations. RX time advances from accumulated
 48 kHz samples; TX consumes local PCM directly into its caller's buffer.
 
+The current direct callback contract has since advanced to ABI 3 to return
+CTCSS enable independently from PTT; the product and host-services tables are
+now ABI 3 and 4 respectively. See ADR 0042. The implementation-status values
+above record the contract when this proof of concept was first integrated.
+
 This proof of concept does not claim the later complete asynchronous ring
 design: its local queue has bounded newest-sample drops and zero-fill
 shortfall, with a latest-state receiver snapshot. Adaptive clock correction,

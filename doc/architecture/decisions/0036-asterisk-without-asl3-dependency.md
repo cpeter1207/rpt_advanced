@@ -100,6 +100,9 @@ together with a USBRadioPlus provider implementing this option; the first releas
 provider version will determine its package minimum. No guessed release minimum
 or alpha compatibility path is introduced.
 
+The later transmit-CTCSS output extends this table to ABI 4; see ADR 0042. The
+peer-binding operation and its version-1 option payload are unchanged.
+
 AllStarLink wire-protocol, directory, topology, and control interoperability
 remain required features. Matching ASL3 behavior on those interfaces is not a
 software dependency on ASL3. Do not remove that behavior to satisfy a linker

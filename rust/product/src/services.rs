@@ -21,14 +21,14 @@ pub enum PeerInput<'a> {
 
 /// Validated process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(&'static abi::rptadv_host_services_v3);
+pub struct HostServices(&'static abi::rptadv_host_services_v4);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
 // SAFETY: the immutable table and context may be copied; object operations remain serialized.
 unsafe impl Sync for HostServices {}
 
-fn complete(api: &abi::rptadv_host_services_v3) -> bool {
+fn complete(api: &abi::rptadv_host_services_v4) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -61,16 +61,16 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v3) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v4) -> Result<Self, Error> {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-                < size_of::<abi::rptadv_host_services_v3>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 3
+                < size_of::<abi::rptadv_host_services_v4>() as u32
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 4
         {
             return Err(Error::Admission);
         }
         let api = unsafe { &*pointer };
-        if api.capability != *b"rptadv.hst3\0" || !complete(api) {
+        if api.capability != *b"rptadv.hst4\0" || !complete(api) {
             return Err(Error::Admission);
         }
         Ok(Self(api))
@@ -254,7 +254,7 @@ impl Radio {
         &mut self,
         receive: abi::rptadv_radio_receive_v2,
         receive_context: *mut c_void,
-        transmit: abi::rptadv_radio_transmit_v2,
+        transmit: abi::rptadv_radio_transmit_v3,
         transmit_context: *mut c_void,
     ) -> Result<(), Error> {
         let code = unsafe {

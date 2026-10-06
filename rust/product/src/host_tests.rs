@@ -24,7 +24,7 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v3 =
+    let mut table: abi::rptadv_host_services_v4 =
         unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()

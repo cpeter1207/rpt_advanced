@@ -293,6 +293,8 @@ pub(super) fn controller(
             parrot_enabled: settings.parrot_enabled,
             full_duplex: settings.full_duplex,
             hang_ms: settings.hang_ms,
+            ctcss_encode_on_input: settings.ctcss_encode_on_input,
+            ctcss_hang_ms: settings.ctcss_hang_ms,
             transmit_timeout_ms: settings.transmit_timeout_ms,
             timeout_lockout_ms: settings.timeout_lockout_ms,
             kerchunk_max_ms: settings.kerchunk_max_ms,

@@ -17,13 +17,13 @@ struct rptadv_file_descriptor;
 struct rptadv_speech_descriptor;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 2U
+#define RPTADV_PRODUCT_ABI_VERSION 3U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod2"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod3"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 3U
+#define RPTADV_HOST_ABI_VERSION 4U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst3"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst4"
 
 /** Copied local civil time. Valid is zero when conversion failed. */
 struct rptadv_local_time_v1 {
@@ -43,12 +43,12 @@ typedef int (*rptadv_radio_receive_v2)(void *context, uint32_t receiving, float 
                                        uint32_t sample_count);
 /** Serial output endpoint; inactive/gated generations succeed with silence/unkeyed.
  * Malformed arguments or processing failure return nonzero with silent output. */
-typedef int (*rptadv_radio_transmit_v2)(void *context, float *samples, uint32_t sample_count,
-                                        uint32_t *keyed);
+typedef int (*rptadv_radio_transmit_v3)(void *context, float *samples, uint32_t sample_count,
+                                        uint32_t *keyed, uint32_t *ctcss_enabled);
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
 /** Exact direct attachment version, independent of the host-services table. */
-#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 2U
+#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 3U
 /** Mutable direct registration; the provider copies callbacks before returning.
  * Initialize accepted_abi_version to zero. Start only when setoption returns zero
  * and acknowledges this exact ABI. Callback code and contexts remain borrowed
@@ -59,7 +59,7 @@ struct urp_ast_direct_callbacks {
     void *receive_context;             /**< Stable input owner context. */
     rptadv_radio_receive_v2 receive;   /**< Input endpoint. */
     void *transmit_context;            /**< Stable output owner context. */
-    rptadv_radio_transmit_v2 transmit; /**< Output endpoint. */
+    rptadv_radio_transmit_v3 transmit; /**< Output endpoint: key and CTCSS enable. */
     uint32_t accepted_abi_version; /**< Provider writes the ABI only after retaining callbacks. */
 };
 /** Synchronous RadioPlusAdvanced link-graph attachment; use block=0. */
@@ -93,11 +93,12 @@ typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t leng
  *
  * Borrowed strings/slices and product callbacks are valid only for the synchronous
  * call, except radio endpoints retained from activate through destroy. PCM is aligned normalized
- * F32 with exactly the stated count. Radio transmit returns its key decision through the output
- * pointer. Peer events are 1 text bytes, 2 one DTMF byte, or 3 normalized F32 PCM. Directory
- * methods are 0 both, 1 DNS, 2 file.
+ * F32 with exactly the stated count. Radio transmit returns key and CTCSS-enable
+ * decisions through separate output pointers. Peer events are 1 text bytes, 2
+ * one DTMF byte, or 3 normalized F32 PCM. Directory methods are 0 both, 1 DNS,
+ * 2 file.
  */
-struct rptadv_host_services_v3 {
+struct rptadv_host_services_v4 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -126,7 +127,7 @@ struct rptadv_host_services_v3 {
      * before return, retaining a safely destroyable reservation. Endpoints are serial
      * individually and may run concurrently with each other, never with destroy. */
     int (*radio_activate)(void *context, void *radio, rptadv_radio_receive_v2 receive,
-                          void *receive_context, rptadv_radio_transmit_v2 transmit,
+                          void *receive_context, rptadv_radio_transmit_v3 transmit,
                           void *transmit_context);
     /** Synchronously stop/hang up and detach both callbacks before returning. */
     void (*radio_destroy)(void *context, void *radio);
@@ -168,7 +169,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v3 *host,
+    int (*start)(const struct rptadv_host_services_v4 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,

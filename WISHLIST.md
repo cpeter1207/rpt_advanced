@@ -12,33 +12,6 @@ are intentionally absent from the open entries below.
 
 ## Entries
 
-### Activity-scoped CTCSS encode and decode
-
-**Requirements**
-
-- Add independent per-node controls that restrict CTCSS encode and CTCSS decode
-  to active received traffic from the local receiver or a connected peer.
-- When enabled, hangtime alone must not cause CTCSS encode or decode. IDs and
-  courtesy tones must likewise run without CTCSS.
-- Telemetry that responds to a command must retain CTCSS from command receipt
-  through the response's actual playout, including any waiting interval before
-  that playout begins.
-- Preserve the existing CTCSS behavior when either control is disabled.
-
-**Decisions recorded**
-
-- The controls are per-node and independently enableable for encode and decode.
-- Both controls default disabled, retaining current behavior until enabled.
-- A live local-receiver or connected-peer transmission qualifies the policy;
-  transmitter hangtime by itself does not.
-- A pending command response is a qualifying telemetry interval from accepted
-  command receipt until response playout completes. IDs and courtesy tones are
-  never qualifying intervals when this policy is enabled.
-
-**Material decisions needed before implementation**
-
-None.
-
 ### Split native receive and transmit workers
 
 **Requirements**
@@ -96,28 +69,6 @@ None.
   delay adds no local-ring delay. Keep one coherent generation across the pair.
   This is not a promise of zero device/DSP latency. Unknown clock relationships
   remain asynchronous; independent link and telemetry rings keep their recovery.
-
-**Material decisions needed before implementation**
-
-None.
-
-### External-load xrun diagnostics
-
-**Requirements**
-
-- Investigate output underruns caused or aggravated by high activity outside
-  Asterisk. Compare quiescent and CPU/I/O-loaded operation and correlate xrun
-  timestamps with host scheduling and system load before changing audio code.
-
-**Decisions recorded**
-
-- Use the adapter's per-callback scheduling and xrun statistics when comparing
-  quiescent and loaded operation; do not infer a cause from an xrun alone.
-- Implementation status — 2026-10-04: callback duration, late-start, and
-  separate capture/playback xrun timestamp observability is implemented in the
-  PortAudio/ALSA adapter. The controlled quiescent-versus-CPU/I/O-load
-  comparison has not been documented as completed, so that diagnostic study
-  remains open.
 
 **Material decisions needed before implementation**
 

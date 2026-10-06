@@ -61,8 +61,11 @@ fn audio_owners() -> (Runtime<Audio>, AudioOwners) {
     audio_owners_with_maximum(8)
 }
 fn audio_owners_with_maximum(maximum: usize) -> (Runtime<Audio>, AudioOwners) {
+    audio_owners_with_config(maximum, "[1000]\nradio_channel=usb\nduplex=full\n")
+}
+fn audio_owners_with_config(maximum: usize, configuration: &str) -> (Runtime<Audio>, AudioOwners) {
     let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\nradio_channel=usb\nduplex=full\n").unwrap(),
+        ConfigDocument::parse(configuration).unwrap(),
         &Media,
         |_, _| {
             let (state, _) =
@@ -145,16 +148,22 @@ fn rx(worker: &RadioWorker, receiving: bool, samples: &mut [f32]) -> i32 {
         )
     }
 }
-fn tx(worker: &RadioWorker, samples: &mut [f32]) -> (i32, u32) {
+fn tx_with_ctcss(worker: &RadioWorker, samples: &mut [f32]) -> (i32, u32, u32) {
     let mut keyed = 99;
+    let mut ctcss_enabled = 99;
     let result = unsafe {
         transmit_callback(
             std::ptr::from_ref(&*worker.transmit).cast_mut().cast(),
             samples.as_mut_ptr(),
             samples.len() as u32,
             &mut keyed,
+            &mut ctcss_enabled,
         )
     };
+    (result, keyed, ctcss_enabled)
+}
+fn tx(worker: &RadioWorker, samples: &mut [f32]) -> (i32, u32) {
+    let (result, keyed, _) = tx_with_ctcss(worker, samples);
     (result, keyed)
 }
 #[test]
@@ -169,7 +178,7 @@ fn independent_callbacks_queue_processed_pcm_and_return_transmit_keying() {
     for _ in 0..256 {
         assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
         let mut discard = [0.0; 8];
-        assert_eq!(tx(&worker, &mut discard), (0, 1));
+        assert_eq!(tx_with_ctcss(&worker, &mut discard), (0, 1, 1));
     }
     assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
     let mut samples = [9.0; 4];
@@ -190,6 +199,27 @@ fn independent_callbacks_queue_processed_pcm_and_return_transmit_keying() {
     let owners = worker.stop().unwrap();
     assert!(runtime.node("1000").unwrap().register_audio().is_none());
     drop(owners);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn direct_transmit_callback_returns_activity_scoped_ctcss_separately_from_ptt() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners_with_config(
+        8,
+        "[1000]\nradio_channel=usb\nduplex=full\nctcss_encode_on_input=yes\nctcss_hang_ms=20\ntransmit_hang_ms=100\n",
+    );
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+
+    let mut output = [0.0; 8];
+    assert_eq!(tx_with_ctcss(&worker, &mut output), (0, 0, 0));
+    assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+    assert_eq!(tx_with_ctcss(&worker, &mut output), (0, 1, 1));
+
+    drop(worker.stop());
     assert!(runtime.stop(0));
 }
 #[test]
@@ -241,23 +271,50 @@ fn malformed_callback_pointers_fail_without_publishing_audio_or_keying() {
     let transmit = std::ptr::from_ref(&*worker.transmit).cast_mut().cast();
     let mut output = [0.25; 8];
     let mut keyed = 99;
+    let mut ctcss_enabled = 99;
     unsafe {
         assert_eq!(receive_callback(receive, 1, null, 8), -1);
         assert_eq!(receive_callback(null.cast(), 1, output.as_mut_ptr(), 8), -1);
         assert_eq!(output, [0.0; 8]);
-        assert_eq!(transmit_callback(transmit, null, 8, &mut keyed), -1);
-        assert_eq!(transmit_callback(transmit, null, 8, null.cast()), -1);
-        assert_eq!(keyed, 0);
-        output.fill(0.25);
-        keyed = 99;
         assert_eq!(
-            transmit_callback(null.cast(), output.as_mut_ptr(), 8, &mut keyed),
+            transmit_callback(transmit, null, 8, &mut keyed, &mut ctcss_enabled),
             -1
         );
-        assert_eq!((output, keyed), ([0.0; 8], 0));
+        assert_eq!(
+            transmit_callback(transmit, null, 8, null.cast(), &mut ctcss_enabled),
+            -1
+        );
+        assert_eq!(keyed, 0);
+        assert_eq!(ctcss_enabled, 0);
+        output.fill(0.25);
+        keyed = 99;
+        ctcss_enabled = 99;
+        assert_eq!(
+            transmit_callback(
+                null.cast(),
+                output.as_mut_ptr(),
+                8,
+                &mut keyed,
+                &mut ctcss_enabled,
+            ),
+            -1
+        );
+        assert_eq!((output, keyed, ctcss_enabled), ([0.0; 8], 0, 0));
         output.fill(0.25);
         assert_eq!(
-            transmit_callback(transmit, output.as_mut_ptr(), 8, null.cast()),
+            transmit_callback(
+                transmit,
+                output.as_mut_ptr(),
+                8,
+                null.cast(),
+                &mut ctcss_enabled,
+            ),
+            -1
+        );
+        assert_eq!(output, [0.0; 8]);
+        output.fill(0.25);
+        assert_eq!(
+            transmit_callback(transmit, output.as_mut_ptr(), 8, &mut keyed, null.cast()),
             -1
         );
         assert_eq!(output, [0.0; 8]);
@@ -682,7 +739,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
         _: *mut c_void,
         receive: crate::abi::rptadv_radio_receive_v2,
         receive_context: *mut c_void,
-        transmit: crate::abi::rptadv_radio_transmit_v2,
+        transmit: crate::abi::rptadv_radio_transmit_v3,
         transmit_context: *mut c_void,
     ) -> i32 {
         let probe = unsafe { &*context.cast::<Probe>() };
@@ -690,22 +747,33 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
         probe.transmit.set(transmit_context);
         let mut samples = [0.25; 8];
         let mut keyed = 9;
+        let mut ctcss_enabled = 9;
         assert_eq!(
             unsafe { receive.unwrap()(receive_context, 1, samples.as_mut_ptr(), 8) },
             0
         );
         assert_eq!(
-            unsafe { transmit.unwrap()(transmit_context, samples.as_mut_ptr(), 8, &mut keyed) },
+            unsafe {
+                transmit.unwrap()(
+                    transmit_context,
+                    samples.as_mut_ptr(),
+                    8,
+                    &mut keyed,
+                    &mut ctcss_enabled,
+                )
+            },
             0
         );
         assert_eq!(samples, [0.0; 8]);
         assert_eq!(keyed, 0);
+        assert_eq!(ctcss_enabled, 0);
         0
     }
     unsafe extern "C" fn destroy(context: *mut c_void, radio: *mut c_void) {
         let probe = unsafe { &*context.cast::<Probe>() };
         let mut samples = [0.25; 8];
         let mut keyed = 0;
+        let mut ctcss_enabled = 0;
         // Both owners remain callable during destruction. Feed real input
         // through the converter's intrinsic FIR startup before checking PCM.
         for _ in 0..64 {
@@ -716,13 +784,20 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
             );
             assert_eq!(
                 unsafe {
-                    transmit_callback(probe.transmit.get(), samples.as_mut_ptr(), 8, &mut keyed)
+                    transmit_callback(
+                        probe.transmit.get(),
+                        samples.as_mut_ptr(),
+                        8,
+                        &mut keyed,
+                        &mut ctcss_enabled,
+                    )
                 },
                 0
             );
         }
         assert!(samples.iter().all(|sample| (*sample - 0.25).abs() < 0.001));
         assert_eq!(keyed, 1);
+        assert_eq!(ctcss_enabled, 1);
         probe.destroyed.set(true);
         unsafe {
             (*crate::fixture::host_descriptor()).radio_destroy.unwrap()(

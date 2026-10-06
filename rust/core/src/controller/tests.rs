@@ -1630,6 +1630,79 @@ fn half_duplex_link_audio_during_local_receive_does_not_advance_transmit_hang() 
 }
 
 #[test]
+fn activity_scoped_ctcss_tracks_receive_and_its_own_hangtime() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ctcss_hang_ms: 1,
+            hang_ms: 10,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(!node.ctcss_enabled());
+    node.process_audio(true, false, &[], &mut [0.0]);
+    assert!(node.ctcss_enabled());
+    node.process_audio(false, false, &[], &mut [0.0; 48]);
+    assert!(node.ctcss_enabled());
+    node.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!node.ctcss_enabled());
+}
+
+#[test]
+fn activity_scoped_ctcss_includes_pending_command_response_but_not_ids_or_courtesies() {
+    let (mut response, mut control) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    control.queue_status("E", Some(vec![0.5; 2])).unwrap();
+    response.process_audio(false, false, &[], &mut [0.0]);
+    assert!(response.ctcss_enabled());
+    response.process_audio(false, false, &[], &mut [0.0; 12_001]);
+    assert!(response.ctcss_enabled());
+    response.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!response.ctcss_enabled());
+
+    let id = Identifier {
+        media: media(0.2, 2),
+        interval_ms: 1,
+        priority: 1,
+        first_key_only: false,
+        regardless_of_activity: true,
+        polite_maximum_wait_ms: None,
+    };
+    let courtesy = CourtesySettings {
+        link: Some(media(0.3, 2)),
+        ..CourtesySettings::default()
+    };
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ..ControllerSettings::default()
+        },
+        vec![id],
+        vec![],
+        courtesy,
+    )
+    .unwrap();
+    node.telemetry.active = Some(telemetry::Source::Identifier(0));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!node.ctcss_enabled());
+    node.telemetry.active = Some(telemetry::Source::Courtesy(0));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!node.ctcss_enabled());
+}
+
+#[test]
 fn empty_courtesy_override_falls_back_to_generic_media() {
     let empty = PreparedMedia::new(None, "", MorseSettings::default()).unwrap();
     let courtesy = CourtesySettings {
