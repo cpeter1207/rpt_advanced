@@ -11,13 +11,14 @@ supersedes backward-compatibility requirements for project-owned interfaces.
 Do not retain compatibility-only code; preserve required current behavior and
 external interoperability, and reject incompatible artifact combinations safely.
 
-`app_rpt_advanced.so` is the metadata loader for an Asterisk-hosted Rust product.
-The product owns controller configuration, node workers, local radio policy,
-telemetry, and AllStarLink peer control; the Asterisk adapter owns channel/frame
-exchange. Standalone operation will use `rpt_advanced.conf` for per-node
-CM119 selection, wiring, and radio signaling settings, resolved by the product
-before opening the shared hardware adapters. The ASL channel adapter owns its own active
-hardware configuration.
+`rpt-advanced` is the standalone service; it owns controller configuration,
+node workers, local radio policy, telemetry, and AllStarLink peer control. It
+reads `rpt_advanced.conf` for per-node CM119 selection, wiring, audio graphs,
+and radio signaling, then opens the shared hardware adapters without Asterisk
+or ASL3. `app_rpt_advanced.so` is a separate deprecated Asterisk adapter; it
+owns only Asterisk channel/frame exchange and requires its configured
+USBRadioPlus channel. The standalone service and Asterisk adapter share the
+versioned product library, but neither requires the other package.
 The separately released `rate_adjusting_pcm_ring3` and samplerate
 adapter DSOs provide playout buffering, clock-rate recovery, and edge conversion.
 The native radio transmit callback returns PTT and CTCSS enable separately; its
@@ -83,6 +84,11 @@ Rust's private ABI.
 | Artifact | Ownership |
 | --- | --- |
 | `librptadv_product.so.1` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
+| `rpt-advanced` | Standalone service executable; loads the product and standalone providers without loading Asterisk |
+| `librptadv_control_standalone_adapter.so.1` | Lock-free standalone control-task executor |
+| `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |
+| `librptadv_gpio_adapter.so.1` | CM119 HID signaling and GPIO I/O |
+| `librptadviax2.so.1` | Asterisk-independent IAX2 packet protocol used by the standalone network client |
 | `librptadv_asterisk_adapter.so.1` | Public Asterisk application/CLI, channel, codec, directory, and frame services |
 | `librptadv_control_asterisk_adapter.so.1` | Replaceable serialized control executor backed by Asterisk's taskprocessor |
 | `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |

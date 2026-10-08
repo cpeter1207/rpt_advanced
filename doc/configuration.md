@@ -52,9 +52,9 @@ headers must name an existing node where their syntax includes a node name, whic
 declared later in the file.
 Repeated ordinary section headers merge options without creating duplicate nodes or media
 sets. A repeated named template, macro, event, permanent-link, or schedule header is instead
-rejected as a duplicate definition. Except for retired local-media selectors described below,
-unknown options and invalid values are rejected even if a later entry would override them. There
-is no fixed limit on the number of nodes, identifiers,
+rejected as a duplicate definition. Unknown options are ignored with a warning; an invalid
+recognized value warns and uses its inherited default. A configuration is rejected only when
+safe deterministic settings cannot be constructed. There is no fixed limit on the number of nodes, identifiers,
 announcements, courtesy tones, templates, macros, events, permanent links, or schedules.
 
 ## Node settings
@@ -111,6 +111,77 @@ before IAX sees it. Each connected peer uses its negotiated PCM rate, and the
 link adapter resamples between it and the local 48 kHz radio rate. A peer can
 therefore negotiate a rate at or below 48 kHz without requiring
 `codec_resample` for the peer-to-radio conversion.
+
+## Standalone radio settings
+
+The standalone service owns local audio-device selection and CM119 signaling.
+Flat `[radio]` values are shared defaults; `[radio <node>]` overrides them for
+one node. These settings are independent of `radio_channel`, which is used only
+by the optional Asterisk adapter. The native audio rate is 48 kHz. Processing
+graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `device_selection` | `exact` | Select `exact` for an identified device, or `automatic_lowest_alsa_card` to choose the lowest ALSA card. Automatic selection is intended for a host with one radio. |
+| `device_identifier` | empty | PortAudio device name or stable USB/ALSA identifier. Used with `usb_serial` when selecting an exact device. |
+| `usb_serial` | empty | Optional exact CM119 USB serial-number match. |
+| `input_device_channels` | `1` | Physical capture channel count; accepted values are 1 or 2. |
+| `output_device_channels` | `1` | Physical playback channel count; accepted values are 1 or 2. |
+| `input_extra_buffer_ms` | `0` | Additional capture buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
+| `output_extra_buffer_ms` | `0` | Additional playback buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
+| `receive_graph` | `anull` | FFmpeg chain applied to mono 48 kHz receiver audio. |
+| `transmit_graph` | `anull` | FFmpeg chain applied to mono 48 kHz transmitter audio. |
+| `cm119_profile` | `dudeusb` | CM119 wiring profile: `dudeusb`, `sphusb`, `nhrc`, or `custom`. |
+| `cm119_ptt_inverted` | `no` | Invert the CM119 PTT output polarity. |
+| `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
+| `cm119_clip_led_gpio` | `0` | GPIO number for the clipping indicator; 0 disables it, 1–8 selects a pin. |
+
+Receive signaling options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `receive_audio` | `flat` | Receiver audio source: `disabled`, speaker audio (`speaker`), or flat discriminator audio with deemphasis (`flat`). |
+| `receive_signaling` | `carrier` | Receive qualification: carrier only (`carrier`), CTCSS (`ctcss`), or DCS (`dcs`). |
+| `carrier_source` | `dsp` | Carrier indication from `disabled`, DSP noise squelch (`dsp`), VOX (`vox`), CM119 GPIO (`cm119`/`cm119_inverted`), or parallel input (`parallel`/`parallel_inverted`). |
+| `ctcss_source` | `dsp` | CTCSS/DCS indication source: `disabled`, `dsp`, CM119 GPIO, or parallel input; GPIO and parallel sources accept normal or inverted polarity. |
+| `receive_ctcss_tones_hz` | `100.0` | Comma-separated allowed CTCSS tones from the supported decoder table. |
+| `ctcss_decoder_gain_db` | `0` | Gain applied before native CTCSS decoding; −60 to +24 dB. |
+| `ctcss_relaxed` | `yes` | Enable relaxed CTCSS decode tolerance. |
+| `ctcss_override` | `no` | Permit carrier qualification without a decoded CTCSS tone when override behavior is requested. |
+| `dcs_receive_code` | `023N` | Three-digit octal DCS code and polarity (`N` normal or `I` inverted). |
+| `squelch_level` | `500` | Native DSP noise-squelch threshold on the 0–999 scale. |
+| `squelch_hysteresis` | `3000` | DSP noise-squelch closing hysteresis in PCM codes (0–32767). |
+| `noise_filter` | `standard` | Native discriminator-noise detector response: `standard` or `alternate`. |
+| `vox_threshold` | `0` | VOX detector threshold in PCM codes (0–32767). |
+| `vox_hang_ms` | `2000` | VOX hold time after received audio ends (0–32767 ms). |
+| `receive_on_delay_ms` | `0` | Ignore receiver keying for this interval after transmitter release (0–65535 ms). |
+| `radio_duplex_mode` | `half` | Physical radio capability: `half` or `full` duplex. |
+
+Transmit signaling options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `transmit_signaling` | `carrier` | Transmit carrier only (`carrier`), CTCSS (`ctcss`), or DCS (`dcs`). |
+| `transmit_ctcss_tones_hz` | `100.0` | Comma-separated CTCSS tones permitted for transmission. |
+| `transmit_ctcss_default_hz` | `100.0` | CTCSS tone used when no selected mapping overrides it. |
+| `transmit_ctcss_level_dbfs` | `-24` | CTCSS peak level (−60 to 0 dBFS). |
+| `transmit_ctcss_turnoff_mode` | `phase_shift` | CTCSS turnoff: `none`, `phase_shift`, `tone_remove`, or `tail_tone`. |
+| `transmit_ctcss_phase_shift_degrees` | `120` | Phase shift for reverse-burst turnoff (0–360 degrees). |
+| `transmit_ctcss_turnoff_duration_ms` | `180` | CTCSS turnoff duration (0–1000 ms). |
+| `transmit_ctcss_tail_tone_hz` | `55` | Replacement low-frequency tail tone for `tail_tone` mode (0–300 Hz). |
+| `transmit_dcs_code` | `023N` | Transmitted three-digit octal DCS code and polarity. |
+| `transmit_dcs_level_dbfs` | `-24` | DCS peak level (−60 to 0 dBFS). |
+| `transmit_dcs_turnoff_enabled` | `yes` | Send DCS turnoff signaling when transmission ends. |
+| `transmit_dcs_turnoff_duration_ms` | `180` | DCS turnoff interval (150–200 ms). |
+| `transmit_settle_ms` | `500` | Delay after PTT assertion before program audio starts (0–32767 ms). |
+| `transmit_receive_blanking_ms` | `0` | Blank receive qualification while transmitting (0–32767 ms). |
+| `transmit_off_delay_ms` | `0` | Ignore receiver activity for this interval after transmit release (0–32767 ms). |
+
+The complete commented example is installed at
+`share/doc/rpt-advanced/examples/rpt_advanced.conf`. Run
+`rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf` before
+restarting the standalone service. Inherited or invalid radio values use the
+documented defaults with a warning; unsafe configurations are rejected.
 
 ## Courtesy tones
 

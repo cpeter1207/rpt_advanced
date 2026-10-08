@@ -4,6 +4,7 @@ use std::{env, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=DEB_HOST_MULTIARCH");
+    println!("cargo:rerun-if-env-changed=RPT_ADVANCED_LIBDIR");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
@@ -27,7 +28,9 @@ fn main() {
             Err(error) => panic!("Cargo did not provide the target architecture: {error}"),
         }
     });
-    println!("cargo:rustc-env=RPT_ADVANCED_LIBDIR=/usr/lib/{multiarch}/rpt_advanced");
+    let library_directory = env::var("RPT_ADVANCED_LIBDIR")
+        .unwrap_or_else(|_| format!("/usr/lib/{multiarch}/rpt_advanced"));
+    println!("cargo:rustc-env=RPT_ADVANCED_LIBDIR={library_directory}");
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
