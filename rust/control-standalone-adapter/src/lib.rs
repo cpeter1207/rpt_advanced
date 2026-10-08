@@ -64,9 +64,28 @@ pub struct Descriptor {
 unsafe impl Sync for Descriptor {}
 
 struct Shared {
-    queue: ArrayQueue<Task>,
+    queue: ArrayQueue<QueuedTask>,
     state: AtomicUsize,
     capacity: usize,
+}
+
+struct QueuedTask {
+    context: *mut c_void,
+    run: unsafe extern "C" fn(*mut c_void),
+    release: unsafe extern "C" fn(*mut c_void),
+}
+
+// SAFETY: submission transfers exclusive ownership of the context and callbacks.
+unsafe impl Send for QueuedTask {}
+
+impl QueuedTask {
+    fn into_task(self) -> Task {
+        Task {
+            context: self.context,
+            run: Some(self.run),
+            release: Some(self.release),
+        }
+    }
 }
 
 /// One bounded FIFO and its single serialized execution thread.
@@ -125,15 +144,32 @@ impl StandaloneExecutor {
     }
 
     fn submit(&self, task: Task) -> Result<(), (Task, RejectionReason)> {
-        if task.run.is_none() || task.release.is_none() {
-            return Err((task, RejectionReason::Backend));
-        }
+        let Task {
+            context,
+            run,
+            release,
+        } = task;
+        let (Some(run), Some(release)) = (run, release) else {
+            return Err((
+                Task {
+                    context,
+                    run,
+                    release,
+                },
+                RejectionReason::Backend,
+            ));
+        };
+        let task = QueuedTask {
+            context,
+            run,
+            release,
+        };
         if let Err(reason) = self.reserve() {
-            return Err((task, reason));
+            return Err((task.into_task(), reason));
         }
         if let Err(task) = self.shared.queue.push(task) {
             self.shared.state.fetch_sub(1, Ordering::Release);
-            return Err((task, RejectionReason::Full));
+            return Err((task.into_task(), RejectionReason::Full));
         }
         self.worker.unpark();
         Ok(())
@@ -162,10 +198,9 @@ impl StandaloneExecutor {
             .is_ok()
         {
             let handle = self.join.swap(ptr::null_mut(), Ordering::AcqRel);
-            if !handle.is_null() {
-                // SAFETY: this caller atomically took the unique join handle.
-                let _ = unsafe { Box::from_raw(handle) }.join();
-            }
+            // SAFETY: open installs one handle, and the successful joining CAS
+            // grants this caller its unique removal before any later call can proceed.
+            let _ = unsafe { Box::from_raw(handle) }.join();
             self.joined.store(true, Ordering::Release);
         } else {
             while !self.joined.load(Ordering::Acquire) {
@@ -214,12 +249,10 @@ fn worker_loop(shared: Arc<Shared>) {
     CONTROL_OWNER.with(|value| value.set(Arc::as_ptr(&shared)));
     loop {
         while let Some(task) = shared.queue.pop() {
-            if let (Some(run), Some(release)) = (task.run, task.release) {
-                // The C ABI requires both callbacks to return normally.
-                unsafe {
-                    run(task.context);
-                    release(task.context);
-                }
+            // The C ABI requires both callbacks to return normally.
+            unsafe {
+                (task.run)(task.context);
+                (task.release)(task.context);
             }
             shared.state.fetch_sub(1, Ordering::Release);
         }

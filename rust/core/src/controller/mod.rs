@@ -399,25 +399,25 @@ impl NodeController {
                 return;
             }
         }
-        match self.parrot_lifecycle.requests.pop() {
+        let acknowledgement = match self.parrot_lifecycle.requests.pop() {
             Ok(ParrotRequest::Enable(capture)) => {
                 self.parrot_capture = Some(capture);
-                self.parrot_pending_ack = Some(ParrotAck::Enabled);
+                ParrotAck::Enabled
             }
             Ok(ParrotRequest::Disable) => {
                 self.telemetry.disable_parrot();
-                if let Some(capture) = self.parrot_capture.take() {
-                    self.parrot_pending_ack = Some(ParrotAck::Disabled(capture));
-                }
+                let capture = self
+                    .parrot_capture
+                    .take()
+                    .expect("disable requests follow an acknowledged enable");
+                ParrotAck::Disabled(capture)
             }
             Err(_) => return,
-        }
-        if let Some(acknowledgement) = self.parrot_pending_ack.take() {
-            if let Err(rtrb::PushError::Full(acknowledgement)) =
-                self.parrot_lifecycle.acknowledgements.push(acknowledgement)
-            {
-                self.parrot_pending_ack = Some(acknowledgement);
-            }
+        };
+        if let Err(rtrb::PushError::Full(acknowledgement)) =
+            self.parrot_lifecycle.acknowledgements.push(acknowledgement)
+        {
+            self.parrot_pending_ack = Some(acknowledgement);
         }
     }
 

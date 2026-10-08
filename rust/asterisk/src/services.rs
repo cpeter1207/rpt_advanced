@@ -162,16 +162,24 @@ unsafe extern "C" fn radio_open(
             return -1;
         };
         *output = ptr::null_mut();
-        let Some(name) = (unsafe { text(name, length) }).and_then(|value| CString::new(value).ok())
-        else {
+        let Some(identity) = (unsafe { text(name, length) }) else {
             return -1;
         };
-        let radio = Connection::open(&name).and_then(|connection| connection.into_radio(maximum));
+        let channel = match identity.split_once('\0') {
+            Some((node, channel)) if !node.is_empty() && !channel.is_empty() => channel,
+            Some(_) => return -1,
+            None => identity,
+        };
+        let Some(channel) = CString::new(channel).ok() else {
+            return -1;
+        };
+        let radio =
+            Connection::open(&channel).and_then(|connection| connection.into_radio(maximum));
         match radio {
             Ok(radio) => {
                 *output = Box::into_raw(Box::new(ReservedRadio {
                     radio: Some(radio),
-                    name,
+                    name: channel,
                 }))
                 .cast();
                 0

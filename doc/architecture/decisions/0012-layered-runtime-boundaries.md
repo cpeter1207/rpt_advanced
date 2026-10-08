@@ -48,10 +48,12 @@ The layers are:
    the selected TTS or sound-file source into the telemetry-program ring; only
    one such source may play at a time.
 5. **Connectivity services:** `librptadvdirectory`, `librptadvaccess`, and
-   `librptadviax2` when implemented. They provide directory lookup,
-   identity/access evaluation, asynchronous network I/O, link media ingress
-   and egress, per-peer jitter buffering, codec work, and protocol mechanics
-   without node routing policy.
+   `librptadviax2`. They provide directory lookup, identity/access evaluation,
+   asynchronous network I/O, link media ingress and egress, per-peer jitter
+   buffering, codec adapters, and protocol mechanics without node routing
+   policy. The IAX2 protocol engine owns packet/session semantics, not sockets;
+   its standalone network adapter owns datagram I/O, while codec adapters use
+   released codec libraries where available.
 6. **Node controller:** the shared controller core, presently reached through
    `app_rpt_advanced`. It owns node configuration semantics, identifiers,
    announcements, topology, links, timeouts, schedules, macros, and telemetry

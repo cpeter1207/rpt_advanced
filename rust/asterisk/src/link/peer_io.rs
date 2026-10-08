@@ -155,10 +155,10 @@ impl PeerIo {
     pub fn rate(&self) -> u32 {
         self.linear.rate()
     }
-    /// Wait at most one millisecond on the sole channel owner.
+    /// Poll the channel without waiting so the shared peer owner can service peers fairly.
     pub fn ready(&mut self) -> Result<bool, Error> {
         // SAFETY: channel ownership is exclusive and retained throughout the wait.
-        match unsafe { ffi::ast_waitfor(self.channel.pointer.as_ptr(), 1) } {
+        match unsafe { ffi::ast_waitfor(self.channel.pointer.as_ptr(), 0) } {
             value if value < 0 => Err(Error::Hangup),
             value => Ok(value > 0),
         }

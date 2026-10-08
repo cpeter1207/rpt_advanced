@@ -217,6 +217,8 @@ unsafe extern "C" fn peer_events(
         event(context, 1, text.as_ptr().cast(), text.len());
         event(context, 2, ptr::from_ref(&digit).cast(), 1);
         event(context, 3, audio.as_ptr().cast(), audio.len());
+        event(context, 4, ptr::null(), 0);
+        event(context, 5, ptr::null(), 0);
         event(context, 0, ptr::null(), 0);
         event(context, 1, ptr::null(), 1);
         event(context, 2, ptr::null(), 1);
@@ -336,10 +338,13 @@ fn lookup_and_handle_admission_errors_are_rejected_without_ownership_transfer() 
     let services = host_services(|table| table.radio_open = Some(radio_open_mode));
     for mode in [1, 2] {
         RADIO_OPEN_MODE.store(mode, Ordering::Relaxed);
-        assert!(matches!(services.radio("usb", 8), Err(Error::Operation)));
+        assert!(matches!(
+            services.radio("1000", "usb", 8),
+            Err(Error::Operation)
+        ));
     }
     RADIO_OPEN_MODE.store(0, Ordering::Relaxed);
-    drop(services.radio("usb", 8).unwrap());
+    drop(services.radio("1000", "usb", 8).unwrap());
 
     let services = host_services(|table| table.peer_dial = Some(peer_dial_mode));
     for mode in [1, 2] {
@@ -361,7 +366,7 @@ fn radio_and_peer_callbacks_contain_client_panics_and_release_once() {
     crate::fixture::RADIO_DROPS.store(0, Ordering::Relaxed);
     crate::fixture::PEER_DROPS.store(0, Ordering::Relaxed);
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
-    let radio = services.radio("usb", 8).unwrap();
+    let radio = services.radio("1000", "usb", 8).unwrap();
     drop(radio);
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), 1);
 
@@ -404,9 +409,20 @@ fn peer_callbacks_dispatch_valid_events_and_reject_invalid_or_failed_operations(
         PeerInput::Text(text) => events.push(format!("text:{:?}", text)),
         PeerInput::Digit(digit) => events.push(format!("digit:{digit}")),
         PeerInput::Audio(audio) => events.push(format!("audio:{audio:?}")),
+        PeerInput::RadioKey => events.push("radio-key".into()),
+        PeerInput::RadioUnkey => events.push("radio-unkey".into()),
     })
     .unwrap();
-    assert_eq!(events, ["text:[111, 107]", "digit:7", "audio:[0.25]"]);
+    assert_eq!(
+        events,
+        [
+            "text:[111, 107]",
+            "digit:7",
+            "audio:[0.25]",
+            "radio-key",
+            "radio-unkey"
+        ]
+    );
     drop(peer);
 
     let services = host_services(|table| table.peer_read = Some(peer_read_failure));

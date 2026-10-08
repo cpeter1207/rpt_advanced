@@ -98,7 +98,7 @@ fn worker_with_interval(status: RadioStatus, interval_ms: u64) -> RadioWorker {
     crate::fixture::RADIO_READY.store(0, Ordering::Release);
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     RadioWorker::prepare(
-        services.radio("usb", 8).unwrap(),
+        services.radio("1000", "usb", 8).unwrap(),
         Instant::now(),
         status,
         0,
@@ -124,7 +124,7 @@ fn local_ring_captures_squelch_delay_before_any_callback() {
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     for (delay, reserve) in [(0, 0), (150, 7200)] {
         let worker = RadioWorker::prepare(
-            services.radio("usb", 4096).unwrap(),
+            services.radio("1000", "usb", 4096).unwrap(),
             Instant::now(),
             RadioStatus::default(),
             delay,
@@ -403,7 +403,7 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
     RadioWorker::fail_next_for_test(TestFailure::Prepare);
     let Err((_, radio)) = RadioWorker::prepare(
-        services.radio("usb", 8).unwrap(),
+        services.radio("1000", "usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -706,7 +706,7 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
     crate::fixture::RADIO_ACTIVATE_RESULT.store(1, Ordering::Release);
     let Err((Error::Operation, radio)) = RadioWorker::prepare(
-        services.radio("usb", 8).unwrap(),
+        services.radio("1000", "usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
         0,
@@ -821,7 +821,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let (mut runtime, owners) = audio_owners();
     let mut worker = RadioWorker::prepare(
-        services.radio("usb", 8).unwrap(),
+        services.radio("1000", "usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
         0,

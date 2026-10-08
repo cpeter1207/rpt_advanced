@@ -166,7 +166,8 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
         },
         0
     );
-    assert!(String::from_utf8(status).unwrap().contains("2000"));
+    let status = String::from_utf8(status).unwrap();
+    assert!(status.contains("2000"), "unexpected link status: {status}");
     let rejected = crate::fixture::peer();
     assert_eq!(
         unsafe {

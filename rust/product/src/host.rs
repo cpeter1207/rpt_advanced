@@ -2,7 +2,10 @@
 use crate::{
     link::{
         ring::{InboundPolicy, InboundRing},
-        session::{Command as PeerCommand, Event, PeerControl, PeerReader, PeerSession},
+        session::{
+            Command as PeerCommand, Event, MAX_PEER_SESSIONS, PeerControl, PeerIoWorker,
+            PeerSession,
+        },
     },
     media::NativeMediaPreparer,
     services::{HostServices, PeerIo},
@@ -80,6 +83,7 @@ impl DeviceHandoff for Device {
             return false;
         }
         let radio = self.services.radio(
+            &settings.node,
             &settings.device,
             settings.receive_maximum.max(settings.transmit_maximum),
         );
@@ -127,7 +131,6 @@ struct PeerOwner {
     mode: Mode,
     group: Option<GroupMemberSelection>,
     announced: bool,
-    reader: PeerReader,
     control: PeerControl,
 }
 
@@ -139,6 +142,7 @@ pub struct Host {
     pub media: NativeMediaPreparer,
     services: HostServices,
     leases: Vec<(String, Arc<Mutex<Lease>>)>,
+    peer_io: PeerIoWorker,
     peers: Vec<PeerOwner>,
     operations: Vec<(String, DigitOperation)>,
     status_post: StatusPostService,
@@ -213,6 +217,7 @@ impl Host {
         epoch: Instant,
         clock: RuntimeClock,
     ) -> Result<Self, RuntimeError> {
+        let peer_io = PeerIoWorker::start(epoch).map_err(|_| RuntimeError::Device)?;
         let mut leases = Vec::new();
         let runtime = Runtime::start(
             document,
@@ -236,6 +241,7 @@ impl Host {
             media,
             services,
             leases,
+            peer_io,
             peers: Vec::new(),
             operations: Vec::new(),
             status_post: StatusPostService::default(),
@@ -344,6 +350,9 @@ impl Host {
         mut io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        if self.peers.len() >= MAX_PEER_SESSIONS {
+            return Err(RuntimeError::Rejected);
+        }
         {
             let (_, lease) = self
                 .leases
@@ -364,7 +373,10 @@ impl Host {
             .into_endpoints();
         let (session, control) = PeerSession::prepare(io, outbound, local, remote)
             .map_err(|_| RuntimeError::Preparation)?;
-        let reader = session.start().map_err(|_| RuntimeError::Preparation)?;
+        if let Err(session) = self.peer_io.attach(session) {
+            session.stop();
+            return Err(RuntimeError::Rejected);
+        }
         let group = self
             .runtime
             .node(local)
@@ -377,11 +389,8 @@ impl Host {
             mode,
             group,
             announced: false,
-            reader,
             control,
         });
-        #[cfg(test)]
-        crate::fixture::wait_for_peer_end(&self.peers.last().unwrap().reader);
         if let Err(error) = self.refresh(local, clock) {
             self.detach(local, remote, clock.now_ms);
             return Err(error);
@@ -420,7 +429,6 @@ impl Host {
             let peer = self.peers.remove(index);
             let announced = peer.announced;
             peer.control.stop();
-            peer.reader.join();
             announced
         } else {
             false
@@ -596,9 +604,7 @@ impl Host {
             while let Some(event) = peer.control.event() {
                 events.push((peer.local.clone(), peer.remote.clone(), event));
             }
-            // Old ring EOF is expected while a Redirected acknowledgment is in flight.
-            // Only the exclusive reader's termination ends the direct channel identity.
-            if peer.reader.ended() {
+            if peer.control.snapshot().is_ok_and(|snapshot| snapshot.ended) {
                 ended.push((peer.local.clone(), peer.remote.clone()));
             }
         }
@@ -734,17 +740,19 @@ impl Host {
             .collect();
         self.status_post.configure(config);
     }
-    /// Stop all producers/readers, drain dispatcher blocks, then acknowledge exact generations.
+    /// Stop peer owners, drain dispatcher blocks, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
         self.status_post.request_stop();
         let statuses = self.runtime.status(now_ms);
+        for peer in &self.peers {
+            peer.control.stop();
+        }
         self.runtime.stop(now_ms);
         for peer in self.peers.drain(..) {
-            peer.control.stop();
-            peer.reader.join();
             self.runtime
                 .peer_detached(&peer.local, &peer.remote, now_ms);
         }
+        self.peer_io.stop();
         for (local, status) in statuses {
             for generation in [status.active, status.retiring].into_iter().flatten() {
                 if let Some(control) = self.runtime.adapter_control_mut(&local, generation) {

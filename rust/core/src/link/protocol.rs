@@ -15,6 +15,10 @@ pub struct Route {
 pub enum Protocol {
     /// Complete replacement topology.
     Topology(Vec<Route>),
+    /// Legacy redundant key-state handshake request.
+    NewKey,
+    /// Initial key-state handshake request.
+    NewKey1,
     /// Broadcast keyed-source query.
     Query {
         /// Requesting node.
@@ -31,8 +35,17 @@ pub enum Protocol {
         /// Seconds since the last carrier edge.
         age_seconds: u64,
     },
-    /// Voice activity keying negotiation.
-    NewKey,
+    /// Addressed AllStarLink remote-control digit.
+    RemoteDigit {
+        /// Node that should receive the digit.
+        destination: String,
+        /// Node that transmitted the digit.
+        source: String,
+        /// Sender's remote-DTMF sequence number.
+        sequence: i32,
+        /// The completed DTMF symbol.
+        digit: char,
+    },
     /// Supported IAX key capability request.
     IaxKey,
     /// Explicit remote teardown.
@@ -48,7 +61,8 @@ impl Protocol {
         }
         let text = std::str::from_utf8(bytes).ok()?;
         match text {
-            "!NEWKEY1!" | "!NEWKEY!" => return Some(Self::NewKey),
+            "!NEWKEY!" => return Some(Self::NewKey),
+            "!NEWKEY1!" => return Some(Self::NewKey1),
             "!IAXKEY!" => return Some(Self::IaxKey),
             "!!DISCONNECT!!" => return Some(Self::Disconnect),
             "L" | "L " => return Some(Self::Topology(Vec::new())),
@@ -101,7 +115,55 @@ impl Protocol {
                     age_seconds: age.parse().ok()?,
                 })
             }
+            "D" if identity(destination)
+                && keyed.parse::<i32>().is_ok()
+                && age.len() == 1
+                && b"0123456789*#ABCD".contains(&age.as_bytes()[0]) =>
+            {
+                Some(Self::RemoteDigit {
+                    destination: destination.to_owned(),
+                    source: source.to_owned(),
+                    sequence: keyed.parse().ok()?,
+                    digit: age.as_bytes()[0] as char,
+                })
+            }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Protocol;
+
+    #[test]
+    fn distinguishes_newkey1_from_the_legacy_newkey_handshake() {
+        assert_eq!(Protocol::parse(b"!NEWKEY!"), Some(Protocol::NewKey));
+        assert_eq!(Protocol::parse(b"!NEWKEY1!"), Some(Protocol::NewKey1));
+    }
+
+    #[test]
+    fn parses_addressed_asl_remote_dtmf_text() {
+        assert_eq!(
+            Protocol::parse(b"D 1000 2000 17 5"),
+            Some(Protocol::RemoteDigit {
+                destination: "1000".into(),
+                source: "2000".into(),
+                sequence: 17,
+                digit: '5',
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_asl_remote_dtmf_text() {
+        for input in [
+            &b"D 1000 2000 x 5"[..],
+            b"D 1000 2000 1 E",
+            b"D 1000 2000 1 55",
+            b"D 1000 2000 1 5 extra",
+        ] {
+            assert_eq!(Protocol::parse(input), None, "{input:?}");
         }
     }
 }

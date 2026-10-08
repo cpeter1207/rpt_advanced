@@ -68,23 +68,8 @@ pub static LOCAL_TIME_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static NOTICE_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIAL_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIAL_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
-/// Fail only the next preparation handshake, never an active reader's control text.
+/// Fail only the next peer preparation handshake, never active control text.
 pub static PEER_PREPARE_TEXT_RESULT: AtomicUsize = AtomicUsize::new(0);
-/// Wait for real reader termination before refresh to exercise the publication race.
-pub static PEER_WAIT_FOR_END: AtomicUsize = AtomicUsize::new(0);
-
-pub(crate) fn wait_for_peer_end(reader: &crate::link::session::PeerReader) {
-    if PEER_WAIT_FOR_END.swap(0, Ordering::AcqRel) != 0 {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !reader.ended() && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
-        }
-        assert!(
-            reader.ended(),
-            "peer must terminate through its real read failure"
-        );
-    }
-}
 pub static PEER_DIGITS: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 pub static RADIO_READY: AtomicUsize = AtomicUsize::new(0);
 
@@ -175,7 +160,6 @@ unsafe extern "C" fn radio_open(
     0
 }
 unsafe extern "C" fn peer_ready(_: *mut c_void, _: *mut c_void) -> i32 {
-    std::thread::sleep(std::time::Duration::from_millis(1));
     i32::from(
         !PEER_DIGITS
             .lock()

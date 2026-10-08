@@ -311,7 +311,11 @@ impl NodeLinkControl {
                     now_ms,
                 )));
             }
-            Protocol::NewKey | Protocol::IaxKey => false,
+            // Remote DTMF is consumed by the peer-I/O session and delivered as a digit event.
+            Protocol::NewKey
+            | Protocol::NewKey1
+            | Protocol::IaxKey
+            | Protocol::RemoteDigit { .. } => false,
         };
         if detach {
             self.ended(remote);

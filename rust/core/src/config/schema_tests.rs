@@ -63,6 +63,76 @@ fn statpost_url_without_host_and_blank_or_oversized_group_names_are_invalid() {
 }
 
 #[test]
+fn iax_registration_accepts_secure_url_and_bounded_port_and_interval() {
+    let valid = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://register.allstarlink.org/\niax_registration_interval_s=60\niax_local_port=4569\n[1000]\niax_registration_url=https://registration.example:8443/path\niax_registration_interval_s=600\niax_local_port=65535\n",
+    )
+    .unwrap();
+    assert!(Schema::validate(&valid).unwrap().warnings.is_empty());
+
+    let invalid = ConfigDocument::parse(
+        "[1000]\niax_registration_url=http://register.example/\niax_registration_interval_s=29\niax_local_port=0\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&invalid).unwrap().warnings;
+    assert_eq!(warnings.len(), 3);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.key == "iax_registration_url")
+    );
+}
+
+#[test]
+fn radio_schema_accepts_each_carrier_source_and_uses_radio_defaults() {
+    for source in [
+        "disabled",
+        "dsp",
+        "vox",
+        "cm119",
+        "cm119_inverted",
+        "parallel",
+        "parallel_inverted",
+    ] {
+        let document =
+            ConfigDocument::parse(&format!("[radio]\ncarrier_source={source}\n")).unwrap();
+        assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    }
+
+    let invalid = ConfigDocument::parse(
+        "[radio]\ninput_extra_buffer_ms=501\nreceive_graph=\ntransmit_graph=\nreceive_signaling=invalid\ntransmit_ctcss_phase_shift_degrees=361\ntransmit_ctcss_turnoff_duration_ms=1001\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&invalid).unwrap().warnings;
+    let fallback = |key: &str| {
+        warnings
+            .iter()
+            .find(|warning| warning.key == key)
+            .map(|warning| warning.fallback.as_str())
+    };
+    assert_eq!(fallback("input_extra_buffer_ms"), Some("0"));
+    assert_eq!(fallback("receive_graph"), Some("anull"));
+    assert_eq!(fallback("transmit_graph"), Some("anull"));
+    assert_eq!(fallback("receive_signaling"), Some("carrier"));
+    assert_eq!(fallback("transmit_ctcss_phase_shift_degrees"), Some("120"));
+    assert_eq!(fallback("transmit_ctcss_turnoff_duration_ms"), Some("180"));
+}
+
+#[test]
+fn iax_registration_url_accepts_empty_value_and_rejects_credentials() {
+    let empty = ConfigDocument::parse("[general]\niax_registration_url=\n").unwrap();
+    assert!(Schema::validate(&empty).unwrap().warnings.is_empty());
+
+    let credentials = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://user:secret@register.example/\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&credentials).unwrap().warnings;
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].key, "iax_registration_url");
+}
+
+#[test]
 fn status_snapshot_interval_is_recognized_in_global_and_node_sections() {
     let document = ConfigDocument::parse(
         "[general]\nstatus_snapshot_interval_ms=80\n[1000]\nstatus_snapshot_interval_ms=25\n",
@@ -225,6 +295,13 @@ fn templates_macros_and_events_are_validated_after_inheritance() {
         .unwrap(),
     )
     .unwrap();
+    Schema::validate(
+        &ConfigDocument::parse(
+            "[node]\n[template node greeting]\ntext=local hello\n[event node morning]\nat=weekly Monday 08:00\ntemplate=greeting\n",
+        )
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -256,6 +333,10 @@ fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
         (
             "[node]\n[permanent node primary]\nremote_node=1\n[schedule node net]\nremote_node=1\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n",
             "schedule replacement must select another node",
+        ),
+        (
+            "[node]\n[permanent node primary]\nremote_node=1\n[permanent node other]\nremote_node=2\n[schedule node net]\nremote_node=2\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n",
+            "duplicate configured link remote node",
         ),
         (
             "[node]\n[permanent node primary]\nremote_node=1\n[schedule node net]\nremote_node=2\nreplace_permanent=primary\nstart_time=12:00\nend_time=11:00\n",
@@ -458,6 +539,10 @@ fn inherited_warning_fallbacks_follow_each_family_scope() {
 
 #[test]
 fn structural_errors_cover_bounded_labels_missing_macros_and_colliding_schedules() {
+    assert_eq!(
+        structure_error("[general invalid]\n").1,
+        "invalid section name"
+    );
     assert_eq!(
         structure_error(&format!(
             "[node]\n[template node {}]\ntext=x\n",

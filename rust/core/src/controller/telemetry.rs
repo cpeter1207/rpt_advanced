@@ -167,7 +167,7 @@ pub struct ControllerControl {
     parrot_acknowledgements: Option<Consumer<ParrotAck>>,
     pending_parrot_control: Option<ParrotCaptureControl>,
     parrot_lifecycle_pending: bool,
-    parrot_flag: Option<Arc<AtomicBool>>,
+    parrot_flag: Arc<AtomicBool>,
 }
 
 impl ControllerControl {
@@ -179,7 +179,7 @@ impl ControllerControl {
     ) {
         self.parrot_requests = Some(requests);
         self.parrot_acknowledgements = Some(acknowledgements);
-        self.parrot_flag = Some(flag);
+        self.parrot_flag = flag;
     }
 
     /// Request live capture allocation or reclamation without work or ownership changes on audio.
@@ -206,9 +206,7 @@ impl ControllerControl {
             return false;
         }
         self.parrot_enabled = enabled;
-        if let Some(flag) = &self.parrot_flag {
-            flag.store(enabled, Ordering::Release);
-        }
+        self.parrot_flag.store(enabled, Ordering::Release);
         self.parrot_lifecycle_pending = true;
         true
     }
@@ -334,7 +332,6 @@ struct ParrotSequence {
     report: Option<Box<dyn PcmStreamReader>>,
     recording: Box<dyn PcmStreamReader>,
     report_started: bool,
-    recording_started: bool,
 }
 
 impl ParrotSequence {
@@ -343,22 +340,17 @@ impl ParrotSequence {
             report,
             recording,
             report_started: false,
-            recording_started: false,
         }
     }
 
     fn start_recording(&mut self) {
-        if !self.recording_started {
-            self.recording.start();
-            self.recording_started = true;
-        }
+        self.recording.start();
     }
 }
 
 impl PcmStreamReader for ParrotSequence {
     fn start(&mut self) {
         self.report_started = false;
-        self.recording_started = false;
         if let Some(report) = &mut self.report {
             report.start();
             self.report_started = true;
@@ -458,7 +450,7 @@ impl TelemetryPlanner {
                 parrot_acknowledgements: None,
                 pending_parrot_control: None,
                 parrot_lifecycle_pending: false,
-                parrot_flag: None,
+                parrot_flag: Arc::new(AtomicBool::new(false)),
             },
         )
     }

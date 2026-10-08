@@ -17,6 +17,10 @@ pub enum PeerInput<'a> {
     Digit(char),
     /// Decoded normalized F32 PCM.
     Audio(&'a [f32]),
+    /// Remote radio asserted receive independently of media-frame arrival.
+    RadioKey,
+    /// Remote radio released receive.
+    RadioUnkey,
 }
 
 /// Validated process-lifetime host capability.
@@ -163,8 +167,10 @@ impl HostServices {
             .map(str::to_owned)
             .map_err(|_| Error::Operation)
     }
-    /// Reserve one uniquely owned radio channel without starting callbacks.
-    pub fn radio(&self, name: &str, maximum_frames: usize) -> Result<Radio, Error> {
+    /// Reserve one uniquely owned radio without starting callbacks. The host receives the node
+    /// identity and adapter-selected channel separated by a NUL byte in the length-delimited name.
+    pub fn radio(&self, node: &str, channel: &str, maximum_frames: usize) -> Result<Radio, Error> {
+        let name = format!("{node}\0{channel}");
         let mut handle = ptr::null_mut();
         let code = unsafe {
             self.0.radio_open.unwrap()(
@@ -329,18 +335,24 @@ impl PeerIo {
         ) {
             let state = unsafe { &mut *context.cast::<State<'_, F>>() };
             let result = catch_unwind(AssertUnwindSafe(|| match kind {
-                1 if !data.is_null() => {
+                abi::RPTADV_PEER_EVENT_TEXT if !data.is_null() => {
                     (state.dispatch)(PeerInput::Text(unsafe {
                         std::slice::from_raw_parts(data.cast(), count)
                     }));
                 }
-                2 if count == 1 && !data.is_null() => {
+                abi::RPTADV_PEER_EVENT_DIGIT if count == 1 && !data.is_null() => {
                     (state.dispatch)(PeerInput::Digit(unsafe { *data.cast::<u8>() } as char));
                 }
-                3 if !data.is_null() => {
+                abi::RPTADV_PEER_EVENT_AUDIO if !data.is_null() => {
                     (state.dispatch)(PeerInput::Audio(unsafe {
                         std::slice::from_raw_parts(data.cast(), count)
                     }));
+                }
+                abi::RPTADV_PEER_EVENT_RADIO_KEY if data.is_null() && count == 0 => {
+                    (state.dispatch)(PeerInput::RadioKey);
+                }
+                abi::RPTADV_PEER_EVENT_RADIO_UNKEY if data.is_null() && count == 0 => {
+                    (state.dispatch)(PeerInput::RadioUnkey);
                 }
                 _ => {}
             }));

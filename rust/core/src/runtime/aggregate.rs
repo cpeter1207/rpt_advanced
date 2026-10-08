@@ -598,7 +598,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 .position(|node| node.name == candidate.name)
             {
                 let old = &mut self.nodes[old_index];
-                if old.bounds.device == candidate.bounds.device {
+                if old.bounds.device == candidate.bounds.device
+                    && old.settings.radio == candidate.settings.radio
+                {
                     continue;
                 }
                 let status = old.status(clock.now_ms);
@@ -653,7 +655,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .status(clock.now_ms)
                     .active
                     .expect("active node");
-                let handoff = old.bounds.device != candidate.bounds.device;
+                let handoff = old.bounds.device != candidate.bounds.device
+                    || old.settings.radio != candidate.settings.radio;
                 let removed = old.links.withdraw_removed(&candidate.links);
                 if !removed.is_empty() {
                     self.effects

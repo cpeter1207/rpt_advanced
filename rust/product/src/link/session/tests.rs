@@ -7,6 +7,8 @@ pub(crate) enum Input {
     Text(&'static [u8]),
     Digit(u8),
     Audio(Vec<f32>),
+    RadioKey,
+    RadioUnkey,
 }
 #[derive(Default)]
 pub(crate) struct State {
@@ -79,6 +81,8 @@ unsafe extern "C" fn read(
                 Input::Audio(samples) => {
                     event.unwrap()(context, 3, samples.as_ptr().cast(), samples.len())
                 }
+                Input::RadioKey => event.unwrap()(context, 4, ptr::null(), 0),
+                Input::RadioUnkey => event.unwrap()(context, 5, ptr::null(), 0),
             }
         }
     }
@@ -129,6 +133,160 @@ fn audio_burst_ends_with_exactly_one_idle_marker() {
     let writes = state.lock().unwrap().writes.clone();
     assert_eq!(writes, [960, 0]);
 }
+
+#[test]
+fn legacy_newkey_is_echoed_once_without_gating_audio() {
+    let (mut session, _control, state, mut output) = make_session("1000");
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY!"));
+    assert_eq!(output.write(&[0.5; 960]), 0);
+    session.step(0).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY!"));
+    assert_eq!(output.write(&[0.25; 960]), 0);
+    session.step(20).unwrap();
+
+    let state = state.lock().unwrap();
+    assert_eq!(state.texts, [b"!NEWKEY1!".to_vec(), b"!NEWKEY!".to_vec()]);
+    let mut expected_audio = vec![0.5; 960];
+    expected_audio.extend(vec![0.25; 960]);
+    assert_eq!(state.audio, expected_audio);
+}
+
+#[test]
+fn radio_key_control_waits_for_peer_negotiation() {
+    let (mut session, _control, state, _) = make_session("1000");
+    session.step(0).unwrap();
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(1).unwrap();
+    assert!(!session.inbound.signals().radio_keyed());
+
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY!"));
+    session.step(2).unwrap();
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(3).unwrap();
+    assert!(session.inbound.signals().radio_keyed());
+}
+
+#[test]
+fn radio_key_control_falls_back_after_two_seconds_without_newkey1() {
+    let (mut session, _control, state, _) = make_session("1000");
+    session.step(0).unwrap();
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(1).unwrap();
+    assert!(!session.inbound.signals().radio_keyed());
+
+    session.step(1_999).unwrap();
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(2_000).unwrap();
+    assert!(session.inbound.signals().radio_keyed());
+}
+
+#[test]
+fn newkey1_disables_radio_key_control_but_unkey_is_always_honored() {
+    let (mut session, _control, state, _) = make_session("1000");
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY!"));
+    session.step(0).unwrap();
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(1).unwrap();
+    assert!(session.inbound.signals().radio_keyed());
+
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY1!"));
+    session.step(2).unwrap();
+    assert!(!session.inbound.signals().radio_keyed());
+
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(3).unwrap();
+    assert!(!session.inbound.signals().radio_keyed());
+
+    state.lock().unwrap().input.push_back(Input::RadioUnkey);
+    session.step(4).unwrap();
+    assert!(!session.inbound.signals().radio_keyed());
+
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY!"));
+    session.step(5).unwrap();
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(6).unwrap();
+    assert!(!session.inbound.signals().radio_keyed());
+}
+
+#[test]
+fn newkey1_does_not_suppress_outbound_audio() {
+    let (mut session, _control, state, mut output) = make_session("1000");
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY1!"));
+    assert_eq!(output.write(&[0.5; 960]), 0);
+    session.step(20).unwrap();
+    assert_eq!(state.lock().unwrap().audio, vec![0.5; 960]);
+}
+
+#[test]
+fn remote_control_digit_uses_the_asl_link_text_envelope() {
+    let (mut session, mut control, state, _) = make_session("1000");
+    control.send(Command::Digit('5')).ok().unwrap();
+    control.send(Command::Digit('6')).ok().unwrap();
+
+    session.step(20).unwrap();
+    session.step(21).unwrap();
+
+    let (text, digits) = {
+        let state = state.lock().unwrap();
+        (
+            state
+                .texts
+                .iter()
+                .filter(|text| text.starts_with(b"D "))
+                .cloned()
+                .collect::<Vec<_>>(),
+            state.digits.clone(),
+        )
+    };
+    drop(session);
+    assert_eq!(
+        text,
+        [b"D 2000 1000 1 5".to_vec(), b"D 2000 1000 2 6".to_vec()]
+    );
+    assert!(digits.is_empty());
+}
+
+#[test]
+fn addressed_asl_remote_dtmf_text_becomes_a_peer_digit_event() {
+    let (mut session, mut control, _, _) = make_session("1000");
+
+    session.text(b"D 9999 2000 16 6".to_vec(), 20).unwrap();
+    session.text(b"D 1000 3000 17 6".to_vec(), 20).unwrap();
+    assert!(control.event().is_none());
+    session.text(b"D 1000 2000 17 5".to_vec(), 21).unwrap();
+
+    assert!(matches!(control.event(), Some(Event::Digit('5'))));
+    assert!(control.event().is_none());
+}
+
 unsafe extern "C" fn destroy(_: *mut c_void, peer: *mut c_void) {
     let state = unsafe { Box::from_raw(peer.cast::<Shared>()) };
     state.lock().unwrap().drops += 1;
@@ -200,7 +358,15 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
         .input
         .push_back(Input::Audio(vec![0.5; 4000]));
     session.step(20).unwrap();
-    assert_eq!(state.lock().unwrap().digits, [b'5']);
+    assert!(state.lock().unwrap().digits.is_empty());
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"D 2000 1000 1 5")
+    );
     assert_eq!(state.lock().unwrap().audio, vec![0.25; 960]);
     assert!(control.snapshot().unwrap().ring.available_samples > 0);
 
@@ -236,10 +402,10 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
 #[test]
 fn keyed_source_accepts_only_current_active_query_and_retains_last_selection() {
     let (mut session, mut control, state, _) = make_session("1000");
-    session.text(b"K 1000 3000 1 0".to_vec()).unwrap();
+    session.text(b"K 1000 3000 1 0".to_vec(), 0).unwrap();
     session.inbound.signals().set_active(true);
     // A response before the reader observes the new activity epoch is advisory only.
-    session.text(b"K 1000 3000 1 0".to_vec()).unwrap();
+    session.text(b"K 1000 3000 1 0".to_vec(), 0).unwrap();
     session.step(10).unwrap();
     assert!(
         state
@@ -249,9 +415,9 @@ fn keyed_source_accepts_only_current_active_query_and_retains_last_selection() {
             .iter()
             .any(|text| text == b"K? * 1000 0 0")
     );
-    session.text(b"K 9999 3000 1 0".to_vec()).unwrap();
-    session.text(b"K 1000 3000 1 0".to_vec()).unwrap();
-    session.text(b"K 1000 4000 1 0".to_vec()).unwrap();
+    session.text(b"K 9999 3000 1 0".to_vec(), 0).unwrap();
+    session.text(b"K 1000 3000 1 0".to_vec(), 0).unwrap();
+    session.text(b"K 1000 4000 1 0".to_vec(), 0).unwrap();
     assert_eq!(
         control.snapshot().unwrap().selected_source.as_deref(),
         Some("3000")
@@ -268,7 +434,7 @@ fn keyed_source_accepts_only_current_active_query_and_retains_last_selection() {
     session.inbound.signals().set_active(true);
     session.step(12).unwrap();
     assert!(session.query_epoch.is_none());
-    session.text(b"K 1000 4000 1 0".to_vec()).unwrap();
+    session.text(b"K 1000 4000 1 0".to_vec(), 0).unwrap();
     assert!(control.snapshot().unwrap().selected_source.is_none());
     let (mut local, _local_control, local_state, _) = make_session("usb/test");
     local.inbound.signals().set_active(true);
@@ -334,10 +500,9 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
         Err(Command::Digit('2'))
     ));
     session.step(0).unwrap();
-    let reader = session.start().unwrap();
-    assert!(!reader.ended());
+    assert!(!control.snapshot().unwrap().ended);
     control.stop();
-    reader.join();
+    assert!(control.snapshot().unwrap().ended);
 }
 
 #[test]

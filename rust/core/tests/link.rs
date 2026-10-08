@@ -216,6 +216,72 @@ fn media_signals_publish_pcm_and_cancel_stale_key_source() {
 }
 
 #[test]
+fn external_radio_key_keys_a_link_without_replaying_stale_pcm() {
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, PeerInput, PeerSignals},
+    };
+    struct Input {
+        signals: std::sync::Arc<PeerSignals>,
+        active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl PeerInput for Input {
+        fn source_rate(&self) -> u32 {
+            48000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.signals
+        }
+        fn available(&self) -> u64 {
+            20000 * u64::from(self.active.load(std::sync::atomic::Ordering::Acquire))
+        }
+        fn render(&mut self, output: &mut [f32]) -> bool {
+            output.fill(0.75);
+            self.active.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+    let signals = std::sync::Arc::new(PeerSignals::new());
+    let media_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    signals.publish_pcm();
+    let (producer, _) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let peer = AudioPeer::new(
+        "200",
+        Mode::TRANSCEIVE,
+        Input {
+            signals: std::sync::Arc::clone(&signals),
+            active: std::sync::Arc::clone(&media_active),
+        },
+        producer,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, _) = LinkAudio::new(vec![peer], 1).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut audio = [0.0];
+    links.process(&mut controller, false, &mut audio).unwrap();
+    assert_eq!(audio, [0.75]);
+
+    media_active.store(false, std::sync::atomic::Ordering::Release);
+    signals.set_radio_keyed(true);
+    audio[0] = 0.5;
+    links.process(&mut controller, false, &mut audio).unwrap();
+    assert_eq!(links.active_count(), 1);
+    assert_eq!(audio, [0.0]);
+
+    signals.set_radio_keyed(false);
+    links.process(&mut controller, false, &mut audio).unwrap();
+    assert_eq!(links.active_count(), 0);
+}
+
+#[test]
 fn concurrent_advisory_publication_never_exposes_a_torn_identity() {
     use rpt_advanced_core::link::PeerSignals;
     use std::sync::{Arc, Barrier};

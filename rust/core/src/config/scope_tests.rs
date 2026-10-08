@@ -4,6 +4,8 @@ use super::scope::{ScopeKind, is_named, is_node_scoped, parse_scope};
 fn documented_section_shapes_are_classified_without_prefix_matches() {
     let cases = [
         ("general", ScopeKind::General, None, None),
+        ("radio", ScopeKind::RadioDefault, None, None),
+        ("radio usb", ScopeKind::RadioNode, Some("usb"), None),
         ("usb", ScopeKind::Node, Some("usb"), None),
         (
             "identifier usb",
@@ -52,6 +54,7 @@ fn documented_section_shapes_are_classified_without_prefix_matches() {
 fn malformed_documented_shapes_are_not_reinterpreted_as_nodes() {
     for name in [
         "",
+        "radio node extra",
         "identifier  usb",
         "identifier usb too many",
         "morse usb label",

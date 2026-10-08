@@ -22,6 +22,21 @@ fn signed_decimal_accepts_only_an_optional_minus_sign() {
 }
 
 #[test]
+fn ctcss_and_dcs_parsers_accept_only_supported_radio_codes() {
+    assert_eq!(parse::ctcss_tone_tenths_hz("100.0"), Some(1_000));
+    assert_eq!(parse::ctcss_tones("100,103.5"), Some(vec![1_000, 1_035]));
+    for invalid in ["", "100.00", "100.1", "60.0", "100.0,100"] {
+        assert_eq!(parse::ctcss_tones(invalid), None);
+    }
+
+    assert_eq!(parse::dcs_code("023N"), Some((0o23, false)));
+    assert_eq!(parse::dcs_code("047i"), Some((0o47, true)));
+    for invalid in ["", "23N", "028N", "023X", "023NI"] {
+        assert_eq!(parse::dcs_code(invalid), None);
+    }
+}
+
+#[test]
 fn unsigned_decimal_and_boolean_grammar_match_the_configuration_contract() {
     assert_eq!(
         parse::unsigned("18446744073709551615", 0, u64::MAX),

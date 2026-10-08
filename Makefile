@@ -21,12 +21,14 @@ ADAPTERS := asterisk control_asterisk file speech
 STANDALONE_ADAPTERS := control_standalone
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
 LIBRARIES += build/librptadv_product.so.1
+STANDALONE_LIBRARIES := build/librptadv_control_standalone_adapter.so.1
+INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
 DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c examples doc debian messages README.md QUALITY.md WISHLIST.md
 
-.PHONY: all rust-build artifacts quality lint static-analysis docs dependency-boundary product-surface rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
+.PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
 .PHONY: build/app_rpt_advanced.so
 all: build/app_rpt_advanced.so
@@ -44,6 +46,22 @@ rust-build: | build
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
+	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
+
+standalone-build: | build
+	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
+		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter
+	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
+	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
+	@set -e; for name in file speech control_standalone; do \
+		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" \
+			"build/librptadv_$${name}_adapter.so.1"; \
+		done
+
+standalone-check:
+	$(TEST_ENV) $(CARGO) test --locked -p rpt-advanced-standalone
+	python3 tests/test_standalone_service.py
+	python3 tests/test_package_combinations.py
 
 $(LIBRARIES): rust-build
 	@test -f $@
@@ -132,13 +150,15 @@ coverage: rust-coverage loader-coverage
 
 install: all
 	install -d $(DESTDIR)$(asteriskmoddir) $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
+	install -D -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/app_rpt_advanced.so $(DESTDIR)$(asteriskmoddir)/
-	install -m 0755 $(LIBRARIES) $(DESTDIR)$(libdir)/
+	install -m 0755 $(INSTALL_LIBRARIES) $(DESTDIR)$(libdir)/
 	ln -sfn librptadv_product.so.1 $(DESTDIR)$(libdir)/librptadv_product.so
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
 	ln -sfn librptadv_control_asterisk_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_asterisk_adapter.so
-	install -m 0644 rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h $(DESTDIR)$(prefix)/include/
+	ln -sfn librptadv_control_standalone_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_standalone_adapter.so
+	install -m 0644 rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h $(DESTDIR)$(prefix)/include/
 	install -D -m 0644 rust/file-adapter/include/rptadv_file_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_file_adapter.h
 	install -D -m 0644 rust/media-support/include/rptadv_media_types.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_media_types.h
 	install -D -m 0644 rust/speech-adapter/include/rptadv_speech_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/speech/rptadv_speech_adapter.h
@@ -149,11 +169,37 @@ install: all
 	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
 	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/asterisk/rpt_advanced/messages/en-US.ftl
+	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
+
+standalone-install: standalone-build
+	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
+	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
+	install -m 0755 build/librptadv_product.so.1 build/librptadv_file_adapter.so.1 \
+		build/librptadv_speech_adapter.so.1 build/librptadv_control_standalone_adapter.so.1 \
+		$(DESTDIR)$(libdir)/
+	ln -sfn librptadv_product.so.1 $(DESTDIR)$(libdir)/librptadv_product.so
+	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
+	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
+	ln -sfn librptadv_control_standalone_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_standalone_adapter.so
+	install -m 0644 rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h \
+		rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h $(DESTDIR)$(prefix)/include/
+	install -D -m 0644 rust/file-adapter/include/rptadv_file_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_file_adapter.h
+	install -D -m 0644 rust/media-support/include/rptadv_media_types.h $(DESTDIR)$(prefix)/include/rpt_advanced/file/rptadv_media_types.h
+	install -D -m 0644 rust/speech-adapter/include/rptadv_speech_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/speech/rptadv_speech_adapter.h
+	install -D -m 0644 rust/media-support/include/rptadv_media_types.h $(DESTDIR)$(prefix)/include/rpt_advanced/speech/rptadv_media_types.h
+	@set -e; for file in $(MANUALS); do \
+		install -D -m 0644 "$$file" "$(DESTDIR)$(docdir)/$$file"; \
+	done
+	install -D -m 0644 COPYING $(DESTDIR)$(docdir)/copyright
+	install -D -m 0644 examples/rpt_advanced.conf $(DESTDIR)$(docdir)/examples/rpt_advanced.conf
+	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
 install-check: artifacts
 	rm -rf -- $(CURDIR)/build/stage
 	$(MAKE) -o rust-build DESTDIR=$(CURDIR)/build/stage prefix=/usr install
 	python3 tests/test_rust_product_surface.py --stage build/stage --multiarch $(multiarch) --asteriskmoddir "$(asteriskmoddir)"
+	python3 tests/test_standalone_service.py
+	python3 tests/test_package_combinations.py
 
 build/chan_rpt_fixture.so: tests/radio_fixture.c rust/product/include/rptadv_product.h | build
 	$(CC) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@

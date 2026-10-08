@@ -561,6 +561,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpt-advanced-standalone"
+version = "0.1.0-alpha7"
+dependencies = [
+ "bindgen",
+ "crossbeam-queue",
+ "libc",
+ "libloading",
+ "rpt-advanced-core",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "rptadv-asterisk-adapter"
 version = "0.1.0-alpha7"
 dependencies = [

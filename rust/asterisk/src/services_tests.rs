@@ -90,7 +90,17 @@ fn radio_activation_accepts_the_installed_direct_callback_abi() {
     let null = ptr::null_mut();
     unsafe {
         let mut radio = null;
-        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+        let identity = b"1000\0usb";
+        assert_eq!(
+            radio_open(
+                null,
+                identity.as_ptr().cast(),
+                identity.len(),
+                8,
+                &mut radio
+            ),
+            0
+        );
         let result = radio_activate(null, radio, Some(receive), null, Some(transmit), null);
         radio_destroy(null, radio);
         assert_eq!(result, 0);

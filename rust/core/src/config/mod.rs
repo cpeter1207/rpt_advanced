@@ -20,9 +20,12 @@ mod tests;
 pub use document::{ConfigDocument, ConfigEntry};
 pub use schema::Schema;
 pub use settings::{
-    LinkLookupMethod, NodeId, ResolvedAnnouncementSettings, ResolvedCourtesySettings,
-    ResolvedEventSettings, ResolvedIdentifierSettings, ResolvedMacroSettings,
-    ResolvedMorseSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
+    Cm119GpioMode, Cm119Profile, CtcssTurnoffMode, DcsCode, LinkLookupMethod, NodeId,
+    RadioCarrierSource, RadioDeviceSelection, RadioDuplexMode, RadioNoiseFilter,
+    RadioReceiveAudioSource, RadioSignalingMode, RadioSubaudibleSource,
+    ResolvedAnnouncementSettings, ResolvedCourtesySettings, ResolvedEventSettings,
+    ResolvedIdentifierSettings, ResolvedMacroSettings, ResolvedMorseSettings, ResolvedNodeSettings,
+    ResolvedPermanentLinkSettings, ResolvedRadioSettings, ResolvedRadioSignalingSettings,
     ResolvedScheduleSettings, ResolvedSpeechSettings, ResolvedTemplateSettings,
     ResolvedTimeSettings,
 };
@@ -58,7 +61,7 @@ impl ConfigWarning {
             section: section.to_owned(),
             key: key.to_owned(),
             // URLs may carry private query parameters; never echo them in diagnostics.
-            value: if key == "statpost_url" {
+            value: if matches!(key, "statpost_url" | "iax_registration_url") {
                 "<redacted URL>".to_owned()
             } else {
                 value.to_owned()

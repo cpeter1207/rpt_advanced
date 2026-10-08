@@ -153,6 +153,41 @@ fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
 }
 
 #[test]
+fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
+    };
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        device,
+        clock(),
+    )
+    .unwrap();
+    log.lock().unwrap().clear();
+
+    runtime
+        .reload(
+            ConfigDocument::parse("[1000]\n[radio 1000]\ncm119_profile=nhrc\n").unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+
+    let events = log.lock().unwrap().clone();
+    assert_eq!(events, ["quiesce", "close", "1000"]);
+    assert_eq!(
+        runtime.settings("1000").unwrap().radio.cm119_profile,
+        crate::config::Cm119Profile::Nhrc
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn admission_loss_discards_partial_commands_on_every_active_node() {
     use crate::runtime::dtmf::DigitEvent;
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -1742,6 +1777,36 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
         Err(RuntimeError::Preparation)
     );
     runtime.stop(0);
+}
+
+#[test]
+fn completed_parrot_capture_is_measured_localized_and_queued_for_playback() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+
+    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        callback
+            .transmit()
+            .controller
+            .observe_parrot(true, &[0.5, 0.25]);
+        callback.transmit().controller.observe_parrot(false, &[]);
+    }
+    runtime.tick_links(clock());
+
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["Peak level -6 dBFS. RMS level -8 dBFS."]
+    );
+    assert!(runtime.stop(clock().now_ms));
 }
 
 #[test]

@@ -326,14 +326,18 @@ impl<P: PeerInput> LinkAudio<P> {
         self.local[..count].copy_from_slice(audio);
         self.mix[..count].fill(0.0);
         for peer in &mut self.peers {
-            let signal = peer.input.signals();
-            let active = peer.receive.should_render(
-                signal.pcm_epoch(),
-                peer.input.available(),
-                signal.ended(),
-                count,
-            );
-            let active = active && peer.input.render(&mut peer.audio[..count]);
+            let (pcm_epoch, available, ended) = {
+                let signal = peer.input.signals();
+                (signal.pcm_epoch(), peer.input.available(), signal.ended())
+            };
+            let audio_active = peer
+                .receive
+                .should_render(pcm_epoch, available, ended, count);
+            let audio_active = audio_active && peer.input.render(&mut peer.audio[..count]);
+            if !audio_active {
+                peer.audio[..count].fill(0.0);
+            }
+            let active = audio_active || peer.input.signals().radio_keyed();
             peer.active = active;
             peer.input.signals().set_active(active);
         }
@@ -491,3 +495,7 @@ impl<P: PeerInput> LinkAudio<P> {
         Ok(keyed)
     }
 }
+
+#[cfg(test)]
+#[path = "audio_tests.rs"]
+mod tests;

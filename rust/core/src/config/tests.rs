@@ -1,8 +1,10 @@
 use super::{
-    ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings, ResolvedCourtesySettings,
-    ResolvedEventSettings, ResolvedIdentifierSettings, ResolvedMorseSettings, ResolvedNodeSettings,
-    ResolvedPermanentLinkSettings, ResolvedScheduleSettings, ResolvedSpeechSettings,
-    ResolvedTimeSettings, Schema,
+    ConfigDocument, ConfigError, NodeId, RadioCarrierSource, RadioDuplexMode, RadioNoiseFilter,
+    RadioReceiveAudioSource, RadioSignalingMode, ResolvedAnnouncementSettings,
+    ResolvedCourtesySettings, ResolvedEventSettings, ResolvedIdentifierSettings,
+    ResolvedMorseSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
+    ResolvedRadioSettings, ResolvedScheduleSettings, ResolvedSpeechSettings, ResolvedTimeSettings,
+    Schema,
 };
 use std::collections::BTreeMap;
 
@@ -94,6 +96,364 @@ fn statpost_settings_inherit_global_values_allow_node_overrides_and_clear_url() 
         .value;
     assert!(cleared.statpost_url.is_empty());
     assert_eq!(cleared.statpost_time, 90);
+}
+
+#[test]
+fn iax_registration_settings_inherit_and_allow_node_overrides() {
+    let document = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://register.example/\niax_registration_interval_s=120\niax_local_port=4570\n[1000]\n[2000]\niax_registration_url=https://backup.example/\niax_registration_interval_s=300\niax_local_port=4569\n",
+    )
+    .unwrap();
+
+    let inherited = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    let overridden = ResolvedNodeSettings::resolve(&document, &NodeId::new("2000").unwrap())
+        .unwrap()
+        .value;
+
+    assert_eq!(inherited.iax_registration_url, "https://register.example/");
+    assert_eq!(inherited.iax_registration_interval_s, 120);
+    assert_eq!(inherited.iax_local_port, 4570);
+    assert_eq!(overridden.iax_registration_url, "https://backup.example/");
+    assert_eq!(overridden.iax_registration_interval_s, 300);
+    assert_eq!(overridden.iax_local_port, 4569);
+}
+
+#[test]
+fn iax_registration_defaults_to_asl_endpoint_and_standard_port_and_refresh() {
+    let document = ConfigDocument::parse("[1000]\n").unwrap();
+    let settings = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+
+    assert_eq!(
+        settings.iax_registration_url,
+        "https://register.allstarlink.org/"
+    );
+    assert_eq!(settings.iax_registration_interval_s, 60);
+    assert_eq!(settings.iax_local_port, 4569);
+}
+
+#[test]
+fn invalid_iax_registration_url_uses_the_safe_inherited_endpoint() {
+    let document = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://register.example/\n[1000]\niax_registration_url=http://untrusted.example/\n",
+    )
+    .unwrap();
+
+    let resolution =
+        ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
+
+    assert_eq!(
+        resolution.value.iax_registration_url,
+        "https://register.example/"
+    );
+    assert!(resolution.warnings.iter().any(|warning| {
+        warning.key == "iax_registration_url" && warning.value == "<redacted URL>"
+    }));
+}
+
+#[test]
+fn iax_registration_url_can_be_cleared_and_credentials_are_rejected() {
+    let cleared = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://register.example/\n[1000]\niax_registration_url=\n",
+    )
+    .unwrap();
+    let settings = ResolvedNodeSettings::resolve(&cleared, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    assert!(settings.iax_registration_url.is_empty());
+
+    let credentials = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://register.example/\n[1000]\niax_registration_url=https://user:secret@register.example/\n",
+    )
+    .unwrap();
+    let resolution =
+        ResolvedNodeSettings::resolve(&credentials, &NodeId::new("1000").unwrap()).unwrap();
+    assert_eq!(
+        resolution.value.iax_registration_url,
+        "https://register.example/"
+    );
+    assert!(resolution.warnings.iter().any(|warning| {
+        warning.key == "iax_registration_url" && warning.value == "<redacted URL>"
+    }));
+}
+
+#[test]
+fn radio_settings_inherit_defaults_and_allow_node_overrides() {
+    let document = ConfigDocument::parse(
+        "[radio]\ndevice_selection=automatic_lowest_alsa_card\ndevice_identifier=3-1:1.0\nusb_serial=SERIAL\ninput_extra_buffer_ms=40\nreceive_graph=highpass=f=150\n[1000]\n[radio 1000]\ndevice_selection=exact\nusb_serial=NODE-SERIAL\noutput_device_channels=2\noutput_extra_buffer_ms=20\ntransmit_graph=anull\n[2000]\n",
+    )
+    .unwrap();
+
+    let resolved = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    assert_eq!(resolved.device_identifier, "3-1:1.0");
+    assert_eq!(
+        resolved.device_selection,
+        super::RadioDeviceSelection::Exact
+    );
+    assert_eq!(resolved.usb_serial, "NODE-SERIAL");
+    assert_eq!(resolved.input_extra_buffer_ms, 40);
+    assert_eq!(resolved.output_extra_buffer_ms, 20);
+    assert_eq!(resolved.output_device_channels, 2);
+    assert_eq!(resolved.receive_graph, "highpass=f=150");
+    assert_eq!(resolved.transmit_graph, "anull");
+    let node = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    assert_eq!(node.radio, resolved);
+    let inherited = ResolvedRadioSettings::resolve(&document, &NodeId::new("2000").unwrap())
+        .unwrap()
+        .value;
+    assert_eq!(
+        inherited.device_selection,
+        super::RadioDeviceSelection::AutomaticLowestAlsaCard
+    );
+}
+
+#[test]
+fn radio_signaling_options_are_supported_in_default_and_node_scopes() {
+    let document = ConfigDocument::parse(
+        "[radio]\nreceive_audio=flat\nreceive_signaling=ctcss\ncarrier_source=dsp\nctcss_source=dsp\nreceive_ctcss_tones_hz=100.0,103.5\nctcss_relaxed=yes\nctcss_decoder_gain_db=0\ndcs_receive_code=023N\nsquelch_level=500\nsquelch_hysteresis=3000\nnoise_filter=standard\nvox_threshold=0\nvox_hang_ms=2000\nreceive_on_delay_ms=0\nradio_duplex_mode=half\ntransmit_signaling=ctcss\ntransmit_ctcss_tones_hz=100.0\ntransmit_ctcss_default_hz=100.0\ntransmit_ctcss_level_dbfs=-24\ntransmit_ctcss_turnoff_mode=phase_shift\ntransmit_ctcss_phase_shift_degrees=120\ntransmit_ctcss_turnoff_duration_ms=180\ntransmit_ctcss_tail_tone_hz=55\ntransmit_dcs_code=023N\ntransmit_dcs_level_dbfs=-24\ntransmit_dcs_turnoff_enabled=yes\ntransmit_dcs_turnoff_duration_ms=180\ntransmit_settle_ms=500\ntransmit_receive_blanking_ms=0\ntransmit_off_delay_ms=0\n[1000]\n[radio 1000]\nreceive_signaling=dcs\ndcs_receive_code=047I\ntransmit_signaling=dcs\ntransmit_dcs_code=047I\n",
+    )
+    .unwrap();
+
+    let resolved =
+        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
+    assert!(resolved.warnings.is_empty());
+    assert_eq!(
+        resolved.value.signaling.receive_mode,
+        super::RadioSignalingMode::Dcs
+    );
+    assert_eq!(resolved.value.signaling.receive_dcs_code.value, 0o47);
+    assert!(resolved.value.signaling.receive_dcs_code.inverted);
+    assert_eq!(
+        resolved.value.signaling.transmit_mode,
+        super::RadioSignalingMode::Dcs
+    );
+    assert_eq!(resolved.value.signaling.transmit_dcs_code.value, 0o47);
+
+    let inherited = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    assert_eq!(
+        inherited.signaling.receive_ctcss_tones_tenths_hz,
+        vec![1_000, 1_035]
+    );
+    assert_eq!(inherited.signaling.squelch_level, 500);
+    assert_eq!(inherited.signaling.squelch_hysteresis, 3_000);
+    assert_eq!(inherited.signaling.transmit_settle_ms, 500);
+    assert_eq!(
+        inherited.signaling.transmit_ctcss_turnoff_mode,
+        super::CtcssTurnoffMode::PhaseShift
+    );
+}
+
+#[test]
+fn radio_signaling_defaults_match_native_radio_defaults_and_invalid_values_fall_back() {
+    let defaults = ResolvedRadioSettings::resolve(
+        &ConfigDocument::parse("[1000]\n[radio 1000]\n").unwrap(),
+        &NodeId::new("1000").unwrap(),
+    )
+    .unwrap();
+    assert!(defaults.warnings.is_empty());
+    assert_eq!(
+        defaults.value.signaling.receive_audio_source,
+        super::RadioReceiveAudioSource::Flat
+    );
+    assert_eq!(
+        defaults.value.signaling.carrier_source,
+        super::RadioCarrierSource::Dsp
+    );
+    assert_eq!(
+        defaults.value.signaling.receive_mode,
+        super::RadioSignalingMode::Carrier
+    );
+    assert_eq!(
+        defaults.value.signaling.receive_ctcss_tones_tenths_hz,
+        vec![1_000]
+    );
+    assert_eq!(defaults.value.signaling.receive_dcs_code.value, 0o23);
+    assert_eq!(defaults.value.signaling.vox_hang_ms, 2_000);
+    assert_eq!(defaults.value.signaling.transmit_ctcss_level_dbfs, -24);
+    assert_eq!(defaults.value.signaling.transmit_dcs_level_dbfs, -24);
+
+    let invalid = ResolvedRadioSettings::resolve(
+        &ConfigDocument::parse(
+            "[1000]\n[radio]\nsquelch_level=1000\nctcss_source=bogus\nreceive_ctcss_tones_hz=100.1\ndcs_receive_code=028N\ntransmit_ctcss_turnoff_mode=bad\ntransmit_dcs_turnoff_duration_ms=100\n",
+        )
+        .unwrap(),
+        &NodeId::new("1000").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(invalid.value.signaling.squelch_level, 500);
+    assert_eq!(
+        invalid.value.signaling.receive_subaudible_source,
+        super::RadioSubaudibleSource::Dsp
+    );
+    assert_eq!(
+        invalid.value.signaling.receive_ctcss_tones_tenths_hz,
+        vec![1_000]
+    );
+    assert_eq!(invalid.value.signaling.receive_dcs_code.value, 0o23);
+    assert_eq!(
+        invalid.value.signaling.transmit_dcs_turnoff_duration_ms,
+        180
+    );
+    assert_eq!(invalid.warnings.len(), 6);
+}
+
+#[test]
+fn radio_enum_settings_resolve_supported_values_and_fall_back_on_unknown_values() {
+    let carrier_sources = [
+        ("disabled", RadioCarrierSource::Disabled),
+        ("vox", RadioCarrierSource::Vox),
+        ("cm119", RadioCarrierSource::Cm119),
+        ("cm119_inverted", RadioCarrierSource::Cm119Inverted),
+        ("parallel", RadioCarrierSource::Parallel),
+        ("parallel_inverted", RadioCarrierSource::ParallelInverted),
+    ];
+    for (source, expected) in carrier_sources {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[radio 1000]\ncarrier_source={source}\nreceive_audio=invalid\nreceive_signaling=invalid\nctcss_override=yes\nnoise_filter=alternate\n"
+        ))
+        .unwrap();
+        let settings = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
+            .unwrap()
+            .value
+            .signaling;
+        assert_eq!(settings.carrier_source, expected);
+        assert_eq!(settings.receive_audio_source, RadioReceiveAudioSource::Flat);
+        assert_eq!(settings.receive_mode, RadioSignalingMode::Carrier);
+        assert!(settings.receive_ctcss_override);
+        assert_eq!(settings.noise_filter, RadioNoiseFilter::Alternate);
+    }
+
+    let invalid_noise_filter = ConfigDocument::parse(
+        "[1000]\n[radio 1000]\nnoise_filter=unsupported\nradio_duplex_mode=full\n",
+    )
+    .unwrap();
+    let settings =
+        ResolvedRadioSettings::resolve(&invalid_noise_filter, &NodeId::new("1000").unwrap())
+            .unwrap()
+            .value
+            .signaling;
+    assert_eq!(settings.noise_filter, RadioNoiseFilter::Standard);
+    assert_eq!(settings.radio_duplex_mode, RadioDuplexMode::Full);
+
+    let invalid_sources = ConfigDocument::parse(
+        "[1000]\n[radio 1000]\ncarrier_source=unsupported\nradio_duplex_mode=unsupported\n",
+    )
+    .unwrap();
+    let settings = ResolvedRadioSettings::resolve(&invalid_sources, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value
+        .signaling;
+    assert_eq!(settings.carrier_source, RadioCarrierSource::Dsp);
+    assert_eq!(settings.radio_duplex_mode, RadioDuplexMode::Half);
+}
+
+#[test]
+fn cm119_hardware_settings_inherit_and_resolve_profile_and_gpio_modes() {
+    let document = ConfigDocument::parse(
+        "[radio]\ncm119_profile=sphusb\ncm119_ptt_inverted=yes\ncm119_gpio_1_mode=out0\ncm119_gpio_2_mode=out1\ncm119_gpio_8_mode=out1\ncm119_clip_led_gpio=2\n[1000]\n[radio 1000]\ncm119_profile=nhrc\ncm119_ptt_inverted=no\ncm119_gpio_2_mode=in\ncm119_gpio_8_mode=out0\ncm119_clip_led_gpio=0\n[2000]\n",
+    )
+    .unwrap();
+
+    let node = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
+    assert!(
+        node.warnings.is_empty(),
+        "supported CM119 settings must not be reported as unknown"
+    );
+    assert_eq!(node.value.cm119_profile, super::Cm119Profile::Nhrc);
+    assert!(!node.value.cm119_ptt_inverted);
+    assert_eq!(
+        node.value.cm119_gpio_modes,
+        [
+            super::Cm119GpioMode::OutputLow,
+            super::Cm119GpioMode::Input,
+            super::Cm119GpioMode::Input,
+            super::Cm119GpioMode::Input,
+            super::Cm119GpioMode::Input,
+            super::Cm119GpioMode::Input,
+            super::Cm119GpioMode::Input,
+            super::Cm119GpioMode::OutputLow,
+        ]
+    );
+    assert_eq!(node.value.cm119_clip_led_gpio, None);
+
+    let inherited = ResolvedRadioSettings::resolve(&document, &NodeId::new("2000").unwrap())
+        .unwrap()
+        .value;
+    assert_eq!(inherited.cm119_profile, super::Cm119Profile::SphUsb);
+    assert!(inherited.cm119_ptt_inverted);
+    assert_eq!(
+        inherited.cm119_gpio_modes[1],
+        super::Cm119GpioMode::OutputHigh
+    );
+    assert_eq!(
+        inherited.cm119_gpio_modes[7],
+        super::Cm119GpioMode::OutputHigh
+    );
+    assert_eq!(inherited.cm119_clip_led_gpio, Some(2));
+}
+
+#[test]
+fn cm119_gpio_modes_convert_to_adapter_masks() {
+    let document = ConfigDocument::parse(
+        "[radio]\ncm119_gpio_1_mode=out0\ncm119_gpio_2_mode=out1\ncm119_gpio_8_mode=out1\n[1000]\n",
+    )
+    .unwrap();
+    let settings = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+
+    assert_eq!(
+        settings.cm119_gpio_output_masks(),
+        (0b1000_0011, 0b1000_0010)
+    );
+}
+
+#[test]
+fn invalid_radio_settings_warn_and_keep_safe_defaults() {
+    let document = ConfigDocument::parse(
+        "[radio]\ndevice_selection=invalid\ninput_extra_buffer_ms=20\ninput_device_channels=3\ncm119_profile=bad\ncm119_ptt_inverted=maybe\ncm119_gpio_8_mode=out2\ncm119_clip_led_gpio=9\n[1000]\n[radio 1000]\ninput_extra_buffer_ms=501\n",
+    )
+    .unwrap();
+
+    let resolved =
+        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
+    assert_eq!(resolved.value.input_extra_buffer_ms, 20);
+    assert_eq!(resolved.value.input_device_channels, 1);
+    assert_eq!(
+        resolved.value.device_selection,
+        super::RadioDeviceSelection::Exact
+    );
+    assert_eq!(resolved.value.cm119_profile, super::Cm119Profile::DudeUsb);
+    assert!(!resolved.value.cm119_ptt_inverted);
+    assert_eq!(
+        resolved.value.cm119_gpio_modes[7],
+        super::Cm119GpioMode::Input
+    );
+    assert_eq!(resolved.value.cm119_clip_led_gpio, None);
+    assert_eq!(resolved.warnings.len(), 7);
+}
+
+#[test]
+fn oversized_radio_device_identifier_is_ignored_with_warning() {
+    let identifier = "x".repeat(256);
+    let document = ConfigDocument::parse(&format!(
+        "[radio]\ndevice_identifier={identifier}\n[1000]\n"
+    ))
+    .unwrap();
+
+    let resolved =
+        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
+    assert!(resolved.value.device_identifier.is_empty());
+    assert_eq!(resolved.warnings.len(), 1);
 }
 
 #[test]
@@ -622,6 +982,32 @@ fn activity_ctcss_defaults_off_and_bounds_its_hang_to_transmit_hang() {
 }
 
 #[test]
+fn activity_ctcss_hang_accepts_valid_global_value_and_ignores_invalid_value() {
+    let node = NodeId::new("1000").unwrap();
+    let valid =
+        ConfigDocument::parse("[general]\ntransmit_hang_ms=250\nctcss_hang_ms=200\n[1000]\n")
+            .unwrap();
+    assert_eq!(
+        ResolvedNodeSettings::resolve(&valid, &node)
+            .unwrap()
+            .value
+            .ctcss_hang_ms,
+        200
+    );
+
+    let invalid =
+        ConfigDocument::parse("[general]\ntransmit_hang_ms=250\nctcss_hang_ms=invalid\n[1000]\n")
+            .unwrap();
+    assert_eq!(
+        ResolvedNodeSettings::resolve(&invalid, &node)
+            .unwrap()
+            .value
+            .ctcss_hang_ms,
+        0
+    );
+}
+
+#[test]
 fn parrot_enabled_defaults_off_and_inherits_with_node_precedence() {
     let node = NodeId::new("1000").unwrap();
     let resolved = |text: &str| {
@@ -946,6 +1332,20 @@ fn schedule_resolution_preserves_group_name_and_remote_priority() {
         .value;
     assert_eq!(value.remote_nodes, ["456", "789"]);
     assert_eq!(value.group_name.as_deref(), Some("Regional Net"));
+
+    for group_name in [String::new(), "x".repeat(64)] {
+        let invalid_optional = ConfigDocument::parse(&format!(
+            "[node]\n[permanent node primary]\nremote_node=123\n[schedule node net]\nremote_node=456\ngroup_name={group_name}\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n"
+        ))
+        .unwrap();
+        let resolved = ResolvedScheduleSettings::resolve(
+            &invalid_optional,
+            &NodeId::new("node").unwrap(),
+            "net",
+        )
+        .unwrap();
+        assert_eq!(resolved.value.group_name, None);
+    }
 }
 
 #[test]

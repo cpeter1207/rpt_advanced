@@ -14,6 +14,7 @@ fn main() {
         .allowlist_function("rptadv_samplerate_adapter_descriptor")
         .allowlist_var("RPCR3_.*")
         .allowlist_var("RPTADV_MEDIA_.*")
+        .allowlist_var("RPTADV_PEER_EVENT_.*")
         .layout_tests(false)
         .generate_comments(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

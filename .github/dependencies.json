@@ -1,5 +1,28 @@
 [
   {
+    "repository": "librptadvradio",
+    "sha": "ef10f6aba4d7f6b641ca755934e8e65d3a1e7408",
+    "packages": ["librptadvradio4", "librptadvradio-dev"]
+  },
+  {
+    "repository": "rptadv-portaudio-alsa-adapter",
+    "sha": "411dc1e9e4285c7140e975bbadf7d7ce3efea220",
+    "packages": [
+      "librptadv-portaudio-alsa-adapter2",
+      "librptadv-portaudio-alsa-adapter-dev"
+    ]
+  },
+  {
+    "repository": "rptadv-gpio-adapter",
+    "sha": "3e662f9be4f6b9731cc4380165afe998e3fda642",
+    "packages": ["librptadv-gpio-adapter1", "librptadv-gpio-adapter-dev"]
+  },
+  {
+    "repository": "rptadv-ffmpeg-adapter",
+    "sha": "6d221ffbcffa890f6de6a4fe51ac6bef78a44b0a",
+    "packages": ["librptadv-ffmpeg-adapter1", "librptadv-ffmpeg-adapter-dev"]
+  },
+  {
     "repository": "rptadv-samplerate-adapter",
     "sha": "ed428dfa12a5ec2a12a221254f957c5f43f9e214",
     "packages": ["librptadv-samplerate-adapter2", "librptadv-samplerate-adapter-dev"]
@@ -8,5 +31,10 @@
     "repository": "rate_adjusting_pcm_ring",
     "sha": "60ee0e0fd846c00724233d9fb767ff3e30c5d42f",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
+  },
+  {
+    "repository": "librptadviax2",
+    "sha": "2f1e2ccc869fcb9be0a39fa4b88a3d4876014176",
+    "packages": ["librptadv-iax2-client1", "librptadv-iax2-client-dev"]
   }
 ]

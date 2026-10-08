@@ -6,6 +6,10 @@ use crate::command::{CommandMapping, DtmfCommandMap, LinkAction};
 use crate::schedule::{date_selector_valid, weekday_selector_valid};
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;
+
 /// Directory lookup source selected after the local static directory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LinkLookupMethod {
@@ -51,6 +55,8 @@ pub struct ResolvedNodeSettings {
     pub courtesy_delay_ms: u64,
     /// Node radio channel.
     pub channel: String,
+    /// Standalone radio-device and processing configuration.
+    pub radio: ResolvedRadioSettings,
     /// Selected Fluent locale, inherited from general settings.
     pub language: String,
     /// Optional callsign.
@@ -59,6 +65,12 @@ pub struct ResolvedNodeSettings {
     pub statpost_url: String,
     /// Status reporting interval in seconds.
     pub statpost_time: u64,
+    /// ASL3 HTTPS node-registration endpoint; empty disables registration.
+    pub iax_registration_url: String,
+    /// HTTPS registration refresh interval in seconds.
+    pub iax_registration_interval_s: u64,
+    /// Locally advertised IAX2 UDP port.
+    pub iax_local_port: u16,
     /// Incoming allowlist.
     pub link_allow_nodes: String,
     /// Incoming denylist.
@@ -77,6 +89,613 @@ pub struct ResolvedNodeSettings {
     pub dtmf_admin_lock_hash: String,
     /// Idle timeout for an unlocked DTMF administration session.
     pub dtmf_admin_timeout_ms: u64,
+}
+
+/// USB audio device selection policy supported by the PortAudio adapter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioDeviceSelection {
+    /// Require the configured stable device identity.
+    #[default]
+    Exact,
+    /// Select the lowest-index usable physical USB audio device.
+    AutomaticLowestAlsaCard,
+}
+
+/// CM119 interface wiring profile passed to the GPIO hardware adapter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cm119Profile {
+    /// Standard DudeUSB/URI wiring.
+    #[default]
+    DudeUsb,
+    /// SPH USB interface wiring.
+    SphUsb,
+    /// NHRC/N1KDO interface wiring.
+    Nhrc,
+    /// Existing custom USBRadioPlus wiring.
+    Custom,
+}
+
+/// Configured state for one ordinary CM119 GPIO.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cm119GpioMode {
+    /// Use the pin as an input.
+    #[default]
+    Input,
+    /// Drive the pin low when the interface opens.
+    OutputLow,
+    /// Drive the pin high when the interface opens.
+    OutputHigh,
+}
+
+/// Radio signaling method selected for reception or transmission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioSignalingMode {
+    /// Use carrier qualification or transmit no subaudible signal.
+    #[default]
+    Carrier,
+    /// Decode or transmit CTCSS.
+    Ctcss,
+    /// Decode or transmit DCS.
+    Dcs,
+}
+
+/// Audio source used by the local receiver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioReceiveAudioSource {
+    /// Do not pass receiver audio.
+    Disabled,
+    /// Use speaker audio.
+    Speaker,
+    /// Use flat discriminator audio and apply configured deemphasis.
+    #[default]
+    Flat,
+}
+
+/// Carrier-operated-squelch source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioCarrierSource {
+    /// Do not qualify on carrier.
+    Disabled,
+    /// Use the native discriminator-noise detector.
+    #[default]
+    Dsp,
+    /// Use voice-activity thresholding.
+    Vox,
+    /// Use normal-polarity CM119 GPIO.
+    Cm119,
+    /// Use inverted CM119 GPIO.
+    Cm119Inverted,
+    /// Use normal-polarity parallel input.
+    Parallel,
+    /// Use inverted parallel input.
+    ParallelInverted,
+}
+
+/// Source of receive CTCSS/DCS qualification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioSubaudibleSource {
+    /// Do not use external tone/code qualification.
+    Disabled,
+    /// Use normal-polarity CM119 GPIO.
+    Cm119,
+    /// Use inverted CM119 GPIO.
+    Cm119Inverted,
+    /// Use the native DSP decoder.
+    #[default]
+    Dsp,
+    /// Use normal-polarity parallel input.
+    Parallel,
+    /// Use inverted parallel input.
+    ParallelInverted,
+}
+
+/// Native noise squelch detector response.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioNoiseFilter {
+    /// Standard discriminator-noise response.
+    #[default]
+    Standard,
+    /// Alternate discriminator-noise response.
+    Alternate,
+}
+
+/// Radio duplex capability, independent of controller link duplex.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioDuplexMode {
+    /// Radio cannot receive while transmitting.
+    #[default]
+    Half,
+    /// Radio can receive while transmitting.
+    Full,
+}
+
+/// CTCSS action before transmitter unkey.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CtcssTurnoffMode {
+    /// End CTCSS with transmitter release.
+    None,
+    /// Apply a phase-shift reverse burst.
+    #[default]
+    PhaseShift,
+    /// Remove the tone before transmitter release.
+    ToneRemove,
+    /// Send the configured tail tone before release.
+    TailTone,
+}
+
+/// DCS code value and polarity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DcsCode {
+    /// Numeric three-digit octal value.
+    pub value: u16,
+    /// Whether inverse polarity is selected.
+    pub inverted: bool,
+}
+
+/// Receive and transmit signaling settings after `[radio]` inheritance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedRadioSignalingSettings {
+    /// Local receiver audio source.
+    pub receive_audio_source: RadioReceiveAudioSource,
+    /// Receive qualification mode.
+    pub receive_mode: RadioSignalingMode,
+    /// Carrier qualification source.
+    pub carrier_source: RadioCarrierSource,
+    /// CTCSS/DCS external indication source.
+    pub receive_subaudible_source: RadioSubaudibleSource,
+    /// Supported receive CTCSS tones in tenths of a hertz.
+    pub receive_ctcss_tones_tenths_hz: Vec<u16>,
+    /// Receive CTCSS decoder gain in dB.
+    pub receive_ctcss_decoder_gain_db: i64,
+    /// Use relaxed native CTCSS decode tolerance.
+    pub receive_ctcss_relaxed: bool,
+    /// Permit carrier without a decoded CTCSS tone when override is active.
+    pub receive_ctcss_override: bool,
+    /// Receive DCS code.
+    pub receive_dcs_code: DcsCode,
+    /// DSP squelch threshold on the 0–999 tuning scale.
+    pub squelch_level: u16,
+    /// DSP squelch closing hysteresis in PCM codes.
+    pub squelch_hysteresis: u16,
+    /// DSP noise-filter response.
+    pub noise_filter: RadioNoiseFilter,
+    /// VOX threshold in PCM codes.
+    pub vox_threshold: u16,
+    /// VOX hang time in milliseconds.
+    pub vox_hang_ms: u32,
+    /// Receiver carrier qualification delay in milliseconds.
+    pub receive_on_delay_ms: u32,
+    /// Whether the radio supports full-duplex operation.
+    pub radio_duplex_mode: RadioDuplexMode,
+    /// Transmit signaling mode.
+    pub transmit_mode: RadioSignalingMode,
+    /// Transmitted CTCSS tone-map values in tenths of a hertz.
+    pub transmit_ctcss_tones_tenths_hz: Vec<u16>,
+    /// Default transmitted CTCSS tone in tenths of a hertz.
+    pub transmit_ctcss_default_tenths_hz: u16,
+    /// Transmitted CTCSS peak in dBFS.
+    pub transmit_ctcss_level_dbfs: i64,
+    /// CTCSS turnoff mode.
+    pub transmit_ctcss_turnoff_mode: CtcssTurnoffMode,
+    /// CTCSS turnoff phase shift in degrees.
+    pub transmit_ctcss_phase_shift_degrees: u16,
+    /// CTCSS turnoff duration in milliseconds.
+    pub transmit_ctcss_turnoff_duration_ms: u32,
+    /// Replacement CTCSS tail-tone frequency in hertz.
+    pub transmit_ctcss_tail_tone_hz: u16,
+    /// Transmit DCS code.
+    pub transmit_dcs_code: DcsCode,
+    /// Transmit DCS peak in dBFS.
+    pub transmit_dcs_level_dbfs: i64,
+    /// Whether to send DCS turnoff code.
+    pub transmit_dcs_turnoff_enabled: bool,
+    /// DCS turnoff duration in milliseconds.
+    pub transmit_dcs_turnoff_duration_ms: u32,
+    /// Delay between PTT assertion and program audio in milliseconds.
+    pub transmit_settle_ms: u32,
+    /// Receive blanking interval during transmit in milliseconds.
+    pub transmit_receive_blanking_ms: u32,
+    /// Receiver ignore interval after transmit in milliseconds.
+    pub transmit_off_delay_ms: u32,
+}
+
+impl Default for ResolvedRadioSignalingSettings {
+    fn default() -> Self {
+        let tone = 1_000;
+        let dcs = DcsCode {
+            value: 0o23,
+            inverted: false,
+        };
+        Self {
+            receive_audio_source: RadioReceiveAudioSource::Flat,
+            receive_mode: RadioSignalingMode::Carrier,
+            carrier_source: RadioCarrierSource::Dsp,
+            receive_subaudible_source: RadioSubaudibleSource::Dsp,
+            receive_ctcss_tones_tenths_hz: vec![tone],
+            receive_ctcss_decoder_gain_db: 0,
+            receive_ctcss_relaxed: true,
+            receive_ctcss_override: false,
+            receive_dcs_code: dcs,
+            squelch_level: 500,
+            squelch_hysteresis: 3_000,
+            noise_filter: RadioNoiseFilter::Standard,
+            vox_threshold: 0,
+            vox_hang_ms: 2_000,
+            receive_on_delay_ms: 0,
+            radio_duplex_mode: RadioDuplexMode::Half,
+            transmit_mode: RadioSignalingMode::Carrier,
+            transmit_ctcss_tones_tenths_hz: vec![tone],
+            transmit_ctcss_default_tenths_hz: tone,
+            transmit_ctcss_level_dbfs: -24,
+            transmit_ctcss_turnoff_mode: CtcssTurnoffMode::PhaseShift,
+            transmit_ctcss_phase_shift_degrees: 120,
+            transmit_ctcss_turnoff_duration_ms: 180,
+            transmit_ctcss_tail_tone_hz: 55,
+            transmit_dcs_code: dcs,
+            transmit_dcs_level_dbfs: -24,
+            transmit_dcs_turnoff_enabled: true,
+            transmit_dcs_turnoff_duration_ms: 180,
+            transmit_settle_ms: 500,
+            transmit_receive_blanking_ms: 0,
+            transmit_off_delay_ms: 0,
+        }
+    }
+}
+
+/// Standalone audio-device and FFmpeg graph settings after inheritance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedRadioSettings {
+    /// Device selection policy.
+    pub device_selection: RadioDeviceSelection,
+    /// Stable USB topology or native ALSA hardware identifier.
+    pub device_identifier: String,
+    /// Optional exact USB serial number.
+    pub usb_serial: String,
+    /// Physical PortAudio input channels, one or two.
+    pub input_device_channels: u32,
+    /// Physical PortAudio output channels, one or two.
+    pub output_device_channels: u32,
+    /// Additional capture buffering requested from PortAudio, 0 through 500 ms.
+    pub input_extra_buffer_ms: u32,
+    /// Additional playback buffering requested from PortAudio, 0 through 500 ms.
+    pub output_extra_buffer_ms: u32,
+    /// Mono 48 kHz receive-processing graph.
+    pub receive_graph: String,
+    /// Mono 48 kHz transmit-processing graph.
+    pub transmit_graph: String,
+    /// CM119 GPIO wiring profile.
+    pub cm119_profile: Cm119Profile,
+    /// Invert the dedicated CM119 PTT output.
+    pub cm119_ptt_inverted: bool,
+    /// Initial direction and value for each ordinary CM119 GPIO.
+    pub cm119_gpio_modes: [Cm119GpioMode; 8],
+    /// Optional ordinary CM119 GPIO used as a clipping indicator.
+    pub cm119_clip_led_gpio: Option<u8>,
+    /// Receive qualification, COR, squelch and transmit signaling policy.
+    pub signaling: ResolvedRadioSignalingSettings,
+}
+
+impl Default for ResolvedRadioSettings {
+    fn default() -> Self {
+        Self {
+            device_selection: RadioDeviceSelection::Exact,
+            device_identifier: String::new(),
+            usb_serial: String::new(),
+            input_device_channels: 1,
+            output_device_channels: 1,
+            input_extra_buffer_ms: 0,
+            output_extra_buffer_ms: 0,
+            receive_graph: "anull".to_owned(),
+            transmit_graph: "anull".to_owned(),
+            cm119_profile: Cm119Profile::DudeUsb,
+            cm119_ptt_inverted: false,
+            cm119_gpio_modes: [Cm119GpioMode::Input; 8],
+            cm119_clip_led_gpio: None,
+            signaling: ResolvedRadioSignalingSettings::default(),
+        }
+    }
+}
+
+impl ResolvedRadioSettings {
+    /// Convert configured CM119 GPIO directions and initial levels to adapter masks.
+    ///
+    /// Bit zero represents GPIO 1; the returned values are output-enable and initial-high masks.
+    pub fn cm119_gpio_output_masks(&self) -> (u8, u8) {
+        self.cm119_gpio_modes.iter().enumerate().fold(
+            (0, 0),
+            |(enabled, initial), (index, mode)| {
+                let bit = 1 << index;
+                match mode {
+                    Cm119GpioMode::Input => (enabled, initial),
+                    Cm119GpioMode::OutputLow => (enabled | bit, initial),
+                    Cm119GpioMode::OutputHigh => (enabled | bit, initial | bit),
+                }
+            },
+        )
+    }
+
+    /// Resolve `[radio]` defaults and `[radio <node>]` overrides.
+    pub fn resolve(
+        document: &ConfigDocument,
+        node: &NodeId,
+    ) -> Result<Resolution<Self>, ConfigError> {
+        let schema = Schema::validate(document)?;
+        Ok(Resolution {
+            value: Self::from_document(document, node),
+            warnings: schema.warnings,
+        })
+    }
+
+    fn from_document(document: &ConfigDocument, node: &NodeId) -> Self {
+        let scopes = [format!("radio {}", node.as_str()), "radio".to_owned()];
+        let mut value = Self::default();
+        if let Some(selection) =
+            lookup_valid(document, "device_selection", &scopes, |raw| match raw {
+                "exact" => Some(RadioDeviceSelection::Exact),
+                "automatic_lowest_alsa_card" => Some(RadioDeviceSelection::AutomaticLowestAlsaCard),
+                _ => None,
+            })
+        {
+            value.device_selection = selection;
+        }
+        macro_rules! text {
+            ($field:ident, $key:literal, $allow_empty:literal, $maximum:literal) => {
+                if let Some(parsed) = lookup_valid(document, $key, &scopes, |raw| {
+                    (raw.len() <= $maximum && ($allow_empty || !raw.is_empty()))
+                        .then(|| raw.to_owned())
+                }) {
+                    value.$field = parsed;
+                }
+            };
+        }
+        macro_rules! number {
+            ($field:ident, $key:literal, $minimum:literal, $maximum:literal) => {
+                if let Some(parsed) = lookup_valid(document, $key, &scopes, |raw| {
+                    parse::unsigned(raw, $minimum, $maximum)
+                }) {
+                    value.$field = parsed as u32;
+                }
+            };
+        }
+        text!(device_identifier, "device_identifier", true, 255);
+        text!(usb_serial, "usb_serial", true, 255);
+        text!(receive_graph, "receive_graph", false, 4096);
+        text!(transmit_graph, "transmit_graph", false, 4096);
+        if let Some(profile) = lookup_valid(document, "cm119_profile", &scopes, |raw| {
+            Some(match raw {
+                "dudeusb" => Cm119Profile::DudeUsb,
+                "sphusb" => Cm119Profile::SphUsb,
+                "nhrc" => Cm119Profile::Nhrc,
+                "custom" => Cm119Profile::Custom,
+                _ => return None,
+            })
+        }) {
+            value.cm119_profile = profile;
+        }
+        if let Some(inverted) =
+            lookup_valid(document, "cm119_ptt_inverted", &scopes, parse::boolean)
+        {
+            value.cm119_ptt_inverted = inverted;
+        }
+        for (index, mode) in value.cm119_gpio_modes.iter_mut().enumerate() {
+            let key = format!("cm119_gpio_{}_mode", index + 1);
+            if let Some(parsed) = lookup_valid(document, &key, &scopes, |raw| match raw {
+                "in" => Some(Cm119GpioMode::Input),
+                "out0" => Some(Cm119GpioMode::OutputLow),
+                "out1" => Some(Cm119GpioMode::OutputHigh),
+                _ => None,
+            }) {
+                *mode = parsed;
+            }
+        }
+        if let Some(pin) = lookup_valid(document, "cm119_clip_led_gpio", &scopes, |raw| {
+            parse::unsigned(raw, 0, 8)
+        }) {
+            value.cm119_clip_led_gpio = (pin != 0).then_some(pin as u8);
+        }
+        number!(input_device_channels, "input_device_channels", 1, 2);
+        number!(output_device_channels, "output_device_channels", 1, 2);
+        number!(input_extra_buffer_ms, "input_extra_buffer_ms", 0, 500);
+        number!(output_extra_buffer_ms, "output_extra_buffer_ms", 0, 500);
+        value.signaling = ResolvedRadioSignalingSettings::from_document(document, &scopes);
+        value
+    }
+}
+
+impl ResolvedRadioSignalingSettings {
+    fn from_document(document: &ConfigDocument, scopes: &[String; 2]) -> Self {
+        let mut value = Self::default();
+        macro_rules! enum_value {
+            ($field:ident, $key:literal, $parser:expr) => {
+                if let Some(parsed) = lookup_valid(document, $key, scopes, $parser) {
+                    value.$field = parsed;
+                }
+            };
+        }
+        macro_rules! unsigned_value {
+            ($field:ident, $key:literal, $minimum:literal, $maximum:literal) => {
+                if let Some(parsed) = lookup_valid(document, $key, scopes, |raw| {
+                    parse::unsigned(raw, $minimum, $maximum)
+                }) {
+                    value.$field = parsed as _;
+                }
+            };
+        }
+        macro_rules! signed_value {
+            ($field:ident, $key:literal, $minimum:literal, $maximum:literal) => {
+                if let Some(parsed) = lookup_valid(document, $key, scopes, |raw| {
+                    parse::signed(raw, $minimum, $maximum)
+                }) {
+                    value.$field = parsed;
+                }
+            };
+        }
+        enum_value!(receive_audio_source, "receive_audio", |raw| match raw {
+            "disabled" => Some(RadioReceiveAudioSource::Disabled),
+            "speaker" => Some(RadioReceiveAudioSource::Speaker),
+            "flat" => Some(RadioReceiveAudioSource::Flat),
+            _ => None,
+        });
+        enum_value!(receive_mode, "receive_signaling", parse_signaling_mode);
+        enum_value!(carrier_source, "carrier_source", parse_carrier_source);
+        enum_value!(
+            receive_subaudible_source,
+            "ctcss_source",
+            parse_subaudible_source
+        );
+        if let Some(parsed) = lookup_valid(
+            document,
+            "receive_ctcss_tones_hz",
+            scopes,
+            parse::ctcss_tones,
+        ) {
+            value.receive_ctcss_tones_tenths_hz = parsed;
+        }
+        signed_value!(
+            receive_ctcss_decoder_gain_db,
+            "ctcss_decoder_gain_db",
+            -60,
+            24
+        );
+        if let Some(parsed) = lookup_valid(document, "ctcss_relaxed", scopes, parse::boolean) {
+            value.receive_ctcss_relaxed = parsed;
+        }
+        if let Some(parsed) = lookup_valid(document, "ctcss_override", scopes, parse::boolean) {
+            value.receive_ctcss_override = parsed;
+        }
+        enum_value!(receive_dcs_code, "dcs_receive_code", parse_dcs_code);
+        unsigned_value!(squelch_level, "squelch_level", 0, 999);
+        unsigned_value!(squelch_hysteresis, "squelch_hysteresis", 0, 32767);
+        enum_value!(noise_filter, "noise_filter", |raw| match raw {
+            "standard" => Some(RadioNoiseFilter::Standard),
+            "alternate" => Some(RadioNoiseFilter::Alternate),
+            _ => None,
+        });
+        unsigned_value!(vox_threshold, "vox_threshold", 0, 32767);
+        unsigned_value!(vox_hang_ms, "vox_hang_ms", 0, 32767);
+        unsigned_value!(receive_on_delay_ms, "receive_on_delay_ms", 0, 65535);
+        enum_value!(radio_duplex_mode, "radio_duplex_mode", |raw| match raw {
+            "half" => Some(RadioDuplexMode::Half),
+            "full" => Some(RadioDuplexMode::Full),
+            _ => None,
+        });
+        enum_value!(transmit_mode, "transmit_signaling", parse_signaling_mode);
+        if let Some(parsed) = lookup_valid(
+            document,
+            "transmit_ctcss_tones_hz",
+            scopes,
+            parse::ctcss_tones,
+        ) {
+            value.transmit_ctcss_tones_tenths_hz = parsed;
+        }
+        if let Some(parsed) = lookup_valid(
+            document,
+            "transmit_ctcss_default_hz",
+            scopes,
+            parse::ctcss_tone_tenths_hz,
+        ) {
+            value.transmit_ctcss_default_tenths_hz = parsed;
+        }
+        signed_value!(
+            transmit_ctcss_level_dbfs,
+            "transmit_ctcss_level_dbfs",
+            -60,
+            0
+        );
+        enum_value!(
+            transmit_ctcss_turnoff_mode,
+            "transmit_ctcss_turnoff_mode",
+            |raw| match raw {
+                "none" => Some(CtcssTurnoffMode::None),
+                "phase_shift" => Some(CtcssTurnoffMode::PhaseShift),
+                "tone_remove" => Some(CtcssTurnoffMode::ToneRemove),
+                "tail_tone" => Some(CtcssTurnoffMode::TailTone),
+                _ => None,
+            }
+        );
+        unsigned_value!(
+            transmit_ctcss_phase_shift_degrees,
+            "transmit_ctcss_phase_shift_degrees",
+            0,
+            360
+        );
+        unsigned_value!(
+            transmit_ctcss_turnoff_duration_ms,
+            "transmit_ctcss_turnoff_duration_ms",
+            0,
+            1000
+        );
+        unsigned_value!(
+            transmit_ctcss_tail_tone_hz,
+            "transmit_ctcss_tail_tone_hz",
+            0,
+            300
+        );
+        enum_value!(transmit_dcs_code, "transmit_dcs_code", parse_dcs_code);
+        signed_value!(transmit_dcs_level_dbfs, "transmit_dcs_level_dbfs", -60, 0);
+        if let Some(parsed) = lookup_valid(
+            document,
+            "transmit_dcs_turnoff_enabled",
+            scopes,
+            parse::boolean,
+        ) {
+            value.transmit_dcs_turnoff_enabled = parsed;
+        }
+        unsigned_value!(
+            transmit_dcs_turnoff_duration_ms,
+            "transmit_dcs_turnoff_duration_ms",
+            150,
+            200
+        );
+        unsigned_value!(transmit_settle_ms, "transmit_settle_ms", 0, 32767);
+        unsigned_value!(
+            transmit_receive_blanking_ms,
+            "transmit_receive_blanking_ms",
+            0,
+            32767
+        );
+        unsigned_value!(transmit_off_delay_ms, "transmit_off_delay_ms", 0, 32767);
+        value
+    }
+}
+
+fn parse_signaling_mode(raw: &str) -> Option<RadioSignalingMode> {
+    match raw {
+        "carrier" => Some(RadioSignalingMode::Carrier),
+        "ctcss" => Some(RadioSignalingMode::Ctcss),
+        "dcs" => Some(RadioSignalingMode::Dcs),
+        _ => None,
+    }
+}
+
+fn parse_carrier_source(raw: &str) -> Option<RadioCarrierSource> {
+    match raw {
+        "disabled" => Some(RadioCarrierSource::Disabled),
+        "dsp" => Some(RadioCarrierSource::Dsp),
+        "vox" => Some(RadioCarrierSource::Vox),
+        "cm119" => Some(RadioCarrierSource::Cm119),
+        "cm119_inverted" => Some(RadioCarrierSource::Cm119Inverted),
+        "parallel" => Some(RadioCarrierSource::Parallel),
+        "parallel_inverted" => Some(RadioCarrierSource::ParallelInverted),
+        _ => None,
+    }
+}
+
+fn parse_subaudible_source(raw: &str) -> Option<RadioSubaudibleSource> {
+    match raw {
+        "disabled" => Some(RadioSubaudibleSource::Disabled),
+        "cm119" => Some(RadioSubaudibleSource::Cm119),
+        "cm119_inverted" => Some(RadioSubaudibleSource::Cm119Inverted),
+        "dsp" => Some(RadioSubaudibleSource::Dsp),
+        "parallel" => Some(RadioSubaudibleSource::Parallel),
+        "parallel_inverted" => Some(RadioSubaudibleSource::ParallelInverted),
+        _ => None,
+    }
+}
+
+fn parse_dcs_code(raw: &str) -> Option<DcsCode> {
+    let (value, inverted) = parse::dcs_code(raw)?;
+    Some(DcsCode { value, inverted })
 }
 
 /// Owned identifier media and scheduling defaults after scope resolution.
@@ -711,7 +1330,7 @@ impl ResolvedScheduleSettings {
                 .filter(|value| *value == "scheduled-link-change")
                 .map(str::to_owned),
         };
-        if value.remote_nodes.is_empty() || value.remote_nodes.iter().any(String::is_empty) {
+        if value.remote_nodes.iter().any(String::is_empty) {
             return Err(ConfigError::structure(
                 &section,
                 "schedule remote node, replacement, start time, and end time are required",
@@ -1159,6 +1778,7 @@ impl ResolvedNodeSettings {
             value.telemetry_duck_db = parsed;
         }
         text!(channel, "radio_channel");
+        value.radio = ResolvedRadioSettings::from_document(document, node);
         if let Some(language) = lookup_valid(document, "language", &scopes, |raw| {
             raw.parse::<unic_langid::LanguageIdentifier>().ok()
         }) {
@@ -1169,6 +1789,31 @@ impl ResolvedNodeSettings {
             parse::unsigned(raw, 30, 600)
         }) {
             value.statpost_time = parsed;
+        }
+        if let Some(url) = lookup_valid(document, "iax_registration_url", &scopes, |raw| {
+            if raw.is_empty() {
+                return Some(String::new());
+            }
+            url::Url::parse(raw)
+                .ok()
+                .filter(|url| {
+                    url.scheme() == "https" && url.username().is_empty() && url.password().is_none()
+                })
+                .map(|_| raw.to_owned())
+        }) {
+            value.iax_registration_url = url;
+        }
+        if let Some(parsed) =
+            lookup_valid(document, "iax_registration_interval_s", &scopes, |raw| {
+                parse::unsigned(raw, 30, 600)
+            })
+        {
+            value.iax_registration_interval_s = parsed;
+        }
+        if let Some(parsed) = lookup_valid(document, "iax_local_port", &scopes, |raw| {
+            parse::unsigned(raw, 1, u16::MAX as u64)
+        }) {
+            value.iax_local_port = parsed as u16;
         }
         if let Some(raw) = lookup_valid(document, "callsign", &scopes, |raw| {
             (raw.len() <= 63).then(|| raw.to_owned())
@@ -1243,10 +1888,14 @@ impl ResolvedNodeSettings {
             telemetry_duck_db: -20,
             courtesy_delay_ms: 250,
             channel: node.as_str().to_owned(),
+            radio: ResolvedRadioSettings::default(),
             language: "en-US".to_owned(),
             callsign: String::new(),
             statpost_url: String::new(),
             statpost_time: 60,
+            iax_registration_url: "https://register.allstarlink.org/".to_owned(),
+            iax_registration_interval_s: 60,
+            iax_local_port: 4569,
             link_allow_nodes: String::new(),
             link_deny_nodes: String::new(),
             link_static_directory_file: String::new(),

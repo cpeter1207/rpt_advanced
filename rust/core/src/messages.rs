@@ -9,8 +9,14 @@ use std::{
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
-const PACKAGE_DIR: &str = "/usr/share/asterisk/rpt_advanced/messages";
-const ADMIN_DIR: &str = "/etc/asterisk/rpt_advanced/messages";
+const PACKAGE_DIRS: [&str; 2] = [
+    "/usr/share/rpt-advanced/messages",
+    "/usr/share/asterisk/rpt_advanced/messages",
+];
+const ADMIN_DIRS: [&str; 2] = [
+    "/etc/rpt_advanced/messages",
+    "/etc/asterisk/rpt_advanced/messages",
+];
 const MAX_MESSAGE_BYTES: usize = 127;
 const ATTRIBUTES: [&str; 3] = ["text", "tts", "morse"];
 const REQUIRED_IDS: &[&str] = &[
@@ -205,24 +211,28 @@ impl MessageCatalog {
     /// Missing translations use English. A malformed English source rejects the candidate
     /// generation, so the caller can keep the currently active catalog.
     pub fn load(locale: &str) -> Result<Self, CatalogError> {
-        Self::load_from_dirs(locale, Path::new(ADMIN_DIR), Path::new(PACKAGE_DIR))
+        let admin_dirs = ADMIN_DIRS.map(PathBuf::from);
+        let package_dirs = PACKAGE_DIRS.map(PathBuf::from);
+        Self::load_from_catalog_dirs(locale, &admin_dirs, &package_dirs)
     }
 
-    fn load_from_dirs(
+    fn load_from_catalog_dirs(
         locale: &str,
-        admin_dir: &Path,
-        package_dir: &Path,
+        admin_dirs: &[PathBuf],
+        package_dirs: &[PathBuf],
     ) -> Result<Self, CatalogError> {
-        let english_admin = catalog_path(admin_dir, "en-US");
-        let english_package = catalog_path(package_dir, "en-US");
-        let english = read_optional(&english_admin)
-            .or_else(|| read_optional(&english_package))
+        let read_catalog = |directories: &[PathBuf], locale: &str| {
+            directories
+                .iter()
+                .find_map(|directory| read_optional(&catalog_path(directory, locale)))
+        };
+        let english = read_catalog(admin_dirs, "en-US")
+            .or_else(|| read_catalog(package_dirs, "en-US"))
             .unwrap_or_else(|| ENGLISH.to_owned());
         let translation = if locale == "en-US" {
-            read_optional(&english_admin).or_else(|| read_optional(&english_package))
+            read_catalog(admin_dirs, locale).or_else(|| read_catalog(package_dirs, locale))
         } else {
-            read_optional(&catalog_path(admin_dir, locale))
-                .or_else(|| read_optional(&catalog_path(package_dir, locale)))
+            read_catalog(admin_dirs, locale).or_else(|| read_catalog(package_dirs, locale))
         };
         Self::from_sources(locale, &english, translation.as_deref())
     }

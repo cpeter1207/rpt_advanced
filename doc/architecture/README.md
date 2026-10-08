@@ -14,8 +14,11 @@ external interoperability, and reject incompatible artifact combinations safely.
 `app_rpt_advanced.so` is the metadata loader for an Asterisk-hosted Rust product.
 The product owns controller configuration, node workers, local radio policy,
 telemetry, and AllStarLink peer control; the Asterisk adapter owns channel/frame
-exchange. USBRadioPlus remains the radio channel driver and owns hardware
-access. The separately released `rate_adjusting_pcm_ring3` and samplerate
+exchange. Standalone operation will use `rpt_advanced.conf` for per-node
+CM119 selection, wiring, and radio signaling settings, resolved by the product
+before opening the shared hardware adapters. The ASL channel adapter owns its own active
+hardware configuration.
+The separately released `rate_adjusting_pcm_ring3` and samplerate
 adapter DSOs provide playout buffering, clock-rate recovery, and edge conversion.
 The native radio transmit callback returns PTT and CTCSS enable separately; its
 activity policy remains in the controller, as specified by
@@ -130,6 +133,13 @@ never from a real-time tick. See
 [ADR 0020](decisions/0020-rust-dylibs-and-external-c-shims.md), and
 [ADR 0021](decisions/0021-versioned-rust-c-adapter-boundaries.md), and
 [ADR 0022](decisions/0022-versioned-external-c-dependency-adapters.md).
+
+Standalone AllStarLink interoperability uses the separately released
+`librptadviax2` protocol engine. It owns IAX2 serialization, parsing, and
+session behavior, but no socket operations. A separate network adapter owns
+datagram I/O; codec adapters use released codec libraries wherever available.
+These boundaries carry no controller routing policy or audio callback work,
+as defined by ADRs 0005, 0011, and 0012.
 
 ## Runtime structure
 

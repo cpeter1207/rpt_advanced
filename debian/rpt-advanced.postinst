@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if ! getent passwd rpt-advanced >/dev/null; then
+            adduser --system --group --home /var/lib/rpt-advanced \
+                --no-create-home --shell /usr/sbin/nologin rpt-advanced
+        fi
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger --action=change --subsystem-match=usb \
+                --attr-match=idVendor=0d8c --attr-match=idProduct=013c || true
+            udevadm settle --timeout=10 || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#

@@ -600,6 +600,11 @@ None.
   The current Asterisk module is outside this new standalone-only requirement
   and retains its existing narrow ingress-mutex exception (ADR 0037).
 - IAX2 interoperability targets AllStarLink.
+- Implement IAX2 in our own independently versioned `librptadviax2` library.
+  Keep packet/session logic separate from datagram I/O, and keep codec adapters
+  separate from protocol logic. Use released codec libraries through plug-in
+  adapters wherever possible; do not write codecs when a suitable released
+  implementation exists.
 - Small binary size, low CPU use, and low memory use are first-class design
   constraints.
 - The Asterisk module and standalone application share as much controller code

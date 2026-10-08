@@ -58,56 +58,48 @@
 - [x] Run focused tests and Clippy with warnings denied; inspect submission for locks and blocking work. Lifecycle drain is intentionally blocking and must run off callbacks.
 - [x] Verify the standalone library has no Asterisk/ASL3 dependency or symbols; confirm the Asterisk provider and product tests pass after sharing the descriptor header.
 - [x] Exercise the standalone descriptor through the product's real `ControlClient` as well as provider-local tests.
-- [ ] Commit `feat: add standalone control executor`.
+- [x] Commit `feat: add standalone control executor` (`b1e2da8`).
 
-### Task 2: Standalone native host-services adapter
+### Task 2: Host-services composition (folded into the standalone executable)
 
-**Files:**
-- Create: `rust/standalone-host-adapter/Cargo.toml`
-- Create: `rust/standalone-host-adapter/src/lib.rs`
-- Create: `rust/standalone-host-adapter/include/rptadv_standalone_host_adapter.h`
-- Modify: `Cargo.toml`
-- Modify: `Makefile`
-- Test: `rust/standalone-host-adapter/src/tests.rs`
-- Test: `tests/test_standalone_host_boundary.py`
+The product already exposes `rptadv_host_services_v4`; a separate library that
+only validates a provider list and returns the same callbacks would add no
+runtime behavior. The standalone executable will own this table and compose the
+selected dynamic providers directly. Its validation and startup rollback tests
+are part of Task 4. This removes the redundant adapter crate while preserving
+the approved dynamic boundaries for reusable production components.
 
-**Interfaces:**
-- Consumes: `rptadv_product.h` host-services v4 and the selected versioned radio, audio, file, speech, and standalone-control adapter descriptors.
-- Produces: `rptadv_standalone_host_services_v1()` plus startup validation that resolves exactly one compatible provider per required service before activating the product.
+- [x] Confirm the host-services contract already exists and is consumed by the product.
+- [x] Fold provider selection, host callbacks, and completeness validation into the executable lifecycle rather than adding a pass-through DSO.
 
-- [ ] Write tests `required_provider_missing_aborts_before_radio_open`, `duplicate_provider_is_rejected`, `abi_mismatch_aborts_without_activation`, and `complete_manifest_starts_and_stops_once`.
-- [ ] Run the focused Rust and boundary tests and verify failures before implementation.
-- [ ] Implement manifest validation and host-service forwarding using existing descriptors; do not create a second controller/runtime.
-- [ ] Run focused tests and inspect generated ELF dependencies for absent Asterisk/ASL3 requirements.
-- [ ] Commit `feat: add standalone host adapter`.
-
-### Task 3: Standalone IAX2 protocol, network adapter, and HTTP registration
+### Task 3: Versioned IAX2 component, protocol, network I/O, and codec adapters
 
 **Files:**
-- Create: `rust/iax-standalone-adapter/Cargo.toml`
-- Create: `rust/iax-standalone-adapter/src/lib.rs`
-- Create: `rust/iax-standalone-adapter/src/protocol.rs`
-- Create: `rust/iax-standalone-adapter/src/network.rs`
-- Create: `rust/iax-standalone-adapter/src/codec.rs`
-- Create: `rust/iax-standalone-adapter/include/rptadv_iax_adapter.h`
-- Modify: `Cargo.toml`
-- Modify: `Makefile`
-- Test: `rust/iax-standalone-adapter/src/tests.rs`
-- Test: `tests/fixtures/iax2/`
-- Test: `tests/test_iax2_standalone.py`
+- Create: sibling source repository `librptadviax2` with its own versioned C ABI, Rust implementation, tests, Debian packages, and quality checks.
+- Reuse: `rptadv-shared-library-workflows` for this library's thin caller and CI; do not create a duplicate workflow repository.
+- Create in `librptadviax2`: protocol serialization/deserialization, UDP/network adapter, and codec-adapter boundary.
+- Modify in `rpt_advanced`: workspace/package metadata to consume the released dynamic object; add ASL3 compatibility fixtures and integration tests.
+- Test: `librptadviax2/tests/fixtures/iax2/` and `tests/test_iax2_standalone.py`
 
 **Interfaces:**
 - Consumes: the current product peer-dial/read/write host callbacks, node configuration, bounded peer-ingress contract in ADR 0037, and the ASL3-compatible IAX2 behavior established by documentation and source review.
-- Produces: a versioned IAX2 adapter descriptor. Its protocol module constructs and serializes outgoing IAX2 packets and deserializes incoming packets without owning sockets; its network module owns network I/O; codec adapters use released codec libraries where available. The adapter handles peer/media/control events and ASL HTTP registration without calling product policy on network/audio threads.
+- Produces: independently released `librptadviax2` with a versioned C descriptor. Its protocol module constructs and serializes outgoing IAX2 packets and deserializes incoming packets without owning sockets; its network adapter owns network I/O; separate codec adapters bridge released codec libraries where available. It handles peer/media/control events without calling product policy on network/audio threads. ASL HTTPS registration stays in the standalone product boundary as ADR 0005 requires.
 
-- [ ] Review the ASL3 manual first. Where it omits or leaves behavior ambiguous, inspect the relevant Asterisk IAX2 and ASL3 `app_rpt` source; record observed wire behavior and its source location in an ASL3 compatibility matrix before implementation.
-- [ ] Establish golden packet/session fixtures from that matrix for the currently supported inbound/outbound link behavior, authentication/call-token flow, codec negotiation, keying, DTMF/text signaling, keepalive/timeout, and disconnect. Include ASL3-specific extensions and quirks found in source, not just base IAX2 packets described in the manual.
-- [ ] Write protocol tests for outgoing packet construction/serialization and incoming packet deserialization, then implement those operations in `protocol.rs` without network I/O. Keep socket handling in `network.rs` and codec handling in `codec.rs` behind adapters to released codec libraries where available.
+- [x] Review the ASL3 manual first. Where it omits or leaves behavior ambiguous, inspect the relevant Asterisk IAX2 and ASL3 `app_rpt` source; record observed wire behavior and its source location in an ASL3 compatibility matrix before implementation.
+- [x] Establish golden packet/session fixtures from that matrix for the currently supported inbound/outbound link behavior, authentication/call-token flow, codec negotiation, keying, DTMF/text signaling, keepalive/timeout, and disconnect. Include ASL3-specific extensions and quirks found in source, not just base IAX2 packets described in the manual. Remaining handshake and topology gaps stay explicitly listed in the matrix.
+- [x] Add the Asterisk-compatible stateless inbound CALLTOKEN challenge/continue/reject decision, with fixtures for empty, valid, invalid, absent, malformed, and non-initial NEW input. This does not establish an inbound listener or call session.
+- [x] Ensure outbound NEW uses the standard extnode identity (`USERNAME=radio`, remote `CALLED_NUMBER`, local `CALLING_NUMBER`); pin the identity mapping in the loopback call-setup regression.
+- [x] Retransmit the pending outbound setup frame after response loss using Asterisk's default bounded retry schedule; verify retries for NEW and AUTHREP over loopback UDP.
+- [x] Add a pure inbound u-law `radio` NEW acceptance primitive that validates node identity and codec capability and emits the legacy FORMAT plus version-0 FORMAT2 ACCEPT. It runs only after the caller validates CALLTOKEN and product access policy; it does not establish an inbound listener or call session.
+- [x] Seed linked protocol state after an inbound ACCEPT, validating both 15-bit call numbers and the post-NEW/ACCEPT sequence positions before the peer is exposed.
+- [x] Map IAX radio-key/unkey control subclasses through named client and product event constants. Gate key-up on `!NEWKEY!`, `!NEWKEY1!`, or the two-second compatibility timeout; always honor unkey. Focused pre-negotiation, timeout, and explicit-disable tests pass.
+- [x] Write protocol tests for outgoing packet construction/serialization and incoming packet deserialization, then implement those operations in `protocol.rs` without network I/O. Keep socket handling in `network.rs` and codec handling in `codec.rs` behind adapters to released codec libraries where available.
 - [ ] Verify behavioral interoperability against the compatibility matrix: the target is complete interoperability with ASL3 for the supported link behavior, not merely basic connection and audio. Record any behavior that cannot be matched as an explicit gap rather than silently omitting it.
-- [ ] Implement bounded per-peer SPSC ingress; prove ordering, queue-full rejection, and stalled-peer fairness with tests `peer_fifo_preserves_order`, `full_peer_queue_rejects_without_blocking`, and `stalled_peer_does_not_starve_ready_peer`.
+- [x] Implement the bounded per-peer lock-free ingress primitive with fixed packet storage; prove FIFO ordering, queue-full rejection, oversize handling, and stalled-peer isolation. The listener's datagram demultiplexing and product wiring remain open.
 - [ ] Implement the HTTPS registration client using configured endpoint/identity, with tests for success, timeout, malformed response, and shutdown cancellation.
 - [ ] Run focused tests and a local Asterisk integration test using the project’s existing test image; verify no network or disk operation reaches audio callbacks.
-- [ ] Commit `feat: add standalone IAX2 transport`.
+- [ ] Verify the new shared library has no Asterisk/ASL3 dependency and its ABI/package metadata matches ADRs 0011, 0018, 0021, and 0022.
+- [ ] Commit `feat: add versioned standalone IAX2 transport` in the component repository; integrate only its released dynamic ABI in `rpt_advanced`.
 
 ### Task 4: Standalone executable and service lifecycle
 
@@ -115,19 +107,26 @@
 - Create: `rust/standalone/Cargo.toml`
 - Create: `rust/standalone/src/main.rs`
 - Create: `rust/standalone/src/lib.rs`
+- Modify: `rust/core/src/config/scope.rs`, `schema.rs`, and `settings.rs`
+- Modify: `examples/rpt_advanced.conf`
 - Create: `debian/rpt-advanced.service`
 - Create: `debian/rpt-advanced.default`
 - Modify: `Cargo.toml`
 - Modify: `Makefile`
 - Test: `rust/standalone/src/tests.rs`
+- Test: `rust/core/src/config/tests.rs`
 - Test: `tests/test_standalone_service.py`
 
 **Interfaces:**
-- Consumes: the standalone host manifest, control executor, IAX2 adapter, existing configuration loader, and selected native radio/audio adapters.
-- Produces: `rpt-advanced --check-config`, `rpt-advanced --foreground`, and systemd lifecycle; startup resolves providers, starts product only after validation, reload replaces a runtime generation, and shutdown drains control before releasing radio and libraries.
+- Consumes: control executor, IAX2 adapter, existing configuration loader, and selected native radio/audio adapters.
+- Produces: `rpt-advanced --check-config`, `rpt-advanced --foreground`, and systemd lifecycle; the process supplies host-services v4, resolves providers and validates composition before starting product, reload replaces a runtime generation, and shutdown drains control before releasing radio and libraries.
 
 - [ ] Write tests `check_config_never_opens_radio`, `startup_failure_releases_resolved_adapters`, `reload_keeps_process_and_replaces_generation`, and `shutdown_drains_before_adapter_unload`.
 - [ ] Verify tests fail against the absent executable before implementation.
+- [x] Add the initial `rpt-advanced --check-config FILE` slice: parse and validate using the portable core only, report warnings/errors, and exit without resolving or opening any radio provider.
+- [x] Add the secrets-file parser and `--check-secrets-file FILE` validator; enforce service-user ownership and mode 0600 and never echo secret values.
+- [x] Add `[radio]` defaults and `[radio <node>]` overrides directly to `rpt_advanced.conf`; resolve stable device selection, CM119 profile/PTT/GPIO configuration, receive/COR/squelch/CTCSS/DCS and transmit-signaling settings, channels, PortAudio buffer requests, and receive/transmit FFmpeg graphs into each node's typed settings.
+- [x] Prove a successful radio-setting reload reopens the adapter with the candidate settings and a rejected reload restores the prior host snapshot. Standalone runtime tests assert candidate channel availability after commit and old channel retention after a rejected reload.
 - [ ] Implement signal handling and lifecycle outside callbacks; require a non-root service user and never silently fall back when a required provider is missing.
 - [ ] Run standalone tests plus an integration test on a Linux host with no Asterisk installed; verify start, config reload, link lifecycle, and clean shutdown.
 - [ ] Commit `feat: add standalone controller service`.
@@ -175,7 +174,7 @@
 
 ## Self-review
 
-- **Spec coverage:** Tasks 1–2 cover replaceable control and dynamic host providers; Task 3 covers IAX2/HTTPS and bounded multi-peer transport; Task 4 covers standalone lifecycle, configuration reload, and systemd; Task 5 covers the four approved package combinations; Task 6 covers lock-free guarantees, ABI and dependency boundaries, platform gates, and preserving the existing adapters.
+- **Spec coverage:** Task 1 covers replaceable control; Task 3 covers IAX2/HTTPS and bounded multi-peer transport; Task 4 covers host-services composition, standalone lifecycle, configuration reload, and systemd; Task 5 covers the four approved install combinations; Task 6 covers lock-free guarantees, ABI and dependency boundaries, platform gates, and preserving the existing adapters.
 - **Step scan:** Every implementation task starts with named failing tests, then a bounded implementation and focused verification. Package boundaries and provider behavior are explicit; no new wishlist capabilities are included.
 - **Type consistency:** Cross-boundary descriptors are versioned `*_v1`; the product host-services boundary stays at v4; Rust tasks consume/produce the existing product callbacks rather than introducing a second product API.
 - **Review focus:** The five high-risk input/failure cases each have a targeted test in Tasks 1–5; callback and fairness constraints are exercised in Tasks 1, 3, and 6.

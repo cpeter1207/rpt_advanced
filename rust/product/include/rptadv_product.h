@@ -24,6 +24,16 @@ struct rptadv_speech_descriptor;
 #define RPTADV_HOST_ABI_VERSION 4U
 /** Host-services capability name stored in its fixed-width descriptor field. */
 #define RPTADV_HOST_CAPABILITY "rptadv.hst4"
+/** Peer event carrying borrowed text bytes. */
+#define RPTADV_PEER_EVENT_TEXT 1U
+/** Peer event carrying one DTMF digit byte. */
+#define RPTADV_PEER_EVENT_DIGIT 2U
+/** Peer event carrying normalized native-rate F32 PCM. */
+#define RPTADV_PEER_EVENT_AUDIO 3U
+/** Peer event asserting remote receiver activity; no payload. */
+#define RPTADV_PEER_EVENT_RADIO_KEY 4U
+/** Peer event clearing remote receiver activity; no payload. */
+#define RPTADV_PEER_EVENT_RADIO_UNKEY 5U
 
 /** Copied local civil time. Valid is zero when conversion failed. */
 struct rptadv_local_time_v1 {
@@ -78,7 +88,7 @@ struct urp_ast_link_attach {
 };
 /** Current-generation predicate used during one bounded outbound dial. */
 typedef uint32_t (*rptadv_current_v1)(void *context);
-/** One borrowed peer input event: 1 text, 2 digit, 3 native F32 audio. */
+/** One borrowed peer input event identified by the RPTADV_PEER_EVENT_* constants. */
 typedef void (*rptadv_peer_event_v1)(void *context, uint32_t kind, const void *data, size_t count);
 /** Borrowed status text sink. */
 typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t length);
@@ -94,9 +104,9 @@ typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t leng
  * Borrowed strings/slices and product callbacks are valid only for the synchronous
  * call, except radio endpoints retained from activate through destroy. PCM is aligned normalized
  * F32 with exactly the stated count. Radio transmit returns key and CTCSS-enable
- * decisions through separate output pointers. Peer events are 1 text bytes, 2
- * one DTMF byte, or 3 normalized F32 PCM. Directory methods are 0 both, 1 DNS,
- * 2 file.
+ * decisions through separate output pointers. Peer text/audio data and DTMF byte
+ * are borrowed for the callback; radio key/unkey events have null data and zero
+ * count. Directory methods are 0 both, 1 DNS, 2 file.
  */
 struct rptadv_host_services_v4 {
     uint32_t struct_size;   /**< Complete readable table size. */
@@ -120,7 +130,9 @@ struct rptadv_host_services_v4 {
                             const char *remote, size_t remote_length, const char *source,
                             size_t source_length, char *output, size_t capacity, size_t *written);
 
-    /** Reserve one uniquely owned radio without starting it. */
+    /** Reserve one uniquely owned radio without starting it. The length-delimited name contains
+     * local-node, NUL, then adapter-selected channel; older single-name test providers may use
+     * the same value for both fields. */
     int (*radio_open)(void *context, const char *name, size_t name_length, size_t maximum_frames,
                       void **radio);
     /** Attach both endpoints before starting. On failure detach/quiesce both endpoints

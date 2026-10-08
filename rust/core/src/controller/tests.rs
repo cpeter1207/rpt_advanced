@@ -128,6 +128,94 @@ fn parrot_buffers_are_allocated_and_freed_on_control_around_lock_free_handoff() 
     AUDIO_ALLOCATIONS.with(|count| count.set(None));
 }
 
+#[test]
+fn parrot_output_size_mismatch_skips_sample_processing() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut audio = [0.25];
+    let mut parrot = [];
+    let mut active = true;
+
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+        },
+    );
+
+    assert_eq!(audio, [0.25]);
+    assert!(!active);
+    assert_eq!(node.now, 0);
+}
+
+#[test]
+fn parrot_lifecycle_retries_a_pending_ack_after_the_ack_queue_drains() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let (capture, _) = parrot::ParrotCapture::new();
+    node.parrot_lifecycle
+        .acknowledgements
+        .push(parrot::ParrotAck::Disabled(capture))
+        .unwrap();
+    node.parrot_pending_ack = Some(parrot::ParrotAck::Enabled);
+
+    node.process_event(false, false);
+    assert!(matches!(
+        node.parrot_pending_ack,
+        Some(parrot::ParrotAck::Enabled)
+    ));
+
+    control.reclaim().for_each(drop);
+    node.process_event(false, false);
+    assert!(node.parrot_pending_ack.is_none());
+    control.reclaim().for_each(drop);
+}
+
+#[test]
+fn parrot_enable_ack_waits_when_the_callback_ack_queue_is_full() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.set_parrot_enabled(true));
+    let (capture, _) = parrot::ParrotCapture::new();
+    node.parrot_lifecycle
+        .acknowledgements
+        .push(parrot::ParrotAck::Disabled(capture))
+        .unwrap();
+
+    node.process_event(false, false);
+    assert!(node.parrot_capture.is_some());
+    assert!(matches!(
+        node.parrot_pending_ack,
+        Some(parrot::ParrotAck::Enabled)
+    ));
+
+    control.reclaim().for_each(drop);
+    node.process_event(false, false);
+    assert!(node.parrot_pending_ack.is_none());
+    control.reclaim().for_each(drop);
+    assert!(control.parrot.is_some());
+}
+
 struct TestPeerInput {
     signals: crate::link::PeerSignals,
     sample: Option<f32>,
@@ -1373,6 +1461,11 @@ fn validation_retains_status_pcm_and_rejects_bad_media_and_settings() {
     }
     let bad = ControllerSettings {
         telemetry_duck_db: -61,
+        ..ControllerSettings::default()
+    };
+    assert!(NodeController::new(bad, vec![], vec![], CourtesySettings::default()).is_err());
+    let bad = ControllerSettings {
+        ctcss_hang_ms: 1,
         ..ControllerSettings::default()
     };
     assert!(NodeController::new(bad, vec![], vec![], CourtesySettings::default()).is_err());
