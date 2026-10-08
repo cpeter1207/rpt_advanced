@@ -26,7 +26,7 @@ INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH" RPT_ADVANCED_LIBDIR="$(CURDIR)/build"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
-DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c examples doc debian messages README.md QUALITY.md WISHLIST.md
+DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c examples doc debian messages README.md QUALITY.md WISHLIST.md
 
 .PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
@@ -121,6 +121,7 @@ rust-coverage: | build
 		$(MAKE) CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" all; \
 		export LIBRARY_PATH="$$CARGO_TARGET_DIR/release:$$LIBRARY_PATH"; \
 		export LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH"; \
+		export RPT_ADVANCED_LIBDIR="$(CURDIR)/build"; \
 		$(CARGO) test --locked --release --workspace --all-targets; \
 		$(MAKE) -o rust-build CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" integration; \
 		$(CARGO) llvm-cov report --release \

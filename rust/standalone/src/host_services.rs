@@ -457,7 +457,7 @@ mod tests {
     use super::{HostServicesOwner, boundary, dial_peer, input, parse_destination, peer_dial};
     use crate::{iax::IaxError, secrets::SecretsFile};
     use std::{
-        ffi::c_void,
+        ffi::{c_char, c_void},
         mem::size_of,
         net::UdpSocket,
         path::Path,
@@ -550,7 +550,7 @@ mod tests {
         .unwrap();
         let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
         let api = owner.descriptor();
-        let mut output = [0_i8; 128];
+        let mut output = [c_char::default(); 128];
         let mut written = 0;
         let path = path.to_string_lossy();
         let status = unsafe {
@@ -967,7 +967,7 @@ mod tests {
         let valid_static = c"/tmp/not-used";
         let valid_external = c"";
         let valid_remote = c"506315";
-        let mut output = [0_i8; 1];
+        let mut output = [c_char::default(); 1];
         let mut written = 0;
         let written_pointer = ptr::from_mut(&mut written);
         let valid_static_length = valid_static.to_bytes().len();
@@ -1117,7 +1117,7 @@ mod tests {
         )
         .unwrap();
         let path_text = path.to_string_lossy();
-        let mut output = [0_i8; 1];
+        let mut output = [c_char::default(); 1];
         for (output_pointer, capacity) in [(ptr::null_mut(), 128), (output.as_mut_ptr(), 0)] {
             assert_eq!(
                 unsafe {
