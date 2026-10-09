@@ -1,7 +1,7 @@
 [
   {
     "repository": "librptadvradio",
-    "sha": "ef10f6aba4d7f6b641ca755934e8e65d3a1e7408",
+    "sha": "d55f5f1a7f41cb3eef62bdfe7bece1a8a5046cdb",
     "packages": ["librptadvradio4", "librptadvradio-dev"]
   },
   {
