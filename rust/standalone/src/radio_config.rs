@@ -2,7 +2,7 @@
 
 use crate::{ResolvedRadioNode, abi};
 use rpt_advanced_core::config::{
-    CtcssTurnoffMode, RadioCarrierSource, RadioDuplexMode, RadioNoiseFilter,
+    CtcssTurnoffMode, RadioCarrierSource, RadioDuplexMode, RadioNoiseFilter, RadioOutputAssignment,
     RadioReceiveAudioSource, RadioSignalingMode, RadioSubaudibleSource,
 };
 use std::mem::size_of;
@@ -107,14 +107,24 @@ pub fn radio_session_config(
             dcs_inverted: u32::from(settings.transmit_dcs_code.inverted),
             dcs_peak: db_to_linear(settings.transmit_dcs_level_dbfs),
             ctcss_peak: db_to_linear(settings.transmit_ctcss_level_dbfs),
-            output_a_route: 3,
-            output_b_route: 0,
+            output_a_route: output_assignment(settings.transmit_output_a_assignment),
+            output_b_route: output_assignment(settings.transmit_output_b_assignment),
             output_a_tone_gain: 1.0,
             output_a_tone_bias: 0.0,
             output_b_tone_gain: 1.0,
             output_b_tone_bias: 0.0,
         },
     })
+}
+
+fn output_assignment(assignment: RadioOutputAssignment) -> u32 {
+    match assignment {
+        RadioOutputAssignment::Disabled => 0,
+        RadioOutputAssignment::Voice => 1,
+        RadioOutputAssignment::Tone => 2,
+        RadioOutputAssignment::Composite => 3,
+        RadioOutputAssignment::AuxiliaryVoice => 4,
+    }
 }
 
 fn tone_index(tenths_hz: u16) -> Result<usize, RadioConfigError> {
@@ -250,6 +260,19 @@ mod tests {
 
         assert_eq!(config.transmit.mapped_ctcss_frequency_tenths_hz[11], 1000);
         assert_eq!(config.transmit.mapped_ctcss_frequency_tenths_hz[12], 1035);
+    }
+
+    #[test]
+    fn maps_configured_transmit_output_assignments() {
+        let document = ConfigDocument::parse(
+            "[radio]\ntransmit_output_b_assignment=voice\n[1000]\n[radio 1000]\ntransmit_output_a_assignment=disabled\ntransmit_output_b_assignment=composite\n",
+        )
+        .expect("valid radio configuration");
+        let radio = resolve_radio_nodes(&document).unwrap().value.remove(0);
+        let config = radio_session_config(&radio, 1, 960, 50).unwrap();
+
+        assert_eq!(config.transmit.output_a_route, 0);
+        assert_eq!(config.transmit.output_b_route, 3);
     }
 
     #[test]

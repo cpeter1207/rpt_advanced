@@ -210,6 +210,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                     | "vox_hang_ms"
                     | "receive_on_delay_ms"
                     | "radio_duplex_mode"
+                    | "transmit_output_a_assignment"
+                    | "transmit_output_b_assignment"
                     | "transmit_signaling"
                     | "transmit_ctcss_tones_hz"
                     | "transmit_ctcss_default_hz"
@@ -386,6 +388,10 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "dcs_receive_code" | "transmit_dcs_code" => parse::dcs_code(value).is_some(),
         "noise_filter" => matches!(value, "standard" | "alternate"),
         "radio_duplex_mode" => matches!(value, "half" | "full"),
+        "transmit_output_a_assignment" | "transmit_output_b_assignment" => matches!(
+            value,
+            "disabled" | "voice" | "tone" | "composite" | "auxiliary_voice"
+        ),
         "transmit_ctcss_turnoff_mode" => {
             matches!(value, "none" | "phase_shift" | "tone_remove" | "tail_tone")
         }
@@ -567,6 +573,8 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "vox_hang_ms") => "2000",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "receive_on_delay_ms") => "0",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "radio_duplex_mode") => "half",
+        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_output_a_assignment") => "voice",
+        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_output_b_assignment") => "tone",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_ctcss_level_dbfs") => "-24",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_ctcss_turnoff_mode") => {
             "phase_shift"
