@@ -37,7 +37,7 @@ impl Drop for Decoder {
 /// Channel, translation state and bounded PCM storage operated by one media owner.
 /// No method is called from a radio worker; inbound ring consumption is independent.
 pub struct PeerIo {
-    channel: Channel,
+    pub(crate) channel: Channel,
     linear: Format,
     decoder: Option<Decoder>,
     input: Vec<f32>,
@@ -47,6 +47,7 @@ impl PeerIo {
     /// Try ordered single-codec offers under one shared 20-second dial deadline.
     /// Recheck the runtime token before and after each blocking dial; final admission
     /// remains the serialized core owner's responsibility after reader preparation.
+    /// Use the answered channel's codec rate, not the offer, for PCM exchange.
     pub fn dial(
         destination: &CStr,
         local: &CStr,
@@ -93,22 +94,7 @@ impl PeerIo {
             {
                 continue;
             }
-            // SAFETY: the cached linear format is borrowed; take one owned reference.
-            let linear = unsafe {
-                let linear = ffi::ast_format_cache_get_slin_by_rate(candidate.rate());
-                if linear.is_null() {
-                    return Err(Error::UnsupportedFormat);
-                }
-                ffi::__ao2_ref(
-                    linear.cast(),
-                    1,
-                    ptr::null(),
-                    c"rust/asterisk/link".as_ptr(),
-                    0,
-                    c"dial".as_ptr(),
-                );
-                Format(Object::owned(linear).unwrap())
-            };
+            let linear = channel.linear_format()?;
             std::mem::forget(channel);
             // SAFETY: ownership transfers exactly once, including failed preparation.
             return unsafe { Self::from_owned_channel(pointer.as_ptr().cast(), linear, maximum) };
@@ -169,15 +155,17 @@ impl PeerIo {
     pub fn rate(&self) -> u32 {
         self.linear.rate()
     }
-    /// Wait at most one millisecond on the sole channel owner.
+    /// Poll the channel without waiting so the shared peer owner can service peers fairly.
     pub fn ready(&mut self) -> Result<bool, Error> {
         // SAFETY: channel ownership is exclusive and retained throughout the wait.
-        match unsafe { ffi::ast_waitfor(self.channel.pointer.as_ptr(), 1) } {
+        match unsafe { ffi::ast_waitfor(self.channel.pointer.as_ptr(), 0) } {
             value if value < 0 => Err(Error::Hangup),
             value => Ok(value > 0),
         }
     }
     /// Read and dispatch one owned frame, preserving codec buffering as a live session.
+    /// Payload-free IAX/translator loss markers keep the call alive but publish no PCM;
+    /// the shared inbound ring supplies concealment for the missing source samples.
     pub fn read(&mut self, mut dispatch: impl FnMut(Input<'_>)) -> Result<(), Error> {
         // SAFETY: this object is the channel's exclusive I/O owner.
         unsafe {
@@ -207,7 +195,7 @@ impl PeerIo {
                     return Err(Error::Hangup);
                 }
                 ffi::AST_FRAME_VOICE => {
-                    if raw.samples == 0 && raw.datalen == 0 {
+                    if raw.samples >= 0 && raw.datalen == 0 {
                         return Ok(());
                     }
                     let source = raw.subclass.__bindgen_anon_1.format;
@@ -256,7 +244,7 @@ impl PeerIo {
                     };
                     let raw = audio.0.as_ref();
                     let count = usize::try_from(raw.samples).map_err(|_| Error::InvalidFrame)?;
-                    if count == 0 && raw.datalen == 0 {
+                    if raw.frametype == ffi::AST_FRAME_VOICE && raw.datalen == 0 {
                         return Ok(());
                     }
                     if raw.frametype != ffi::AST_FRAME_VOICE

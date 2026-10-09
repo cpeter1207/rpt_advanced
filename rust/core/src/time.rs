@@ -1,5 +1,6 @@
 //! Deterministic local-time announcement formatting.
 
+use crate::messages::{Daypart, Message, MessageCatalog};
 use std::fmt;
 
 /// Supported clock-display modes.
@@ -14,6 +15,7 @@ pub enum TimeFormat {
 /// A complete speech announcement and its matching Morse clock text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TimeAnnouncement {
+    text: String,
     speech: String,
     morse: String,
 }
@@ -57,6 +59,7 @@ impl TimeAnnouncement {
         hour: i32,
         minute: i32,
         format: TimeFormat,
+        catalog: &MessageCatalog,
     ) -> Result<Self, TimeAnnouncementError> {
         if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
             return Err(TimeAnnouncementError::InvalidTime);
@@ -73,18 +76,33 @@ impl TimeAnnouncement {
             }
             TimeFormat::TwentyFourHour => format!("{hour:02}:{minute:02}"),
         };
-        let greeting = match hour {
-            0..=11 => "Good Morning",
-            12..=16 => "Good Afternoon",
-            _ => "Good Evening",
+        let daypart = match hour {
+            0..=11 => Daypart::Morning,
+            12..=16 => Daypart::Afternoon,
+            _ => Daypart::Evening,
         };
+        let greeting = catalog
+            .format(&Message::Greeting { daypart })
+            .map_err(|_| TimeAnnouncementError::InvalidFormat)?;
+        let forms = catalog
+            .format(&Message::TimeAnnouncement {
+                greeting_text: &greeting.text,
+                greeting_tts: &greeting.tts,
+                time: &morse,
+            })
+            .map_err(|_| TimeAnnouncementError::InvalidFormat)?;
 
         Ok(Self {
-            speech: format!("{greeting}. The time is {morse}."),
-            morse,
+            text: forms.text,
+            speech: forms.tts,
+            morse: forms.morse,
         })
     }
 
+    /// Borrow the text/status form of the announcement.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
     /// Borrow the complete spoken announcement.
     pub fn speech(&self) -> &str {
         &self.speech

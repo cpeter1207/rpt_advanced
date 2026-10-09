@@ -1,11 +1,84 @@
 //! Generation-owned peer audio composition; no channel operations or locks.
 use super::{AdmissionError, Mode, PeerSignals, ReceiveState};
-use crate::{audio::LinkAudioProducer, controller::NodeController};
+use crate::{
+    audio::LinkAudioProducer,
+    controller::{NodeController, ParrotOutput},
+};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+
+/// Lock-free control/audio handoff for one immutable priority group.
+#[derive(Clone, Debug, Default)]
+pub struct GroupSelection {
+    desired: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    revision: Arc<AtomicU64>,
+}
+impl GroupSelection {
+    /// Create a group with no selected member.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Publish a one-based member slot, or clear selection when no member is reachable.
+    pub fn publish_desired(&self, slot: Option<std::num::NonZeroUsize>) {
+        self.desired.store(
+            slot.map_or(0, std::num::NonZeroUsize::get),
+            Ordering::Release,
+        );
+    }
+    /// Current callback-active member slot, or none before initial activation.
+    pub fn active(&self) -> Option<std::num::NonZeroUsize> {
+        std::num::NonZeroUsize::new(self.active.load(Ordering::Acquire))
+    }
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+    pub(crate) fn callback_slot(&self, inputs_idle: bool) -> usize {
+        if inputs_idle {
+            let desired = self.desired.load(Ordering::Acquire);
+            let active = self.active.swap(desired, Ordering::AcqRel);
+            if active != desired {
+                self.revision.fetch_add(1, Ordering::Release);
+            }
+            desired
+        } else {
+            self.active.load(Ordering::Acquire)
+        }
+    }
+}
+
+/// A configured group identity, callback slot, and shared atomic selection.
+#[derive(Clone, Debug)]
+pub struct GroupMemberSelection {
+    label: String,
+    slot: std::num::NonZeroUsize,
+    selection: GroupSelection,
+}
+impl GroupMemberSelection {
+    /// Create one member view for a group's one-based priority slot.
+    pub fn new(label: &str, slot: std::num::NonZeroUsize, selection: GroupSelection) -> Self {
+        Self {
+            label: label.into(),
+            slot,
+            selection,
+        }
+    }
+    /// Permanent-section identity shared by all members.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    /// One-based priority slot in the group.
+    pub fn slot(&self) -> std::num::NonZeroUsize {
+        self.slot
+    }
+    /// Shared atomic callback selection for this group.
+    pub fn selection(&self) -> &GroupSelection {
+        &self.selection
+    }
+}
 
 /// Control-readable last-keyed direct identity for one prepared peer generation.
 #[derive(Clone)]
@@ -52,6 +125,9 @@ pub struct AudioPeer<P: PeerInput> {
     active: bool,
     duration: u64,
     kerchunk_samples: u64,
+    group: Option<(GroupSelection, std::num::NonZeroUsize)>,
+    group_index: Option<usize>,
+    reported_active: bool,
 }
 impl<P: PeerInput> AudioPeer<P> {
     /// Allocate scratch before publication; no endpoint is cloneable.
@@ -77,7 +153,20 @@ impl<P: PeerInput> AudioPeer<P> {
             active: false,
             duration: 0,
             kerchunk_samples: u64::from(kerchunk_ms) * 48,
+            group: None,
+            group_index: None,
+            reported_active: false,
         })
+    }
+    /// Mark this peer as a one-based member of a configured priority group.
+    pub fn with_group(mut self, selection: GroupSelection, slot: std::num::NonZeroUsize) -> Self {
+        self.group = Some((selection, slot));
+        self
+    }
+    /// Mark this peer as a configured priority-group member.
+    pub fn with_group_member(mut self, member: GroupMemberSelection) -> Self {
+        self.group = Some((member.selection, member.slot));
+        self
     }
 }
 
@@ -86,8 +175,12 @@ pub struct LinkAudio<P: PeerInput> {
     peers: Vec<AudioPeer<P>>,
     local: Vec<f32>,
     mix: Vec<f32>,
+    parrot_mix: Vec<f32>,
+    parrot_output: Vec<f32>,
     status: LinkAudioStatus,
     destinations: Vec<usize>,
+    groups: Vec<GroupSelection>,
+    selected_groups: Vec<usize>,
     publish: Producer<ProgramBlock>,
     recycled: Consumer<ProgramBlock>,
 }
@@ -150,15 +243,28 @@ impl<P: PeerInput> LinkAudio<P> {
             last_keyed: Arc::new(AtomicUsize::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
         };
+        let mut groups = Vec::<GroupSelection>::new();
+        for peer in &mut peers {
+            let Some((selection, _)) = &peer.group else {
+                continue;
+            };
+            let index = groups
+                .iter()
+                .position(|group| Arc::ptr_eq(&group.active, &selection.active))
+                .unwrap_or_else(|| {
+                    groups.push(selection.clone());
+                    groups.len() - 1
+                });
+            peer.group_index = Some(index);
+        }
+        let selected_groups = vec![0; groups.len()];
         let mut destinations = Vec::new();
         let mut outbound = Vec::new();
         for (index, peer) in peers.iter_mut().enumerate() {
             // Control-only construction consumes each freshly prepared peer exactly once.
             let producer = peer.outbound.take().expect("prepared outbound owner");
-            if peer.mode.transmits() {
-                destinations.push(index);
-                outbound.push(producer);
-            }
+            destinations.push(index);
+            outbound.push(producer);
         }
         let samples = maximum
             .checked_mul(destinations.len() + 1)
@@ -186,8 +292,12 @@ impl<P: PeerInput> LinkAudio<P> {
                 peers,
                 local: vec![0.0; maximum],
                 mix: vec![0.0; maximum],
+                parrot_mix: vec![0.0; maximum],
+                parrot_output: vec![0.0; maximum],
                 status,
                 destinations,
+                groups,
+                selected_groups,
                 publish,
                 recycled,
             },
@@ -215,26 +325,42 @@ impl<P: PeerInput> LinkAudio<P> {
         }
         self.local[..count].copy_from_slice(audio);
         self.mix[..count].fill(0.0);
+        for peer in &mut self.peers {
+            let (pcm_epoch, available, ended) = {
+                let signal = peer.input.signals();
+                (signal.pcm_epoch(), peer.input.available(), signal.ended())
+            };
+            let audio_active = peer
+                .receive
+                .should_render(pcm_epoch, available, ended, count);
+            let audio_active = audio_active && peer.input.render(&mut peer.audio[..count]);
+            if !audio_active {
+                peer.audio[..count].fill(0.0);
+            }
+            let active = audio_active || peer.input.signals().radio_keyed();
+            peer.active = active;
+            peer.input.signals().set_active(active);
+        }
+        let inputs_idle = !receiving && self.peers.iter().all(|peer| !peer.active);
+        for (index, group) in self.groups.iter().enumerate() {
+            self.selected_groups[index] = group.callback_slot(inputs_idle);
+        }
+        let selected_groups = &self.selected_groups;
         for (index, peer) in self.peers.iter_mut().enumerate() {
-            let signal = peer.input.signals();
-            let active = peer.receive.should_render(
-                signal.pcm_epoch(),
-                peer.input.available(),
-                signal.ended(),
-                count,
-            );
-            let active = active && peer.input.render(&mut peer.audio[..count]);
+            let selected = peer.group_index.is_none_or(|group| {
+                peer.group
+                    .as_ref()
+                    .is_some_and(|(_, slot)| selected_groups[group] == slot.get())
+            });
+            let active = peer.active && selected;
             if active {
-                if !peer.active {
+                if !peer.reported_active {
                     controller.link_keyed(&peer.direct);
                     peer.duration = 0;
                     self.status.last_keyed.store(index + 1, Ordering::Release);
                 }
                 peer.duration = peer.duration.saturating_add(count as u64);
-                for (mixed, input) in self.mix[..count].iter_mut().zip(&peer.audio) {
-                    *mixed += input;
-                }
-            } else if peer.active {
+            } else if peer.reported_active {
                 let mut storage = [0; 64];
                 let signal = peer.input.signals();
                 let source = signal
@@ -246,14 +372,51 @@ impl<P: PeerInput> LinkAudio<P> {
                     peer.kerchunk_samples != 0 && peer.duration <= peer.kerchunk_samples,
                 );
             }
-            peer.active = active;
-            peer.input.signals().set_active(active);
+            peer.reported_active = active;
+            if active {
+                for (mixed, input) in self.mix[..count].iter_mut().zip(&peer.audio) {
+                    *mixed += input;
+                }
+            }
         }
-        let keyed = controller.process_audio(
+        let linked_active = self.peers.iter().any(|peer| {
+            peer.active
+                && peer.group_index.is_none_or(|group| {
+                    peer.group
+                        .as_ref()
+                        .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+                })
+        });
+        let any_peer_active = self.peers.iter().any(|peer| peer.active);
+        self.parrot_mix[..count].fill(0.0);
+        if receiving {
+            self.parrot_mix[..count].copy_from_slice(&self.local[..count]);
+        }
+        for peer in &self.peers {
+            if peer.active {
+                for (mixed, input) in self.parrot_mix[..count]
+                    .iter_mut()
+                    .zip(&peer.audio[..count])
+                {
+                    *mixed += input;
+                }
+            }
+        }
+        for sample in &mut self.parrot_mix[..count] {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        controller.observe_parrot(receiving || any_peer_active, &self.parrot_mix[..count]);
+        let mut parrot_active = false;
+        let keyed = controller.process_audio_with_parrot(
             receiving,
-            self.active_count() != 0,
+            linked_active,
+            receiving || any_peer_active,
             &self.mix[..count],
             audio,
+            ParrotOutput {
+                samples: &mut self.parrot_output[..count],
+                active: &mut parrot_active,
+            },
         );
         if count == 0 || self.destinations.is_empty() {
             return Ok(keyed);
@@ -270,26 +433,58 @@ impl<P: PeerInput> LinkAudio<P> {
             }
         }
         for peer in &self.peers {
-            if peer.active && peer.mode.forwards() {
+            if peer.active
+                && peer.mode.forwards()
+                && peer.group_index.is_none_or(|group| {
+                    peer.group
+                        .as_ref()
+                        .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+                })
+            {
                 for (output, input) in block.audio[..count].iter_mut().zip(&peer.audio) {
                     *output += input;
                 }
             }
         }
+        for (output, parrot) in block.audio[..count]
+            .iter_mut()
+            .zip(&self.parrot_output[..count])
+        {
+            *output += parrot;
+        }
         let forwarding_sources = self
             .peers
             .iter()
-            .filter(|peer| peer.active && peer.mode.forwards())
+            .filter(|peer| {
+                peer.active
+                    && peer.mode.forwards()
+                    && peer.group_index.is_none_or(|group| {
+                        peer.group
+                            .as_ref()
+                            .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+                    })
+            })
             .count();
         for (destination, &peer_index) in self.destinations.iter().enumerate() {
             let peer = &self.peers[peer_index];
-            let own_source = usize::from(peer.active && peer.mode.forwards());
-            block.enabled[destination] =
-                !peer.input.signals().ended() && (receiving || forwarding_sources > own_source);
+            let selected = peer.group_index.is_none_or(|group| {
+                peer.group
+                    .as_ref()
+                    .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+            });
+            let own_source = usize::from(peer.active && peer.mode.forwards() && selected);
+            block.enabled[destination] = !peer.input.signals().ended()
+                && if parrot_active {
+                    true
+                } else {
+                    (peer.mode.transmits() || peer.group.is_some())
+                        && selected
+                        && (receiving || forwarding_sources > own_source)
+                };
             let offset = (destination + 1) * self.local.len();
             let own = &mut block.audio[offset..offset + count];
             // Every transmitting mode forwards; preparation excludes monitor destinations.
-            if peer.active {
+            if peer.active && peer.mode.forwards() && selected {
                 own.copy_from_slice(&peer.audio[..count]);
             } else {
                 own.fill(0.0);
@@ -300,3 +495,7 @@ impl<P: PeerInput> LinkAudio<P> {
         Ok(keyed)
     }
 }
+
+#[cfg(test)]
+#[path = "audio_tests.rs"]
+mod tests;

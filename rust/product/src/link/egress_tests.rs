@@ -1,7 +1,44 @@
 use super::*;
 use std::cell::Cell;
 thread_local! { static MODE: Cell<u8> = const { Cell::new(0) }; }
+static DESTROYED_FAILED_CONVERTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[test]
+fn old_unbounded_samplerate_descriptor_is_rejected() {
+    // SAFETY: the installed descriptor is copied into process-lifetime storage.
+    unsafe {
+        let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
+        api.abi_version = 1;
+        assert!(Egress::from_descriptor(8000, 960, Box::leak(Box::new(api))).is_err());
+    }
+}
+
+#[test]
+fn bandlimited_egress_retains_fir_input_without_duplication_across_partitions() {
+    let source: Vec<f32> = (0..4096)
+        .map(|index| (index as f32 * 0.07).sin() * 0.5)
+        .collect();
+    let mut whole = Egress::new(8000, 4096).unwrap();
+    let expected = whole.process(&source).unwrap().to_vec();
+    let mut split = Egress::new(8000, 4096).unwrap();
+    let mut actual = split.process(&source[..1]).unwrap().to_vec();
+    for chunk in source[1..].chunks(17) {
+        actual.extend_from_slice(split.process(chunk).unwrap());
+    }
+    actual.extend_from_slice(split.process(&[]).unwrap());
+    assert!(actual.len() > 600);
+    assert_eq!(actual.len(), expected.len());
+    assert!(
+        actual
+            .iter()
+            .zip(&expected)
+            .all(|(actual, expected)| (actual - expected).abs() < 0.00001)
+    );
+}
 unsafe extern "C" fn failed_create(
+    _: u32,
+    _: u32,
     _: u32,
     _: u32,
     _: *mut *mut ffi::rptadv_samplerate_converter,
@@ -11,9 +48,25 @@ unsafe extern "C" fn failed_create(
 unsafe extern "C" fn empty_create(
     _: u32,
     _: u32,
+    _: u32,
+    _: u32,
     _: *mut *mut ffi::rptadv_samplerate_converter,
 ) -> i32 {
     0
+}
+unsafe extern "C" fn failed_create_with_converter(
+    _: u32,
+    _: u32,
+    _: u32,
+    _: u32,
+    converter: *mut *mut ffi::rptadv_samplerate_converter,
+) -> i32 {
+    unsafe { *converter = 1_usize as *mut ffi::rptadv_samplerate_converter };
+    -1
+}
+unsafe extern "C" fn destroy_failed_converter(converter: *mut ffi::rptadv_samplerate_converter) {
+    assert_eq!(converter as usize, 1);
+    DESTROYED_FAILED_CONVERTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 unsafe extern "C" fn process(
     _: *mut ffi::rptadv_samplerate_converter,
@@ -41,7 +94,7 @@ fn malformed_converter_tables_and_impossible_output_counts_fail_closed() {
             assert!(Egress::new(rate, maximum).is_err());
         }
         let original = *ffi::rptadv_samplerate_adapter_descriptor();
-        for case in 0..9 {
+        for case in 0..12 {
             let mut api = original;
             match case {
                 0 => api.struct_size = 8,
@@ -52,7 +105,10 @@ fn malformed_converter_tables_and_impossible_output_counts_fail_closed() {
                 5 => api.process = None,
                 6 => api.destroy = None,
                 7 => api.create = Some(failed_create),
-                _ => api.create = Some(empty_create),
+                8 => api.create = Some(empty_create),
+                9 => api.reset = None,
+                10 => api.queued_input = None,
+                _ => api.converter_output_delay = None,
             }
             assert!(Egress::from_descriptor(8000, 16, Box::leak(Box::new(api))).is_err());
         }
@@ -78,4 +134,20 @@ fn native_rate_is_copied_without_conversion_and_oversize_input_is_rejected() {
     let mut converter = Egress::new(48000, 4).unwrap();
     assert_eq!(converter.process(&[0.25, -0.25]).unwrap(), &[0.25, -0.25]);
     assert!(converter.process(&[0.0; 5]).is_err());
+}
+
+#[test]
+fn failed_creation_releases_a_converter_returned_alongside_an_error() {
+    // SAFETY: descriptor callback storage remains live until validation returns.
+    unsafe {
+        let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
+        api.create = Some(failed_create_with_converter);
+        api.destroy = Some(destroy_failed_converter);
+        let before = DESTROYED_FAILED_CONVERTER.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(Egress::from_descriptor(8000, 16, Box::leak(Box::new(api))).is_err());
+        assert_eq!(
+            DESTROYED_FAILED_CONVERTER.load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+    }
 }

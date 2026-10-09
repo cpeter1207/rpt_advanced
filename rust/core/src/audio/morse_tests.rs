@@ -79,3 +79,14 @@ fn trait_rendering_preserves_the_exact_dot_duration() {
         2880
     );
 }
+
+#[test]
+fn restart_replays_the_message_from_its_initial_phase() {
+    let mut renderer = MorseRenderer::new("E", 20, 1_000.0, -6).unwrap();
+    let mut first = [0.0; 64];
+    assert_eq!(renderer.render(&mut first), first.len());
+    renderer.restart();
+    let mut replay = [0.0; 64];
+    assert_eq!(renderer.render(&mut replay), replay.len());
+    assert_eq!(replay, first);
+}

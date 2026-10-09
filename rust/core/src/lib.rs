@@ -13,8 +13,15 @@ pub mod control;
 pub mod controller;
 pub mod link;
 pub mod media;
+pub mod messages;
 pub mod policy;
 pub mod runtime;
 pub mod schedule;
 pub mod template;
 pub mod time;
+
+#[cfg(test)]
+mod messages_tests;
+
+#[cfg(test)]
+mod time_tests;

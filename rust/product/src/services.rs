@@ -17,18 +17,22 @@ pub enum PeerInput<'a> {
     Digit(char),
     /// Decoded normalized F32 PCM.
     Audio(&'a [f32]),
+    /// Remote radio asserted receive independently of media-frame arrival.
+    RadioKey,
+    /// Remote radio released receive.
+    RadioUnkey,
 }
 
 /// Validated process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(&'static abi::rptadv_host_services_v2);
+pub struct HostServices(&'static abi::rptadv_host_services_v4);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
 // SAFETY: the immutable table and context may be copied; object operations remain serialized.
 unsafe impl Sync for HostServices {}
 
-fn complete(api: &abi::rptadv_host_services_v2) -> bool {
+fn complete(api: &abi::rptadv_host_services_v4) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -39,6 +43,7 @@ fn complete(api: &abi::rptadv_host_services_v2) -> bool {
         api.radio_activate.is_some(),
         api.radio_destroy.is_some(),
         api.peer_dial.is_some(),
+        api.peer_bind_radio.is_some(),
         api.peer_rate.is_some(),
         api.peer_ready.is_some(),
         api.peer_read.is_some(),
@@ -60,16 +65,16 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v2) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v4) -> Result<Self, Error> {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-                < size_of::<abi::rptadv_host_services_v2>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 2
+                < size_of::<abi::rptadv_host_services_v4>() as u32
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 4
         {
             return Err(Error::Admission);
         }
         let api = unsafe { &*pointer };
-        if api.capability != *b"rptadv.hst2\0" || !complete(api) {
+        if api.capability != *b"rptadv.hst4\0" || !complete(api) {
             return Err(Error::Admission);
         }
         Ok(Self(api))
@@ -162,8 +167,10 @@ impl HostServices {
             .map(str::to_owned)
             .map_err(|_| Error::Operation)
     }
-    /// Reserve one uniquely owned radio channel without starting callbacks.
-    pub fn radio(&self, name: &str, maximum_frames: usize) -> Result<Radio, Error> {
+    /// Reserve one uniquely owned radio without starting callbacks. The host receives the node
+    /// identity and adapter-selected channel separated by a NUL byte in the length-delimited name.
+    pub fn radio(&self, node: &str, channel: &str, maximum_frames: usize) -> Result<Radio, Error> {
+        let name = format!("{node}\0{channel}");
         let mut handle = ptr::null_mut();
         let code = unsafe {
             self.0.radio_open.unwrap()(
@@ -253,7 +260,7 @@ impl Radio {
         &mut self,
         receive: abi::rptadv_radio_receive_v2,
         receive_context: *mut c_void,
-        transmit: abi::rptadv_radio_transmit_v2,
+        transmit: abi::rptadv_radio_transmit_v3,
         transmit_context: *mut c_void,
     ) -> Result<(), Error> {
         let code = unsafe {
@@ -285,6 +292,19 @@ pub struct PeerIo {
 // SAFETY: the handle is uniquely moved to one owner thread.
 unsafe impl Send for PeerIo {}
 impl PeerIo {
+    /// Bind this exclusive peer to the existing radio before starting any media.
+    pub fn bind_radio(&mut self, radio: &Radio) -> Result<(), Error> {
+        // SAFETY: control borrows both live handles; the host retains neither handle.
+        let result = unsafe {
+            self.services.0.peer_bind_radio.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                radio.handle.as_ptr(),
+            )
+        };
+        (result == 0).then_some(()).ok_or(Error::Operation)
+    }
+
     /// Negotiated signed-linear input/output rate.
     pub fn rate(&self) -> u32 {
         unsafe { self.services.0.peer_rate.unwrap()(self.services.0.context, self.handle.as_ptr()) }
@@ -315,18 +335,24 @@ impl PeerIo {
         ) {
             let state = unsafe { &mut *context.cast::<State<'_, F>>() };
             let result = catch_unwind(AssertUnwindSafe(|| match kind {
-                1 if !data.is_null() => {
+                abi::RPTADV_PEER_EVENT_TEXT if !data.is_null() => {
                     (state.dispatch)(PeerInput::Text(unsafe {
                         std::slice::from_raw_parts(data.cast(), count)
                     }));
                 }
-                2 if count == 1 && !data.is_null() => {
+                abi::RPTADV_PEER_EVENT_DIGIT if count == 1 && !data.is_null() => {
                     (state.dispatch)(PeerInput::Digit(unsafe { *data.cast::<u8>() } as char));
                 }
-                3 if !data.is_null() => {
+                abi::RPTADV_PEER_EVENT_AUDIO if !data.is_null() => {
                     (state.dispatch)(PeerInput::Audio(unsafe {
                         std::slice::from_raw_parts(data.cast(), count)
                     }));
+                }
+                abi::RPTADV_PEER_EVENT_RADIO_KEY if data.is_null() && count == 0 => {
+                    (state.dispatch)(PeerInput::RadioKey);
+                }
+                abi::RPTADV_PEER_EVENT_RADIO_UNKEY if data.is_null() && count == 0 => {
+                    (state.dispatch)(PeerInput::RadioUnkey);
                 }
                 _ => {}
             }));

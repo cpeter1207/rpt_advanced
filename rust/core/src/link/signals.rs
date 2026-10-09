@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 pub struct PeerSignals {
     pcm: AtomicU64,
     ended: AtomicBool,
+    radio_keyed: AtomicBool,
     edge: AtomicU64,
     source_version: AtomicU64,
     source_edge: AtomicU64,
@@ -22,6 +23,7 @@ impl PeerSignals {
         Self {
             pcm: AtomicU64::new(0),
             ended: AtomicBool::new(false),
+            radio_keyed: AtomicBool::new(false),
             edge: AtomicU64::new(0),
             source_version: AtomicU64::new(0),
             source_edge: AtomicU64::new(0),
@@ -43,6 +45,14 @@ impl PeerSignals {
     /// Terminal failure wins over any buffered activity.
     pub fn ended(&self) -> bool {
         self.ended.load(Ordering::Acquire)
+    }
+    /// Publish a transport radio-key edge independently of decoded PCM arrival.
+    pub fn set_radio_keyed(&self, keyed: bool) {
+        self.radio_keyed.store(keyed, Ordering::Release);
+    }
+    /// Read the latest transport radio-key state without waiting for the peer owner.
+    pub fn radio_keyed(&self) -> bool {
+        self.radio_keyed.load(Ordering::Acquire)
     }
     /// Audio-owner activity edge; an odd serial means active. No allocation or wait.
     pub fn set_active(&self, active: bool) -> u64 {

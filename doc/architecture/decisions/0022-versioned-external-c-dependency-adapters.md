@@ -5,7 +5,7 @@ Status: Accepted
 ## Context
 
 Rust-owned controller and radio components need capabilities supplied by
-external implementations such as FFmpeg, libsamplerate, Hamlib, and Piper.
+external implementations such as FFmpeg, Hamlib, and Piper.
 Direct FFI or process calls would make those implementation choices part of
 internal Rust code and make a replacement require changes throughout the
 controller.
@@ -75,7 +75,7 @@ requires them to replace the current `res_usbradio` dependency.
 
 ## Consequences
 
-FFmpeg, libsamplerate, Hamlib, Piper, PortAudio/ALSA, the Asterisk integration,
+FFmpeg, Hamlib, Piper, PortAudio/ALSA, the Asterisk integration,
 and future external dependencies are replaceable implementation details rather
 than controller dependencies. Each adapter has its own SONAME, Debian runtime
 package, compatibility tests, and minimum-compatible-version policy.

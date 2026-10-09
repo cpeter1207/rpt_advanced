@@ -1,14 +1,26 @@
 #!/usr/bin/make -f
 
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
-PRIVATE_LIB_DIRS := $(CURDIR)/debian/librptadv-product1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
-PRIVATE_LIB_DIRS := $(PRIVATE_LIB_DIRS):$(CURDIR)/debian/librptadv-file-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
-PRIVATE_LIB_DIRS := $(PRIVATE_LIB_DIRS):$(CURDIR)/debian/librptadv-speech-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
-PRIVATE_LIB_DIRS := $(PRIVATE_LIB_DIRS):$(CURDIR)/debian/librptadv-control-asterisk-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
+PRIVATE_LIB_DIRS := $(CURDIR)/debian/librptadv-product1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-file-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-speech-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-control-asterisk-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-control-standalone-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
+DH_OPTIONS :=
+
+ifneq (,$(filter standalone,$(DEB_BUILD_PROFILES)))
+DH_OPTIONS += -Napp-rpt-advanced -Nlibrptadv-control-asterisk-adapter1 -Nlibrptadv-control-asterisk-adapter-dev
+endif
 
 %:
-	dh $@
+	dh $@ $(DH_OPTIONS)
 
+ifneq (,$(filter standalone,$(DEB_BUILD_PROFILES)))
+override_dh_auto_build:
+	$(MAKE) standalone-build
+
+override_dh_auto_test:
+	$(MAKE) standalone-check
+
+override_dh_auto_install:
+	$(MAKE) DESTDIR=$(CURDIR)/debian/tmp prefix=/usr standalone-install
+else
 override_dh_auto_build:
 	$(MAKE) all
 
@@ -18,6 +30,7 @@ override_dh_auto_test:
 override_dh_auto_install:
 	$(MAKE) DESTDIR=$(CURDIR)/debian/tmp prefix=/usr \
 		asteriskmoddir=/usr/lib/$(DEB_HOST_MULTIARCH)/asterisk/modules install
+endif
 
 override_dh_missing:
 	dh_missing --fail-missing

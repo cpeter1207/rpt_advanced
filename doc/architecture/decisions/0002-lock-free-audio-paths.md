@@ -34,8 +34,9 @@ worker writes processed audio to the local receive inbound ring; the transmit
 worker alone consumes it. A linked-peer
 receive worker is the sole producer for that peer's receive-program ring; the
 transmit worker is its consumer. The station-telemetry audio worker is the
-sole producer for the telemetry playout ring; the transmit worker is its
-consumer. The transmit worker is the sole producer for the program-audio
+sole producer for the telemetry playout ring and generates every telemetry
+source there, including Morse and tone sequences; the transmit worker only
+consumes and mixes the resulting PCM. The transmit worker is the sole producer for the program-audio
 loopback ring; the link-audio dispatcher is its consumer. The dispatcher owns
 fan-out into each linked peer's transmit-program queue, and that peer's
 transmit worker is its sole consumer. A logical linked-peer worker may run on a

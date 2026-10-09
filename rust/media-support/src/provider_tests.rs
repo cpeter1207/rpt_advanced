@@ -10,11 +10,73 @@ fn raw_config() -> RawConfig {
         struct_size: size_of::<RawConfig>() as u32,
         abi_version: ABI_VERSION,
         executable: c"ffmpeg".as_ptr(),
-        temporary_directory: c"/tmp".as_ptr(),
         timeout_ms: 100,
         reaper_acquire: None,
         reaper_release: None,
     }
+}
+
+#[cfg(file_adapter)]
+fn test_stream() -> PcmStream {
+    let config = Config {
+        #[cfg(file_adapter)]
+        ffmpeg: "ffmpeg".into(),
+        #[cfg(speech_adapter)]
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    };
+    let mut wave = Vec::from(
+        *b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x03\0\x01\0\x80\xbb\0\0\0\xee\x02\0\x04\0\x20\0data\x04\0\0\0",
+    );
+    wave.extend_from_slice(&0.0_f32.to_le_bytes());
+    let mut command = std::process::Command::new("cat");
+    PcmStream::f32_wave(
+        crate::process::ChildStream::spawn(&config, &mut command, Some(&wave), &|| false).unwrap(),
+        &|| false,
+    )
+    .unwrap()
+}
+
+#[cfg(file_adapter)]
+#[test]
+fn truncated_finite_wave_data_is_rejected_after_complete_samples() {
+    let config = Config {
+        ffmpeg: "ffmpeg".into(),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    };
+    let mut wave = Vec::from(
+        *b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x03\0\x01\0\x80\xbb\0\0\0\xee\x02\0\x04\0\x20\0data\x04\0\0\0",
+    );
+    wave[40..44].copy_from_slice(&8_u32.to_le_bytes());
+    wave.extend_from_slice(&0.0_f32.to_le_bytes());
+    let mut command = std::process::Command::new("cat");
+    let child =
+        crate::process::ChildStream::spawn(&config, &mut command, Some(&wave), &|| false).unwrap();
+    let mut stream = PcmStream::f32_wave(child, &|| false).unwrap();
+    let mut samples = [0.0; 4];
+    assert_eq!(stream.read(&mut samples, &|| false).unwrap(), 1);
+    assert_eq!(
+        stream.read(&mut samples, &|| false),
+        Err(MediaError::InvalidOutput)
+    );
+}
+
+#[cfg(speech_adapter)]
+fn test_stream() -> PcmStream {
+    let config = Config {
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    };
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "printf '\\000\\000'"]);
+    PcmStream::s16_raw(
+        crate::process::ChildStream::spawn(&config, &mut command, None, &|| false).unwrap(),
+        48_000,
+        1.0,
+    )
 }
 
 #[test]
@@ -40,7 +102,7 @@ fn truncated_config_is_rejected_before_full_config_access() {
 }
 
 #[test]
-fn abi_rejects_invalid_creation_and_preparation_arguments() {
+fn abi_rejects_invalid_creation_and_stream_arguments() {
     let mut context = 1_usize as *mut c_void;
     assert_eq!(unsafe { create(std::ptr::null(), &mut context) }, -1);
     assert!(context.is_null());
@@ -51,9 +113,6 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
     assert_eq!(unsafe { create(&invalid, &mut context) }, -1);
     invalid = raw_config();
     invalid.executable = c"".as_ptr();
-    assert_eq!(unsafe { create(&invalid, &mut context) }, -1);
-    invalid = raw_config();
-    invalid.temporary_directory = c"".as_ptr();
     assert_eq!(unsafe { create(&invalid, &mut context) }, -1);
     invalid = raw_config();
     invalid.reaper_acquire = Some(no_op);
@@ -70,10 +129,10 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
             context: std::ptr::null(),
             is_cancelled: not_cancelled,
         };
-        let mut audio = empty_audio();
+        let mut audio = empty_stream();
         assert_eq!(
             unsafe {
-                prepare_file(
+                open_file(
                     std::ptr::null(),
                     c"/missing".as_ptr(),
                     &cancellation,
@@ -83,16 +142,16 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
             -1
         );
         assert_eq!(
-            unsafe { prepare_file(context, c"/missing".as_ptr(), std::ptr::null(), &mut audio,) },
+            unsafe { open_file(context, c"/missing".as_ptr(), std::ptr::null(), &mut audio,) },
             -1
         );
         assert_eq!(
-            unsafe { prepare_file(context, std::ptr::null(), &cancellation, &mut audio) },
+            unsafe { open_file(context, std::ptr::null(), &cancellation, &mut audio) },
             -1
         );
         assert_eq!(
             unsafe {
-                prepare_file(
+                open_file(
                     context,
                     c"/missing".as_ptr(),
                     &cancellation,
@@ -103,7 +162,7 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
         );
     }
     unsafe {
-        release_audio(std::ptr::null_mut());
+        close_stream(std::ptr::null_mut());
         destroy(context);
         destroy(std::ptr::null_mut());
     }
@@ -111,7 +170,7 @@ fn abi_rejects_invalid_creation_and_preparation_arguments() {
 
 #[test]
 #[cfg(speech_adapter)]
-fn abi_rejects_invalid_speech_requests() {
+fn abi_rejects_invalid_speech_streams() {
     let mut context = std::ptr::null_mut();
     let mut config = raw_config();
     config.executable = c"/definitely/missing/piper".as_ptr();
@@ -120,7 +179,7 @@ fn abi_rejects_invalid_speech_requests() {
         context: std::ptr::null(),
         is_cancelled: not_cancelled,
     };
-    let mut audio = empty_audio();
+    let mut audio = empty_stream();
     let valid = RawSpeechRequest {
         text: c"text".as_ptr(),
         model: c"model".as_ptr(),
@@ -128,15 +187,15 @@ fn abi_rejects_invalid_speech_requests() {
         level_db: 0,
     };
     assert_eq!(
-        unsafe { prepare_speech(std::ptr::null(), &valid, &cancellation, &mut audio,) },
+        unsafe { open_speech(std::ptr::null(), &valid, &cancellation, &mut audio,) },
         -1
     );
     assert_eq!(
-        unsafe { prepare_speech(context, &valid, std::ptr::null(), &mut audio) },
+        unsafe { open_speech(context, &valid, std::ptr::null(), &mut audio) },
         -1
     );
     assert_eq!(
-        unsafe { prepare_speech(context, std::ptr::null(), &cancellation, &mut audio) },
+        unsafe { open_speech(context, std::ptr::null(), &cancellation, &mut audio) },
         -1
     );
     let invalid_utf8 = std::ffi::CString::new([0xff]).unwrap();
@@ -147,7 +206,7 @@ fn abi_rejects_invalid_speech_requests() {
         level_db: 0,
     };
     assert_eq!(
-        unsafe { prepare_speech(context, &invalid, &cancellation, &mut audio) },
+        unsafe { open_speech(context, &invalid, &cancellation, &mut audio) },
         -1
     );
     let invalid = RawSpeechRequest {
@@ -157,11 +216,11 @@ fn abi_rejects_invalid_speech_requests() {
         level_db: 0,
     };
     assert_eq!(
-        unsafe { prepare_speech(context, &invalid, &cancellation, &mut audio) },
+        unsafe { open_speech(context, &invalid, &cancellation, &mut audio) },
         -1
     );
     assert_eq!(
-        unsafe { prepare_speech(context, &valid, &cancellation, &mut audio) },
+        unsafe { open_speech(context, &valid, &cancellation, &mut audio) },
         -2
     );
     unsafe { destroy(context) };
@@ -188,7 +247,7 @@ fn boundary_maps_internal_output_and_panic_failures() {
 }
 
 #[test]
-fn abi_prepares_owned_source_rate_results() {
+fn abi_opens_and_streams_source_rate_media() {
     use std::os::unix::ffi::OsStrExt;
 
     let directory =
@@ -223,13 +282,21 @@ fn abi_prepares_owned_source_rate_results() {
 
     #[cfg(speech_adapter)]
     let piper = std::ffi::CString::new(piper_path.as_os_str().as_bytes()).unwrap();
-    let directory_path = std::ffi::CString::new(directory.as_os_str().as_bytes()).unwrap();
+    #[cfg(speech_adapter)]
+    let model_path = directory.join("001.000000.onnx");
+    #[cfg(speech_adapter)]
+    let model = std::ffi::CString::new(model_path.as_os_str().as_bytes()).unwrap();
+    #[cfg(speech_adapter)]
+    {
+        let mut model_config = model_path.as_os_str().to_os_string();
+        model_config.push(".json");
+        std::fs::write(model_config, br#"{"audio":{"sample_rate":22050}}"#).unwrap();
+    }
     #[cfg(file_adapter)]
     let source_path = std::ffi::CString::new(source.as_os_str().as_bytes()).unwrap();
     let config = RawConfig {
         #[cfg(speech_adapter)]
         executable: piper.as_ptr(),
-        temporary_directory: directory_path.as_ptr(),
         timeout_ms: 30_000,
         ..raw_config()
     };
@@ -239,37 +306,70 @@ fn abi_prepares_owned_source_rate_results() {
     };
     let mut context = std::ptr::null_mut();
     assert_eq!(unsafe { create(&config, &mut context) }, 0);
-    let mut audio = empty_audio();
+    let mut stream = empty_stream();
     #[cfg(file_adapter)]
     assert_eq!(
-        unsafe { prepare_file(context, source_path.as_ptr(), &cancellation, &mut audio) },
+        unsafe { open_file(context, source_path.as_ptr(), &cancellation, &mut stream) },
         0
     );
     #[cfg(speech_adapter)]
     {
         let request = RawSpeechRequest {
             text: c"Identifier; $(not a command)\n".as_ptr(),
-            model: c"001.000000".as_ptr(),
+            model: model.as_ptr(),
             speed_percent: 100,
             level_db: 0,
         };
         assert_eq!(
-            unsafe { prepare_speech(context, &request, &cancellation, &mut audio) },
+            unsafe { open_speech(context, &request, &cancellation, &mut stream) },
             0
         );
     }
+    assert_eq!(stream.sample_rate_hz, 22050);
+    let mut samples = Vec::new();
+    let mut chunk = [0.0; 8];
+    loop {
+        let mut count = usize::MAX;
+        assert_eq!(
+            unsafe {
+                read_stream(
+                    stream.handle,
+                    &cancellation,
+                    chunk.as_mut_ptr(),
+                    chunk.len(),
+                    &mut count,
+                )
+            },
+            0
+        );
+        assert!(count <= chunk.len());
+        if count == 0 {
+            break;
+        }
+        samples.extend_from_slice(&chunk[..count]);
+    }
+    #[cfg(file_adapter)]
+    assert_eq!(samples.len(), 2);
+    #[cfg(speech_adapter)]
+    assert_eq!(samples.len(), 2205);
     unsafe {
-        release_audio(audio.handle);
+        close_stream(stream.handle);
         destroy(context);
     }
     std::fs::remove_file(source).unwrap();
     #[cfg(speech_adapter)]
     std::fs::remove_file(piper_path).unwrap();
+    #[cfg(speech_adapter)]
+    {
+        let mut model_config = model_path.as_os_str().to_os_string();
+        model_config.push(".json");
+        std::fs::remove_file(model_config).unwrap();
+    }
     std::fs::remove_dir(directory).unwrap();
 }
 
 #[test]
-fn cancellation_after_preparation_discards_the_owned_result() {
+fn cancellation_after_stream_open_discards_the_owned_handle() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     extern "C" fn cancel_on_second_call(context: *const c_void) -> u32 {
@@ -282,7 +382,6 @@ fn cancellation_after_preparation_discards_the_owned_result() {
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "piper".into(),
-        temporary_directory: "/tmp".into(),
         process_timeout: Duration::from_millis(100),
         child_reaper: None,
     });
@@ -291,14 +390,12 @@ fn cancellation_after_preparation_discards_the_owned_result() {
         context: std::ptr::from_ref(&calls).cast(),
         is_cancelled: cancel_on_second_call,
     };
-    let mut output = RawAudio {
+    let mut output = RawStream {
         handle: 1_usize as *mut c_void,
-        samples: 1_usize as *const f32,
-        sample_count: 1,
         sample_rate_hz: 1,
     };
     let (owner, cancellation) = unsafe {
-        prepare_arguments(
+        open_arguments(
             std::ptr::from_ref(&preparation).cast(),
             &cancellation,
             &mut output,
@@ -307,29 +404,79 @@ fn cancellation_after_preparation_discards_the_owned_result() {
     .unwrap();
     assert!(std::ptr::eq(owner, &preparation));
     assert_eq!(cancel_on_second_call(cancellation.context), 0);
-    let result = unsafe {
-        publish(
-            cancellation,
-            &mut output,
-            PreparedAudio::new(48_000, vec![0.0]).unwrap(),
-        )
-    };
+    let result = unsafe { publish(cancellation, &mut output, test_stream()) };
     assert_eq!(result, Err(MediaError::Cancelled));
     assert!(output.handle.is_null());
-    assert!(output.samples.is_null());
 
     let cancellation = RawCancellation {
         context: std::ptr::null(),
         is_cancelled: not_cancelled,
     };
-    unsafe {
-        publish(
-            &cancellation,
-            &mut output,
-            PreparedAudio::new(48_000, vec![0.0]).unwrap(),
-        )
-    }
-    .unwrap();
+    unsafe { publish(&cancellation, &mut output, test_stream()) }.unwrap();
     assert!(!output.handle.is_null());
-    unsafe { release_audio(output.handle) };
+    unsafe { close_stream(output.handle) };
+}
+
+#[test]
+fn read_stream_rejects_invalid_output_and_cancellation_arguments() {
+    let cancellation = RawCancellation {
+        context: std::ptr::null(),
+        is_cancelled: not_cancelled,
+    };
+    let mut stream = test_stream();
+    let handle = std::ptr::from_mut(&mut stream).cast();
+    let mut output = [0.0_f32; 2];
+    let mut count = usize::MAX;
+
+    assert_eq!(
+        unsafe {
+            read_stream(
+                handle,
+                &cancellation,
+                output.as_mut_ptr(),
+                2,
+                std::ptr::null_mut(),
+            )
+        },
+        -1
+    );
+    assert_eq!(
+        unsafe { read_stream(handle, &cancellation, std::ptr::null_mut(), 2, &mut count) },
+        -1
+    );
+    assert_eq!(
+        unsafe { read_stream(handle, &cancellation, output.as_mut_ptr(), 0, &mut count) },
+        -1
+    );
+    assert_eq!(
+        unsafe { read_stream(handle, std::ptr::null(), output.as_mut_ptr(), 2, &mut count) },
+        -1
+    );
+
+    extern "C" fn cancelled(_: *const c_void) -> u32 {
+        1
+    }
+    let cancellation = RawCancellation {
+        context: std::ptr::null(),
+        is_cancelled: cancelled,
+    };
+    assert_eq!(
+        unsafe { read_stream(handle, &cancellation, output.as_mut_ptr(), 2, &mut count) },
+        -6
+    );
+    assert_eq!(
+        unsafe {
+            read_stream(
+                std::ptr::null_mut(),
+                &RawCancellation {
+                    context: std::ptr::null(),
+                    is_cancelled: not_cancelled,
+                },
+                output.as_mut_ptr(),
+                2,
+                &mut count,
+            )
+        },
+        -1
+    );
 }

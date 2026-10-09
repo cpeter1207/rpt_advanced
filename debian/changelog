@@ -1,3 +1,12 @@
+rpt-advanced (0.1.0~alpha8-1) unstable; urgency=medium
+
+  * Release the standalone controller with AllStarLink ULAW support and
+    configured radio-signaling defaults.
+  * Retain alpha7's tested radio core, PortAudio/ALSA, GPIO, FFmpeg, shared-ring,
+    and samplerate adapter dependencies.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Fri, 09 Oct 2026 06:15:26 -0500
+
 rpt-advanced (0.1.0~alpha7-1) unstable; urgency=medium
 
   * Release the Rust controller, versioned adapters, and tested local audio fixes.

@@ -158,6 +158,18 @@ fn hub_checks_exact_local_transitive_paused_and_ended_admission_states() {
 }
 
 #[test]
+fn configured_group_members_allow_advertised_topology_overlap() {
+    let mut hub = LinkManager::new("1000").unwrap();
+    hub.attach_group("2000", Mode::MONITOR, true, Some("network"))
+        .unwrap();
+    hub.attach_group("3000", Mode::MONITOR, true, Some("network"))
+        .unwrap();
+    assert_eq!(hub.update_topology("2000", b"L T3000"), Ok(false));
+    assert_eq!(hub.update_topology("3000", b"L T2000"), Ok(false));
+    assert_eq!(hub.snapshot().len(), 2);
+}
+
+#[test]
 fn key_advice_falls_back_to_eligible_flood_without_echoing_ingress_source_or_local() {
     let mut hub = LinkManager::new("1000").unwrap();
     for remote in ["2000", "3000", "4000", "5000"] {
@@ -201,6 +213,72 @@ fn media_signals_publish_pcm_and_cancel_stale_key_source() {
     assert_eq!(signals.selected_source(next, &mut storage), None);
     signals.end();
     assert!(signals.ended());
+}
+
+#[test]
+fn external_radio_key_keys_a_link_without_replaying_stale_pcm() {
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, PeerInput, PeerSignals},
+    };
+    struct Input {
+        signals: std::sync::Arc<PeerSignals>,
+        active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl PeerInput for Input {
+        fn source_rate(&self) -> u32 {
+            48000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.signals
+        }
+        fn available(&self) -> u64 {
+            20000 * u64::from(self.active.load(std::sync::atomic::Ordering::Acquire))
+        }
+        fn render(&mut self, output: &mut [f32]) -> bool {
+            output.fill(0.75);
+            self.active.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+    let signals = std::sync::Arc::new(PeerSignals::new());
+    let media_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    signals.publish_pcm();
+    let (producer, _) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let peer = AudioPeer::new(
+        "200",
+        Mode::TRANSCEIVE,
+        Input {
+            signals: std::sync::Arc::clone(&signals),
+            active: std::sync::Arc::clone(&media_active),
+        },
+        producer,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, _) = LinkAudio::new(vec![peer], 1).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut audio = [0.0];
+    links.process(&mut controller, false, &mut audio).unwrap();
+    assert_eq!(audio, [0.75]);
+
+    media_active.store(false, std::sync::atomic::Ordering::Release);
+    signals.set_radio_keyed(true);
+    audio[0] = 0.5;
+    links.process(&mut controller, false, &mut audio).unwrap();
+    assert_eq!(links.active_count(), 1);
+    assert_eq!(audio, [0.0]);
+
+    signals.set_radio_keyed(false);
+    links.process(&mut controller, false, &mut audio).unwrap();
+    assert_eq!(links.active_count(), 0);
 }
 
 #[test]
@@ -423,10 +501,23 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
 #[test]
 fn generated_status_stays_local_and_never_reaches_a_link() {
     use rpt_advanced_core::{
-        audio::LinkAudioQueue,
-        controller::{ControllerSettings, CourtesySettings, NodeController},
+        audio::{LinkAudioQueue, PcmRead, PcmStreamReader},
+        controller::{ControllerSettings, CourtesySettings, NodeController, PreparedMedia},
         link::{AudioPeer, LinkAudio, PeerInput, PeerSignals},
     };
+    struct StatusStream(usize);
+    impl PcmStreamReader for StatusStream {
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            let count = output.len().min(self.0);
+            output[..count].fill(0.5);
+            self.0 -= count;
+            if self.0 == 0 {
+                PcmRead::FinalSamples(count)
+            } else {
+                PcmRead::Samples(count)
+            }
+        }
+    }
     struct Quiet(PeerSignals);
     impl PeerInput for Quiet {
         fn source_rate(&self) -> u32 {
@@ -461,7 +552,10 @@ fn generated_status_stays_local_and_never_reaches_a_link() {
         CourtesySettings::default(),
     )
     .unwrap();
-    control.queue_status("E", Some(vec![0.5; 240])).unwrap();
+    assert!(
+        control
+            .queue_prepared_status(PreparedMedia::new_stream(Box::new(StatusStream(240))).unwrap())
+    );
     let mut found_local = false;
     for _ in 0..14 {
         let mut rf = [0.0; 960];

@@ -1,0 +1,262 @@
+use super::messages::{CatalogError, Message, MessageCatalog};
+
+const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
+
+#[test]
+fn message_catalog_formats_all_variants_with_typed_arguments() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let forms = catalog
+        .format(&Message::PeerConnectedLocal { peer: "506316" })
+        .unwrap();
+    assert_eq!(forms.text, "506316 connected");
+    assert_eq!(forms.tts, "506316 connected");
+    assert_eq!(forms.morse, "506316 CONNECTED");
+}
+
+#[test]
+fn message_catalog_formats_parrot_level_report_in_all_required_forms() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let forms = catalog
+        .format(&Message::ParrotLevels {
+            peak_dbfs: -3,
+            rms_dbfs: -18,
+        })
+        .unwrap();
+    assert_eq!(forms.text, "Peak level -3 dBFS. RMS level -18 dBFS.");
+    assert_eq!(forms.tts, "Peak level -3 dBFS. RMS level -18 dBFS.");
+    assert_eq!(forms.morse, "PEAK -3 DBFS RMS -18 DBFS");
+}
+
+#[test]
+fn message_catalog_formats_third_party_link_wording_and_link_status_arguments() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let connected = catalog
+        .format(&Message::PeerConnectedThirdParty {
+            first: "1000",
+            second: "2000",
+        })
+        .unwrap();
+    assert_eq!(connected.text, "1000 CONNECTED TO 2000");
+    assert_eq!(connected.tts, "1000 connected to 2000");
+    let status = catalog
+        .format(&Message::LinkStatus {
+            count: 2,
+            peer: "2000",
+            mode: super::messages::LinkDisplayMode::Transceive,
+        })
+        .unwrap();
+    assert_eq!(status.text, "2 LINKS 2000 TRANSCEIVE");
+}
+
+#[test]
+fn message_catalog_localizes_time_greeting_and_keeps_morse_time_only() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let morning = catalog
+        .format(&Message::Greeting {
+            daypart: super::messages::Daypart::Morning,
+        })
+        .unwrap();
+    let time = catalog
+        .format(&Message::TimeAnnouncement {
+            greeting_text: &morning.text,
+            greeting_tts: &morning.tts,
+            time: "12:05 AM",
+        })
+        .unwrap();
+    assert_eq!(time.tts, "Good Morning. The time is 12:05 AM.");
+    assert_eq!(time.morse, "12:05 AM");
+}
+
+#[test]
+fn message_catalog_localizes_weekday_values_used_by_custom_templates() {
+    let translated =
+        "day-of-week =\n    .text = Vendredi\n    .tts = Vendredi\n    .morse = VENDREDI\n";
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, Some(translated)).unwrap();
+    let forms = catalog
+        .format(&Message::DayOfWeek {
+            day: crate::schedule::Weekday::Friday,
+        })
+        .unwrap();
+    assert_eq!(forms.text, "Vendredi");
+    assert_eq!(forms.tts, "Vendredi");
+    assert_eq!(forms.morse, "VENDREDI");
+}
+
+#[test]
+fn message_catalog_formats_status_rejection_groups_and_schedule_warnings() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    assert_eq!(catalog.format(&Message::NoLinks).unwrap().text, "NO LINKS");
+    assert_eq!(
+        catalog.format(&Message::LastKeyedNone).unwrap().tts,
+        "No last keyed station"
+    );
+    assert_eq!(
+        catalog
+            .format(&Message::LoopRejected { node: "2000" })
+            .unwrap()
+            .text,
+        "LINK TO NODE 2000 REJECTED: WOULD CREATE LOOP"
+    );
+    assert_eq!(
+        catalog
+            .format(&Message::PriorityGroupSelected {
+                group: "Blind Hams Network",
+                peer: "506315",
+            })
+            .unwrap()
+            .tts,
+        "Blind Hams Network. 506315 selected"
+    );
+    assert_eq!(
+        catalog
+            .format(&Message::PriorityGroupUnavailable {
+                group: "Blind Hams Network",
+            })
+            .unwrap()
+            .morse,
+        "Blind Hams Network UNAVAILABLE"
+    );
+    assert_eq!(
+        catalog
+            .format(&Message::ScheduledLinkChange {
+                time_remaining: "60 seconds",
+            })
+            .unwrap()
+            .tts,
+        "This connection will change in 60 seconds"
+    );
+}
+
+#[test]
+fn schedule_warning_uses_the_matching_localized_duration_form() {
+    let french = "duration-seconds =\n    .text = texte { $seconds }\n    .tts = voix { $seconds }\n    .morse = morse { $seconds }\nscheduled-link-change =\n    .text = texte changement { $time_remaining }\n    .tts = voix changement { $time_remaining }\n    .morse = morse changement { $time_remaining }\n";
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, Some(french)).unwrap();
+    assert_eq!(
+        catalog.format_schedule_warning(60).unwrap(),
+        super::messages::MessageForms {
+            text: "texte changement texte 60".into(),
+            tts: "voix changement voix 60".into(),
+            morse: "morse changement morse 60".into(),
+        }
+    );
+}
+
+#[test]
+fn message_catalog_falls_back_per_attribute_and_ignores_bad_translation_entries() {
+    let french =
+        "peer-connected-local =\n    .text = { $wrong }\n    .tts = Noeud { $peer } connecte\n";
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, Some(french)).unwrap();
+    let forms = catalog
+        .format(&Message::PeerConnectedLocal { peer: "2000" })
+        .unwrap();
+    assert_eq!(forms.text, "2000 connected");
+    assert_eq!(forms.tts, "Noeud 2000 connecte");
+    assert_eq!(forms.morse, "2000 CONNECTED");
+    assert!(
+        catalog
+            .translation_warnings()
+            .contains(&"peer-connected-local.text falls back to English".to_owned())
+    );
+}
+
+#[test]
+fn message_catalog_rejects_incomplete_english_but_accepts_missing_optional_locale_entries() {
+    let incomplete = "peer-connected-local =\n    .text = x\n";
+    assert_eq!(
+        MessageCatalog::from_sources("en-US", incomplete, None).unwrap_err(),
+        CatalogError::InvalidEnglish
+    );
+    let catalog =
+        MessageCatalog::from_sources("fr-CA", ENGLISH, Some("no-links =\n    .text = x\n"))
+            .unwrap();
+    let forms = catalog.format(&Message::NoLinks).unwrap();
+    assert_eq!(forms.text, "x");
+    assert_eq!(forms.tts, "No links");
+    assert_eq!(forms.morse, "NO LINKS");
+}
+
+#[test]
+fn message_catalog_rejects_formatted_output_over_127_bytes() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let peer = "x".repeat(128);
+    assert_eq!(
+        catalog.format(&Message::PeerConnectedLocal { peer: &peer }),
+        Err(CatalogError::OutputTooLong)
+    );
+}
+
+#[test]
+fn message_catalog_requires_every_builtin_id_and_attribute() {
+    let missing = ENGLISH.replace("    .morse = NO LINKS\n", "");
+    assert_eq!(
+        MessageCatalog::from_sources("en-US", &missing, None).unwrap_err(),
+        CatalogError::InvalidEnglish
+    );
+}
+
+#[test]
+fn catalog_debug_and_optional_translation_failures_are_readable() {
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, None).unwrap();
+    assert_eq!(format!("{catalog:?}"), "MessageCatalog");
+    assert_eq!(catalog.translation_warnings(), &["catalog unavailable"]);
+
+    let malformed = MessageCatalog::from_sources("fr-CA", ENGLISH, Some("!!!")).unwrap();
+    assert_eq!(malformed.translation_warnings(), &["catalog is malformed"]);
+}
+
+#[test]
+fn weekday_message_uses_each_localized_weekday_key() {
+    use crate::schedule::Weekday;
+
+    let weekdays = [
+        Weekday::Sunday,
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+    ];
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (day, name) in weekdays.into_iter().zip([
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ]) {
+        assert_eq!(
+            catalog.format(&Message::DayOfWeek { day }).unwrap().text,
+            name
+        );
+    }
+}
+
+#[test]
+fn english_catalog_rejects_oversized_builtin_output() {
+    let oversized = ENGLISH.replace(
+        "    .text = NO LINKS\n",
+        &format!("    .text = {}\n", "x".repeat(128)),
+    );
+    assert_eq!(
+        MessageCatalog::from_sources("en-US", &oversized, None).unwrap_err(),
+        CatalogError::InvalidEnglish
+    );
+}
+
+#[test]
+fn english_catalog_rejects_fluent_format_errors() {
+    let invalid = ENGLISH.replace("    .text = NO LINKS\n", "    .text = { $missing }\n");
+    assert_eq!(
+        MessageCatalog::from_sources("en-US", &invalid, None).unwrap_err(),
+        CatalogError::InvalidEnglish
+    );
+}
+
+#[test]
+fn catalog_load_uses_missing_locale_fallback() {
+    let catalog = MessageCatalog::load("fr-CA").unwrap();
+    assert!(catalog.format(&Message::NoLinks).is_ok());
+}

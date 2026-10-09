@@ -1,38 +1,36 @@
 use super::*;
-// Only tests link a concrete provider. Production receives its descriptor from the loader.
-#[link(name = "rptadv_file_adapter")]
-unsafe extern "C" {
-    fn rptadv_file_adapter_descriptor() -> *const FileDescriptor;
-}
-#[link(name = "rptadv_speech_adapter")]
-unsafe extern "C" {
-    fn rptadv_speech_adapter_descriptor() -> *const SpeechDescriptor;
-}
 use rpt_advanced_core::{
     media::Cancellation,
     runtime::{NativeFilePreparer as _, NativeSpeechPreparer as _},
 };
+use rptadv_file_adapter::abi as file_abi;
+use rptadv_file_adapter::rptadv_file_adapter_descriptor;
+use rptadv_speech_adapter::abi as speech_abi;
+use rptadv_speech_adapter::rptadv_speech_adapter_descriptor;
 use std::{
     fs,
     path::Path,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[test]
+fn finite_source_count_preserves_the_shared_ring_api_limit() {
+    assert_eq!(super::validate_source_count(u64::from(u32::MAX)), Ok(()));
+    assert_eq!(
+        super::validate_source_count(u64::from(u32::MAX) + 1),
+        Err(MediaError::InvalidOutput)
+    );
+}
+
 impl NativeMediaPreparer {
-    fn new(
-        ffmpeg: &Path,
-        piper: &Path,
-        temporary_directory: &Path,
-        timeout_ms: u32,
-    ) -> Result<Self, MediaError> {
+    fn new(ffmpeg: &Path, piper: &Path, timeout_ms: u32) -> Result<Self, MediaError> {
         // SAFETY: the linked descriptor has a process-lifetime readable ABI prefix.
         unsafe {
             Self::from_descriptors(
-                rptadv_file_adapter_descriptor(),
-                rptadv_speech_adapter_descriptor(),
+                rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter_descriptor().cast(),
                 ffmpeg,
                 piper,
-                temporary_directory,
                 timeout_ms,
                 (ast_replace_sigchld, ast_unreplace_sigchld),
             )
@@ -59,6 +57,7 @@ fn finite_ring_conversion_preserves_duration_and_short_impulse_tail() {
         (48000, vec![0.5; 100], 100),
         (8000, vec![0.5], 6),
         (96000, vec![0.5; 960], 480),
+        (192000, vec![0.5; 1920], 480),
     ] {
         let result = native(rate, &input, &Cancellation::default()).unwrap();
         assert_eq!(result.sample_rate_hz(), 48000);
@@ -81,81 +80,87 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
     let path = Path::new("unused");
     let file = unsafe { rptadv_file_adapter_descriptor().read() };
     let speech = unsafe { rptadv_speech_adapter_descriptor().read() };
-    let open = |file, speech| unsafe {
+    let open = |file: *const file_abi::Descriptor, speech: *const speech_abi::Descriptor| unsafe {
         NativeMediaPreparer::from_descriptors(
-            file,
-            speech,
-            path,
+            file.cast(),
+            speech.cast(),
             path,
             path,
             1,
             (ast_replace_sigchld, ast_unreplace_sigchld),
         )
     };
-    let prefix = [8_u32, 1];
+    let prefix = [8_u32, ffi::RPTADV_MEDIA_ABI_VERSION];
     for (f, s) in [
-        (ptr::null(), &speech as *const _),
-        (&file as *const _, ptr::null()),
-        (prefix.as_ptr().cast(), &speech),
-        (&file, prefix.as_ptr().cast()),
+        (ptr::null(), ptr::from_ref(&speech)),
+        (ptr::from_ref(&file), ptr::null()),
+        (prefix.as_ptr().cast(), ptr::from_ref(&speech)),
+        (ptr::from_ref(&file), prefix.as_ptr().cast()),
     ] {
         assert!(matches!(open(f, s), Err(MediaError::IncompatibleAdapter)));
     }
-    let mut invalid = [file; 7];
+    let mut invalid = [file; 8];
     invalid[0].abi_version = 99;
     invalid[1].capability[0] = 0;
     invalid[2].create = None;
     invalid[3].destroy = None;
-    invalid[4].prepare_file = None;
-    invalid[5].release_audio = None;
-    invalid[6].struct_size = 8;
+    invalid[4].open_file = None;
+    invalid[5].read_stream = None;
+    invalid[6].close_stream = None;
+    invalid[7].struct_size = 8;
     for table in invalid {
         assert!(matches!(
-            open(&table, &speech),
+            open(ptr::from_ref(&table), ptr::from_ref(&speech)),
             Err(MediaError::IncompatibleAdapter)
         ));
     }
-    let mut invalid = [speech; 7];
+    let mut invalid = [speech; 8];
     invalid[0].abi_version = 99;
     invalid[1].capability[0] = 0;
     invalid[2].create = None;
     invalid[3].destroy = None;
-    invalid[4].prepare_speech = None;
-    invalid[5].release_audio = None;
-    invalid[6].struct_size = 8;
+    invalid[4].open_speech = None;
+    invalid[5].read_stream = None;
+    invalid[6].close_stream = None;
+    invalid[7].struct_size = 8;
     for table in invalid {
         assert!(matches!(
-            open(&file, &table),
+            open(ptr::from_ref(&file), ptr::from_ref(&table)),
             Err(MediaError::IncompatibleAdapter)
         ));
     }
-    for (ffmpeg, piper, temporary, timeout) in [
-        (Path::new("bad\0path"), path, path, 1),
-        (path, Path::new("bad\0piper"), path, 1),
-        (path, path, Path::new("bad\0directory"), 1),
-        (path, path, path, 0),
+    for (ffmpeg, piper, timeout) in [
+        (Path::new("bad\0path"), path, 1),
+        (path, Path::new("bad\0piper"), 1),
+        (path, path, 0),
     ] {
         assert!(matches!(
-            NativeMediaPreparer::new(ffmpeg, piper, temporary, timeout),
+            NativeMediaPreparer::new(ffmpeg, piper, timeout),
             Err(MediaError::InvalidRequest)
         ));
     }
-    unsafe extern "C" fn empty_context(
-        _: *const ffi::rptadv_media_config,
+    unsafe extern "C" fn empty_file_context(
+        _: *const file_abi::RawConfig,
+        _: *mut *mut c_void,
+    ) -> i32 {
+        0
+    }
+    unsafe extern "C" fn empty_speech_context(
+        _: *const speech_abi::RawConfig,
         _: *mut *mut c_void,
     ) -> i32 {
         0
     }
     let mut f = file;
-    f.create = Some(empty_context);
+    f.create = Some(empty_file_context);
     assert!(matches!(
-        open(&f, &speech),
+        open(ptr::from_ref(&f), ptr::from_ref(&speech)),
         Err(MediaError::IncompatibleAdapter)
     ));
     let mut s = speech;
-    s.create = Some(empty_context);
+    s.create = Some(empty_speech_context);
     assert!(matches!(
-        open(&file, &s),
+        open(ptr::from_ref(&file), ptr::from_ref(&s)),
         Err(MediaError::IncompatibleAdapter)
     ));
 }
@@ -164,7 +169,7 @@ fn incompatible_media_tables_are_rejected_before_context_creation() {
 fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
     static DESTROYED: AtomicUsize = AtomicUsize::new(0);
     unsafe extern "C" fn create(
-        config: *const ffi::rptadv_media_config,
+        config: *const file_abi::RawConfig,
         output: *mut *mut c_void,
     ) -> i32 {
         assert_eq!(
@@ -180,10 +185,7 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
         assert_eq!(context as usize, 1);
         DESTROYED.fetch_add(1, Ordering::Relaxed);
     }
-    unsafe extern "C" fn reject(
-        config: *const ffi::rptadv_media_config,
-        _: *mut *mut c_void,
-    ) -> i32 {
+    unsafe extern "C" fn reject(config: *const speech_abi::RawConfig, _: *mut *mut c_void) -> i32 {
         assert_eq!(
             unsafe { CStr::from_ptr((*config).executable) },
             c"speech-only"
@@ -198,11 +200,10 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
     assert!(matches!(
         unsafe {
             NativeMediaPreparer::from_descriptors(
-                &file,
-                &speech,
+                ptr::from_ref(&file).cast(),
+                ptr::from_ref(&speech).cast(),
                 Path::new("file-only"),
                 Path::new("speech-only"),
-                Path::new("unused"),
                 1,
                 (ast_replace_sigchld, ast_unreplace_sigchld),
             )
@@ -214,26 +215,47 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
 
 thread_local! {
     static RING_FAILURE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static PUSH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CANCEL_DURING_RENDER: std::cell::Cell<*const Cancellation> = const { std::cell::Cell::new(ptr::null()) };
 }
-unsafe extern "C" fn ring_create(_: *const ffi::rpcr2_config, _: *mut *mut ffi::rpcr2_ring) -> i32 {
+unsafe extern "C" fn ring_create(_: *const ffi::rpcr3_config, _: *mut *mut ffi::rpcr3_ring) -> i32 {
     if RING_FAILURE.get() == 0 { -1 } else { 0 }
 }
-unsafe extern "C" fn ring_push(_: *mut ffi::rpcr2_ring, _: *const f32, _: u64, _: *mut u64) -> i32 {
+unsafe extern "C" fn ring_push(_: *mut ffi::rpcr3_ring, _: *const f32, _: u64, _: *mut u64) -> i32 {
     if RING_FAILURE.get() == 0 { -1 } else { 0 }
 }
-unsafe extern "C" fn ring_render(
-    _: *mut ffi::rpcr2_ring,
-    _: *mut f32,
-    _: u64,
-    _: *mut bool,
-) -> i32 {
+unsafe extern "C" fn ring_render(_: *mut ffi::rpcr3_ring, _: *mut f32, _: *mut bool) -> i32 {
     let token = CANCEL_DURING_RENDER.get();
     if !token.is_null() {
         // SAFETY: the test keeps this token borrowed until synchronous conversion returns.
         unsafe { &*token }.cancel();
     }
     if RING_FAILURE.get() == 0 { -1 } else { 0 }
+}
+unsafe extern "C" fn failed_output_delay(_: *const ffi::rpcr3_ring, _: *mut u64) -> i32 {
+    -1
+}
+unsafe extern "C" fn fail_padding_push(
+    _: *mut ffi::rpcr3_ring,
+    _: *const f32,
+    frames: u64,
+    accepted: *mut u64,
+) -> i32 {
+    let call = PUSH_CALLS.get();
+    PUSH_CALLS.set(call + 1);
+    unsafe { *accepted = frames };
+    if call == 0 { 0 } else { -1 }
+}
+unsafe extern "C" fn overaccept_padding_push(
+    _: *mut ffi::rpcr3_ring,
+    _: *const f32,
+    frames: u64,
+    accepted: *mut u64,
+) -> i32 {
+    let call = PUSH_CALLS.get();
+    PUSH_CALLS.set(call + 1);
+    unsafe { *accepted = if call == 0 { frames } else { frames + 1 } };
+    0
 }
 
 #[test]
@@ -245,18 +267,19 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
     };
     assert_eq!(convert(ptr::null()), Err(MediaError::IncompatibleAdapter));
     // SAFETY: installed immutable descriptor has its complete current ABI layout.
-    let original = unsafe { *ffi::rpcr2_descriptor() };
-    for case in 0..10 {
+    let original = unsafe { *ffi::rpcr3_descriptor() };
+    for case in 0..11 {
         let mut api = original;
         match case {
             0 => api.struct_size = 8,
-            1 => api.abi_version = 99,
+            1 => api.abi_version = 2,
             2 => api.capability_name = ptr::null(),
             3 => api.capability_name = c"other".as_ptr(),
             4 => api.ring_create = None,
             5 => api.ring_destroy = None,
             6 => api.ring_producer_push = None,
             7 => api.ring_consumer_render_sample = None,
+            10 => api.ring_output_delay = None,
             _ => {
                 RING_FAILURE.set(case - 8);
                 api.ring_create = Some(ring_create);
@@ -290,22 +313,45 @@ fn finite_conversion_rejects_broken_ring_contracts_and_bounded_storage_failure()
         Err(MediaError::Cancelled)
     );
     CANCEL_DURING_RENDER.set(ptr::null());
-    for bytes in [513 * size_of::<f32>(), size_of::<f32>()] {
+    assert_eq!(
+        crate::fixture::fail_allocation(size_of::<f32>(), || native(
+            48000,
+            &[0.5],
+            &Cancellation::default()
+        )),
+        Err(MediaError::Io)
+    );
+}
+
+#[test]
+fn finite_conversion_rejects_delay_and_context_refill_failures() {
+    let token = Cancellation::default();
+    let convert = |api| unsafe { native_with_descriptor(48000, &[0.5], &token, api) };
+    let original = unsafe { *ffi::rpcr3_descriptor() };
+
+    let mut api = original;
+    api.ring_output_delay = Some(failed_output_delay);
+    assert_eq!(
+        convert(Box::leak(Box::new(api))),
+        Err(MediaError::InvalidOutput)
+    );
+
+    for callback in [fail_padding_push as _, overaccept_padding_push as _] {
+        PUSH_CALLS.set(0);
+        let mut api = original;
+        api.ring_producer_push = Some(callback);
         assert_eq!(
-            crate::fixture::fail_allocation(bytes, || native(
-                48000,
-                &[0.5],
-                &Cancellation::default()
-            )),
-            Err(MediaError::Io)
+            convert(Box::leak(Box::new(api))),
+            Err(MediaError::InvalidOutput)
         );
+        assert!(PUSH_CALLS.get() >= 2);
     }
 }
 
 #[test]
 fn invalid_file_and_speech_strings_fail_before_provider_dispatch() {
     let path = Path::new("unused");
-    let adapter = NativeMediaPreparer::new(path, path, path, 1).unwrap();
+    let adapter = NativeMediaPreparer::new(path, path, 1).unwrap();
     let cancellation = Cancellation::default();
     assert_eq!(
         adapter.file(&FileRequest {
@@ -331,13 +377,39 @@ fn invalid_file_and_speech_strings_fail_before_provider_dispatch() {
 #[test]
 fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     static RELEASES: AtomicUsize = AtomicUsize::new(0);
-    unsafe extern "C" fn release(handle: *mut c_void) {
+    unsafe extern "C" fn close(handle: *mut c_void) {
         assert_eq!(handle as usize, 1);
         RELEASES.fetch_add(1, Ordering::Relaxed);
     }
-    let path = Path::new("unused");
-    let mut adapter = NativeMediaPreparer::new(path, path, path, 1).unwrap();
-    adapter.file.release_audio = release;
+    unsafe extern "C" fn eof(
+        _: *mut c_void,
+        _: *const ffi::rptadv_media_cancellation,
+        _: *mut f32,
+        _: usize,
+        count: *mut usize,
+    ) -> i32 {
+        unsafe { *count = 0 };
+        0
+    }
+    unsafe extern "C" fn bad_count(
+        _: *mut c_void,
+        _: *const ffi::rptadv_media_cancellation,
+        _: *mut f32,
+        capacity: usize,
+        count: *mut usize,
+    ) -> i32 {
+        unsafe { *count = capacity + 1 };
+        0
+    }
+    unsafe extern "C" fn destroy(_: *mut c_void) {}
+    let context = Context {
+        handle: NonNull::new(1_usize as *mut c_void).unwrap(),
+        destroy,
+        read_stream: eof,
+        close_stream: close,
+        open_file: None,
+        open_speech: None,
+    };
     let token = Cancellation::default();
     for (code, expected) in [
         (-1, MediaError::InvalidRequest),
@@ -351,9 +423,10 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         (0, MediaError::InvalidOutput),
     ] {
         assert_eq!(
-            adapter.file.receive(&token, |output| {
+            context.collect_stream(&token, |output| {
                 unsafe {
                     (*output).handle = 1_usize as *mut c_void;
+                    (*output).sample_rate_hz = 48000;
                 }
                 code
             }),
@@ -362,20 +435,43 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     }
     assert_eq!(RELEASES.load(Ordering::Relaxed), 9);
     assert_eq!(
-        adapter.file.receive(&token, |_| 0),
+        context.collect_stream(&token, |_| 0),
         Err(MediaError::InvalidOutput)
     );
     assert_eq!(
-        adapter.file.receive(&token, |output| {
+        context.collect_stream(&token, |output| {
             unsafe {
                 (*output).handle = 1_usize as *mut c_void;
-                (*output).sample_count = 1;
             }
             0
         }),
         Err(MediaError::InvalidOutput)
     );
     assert_eq!(RELEASES.load(Ordering::Relaxed), 10);
+    assert_eq!(
+        context.collect_stream(&token, |output| {
+            unsafe {
+                (*output).handle = 1_usize as *mut c_void;
+                (*output).sample_rate_hz = 48000;
+            }
+            0
+        }),
+        Err(MediaError::InvalidOutput)
+    );
+    let bad_context = Context {
+        read_stream: bad_count,
+        ..context
+    };
+    assert_eq!(
+        bad_context.collect_stream(&token, |output| {
+            unsafe {
+                (*output).handle = 1_usize as *mut c_void;
+                (*output).sample_rate_hz = 48000;
+            }
+            0
+        }),
+        Err(MediaError::InvalidOutput)
+    );
     for (rate, source) in [
         (0, vec![0.0]),
         (48000, vec![]),
@@ -387,23 +483,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
             Err(MediaError::InvalidOutput)
         );
     }
-    for (count, sample) in [(0, 0.0), (usize::MAX, 0.0), (1, f32::NAN)] {
-        assert_eq!(
-            adapter.file.receive(&token, |output| {
-                unsafe {
-                    *output = ffi::rptadv_media_audio {
-                        handle: 1_usize as *mut c_void,
-                        samples: &sample,
-                        sample_count: count,
-                        sample_rate_hz: 48000,
-                    };
-                }
-                0
-            }),
-            Err(MediaError::InvalidOutput)
-        );
-    }
-    assert_eq!(RELEASES.load(Ordering::Relaxed), 13);
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 12);
 }
 
 #[test]
@@ -417,13 +497,8 @@ fn descriptor_file_decode_uses_host_reaper_and_retains_no_temporary_files() {
         wave.extend_from_slice(&1000_i16.to_le_bytes());
     }
     fs::write(&path, wave).unwrap();
-    let adapter = NativeMediaPreparer::new(
-        Path::new("ffmpeg"),
-        Path::new("missing-piper"),
-        &directory,
-        30000,
-    )
-    .unwrap();
+    let adapter =
+        NativeMediaPreparer::new(Path::new("ffmpeg"), Path::new("missing-piper"), 30000).unwrap();
     let token = Cancellation::default();
     let audio = adapter
         .file(&FileRequest {
@@ -445,8 +520,8 @@ fn descriptor_file_decode_uses_host_reaper_and_retains_no_temporary_files() {
         }),
         Err(MediaError::Unavailable)
     );
-    assert_eq!(ACQUIRED.load(Ordering::Relaxed), 2);
-    assert_eq!(RELEASED.load(Ordering::Relaxed), 2);
+    assert_eq!(ACQUIRED.load(Ordering::Relaxed), 1);
+    assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
     token.cancel();
     assert_eq!(
         adapter.file(&FileRequest {

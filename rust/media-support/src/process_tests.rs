@@ -1,11 +1,21 @@
 use super::*;
+#[cfg(file_adapter)]
+use std::{fs, path::PathBuf};
+use std::{path::Path, sync::atomic::Ordering};
+
+#[cfg(file_adapter)]
+fn test_directory(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("rptadv-{name}-{}", std::process::id()));
+    std::fs::create_dir(&path).unwrap();
+    path
+}
 
 #[test]
 #[cfg(file_adapter)]
 fn fifo_source_is_rejected_without_waiting_for_a_writer() {
     use std::os::unix::ffi::OsStrExt;
-    let directory = Temporary::new(&std::env::temp_dir()).unwrap();
-    let path = directory.path("input");
+    let directory = test_directory("fifo");
+    let path = directory.join("input");
     let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
     // SAFETY: path_bytes is a live NUL-terminated pathname.
     assert_eq!(unsafe { libc::mkfifo(path_bytes.as_ptr(), 0o600) }, 0);
@@ -13,58 +23,220 @@ fn fifo_source_is_rejected_without_waiting_for_a_writer() {
     assert!(matches!(open_local(&path), Err(MediaError::Unavailable)));
     assert!(started.elapsed() < Duration::from_secs(1));
     fs::remove_file(path).unwrap();
+    fs::remove_dir(directory).unwrap();
 }
 
 #[test]
 #[cfg(file_adapter)]
 fn regular_file_source_is_opened() {
-    let directory = Temporary::new(&std::env::temp_dir()).unwrap();
-    let path = directory.path("input");
+    let directory = test_directory("regular");
+    let path = directory.join("input");
     fs::write(&path, b"audio").unwrap();
     assert!(open_local(&path).is_ok());
     fs::remove_file(path).unwrap();
+    fs::remove_dir(directory).unwrap();
+}
+
+#[cfg(file_adapter)]
+fn wave(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut body = b"WAVE".to_vec();
+    for (name, data) in chunks {
+        body.extend_from_slice(*name);
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        if data.len() % 2 != 0 {
+            body.push(0);
+        }
+    }
+    let mut riff = b"RIFF".to_vec();
+    riff.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    riff.extend_from_slice(&body);
+    riff
+}
+
+#[cfg(file_adapter)]
+fn format_chunk(size: usize) -> Vec<u8> {
+    let mut format = vec![0; size];
+    if size >= 16 {
+        format[0..2].copy_from_slice(&3_u16.to_le_bytes());
+        format[2..4].copy_from_slice(&1_u16.to_le_bytes());
+        format[4..8].copy_from_slice(&48_000_u32.to_le_bytes());
+        format[8..12].copy_from_slice(&192_000_u32.to_le_bytes());
+        format[12..14].copy_from_slice(&4_u16.to_le_bytes());
+        format[14..16].copy_from_slice(&32_u16.to_le_bytes());
+    }
+    format
+}
+
+#[cfg(file_adapter)]
+fn pcm_stream(bytes: &[u8]) -> Result<PcmStream, MediaError> {
+    let config = Config {
+        ffmpeg: "ffmpeg".into(),
+        #[cfg(speech_adapter)]
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(5),
+        child_reaper: None,
+    };
+    let mut command = Command::new("cat");
+    let child = ChildStream::spawn(&config, &mut command, Some(bytes), &|| false)?;
+    PcmStream::f32_wave(child, &|| false)
 }
 
 #[test]
-fn temporary_creation_retries_collisions_and_reports_exhaustion_and_io_errors() {
-    let owner = Temporary::new(&std::env::temp_dir()).unwrap();
+#[cfg(file_adapter)]
+fn wave_stream_decodes_incrementally_and_drains_declared_data() {
+    let mut data = 0.25_f32.to_le_bytes().to_vec();
+    data.extend_from_slice(&(-0.5_f32).to_le_bytes());
+    let format = format_chunk(16);
+    let wave = wave(&[(b"fmt ", &format), (b"data", &data)]);
+    let mut stream = pcm_stream(&wave).unwrap();
+    assert_eq!(stream.sample_rate_hz(), 48_000);
+    let mut output = [0.0; 2];
+    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 2);
+    assert_eq!(output, [0.25, -0.5]);
+    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 0);
+    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 0);
+}
 
-    let collision_parent = owner.path("collision-parent");
-    fs::create_dir(&collision_parent).unwrap();
-    fs::create_dir(temporary_path(&collision_parent, 0)).unwrap();
-    let next = AtomicU64::new(0);
-    let temporary = Temporary::new_with_counter(&collision_parent, &next).unwrap();
-    assert_eq!(temporary.path, temporary_path(&collision_parent, 1));
-    drop(temporary);
-    fs::remove_dir(temporary_path(&collision_parent, 0)).unwrap();
-    fs::remove_dir(&collision_parent).unwrap();
+#[test]
+#[cfg(file_adapter)]
+fn wave_stream_skips_unknown_and_odd_sized_chunks_and_accepts_unknown_data_size() {
+    let odd_format = format_chunk(17);
+    let mut data = 0.75_f32.to_le_bytes().to_vec();
+    let unknown_size = u32::MAX.to_le_bytes();
+    let mut file = b"RIFF\0\0\0\0WAVE".to_vec();
+    file.extend_from_slice(b"JUNK");
+    file.extend_from_slice(&3_u32.to_le_bytes());
+    file.extend_from_slice(&[1, 2, 3, 0]);
+    file.extend_from_slice(b"fmt ");
+    file.extend_from_slice(&(odd_format.len() as u32).to_le_bytes());
+    file.extend_from_slice(&odd_format);
+    file.push(0);
+    file.extend_from_slice(b"data");
+    file.extend_from_slice(&unknown_size);
+    file.append(&mut data);
+    let riff_size = (file.len() - 8) as u32;
+    file[4..8].copy_from_slice(&riff_size.to_le_bytes());
 
-    let full_parent = owner.path("full-parent");
-    fs::create_dir(&full_parent).unwrap();
-    for sequence in 0..64 {
-        fs::create_dir(temporary_path(&full_parent, sequence)).unwrap();
-    }
-    let next = AtomicU64::new(0);
+    let mut stream = pcm_stream(&file).unwrap();
+    let mut output = [0.0; 1];
+    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 1);
+    assert_eq!(output[0], 0.75);
+    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 0);
+}
+
+#[test]
+#[cfg(file_adapter)]
+fn wave_stream_rejects_invalid_headers_chunks_and_sample_formats() {
     assert!(matches!(
-        Temporary::new_with_counter(&full_parent, &next),
-        Err(MediaError::Io)
+        pcm_stream(b"short"),
+        Err(MediaError::InvalidOutput)
     ));
-    for sequence in 0..64 {
-        fs::remove_dir(temporary_path(&full_parent, sequence)).unwrap();
-    }
-    fs::remove_dir(&full_parent).unwrap();
-
-    let missing_parent = owner.path("missing-parent");
-    let next = AtomicU64::new(0);
+    let mut not_riff = wave(&[]);
+    not_riff[..4].copy_from_slice(b"NOPE");
     assert!(matches!(
-        Temporary::new_with_counter(&missing_parent, &next),
-        Err(MediaError::Unavailable)
+        pcm_stream(&not_riff),
+        Err(MediaError::InvalidOutput)
+    ));
+    let mut not_wave = wave(&[]);
+    not_wave[8..12].copy_from_slice(b"NOPE");
+    assert!(matches!(
+        pcm_stream(&not_wave),
+        Err(MediaError::InvalidOutput)
     ));
 
-    let first = owner.create("duplicate").unwrap();
-    assert!(matches!(owner.create("duplicate"), Err(MediaError::Io)));
-    drop(first);
-    fs::remove_file(owner.path("duplicate")).unwrap();
+    let short_format = format_chunk(15);
+    assert!(matches!(
+        pcm_stream(&wave(&[(b"fmt ", &short_format), (b"data", &[])])),
+        Err(MediaError::InvalidOutput)
+    ));
+    let mut bad_format = format_chunk(16);
+    bad_format[0..2].copy_from_slice(&1_u16.to_le_bytes());
+    assert!(matches!(
+        pcm_stream(&wave(&[(b"fmt ", &bad_format), (b"data", &[])])),
+        Err(MediaError::InvalidOutput)
+    ));
+    assert!(matches!(
+        pcm_stream(&wave(&[(b"data", &[])])),
+        Err(MediaError::InvalidOutput)
+    ));
+    let mut misaligned = 1_f32.to_le_bytes().to_vec();
+    misaligned.pop();
+    assert!(matches!(
+        pcm_stream(&wave(&[
+            (b"fmt ", &format_chunk(16)),
+            (b"data", &misaligned)
+        ])),
+        Err(MediaError::InvalidOutput)
+    ));
+}
+
+#[test]
+#[cfg(file_adapter)]
+fn wave_stream_rejects_each_incompatible_format_field_and_duplicate_format() {
+    for offset in [0, 2, 4, 8, 12, 14] {
+        let mut format = format_chunk(16);
+        match offset {
+            0 => format[0..2].copy_from_slice(&1_u16.to_le_bytes()),
+            2 => format[2..4].copy_from_slice(&2_u16.to_le_bytes()),
+            4 => {
+                format[4..8].copy_from_slice(&0_u32.to_le_bytes());
+                format[8..12].copy_from_slice(&0_u32.to_le_bytes());
+            }
+            8 => format[8..12].copy_from_slice(&1_u32.to_le_bytes()),
+            12 => format[12..14].copy_from_slice(&2_u16.to_le_bytes()),
+            _ => format[14..16].copy_from_slice(&16_u16.to_le_bytes()),
+        }
+        assert!(matches!(
+            pcm_stream(&wave(&[(b"fmt ", &format), (b"data", &[])])),
+            Err(MediaError::InvalidOutput)
+        ));
+    }
+
+    let valid = format_chunk(16);
+    assert!(matches!(
+        pcm_stream(&wave(&[
+            (b"fmt ", &valid),
+            (b"fmt ", &valid),
+            (b"data", &[])
+        ])),
+        Err(MediaError::InvalidOutput)
+    ));
+    let oversized = format_chunk(257);
+    assert!(matches!(
+        pcm_stream(&wave(&[(b"fmt ", &oversized), (b"data", &[])])),
+        Err(MediaError::InvalidOutput)
+    ));
+}
+
+#[test]
+#[cfg(file_adapter)]
+fn empty_wave_data_is_rejected_after_declared_bytes_are_drained() {
+    let mut bytes = wave(&[(b"fmt ", &format_chunk(16)), (b"data", &[])]);
+    bytes.extend_from_slice(b"trailing bytes");
+    let mut stream = pcm_stream(&bytes).unwrap();
+    assert_eq!(
+        stream.read(&mut [0.0; 1], &|| false),
+        Err(MediaError::InvalidOutput)
+    );
+}
+
+#[test]
+#[cfg(file_adapter)]
+fn pcm_reader_validates_requests_and_defers_errors_after_returned_samples() {
+    let data = [0.5_f32.to_le_bytes(), f32::NAN.to_le_bytes()].concat();
+    let mut stream = pcm_stream(&wave(&[(b"fmt ", &format_chunk(16)), (b"data", &data)])).unwrap();
+    assert_eq!(
+        stream.read(&mut [], &|| false),
+        Err(MediaError::InvalidRequest)
+    );
+    let mut output = [0.0; 2];
+    assert_eq!(stream.read(&mut output, &|| false).unwrap(), 1);
+    assert_eq!(output[0], 0.5);
+    assert_eq!(
+        stream.read(&mut output, &|| false),
+        Err(MediaError::InvalidOutput)
+    );
 }
 
 #[test]
@@ -103,20 +275,43 @@ fn child_wait_helpers_retry_interrupts_and_map_other_errors() {
 }
 
 #[test]
-fn run_honors_cancellation_before_spawning() {
-    let config = Config {
-        #[cfg(file_adapter)]
-        ffmpeg: "ffmpeg".into(),
-        #[cfg(speech_adapter)]
-        piper: "piper".into(),
-        temporary_directory: std::env::temp_dir(),
-        process_timeout: Duration::from_secs(1),
-        child_reaper: None,
-    };
+fn interrupted_pipe_reads_are_the_only_errors_retried() {
+    assert!(super::retry_interrupted(&io::Error::from(
+        io::ErrorKind::Interrupted
+    )));
+    assert!(!super::retry_interrupted(&io::Error::from(
+        io::ErrorKind::WouldBlock
+    )));
+}
+
+#[test]
+fn child_read_retries_interrupted_calls_and_returns_the_next_result() {
+    let mut calls = 0;
     assert_eq!(
-        run(&config, &mut Command::new("must-not-run"), &|| true),
-        Err(MediaError::Cancelled)
+        super::read_retry_interrupted(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(7)
+            }
+        })
+        .unwrap(),
+        7
     );
+    assert_eq!(calls, 2);
+
+    let mut calls = 0;
+    assert_eq!(
+        super::read_retry_interrupted(|| {
+            calls += 1;
+            Err::<usize, _>(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(calls, 1);
 }
 
 #[test]
@@ -142,142 +337,194 @@ fn normal_scheduler_request_uses_other_at_zero_priority_and_propagates_errors() 
 }
 
 #[test]
-fn run_reports_success_and_process_failure() {
+fn stream_yields_output_before_exit_and_reports_failure_after_drain() {
     let config = Config {
         #[cfg(file_adapter)]
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "piper".into(),
-        temporary_directory: std::env::temp_dir(),
-        process_timeout: Duration::from_secs(1),
+        process_timeout: Duration::from_secs(5),
         child_reaper: None,
     };
-    assert_eq!(run(&config, &mut Command::new("true"), &|| false), Ok(()));
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf first; sleep 1; printf last"]);
+    let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
+    let mut bytes = [0; 16];
+    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 5);
+    assert_eq!(&bytes[..5], b"first");
+    assert!(stream.try_wait().unwrap().is_none());
+    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 4);
+    assert_eq!(&bytes[..4], b"last");
+    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 0);
+
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf audio; exit 9"]);
+    let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
+    assert_eq!(stream.read(&mut bytes, &|| false).unwrap(), 5);
+    assert_eq!(&bytes[..5], b"audio");
     assert_eq!(
-        run(&config, &mut Command::new("false"), &|| false),
+        stream.read(&mut bytes, &|| false),
         Err(MediaError::ProcessFailed)
     );
+}
 
-    extern "C" fn no_op() {}
-    let guarded = Config {
+#[test]
+#[cfg(unix)]
+fn eof_waits_for_a_child_that_closed_stdout_before_exiting() {
+    let config = Config {
         #[cfg(file_adapter)]
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "piper".into(),
-        temporary_directory: std::env::temp_dir(),
-        process_timeout: Duration::from_secs(1),
-        child_reaper: Some(crate::ChildReaper {
-            acquire: no_op,
-            release: no_op,
-        }),
-    };
-    assert_eq!(run(&guarded, &mut Command::new("true"), &|| false), Ok(()));
-
-    let timed_out = Config {
-        #[cfg(file_adapter)]
-        ffmpeg: "ffmpeg".into(),
-        #[cfg(speech_adapter)]
-        piper: "piper".into(),
-        temporary_directory: std::env::temp_dir(),
-        process_timeout: Duration::ZERO,
+        process_timeout: Duration::from_secs(2),
         child_reaper: None,
     };
-    assert_eq!(
-        run(&timed_out, &mut Command::new("true"), &|| false),
-        Err(MediaError::TimedOut)
-    );
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec 1>&-; sleep 0.02; exit 0"]);
+    let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
 
-    let checks = AtomicU64::new(0);
+    assert_eq!(stream.read(&mut [0; 1], &|| false), Ok(0));
+    assert!(stream.try_wait().unwrap().is_some());
+}
+
+#[test]
+fn stream_cancellation_and_deadline_kill_and_reap_the_owned_child() {
+    use std::sync::atomic::AtomicBool;
+
+    let config = Config {
+        #[cfg(file_adapter)]
+        ffmpeg: "ffmpeg".into(),
+        #[cfg(speech_adapter)]
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(5),
+        child_reaper: None,
+    };
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 30"]);
+    let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
+    let pid = stream.id();
+    let cancelled = AtomicBool::new(true);
+    let mut byte = [0];
     assert_eq!(
-        run(&config, &mut Command::new("sleep"), &|| {
-            checks.fetch_add(1, Ordering::Relaxed) != 0
-        }),
+        stream.read(&mut byte, &|| cancelled.load(Ordering::Relaxed)),
         Err(MediaError::Cancelled)
     );
+    drop(stream);
+    assert!(!Path::new("/proc").join(pid.to_string()).exists());
+
+    let timed = Config {
+        process_timeout: Duration::from_millis(10),
+        ..config
+    };
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 30"]);
+    let mut stream = ChildStream::spawn(&timed, &mut command, None, &|| false).unwrap();
+    let pid = stream.id();
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(stream.read(&mut byte, &|| false), Err(MediaError::TimedOut));
+    drop(stream);
+    assert!(!Path::new("/proc").join(pid.to_string()).exists());
+}
+
+#[test]
+fn child_stream_handles_pre_cancelled_spawn_stdin_failure_and_cached_exit() {
+    let config = Config {
+        #[cfg(file_adapter)]
+        ffmpeg: "ffmpeg".into(),
+        #[cfg(speech_adapter)]
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(5),
+        child_reaper: None,
+    };
+    let mut command = Command::new("cat");
+    assert!(matches!(
+        ChildStream::spawn(&config, &mut command, None, &|| true),
+        Err(MediaError::Cancelled)
+    ));
+
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec 0<&-; sleep 1"]);
+    assert!(matches!(
+        ChildStream::spawn(&config, &mut command, Some(&vec![0; 1_000_000]), &|| false),
+        Err(MediaError::Io)
+    ));
+
+    let mut command = Command::new("true");
+    let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
+    for _ in 0..100 {
+        if stream.try_wait().unwrap().is_some() {
+            assert!(stream.try_wait().unwrap().is_some());
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("successful child did not exit");
+}
+
+#[test]
+#[cfg(unix)]
+fn child_stream_reports_closed_stdout_descriptor_errors() {
+    use std::os::fd::AsRawFd;
+
+    let config = Config {
+        #[cfg(file_adapter)]
+        ffmpeg: "ffmpeg".into(),
+        #[cfg(speech_adapter)]
+        piper: "piper".into(),
+        process_timeout: Duration::from_secs(5),
+        child_reaper: None,
+    };
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 1"]);
+    let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
+    let stdout = stream.stdout.as_ref().unwrap();
+    let target = stdout.as_raw_fd();
+    let mut descriptors = [0; 2];
+    // SAFETY: descriptors points to writable storage for the new pipe endpoints.
+    assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+    // SAFETY: replace the owned descriptor with a valid write-only pipe endpoint. ChildStdout
+    // still owns target, which remains valid and is closed exactly once on drop.
+    assert_eq!(unsafe { libc::dup2(descriptors[1], target) }, target);
+    // SAFETY: these are the original, separately owned pipe descriptors.
+    assert_eq!(unsafe { libc::close(descriptors[0]) }, 0);
+    assert_eq!(unsafe { libc::close(descriptors[1]) }, 0);
+    assert_eq!(stream.read(&mut [0_u8; 1], &|| false), Err(MediaError::Io));
+}
+
+#[test]
+#[cfg(unix)]
+fn nonblocking_setup_reports_an_invalid_descriptor() {
+    assert!(set_nonblocking_fd(-1).is_err());
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn run_starts_children_with_normal_scheduling() {
-    let original_policy = unsafe { libc::sched_getscheduler(0) };
-    assert_ne!(original_policy, -1);
-    let mut original_parameters = libc::sched_param { sched_priority: 0 };
-    assert_eq!(
-        unsafe { libc::sched_getparam(0, &mut original_parameters) },
-        0
-    );
-
-    let realtime_parameters = libc::sched_param {
-        sched_priority: unsafe { libc::sched_get_priority_min(libc::SCHED_RR) },
-    };
-    let realtime =
-        unsafe { libc::sched_setscheduler(0, libc::SCHED_RR, &realtime_parameters) } == 0;
-    if !realtime {
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
-    }
-
-    let config = Config {
-        #[cfg(file_adapter)]
-        ffmpeg: "ffmpeg".into(),
-        #[cfg(speech_adapter)]
-        piper: "piper".into(),
-        temporary_directory: std::env::temp_dir(),
-        process_timeout: Duration::from_secs(1),
-        child_reaper: None,
-    };
-    let mut command = Command::new("/bin/sh");
-    command.arg("-c").arg(
-        "read -r stat < /proc/self/stat; set -- $stat; \
-         test \"${40}\" -eq 0 && test \"${41}\" -eq 0",
-    );
-    let result = run(&config, &mut command, &|| false);
-
-    if realtime {
-        assert_eq!(
-            unsafe { libc::sched_setscheduler(0, original_policy, &original_parameters) },
-            0
-        );
-    }
-    assert_eq!(result, Ok(()));
+fn nonblocking_setup_reports_a_failure_after_reading_descriptor_flags() {
+    // O_PATH permits F_GETFL but not F_SETFL, covering the second fcntl failure.
+    let descriptor = unsafe { libc::open(c"/proc/self".as_ptr(), libc::O_PATH) };
+    assert!(descriptor >= 0);
+    assert!(set_nonblocking_fd(descriptor).is_err());
+    assert_eq!(unsafe { libc::close(descriptor) }, 0);
 }
 
 #[test]
-#[cfg(file_adapter)]
-fn decode_preserves_file_level_and_reports_missing_decoder() {
-    use std::io::Write;
-
-    let parent = Temporary::new(&std::env::temp_dir()).unwrap();
-    let source = parent.path("text");
-    let mut input = parent.create("text").unwrap();
-    let mut wave = Vec::from(
-        *b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x22\x56\0\0\x44\xac\0\0\x02\0\x10\0data\x04\0\0\0",
-    );
-    wave.extend_from_slice(&[0, 128, 255, 127]);
-    input.write_all(&wave).unwrap();
-    drop(input);
+fn read_reports_a_child_without_a_stdout_pipe() {
     let config = Config {
         #[cfg(file_adapter)]
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "piper".into(),
-        temporary_directory: parent.path.clone(),
-        process_timeout: Duration::from_secs(30),
+        process_timeout: Duration::from_secs(1),
         child_reaper: None,
     };
-    let audio = decode(&config, File::open(&source).unwrap(), &|| false).unwrap();
-    assert_eq!(audio.sample_rate_hz(), 22_050);
-    assert_eq!(audio.samples(), &[-1.0, 0.9999695]);
-    let unavailable = Config {
-        #[cfg(file_adapter)]
-        ffmpeg: "/definitely/missing/ffmpeg".into(),
-        #[cfg(speech_adapter)]
-        piper: "piper".into(),
-        temporary_directory: parent.path.clone(),
-        process_timeout: Duration::from_secs(5),
-        child_reaper: None,
+    let child = Command::new("true").stdout(Stdio::null()).spawn().unwrap();
+    let mut stream = ChildStream {
+        child: OwnedChild(child),
+        stdout: None,
+        _reaper: ReaperGuard(config.child_reaper),
+        started: Instant::now(),
+        timeout: config.process_timeout,
+        status: None,
     };
-    assert_eq!(
-        decode(&unavailable, File::open(source).unwrap(), &|| false),
-        Err(MediaError::Unavailable)
-    );
+    assert_eq!(stream.read(&mut [0], &|| false), Err(MediaError::Io));
 }

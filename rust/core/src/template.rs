@@ -6,7 +6,7 @@ use std::fmt;
 const MAX_OUTPUT_BYTES: usize = 127;
 
 /// Maximum replacement widths guaranteed by the current controller inputs.
-const WEEKDAY_MAX: usize = 9;
+const WEEKDAY_MAX: usize = 32;
 const DATE_MAX: usize = 10;
 const TIME_MAX: usize = 8;
 const GREETING_MAX: usize = 14;

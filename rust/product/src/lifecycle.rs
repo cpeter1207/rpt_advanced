@@ -109,9 +109,32 @@ impl Engine {
         local: String,
         operation: DigitOperation,
     ) -> Result<(), RuntimeError> {
+        self.execute_with_source(local, operation, false)
+    }
+    fn execute_digit(
+        self: &Arc<Self>,
+        local: String,
+        operation: DigitOperation,
+    ) -> Result<(), RuntimeError> {
+        self.execute_with_source(local, operation, true)
+    }
+    fn execute_with_source(
+        self: &Arc<Self>,
+        local: String,
+        operation: DigitOperation,
+        local_rf_source: bool,
+    ) -> Result<(), RuntimeError> {
         let revision = self.revision.load(Ordering::Acquire);
-        let effect = self.operation(&local, operation)?;
-        self.effect(local, effect, revision)
+        let peer = operation.command.node.clone();
+        match self.operation(&local, operation) {
+            Ok(effect) => self.effect(local, effect, revision),
+            Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
+                if local_rf_source =>
+            {
+                self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer))
+            }
+            Err(error) => Err(error),
+        }
     }
     fn operation(
         self: &Arc<Self>,
@@ -433,7 +456,7 @@ impl Engine {
                 }
                 let local = event.local().to_owned();
                 let (effect, event) = self.run(move |host| {
-                    host.runtime.queue_event(&event, &host.media)?;
+                    host.runtime.queue_event(&event)?;
                     let effect = host.runtime.event_command(&event, clock);
                     Ok((effect, event))
                 })?;
@@ -547,18 +570,29 @@ impl Engine {
                     1 => false,
                     _ => stopped,
                 };
+                let retired_status_posts = if stopped {
+                    host.as_mut().map(Host::take_status_posts)
+                } else {
+                    None
+                };
                 if stopped {
                     *host = None;
                 }
-                let _ = send.send(stopped);
+                let _ = send.send((stopped, retired_status_posts));
             }))
             .is_err()
         {
             return false;
         }
-        if receive.recv() != Ok(true) || self.executor.stop_and_drain().is_err() {
+        let Ok((true, retired_status_posts)) = receive.recv() else {
+            return false;
+        };
+        if self.executor.stop_and_drain().is_err() {
             return false;
         }
+        // The HTTP worker may finish an in-flight request; join it only after leaving the
+        // serialized lifecycle executor so network latency cannot stall control work.
+        drop(retired_status_posts);
         true
     }
 }
@@ -631,7 +665,7 @@ unsafe fn incoming_identity(
 /// # Safety
 /// The complete descriptor/code allocations must remain live through successful stop.
 unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v2,
+    host: *const abi::rptadv_host_services_v4,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
@@ -653,14 +687,16 @@ unsafe extern "C" fn rptadv_product_start(
                 speech,
                 Path::new("/usr/bin/ffmpeg"),
                 Path::new("/usr/bin/piper"),
-                Path::new("/tmp"),
                 30000,
                 (services.reaper_acquire(), services.reaper_release()),
             )
         }
         .map_err(|_| RuntimeError::Preparation)?;
         // Mandatory released composition is validated even for a disabled configuration.
-        drop(crate::link::ring::InboundRing::open(48000).map_err(|_| RuntimeError::Preparation)?);
+        drop(
+            crate::link::ring::InboundRing::open(48000, crate::link::ring::InboundPolicy::Peer)
+                .map_err(|_| RuntimeError::Preparation)?,
+        );
         drop(crate::link::egress::Egress::new(48000, 960).map_err(|_| RuntimeError::Preparation)?);
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let origin = Instant::now();
@@ -854,13 +890,13 @@ unsafe extern "C" fn rptadv_product_link_command(
         let (engine, _call) = selected()?;
         engine.execute(
             unsafe { input(local, local_length) }?.to_owned(),
-            DigitOperation {
-                command: rpt_advanced_core::command::Command {
+            DigitOperation::new(
+                rpt_advanced_core::command::Command {
                     action,
                     node: unsafe { input(remote, remote_length) }?.to_owned(),
                 },
-                digit: None,
-            },
+                None,
+            ),
         )
     }))
     .ok()
@@ -912,7 +948,7 @@ unsafe extern "C" fn rptadv_product_digit(
             ))
         })?;
         let value = if let Some(operation) = operation {
-            engine.execute(local, operation)?;
+            engine.execute_digit(local, operation)?;
             1
         } else {
             0
@@ -927,8 +963,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 2,
-    capability: *b"rptadv.prod2\0\0\0\0",
+    abi_version: 3,
+    capability: *b"rptadv.prod3\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),

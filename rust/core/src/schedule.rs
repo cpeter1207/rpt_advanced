@@ -107,6 +107,15 @@ impl CivilTime {
             * 60)
             + u64::from(self.minute)
     }
+
+    fn date_ordinal(self) -> u64 {
+        CivilDate {
+            year: self.year,
+            month: self.month,
+            day: self.day,
+        }
+        .ordinal()
+    }
 }
 
 /// Operations permitted in a named scheduler macro.
@@ -243,6 +252,79 @@ pub struct ScheduledWindow {
 }
 
 impl ScheduledWindow {
+    /// Whether two bounded same-date windows can be active at the same local civil minute.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        if self.start_minute >= other.end_minute || other.start_minute >= self.end_minute {
+            return false;
+        }
+        match (self.dates.is_empty(), other.dates.is_empty()) {
+            (false, false) => self.dates.iter().any(|date| other.dates.contains(date)),
+            (false, true) => self
+                .dates
+                .iter()
+                .any(|date| other.matches_date_weekday(*date)),
+            (true, false) => other
+                .dates
+                .iter()
+                .any(|date| self.matches_date_weekday(*date)),
+            (true, true) => {
+                selected_weekdays(self.weekday_mask) & selected_weekdays(other.weekday_mask) != 0
+            }
+        }
+    }
+
+    fn matches_date_weekday(&self, date: CivilDate) -> bool {
+        self.weekday_mask == 0 || self.weekday_mask & (1 << date.weekday()) != 0
+    }
+
+    /// Milliseconds until the next selected inclusive start and its date identity.
+    pub(crate) fn next_start(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
+        self.next_boundary(local, second, u64::from(self.start_minute) * 60)
+    }
+
+    /// Milliseconds until the next selected exclusive end and its date identity.
+    pub(crate) fn next_end(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
+        self.next_boundary(local, second, u64::from(self.end_minute) * 60)
+    }
+
+    fn next_boundary(
+        &self,
+        local: &CivilTime,
+        second: u8,
+        target_second: u64,
+    ) -> Option<(u64, u64)> {
+        if second >= 60 {
+            return None;
+        }
+        let today = local.date_ordinal();
+        let current_second = u64::from(local.minute_of_day()) * 60 + u64::from(second);
+        if !self.dates.is_empty() {
+            return self
+                .dates
+                .iter()
+                .filter_map(|date| {
+                    let date = date.ordinal();
+                    let days = date.checked_sub(today)?;
+                    let remaining = days
+                        .checked_mul(86_400)?
+                        .checked_add(target_second)?
+                        .checked_sub(current_second)?;
+                    Some((date, remaining))
+                })
+                .filter(|(_, remaining)| *remaining > 0)
+                .min_by_key(|(_, remaining)| *remaining)
+                .map(|(date, remaining)| (date, remaining * 1000));
+        }
+        (0..=7).find_map(|days| {
+            let weekday = (local.weekday as u8 + days) % 7;
+            if self.weekday_mask != 0 && self.weekday_mask & (1 << weekday) == 0 {
+                return None;
+            }
+            let remaining = (days as u64 * 86_400 + target_second).checked_sub(current_second)?;
+            (remaining > 0).then_some((today + days as u64, remaining * 1000))
+        })
+    }
+
     /// Elapsed wall-clock milliseconds after this selected date's window end.
     /// Returns `None` before the end, on another selected date, or for invalid seconds.
     pub fn elapsed_after_end(&self, local: &CivilTime, second: u8) -> Option<u64> {
@@ -333,6 +415,23 @@ impl CivilDate {
             && self.day >= 1
             && self.day <= month_days(self.year, self.month)
     }
+
+    fn ordinal(&self) -> u64 {
+        let year = u64::from(self.year - 1);
+        let leap_days = year / 4 - year / 100 + year / 400;
+        let month_days: u64 = (1..self.month)
+            .map(|month| u64::from(month_days(self.year, month)))
+            .sum();
+        365 * year + leap_days + month_days + u64::from(self.day - 1)
+    }
+
+    fn weekday(&self) -> u8 {
+        ((self.ordinal() + 1) % 7) as u8
+    }
+}
+
+fn selected_weekdays(mask: u8) -> u8 {
+    if mask == 0 { 0x7f } else { mask }
 }
 
 fn parse_clock(text: &str) -> Result<(u8, u8), ScheduleError> {

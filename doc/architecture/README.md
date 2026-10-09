@@ -11,12 +11,24 @@ supersedes backward-compatibility requirements for project-owned interfaces.
 Do not retain compatibility-only code; preserve required current behavior and
 external interoperability, and reject incompatible artifact combinations safely.
 
-`app_rpt_advanced.so` is the metadata loader for an Asterisk-hosted Rust product.
-The product owns controller configuration, node workers, local radio policy,
-telemetry, and AllStarLink peer control; the Asterisk adapter owns channel/frame
-exchange. USBRadioPlus remains the radio channel driver and owns hardware
-access. The separately released `rate_adjusting_pcm_ring2` and samplerate
+`rpt-advanced` is the standalone service; it owns controller configuration,
+node workers, local radio policy, telemetry, and AllStarLink peer control. It
+reads `rpt_advanced.conf` for per-node CM119 selection, wiring, audio graphs,
+and radio signaling, then opens the shared hardware adapters without Asterisk
+or ASL3. `app_rpt_advanced.so` is a separate deprecated Asterisk adapter; it
+owns only Asterisk channel/frame exchange and requires its configured
+USBRadioPlus channel. The standalone service and Asterisk adapter share the
+versioned product library, but neither requires the other package.
+The separately released `rate_adjusting_pcm_ring3` and samplerate
 adapter DSOs provide playout buffering, clock-rate recovery, and edge conversion.
+The native radio transmit callback returns PTT and CTCSS enable separately; its
+activity policy remains in the controller, as specified by
+[ADR 0042](decisions/0042-activity-scoped-ctcss-encode.md).
+Before either incoming or outgoing peer media starts, the product binds it to
+its node's existing radio lease. Host-services ABI 4 forwards this control-only
+operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
+USBRadioPlus retains ownership of the configured per-peer graph and its reload
+lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
 
 Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that
@@ -72,6 +84,11 @@ Rust's private ABI.
 | Artifact | Ownership |
 | --- | --- |
 | `librptadv_product.so.1` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
+| `rpt-advanced` | Standalone service executable; loads the product and standalone providers without loading Asterisk |
+| `librptadv_control_standalone_adapter.so.1` | Lock-free standalone control-task executor |
+| `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |
+| `librptadv_gpio_adapter.so.1` | CM119 HID signaling and GPIO I/O |
+| `librptadviax2.so.1` | Asterisk-independent IAX2 packet protocol used by the standalone network client |
 | `librptadv_asterisk_adapter.so.1` | Public Asterisk application/CLI, channel, codec, directory, and frame services |
 | `librptadv_control_asterisk_adapter.so.1` | Replaceable serialized control executor backed by Asterisk's taskprocessor |
 | `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
@@ -81,7 +98,7 @@ The file and speech providers are independently replaceable and expose only
 their own operation. Speech does not invoke FFmpeg; file decoding does not
 invoke Piper. Their private process/WAV source is shared at build time, without
 a support DSO or a duplicate controller core. The product converts their
-source-rate PCM through the released ring2 before prepared playback. Asterisk
+source-rate PCM through the released ring3 before prepared playback. Asterisk
 child-reaper coordination arrives through host callbacks, not product imports.
 Adapter replacement requires quiescence and controlled reload/restart. The
 retired combined media descriptor is not retained for initial-alpha compatibility.
@@ -123,13 +140,20 @@ never from a real-time tick. See
 [ADR 0021](decisions/0021-versioned-rust-c-adapter-boundaries.md), and
 [ADR 0022](decisions/0022-versioned-external-c-dependency-adapters.md).
 
+Standalone AllStarLink interoperability uses the separately released
+`librptadviax2` protocol engine. It owns IAX2 serialization, parsing, and
+session behavior, but no socket operations. A separate network adapter owns
+datagram I/O; codec adapters use released codec libraries wherever available.
+These boundaries carry no controller routing policy or audio callback work,
+as defined by ADRs 0005, 0011, and 0012.
+
 ## Runtime structure
 
 `RuntimeNode` is the per-station policy and lifecycle aggregate. It owns that
 station's `NodeController`, link and schedule policy, adapter control, and
 generation-scoped resources. `NodeController` is the bounded audio and
 transmit-policy aggregate for duplex, hang time, identifiers, announcements,
-courtesy tones, timeout, and telemetry sequencing. `RadioCore` remains the
+courtesy tones, optional parrot capture/playback, timeout, and telemetry sequencing. `RadioCore` remains the
 real-time aggregate; none of these ownership names permits control work in an
 audio worker.
 
@@ -152,10 +176,10 @@ audio input → local receive worker
               squelch / CTCSS-DCS decode / deemphasis / receive DSP
                 └─ local receive inbound PCM ring ────────────────┐
 link packet → per-peer jitter / decode → peer inbound PCM ring ───┤
-station telemetry producer → telemetry playout ring ──────────────┤
+file/speech/Morse/tone worker ──streaming PCM──> telemetry playout ring ──┤
                                                                 ▼
                       transmit worker ← DAC / adapter output demand
-                      ├─ native-rate mix / transmit processing / Morse / tones
+                      ├─ native-rate PCM mix / transmit processing
                       ├─ pre-access-tone peer-routable program-audio loopback ring
                       │  └─ link distributor → per-link egress queues
                       │     └─ serial codec encode / send outside audio workers
@@ -175,6 +199,28 @@ source-to-transmit conversion and drift recovery. The transmit worker runs
 entirely at the native output rate, with no mix/output resampler. The
 complete media ownership and ordering contract is
 [ADR 0025](decisions/0025-native-media-routing-and-pcm-ring-ownership.md).
+One serialized station-media worker per node generation renders all telemetry
+sources, including file, speech, Morse, and tone, and streams bounded PCM chunks
+into that ring. `Playback::Render` only consumes ready samples; the transmit
+worker never synthesizes telemetry.
+
+When enabled, the native-rate parrot captures the processed local and active
+peer mix in fixed buffers, then hands completed audio to station control for
+level measurement and speech preparation. Its tagged playback bus is routed to
+the local transmitter and all connected peers without changing ordinary
+telemetry routing. New receive interrupts replay; only the retained first 30
+seconds are measured and played. Local recapture is suppressed; remote parrot
+loops cannot be identified by the current peer protocol.
+
+Controller-owned RF wording is stored in the packaged Fluent catalogs, with
+separate text, TTS, and Morse forms. The configuration generation validates its
+catalog before publication; built-in message formatting stays on the control
+plane, and optional translation attributes fall back to English independently.
+The package provides `en-US.ftl` under `/usr/share/asterisk/rpt_advanced/messages/`;
+administrator locale overlays live under `/etc/asterisk/rpt_advanced/messages/`.
+Operator-authored event templates remain unchanged. Scheduled warnings are
+localized by catalog ID, then queued through the same serialized telemetry path.
+See [ADR 0041](decisions/0041-fluent-localized-controller-telemetry.md).
 
 ### Radio-port audio ownership and lifecycle
 
@@ -292,7 +338,21 @@ defines the full reload, hardware-handoff, and failure policy.
 - `rust/core/src/runtime/` materializes configuration-owned permanent-link
   intent and local-time replacement windows. It snapshots lock-free local/link
   receive activity and returns ordinary attach or detach work to the serialized
-  control plane; it never changes a peer from a radio worker.
+  control plane; it never changes a peer from a radio worker. Ordered permanent
+  and scheduled link groups connect and recover each member independently,
+  select the highest-priority reachable peer for transceive, and keep other
+  group members receive-only. A schedule replaces the whole named permanent
+  group. Connected non-selected members are advertised as direct
+  local-only (`L`) peers in topology and stats, with no routes claimed through
+  them; disconnected retries remain `C`. This is reporting-only and does not
+  change media routing. A winner change is atomically committed only while
+  local and linked inputs are idle; transmitter PTT alone does not block it. Only initial
+  selection and total group unavailability are announced; retries, standby
+  changes, and subsequent winner handoffs are silent. Scheduled warnings use
+  the expected start/end or inactivity deadline, skip active input, and remain
+  serialized with other telemetry. The same peer may appear in multiple
+  schedules only when their local-time windows do not overlap; overlapping
+  duplicate peer routes are rejected during validation.
 - `rust/core/src/link/`, `rust/product/src/link/`, and `rust/asterisk/src/link/` implement
   AllStarLink admission, peer media, topology, advisory keyed-source queries,
   and permitted DTMF control. A direct receive edge starts the canonical
@@ -348,7 +408,9 @@ defines the full reload, hardware-handoff, and failure policy.
   by the transmit mixer or a second output queue. Asterisk representation and
   egress conversion plus partial device I/O remain adapter responsibilities.
   Edge events publish after their detecting worker call; meter/FIFO snapshots
-  default to a 50 ms per-node interval with global fallback. See
+  use `status_snapshot_interval_ms` with per-node override, `[general]`
+  fallback, and a 50 ms default. RX/TX cadence is independently rounded up to
+  each worker's first callback ending at or after its sample deadline. See
   [ADR 0027](decisions/0027-variable-frame-native-tick-and-adapter-io.md).
 - A valid configuration reload replaces workers without restarting Asterisk;
   invalid configuration leaves the running configuration intact.
@@ -389,10 +451,11 @@ defines the full reload, hardware-handoff, and failure policy.
 - Each inbound peer PCM ring uses that same configured delay for DTMF muting.
   Detected DTMF immediately gates its delayed output; insufficient delay can
   leave only the initial few milliseconds audible.
-- Optional per-node CTCSS encode/decode policy is activity-scoped. Live local
-  or peer traffic and pending command-response telemetry qualify it; hangtime,
-  IDs, and courtesy tones do not. The command-response window begins at command
-  receipt and remains active through playout.
+- Optional per-node transmit CTCSS restriction is independent of PTT. When
+  enabled, live local/peer traffic, its separate CTCSS hang, and pending
+  command-response telemetry qualify it; transmitter hang alone, IDs, and
+  courtesy tones do not. The response window begins at command receipt and
+  remains active through playout.
 - WebSocket streaming is status-only. CLI, REST, and DTMF use the shared
   controller operation catalog under ADR 0023.
 - Scheduled work is wall-clock control-plane work. A due event queues its
@@ -407,9 +470,9 @@ defines the full reload, hardware-handoff, and failure policy.
   policy or a media queue. Its Asterisk taskprocessor backend preserves current
   FIFO execution and failure/reload behavior. Standalone media fan-in under
   ADR 0037 remains separate from that control executor.
-- A configured replacement window withdraws its named permanent route before it
-  attaches the replacement, and withdraws the replacement before restoring the
-  permanent route. Post-window quiet-time decisions use only local or linked
+- A configured replacement window withdraws its named permanent group before
+  attaching the scheduled group, and withdraws the scheduled group before
+  restoring the permanent group. Post-window quiet-time decisions use only local or linked
   receive activity. Matching replacement windows intentionally form a union;
   topology admission is their only conflict gate. ADR 0017 defines the required
   continuous route-ownership, retry-gating, and activity-presence semantics for

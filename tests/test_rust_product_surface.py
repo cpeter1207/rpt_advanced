@@ -20,19 +20,23 @@ FORBIDDEN_MAKE_TOKENS = (
     "$(wildcard src/*.c)",
 )
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
+STANDALONE_CONTROL = "librptadv_control_standalone_adapter.so.1"
+STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.1"
-RING_MINIMUM_VERSION = "2.0.0~alpha3"
+RING_MINIMUM_VERSION = "3.0.0~alpha2"
+SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
     "librptadv_asterisk_adapter.so.1": set(),
     PRODUCT: {
-        "librate_adjusting_pcm_ring2.so.2",
-        "librptadv_samplerate_adapter.so.1",
+        "librate_adjusting_pcm_ring3.so.3",
+        "librptadv_samplerate_adapter.so.2",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
     "librptadv_speech_adapter.so.1": set(),
+    STANDALONE_CONTROL: set(),
 }
 EXPORTS = {
     "librptadv_asterisk_adapter.so.1": "rptadv_asterisk_descriptor_v1",
@@ -40,6 +44,7 @@ EXPORTS = {
     "librptadv_control_asterisk_adapter.so.1": "rptadv_control_descriptor_v1",
     "librptadv_file_adapter.so.1": "rptadv_file_adapter_descriptor",
     "librptadv_speech_adapter.so.1": "rptadv_speech_adapter_descriptor",
+    STANDALONE_CONTROL: "rptadv_control_standalone_descriptor_v1",
 }
 MANUALS = (
     "README.md",
@@ -83,7 +88,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     for name, dependencies in ELF_DEPENDENCIES.items():
         path = directory / name
         assert path.is_file(), f"missing artifact: {path}"
-        if name in LIBRARIES:
+        if name in LIBRARIES or name == STANDALONE_CONTROL:
             assert dynamic(path, "SONAME") == {name}, f"incorrect SONAME: {name}"
             exports = {
                 line.split()[-1]
@@ -98,7 +103,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
         assert needed - system == dependencies, f"incorrect NEEDED for {name}: {needed}"
         symbols = command("nm", "--defined-only", "--demangle", str(path))
         assert not re.search(
-            r"\b(rpcr2_descriptor|rptadv_samplerate_adapter_descriptor)$",
+            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor)$",
             symbols,
             re.MULTILINE,
         ), f"static external adapter in {name}"
@@ -107,6 +112,12 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     assert dynamic(directory / "app_rpt_advanced.so", "RUNPATH") == {runpath}, (
         "loader must resolve the configured private-library directory"
     )
+    standalone = directory / STANDALONE_BINARY
+    assert standalone.is_file(), f"missing artifact: {standalone}"
+    needed = dynamic(standalone, "NEEDED")
+    assert not any(
+        "asterisk" in name.lower() or "asl3" in name.lower() for name in needed
+    ), f"standalone executable has an Asterisk/ASL3 dependency: {needed}"
 
 
 def staged(
@@ -119,15 +130,35 @@ def staged(
         if module_directory is not None
         else Path(f"usr/lib/{multiarch}/asterisk/modules")
     ) / "app_rpt_advanced.so"
-    expected = {module, *(library / name for name in LIBRARIES)}
+    expected = {
+        module,
+        Path("usr/bin") / STANDALONE_BINARY,
+        *(library / name for name in LIBRARIES),
+        library / STANDALONE_CONTROL,
+    }
     link = library / "librptadv_product.so"
     expected.add(link)
     assert (stage / link).is_symlink(), f"missing developer link: {link}"
     assert (stage / link).readlink() == Path(PRODUCT)
+    link = library / "librptadv_control_standalone_adapter.so"
+    expected.add(link)
+    assert (stage / link).is_symlink(), f"missing developer link: {link}"
+    assert (stage / link).readlink() == Path(STANDALONE_CONTROL)
     header = Path("usr/include/rptadv_product.h")
     expected.add(header)
     assert (stage / header).read_bytes() == (
         root / "rust/product/include/rptadv_product.h"
+    ).read_bytes()
+    header = Path("usr/include/rptadv_control_adapter.h")
+    expected.add(header)
+    assert (stage / header).read_bytes() == (
+        root / "rust/control-abi/include/rptadv_control_adapter.h"
+    ).read_bytes()
+    header = Path("usr/include/rptadv_control_standalone_adapter.h")
+    expected.add(header)
+    assert (stage / header).read_bytes() == (
+        root
+        / "rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h"
     ).read_bytes()
     for name, crate in (("control_asterisk", "control-asterisk-adapter"),):
         link = library / f"librptadv_{name}_adapter.so"
@@ -168,6 +199,14 @@ def staged(
         assert (stage / destination).read_bytes() == source.read_bytes(), str(
             destination
         )
+    catalog = Path("usr/share/asterisk/rpt_advanced/messages/en-US.ftl")
+    expected.add(catalog)
+    assert (stage / catalog).read_bytes() == (root / "messages/en-US.ftl").read_bytes()
+    standalone_catalog = Path("usr/share/rpt-advanced/messages/en-US.ftl")
+    expected.add(standalone_catalog)
+    assert (stage / standalone_catalog).read_bytes() == (
+        root / "messages/en-US.ftl"
+    ).read_bytes()
     found = {
         path.relative_to(stage)
         for path in stage.rglob("*")
@@ -176,10 +215,13 @@ def staged(
     assert found == expected, (
         f"staged manifest: missing={expected - found}, extra={found - expected}"
     )
-    for name in LIBRARIES:
+    for name in (*LIBRARIES, STANDALONE_CONTROL):
         assert (stage / library / name).read_bytes() == (
             root / "build" / name
         ).read_bytes()
+    assert (stage / "usr/bin" / STANDALONE_BINARY).read_bytes() == (
+        standalone_binary(root)
+    ).read_bytes()
     assert (stage / module).read_bytes() == (
         root / "build/app_rpt_advanced.so"
     ).read_bytes()
@@ -194,6 +236,14 @@ def staged(
         )
 
 
+def standalone_binary(root: Path) -> Path:
+    """Resolve the executable from Cargo's selected build directory."""
+    target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    if not target.is_absolute():
+        target = root / target
+    return target / "release" / STANDALONE_BINARY
+
+
 def package(control: Path) -> None:
     """Require runtime dependencies that provide this product's complete ABI table."""
     contents = control.read_text(encoding="utf-8")
@@ -204,7 +254,7 @@ def package(control: Path) -> None:
         "debhelper",
         "pkg-config",
         "dh-sequence-asterisk",
-        "librate-adjusting-pcm-ring2-dev",
+        "librate-adjusting-pcm-ring3-dev",
         "librptadv-samplerate-adapter-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
@@ -212,11 +262,171 @@ def package(control: Path) -> None:
     ):
         assert token in contents, f"missing package dependency: {token}"
     for token in (
-        f"librate-adjusting-pcm-ring2-dev (>= {RING_MINIMUM_VERSION})",
-        f"librate-adjusting-pcm-ring2 (>= {RING_MINIMUM_VERSION})",
+        f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
+        f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
+        f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
+        f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",
     ):
-        assert token in contents, f"missing compatible ring provider: {token}"
+        assert token in contents, f"missing compatible audio provider: {token}"
+    stanzas = {
+        stanza.splitlines()[0].removeprefix("Package: ").split()[0]: stanza
+        for stanza in contents.split("\n\n")
+        if stanza.startswith("Package: ")
+    }
+    standalone = stanzas["rpt-advanced"].split("Description:", 1)[0]
+    adapter = stanzas["app-rpt-advanced"].split("Description:", 1)[0]
+    assert "${asterisk:Depends}" not in standalone, (
+        "standalone package depends on Asterisk"
+    )
+    assert "${asterisk:Depends}" in adapter, "Asterisk adapter lost its dependency"
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
+
+
+def _cfg_item_end(source: str) -> int:
+    """Return the 1-based line where a cfg(test) item ends."""
+    state = "code"
+    block_depth = 0
+    raw_end = ""
+    braces = 0
+    body = False
+    parentheses = brackets = 0
+    line = 1
+    index = 0
+    while index < len(source):
+        char = source[index]
+        following = source[index : index + 2]
+        if char == "\n":
+            line += 1
+        if state == "line_comment":
+            if char == "\n":
+                state = "code"
+        elif state == "block_comment":
+            if following == "/*":
+                block_depth += 1
+                index += 1
+            elif following == "*/":
+                block_depth -= 1
+                index += 1
+                if block_depth == 0:
+                    state = "code"
+        elif state == "string":
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                state = "code"
+        elif state == "raw_string":
+            if source.startswith(raw_end, index):
+                index += len(raw_end) - 1
+                state = "code"
+        else:
+            raw = re.match(r"(?:b|c)?r(#+)?\"", source[index:])
+            if raw:
+                raw_end = '"' + (raw.group(1) or "")
+                index += len(raw.group(0)) - 1
+                state = "raw_string"
+            elif following == "//":
+                state = "line_comment"
+                index += 1
+            elif following == "/*":
+                state = "block_comment"
+                block_depth = 1
+                index += 1
+            elif char == '"':
+                state = "string"
+            elif char == "(":
+                parentheses += 1
+            elif char == ")":
+                parentheses -= 1
+            elif char == "[":
+                brackets += 1
+            elif char == "]":
+                brackets -= 1
+            elif char == "{":
+                body = True
+                braces += 1
+            elif char == "}" and body:
+                braces -= 1
+                if braces == 0:
+                    return line
+            elif not body and parentheses == 0 and brackets == 0 and char in ";,":
+                return line
+        index += 1
+    return line
+
+
+def get_test_only_ranges(filename: str) -> list[tuple[int, int]]:
+    """Return source line ranges compiled only with Rust's test configuration."""
+    try:
+        lines = Path(filename).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    ranges = []
+    index = 0
+    while index < len(lines):
+        if not re.fullmatch(r"\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*", lines[index]):
+            index += 1
+            continue
+        start = index + 1
+        item = start
+        while item < len(lines) and (
+            not lines[item].strip() or lines[item].lstrip().startswith("#[")
+        ):
+            item += 1
+        if item == len(lines):
+            ranges.append((start, start))
+            index += 1
+            continue
+        end = item + _cfg_item_end("\n".join(lines[item:]))
+        ranges.append((start, end))
+        index = end
+    return ranges
+
+
+def test_separate_rust_test_source_is_not_production_coverage() -> None:
+    assert is_test_source("/workspace/rust/control-standalone-adapter/src/tests.rs")
+    assert is_test_source("/workspace/rust/core/src/runtime/aggregate_tests.rs")
+    assert is_test_source("/workspace/rust/asterisk/src/fixture.rs")
+    assert not is_test_source("/workspace/rust/core/src/runtime/aggregate.rs")
+
+
+def test_cfg_test_items_are_excluded_without_hiding_following_production(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "mixed.rs"
+    source.write_text(
+        "pub fn before() {}\n"
+        "#[cfg(test)]\n"
+        "impl Fixture {\n"
+        '    fn helper() { let text = "}"; /* { } */ }\n'
+        "}\n"
+        "#[cfg(test)]\n"
+        "fn test_helper() {\n"
+        '    let raw = r#"}"#;\n'
+        "}\n"
+        "pub fn after() {}\n",
+        encoding="utf-8",
+    )
+
+    assert get_test_only_ranges(str(source)) == [(2, 5), (6, 9)]
+
+
+def test_standalone_binary_uses_the_configured_cargo_target_directory(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "coverage-target"
+    with patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}):
+        assert standalone_binary(tmp_path) == target / "release" / STANDALONE_BINARY
+
+
+def is_test_source(filename: str) -> bool:
+    """Identify separately compiled Rust test sources outside production coverage."""
+    path = filename.replace("\\", "/")
+    name = path.rsplit("/", 1)[-1]
+    return (
+        "/tests/" in path
+        or name in {"fixture.rs", "tests.rs"}
+        or name.endswith("_tests.rs")
+    )
 
 
 def coverage(report: Path) -> None:
@@ -227,7 +437,10 @@ def coverage(report: Path) -> None:
     assert data["data"], "missing coverage instrumentation"
     for unit in data["data"]:
         for source in unit["files"]:
+            if is_test_source(source["filename"]):
+                continue
             segments = source.get("segments", [])
+            test_ranges = get_test_only_ranges(source["filename"])
             if segments:
                 assert not segments[-1][3] or segments[-1][5], (
                     "unterminated executable coverage segment"
@@ -242,9 +455,13 @@ def coverage(report: Path) -> None:
                 # turn comments/braces between code regions into requirements.
                 end = following[0] - (following[1] == 1)
                 for line in range(segment[0], end + 1):
+                    if any(start <= line <= end for start, end in test_ranges):
+                        continue
                     key = (source["filename"], line)
                     lines[key] = lines.get(key, False) or segment[2] > 0
             for branch in source.get("branches", []):
+                if any(start <= branch[0] <= end for start, end in test_ranges):
+                    continue
                 # LLVM emits the same source region for the DSO, unit-test crate,
                 # and generic callback instances. Each source arm must run, but
                 # it need not run in every codegen instance of that same region.
@@ -341,8 +558,10 @@ def verify_artifact_policy() -> None:
         for name, dependencies in ELF_DEPENDENCIES.items():
             write(root, name)
             tables[name] = {"NEEDED": set(dependencies)}
-            if name in LIBRARIES:
+            if name in LIBRARIES or name == STANDALONE_CONTROL:
                 tables[name]["SONAME"] = {name}
+        write(root, STANDALONE_BINARY)
+        tables[STANDALONE_BINARY] = {"NEEDED": set()}
         tables["app_rpt_advanced.so"]["RUNPATH"] = {"$ORIGIN/../../rpt_advanced"}
 
         def read_table(path: Path, tag: str) -> set[str]:
@@ -374,14 +593,16 @@ def verify_artifact_policy() -> None:
             for name, table in tables.items():
                 for tag in table:
                     previous = table[tag]
-                    table[tag] = {"wrong.so"}
+                    table[tag] = {
+                        "libasterisk.so" if name == STANDALONE_BINARY else "wrong.so"
+                    }
                     rejected()
                     table[tag] = previous
                 (root / name).unlink()
                 rejected()
                 write(root, name)
             for duplicate in (
-                "0000 T rpcr2_descriptor\n",
+                "0000 T rpcr3_descriptor\n",
                 "rpt_advanced_core::controller",
             ):
                 symbols.side_effect = lambda *arguments, value=duplicate: (
@@ -495,6 +716,38 @@ def verify_artifact_policy() -> None:
             else:
                 assert accepted
 
+        source_file = root / "production.rs"
+        write(
+            root, source_file.name, "fn production() {}\n#[cfg(test)]\nmod tests {\n}\n"
+        )
+        write(
+            root,
+            report.name,
+            json.dumps(
+                {
+                    "data": [
+                        {
+                            "files": [
+                                {
+                                    "filename": str(source_file),
+                                    "segments": [
+                                        [1, 1, 1, True, True, False],
+                                        [2, 1, 0, True, True, False],
+                                        [4, 1, 0, False, False, False],
+                                    ],
+                                    "branches": [
+                                        [1, 1, 1, 10, 1, 1],
+                                        [3, 1, 3, 10, 0, 0],
+                                    ],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ),
+        )
+        coverage(report)
+
         def source(name: str, segments: list) -> dict:
             return {
                 "filename": name,
@@ -543,14 +796,27 @@ def verify_stage_policy() -> None:
         root = Path(temporary)
         stage = root / "stage"
         library = "usr/lib/test-linux-gnu/rpt_advanced"
-        for name in LIBRARIES:
+        for name in (*LIBRARIES, STANDALONE_CONTROL):
             write(root, f"build/{name}")
             write(stage, f"{library}/{name}")
+        target_directory = "coverage-target"
+        write(root, f"{target_directory}/release/{STANDALONE_BINARY}")
+        write(stage, f"usr/bin/{STANDALONE_BINARY}")
         write(root, "build/app_rpt_advanced.so")
         write(stage, "usr/lib/test-linux-gnu/asterisk/modules/app_rpt_advanced.so")
         write(root, "rust/product/include/rptadv_product.h")
         write(stage, "usr/include/rptadv_product.h")
+        write(root, "rust/control-abi/include/rptadv_control_adapter.h")
+        write(stage, "usr/include/rptadv_control_adapter.h")
+        write(
+            root,
+            "rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h",
+        )
+        write(stage, "usr/include/rptadv_control_standalone_adapter.h")
         (stage / library / "librptadv_product.so").symlink_to(PRODUCT)
+        (stage / library / "librptadv_control_standalone_adapter.so").symlink_to(
+            STANDALONE_CONTROL
+        )
         for name, crate in (("control_asterisk", "control-asterisk-adapter"),):
             header = f"rptadv_{name}_adapter.h"
             write(root, f"rust/{crate}/include/{header}")
@@ -574,10 +840,16 @@ def verify_stage_policy() -> None:
         ):
             write(root, source)
             write(stage, f"usr/share/doc/rpt-advanced/{destination}")
+        write(root, "messages/en-US.ftl")
+        write(stage, "usr/share/asterisk/rpt_advanced/messages/en-US.ftl")
+        write(stage, "usr/share/rpt-advanced/messages/en-US.ftl")
         resolved = "\n".join(
             f"{name} => {stage / library / name}" for name in LIBRARIES
         )
-        with patch(f"{__name__}.command", return_value=resolved):
+        with (
+            patch.dict(os.environ, {"CARGO_TARGET_DIR": target_directory}),
+            patch(f"{__name__}.command", return_value=resolved),
+        ):
             staged(root, stage, "test-linux-gnu")
             for document in (
                 "doc/allstarlink-status.md",
@@ -649,6 +921,7 @@ def main() -> None:
             "rptadv_product",
             "rptadv_asterisk_adapter",
             "rptadv_control_asterisk_adapter",
+            "rptadv_control_standalone_adapter",
             "rptadv_file_adapter",
             "rptadv_speech_adapter",
         ):

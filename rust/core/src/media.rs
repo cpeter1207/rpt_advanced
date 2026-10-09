@@ -1,6 +1,7 @@
 //! Offline media preparation port. Selection and fallback belong to the controller.
 
-use std::path::Path;
+use crate::audio::PcmStreamReader;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -41,6 +42,81 @@ pub struct SpeechRequest<'a> {
     pub level_db: i32,
     /// Cancellation scoped to this preparation.
     pub cancellation: &'a Cancellation,
+}
+
+/// Owned source chain queued for off-callback station rendering.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaSource {
+    /// Optional file attempted before speech.
+    pub file: Option<PathBuf>,
+    /// Optional speech fallback after file-open or pre-output failure.
+    pub speech: Option<SpeechSource>,
+    /// Gain applied only to decoded file/speech output before generated fallbacks.
+    pub provider_gain_db: i8,
+    /// Optional tone source after file/speech failure, before Morse fallback.
+    pub tone: Option<ToneSource>,
+    /// Optional Morse source after all higher-priority sources fail.
+    pub morse: Option<MorseSource>,
+}
+
+/// Generated tone sequence rendered by the station-telemetry producer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToneSource {
+    /// Validated tone-sequence text.
+    pub sequence: String,
+    /// Tone level relative to full scale.
+    pub level_db: i8,
+}
+
+/// Morse message rendered by the station-telemetry producer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MorseSource {
+    /// Text encoded as Morse.
+    pub text: String,
+    /// Sending speed in words per minute.
+    pub speed_wpm: u32,
+    /// Sidetone frequency in Hz.
+    pub frequency_hz: f32,
+    /// Morse level relative to full scale.
+    pub level_db: i8,
+}
+
+/// Owned Piper-compatible speech request kept off audio callbacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechSource {
+    /// Literal text.
+    pub text: String,
+    /// Local speech model path.
+    pub model: PathBuf,
+    /// Speed in percent.
+    pub speed_percent: u32,
+    /// Speech gain in dB.
+    pub level_db: i32,
+}
+
+/// Generation-owned builder/control for one serialized station media worker.
+pub trait StationMediaSession: Send {
+    /// Register an immutable source chain and return its callback-safe reader.
+    fn register(&mut self, source: MediaSource) -> Result<Box<dyn PcmStreamReader>, MediaError>;
+
+    /// Register one-shot telemetry generated after the station worker starts.
+    fn register_once(
+        &mut self,
+        source: MediaSource,
+    ) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+        self.register(source)
+    }
+
+    /// Stream already validated PCM through the same station ring used for decoded media.
+    fn register_prepared(
+        &mut self,
+        _audio: PreparedAudio,
+    ) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+        Err(MediaError::IncompatibleAdapter)
+    }
+
+    /// Start the single worker after all source chains are registered.
+    fn start(&mut self) -> Result<(), MediaError>;
 }
 
 /// Immutable mono normalized F32 PCM at its decoded source rate.
@@ -90,6 +166,8 @@ pub enum MediaError {
     InvalidOutput,
     /// Required adapter descriptor failed composition validation.
     IncompatibleAdapter,
+    /// The bounded station-producer request queue has no available slot.
+    QueueFull,
 }
 
 /// Independently replaceable control-plane local-file decoding capability.

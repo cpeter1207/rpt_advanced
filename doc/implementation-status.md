@@ -9,6 +9,13 @@ versioned Asterisk entry, control-execution, file, and speech providers. The
 records their ownership. Component and isolated-host tests exercise the behavior
 below; they do not replace the fresh full gate or live verification listed later.
 
+The current branch also adds the separately packaged `rpt-advanced` standalone
+service, direct PortAudio/ALSA and CM119 provider loading, standalone radio
+settings, and IAX2 shared-library client. Synthetic lifecycle and package-boundary
+tests are present. This branch has not yet passed its full hosted pull-request
+gate or current hardware/peer acceptance; do not treat a package build alone as
+standalone deployment approval.
+
 - Identifier scheduling policy: intervals, priorities, activity-based
   and unconditional periods, first-key-only sets, bounded polite deferral while
   receiver/link activity or queued telemetry is present, and completion hierarchy.

@@ -30,9 +30,9 @@ status. Superseded records remain and point to their replacement.
 | [0022](0022-versioned-external-c-dependency-adapters.md) | Accepted | Stable C contracts isolate replaceable external implementations. |
 | [0023](0023-unified-control-and-dtmf-policy.md) | Accepted | CLI, REST, and DTMF share a controlled operation model. |
 | [0024](0024-voting-receivers-and-simulcast-timing.md) | Accepted | Voting and simulcast use explicit clock and node boundaries. |
-| [0025](0025-native-media-routing-and-pcm-ring-ownership.md) | Accepted | Local receive, peer, and telemetry inbound rings alone own conversion and drift recovery into native transmit mixing. |
+| [0025](0025-native-media-routing-and-pcm-ring-ownership.md) | Accepted | The telemetry producer streams every media type through its PCM ring; transmit only mixes consumed PCM. |
 | [0026](0026-generational-real-time-runtime-lifecycle.md) | Accepted | Station generations provide lock-free real-time ownership and safe reload reclamation. |
-| [0027](0027-variable-frame-native-tick-and-adapter-io.md) | Accepted | Input-driven receive and DAC/adapter-clocked transmit replace the combined tick; verified shared clocks permit back-to-back calls without adaptive local drift recovery, with target reserve equal to configured squelch delay and direct output-buffer rendering (implementation pending). |
+| [0027](0027-variable-frame-native-tick-and-adapter-io.md) | Accepted | Input-driven receive and DAC/adapter-clocked transmit use variable frames; all telemetry is produced off-worker and streamed via its PCM ring. |
 | [0028](0028-remove-res-usbradio-through-hardware-adapters.md) | Accepted | Hardware adapters replace res_usbradio; one ASL3 compatibility implementation replaces its legacy/modern split. |
 | [0029](0029-canonical-f32-internal-pcm.md) | Accepted | Internal PCM is normalized `f32`; Asterisk and hardware convert at their boundaries. |
 | [0030](0030-appliance-update-trust-and-compliance.md) | Accepted | Appliance compliance targets and signed-update roles are explicit. |
@@ -44,5 +44,7 @@ status. Superseded records remain and point to their replacement.
 | [0036](0036-asterisk-without-asl3-dependency.md) | Accepted | rpt_advanced uses adapter-neutral execution; Asterisk thread handling stays in adapters, and ASL3-specific code stays in its compatibility adapter. |
 | [0037](0037-standalone-lock-free-peer-ingress.md) | Accepted | Standalone ingress uses bounded SPSC fan-in and one media owner per peer, without mutex serialization or per-peer threads. |
 | [0038](0038-replaceable-control-path-adapter.md) | Accepted | Control execution uses a replaceable adapter, initially backed by the Asterisk taskprocessor. |
-| [0039](0039-retire-usbradioplus-native-mode.md) | Accepted | Remove USBRadioPlus native software-repeat and native parrot modes; preserve shared native DSP and controller transport (candidate under verification). |
+| [0039](0039-retire-usbradioplus-native-mode.md) | Accepted | Remove USBRadioPlus native software-repeat and native parrot modes; preserve shared native DSP and controller transport (implemented; source-audited 2026-10-04). |
 | [0040](0040-initial-alpha-compatibility-policy.md) | Accepted | Initial-alpha project interfaces do not require backward compatibility; remove compatibility-only code while rejecting mismatched artifacts safely. |
+| [0041](0041-fluent-localized-controller-telemetry.md) | Accepted | Built-in RF telemetry uses validated Fluent catalogs with independent text, speech, and Morse forms. |
+| [0042](0042-activity-scoped-ctcss-encode.md) | Accepted | Activity-scoped CTCSS transmit control is returned independently from PTT by the native radio callback. |

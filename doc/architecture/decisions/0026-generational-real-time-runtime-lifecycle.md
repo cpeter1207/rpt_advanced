@@ -50,7 +50,7 @@ documentation:
 | **Radio-port transmit worker** | DAC/adapter-output-clocked sole owner of inbound-ring consumers, native mixer/transmit DSP, oscillator phase, physical PTT, and direct adapter-buffer rendering. It writes one pre-access-tone program-audio loopback block per output count. |
 | **RF-signaling edge publishers** | One bounded publisher per audio worker, each owning its state fields and SPSC event producer. Receive publishes decoder/qualification state; transmit publishes PTT and transmit state. Neither executes controller policy. |
 | **Link media ingress** | The serial owner for one received network link's jitter buffer, decoder, and producer end of that link's inbound PCM ring. |
-| **Station-telemetry audio producer** | The sole telemetry-program-ring producer. It prepares speech, files, and other non-native station telemetry outside the radio-port audio engine. Native Morse and tone generation remains in the engine. |
+| **Station-telemetry audio producer** | The sole telemetry-program-ring producer. It renders every telemetry source—including Morse and tone—outside the radio-port audio engine and streams canonical PCM to the ring. |
 | **Link audio distributor** | The sole consumer of the program-audio loopback. It fans native blocks into bounded per-link egress queues. |
 | **Link media egress** | The serial owner for one link's encoder, packet order, and network send sequence. |
 | **Station-control event dispatcher** | The serialized owner for configuration, schedules, topology, link lifecycle, telemetry policy, status, generation construction, retirement, and reclamation. Its scheduler and configurator are logical responsibilities of this owner, not separate real-time threads. |

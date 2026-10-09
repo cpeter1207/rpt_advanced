@@ -2,15 +2,15 @@
 
 Status: Accepted
 
-Amended 2026-09-13 for the receive/transmit split in ADR 0027. The current
-USBRadioPlus migration implements the callback split; this record's complete
-local/link/telemetry ring ownership remains pending.
+Amended 2026-10-01: every telemetry source, including Morse and tone sequences,
+is produced outside the transmit worker and streamed through the telemetry PCM
+ring. The RPT Advanced implementation status is tracked in `WISHLIST.md`.
 
 ## Context
 
 Native-rate radio-port output receives program audio from asynchronous linked
-peer networking, speech synthesis, sound-file preparation, native telemetry
-generation, and local radio paths. Those producers have independent scheduling
+peer networking, telemetry synthesis and decoding, and local radio paths. Those
+producers have independent scheduling
 and may use different sample rates. The design needs one explicit owner for
 rate conversion and clock-drift recovery without putting codec, network, file,
 or speech work in either radio audio worker.
@@ -23,8 +23,8 @@ program producers and the transmit worker. The input-driven local receive
 worker performs DSP squelch, CTCSS/DCS decode, deemphasis, and local receive
 processing, then writes its processed audio to a dedicated local receive
 inbound PCM ring. Each linked peer has a separate inbound ring, and station
-telemetry prepared by speech or sound-file playback uses a telemetry playout
-ring (also called the telemetry-program ring). Even nominally equal capture
+telemetry from files, speech, Morse, and tones uses a telemetry playout ring
+(also called the telemetry-program ring). Even nominally equal capture
 and playback rates use that local ring for independent-clock recovery, not a
 second raw-capture converter. Internal PCM is canonical normalized `f32`;
 codec/Asterisk representation conversion remains at the boundary under ADR
@@ -74,6 +74,39 @@ local receive replies use the local transmitter, linked-peer replies use only
 that peer's egress, and CLI/REST replies stay on the requesting interface.
 Response routing is carried explicitly with the prepared telemetry; it is not
 inferred from whichever peer happens to be active when playout begins.
+
+The optional rpt_advanced parrot is a separate, explicitly tagged exception to
+ordinary telemetry routing. When enabled for a node, the radio worker captures
+one mixed burst from processed local receive and every active linked-peer
+input, retains at most the first 30 seconds at 48 kHz, and publishes the
+preallocated clip to the control owner only after all inputs unkey. Control
+measures the retained samples and queues a localized spoken peak/RMS report
+followed by the recording through the station-media producer and telemetry
+playout ring. Missing speech skips the report, not the recording. A new
+receive discards a queued response or interrupts an active one; its remainder
+is not replayed. The tagged parrot bus reaches the local transmitter and every
+still-connected outbound peer, including the originating peer and monitor or
+fallback destinations. It is kept separate from ordinary telemetry, so ADR
+0023's source-scoped command/status routing is unchanged. Parrot output is
+excluded from receive capture, preventing local recapture. A remote parrot-
+enabled node cannot identify this audio as a parrot transmission, so remote
+parrot replay loops remain possible.
+
+`parrot_enabled` controls startup/reload state. The DTMF enable and disable
+commands change that state live without rebuilding the node generation. Capture
+storage is allocated by the station-control owner only when enabled and is
+transferred to the radio worker through a bounded SPSC lifecycle queue. On
+disable, capture and queued/active parrot playback stop at the next callback
+boundary. The worker returns the two bounded capture buffers through a second
+SPSC queue; control frees them only after receiving that acknowledgement.
+Playback media interrupted this way follows the existing completed-media
+handoff and is reclaimed off the callback. Thus the callback neither allocates
+nor frees parrot storage.
+
+Implementation status — 2026-10-05: live DTMF parrot controls and the bounded
+control/audio-owner buffer lifecycle are implemented. Remote parrot replay
+loops remain the documented limitation above.
+
 The dispatcher queues a destination block for local receive, another active
 forwarding peer, or a command response explicitly addressed to that destination.
 Local transmitter hang is excluded from peer program audio. A destination's
@@ -101,8 +134,9 @@ The DAC/adapter-output-clocked transmit worker calls a bounded radio-program
 mixer that consumes the requested native frame count from the local receive
 inbound ring, each linked-peer inbound ring, and the telemetry playout ring.
 All of those rings render at the same native output rate, owning their own
-source conversion and drift correction. Tones and Morse may be generated
-directly at native rate in the transmit worker. It adds generated CTCSS or DCS only
+source conversion and drift correction. The transmit worker does not synthesize
+any telemetry; Morse, tone, speech, and decoded file audio arrive only as PCM
+from the telemetry playout ring. It adds generated CTCSS or DCS only
 when the selected radio capability profile requires an analog generated signal,
 then writes directly to the supplied adapter output buffer (PortAudio's output
 buffer for that adapter). There is no transmit-mix resampler or additional
@@ -121,11 +155,20 @@ This is source-aware signaling policy, not an inference from physical PTT
 alone, and it applies equally to native generated CTCSS and profile-selected
 external CTCSS enable.
 
-Exactly one reserved station-telemetry audio worker owns speech synthesis
-and sound-file playout, because only one announcement source may play at a
-time. It writes decoded source samples at their original rate to the
-telemetry-program ring after converting its source representation to canonical
-`f32`; that ring produces the native-rate samples used by the mixer.
+One station-telemetry audio worker per node generation owns every telemetry
+source, because only one announcement source may play at a time. The worker
+starts with the node generation, renders Morse and tone sequences, and
+owns speech synthesis and sound-file decoding. It opens and reads one source at
+a time, pushing bounded canonical-`f32` chunks to the telemetry-program ring as
+generation proceeds. Source selection and fallback (file, speech, tone, then
+Morse as configured) stay on this worker; receive interruption switches to the
+producer-rendered Morse source. The ring performs source-rate conversion and
+produces native-rate samples. A bounded, generation-tagged handoff publishes
+its consumer to playback; `Playback::Render` reads only available samples and
+never waits for or synthesizes for the producer. Producer streams are canceled
+and retired away from the audio callback. A failed source falls through to the
+next configured source before producing audio; a failure after audio begins
+ends that source without restarting its fallback.
 
 Each audio worker has an **RF-signaling edge publisher** for its owned state:
 receive qualification/decoder status in local receive, and physical PTT and
@@ -147,6 +190,8 @@ Queue ownership is fixed:
 | Linked-peer transmit-program queue | Link-audio dispatcher | That peer's transmit worker |
 | Receive RF-signaling event queue | Receive edge publisher | Station-control event dispatcher |
 | Transmit RF-signaling event queue | Transmit edge publisher | Station-control event dispatcher |
+| Parrot capture completion/recycle queues | Radio-port transmit worker / station-control thread | Station-control thread / radio-port transmit worker |
+| Prepared parrot playback queue | Station-control thread | Radio-port transmit worker |
 
 ## Consequences
 

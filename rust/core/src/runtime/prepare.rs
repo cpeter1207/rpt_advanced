@@ -1,7 +1,6 @@
 //! Configuration-to-controller preparation. All allocation and external media work is offline.
 
 use crate::{
-    audio::ToneSequence,
     config::{
         ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings,
         ResolvedCourtesySettings, ResolvedIdentifierSettings, ResolvedNodeSettings,
@@ -10,26 +9,33 @@ use crate::{
         Announcement, ControllerControl, ControllerSettings, CourtesySettings, Identifier,
         MorseSettings, NodeController, PreparedMedia,
     },
-    media::{Cancellation, FileRequest, MediaError, PreparedAudio, SpeechRequest},
+    media::{
+        FileRequest, MediaError, MediaSource, MorseSource, PreparedAudio, SpeechRequest,
+        SpeechSource, StationMediaSession, ToneSource,
+    },
 };
-use std::path::Path;
 
-/// Native media capability composed by the adapter from decoding/synthesis and the released
-/// resampling ring. Successful output must already be mono 48-kHz PCM.
+/// Decode a configured file for adapters that expose a non-streaming control API.
 pub trait NativeFilePreparer {
-    /// Decode and convert a local file on a non-audio preparation owner.
+    /// Decode the complete file away from an audio callback.
     fn file(&self, request: &FileRequest<'_>) -> Result<PreparedAudio, MediaError>;
 }
 
-/// Selected speech capability followed by native-rate ring conversion.
+/// Synthesize speech for adapters that expose a non-streaming control API.
 pub trait NativeSpeechPreparer {
-    /// Synthesize and convert literal speech on a non-audio preparation owner.
+    /// Synthesize the complete utterance away from an audio callback.
     fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError>;
 }
 
-/// Complete selected media composition; neither independently selected port is optional.
-pub trait NativeMediaPreparer: NativeFilePreparer + NativeSpeechPreparer {}
-impl<T: NativeFilePreparer + NativeSpeechPreparer> NativeMediaPreparer for T {}
+/// Required per-generation producer for every telemetry PCM source.
+pub trait NativeMediaPreparer: NativeFilePreparer + NativeSpeechPreparer {
+    /// Create the station producer before any telemetry is registered for this generation.
+    fn station(
+        &self,
+        node: &str,
+        generation: u64,
+    ) -> Result<Box<dyn StationMediaSession>, MediaError>;
+}
 
 /// A preparation or lifecycle failure leaves the previous runtime configuration published.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,70 +80,117 @@ pub(super) fn morse(settings: &ResolvedIdentifierSettings) -> MorseSettings {
     }
 }
 
-fn native(audio: PreparedAudio) -> Result<Vec<f32>, MediaError> {
-    if audio.sample_rate_hz() != 48000 || audio.samples().iter().any(|sample| sample.abs() > 1.0) {
-        return Err(MediaError::IncompatibleAdapter);
-    }
-    Ok(audio.samples().to_vec())
-}
-
-pub(super) fn speech(
-    media: &dyn NativeMediaPreparer,
+fn streaming_source(
     settings: &ResolvedIdentifierSettings,
-    text: &str,
-) -> Result<Option<Vec<f32>>, RuntimeError> {
-    if text.is_empty() {
-        return Ok(None);
-    }
-    let cancellation = Cancellation::default();
-    match media
-        .speech(&SpeechRequest {
-            text,
-            model: Path::new(&settings.speech_model),
+    tone: Option<ToneSource>,
+    provider_gain_db: i8,
+) -> MediaSource {
+    MediaSource {
+        file: (!settings.sound_file.is_empty()).then(|| settings.sound_file.clone().into()),
+        speech: (!settings.speech_text.is_empty()).then(|| SpeechSource {
+            text: settings.speech_text.clone(),
+            model: settings.speech_model.clone().into(),
             speed_percent: settings.speech_speed_percent as u32,
             level_db: settings.speech_level_db as i32,
-            cancellation: &cancellation,
-        })
-        .and_then(native)
-    {
-        Ok(audio) => Ok(Some(audio)),
-        Err(MediaError::IncompatibleAdapter) => Err(RuntimeError::Preparation),
-        Err(_) => Ok(None),
+        }),
+        provider_gain_db,
+        tone,
+        morse: (!settings.morse_text.is_empty()).then(|| MorseSource {
+            text: settings.morse_text.clone(),
+            speed_wpm: settings.morse_speed_wpm as u32,
+            frequency_hz: settings.morse_frequency_hz as f32,
+            level_db: settings.morse_level_db as i8,
+        }),
     }
 }
 
-fn source(
-    media: &dyn NativeMediaPreparer,
+pub(super) fn streamed_status(
+    station: &mut dyn StationMediaSession,
     settings: &ResolvedIdentifierSettings,
-) -> Result<Option<Vec<f32>>, RuntimeError> {
-    if !settings.sound_file.is_empty() {
-        let cancellation = Cancellation::default();
-        match media
-            .file(&FileRequest {
-                path: Path::new(&settings.sound_file),
-                cancellation: &cancellation,
+    morse_text: &str,
+    speech_text: &str,
+) -> Result<PreparedMedia, RuntimeError> {
+    let source = MediaSource {
+        file: None,
+        speech: (!speech_text.is_empty()).then(|| SpeechSource {
+            text: speech_text.to_owned(),
+            model: settings.speech_model.clone().into(),
+            speed_percent: settings.speech_speed_percent as u32,
+            level_db: settings.speech_level_db as i32,
+        }),
+        provider_gain_db: 0,
+        tone: None,
+        morse: Some(MorseSource {
+            text: morse_text.to_owned(),
+            speed_wpm: settings.morse_speed_wpm as u32,
+            frequency_hz: settings.morse_frequency_hz as f32,
+            level_db: settings.morse_level_db as i8,
+        }),
+    };
+    let stream = station
+        .register_once(source)
+        .map_err(|_| RuntimeError::Preparation)?;
+    PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
+}
+
+/// Prepare an optional streamed level report followed by native-rate retained receive PCM.
+pub(super) fn streamed_parrot(
+    station: &mut dyn StationMediaSession,
+    settings: &ResolvedIdentifierSettings,
+    speech_text: &str,
+    recording: PreparedAudio,
+) -> Result<PreparedMedia, RuntimeError> {
+    let report = if speech_text.is_empty() || settings.speech_model.is_empty() {
+        None
+    } else {
+        station
+            .register_once(MediaSource {
+                file: None,
+                speech: Some(SpeechSource {
+                    text: speech_text.to_owned(),
+                    model: settings.speech_model.clone().into(),
+                    speed_percent: settings.speech_speed_percent as u32,
+                    level_db: settings.speech_level_db as i32,
+                }),
+                provider_gain_db: 0,
+                tone: None,
+                morse: None,
             })
-            .and_then(native)
-        {
-            Ok(audio) => return Ok(Some(audio)),
-            Err(MediaError::IncompatibleAdapter) => return Err(RuntimeError::Preparation),
-            Err(_) => {}
-        }
+            .ok()
+    };
+    let recording = station
+        .register_prepared(recording)
+        .map_err(|_| RuntimeError::Preparation)?;
+    Ok(PreparedMedia::new_parrot_stream(report, recording))
+}
+
+fn source_with_station(
+    station: &mut Box<dyn StationMediaSession>,
+    settings: &ResolvedIdentifierSettings,
+    tone: Option<ToneSource>,
+    provider_gain_db: i8,
+) -> Result<Option<PreparedMedia>, RuntimeError> {
+    let source = streaming_source(settings, tone, provider_gain_db);
+    if source.file.is_some()
+        || source.speech.is_some()
+        || source.tone.is_some()
+        || source.morse.is_some()
+    {
+        let stream = station
+            .register(source)
+            .map_err(|_| RuntimeError::Preparation)?;
+        return PreparedMedia::new_stream(stream)
+            .map(Some)
+            .map_err(|_| RuntimeError::Preparation);
     }
-    speech(media, settings, &settings.speech_text)
+    Ok(None)
 }
 
 fn prepared(
-    media: &dyn NativeMediaPreparer,
+    station: &mut Box<dyn StationMediaSession>,
     settings: &ResolvedIdentifierSettings,
 ) -> Result<Option<PreparedMedia>, RuntimeError> {
-    let audio = source(media, settings)?;
-    if audio.is_none() && settings.morse_text.is_empty() {
-        return Ok(None);
-    }
-    PreparedMedia::new(audio, &settings.morse_text, morse(settings))
-        .map(Some)
-        .map_err(|_| RuntimeError::Preparation)
+    source_with_station(station, settings, None, 0)
 }
 
 fn announcement_media(
@@ -158,7 +211,7 @@ fn announcement_media(
 }
 
 fn courtesy_media(
-    media: &dyn NativeMediaPreparer,
+    station: &mut Box<dyn StationMediaSession>,
     settings: &ResolvedCourtesySettings,
     base: &ResolvedIdentifierSettings,
 ) -> Result<Option<PreparedMedia>, RuntimeError> {
@@ -172,49 +225,35 @@ fn courtesy_media(
     item.morse_speed_wpm = settings.morse_speed_wpm;
     item.morse_frequency_hz = settings.morse_frequency_hz;
     item.morse_level_db = settings.level_db;
-    let mut audio = source(media, &item)?;
-    if let Some(audio) = &mut audio {
-        let gain = 10_f32.powf(settings.level_db as f32 / 20.0);
-        for sample in audio {
-            *sample *= gain;
-        }
-    }
-    if !settings.tone_sequence.is_empty() {
-        // Validate even when a higher-priority source succeeded.
-        let mut tones = ToneSequence::new(&settings.tone_sequence, settings.level_db as i8)
-            .map_err(|_| RuntimeError::Preparation)?;
-        if audio.is_none() {
-            let mut pcm = vec![0.0; tones.rendered_samples()];
-            tones.render(&mut pcm);
-            audio = Some(pcm);
-        }
-    }
-    if audio.is_none() && item.morse_text.is_empty() {
-        return Ok(None);
-    }
-    PreparedMedia::new(audio, &item.morse_text, morse(&item))
-        .map(Some)
-        .map_err(|_| RuntimeError::Preparation)
+    let tone_source = (!settings.tone_sequence.is_empty()).then(|| ToneSource {
+        sequence: settings.tone_sequence.clone(),
+        level_db: settings.level_db as i8,
+    });
+    source_with_station(station, &item, tone_source, settings.level_db as i8)
 }
+
+type PreparedController = (
+    NodeController,
+    ControllerControl,
+    ResolvedIdentifierSettings,
+    Box<dyn StationMediaSession>,
+);
 
 pub(super) fn controller(
     document: &ConfigDocument,
     node: &NodeId,
     settings: &ResolvedNodeSettings,
     media: &dyn NativeMediaPreparer,
-) -> Result<
-    (
-        NodeController,
-        ControllerControl,
-        ResolvedIdentifierSettings,
-    ),
-    RuntimeError,
-> {
+    generation: u64,
+) -> Result<PreparedController, RuntimeError> {
     let status = ResolvedIdentifierSettings::resolve(document, node, None)?.value;
+    let mut station = media
+        .station(node.as_str(), generation)
+        .map_err(|_| RuntimeError::Preparation)?;
     let mut ids = Vec::new();
     for label in labels(document, "identifier", node.as_str()) {
         let settings = ResolvedIdentifierSettings::resolve(document, node, Some(label))?.value;
-        if let Some(prepared) = prepared(media, &settings)? {
+        if let Some(prepared) = prepared(&mut station, &settings)? {
             ids.push(Identifier {
                 media: prepared,
                 interval_ms: settings.interval_ms,
@@ -229,7 +268,7 @@ pub(super) fn controller(
     let mut announcements = Vec::new();
     for label in labels(document, "announcement", node.as_str()) {
         let settings = ResolvedAnnouncementSettings::resolve(document, node, Some(label))?.value;
-        if let Some(prepared) = prepared(media, &announcement_media(&settings, &status))? {
+        if let Some(prepared) = prepared(&mut station, &announcement_media(&settings, &status))? {
             announcements.push(Announcement {
                 media: prepared,
                 interval_ms: settings.interval_ms,
@@ -239,7 +278,7 @@ pub(super) fn controller(
     let mut courtesy = CourtesySettings::default();
     for label in labels(document, "courtesy", node.as_str()) {
         let settings = ResolvedCourtesySettings::resolve(document, node, label)?.value;
-        if let Some(prepared) = courtesy_media(media, &settings, &status)? {
+        if let Some(prepared) = courtesy_media(&mut station, &settings, &status)? {
             if settings.input == "receiver" {
                 courtesy.receiver = Some(prepared);
             } else if settings.remote_node.is_empty() {
@@ -251,8 +290,11 @@ pub(super) fn controller(
     }
     let (controller, control) = NodeController::new(
         ControllerSettings {
+            parrot_enabled: settings.parrot_enabled,
             full_duplex: settings.full_duplex,
             hang_ms: settings.hang_ms,
+            ctcss_encode_on_input: settings.ctcss_encode_on_input,
+            ctcss_hang_ms: settings.ctcss_hang_ms,
             transmit_timeout_ms: settings.transmit_timeout_ms,
             timeout_lockout_ms: settings.timeout_lockout_ms,
             kerchunk_max_ms: settings.kerchunk_max_ms,
@@ -265,7 +307,8 @@ pub(super) fn controller(
         courtesy,
     )
     .map_err(|_| RuntimeError::Preparation)?;
-    Ok((controller, control, status))
+    station.start().map_err(|_| RuntimeError::Preparation)?;
+    Ok((controller, control, status, station))
 }
 
 #[cfg(test)]

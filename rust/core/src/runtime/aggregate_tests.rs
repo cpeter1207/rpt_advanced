@@ -2,12 +2,53 @@ use super::*;
 use crate::{
     command::LinkAction,
     config::{ConfigDocument, ResolvedNodeSettings},
-    media::{FileRequest, MediaError, PreparedAudio, SpeechRequest},
+    media::{
+        FileRequest, MediaError, MediaSource, PreparedAudio, SpeechRequest, StationMediaSession,
+    },
     schedule::{CivilTime, Weekday},
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 struct Media;
+struct TestPcm(usize);
+impl crate::audio::PcmStreamReader for TestPcm {
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        let count = output.len().min(20_000_usize.saturating_sub(self.0));
+        output[..count].fill(0.25);
+        self.0 += count;
+        if count == 0 {
+            crate::audio::PcmRead::Finished
+        } else if self.0 == 20_000 {
+            crate::audio::PcmRead::FinalSamples(count)
+        } else {
+            crate::audio::PcmRead::Samples(count)
+        }
+    }
+}
+struct TestStation(Option<Arc<Mutex<Vec<String>>>>);
+impl StationMediaSession for TestStation {
+    fn register(
+        &mut self,
+        source: MediaSource,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        if let (Some(messages), Some(speech)) = (&self.0, source.speech) {
+            messages.lock().unwrap().push(speech.text);
+        }
+        Ok(Box::new(TestPcm(0)))
+    }
+    fn register_prepared(
+        &mut self,
+        _: PreparedAudio,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        Ok(Box::new(TestPcm(0)))
+    }
+    fn start(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
 impl NativeFilePreparer for Media {
     fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
         Err(MediaError::Unavailable)
@@ -16,6 +57,27 @@ impl NativeFilePreparer for Media {
 impl NativeSpeechPreparer for Media {
     fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
         Err(MediaError::Unavailable)
+    }
+}
+impl NativeMediaPreparer for Media {
+    fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+        Ok(Box::new(TestStation(None)))
+    }
+}
+struct CapturingMedia(Arc<Mutex<Vec<String>>>);
+impl NativeFilePreparer for CapturingMedia {
+    fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+impl NativeSpeechPreparer for CapturingMedia {
+    fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+impl NativeMediaPreparer for CapturingMedia {
+    fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+        Ok(Box::new(TestStation(Some(self.0.clone()))))
     }
 }
 struct Device(Arc<Mutex<Vec<String>>>);
@@ -49,6 +111,86 @@ fn adapter(_: &str, _: &ResolvedNodeSettings) -> Result<PreparedAdapter<()>, Run
         receive_maximum: 960,
         transmit_maximum: 960,
     })
+}
+
+struct SnapshotDevice {
+    node: String,
+    snapshots: Arc<Mutex<Vec<(String, u64)>>>,
+}
+impl DeviceHandoff for SnapshotDevice {
+    fn quiesce(&mut self) -> bool {
+        true
+    }
+    fn close(&mut self) {}
+    fn open(&mut self, settings: &GenerationSettings) -> bool {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .push((self.node.clone(), settings.status_snapshot_interval_ms));
+        true
+    }
+}
+
+#[test]
+fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
+    let snapshots = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[general]\nstatus_snapshot_interval_ms=80\n[1000]\n[2000]\nstatus_snapshot_interval_ms=25\n",
+        )
+        .unwrap(),
+        &Media,
+        adapter,
+        |name, _| {
+            Ok(Box::new(SnapshotDevice {
+                node: name.to_owned(),
+                snapshots: snapshots.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        },
+        clock(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        *snapshots.lock().unwrap(),
+        vec![("1000".to_owned(), 80), ("2000".to_owned(), 25)]
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
+    };
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        device,
+        clock(),
+    )
+    .unwrap();
+    log.lock().unwrap().clear();
+
+    runtime
+        .reload(
+            ConfigDocument::parse("[1000]\n[radio 1000]\ncm119_profile=nhrc\n").unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+
+    let events = log.lock().unwrap().clone();
+    assert_eq!(events, ["quiesce", "close", "1000"]);
+    assert_eq!(
+        runtime.settings("1000").unwrap().radio.cm119_profile,
+        crate::config::Cm119Profile::Nhrc
+    );
+    assert!(runtime.stop(0));
 }
 
 #[test]
@@ -131,7 +273,7 @@ fn message_only_event_has_no_link_effect_and_unexposed_handoff_reclaims_automati
     .unwrap();
     assert!(runtime.next_link().is_none());
     let event = runtime.next_event(clock()).unwrap().unwrap();
-    runtime.queue_event(&event, &Media).unwrap();
+    runtime.queue_event(&event).unwrap();
     assert!(matches!(
         runtime.event_command(&event, clock()),
         Ok(links::LinkEffect::None)
@@ -197,13 +339,13 @@ fn repeated_detach_tracking_is_idempotent_and_unrelated_acknowledgments_preserve
         runtime
             .command(
                 "1000",
-                dtmf::DigitOperation {
-                    command: crate::command::Command {
+                dtmf::DigitOperation::new(
+                    crate::command::Command {
                         action: LinkAction::Disconnect,
                         node: "2000".into(),
                     },
-                    digit: None,
-                },
+                    None,
+                ),
                 clock(),
                 true,
             )
@@ -286,6 +428,80 @@ fn peer_set_publication_preserves_live_controller_and_does_not_force_past_a_haza
     assert!(runtime.stop(1004));
 }
 
+struct PendingStream;
+impl crate::audio::PcmStreamReader for PendingStream {
+    fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+        crate::audio::PcmRead::Pending
+    }
+}
+
+struct StreamingStation(Arc<AtomicUsize>);
+impl StationMediaSession for StreamingStation {
+    fn register(
+        &mut self,
+        _: MediaSource,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        Ok(Box::new(PendingStream))
+    }
+
+    fn start(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
+impl Drop for StreamingStation {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct StreamingMedia(Arc<AtomicUsize>);
+impl NativeFilePreparer for StreamingMedia {
+    fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+impl NativeSpeechPreparer for StreamingMedia {
+    fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+impl NativeMediaPreparer for StreamingMedia {
+    fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+        Ok(Box::new(StreamingStation(Arc::clone(&self.0))))
+    }
+}
+
+#[test]
+fn adapter_replacement_keeps_stream_producer_with_live_controller() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let media = StreamingMedia(Arc::clone(&drops));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[courtesy 1000 link]\ninput=link\nspeech_text=Connected\nmorse_text=L\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    let settings = runtime.settings("1000").unwrap().clone();
+    assert_eq!(
+        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        Ok(2)
+    );
+
+    assert!(runtime.detached("1000", 1));
+    runtime.reclaim();
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert!(runtime.stop(1002));
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
 #[test]
 fn multi_node_failed_candidate_and_device_activation_restore_complete_old_runtime() {
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -338,7 +554,7 @@ fn aggregate_scheduled_template_and_macro_use_trigger_clock_and_current_node() {
     let dispatch = runtime.next_event(clock()).unwrap().unwrap();
     assert_eq!(dispatch.morse(), Some("1000. 9:07 AM"));
     assert!(dispatch.speech().unwrap().starts_with("node,1,0,0,0."));
-    assert!(runtime.queue_event(&dispatch, &Media).is_ok());
+    assert!(runtime.queue_event(&dispatch).is_ok());
     assert!(runtime.complete_event(&dispatch));
     assert!(runtime.next_event(clock()).unwrap().is_none());
     assert!(runtime.stop(clock().now_ms));
@@ -493,7 +709,7 @@ fn scheduled_message_queue_retry_is_once_and_stale_dispatch_does_not_prepare_spe
     .unwrap();
     let dispatch = runtime.next_event(clock()).unwrap().unwrap();
     for _ in 0..10 {
-        assert_eq!(runtime.queue_event(&dispatch, &Media), Ok(()));
+        assert_eq!(runtime.queue_event(&dispatch), Ok(()));
     }
     runtime
         .reload(
@@ -504,16 +720,13 @@ fn scheduled_message_queue_retry_is_once_and_stale_dispatch_does_not_prepare_spe
             clock(),
         )
         .unwrap();
-    assert_eq!(
-        runtime.queue_event(&dispatch, &Media),
-        Err(RuntimeError::Rejected)
-    );
+    assert_eq!(runtime.queue_event(&dispatch), Err(RuntimeError::Rejected));
     assert!(runtime.next_event(clock()).unwrap().is_none());
     assert!(runtime.stop(0));
 }
 
 #[test]
-fn native_media_contract_and_source_fallback_are_enforced_before_device_open() {
+fn telemetry_is_registered_with_station_producer_not_synchronously_prepared() {
     struct Prepared {
         rate: u32,
         file_ok: bool,
@@ -535,34 +748,29 @@ fn native_media_contract_and_source_fallback_are_enforced_before_device_open() {
             PreparedAudio::new(self.rate, vec![0.1; 96])
         }
     }
-    let config =
-        "[1000]\n[identifier 1000 test]\nsound_file=test.wav\nspeech_text=hello\nmorse_text=TEST\n";
-    for (rate, file_ok, expected) in [
-        (48000, true, vec!["file"]),
-        (48000, false, vec!["file", "speech"]),
-        (22050, true, vec!["file"]),
-    ] {
-        let media = Prepared {
-            rate,
-            file_ok,
-            calls: Mutex::new(Vec::new()),
-        };
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let result = Runtime::start(
-            ConfigDocument::parse(config).unwrap(),
-            &media,
-            adapter,
-            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
-            clock(),
-        );
-        assert_eq!(*media.calls.lock().unwrap(), expected);
-        if rate == 48000 {
-            assert!(result.unwrap().stop(0));
-        } else {
-            assert!(matches!(result, Err(RuntimeError::Preparation)));
-            assert!(log.lock().unwrap().is_empty());
+    impl NativeMediaPreparer for Prepared {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(None)))
         }
     }
+    let config =
+        "[1000]\n[identifier 1000 test]\nsound_file=test.wav\nspeech_text=hello\nmorse_text=TEST\n";
+    let media = Prepared {
+        rate: 22050,
+        file_ok: true,
+        calls: Mutex::new(Vec::new()),
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(config).unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert!(media.calls.lock().unwrap().is_empty());
+    assert!(runtime.stop(0));
 }
 
 #[test]
@@ -587,12 +795,14 @@ fn reconnect_reconciles_window_before_resuming_old_permanent_retry() {
             .finish_connect("1000", attempt, false, clock())
             .unwrap()
     );
-    let operation = |action| DigitOperation {
-        command: Command {
-            action,
-            node: String::new(),
-        },
-        digit: None,
+    let operation = |action| {
+        DigitOperation::new(
+            Command {
+                action,
+                node: String::new(),
+            },
+            None,
+        )
     };
     for civil in [None, Some((clock().civil.unwrap().0, 60))] {
         let mut invalid_clock = clock();
@@ -687,6 +897,41 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
     runtime.peer_detached("1000", "3000", 60_000);
     drop((receive, transmit));
     assert!(runtime.stop(60_000));
+}
+
+#[test]
+fn aggregate_schedule_warning_queues_one_localized_status_message() {
+    let config = "[general]\nlanguage=fr-CA\n[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 weekday]\nremote_node=3000\nreplace_permanent=main\ndays=Monday-Friday\nstart_time=12:00\nend_time=13:00\nwarning_before_start_ms=60000\nwarning_message_id=scheduled-link-change\n";
+    let clock = RuntimeClock {
+        now_ms: 1_000,
+        wall_seconds: 0,
+        civil: Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 59).unwrap(),
+            0,
+        )),
+    };
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let devices = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(config).unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(devices.clone())) as Box<dyn DeviceHandoff>),
+        clock,
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .warnings()
+            .iter()
+            .any(|warning| warning.key == "language")
+    );
+    runtime.tick_links(clock);
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["This connection will change in 60 seconds"]
+    );
+    assert!(runtime.stop(clock.now_ms));
 }
 
 #[test]
@@ -1139,7 +1384,7 @@ fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
                 Err(RuntimeError::Rejected)
             ));
         }
-        runtime.queue_event(&event, &Media).unwrap();
+        runtime.queue_event(&event).unwrap();
         match runtime.event_command(&event, clock()).unwrap() {
             links::LinkEffect::Connect(attempt) => {
                 assert_eq!(attempt.remote(), "3000");
@@ -1167,16 +1412,13 @@ fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
         runtime.detached("1000", 1);
         assert!(runtime.stop(0));
         assert!(runtime.next_event(clock()).unwrap().is_none());
-        assert_eq!(
-            runtime.queue_event(&event, &Media),
-            Err(RuntimeError::Rejected)
-        );
+        assert_eq!(runtime.queue_event(&event), Err(RuntimeError::Rejected));
     }
 }
 
 #[test]
-fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
-    struct Speech(Mutex<Vec<String>>);
+fn status_actions_register_speech_with_station_and_queue_ring_playback() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
     impl NativeFilePreparer for Speech {
         fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
             Err(MediaError::Unavailable)
@@ -1188,18 +1430,23 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
             PreparedAudio::new(48000, vec![0.25; 960])
         }
     }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
     for (action, last, expected) in [
         (LinkAction::Time, None, "Good Morning. The time is 9:07 AM."),
-        (LinkAction::LastKeyed, None, "NO LAST KEYED"),
+        (LinkAction::LastKeyed, None, "No last keyed station"),
         (
             LinkAction::LastKeyed,
             Some("2000"),
-            "LAST KEYED node,2,0,0,0",
+            "Last keyed node node,2,0,0,0",
         ),
-        (LinkAction::Status, None, "NO LINKS"),
-        (LinkAction::FullStatus, None, "NO LINKS"),
+        (LinkAction::Status, None, "No links"),
+        (LinkAction::FullStatus, None, "No links"),
     ] {
-        let media = Speech(Mutex::new(Vec::new()));
+        let media = Speech(Arc::new(Mutex::new(Vec::new())));
         let log = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::start(
             ConfigDocument::parse("[1000]\n").unwrap(),
@@ -1209,17 +1456,13 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
             clock(),
         )
         .unwrap();
-        runtime
-            .queue_status("1000", action, last, clock(), &media)
-            .unwrap();
+        runtime.queue_status("1000", action, last, clock()).unwrap();
         assert_eq!(*media.0.lock().unwrap(), [expected]);
         for _ in 0..3 {
-            runtime
-                .queue_status("1000", action, last, clock(), &media)
-                .unwrap();
+            runtime.queue_status("1000", action, last, clock()).unwrap();
         }
         assert_eq!(
-            runtime.queue_status("1000", action, last, clock(), &media),
+            runtime.queue_status("1000", action, last, clock()),
             Err(RuntimeError::Rejected)
         );
         let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
@@ -1237,11 +1480,11 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
         let mut invalid_clock = clock();
         invalid_clock.civil = None;
         assert_eq!(
-            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock, &media),
+            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock),
             Err(RuntimeError::Clock)
         );
         assert_eq!(
-            runtime.queue_status("missing", action, last, clock(), &media),
+            runtime.queue_status("missing", action, last, clock()),
             Err(RuntimeError::MissingNode)
         );
         assert!(runtime.stop(0));
@@ -1249,8 +1492,8 @@ fn status_actions_prepare_matching_speech_and_queue_real_radio_playback() {
 }
 
 #[test]
-fn link_lifecycle_events_prepare_perspective_aware_speech_for_every_node() {
-    struct Speech(Mutex<Vec<String>>);
+fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
     impl NativeFilePreparer for Speech {
         fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
             Err(MediaError::Unavailable)
@@ -1262,8 +1505,52 @@ fn link_lifecycle_events_prepare_perspective_aware_speech_for_every_node() {
             PreparedAudio::new(48000, vec![0.25; 960])
         }
     }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
 
-    let media = Speech(Mutex::new(Vec::new()));
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+
+    runtime.queue_loop_rejected("1000", "2000").unwrap();
+    assert_eq!(
+        *media.0.lock().unwrap(),
+        ["Connection to node,2,0,0,0 rejected because it would create a link loop"]
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn link_lifecycle_events_register_speech_for_every_node() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
+    impl NativeFilePreparer for Speech {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Speech {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            self.0.lock().unwrap().push(request.text.into());
+            PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
+
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
         ConfigDocument::parse(
@@ -1279,24 +1566,422 @@ fn link_lifecycle_events_prepare_perspective_aware_speech_for_every_node() {
     )
     .unwrap();
 
-    runtime
-        .queue_link_event("1000", "2000", true, &media)
-        .unwrap();
-    runtime
-        .queue_link_event("1000", "2000", false, &media)
-        .unwrap();
+    runtime.queue_link_event("1000", "2000", true).unwrap();
+    runtime.queue_link_event("1000", "2000", false).unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         [
-            "node,2,0,0,0 CONNECTED",
-            "node,1,0,0,0 CONNECTED",
-            "node,1,0,0,0 CONNECTED TO node,2,0,0,0",
-            "node,2,0,0,0 DISCONNECTED",
-            "node,1,0,0,0 DISCONNECTED",
-            "node,1,0,0,0 DISCONNECTED FROM node,2,0,0,0",
+            "node,2,0,0,0 connected",
+            "node,1,0,0,0 connected",
+            "node,1,0,0,0 connected to node,2,0,0,0",
+            "node,2,0,0,0 disconnected",
+            "node,1,0,0,0 disconnected",
+            "node,1,0,0,0 disconnected from node,2,0,0,0",
         ]
     );
     assert!(runtime.stop(0));
+}
+
+#[test]
+fn group_members_skip_direct_events_but_unrelated_nodes_hear_pair_events() {
+    struct Speech(Arc<Mutex<Vec<String>>>);
+    impl NativeFilePreparer for Speech {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Speech {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            self.0.lock().unwrap().push(request.text.into());
+            PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\nradio_channel=first\n[permanent 1000 network]\nremote_node=2000,3000\n[4000]\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+
+    runtime.queue_link_event("1000", "2000", true).unwrap();
+    runtime.queue_link_event("1000", "2000", false).unwrap();
+    runtime.queue_link_event("2000", "1000", true).unwrap();
+    runtime.queue_link_event("2000", "1000", false).unwrap();
+    assert_eq!(
+        *media.0.lock().unwrap(),
+        [
+            "node,1,0,0,0 connected to node,2,0,0,0",
+            "node,1,0,0,0 disconnected from node,2,0,0,0",
+            "node,2,0,0,0 connected to node,1,0,0,0",
+            "node,2,0,0,0 disconnected from node,1,0,0,0",
+        ]
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn priority_group_announces_initial_selection_and_total_outage_only() {
+    use super::links::LinkEffect;
+    struct Speech(Arc<Mutex<Vec<String>>>);
+    impl NativeFilePreparer for Speech {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for Speech {
+        fn speech(&self, request: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            self.0.lock().unwrap().push(request.text.into());
+            PreparedAudio::new(48000, vec![0.25; 960])
+        }
+    }
+    impl NativeMediaPreparer for Speech {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(TestStation(Some(Arc::clone(&self.0)))))
+        }
+    }
+    let media = Speech(Arc::new(Mutex::new(Vec::new())));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Blind Hams Network\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.queue_priority_group_events().unwrap();
+    let group = runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .group_member("2000")
+        .unwrap();
+    for remote in ["2000", "3000"] {
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("group dial")
+        };
+        assert_eq!(attempt.remote(), remote);
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, true, clock()),
+            Ok(true)
+        );
+    }
+
+    assert_eq!(group.selection().callback_slot(true), 1);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(
+        *media.0.lock().unwrap(),
+        ["Blind Hams Network. node,2,0,0,0 selected"]
+    );
+    group
+        .selection()
+        .publish_desired(std::num::NonZeroUsize::new(2));
+    assert_eq!(group.selection().callback_slot(true), 2);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(media.0.lock().unwrap().len(), 1);
+
+    for remote in ["2000", "3000"] {
+        let node = runtime.node("1000").unwrap();
+        node.links().ended(remote);
+        node.links().reclaimed(remote, clock().now_ms);
+    }
+    assert_eq!(group.selection().callback_slot(true), 0);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(
+        media.0.lock().unwrap().last().unwrap(),
+        "Blind Hams Network is unavailable"
+    );
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(
+        media.0.lock().unwrap().last().unwrap(),
+        "Blind Hams Network is unavailable"
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn priority_group_media_failure_is_reported_after_recording_the_transition() {
+    struct RejectingMedia;
+    struct RejectingStation;
+    impl StationMediaSession for RejectingStation {
+        fn register(
+            &mut self,
+            _: MediaSource,
+        ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+            Err(MediaError::Io)
+        }
+        fn start(&mut self) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+    impl NativeFilePreparer for RejectingMedia {
+        fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeSpeechPreparer for RejectingMedia {
+        fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+    }
+    impl NativeMediaPreparer for RejectingMedia {
+        fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+            Ok(Box::new(RejectingStation))
+        }
+    }
+
+    use super::links::LinkEffect;
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
+        )
+        .unwrap(),
+        &RejectingMedia,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let group = runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .group_member("2000")
+        .unwrap();
+    for _ in 0..2 {
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("group dial")
+        };
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, true, clock()),
+            Ok(true)
+        );
+    }
+    assert_eq!(group.selection().callback_slot(true), 1);
+    assert_eq!(
+        runtime.node("1000").unwrap().links().priority_groups()[0].selected,
+        Some("2000".to_owned())
+    );
+
+    assert_eq!(
+        runtime.queue_priority_group_events(),
+        Err(RuntimeError::Preparation)
+    );
+    runtime.stop(0);
+}
+
+#[test]
+fn priority_group_event_reports_a_full_status_queue() {
+    use super::links::LinkEffect;
+
+    let media = CapturingMedia(Arc::new(Mutex::new(Vec::new())));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    for _ in ["2000", "3000"] {
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("configured group dial")
+        };
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, true, clock()),
+            Ok(true)
+        );
+    }
+    runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .group_member("2000")
+        .unwrap()
+        .selection()
+        .callback_slot(true);
+    for _ in 0..4 {
+        runtime.queue_link_event("7000", "8000", true).unwrap();
+    }
+    assert_eq!(
+        runtime.queue_link_event("7000", "8000", true),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.node("1000").unwrap().links().priority_groups()[0].selected,
+        Some("2000".to_owned())
+    );
+
+    assert_eq!(
+        runtime.queue_priority_group_events(),
+        Err(RuntimeError::Rejected)
+    );
+    for remote in ["2000", "3000"] {
+        runtime.node("1000").unwrap().links().ended(remote);
+        runtime.peer_detached("1000", remote, 0);
+    }
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn completed_parrot_capture_is_measured_localized_and_queued_for_playback() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+
+    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        callback
+            .transmit()
+            .controller
+            .observe_parrot(true, &[0.5, 0.25]);
+        callback.transmit().controller.observe_parrot(false, &[]);
+    }
+    runtime.tick_links(clock());
+
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["Peak level -6 dBFS. RMS level -8 dBFS."]
+    );
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn parrot_capture_waits_for_receive_to_end_and_reuses_the_deferred_buffer() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        callback
+            .transmit()
+            .controller
+            .observe_parrot(true, &[0.5, 0.25]);
+        callback.transmit().controller.observe_parrot(false, &[]);
+        callback.transmit().controller.process_event(true, false);
+    }
+    runtime.tick_links(clock());
+    assert!(messages.lock().unwrap().is_empty());
+
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        callback.transmit().controller.process_event(false, false);
+        callback
+            .transmit()
+            .controller
+            .observe_parrot(true, &[0.5, 0.25]);
+        callback.transmit().controller.observe_parrot(false, &[]);
+    }
+    runtime.tick_links(clock());
+    assert_eq!(messages.lock().unwrap().len(), 1);
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn parrot_capture_drops_a_second_prepared_burst_while_playback_is_pending() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        for _ in 0..2 {
+            callback
+                .transmit()
+                .controller
+                .observe_parrot(true, &[0.5, 0.25]);
+            callback.transmit().controller.observe_parrot(false, &[]);
+        }
+    }
+    runtime.tick_links(clock());
+    assert_eq!(messages.lock().unwrap().len(), 2);
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn parrot_command_rejects_a_second_toggle_until_callback_acknowledges_enable() {
+    use super::dtmf::DigitEvent;
+    use super::links::LinkEffect;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let hash = |code: &[u8], salt: &str| {
+        Argon2::default()
+            .hash_password(code, &SaltString::from_b64(salt).unwrap())
+            .unwrap()
+            .to_string()
+    };
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.node("1000").unwrap().links().configure_admin(
+        &hash(b"1234", "c29tZXNhbHQ"),
+        &hash(b"5678", "bG9ja3NhbHQ"),
+        60_000,
+    );
+    let feed = |runtime: &mut Runtime, sequence: &str, now_ms: u64| {
+        let mut operation = None;
+        for digit in sequence.chars() {
+            operation = runtime
+                .digit("1000", DigitEvent::Digit { digit, now_ms })
+                .or(operation);
+        }
+        operation
+    };
+    assert!(feed(&mut runtime, "*8001234#", 1000).is_none());
+    let enabled = feed(&mut runtime, "*804", 1001).unwrap();
+    assert!(matches!(
+        runtime.command("1000", enabled, clock(), false),
+        Ok(LinkEffect::ParrotEnabled(true))
+    ));
+    let disabled = feed(&mut runtime, "*805", 1002).unwrap();
+    assert!(matches!(
+        runtime.command("1000", disabled, clock(), false),
+        Err(RuntimeError::Rejected)
+    ));
+    assert!(runtime.stop(clock().now_ms));
 }
 
 #[test]

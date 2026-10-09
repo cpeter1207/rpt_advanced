@@ -56,6 +56,17 @@ function unassigned and both applicable adapters are available, Hamlib is the
 preferred source. CM119 EEPROM access belongs to the GPIO adapter because it
 uses the CM119 HID transport; the audio adapter owns ALSA mixer controls.
 
+For standalone operation, `rpt_advanced.conf` is the source of truth for each
+node's CM119 selection, wiring profile, PTT polarity, GPIO directions and
+initial output values, optional clipping-indicator GPIO, and radio policy:
+receive audio source, COR/squelch and CTCSS/DCS decode, duplex, transmit
+signaling, and signaling timing/levels. Flat `[radio]` values are defaults and
+`[radio <node>]` values override them. The standalone product resolves these
+values before opening the selected adapters; adapters own device discovery and
+I/O. The ASL channel adapter continues to resolve its own active channel
+configuration. Exclusive device ownership still prevents both compositions
+from opening one interface at the same time.
+
 USBRadioPlus maintains one ASL3 compatibility adapter once these hardware
 boundaries replace `res_usbradio`. The old legacy/modern split follows the
 resource module's two hardware APIs, not two different radio behaviors. Do not
@@ -196,6 +207,11 @@ the contexts with release/acquire atomics. Failed activation synchronously
 hangs up before returning, while normal quiesce destroys the channel before
 reclaiming contexts or registrations. RX time advances from accumulated
 48 kHz samples; TX consumes local PCM directly into its caller's buffer.
+
+The current direct callback contract has since advanced to ABI 3 to return
+CTCSS enable independently from PTT; the product and host-services tables are
+now ABI 3 and 4 respectively. See ADR 0042. The implementation-status values
+above record the contract when this proof of concept was first integrated.
 
 This proof of concept does not claim the later complete asynchronous ring
 design: its local queue has bounded newest-sample drops and zero-fill

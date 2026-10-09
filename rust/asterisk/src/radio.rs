@@ -26,6 +26,32 @@ impl Drop for Frame {
 }
 
 impl Radio {
+    /// Synchronously attach this radio's link profile before the peer starts media.
+    /// Peer construction has already installed its negotiated decoded read format.
+    pub(crate) fn bind_peer(&self, peer: &mut crate::link::peer_io::PeerIo) -> Result<(), Error> {
+        let mut attachment = ffi::urp_ast_link_attach {
+            struct_size: std::mem::size_of::<ffi::urp_ast_link_attach>() as u32,
+            abi_version: ffi::URP_AST_LINK_ATTACH_ABI_VERSION,
+            peer_channel: peer.channel.pointer.as_ptr().cast(),
+            accepted_abi_version: 0,
+        };
+        // SAFETY: both owned channels and the exclusive option payload remain live.
+        let result = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_LINK_ATTACH as i32,
+                std::ptr::from_mut(&mut attachment).cast(),
+                std::mem::size_of_val(&attachment) as i32,
+                0,
+            )
+        };
+        if result == 0 && attachment.accepted_abi_version == ffi::URP_AST_LINK_ATTACH_ABI_VERSION {
+            Ok(())
+        } else {
+            Err(Error::Call)
+        }
+    }
+
     /// Attach both direct callbacks and require acknowledgment before channel start.
     ///
     /// # Safety

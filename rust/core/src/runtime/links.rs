@@ -3,12 +3,15 @@
 use super::{
     GenerationWork,
     dtmf::{DigitEvent, DigitOperation, DtmfCommands},
-    link_schedule::{LinkReservation, LinkScheduler, LinkTransition},
+    link_schedule::{LinkReservation, LinkScheduler, LinkTransition, ScheduleWarning, WarningGate},
 };
 use crate::{
     access::AccessPolicy,
     command::{DtmfCommandMap, LinkAction},
-    link::{AdmissionError, LinkManager, Mode, Protocol, RetryAttempt, TopologyManager},
+    link::{
+        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, Protocol,
+        RetryAttempt, TopologyManager,
+    },
     schedule::CivilTime,
 };
 
@@ -17,6 +20,7 @@ pub struct ConnectAttempt {
     remote: String,
     mode: Mode,
     permanent: bool,
+    group: Option<Box<GroupMemberSelection>>,
     work: GenerationWork,
     scheduled: Option<LinkReservation>,
 }
@@ -78,6 +82,8 @@ pub enum LinkEffect {
     SelectedRemote,
     /// Prepare existing status/topology/time telemetry outside audio.
     Telemetry(LinkAction),
+    /// Change the live node's parrot state; apply buffer lifecycle work on control.
+    ParrotEnabled(bool),
     /// No physical operation is needed (for example resumed retry intent).
     None,
 }
@@ -89,8 +95,64 @@ pub struct NodeLinkControl {
     policy: AccessPolicy,
     commands: DtmfCommands,
     schedule: Option<LinkScheduler>,
+    groups: Vec<ConfiguredGroup>,
     topology: TopologyManager,
     admitting: bool,
+}
+struct ConfiguredGroup {
+    label: String,
+    name: String,
+    members: Vec<(usize, String)>,
+    selection: GroupSelection,
+}
+
+/// Control-plane view of one immutable priority group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PriorityGroupStatus {
+    pub label: String,
+    pub name: String,
+    pub members: Vec<String>,
+    pub selected: Option<String>,
+    pub unavailable: bool,
+}
+
+fn configured_groups(
+    schedule: Option<&LinkScheduler>,
+    previous: &[ConfiguredGroup],
+) -> Vec<ConfiguredGroup> {
+    let mut groups = Vec::<ConfiguredGroup>::new();
+    if let Some(schedule) = schedule {
+        for route in schedule.route_specs() {
+            let Some(label) = route.group_label else {
+                continue;
+            };
+            let index = groups
+                .iter()
+                .position(|group| group.label == label)
+                .unwrap_or_else(|| {
+                    groups.push(ConfiguredGroup {
+                        label: label.clone(),
+                        name: route.group_name.clone().unwrap_or_else(|| label.clone()),
+                        members: Vec::new(),
+                        selection: GroupSelection::new(),
+                    });
+                    groups.len() - 1
+                });
+            groups[index]
+                .members
+                .push((route.group_priority.unwrap_or(usize::MAX), route.remote));
+        }
+    }
+    for group in &mut groups {
+        group.members.sort_by_key(|(priority, _)| *priority);
+        if let Some(old) = previous
+            .iter()
+            .find(|old| old.label == group.label && old.members == group.members)
+        {
+            group.selection = old.selection.clone();
+        }
+    }
+    groups
 }
 impl NodeLinkControl {
     /// Compose validated node policy before registering any external callbacks.
@@ -100,12 +162,14 @@ impl NodeLinkControl {
         commands: DtmfCommandMap,
         schedule: Option<LinkScheduler>,
     ) -> Result<Self, AdmissionError> {
+        let groups = configured_groups(schedule.as_ref(), &[]);
         Ok(Self {
             local: local.into(),
             manager: LinkManager::new(local)?,
             policy,
             commands: DtmfCommands::new(commands),
             schedule,
+            groups,
             topology: TopologyManager::default(),
             admitting: true,
         })
@@ -118,14 +182,83 @@ impl NodeLinkControl {
         commands: DtmfCommandMap,
         schedule: Option<LinkScheduler>,
     ) {
+        self.groups = configured_groups(schedule.as_ref(), &self.groups);
         self.manager.invalidate_generation();
         self.policy = policy;
         self.commands = DtmfCommands::new(commands);
         self.schedule = schedule;
     }
+    /// Configure per-node Argon2id credentials; missing either digest disables admin DTMF.
+    pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
+        self.commands
+            .configure_admin(unlock_hash, lock_hash, timeout_ms);
+    }
+    /// Renew the DTMF administration window only after the parrot toggle is accepted.
+    pub(crate) fn confirm_parrot_command(&mut self, now_ms: u64) {
+        self.commands.confirm_parrot_action(now_ms);
+    }
     /// Immutable current hub view for status/topology publication.
     pub fn manager(&self) -> &LinkManager {
         &self.manager
+    }
+    /// Whether an exact peer belongs to a configured permanent group.
+    pub fn is_group_member(&self, remote: &str) -> bool {
+        self.schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.is_group_member(remote))
+    }
+    /// Resolve a configured peer's stable group slot and lock-free callback selection.
+    pub fn group_member(&self, remote: &str) -> Option<GroupMemberSelection> {
+        let route = self
+            .schedule
+            .as_ref()?
+            .route_specs()
+            .into_iter()
+            .find(|route| route.remote == remote && route.group_label.is_some())?;
+        let label = route.group_label?;
+        let group = self.groups.iter().find(|group| group.label == label)?;
+        let slot = std::num::NonZeroUsize::new(route.group_priority?.saturating_add(1))?;
+        Some(GroupMemberSelection::new(
+            &label,
+            slot,
+            group.selection.clone(),
+        ))
+    }
+    /// Snapshot callback-active group selection for local telemetry on the control plane.
+    pub(crate) fn priority_groups(&self) -> Vec<PriorityGroupStatus> {
+        let peers = self.manager.snapshot();
+        self.groups
+            .iter()
+            .map(|group| {
+                let selected = group.selection.active().and_then(|slot| {
+                    group
+                        .members
+                        .iter()
+                        .find(|(priority, _)| priority.saturating_add(1) == slot.get())
+                        .map(|(_, peer)| peer.clone())
+                });
+                let any_reachable = group.members.iter().any(|(_, remote)| {
+                    peers
+                        .iter()
+                        .any(|peer| peer.name == *remote && !peer.ended && !peer.retrying)
+                });
+                let all_attempted = group
+                    .members
+                    .iter()
+                    .all(|(_, remote)| peers.iter().any(|peer| peer.name == *remote));
+                PriorityGroupStatus {
+                    label: group.label.clone(),
+                    name: group.name.clone(),
+                    members: group
+                        .members
+                        .iter()
+                        .map(|(_, remote)| remote.clone())
+                        .collect(),
+                    selected,
+                    unavailable: all_attempted && !any_reachable,
+                }
+            })
+            .collect()
     }
     /// Prepare changed or thirty-second topology messages; these are not key advice.
     pub fn due_topology(&mut self, now_ms: u64) -> Vec<(String, String)> {
@@ -171,7 +304,11 @@ impl NodeLinkControl {
                     now_ms,
                 )));
             }
-            Protocol::NewKey | Protocol::IaxKey => false,
+            // Remote DTMF is consumed by the peer-I/O session and delivered as a digit event.
+            Protocol::NewKey
+            | Protocol::NewKey1
+            | Protocol::IaxKey
+            | Protocol::RemoteDigit { .. } => false,
         };
         if detach {
             self.ended(remote);
@@ -185,13 +322,22 @@ impl NodeLinkControl {
         if !self.admitting {
             return Err(AdmissionError::Stale);
         }
-        self.manager
-            .authorize_incoming(remote, verified, &self.policy)
+        self.manager.authorize_incoming_member(
+            remote,
+            verified,
+            &self.policy,
+            self.group_member(remote).as_ref(),
+        )
     }
     /// Recheck and publish a directory-verified incoming peer.
     pub fn accept(&mut self, remote: &str, verified: bool) -> Result<(), AdmissionError> {
         self.authorize(remote, verified)?;
-        self.manager.admit_incoming(remote, verified, &self.policy)
+        self.manager.admit_incoming_member(
+            remote,
+            verified,
+            &self.policy,
+            self.group_member(remote),
+        )
     }
     pub(super) fn schedule(&self) -> Option<&LinkScheduler> {
         self.schedule.as_ref()
@@ -245,7 +391,7 @@ impl NodeLinkControl {
                 if !self.policy.allows(&remote, true) {
                     return Err(AdmissionError::Denied);
                 }
-                if remote == self.local || self.manager.reaches(&remote, true) {
+                if remote == self.local {
                     return Err(AdmissionError::Loop);
                 }
                 let mode = match operation.command.action {
@@ -261,10 +407,20 @@ impl NodeLinkControl {
                         | LinkAction::PermanentLocalMonitor
                         | LinkAction::PermanentTransceive
                 );
+                if permanent
+                    && !self.manager.reaches(&remote, false)
+                    && self.manager.resume_permanent_retry(&remote, mode, now_ms)
+                {
+                    return Ok(LinkEffect::None);
+                }
+                if self.manager.reaches(&remote, true) {
+                    return Err(AdmissionError::Loop);
+                }
                 LinkEffect::Connect(ConnectAttempt {
                     remote,
                     mode,
                     permanent,
+                    group: None,
                     work,
                     scheduled: None,
                 })
@@ -285,6 +441,16 @@ impl NodeLinkControl {
                     schedule.pause(&self.local);
                 }
                 let removed = self.manager.disconnect_all();
+                for remote in &removed {
+                    self.commands.disconnect(remote);
+                }
+                LinkEffect::Detach(removed)
+            }
+            LinkAction::DisconnectPermanentAll => {
+                if let Some(schedule) = &mut self.schedule {
+                    schedule.pause(&self.local);
+                }
+                let removed = self.manager.disconnect_permanent_all();
                 for remote in &removed {
                     self.commands.disconnect(remote);
                 }
@@ -314,6 +480,23 @@ impl NodeLinkControl {
                     LinkEffect::Detach(removed)
                 }
             }
+            LinkAction::ReconnectPermanentAll => {
+                let mut removed = Vec::new();
+                if let Some(schedule) = &mut self.schedule {
+                    schedule.resume(&self.local);
+                    removed = schedule.withdraw_undesired();
+                    for remote in &removed {
+                        self.manager.disconnect_permanent(remote);
+                        self.commands.disconnect(remote);
+                    }
+                }
+                self.manager.resume_permanent_retries(now_ms);
+                if removed.is_empty() {
+                    LinkEffect::None
+                } else {
+                    LinkEffect::Detach(removed)
+                }
+            }
             LinkAction::Command => {
                 if !self.manager.remote_digit(&remote, '*', &self.policy)
                     || (operation.digit.is_none() && !directory_verified)
@@ -331,6 +514,18 @@ impl NodeLinkControl {
             | LinkAction::LastKeyed
             | LinkAction::FullStatus
             | LinkAction::Time) => LinkEffect::Telemetry(action),
+            action @ (LinkAction::ParrotEnable | LinkAction::ParrotDisable) => {
+                if !self
+                    .commands
+                    .consume_parrot_authorization(operation.admin_authorized, now_ms)
+                {
+                    return Err(AdmissionError::Denied);
+                }
+                LinkEffect::ParrotEnabled(action == LinkAction::ParrotEnable)
+            }
+            LinkAction::AdminUnlock | LinkAction::AdminLock => {
+                return Err(AdmissionError::Denied);
+            }
         };
         Ok(effect)
     }
@@ -379,14 +574,20 @@ impl NodeLinkControl {
         } else if !self.policy.allows(&attempt.remote, true) {
             Err(AdmissionError::Denied)
         } else if answered {
-            match self
-                .manager
-                .attach(&attempt.remote, attempt.mode, attempt.permanent)
-            {
+            match self.manager.attach_member(
+                &attempt.remote,
+                attempt.mode,
+                attempt.permanent,
+                attempt.group.as_deref().cloned(),
+            ) {
                 Ok(()) => Ok(true),
                 Err(AdmissionError::Loop) if attempt.permanent => {
-                    self.manager
-                        .retain_topology_blocked(&attempt.remote, attempt.mode);
+                    self.manager.retain_topology_blocked_group(
+                        &attempt.remote,
+                        attempt.mode,
+                        attempt.group.as_deref().map(GroupMemberSelection::label),
+                        attempt.group.as_deref().cloned(),
+                    );
                     topology_blocked = true;
                     Err(AdmissionError::Loop)
                 }
@@ -394,7 +595,12 @@ impl NodeLinkControl {
             }
         } else if attempt.permanent {
             self.manager
-                .retain_retry(&attempt.remote, attempt.mode, now_ms)
+                .retain_retry_member(
+                    &attempt.remote,
+                    attempt.mode,
+                    now_ms,
+                    attempt.group.as_deref().cloned(),
+                )
                 .map(|()| false)
         } else {
             Ok(false)
@@ -451,6 +657,28 @@ impl NodeLinkControl {
             });
         }
     }
+    /// Refresh route policy and reserve one due warning only when its local queue has room.
+    pub(super) fn tick_with_warnings(
+        &mut self,
+        local: CivilTime,
+        second: u8,
+        now_ms: u64,
+        activity: impl FnMut(&str) -> Option<u64>,
+        active: bool,
+        warning_capacity: bool,
+    ) -> Option<ScheduleWarning> {
+        self.schedule.as_mut()?.tick_with_warnings(
+            local,
+            second,
+            now_ms,
+            activity,
+            |route| self.manager.owns_permanent(&route.remote),
+            WarningGate {
+                source_active: |_: &str| active,
+                capacity: warning_capacity,
+            },
+        )
+    }
     /// Reserve a configured attach, or unpublish a withdrawal before allowing replacements.
     pub fn next_scheduled(&mut self, work: GenerationWork) -> Option<LinkEffect> {
         if !self.admitting || !work.is_current() {
@@ -469,6 +697,10 @@ impl NodeLinkControl {
             remote: reservation.remote().into(),
             mode: Mode::TRANSCEIVE,
             permanent: true,
+            group: reservation
+                .group_label()
+                .and_then(|_| self.group_member(reservation.remote()))
+                .map(Box::new),
             work,
             scheduled: Some(reservation),
         }))

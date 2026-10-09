@@ -54,9 +54,12 @@ dependencies:
   dependency.
 - `librptadvaccess` becomes appropriate when RF, AllStarLink, EchoLink, and
   REST access control share a substantial verified-identity policy.
-- `librptadviax2` will own IAX2 framing, negotiation, control messages, and
-  media transport for standalone interoperability. The current
-  Asterisk-specific link implementation is not extracted prematurely.
+- `librptadviax2` owns IAX2 framing, negotiation, control messages, and media
+  packet handling for standalone interoperability. Its protocol engine is
+  separate from socket I/O; a standalone network adapter supplies and sends
+  datagrams through a bounded interface. Codec adapters are separate from the
+  protocol engine and use released codec libraries where available. The
+  current Asterisk-specific link implementation is not extracted prematurely.
 - The control-path execution adapter owns only taskprocessor submission,
   serialized execution, and stop/drain. ADR 0038 selects Asterisk's
   taskprocessor as its current backend; scheduling and controller policy are

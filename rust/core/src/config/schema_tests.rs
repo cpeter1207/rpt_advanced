@@ -24,6 +24,158 @@ fn unknown_input_warns_once_with_source_context() {
 }
 
 #[test]
+fn statpost_options_are_recognized_in_global_and_node_sections() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatpost_url=https://stats.example/report?site=main\nstatpost_time=60\n[1000]\nstatpost_url=http://127.0.0.1:8080/status\nstatpost_time=300\n",
+    )
+    .unwrap();
+
+    let result = Schema::validate(&document).unwrap();
+    assert!(
+        result.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn statpost_url_without_host_and_blank_or_oversized_group_names_are_invalid() {
+    let source = format!(
+        "[1000]\nstatpost_url=http://\n[permanent 1000 net]\nremote_node=2000\ngroup_name=   \n[permanent 1000 long]\nremote_node=3000\ngroup_name={}\n",
+        "x".repeat(64)
+    );
+    let document = ConfigDocument::parse(&source).unwrap();
+    let warnings = Schema::validate(&document).unwrap().warnings;
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning.key == "statpost_url")
+            .count(),
+        1
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| warning.key == "group_name")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn iax_registration_accepts_secure_url_and_bounded_port_and_interval() {
+    let valid = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://register.allstarlink.org/\niax_registration_interval_s=60\niax_local_port=4569\n[1000]\niax_registration_url=https://registration.example:8443/path\niax_registration_interval_s=600\niax_local_port=65535\n",
+    )
+    .unwrap();
+    assert!(Schema::validate(&valid).unwrap().warnings.is_empty());
+
+    let invalid = ConfigDocument::parse(
+        "[1000]\niax_registration_url=http://register.example/\niax_registration_interval_s=29\niax_local_port=0\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&invalid).unwrap().warnings;
+    assert_eq!(warnings.len(), 3);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.key == "iax_registration_url")
+    );
+}
+
+#[test]
+fn radio_schema_accepts_each_carrier_source_and_uses_radio_defaults() {
+    for source in [
+        "disabled",
+        "dsp",
+        "vox",
+        "cm119",
+        "cm119_inverted",
+        "parallel",
+        "parallel_inverted",
+    ] {
+        let document =
+            ConfigDocument::parse(&format!("[radio]\ncarrier_source={source}\n")).unwrap();
+        assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    }
+
+    let invalid = ConfigDocument::parse(
+        "[radio]\ninput_extra_buffer_ms=501\nreceive_graph=\ntransmit_graph=\nreceive_signaling=invalid\ntransmit_ctcss_phase_shift_degrees=361\ntransmit_ctcss_turnoff_duration_ms=1001\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&invalid).unwrap().warnings;
+    let fallback = |key: &str| {
+        warnings
+            .iter()
+            .find(|warning| warning.key == key)
+            .map(|warning| warning.fallback.as_str())
+    };
+    assert_eq!(fallback("input_extra_buffer_ms"), Some("0"));
+    assert_eq!(fallback("receive_graph"), Some("anull"));
+    assert_eq!(fallback("transmit_graph"), Some("anull"));
+    assert_eq!(fallback("receive_signaling"), Some("carrier"));
+    assert_eq!(fallback("transmit_ctcss_phase_shift_degrees"), Some("120"));
+    assert_eq!(fallback("transmit_ctcss_turnoff_duration_ms"), Some("180"));
+}
+
+#[test]
+fn iax_registration_url_accepts_empty_value_and_rejects_credentials() {
+    let empty = ConfigDocument::parse("[general]\niax_registration_url=\n").unwrap();
+    assert!(Schema::validate(&empty).unwrap().warnings.is_empty());
+
+    let credentials = ConfigDocument::parse(
+        "[general]\niax_registration_url=https://user:secret@register.example/\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&credentials).unwrap().warnings;
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].key, "iax_registration_url");
+}
+
+#[test]
+fn status_snapshot_interval_is_recognized_in_global_and_node_sections() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatus_snapshot_interval_ms=80\n[1000]\nstatus_snapshot_interval_ms=25\n",
+    )
+    .unwrap();
+
+    let result = Schema::validate(&document).unwrap();
+    assert!(
+        result.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn invalid_statpost_values_warn_and_use_inherited_fallback() {
+    let document = ConfigDocument::parse(
+        "[general]\nstatpost_url=https://stats.example/report\nstatpost_time=90\n[1000]\nstatpost_url=ftp://stats.example/report\nstatpost_time=601\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&document).unwrap().warnings;
+
+    assert_eq!(warnings.len(), 2);
+    assert_eq!(warnings[0].key, "statpost_url");
+    assert_eq!(warnings[0].message, "invalid option value");
+    assert_eq!(warnings[0].fallback, "https://stats.example/report");
+    assert_eq!(warnings[1].key, "statpost_time");
+    assert_eq!(warnings[1].fallback, "90");
+
+    let credentials =
+        ConfigDocument::parse("[1000]\nstatpost_url=https://user:password@stats.example/report\n")
+            .unwrap();
+    let warning = Schema::validate(&credentials)
+        .unwrap()
+        .warnings
+        .into_iter()
+        .find(|warning| warning.key == "statpost_url")
+        .unwrap();
+    assert_eq!(warning.value, "<redacted URL>");
+    assert!(!format!("{warning:?}").contains("password"));
+}
+
+#[test]
 fn repeated_default_sections_are_merged_without_duplicate_warnings() {
     let source = "[general]\nfull_duplex=maybe\n[general]\ntransmit_hang_ms=invalid\n";
     let result = Schema::validate(&ConfigDocument::parse(source).unwrap()).unwrap();
@@ -143,6 +295,13 @@ fn templates_macros_and_events_are_validated_after_inheritance() {
         .unwrap(),
     )
     .unwrap();
+    Schema::validate(
+        &ConfigDocument::parse(
+            "[node]\n[template node greeting]\ntext=local hello\n[event node morning]\nat=weekly Monday 08:00\ntemplate=greeting\n",
+        )
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -176,6 +335,10 @@ fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
             "schedule replacement must select another node",
         ),
         (
+            "[node]\n[permanent node primary]\nremote_node=1\n[permanent node other]\nremote_node=2\n[schedule node net]\nremote_node=2\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n",
+            "duplicate configured link remote node",
+        ),
+        (
             "[node]\n[permanent node primary]\nremote_node=1\n[schedule node net]\nremote_node=2\nreplace_permanent=primary\nstart_time=12:00\nend_time=11:00\n",
             "invalid schedule window",
         ),
@@ -186,6 +349,112 @@ fn configured_links_are_complete_unique_and_reference_a_distinct_primary() {
     ];
     for (source, expected) in cases {
         assert_eq!(structure_error(source).1, expected, "{source}");
+    }
+}
+
+#[test]
+fn scheduled_link_warnings_are_validated_as_positive_ordered_millisecond_lists() {
+    let source = "[524950]\n[permanent 524950 primary]\nremote_node=506315\n[schedule 524950 weekday-net]\nremote_node=2627\nreplace_permanent=primary\ndays=Monday-Friday\nstart_time=11:00\nend_time=12:00\nwarning_before_start_ms=3600000,1800000,900000,600000,300000,60000\nwarning_before_end_ms=600000,300000,60000\nwarning_message_id=scheduled-link-change\n";
+    assert!(
+        Schema::validate(&ConfigDocument::parse(source).unwrap())
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
+}
+
+#[test]
+fn invalid_or_incomplete_scheduled_link_warnings_are_reported_without_rejecting_config() {
+    let base = "[524950]\n[permanent 524950 primary]\nremote_node=506315\n[schedule 524950 weekday-net]\nremote_node=2627\nreplace_permanent=primary\nstart_time=11:00\nend_time=12:00\n";
+    for (extra, expected_key) in [
+        (
+            "warning_before_start_ms=60000,0\nwarning_message_id=scheduled-link-change\n",
+            "warning_before_start_ms",
+        ),
+        (
+            "warning_before_end_ms=60000,,30000\nwarning_message_id=scheduled-link-change\n",
+            "warning_before_end_ms",
+        ),
+        ("warning_before_start_ms=60000\n", "warning_message_id"),
+        (
+            "warning_before_start_ms=60000\nwarning_message_id=unknown\n",
+            "warning_message_id",
+        ),
+    ] {
+        let document = ConfigDocument::parse(&format!("{base}{extra}")).unwrap();
+        assert!(
+            Schema::validate(&document)
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|warning| warning.key == expected_key)
+        );
+    }
+}
+
+#[test]
+fn permanent_remote_node_list_is_accepted_without_config_warnings() {
+    let source = "[524950]\n[permanent 524950 blind-hams]\nremote_node=506315, 506312,506310,506311,506313,506314\ngroup_name=The Blind Hams Network\n";
+    let validation = Schema::validate(&ConfigDocument::parse(source).unwrap()).unwrap();
+    assert!(
+        validation.warnings.is_empty(),
+        "remote_node lists are valid"
+    );
+}
+
+#[test]
+fn scheduled_remote_node_list_and_group_name_are_accepted_without_warnings() {
+    let source = "[524950]\n[permanent 524950 blind-hams]\nremote_node=506315,506312\n[schedule 524950 weekday-net]\nremote_node=2627,2628\ngroup_name=The Blind Hams Network\nreplace_permanent=blind-hams\nstart_time=11:00\nend_time=12:00\n";
+    let result = Schema::validate(&ConfigDocument::parse(source).unwrap());
+    assert!(
+        result.is_ok(),
+        "scheduled link groups should validate: {result:?}"
+    );
+    assert!(result.unwrap().warnings.is_empty());
+}
+
+#[test]
+fn unnamed_single_member_permanent_group_remains_valid() {
+    let source = "[524950]\n[permanent 524950 home]\nremote_node=506315\n";
+    assert!(
+        Schema::validate(&ConfigDocument::parse(source).unwrap())
+            .unwrap()
+            .warnings
+            .is_empty()
+    );
+}
+
+#[test]
+fn malformed_or_conflicting_permanent_node_lists_report_specific_errors() {
+    for remote in ["506315,", "506315,,506312", "506315,not-a-node"] {
+        let source = format!("[524950]\n[permanent 524950 group]\nremote_node={remote}\n");
+        assert_eq!(
+            structure_error(&source).1,
+            "permanent remote node list is invalid",
+            "{remote}"
+        );
+    }
+    for (source, expected) in [
+        (
+            "[524950]\n[permanent 524950 group]\nremote_node=506315,524950\n",
+            "configured link cannot target its local node",
+        ),
+        (
+            "[524950]\n[permanent 524950 one]\nremote_node=506315,506312\n[permanent 524950 two]\nremote_node=506314,506312\n",
+            "duplicate configured link remote node",
+        ),
+    ] {
+        assert_eq!(structure_error(source).1, expected, "{source}");
+    }
+    for remote in ["2627,", "2627,,2628", "2627,not-a-node"] {
+        let source = format!(
+            "[524950]\n[permanent 524950 group]\nremote_node=506315\n[schedule 524950 net]\nremote_node={remote}\nreplace_permanent=group\nstart_time=11:00\nend_time=12:00\n"
+        );
+        assert_eq!(
+            structure_error(&source).1,
+            "schedule remote node list is invalid",
+            "{remote}"
+        );
     }
 }
 
@@ -271,6 +540,10 @@ fn inherited_warning_fallbacks_follow_each_family_scope() {
 #[test]
 fn structural_errors_cover_bounded_labels_missing_macros_and_colliding_schedules() {
     assert_eq!(
+        structure_error("[general invalid]\n").1,
+        "invalid section name"
+    );
+    assert_eq!(
         structure_error(&format!(
             "[node]\n[template node {}]\ntext=x\n",
             "x".repeat(64)
@@ -309,6 +582,11 @@ fn structural_errors_cover_bounded_labels_missing_macros_and_colliding_schedules
         .1,
         "duplicate configured link remote node"
     );
+    let repeated_peer = format!(
+        "{primary}[schedule 1000 morning]\nremote_node=3000\nreplace_permanent=primary\ndays=Monday-Friday\nstart_time=09:30\nend_time=11:00\n\
+         [schedule 1000 evening]\nremote_node=3000\nreplace_permanent=primary\ndays=Monday\nstart_time=20:00\nend_time=21:30\n"
+    );
+    assert!(ConfigDocument::parse(&repeated_peer).is_ok());
     for missing in ["remote_node", "replace_permanent", "start_time", "end_time"] {
         let complete = schedule("incomplete", "3000");
         let incomplete = complete

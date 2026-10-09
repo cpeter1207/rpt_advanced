@@ -2,11 +2,10 @@
 
 Status: Accepted
 
-Amended 2026-09-13: the combined native tick is split into input-driven local
-receive and output-clocked transmit workers. The current USBRadioPlus migration
-implements the independent callback entry points. The local/link/telemetry
-inbound-ring topology, shared-clock fast path, and two-owner generational
-lifecycle remain pending; none was shipped in USBRadioPlus alpha18.
+Amended 2026-10-01: every telemetry source, including Morse and tone sequences,
+is rendered outside the transmit worker and delivered as PCM through the
+telemetry ring. This ADR describes required ownership; implementation status is
+tracked in `WISHLIST.md`.
 
 Native-rate scope is narrowed to 48 kHz by
 [ADR 0035](0035-fixed-48khz-native-audio.md). The variable-frame and elapsed-sample
@@ -44,10 +43,10 @@ from its corresponding callback.
    by the selected audio adapter. It consumes the outputs of the local receive
    inbound ring, every connected link's inbound PCM ring, and the telemetry
    playout ring, and mixes them under the existing routing and duplex policy.
-   It owns transmit processing, native telemetry generation, PTT timing, and
-   transmit oscillator phase. After the program mix, it adds the selected DCS
-   or CTCSS signal where the hardware profile requires generated signaling
-   (ADR 0033), and writes directly into the adapter-supplied output buffer.
+   It owns transmit processing, PTT timing, and transmit oscillator phase. All
+   telemetry PCM comes only from the telemetry ring. After the program mix, it
+   adds profile-selected generated DCS or CTCSS (ADR 0033) and writes directly
+   into the adapter-supplied output buffer.
    For PortAudio this is PortAudio's output callback buffer, not an
    intermediate output ring.
 
@@ -58,6 +57,19 @@ frames. The receive call independently supplies its available input count;
 there is no requirement that receive and transmit counts or callback times
 match. Neither worker performs device reads/writes, codec or network I/O.
 
+### Telemetry rendering and ownership
+
+The station-control owner serializes telemetry selection and submits source
+descriptions to one station-telemetry worker. That worker performs speech
+synthesis, sound-file decoding, Morse rendering, and tone-sequence rendering
+outside the radio audio callbacks. It writes bounded canonical `f32` chunks at
+their source rate into the telemetry PCM ring while sources are produced. The
+ring alone converts and clocks that media for native-rate playout; it is not the
+bounded control queue that transfers source descriptions. Configured source
+fallback and receive-interruption Morse are selected by the producer, so the
+transmit worker handles only PCM reads and mixing. It does not contain
+telemetry generators or generate fallback audio.
+
 All source-to-transmit sample-rate conversion and clock-drift correction
 belong to the inbound rings, including the local receive and telemetry rings.
 The local receive ring corrects capture-to-playback drift **after** receive
@@ -67,7 +79,7 @@ independent timer or output clock-recovery loop. Outbound codec conversion and
 detector-private analysis decimation are distinct boundaries, not additional
 inbound rate converters (ADR 0035).
 
-### Verified shared-clock fast path
+### Shared-clock fast path
 
 An audio adapter that knows ADC and DAC have no relative clock drift may
 declare a shared-clock capability at stream setup. A known common disciplined
@@ -218,11 +230,16 @@ output queue. Actual device I/O errors retain their normal safe recovery path.
 COR, CTCSS, DCS, PTT, and GPIO edge notifications publish immediately after
 the receive or transmit call that detects them. Each publisher has its own
 bounded SPSC event queue to the control owner. Meter, FIFO, and periodic status
-snapshots use a separately configured per-node interval with a global fallback;
-the default is 50 ms. Each worker accumulates its elapsed samples and publishes
-its own fields on the first call ending at or after its deadline. Control
-combines timestamped snapshots; it must not mistake independent receive and
-transmit publications for simultaneous observations.
+snapshots use `status_snapshot_interval_ms`, configured per node with a
+`[general]` fallback and a 50 ms default. Values must be positive integers.
+Each independently paced worker accumulates its own elapsed samples and
+publishes on the first call ending at or after its deadline. Control drains the
+bounded queues and retains the latest RX and TX snapshots separately; their
+timestamps are not presented as simultaneous observations. A full queue drops
+the new snapshot and increments an observable counter rather than blocking an
+audio callback. CLI status includes the latest RX/TX peak, RMS, clipping count,
+and available local-ring occupancy, reserve, target, capacity, ratio, shortfall,
+and discard statistics.
 
 ## Consequences
 

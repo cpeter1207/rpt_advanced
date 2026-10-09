@@ -94,9 +94,13 @@ fallback remains after the migration.
 
 Standalone IAX2 interoperability targets current ASL3 behavior, including
 ASL's HTTPS registration mechanism rather than retired IAX registration. NAT
-shortcomings beyond ASL3 parity are out of scope. Initial autopatch, reverse
-patch, and paging use an external IAX or SIP connection; a native lock-free
-IAX2 telephony replacement remains a future architectural direction.
+shortcomings beyond ASL3 parity are out of scope. `librptadviax2` is our own
+separately versioned IAX2 implementation; it does not depend on Asterisk or
+ASL3. The protocol engine serializes and parses IAX2 packets without performing
+socket I/O. A separate network adapter owns datagram I/O, and codec adapters
+provide codecs through released libraries wherever available. All three remain
+outside real-time audio callbacks. Initial autopatch, reverse patch, and paging
+use an external IAX or SIP connection.
 
 The standalone service runs under its own non-root account under `systemd` and
 is upgraded by Debian packages through `apt`. USBRadioPlus and rpt_advanced

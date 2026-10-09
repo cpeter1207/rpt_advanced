@@ -11,22 +11,279 @@ fn scheduler() -> LinkScheduler {
                 local: "524950".into(),
                 remote: "2000".into(),
                 permanent: true,
+                group_label: None,
+                group_name: None,
+                group_priority: None,
             },
             RouteSpec {
                 local: "524950".into(),
                 remote: "3000".into(),
                 permanent: false,
+                group_label: None,
+                group_name: None,
+                group_priority: None,
             },
         ],
         vec![ReplacementSpec {
-            route: 1,
-            replaced: 0,
+            routes: vec![1],
+            replaced: vec![0],
             window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
             end_inactivity_ms: 60000,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
         }],
         None,
     )
     .unwrap()
+}
+
+#[test]
+fn separate_nonoverlapping_windows_may_share_a_scheduled_peer() {
+    let routes = vec![
+        RouteSpec {
+            local: "524950".into(),
+            remote: "2000".into(),
+            permanent: true,
+            group_label: Some("blind-hams".into()),
+            group_name: None,
+            group_priority: Some(0),
+        },
+        RouteSpec {
+            local: "524950".into(),
+            remote: "3000".into(),
+            permanent: false,
+            group_label: Some("schedule:morning".into()),
+            group_name: Some("Morning".into()),
+            group_priority: Some(0),
+        },
+        RouteSpec {
+            local: "524950".into(),
+            remote: "3000".into(),
+            permanent: false,
+            group_label: Some("schedule:evening".into()),
+            group_name: Some("Evening".into()),
+            group_priority: Some(0),
+        },
+    ];
+    let windows = vec![
+        ReplacementSpec {
+            routes: vec![1],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(Some("Monday-Friday"), None, "09:30", "11:00").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        },
+        ReplacementSpec {
+            routes: vec![2],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(Some("Monday"), None, "20:00", "21:30").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        },
+    ];
+
+    assert!(LinkScheduler::new(1, routes.clone(), windows.clone(), None).is_ok());
+
+    let mut overlapping = windows;
+    overlapping[1].window =
+        ScheduledWindow::parse(Some("Monday-Friday"), None, "10:00", "11:30").unwrap();
+    assert!(LinkScheduler::new(1, routes, overlapping, None).is_err());
+}
+
+fn warning_scheduler(start: &[u64], end: &[u64]) -> LinkScheduler {
+    let mut schedule = scheduler();
+    schedule.windows[0].spec.warning_before_start_ms = start.to_vec();
+    schedule.windows[0].spec.warning_before_end_ms = end.to_vec();
+    schedule.windows[0].spec.warning_message_id = Some("scheduled-link-change".into());
+    schedule
+}
+
+fn tick_warnings(
+    schedule: &mut LinkScheduler,
+    time: CivilTime,
+    second: u8,
+    now_ms: u64,
+    activity: impl FnMut(&str) -> Option<u64>,
+    active: impl FnMut(&str) -> bool,
+) -> Option<super::ScheduleWarning> {
+    schedule.tick_with_warnings(
+        time,
+        second,
+        now_ms,
+        activity,
+        |_| false,
+        WarningGate {
+            source_active: active,
+            capacity: true,
+        },
+    )
+}
+
+#[test]
+fn schedule_warning_start_leads_are_ordered_and_not_repeated() {
+    let mut schedule = warning_scheduler(&[120_000, 60_000], &[]);
+    let first = tick_warnings(&mut schedule, civil(11, 58), 0, 1_000, |_| None, |_| false);
+    assert_eq!(first.unwrap().remaining_ms, 120_000);
+    let second = tick_warnings(&mut schedule, civil(11, 59), 0, 61_000, |_| None, |_| false);
+    assert_eq!(second.unwrap().remaining_ms, 60_000);
+    assert!(
+        tick_warnings(
+            &mut schedule,
+            civil(11, 59),
+            30,
+            91_000,
+            |_| None,
+            |_| false
+        )
+        .is_none()
+    );
+    assert!(tick_warnings(&mut schedule, civil(12, 0), 0, 121_000, |_| None, |_| false).is_none());
+}
+
+#[test]
+fn schedule_warning_end_uses_expected_inactivity_deadline() {
+    let mut schedule = warning_scheduler(&[], &[60_000]);
+    assert!(tick_warnings(&mut schedule, civil(12, 59), 0, 1_000, |_| None, |_| false).is_none());
+    let due = tick_warnings(&mut schedule, civil(13, 0), 0, 61_000, |_| None, |_| false).unwrap();
+    assert_eq!(due.remaining_ms, 60_000);
+    assert!(tick_warnings(&mut schedule, civil(13, 1), 0, 121_000, |_| None, |_| false).is_none());
+}
+
+#[test]
+fn schedule_warning_skips_active_input_and_reenables_after_inactivity_reset() {
+    let mut schedule = warning_scheduler(&[], &[60_000]);
+    schedule.tick(civil(12, 59), 0, 1_000, |_| None, |_| false);
+    assert!(tick_warnings(&mut schedule, civil(13, 0), 0, 61_000, |_| None, |_| true).is_none());
+    let due_after_reset = tick_warnings(
+        &mut schedule,
+        civil(13, 0),
+        10,
+        71_000,
+        |_| Some(71_000),
+        |_| false,
+    )
+    .unwrap();
+    assert_eq!(due_after_reset.remaining_ms, 60_000);
+}
+
+#[test]
+fn schedule_start_warning_is_skipped_during_activity_without_later_deferral() {
+    let mut schedule = warning_scheduler(&[60_000], &[]);
+    assert!(tick_warnings(&mut schedule, civil(11, 59), 0, 1_000, |_| None, |_| true,).is_none());
+    assert!(
+        tick_warnings(
+            &mut schedule,
+            civil(11, 59),
+            30,
+            31_000,
+            |_| None,
+            |_| false,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn schedule_warning_is_skipped_at_or_after_deadline() {
+    let mut starts = warning_scheduler(&[1], &[]);
+    assert!(tick_warnings(&mut starts, civil(12, 0), 0, 1_000, |_| None, |_| false).is_none());
+    let mut ends = warning_scheduler(&[], &[1]);
+    ends.tick(civil(12, 59), 0, 1_000, |_| None, |_| false);
+    assert!(tick_warnings(&mut ends, civil(13, 1), 0, 121_000, |_| None, |_| false).is_none());
+}
+
+#[test]
+fn schedule_warning_waits_for_bounded_status_queue_capacity() {
+    let mut schedule = warning_scheduler(&[60_000], &[]);
+    assert!(
+        schedule
+            .tick_with_warnings(
+                civil(11, 59),
+                0,
+                1_000,
+                |_| None,
+                |_| false,
+                WarningGate {
+                    source_active: |_: &str| false,
+                    capacity: false,
+                }
+            )
+            .is_none()
+    );
+    assert_eq!(
+        schedule
+            .tick_with_warnings(
+                civil(11, 59),
+                1,
+                2_000,
+                |_| None,
+                |_| false,
+                WarningGate {
+                    source_active: |_: &str| false,
+                    capacity: true,
+                }
+            )
+            .unwrap()
+            .remaining_ms,
+        59_000
+    );
+}
+
+#[test]
+fn end_warning_can_target_a_future_window_with_and_without_inactivity() {
+    let mut before_window = warning_scheduler(&[], &[u64::MAX]);
+    assert!(tick_warnings(&mut before_window, civil(10, 0), 0, 0, |_| None, |_| false,).is_some());
+
+    let mut immediate = warning_scheduler(&[], &[60_000]);
+    immediate.windows[0].spec.end_inactivity_ms = 0;
+    assert!(tick_warnings(&mut immediate, civil(12, 59), 0, 1_000, |_| None, |_| false,).is_some());
+}
+
+#[test]
+fn due_warning_is_selected_once_across_multiple_windows() {
+    let old = warning_scheduler(&[60_000], &[]);
+    let mut windows = old.window_specs();
+    windows.push(windows[0].clone());
+    let mut schedule =
+        LinkScheduler::new(2, old.route_specs(), windows, None).expect("two valid windows");
+
+    assert!(tick_warnings(&mut schedule, civil(11, 59), 0, 1_000, |_| None, |_| false,).is_some());
+}
+
+#[test]
+fn reload_matching_checks_replacement_route_identity_and_members() {
+    let old = warning_scheduler(&[120_000], &[60_000]);
+    let add_primary = |routes: &mut Vec<RouteSpec>| {
+        routes.push(RouteSpec {
+            local: "524950".into(),
+            remote: "4000".into(),
+            permanent: true,
+            group_label: None,
+            group_name: None,
+            group_priority: None,
+        });
+    };
+
+    let mut routes = old.route_specs();
+    routes[1].remote = "4000".into();
+    assert!(LinkScheduler::new(2, routes, old.window_specs(), Some(&old)).is_ok());
+
+    let mut routes = old.route_specs();
+    add_primary(&mut routes);
+    let mut windows = old.window_specs();
+    windows[0].replaced.push(2);
+    assert!(LinkScheduler::new(2, routes, windows, Some(&old)).is_ok());
+
+    let mut routes = old.route_specs();
+    add_primary(&mut routes);
+    let mut windows = old.window_specs();
+    windows[0].replaced[0] = 2;
+    assert!(LinkScheduler::new(2, routes, windows, Some(&old)).is_ok());
 }
 
 #[test]
@@ -239,6 +496,10 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
         );
     }
     for invalid in [
+        "empty_routes",
+        "duplicate_routes",
+        "empty_replaced",
+        "duplicate_replaced",
         "same",
         "missing_primary",
         "missing_replacement",
@@ -248,14 +509,79 @@ fn candidate_validation_rejects_each_invalid_endpoint_and_window_relationship() 
         let mut routes = old.route_specs();
         let mut windows = old.window_specs();
         match invalid {
-            "same" => windows[0].route = windows[0].replaced,
-            "missing_primary" => windows[0].replaced = 2,
-            "missing_replacement" => windows[0].route = 2,
+            "empty_routes" => windows[0].routes.clear(),
+            "duplicate_routes" => {
+                let route = windows[0].routes[0];
+                windows[0].routes.push(route);
+            }
+            "empty_replaced" => windows[0].replaced.clear(),
+            "duplicate_replaced" => windows[0].replaced.push(0),
+            "same" => windows[0].routes[0] = windows[0].replaced[0],
+            "missing_primary" => windows[0].replaced = vec![2],
+            "missing_replacement" => windows[0].routes[0] = 2,
             "temporary_primary" => routes[0].permanent = false,
             _ => routes[1].local = "other".into(),
         }
         assert!(
             LinkScheduler::new(2, routes, windows, Some(&old)).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn candidate_validation_requires_scheduled_lists_to_be_one_ordered_group() {
+    for invalid in [
+        "missing_group",
+        "wrong_priority",
+        "different_name",
+        "different_group",
+        "different_local",
+    ] {
+        let mut routes = vec![
+            RouteSpec {
+                local: "524950".into(),
+                remote: "2000".into(),
+                permanent: true,
+                group_label: Some("primary".into()),
+                group_name: None,
+                group_priority: Some(0),
+            },
+            RouteSpec {
+                local: "524950".into(),
+                remote: "3000".into(),
+                permanent: false,
+                group_label: Some("schedule:net".into()),
+                group_name: Some("Net".into()),
+                group_priority: Some(0),
+            },
+            RouteSpec {
+                local: "524950".into(),
+                remote: "4000".into(),
+                permanent: false,
+                group_label: Some("schedule:net".into()),
+                group_name: Some("Net".into()),
+                group_priority: Some(1),
+            },
+        ];
+        match invalid {
+            "missing_group" => routes[1].group_label = None,
+            "wrong_priority" => routes[2].group_priority = Some(2),
+            "different_name" => routes[2].group_name = Some("Other".into()),
+            "different_group" => routes[2].group_label = Some("schedule:other".into()),
+            _ => routes[2].local = "other".into(),
+        }
+        let windows = vec![ReplacementSpec {
+            routes: vec![1, 2],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        }];
+        assert!(
+            LinkScheduler::new(1, routes, windows, None).is_err(),
             "{invalid}"
         );
     }
@@ -290,10 +616,107 @@ fn route_removal_and_lost_ownership_only_reissue_exact_configured_intent() {
 }
 
 #[test]
+fn permanent_group_members_are_desired_and_retried_independently() {
+    let mut routes = (0..3)
+        .map(|priority| RouteSpec {
+            local: "524950".into(),
+            remote: format!("{}", 2000 + priority),
+            permanent: true,
+            group_label: Some("network".into()),
+            group_name: Some("Network".into()),
+            group_priority: Some(priority),
+        })
+        .collect::<Vec<_>>();
+    let mut schedule = LinkScheduler::new(1, std::mem::take(&mut routes), vec![], None).unwrap();
+    schedule.tick(civil(11, 0), 0, 0, |_| None, |_| false);
+    let reservations = (0..3)
+        .map(|_| schedule.next_operation().unwrap())
+        .collect::<Vec<_>>();
+    for reservation in reservations.into_iter().rev() {
+        assert!(schedule.complete(&reservation, true));
+    }
+    assert!(schedule.next_operation().is_none());
+
+    schedule.tick(civil(11, 1), 0, 1, |_| None, |route| route.remote != "2001");
+    let retry = schedule.next_operation().unwrap();
+    assert_eq!(retry.remote(), "2001");
+    assert!(schedule.complete(&retry, true));
+    assert!(schedule.next_operation().is_none());
+}
+
+#[test]
+fn scheduled_replacement_suppresses_and_restores_every_group_member() {
+    let mut routes = (0..3)
+        .map(|priority| RouteSpec {
+            local: "524950".into(),
+            remote: format!("{}", 2000 + priority),
+            permanent: true,
+            group_label: Some("network".into()),
+            group_name: Some("Network".into()),
+            group_priority: Some(priority),
+        })
+        .collect::<Vec<_>>();
+    routes.push(RouteSpec {
+        local: "524950".into(),
+        remote: "3000".into(),
+        permanent: false,
+        group_label: None,
+        group_name: None,
+        group_priority: None,
+    });
+    let mut schedule = LinkScheduler::new(
+        1,
+        routes,
+        vec![ReplacementSpec {
+            routes: vec![3],
+            replaced: vec![0, 1, 2],
+            window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        }],
+        None,
+    )
+    .unwrap();
+    schedule.tick(civil(11, 59), 0, 0, |_| None, |_| false);
+    for remote in ["2000", "2001", "2002"] {
+        let attach = schedule.next_operation().unwrap();
+        assert_eq!(attach.remote(), remote);
+        assert!(schedule.complete(&attach, true));
+    }
+    assert!(schedule.next_operation().is_none());
+
+    schedule.tick(civil(12, 0), 0, 1, |_| None, |_| true);
+    for remote in ["2000", "2001", "2002"] {
+        let detach = schedule.next_operation().unwrap();
+        assert_eq!(detach.action(), LinkTransition::Detach);
+        assert_eq!(detach.remote(), remote);
+        assert!(schedule.complete(&detach, true));
+    }
+    let replacement = schedule.next_operation().unwrap();
+    assert_eq!(replacement.action(), LinkTransition::Attach);
+    assert_eq!(replacement.remote(), "3000");
+    assert!(schedule.complete(&replacement, true));
+
+    schedule.tick(civil(13, 0), 0, 2, |_| None, |_| true);
+    let detach = schedule.next_operation().unwrap();
+    assert_eq!(detach.action(), LinkTransition::Detach);
+    assert_eq!(detach.remote(), "3000");
+    assert!(schedule.complete(&detach, true));
+    for remote in ["2000", "2001", "2002"] {
+        let restore = schedule.next_operation().unwrap();
+        assert_eq!(restore.action(), LinkTransition::Attach);
+        assert_eq!(restore.remote(), remote);
+        assert!(schedule.complete(&restore, true));
+    }
+}
+
+#[test]
 fn changed_windows_preserve_activity_but_not_previous_window_state() {
     let mut old = scheduler();
     old.tick(civil(12, 0), 0, 1000, |_| Some(900), |_| false);
-    for change in ["time", "inactivity", "replacement", "primary"] {
+    for change in ["time", "inactivity", "replacement", "primary", "group"] {
         let mut routes = old.route_specs();
         let mut windows = old.window_specs();
         match change {
@@ -302,6 +725,7 @@ fn changed_windows_preserve_activity_but_not_previous_window_state() {
             }
             "inactivity" => windows[0].end_inactivity_ms = 30000,
             "replacement" => routes[1].remote = "4000".into(),
+            "group" => routes[1].group_label = Some("other-group".into()),
             _ => routes[0].remote = "4000".into(),
         }
         let mut next = LinkScheduler::new(2, routes, windows, Some(&old)).unwrap();
@@ -320,4 +744,148 @@ fn changed_windows_preserve_activity_but_not_previous_window_state() {
     let empty = LinkScheduler::new(1, vec![], vec![], None).unwrap();
     let fresh = LinkScheduler::new(2, old.route_specs(), old.window_specs(), Some(&empty)).unwrap();
     assert_eq!(fresh.windows[0].last_activity, None);
+}
+
+#[test]
+fn changed_warning_configuration_does_not_reuse_a_previous_window() {
+    for change in ["start", "end", "message"] {
+        let mut old = warning_scheduler(&[120_000], &[60_000]);
+        old.tick(civil(11, 0), 0, 1, |_| None, |_| false);
+        let mut window = old.window_specs();
+        match change {
+            "start" => window[0].warning_before_start_ms.push(30_000),
+            "end" => window[0].warning_before_end_ms.push(30_000),
+            _ => window[0].warning_message_id = Some("another-message".into()),
+        }
+        let next = LinkScheduler::new(2, old.route_specs(), window, Some(&old)).unwrap();
+        assert!(!next.windows[0].initialized, "{change}");
+        assert_eq!(next.windows[0].start_warned, Vec::<u64>::new());
+        assert_eq!(next.windows[0].end_warned, Vec::<u64>::new());
+    }
+}
+
+#[test]
+fn duplicate_routes_reject_permanent_same_group_and_missing_windows() {
+    let duplicate = |permanent, group: Option<&str>| RouteSpec {
+        local: "524950".into(),
+        remote: "3000".into(),
+        permanent,
+        group_label: group.map(str::to_owned),
+        group_name: None,
+        group_priority: None,
+    };
+    let empty_window = ReplacementSpec {
+        routes: vec![],
+        replaced: vec![],
+        window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
+        end_inactivity_ms: 0,
+        warning_before_start_ms: Vec::new(),
+        warning_before_end_ms: Vec::new(),
+        warning_message_id: None,
+    };
+
+    for (routes, windows) in [
+        (vec![duplicate(true, None), duplicate(false, None)], vec![]),
+        (
+            vec![
+                duplicate(false, Some("same")),
+                duplicate(false, Some("same")),
+            ],
+            vec![],
+        ),
+        (
+            vec![
+                duplicate(false, Some("first")),
+                duplicate(false, Some("second")),
+            ],
+            vec![],
+        ),
+        (
+            vec![
+                duplicate(false, Some("first")),
+                duplicate(false, Some("second")),
+            ],
+            vec![ReplacementSpec {
+                routes: vec![0],
+                ..empty_window.clone()
+            }],
+        ),
+        (
+            vec![
+                duplicate(false, Some("first")),
+                duplicate(false, Some("second")),
+            ],
+            vec![ReplacementSpec {
+                routes: vec![1],
+                ..empty_window.clone()
+            }],
+        ),
+    ] {
+        assert!(LinkScheduler::new(1, routes, windows, None).is_err());
+    }
+}
+
+#[test]
+fn schedule_validation_rejects_permanent_and_malformed_group_replacements() {
+    let mut routes = scheduler().route_specs();
+    let mut windows = scheduler().window_specs();
+    windows[0].routes = vec![0];
+    windows[0].replaced = vec![1];
+    assert!(LinkScheduler::new(1, routes.clone(), windows.clone(), None).is_err());
+
+    routes[1].group_label = Some("fallback".into());
+    routes[1].group_name = Some("Fallback".into());
+    routes[1].group_priority = Some(0);
+    routes.push(RouteSpec {
+        local: "524950".into(),
+        remote: "4000".into(),
+        permanent: true,
+        group_label: Some("fallback".into()),
+        group_name: Some("Fallback".into()),
+        group_priority: Some(1),
+    });
+    windows[0].routes = vec![1, 2];
+    windows[0].replaced = vec![0];
+    assert!(LinkScheduler::new(1, routes, windows, None).is_err());
+}
+
+#[test]
+fn route_count_change_does_not_reuse_previous_window_state() {
+    let old = scheduler();
+    let mut routes = old.route_specs();
+    routes[1].group_label = Some("fallback".into());
+    routes[1].group_name = Some("Fallback".into());
+    routes[1].group_priority = Some(0);
+    routes.push(RouteSpec {
+        local: "524950".into(),
+        remote: "4000".into(),
+        permanent: false,
+        group_label: Some("fallback".into()),
+        group_name: Some("Fallback".into()),
+        group_priority: Some(1),
+    });
+    let mut windows = old.window_specs();
+    windows[0].routes = vec![1, 2];
+
+    let next = LinkScheduler::new(2, routes, windows, Some(&old)).unwrap();
+    assert!(!next.windows[0].initialized);
+}
+
+#[test]
+fn changed_permanence_is_a_different_route_identity() {
+    let original = RouteSpec {
+        local: "524950".into(),
+        remote: "3000".into(),
+        permanent: false,
+        group_label: None,
+        group_name: None,
+        group_priority: None,
+    };
+    let mut old = LinkScheduler::new(1, vec![original.clone()], vec![], None).unwrap();
+    old.routes[0].paused = true;
+    let mut changed = original;
+    changed.permanent = true;
+    let next = LinkScheduler::new(2, vec![changed], vec![], Some(&old)).unwrap();
+
+    assert!(!next.routes[0].paused);
 }

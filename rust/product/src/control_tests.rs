@@ -3,7 +3,9 @@ use std::ffi::{c_char, c_int};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc,
 };
+use std::time::Duration;
 
 type Task = crate::abi::rptadv_control_task_v1;
 
@@ -113,6 +115,22 @@ fn truncated_or_missing_operation_tables_fail_before_open() {
             Err(ClientError::Incompatible)
         ));
     }
+}
+
+#[test]
+fn standalone_provider_runs_through_the_product_control_client() {
+    let provider = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+    let client = unsafe { ControlClient::open(provider.cast(), "product-test", 2) }.unwrap();
+    let (send, receive) = mpsc::channel();
+    assert!(
+        client
+            .submit(ControlTask::lifecycle(move || send.send(()).unwrap()))
+            .is_ok()
+    );
+    receive
+        .recv_timeout(Duration::from_secs(2))
+        .expect("product task executes on standalone control provider");
+    client.stop_and_drain().unwrap();
 }
 
 #[test]

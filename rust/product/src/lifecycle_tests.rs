@@ -10,15 +10,6 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-#[link(name = "rptadv_file_adapter")]
-unsafe extern "C" {
-    fn rptadv_file_adapter_descriptor() -> *const FileDescriptor;
-}
-#[link(name = "rptadv_speech_adapter")]
-unsafe extern "C" {
-    fn rptadv_speech_adapter_descriptor() -> *const SpeechDescriptor;
-}
-
 fn descriptor() -> &'static abi::rptadv_product_descriptor_v1 {
     unsafe { &*rptadv_product_descriptor_v1() }
 }
@@ -29,8 +20,8 @@ unsafe fn start(configuration: &str) -> i32 {
         api.start.unwrap()(
             crate::fixture::host_descriptor(),
             crate::fixture::control_descriptor(),
-            rptadv_file_adapter_descriptor(),
-            rptadv_speech_adapter_descriptor(),
+            rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+            rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
             configuration.as_ptr().cast(),
             configuration.len(),
         )
@@ -42,13 +33,13 @@ fn active_configuration(extra: &str) -> String {
 }
 
 fn operation(action: LinkAction, node: &str) -> DigitOperation {
-    DigitOperation {
-        command: Command {
+    DigitOperation::new(
+        Command {
             action,
             node: node.into(),
         },
-        digit: None,
-    }
+        None,
+    )
 }
 
 #[test]
@@ -63,8 +54,8 @@ fn descriptor_rejects_bad_composition_and_preserves_reload_state() {
             descriptor().start.unwrap()(
                 ptr::null(),
                 crate::fixture::control_descriptor(),
-                rptadv_file_adapter_descriptor(),
-                rptadv_speech_adapter_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
                 configuration.as_ptr().cast(),
                 configuration.len(),
             )
@@ -175,7 +166,8 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
         },
         0
     );
-    assert!(String::from_utf8(status).unwrap().contains("2000"));
+    let status = String::from_utf8(status).unwrap();
+    assert!(status.contains("2000"), "unexpected link status: {status}");
     let rejected = crate::fixture::peer();
     assert_eq!(
         unsafe {
@@ -232,13 +224,13 @@ fn failed_dial_thread_runs_reserved_attempt_synchronously() {
         let effect = engine
             .operation(
                 "1000",
-                DigitOperation {
-                    command: Command {
+                DigitOperation::new(
+                    Command {
                         action: LinkAction::Transceive,
                         node: "2000".into(),
                     },
-                    digit: None,
-                },
+                    None,
+                ),
             )
             .unwrap();
         let LinkEffect::Connect(attempt) = effect else {
@@ -261,6 +253,42 @@ fn failed_dial_thread_runs_reserved_attempt_synchronously() {
                 .contains("2000")
         );
     }
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
+fn local_rf_loop_rejection_is_a_completed_command_with_queued_telemetry() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+
+    for (index, digit) in b"*31000#".iter().enumerate() {
+        let mut completed = 99;
+        assert_eq!(
+            unsafe { descriptor().digit.unwrap()(c"1000".as_ptr(), 4, *digit, &mut completed) },
+            0,
+            "digit index {index}"
+        );
+        assert_eq!(completed, u32::from(index == 6));
+    }
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
+fn non_rf_loop_rejection_is_returned_without_local_rf_telemetry() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+
+    assert_eq!(
+        unsafe { descriptor().link_command.unwrap()(c"1000".as_ptr(), 4, c"1000".as_ptr(), 4, 1,) },
+        -1
+    );
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
 }
 

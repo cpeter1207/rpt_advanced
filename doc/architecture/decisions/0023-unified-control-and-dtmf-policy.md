@@ -55,6 +55,17 @@ algorithm in an upgradable format. The default administrative idle timeout is
 five minutes, and only a successful administrative command renews it. The lock
 code immediately clears the administrative unlock.
 
+The default DTMF unlock and lock prefixes are `*800` and `*801`; each requires
+the corresponding configured code followed by `#`. They are remappable with
+the node's other command prefixes. The parrot enable and disable operations use
+`*804` and `*805`, are also remappable, and require an active administrative
+unlock. Those parrot changes are live only; configuration reload restores the
+configured `parrot_enabled` value.
+
+Implementation status — 2026-10-05: the hashed-code unlock/lock and authorized
+live parrot commands are implemented in the Rust configuration and runtime.
+Buffer allocation and reclamation follow ADR 0025.
+
 Pad test is a public inherited per-node command whose default is `*82`. After
 the command, a local RF user may enter any of the sixteen DTMF symbols. Local
 receiver unkey alone ends capture. The first 127 symbols are retained; later

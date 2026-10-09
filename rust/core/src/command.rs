@@ -17,6 +17,8 @@ pub enum LinkAction {
     Status,
     /// Disconnect all links while retaining reconnect information.
     DisconnectAll,
+    /// Disconnect and pause permanent links while leaving temporary links active.
+    DisconnectPermanentAll,
     /// Report the last transmitting node.
     LastKeyed,
     /// Monitor one remote node locally without forwarding audio.
@@ -31,16 +33,26 @@ pub enum LinkAction {
     FullStatus,
     /// Restore links saved by disconnect-all.
     ReconnectAll,
+    /// Re-evaluate and restore only permanent links saved by disconnect-all.
+    ReconnectPermanentAll,
     /// Maintain one permanent local-monitor link.
     PermanentLocalMonitor,
     /// Disconnect every active nonpermanent link.
     DisconnectNonPermanentAll,
     /// Announce the local time.
     Time,
+    /// Unlock DTMF administration using the configured code.
+    AdminUnlock,
+    /// Lock DTMF administration using the configured code.
+    AdminLock,
+    /// Enable the native-rate parrot for this node.
+    ParrotEnable,
+    /// Disable the native-rate parrot for this node.
+    ParrotDisable,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 16;
+pub const ACTION_COUNT: usize = 20;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,11 +202,11 @@ impl DtmfCommandMap {
         }
     }
 
-    /// Build the standard 16-action command map.
+    /// Build the standard AllStar-compatible and local administration command map.
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722",
+            "10", "722", "800", "801", "804", "805",
         ];
         let mappings = prefixes
             .into_iter()
@@ -268,17 +280,21 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::Transceive,
         LinkAction::Command,
         LinkAction::Status,
-        LinkAction::DisconnectAll,
+        LinkAction::DisconnectPermanentAll,
         LinkAction::LastKeyed,
         LinkAction::LocalMonitor,
         LinkAction::DisconnectPermanent,
         LinkAction::PermanentMonitor,
         LinkAction::PermanentTransceive,
         LinkAction::FullStatus,
-        LinkAction::ReconnectAll,
+        LinkAction::ReconnectPermanentAll,
         LinkAction::PermanentLocalMonitor,
         LinkAction::DisconnectNonPermanentAll,
         LinkAction::Time,
+        LinkAction::AdminUnlock,
+        LinkAction::AdminLock,
+        LinkAction::ParrotEnable,
+        LinkAction::ParrotDisable,
     ]
 }
 
@@ -287,11 +303,15 @@ fn takes_node(action: LinkAction) -> bool {
         action,
         LinkAction::Status
             | LinkAction::DisconnectAll
+            | LinkAction::DisconnectPermanentAll
             | LinkAction::LastKeyed
             | LinkAction::FullStatus
             | LinkAction::ReconnectAll
+            | LinkAction::ReconnectPermanentAll
             | LinkAction::DisconnectNonPermanentAll
             | LinkAction::Time
+            | LinkAction::ParrotEnable
+            | LinkAction::ParrotDisable
     )
 }
 

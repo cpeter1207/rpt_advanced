@@ -4,6 +4,9 @@ use crate::fixture::{host, reset};
 const DIRECT_ACK_MISSING: u8 = 41;
 const DIRECT_ACK_WRONG: u8 = 42;
 const DIRECT_OPTION_FAILED: u8 = 43;
+const LINK_ACK_MISSING: u8 = 44;
+const LINK_ACK_WRONG: u8 = 45;
+const LINK_OPTION_FAILED: u8 = 46;
 
 #[unsafe(no_mangle)]
 extern "C" fn ast_replace_sigchld() {}
@@ -18,29 +21,58 @@ unsafe extern "C" fn current(_: *mut c_void) -> u32 {
 unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
     0
 }
-unsafe extern "C" fn transmit(_: *mut c_void, _: *mut f32, _: u32, _: *mut u32) -> i32 {
+unsafe extern "C" fn transmit(
+    _: *mut c_void,
+    _: *mut f32,
+    _: u32,
+    _: *mut u32,
+    _: *mut u32,
+) -> i32 {
     0
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_channel_setoption(
-    _: *mut ffi::ast_channel,
+    channel: *mut ffi::ast_channel,
     option: i32,
     data: *mut c_void,
     length: i32,
-    _: i32,
+    block: i32,
 ) -> i32 {
+    assert_eq!(block, 0);
+    if option == 0x52504C41 {
+        assert_eq!(length as usize, size_of::<ffi::urp_ast_link_attach>());
+        let attachment = unsafe { &mut *data.cast::<ffi::urp_ast_link_attach>() };
+        assert_eq!(
+            attachment.struct_size as usize,
+            size_of::<ffi::urp_ast_link_attach>()
+        );
+        assert_eq!(attachment.abi_version, 1);
+        assert_eq!(attachment.accepted_abi_version, 0);
+        assert_eq!(channel, host(|state| state.token(0)));
+        assert_eq!(attachment.peer_channel, ptr::dangling_mut());
+        assert!(host(|state| state
+            .read_rates
+            .contains_key(&(attachment.peer_channel as usize))));
+        let failure = host(|state| state.failure);
+        attachment.accepted_abi_version = match failure {
+            LINK_ACK_MISSING => 0,
+            LINK_ACK_WRONG => 2,
+            _ => 1,
+        };
+        return if failure == LINK_OPTION_FAILED { -1 } else { 0 };
+    }
     assert_eq!(option, 0x52504144);
     assert_eq!(length as usize, size_of::<ffi::urp_ast_direct_callbacks>());
     // SAFETY: attach_direct supplies exclusive access to this complete live descriptor.
     let descriptor = unsafe { &mut *data.cast::<ffi::urp_ast_direct_callbacks>() };
     assert!(descriptor.receive.is_some() && descriptor.transmit.is_some());
-    assert_eq!(descriptor.abi_version, 2);
+    assert_eq!(descriptor.abi_version, 3);
     assert_eq!(descriptor.accepted_abi_version, 0);
     let failure = host(|state| state.failure);
     descriptor.accepted_abi_version = match failure {
         DIRECT_ACK_MISSING => 0,
         DIRECT_ACK_WRONG => 1,
-        _ => 2,
+        _ => 3,
     };
     if failure == DIRECT_OPTION_FAILED {
         -1
@@ -58,7 +90,17 @@ fn radio_activation_accepts_the_installed_direct_callback_abi() {
     let null = ptr::null_mut();
     unsafe {
         let mut radio = null;
-        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+        let identity = b"1000\0usb";
+        assert_eq!(
+            radio_open(
+                null,
+                identity.as_ptr().cast(),
+                identity.len(),
+                8,
+                &mut radio
+            ),
+            0
+        );
         let result = radio_activate(null, radio, Some(receive), null, Some(transmit), null);
         radio_destroy(null, radio);
         assert_eq!(result, 0);
@@ -103,7 +145,7 @@ fn missing_direct_callbacks_destroy_channels_and_cannot_reactivate_the_reservati
     for (receive, transmit) in [
         (
             None,
-            Some(transmit as unsafe extern "C" fn(_, _, _, _) -> _),
+            Some(transmit as unsafe extern "C" fn(_, _, _, _, _) -> _),
         ),
         (Some(receive as unsafe extern "C" fn(_, _, _, _) -> _), None),
     ] {
@@ -153,7 +195,56 @@ fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
         command_notice(null, c"100".as_ptr(), 3, 0);
     }
     assert_eq!(boundary(-1, || panic!("callback fault")), -1);
-    assert_eq!(descriptor().abi_version, 2);
+    assert_eq!(descriptor().abi_version, 4);
+}
+
+#[test]
+fn peer_binding_requires_radio_option_acknowledgment_and_preserves_owners() {
+    for failure in [0, LINK_ACK_MISSING, LINK_ACK_WRONG, LINK_OPTION_FAILED] {
+        reset();
+        let null = ptr::null_mut();
+        unsafe {
+            let mut radio = null;
+            assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+            let peer = PeerIo::dial(c"radio@host/200", c"100", 8, || true).unwrap();
+            assert_eq!(
+                host(|state| state.read_rates[&(peer.channel.pointer.as_ptr() as usize)]),
+                peer.rate(),
+                "the hook must see the already negotiated decoded rate"
+            );
+            let peer = into_raw(peer);
+            host(|state| state.failure = failure);
+            assert_eq!(
+                peer_bind_radio(null, peer, radio),
+                if failure == 0 { 0 } else { -1 }
+            );
+            assert_eq!(peer_bind_radio(null, null, radio), -1);
+            assert_eq!(peer_bind_radio(null, peer, null), -1);
+            assert_eq!(
+                host(|state| state.channels),
+                2,
+                "binding borrows both handles"
+            );
+            let reserved = &mut *radio.cast::<ReservedRadio>();
+            drop(reserved.radio.take());
+            assert_eq!(peer_bind_radio(null, peer, radio), -1);
+            peer_destroy(null, peer);
+            radio_destroy(null, radio);
+        }
+        host(|state| state.clean());
+    }
+}
+
+#[test]
+fn destroy_raw_releases_a_peer_retained_by_the_adapter() {
+    reset();
+    // SAFETY: the fixture owns the fake channel, and the raw peer is destroyed once.
+    unsafe {
+        let peer = PeerIo::dial(c"radio@host/200", c"100", 8, || true).unwrap();
+        let peer = into_raw(peer);
+        destroy_raw(peer);
+    }
+    host(|state| state.clean());
 }
 
 #[test]
@@ -165,6 +256,23 @@ fn radio_service_validates_handles_and_releases_each_successful_open() {
         let mut radio = ptr::dangling_mut();
         assert_eq!(radio_open(null, ptr::null(), 1, 8, &mut radio), -1);
         assert!(radio.is_null());
+        for identity in [
+            b"\0usb".as_slice(),
+            b"node\0".as_slice(),
+            b"node\0usb\0other",
+        ] {
+            assert_eq!(
+                radio_open(
+                    null,
+                    identity.as_ptr().cast(),
+                    identity.len(),
+                    8,
+                    &mut radio
+                ),
+                -1
+            );
+            assert!(radio.is_null());
+        }
         host(|state| state.failure = 1);
         assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), -1);
         assert!(radio.is_null());

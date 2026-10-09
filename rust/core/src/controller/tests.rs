@@ -33,9 +33,193 @@ fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
 }
 
+struct PendingMedia;
+
+impl crate::audio::PcmStreamReader for PendingMedia {
+    fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+        crate::audio::PcmRead::Pending
+    }
+}
+
+#[test]
+fn pending_media_does_not_key_transmitter_while_producer_starts() {
+    let media = PreparedMedia::new_stream(Box::new(PendingMedia)).unwrap();
+    let id = Identifier {
+        media,
+        interval_ms: 1,
+        priority: 1,
+        first_key_only: false,
+        regardless_of_activity: true,
+        polite_maximum_wait_ms: None,
+    };
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![id],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    node.process_audio(false, false, &[], &mut [0.0; 64]);
+
+    assert!(matches!(
+        node.telemetry.active,
+        Some(telemetry::Source::Identifier(0))
+    ));
+    assert!(!node.keyed);
+}
+
+#[test]
+fn activity_snapshot_exposes_current_receive_state_and_bounded_status_capacity() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let activity = node.activity();
+    assert!(!activity.is_active());
+    assert!(control.can_queue_status());
+    node.process_event(true, false);
+    assert!(activity.is_active());
+    node.process_event(false, false);
+    assert!(!activity.is_active());
+    for _ in 0..4 {
+        assert!(control.queue_prepared_status(media(0.1, 8)));
+    }
+    assert!(!control.can_queue_status());
+}
+
+#[test]
+fn parrot_buffers_are_allocated_and_freed_on_control_around_lock_free_handoff() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    assert!(control.set_parrot_enabled(true));
+    let allocations = AUDIO_ALLOCATIONS.with(|count| count.get().unwrap());
+    assert!(
+        allocations >= 4,
+        "capture buffers and queues allocate on control"
+    );
+
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_event(false, false);
+    assert_eq!(AUDIO_ALLOCATIONS.with(|count| count.get().unwrap()), 0);
+    control.reclaim().for_each(drop);
+    assert!(control.parrot_enabled());
+    assert!(control.parrot.is_some());
+    node.observe_parrot(true, &[0.25]);
+
+    assert!(control.set_parrot_enabled(false));
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_event(false, false);
+    assert_eq!(AUDIO_ALLOCATIONS.with(|count| count.get().unwrap()), 0);
+    control.reclaim().for_each(drop);
+    assert!(!control.parrot_enabled());
+    assert!(control.parrot.is_none());
+    assert!(control.take_parrot_capture().is_none());
+    assert!(AUDIO_ALLOCATIONS.with(|count| count.get().unwrap()) >= 4);
+    AUDIO_ALLOCATIONS.with(|count| count.set(None));
+}
+
+#[test]
+fn parrot_output_size_mismatch_skips_sample_processing() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut audio = [0.25];
+    let mut parrot = [];
+    let mut active = true;
+
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+        },
+    );
+
+    assert_eq!(audio, [0.25]);
+    assert!(!active);
+    assert_eq!(node.now, 0);
+}
+
+#[test]
+fn parrot_lifecycle_retries_a_pending_ack_after_the_ack_queue_drains() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let (capture, _) = parrot::ParrotCapture::new();
+    node.parrot_lifecycle
+        .acknowledgements
+        .push(parrot::ParrotAck::Disabled(capture))
+        .unwrap();
+    node.parrot_pending_ack = Some(parrot::ParrotAck::Enabled);
+
+    node.process_event(false, false);
+    assert!(matches!(
+        node.parrot_pending_ack,
+        Some(parrot::ParrotAck::Enabled)
+    ));
+
+    control.reclaim().for_each(drop);
+    node.process_event(false, false);
+    assert!(node.parrot_pending_ack.is_none());
+    control.reclaim().for_each(drop);
+}
+
+#[test]
+fn parrot_enable_ack_waits_when_the_callback_ack_queue_is_full() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.set_parrot_enabled(true));
+    let (capture, _) = parrot::ParrotCapture::new();
+    node.parrot_lifecycle
+        .acknowledgements
+        .push(parrot::ParrotAck::Disabled(capture))
+        .unwrap();
+
+    node.process_event(false, false);
+    assert!(node.parrot_capture.is_some());
+    assert!(matches!(
+        node.parrot_pending_ack,
+        Some(parrot::ParrotAck::Enabled)
+    ));
+
+    control.reclaim().for_each(drop);
+    node.process_event(false, false);
+    assert!(node.parrot_pending_ack.is_none());
+    control.reclaim().for_each(drop);
+    assert!(control.parrot.is_some());
+}
+
 struct TestPeerInput {
     signals: crate::link::PeerSignals,
     sample: Option<f32>,
+    enabled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TestPeerInput {
@@ -44,7 +228,11 @@ impl TestPeerInput {
         if sample.is_some() {
             signals.publish_pcm();
         }
-        Self { signals, sample }
+        Self {
+            signals,
+            sample,
+            enabled: None,
+        }
     }
 }
 
@@ -62,12 +250,641 @@ impl crate::link::PeerInput for TestPeerInput {
     }
 
     fn render(&mut self, output: &mut [f32]) -> bool {
-        let Some(sample) = self.sample else {
+        let Some(sample) = self.sample.filter(|_| {
+            self.enabled
+                .as_ref()
+                .is_none_or(|enabled| enabled.load(std::sync::atomic::Ordering::Acquire))
+        }) else {
             return false;
         };
         output.fill(sample);
         true
     }
+}
+
+fn grouped_test_audio_peer(
+    direct: &str,
+    slot: std::num::NonZeroUsize,
+    selection: crate::link::GroupSelection,
+    input: TestPeerInput,
+    maximum: usize,
+) -> (
+    crate::link::AudioPeer<TestPeerInput>,
+    crate::audio::LinkAudioConsumer,
+) {
+    let (outbound, consumer) = crate::audio::LinkAudioQueue::new(maximum * 2)
+        .unwrap()
+        .into_endpoints();
+    let peer = crate::link::AudioPeer::new(
+        direct,
+        crate::link::Mode::TRANSCEIVE,
+        input,
+        outbound,
+        maximum,
+        0,
+    )
+    .unwrap()
+    .with_group(selection, slot);
+    (peer, consumer)
+}
+
+#[test]
+fn standby_group_audio_never_reaches_rf_or_any_peer() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let (selected, mut selected_out) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        TestPeerInput::new(None),
+        1,
+    );
+    let standby_enabled = Arc::new(AtomicBool::new(false));
+    let mut standby_input = TestPeerInput::new(Some(0.7));
+    standby_input.enabled = Some(Arc::clone(&standby_enabled));
+    let (standby, mut standby_out) = grouped_test_audio_peer(
+        "201",
+        NonZeroUsize::new(2).unwrap(),
+        selection,
+        standby_input,
+        1,
+    );
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![selected, standby], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut rf = [0.0];
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+    standby_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+    let mut sent = [0.0];
+    assert_eq!(rf, [0.0]);
+    assert_eq!(selected_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+    assert_eq!(standby_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+}
+
+#[test]
+fn selected_group_audio_reaches_rf_but_not_a_standby_peer() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let selected_enabled = Arc::new(AtomicBool::new(false));
+    let mut selected_input = TestPeerInput::new(Some(0.25));
+    selected_input.enabled = Some(Arc::clone(&selected_enabled));
+    let (selected, mut selected_out) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        selected_input,
+        1,
+    );
+    let standby_enabled = Arc::new(AtomicBool::new(false));
+    let mut standby = TestPeerInput::new(Some(0.7));
+    standby.enabled = Some(standby_enabled);
+    let (standby, mut standby_out) =
+        grouped_test_audio_peer("201", NonZeroUsize::new(2).unwrap(), selection, standby, 1);
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![selected, standby], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut rf = [0.0];
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+    selected_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+
+    assert_eq!(rf, [0.25]);
+    let mut sent = [0.0];
+    assert_eq!(selected_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+    assert_eq!(standby_out.read(&mut sent), 1);
+    assert_eq!(sent, [0.0]);
+}
+
+#[test]
+fn parrot_capture_includes_local_and_receive_active_nonforwarded_peer_audio() {
+    use crate::link::{AudioPeer, LinkAudio, Mode};
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    let peer_enabled = Arc::new(AtomicBool::new(true));
+    let mut input = TestPeerInput::new(Some(0.2));
+    input.enabled = Some(Arc::clone(&peer_enabled));
+    let (local_out, _) = crate::audio::LinkAudioQueue::new(4)
+        .unwrap()
+        .into_endpoints();
+    let local_monitor = AudioPeer::new("100", Mode::LOCAL_MONITOR, input, local_out, 2, 0).unwrap();
+    let (mut links, _) = LinkAudio::new(vec![local_monitor], 2).unwrap();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    links.process(&mut node, true, &mut [0.1, 0.1]).unwrap();
+    assert_eq!(links.active_count(), 1);
+    peer_enabled.store(false, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut [0.0, 0.0]).unwrap();
+    assert_eq!(links.active_count(), 0);
+
+    let clip = control.take_parrot_capture().unwrap();
+    assert_eq!(clip.samples(), &[0.3, 0.3]);
+}
+
+struct ParrotSamples {
+    offset: usize,
+}
+
+impl crate::audio::PcmStreamReader for ParrotSamples {
+    fn start(&mut self) {
+        self.offset = 0;
+    }
+
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        if self.offset == 2 {
+            return crate::audio::PcmRead::Finished;
+        }
+        output[0] = [0.4, 0.5][self.offset];
+        self.offset += 1;
+        crate::audio::PcmRead::Samples(1)
+    }
+}
+
+#[test]
+fn parrot_bypasses_monitor_and_fallback_peer_routing_only_for_its_audio() {
+    use crate::link::{AudioPeer, LinkAudio, Mode};
+
+    let (to_transceiver, mut from_transceiver) = crate::audio::LinkAudioQueue::new(8)
+        .unwrap()
+        .into_endpoints();
+    let (to_monitor, mut from_monitor) = crate::audio::LinkAudioQueue::new(8)
+        .unwrap()
+        .into_endpoints();
+    let peers = vec![
+        AudioPeer::new(
+            "200",
+            Mode::TRANSCEIVE,
+            TestPeerInput::new(None),
+            to_transceiver,
+            4,
+            0,
+        )
+        .unwrap(),
+        AudioPeer::new(
+            "201",
+            Mode::LOCAL_MONITOR,
+            TestPeerInput::new(None),
+            to_monitor,
+            4,
+            0,
+        )
+        .unwrap(),
+    ];
+    let (mut links, mut dispatcher) = LinkAudio::new(peers, 4).unwrap();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let media = PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 }));
+    assert!(control.queue_prepared_parrot(media));
+
+    let mut local = [0.0; 2];
+    links.process(&mut node, false, &mut local).unwrap();
+    assert_eq!(local, [0.4, 0.5]);
+    assert!(node.parrot_playback_active());
+    assert_eq!(dispatcher.dispatch(1), 1);
+    let mut sent = [0.0; 2];
+    assert_eq!(from_transceiver.read(&mut sent), 0);
+    assert_eq!(sent, [0.4, 0.5]);
+    assert_eq!(from_monitor.read(&mut sent), 0);
+    assert_eq!(sent, [0.4, 0.5]);
+}
+
+struct OneSampleParrot;
+
+impl crate::audio::PcmStreamReader for OneSampleParrot {
+    fn start(&mut self) {}
+
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        output[0] = 0.4;
+        crate::audio::PcmRead::FinalSamples(1)
+    }
+}
+
+#[test]
+fn parrot_final_callback_block_reaches_every_peer() {
+    use crate::link::{AudioPeer, LinkAudio, Mode};
+
+    let (outbound, mut peer_output) = crate::audio::LinkAudioQueue::new(4)
+        .unwrap()
+        .into_endpoints();
+    let peer = AudioPeer::new(
+        "200",
+        Mode::TRANSCEIVE,
+        TestPeerInput::new(None),
+        outbound,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 1).unwrap();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(
+        control.queue_prepared_parrot(PreparedMedia::new_parrot_stream(
+            None,
+            Box::new(OneSampleParrot)
+        ))
+    );
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    assert!(!node.parrot_playback_active());
+    assert_eq!(dispatcher.dispatch(1), 1);
+    let mut sent = [0.0];
+    assert_eq!(peer_output.read(&mut sent), 0);
+    assert_eq!(sent, [0.4]);
+}
+
+fn queued_parrot() -> PreparedMedia {
+    PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 }))
+}
+
+#[test]
+fn receive_activity_discards_a_queued_parrot_before_playback() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.queue_prepared_parrot(queued_parrot()));
+    let mut audio = [0.0; 1];
+    let mut parrot = [0.0; 1];
+    let mut parrot_active = false;
+
+    node.process_audio_with_parrot(
+        false,
+        false,
+        true,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+        },
+    );
+
+    assert_eq!(parrot, [0.0]);
+    assert!(!parrot_active);
+    assert!(!node.parrot_playback_active());
+    control.reclaim().for_each(drop);
+}
+
+#[test]
+fn receive_activity_interrupts_and_discards_active_parrot_audio() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.queue_prepared_parrot(queued_parrot()));
+    let mut audio = [0.0; 1];
+    let mut parrot = [0.0; 1];
+    let mut parrot_active = false;
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+        },
+    );
+    assert_eq!(parrot, [0.4]);
+    assert!(node.parrot_playback_active());
+
+    node.process_audio_with_parrot(
+        false,
+        false,
+        true,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+        },
+    );
+
+    assert_eq!(parrot, [0.0]);
+    assert!(!parrot_active);
+    assert!(!node.parrot_playback_active());
+    control.reclaim().for_each(drop);
+}
+
+#[test]
+fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(control.queue_prepared_parrot(queued_parrot()));
+    let mut rf = [0.0];
+    let mut parrot = [0.0];
+    let mut active = false;
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut rf,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+        },
+    );
+    assert_eq!(parrot, [0.4]);
+    assert!(active);
+    assert!(control.set_parrot_enabled(false));
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut rf,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+        },
+    );
+    assert_eq!(parrot, [0.0]);
+    assert!(!active);
+    control.reclaim().for_each(drop);
+    assert!(!control.parrot_enabled());
+    assert!(control.parrot.is_none());
+}
+
+#[test]
+fn peer_transmit_is_subtracted_from_its_own_outbound_audio() {
+    use crate::link::LinkAudio;
+
+    let (outbound, mut peer_out) = crate::audio::LinkAudioQueue::new(4)
+        .unwrap()
+        .into_endpoints();
+    let peer = crate::link::AudioPeer::new(
+        "200",
+        crate::link::Mode::TRANSCEIVE,
+        TestPeerInput::new(Some(0.25)),
+        outbound,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    dispatcher.dispatch(1);
+    let mut outbound = [1.0; 1];
+    assert_eq!(peer_out.read(&mut outbound), 1);
+    assert_eq!(outbound, [0.0]);
+    let mut rf = [0.5];
+    links.process(&mut node, true, &mut rf).unwrap();
+    dispatcher.dispatch(1);
+
+    assert!((rf[0] - 0.75).abs() < 0.001);
+    outbound.fill(0.0);
+    assert_eq!(peer_out.read(&mut outbound), 0);
+    assert_eq!(outbound, [0.5]);
+}
+
+#[test]
+fn monitor_destinations_are_prepared_only_when_they_belong_to_a_group() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let grouped_enabled = Arc::new(AtomicBool::new(false));
+    let mut grouped_input = TestPeerInput::new(Some(0.25));
+    grouped_input.enabled = Some(Arc::clone(&grouped_enabled));
+    let (grouped_outbound, _) = crate::audio::LinkAudioQueue::new(2)
+        .unwrap()
+        .into_endpoints();
+    let grouped_monitor = crate::link::AudioPeer::new(
+        "200",
+        crate::link::Mode::LOCAL_MONITOR,
+        grouped_input,
+        grouped_outbound,
+        1,
+        0,
+    )
+    .unwrap()
+    .with_group(selection.clone(), NonZeroUsize::new(1).unwrap());
+    let plain_enabled = Arc::new(AtomicBool::new(false));
+    let mut plain_input = TestPeerInput::new(Some(0.5));
+    plain_input.enabled = Some(plain_enabled);
+    let (plain_outbound, _) = crate::audio::LinkAudioQueue::new(2)
+        .unwrap()
+        .into_endpoints();
+    let plain_monitor = crate::link::AudioPeer::new(
+        "201",
+        crate::link::Mode::MONITOR,
+        plain_input,
+        plain_outbound,
+        1,
+        0,
+    )
+    .unwrap();
+    let (mut links, mut dispatcher) =
+        LinkAudio::new(vec![grouped_monitor, plain_monitor], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    links.process(&mut node, false, &mut [0.0]).unwrap();
+    assert_eq!(dispatcher.dispatch(1), 1);
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    grouped_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, true, &mut [0.1]).unwrap();
+
+    assert_eq!(links.active_count(), 1);
+    assert_eq!(dispatcher.dispatch(1), 1);
+}
+
+#[test]
+fn group_winner_change_waits_for_all_inputs_to_be_idle() {
+    use crate::link::LinkAudio;
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let selected_enabled = Arc::new(AtomicBool::new(false));
+    let mut selected_input = TestPeerInput::new(Some(0.2));
+    selected_input.enabled = Some(Arc::clone(&selected_enabled));
+    let (selected, _) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        selected_input,
+        1,
+    );
+    let standby_enabled = Arc::new(AtomicBool::new(false));
+    let mut standby_input = TestPeerInput::new(Some(0.4));
+    standby_input.enabled = Some(Arc::clone(&standby_enabled));
+    let (standby, _) = grouped_test_audio_peer(
+        "201",
+        NonZeroUsize::new(2).unwrap(),
+        selection.clone(),
+        standby_input,
+        1,
+    );
+    let (mut links, _) = LinkAudio::new(vec![selected, standby], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+
+    let mut rf = [0.0];
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    links.process(&mut node, true, &mut rf).unwrap();
+    selection.publish_desired(NonZeroUsize::new(2));
+    links.process(&mut node, true, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+
+    selected_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    selected_enabled.store(false, std::sync::atomic::Ordering::Release);
+    standby_enabled.store(true, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    standby_enabled.store(false, std::sync::atomic::Ordering::Release);
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(2));
+}
+
+#[test]
+fn group_winner_can_change_while_transmitter_is_keyed_without_input_activity() {
+    use crate::link::LinkAudio;
+    use std::num::NonZeroUsize;
+
+    let selection = crate::link::GroupSelection::new();
+    selection.publish_desired(NonZeroUsize::new(1));
+    let (first, _) = grouped_test_audio_peer(
+        "200",
+        NonZeroUsize::new(1).unwrap(),
+        selection.clone(),
+        TestPeerInput::new(None),
+        1,
+    );
+    let (second, _) = grouped_test_audio_peer(
+        "201",
+        NonZeroUsize::new(2).unwrap(),
+        selection.clone(),
+        TestPeerInput::new(None),
+        1,
+    );
+    let (mut links, _) = LinkAudio::new(vec![first, second], 1).unwrap();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.keyed = true;
+    let mut rf = [0.0];
+
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(1));
+    selection.publish_desired(NonZeroUsize::new(2));
+    links.process(&mut node, false, &mut rf).unwrap();
+    assert_eq!(selection.active(), NonZeroUsize::new(2));
 }
 
 fn test_audio_peer(
@@ -551,6 +1368,36 @@ fn courtesy_ducks_without_switching_media_and_partitions_match() {
 }
 
 #[test]
+fn transmit_worker_renders_tone_courtesy_directly() {
+    let sequence = "1000/2,1200+1300@-12/2";
+    let mut expected_source = crate::audio::ToneSequence::new(sequence, -6).unwrap();
+    let mut expected = [0.0; 192];
+    assert_eq!(expected_source.render(&mut expected), expected.len());
+    let courtesy = CourtesySettings {
+        link: Some(
+            PreparedMedia::new_with_tone(
+                None,
+                Some(crate::audio::ToneSequence::new(sequence, -6).unwrap()),
+                "",
+                MorseSettings::default(),
+            )
+            .unwrap(),
+        ),
+        ..CourtesySettings::default()
+    };
+    let (mut node, _) =
+        NodeController::new(ControllerSettings::default(), vec![], vec![], courtesy).unwrap();
+    node.link_unkeyed("peer", "", false);
+    node.process_event(false, false);
+    let mut output = [0.0; 192];
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut output);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn every_release_announcements_follow_hang_once_and_ids_satisfy_lower_priority() {
     let ids = vec![
         Identifier {
@@ -616,6 +1463,11 @@ fn validation_retains_status_pcm_and_rejects_bad_media_and_settings() {
     }
     let bad = ControllerSettings {
         telemetry_duck_db: -61,
+        ..ControllerSettings::default()
+    };
+    assert!(NodeController::new(bad, vec![], vec![], CourtesySettings::default()).is_err());
+    let bad = ControllerSettings {
+        ctcss_hang_ms: 1,
         ..ControllerSettings::default()
     };
     assert!(NodeController::new(bad, vec![], vec![], CourtesySettings::default()).is_err());
@@ -843,6 +1695,106 @@ fn audio_path_never_allocates_or_reclaims_prepared_media() {
     let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(calls, Some(0));
     assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
+fn tone_configuration_does_not_allocate_duration_sized_pcm() {
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    let tone = crate::audio::ToneSequence::new("1000/60000", -6).unwrap();
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(tone.rendered_samples(), 2_880_000);
+    assert_eq!(calls, Some(3));
+}
+
+#[test]
+fn half_duplex_link_audio_during_local_receive_does_not_advance_transmit_hang() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio(false, false, &[], &mut [0.0]);
+    node.process_audio(false, true, &[], &mut [0.0]);
+    assert_eq!(node.last_audio, 1);
+
+    node.process_audio(true, true, &[], &mut [0.0]);
+
+    assert_eq!(node.last_audio, 1);
+}
+
+#[test]
+fn activity_scoped_ctcss_tracks_receive_and_its_own_hangtime() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ctcss_hang_ms: 1,
+            hang_ms: 10,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(!node.ctcss_enabled());
+    node.process_audio(true, false, &[], &mut [0.0]);
+    assert!(node.ctcss_enabled());
+    node.process_audio(false, false, &[], &mut [0.0; 48]);
+    assert!(node.ctcss_enabled());
+    node.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!node.ctcss_enabled());
+}
+
+#[test]
+fn activity_scoped_ctcss_includes_pending_command_response_but_not_ids_or_courtesies() {
+    let (mut response, mut control) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    control.queue_status("E", Some(vec![0.5; 2])).unwrap();
+    response.process_audio(false, false, &[], &mut [0.0]);
+    assert!(response.ctcss_enabled());
+    response.process_audio(false, false, &[], &mut [0.0; 12_001]);
+    assert!(response.ctcss_enabled());
+    response.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!response.ctcss_enabled());
+
+    let id = Identifier {
+        media: media(0.2, 2),
+        interval_ms: 1,
+        priority: 1,
+        first_key_only: false,
+        regardless_of_activity: true,
+        polite_maximum_wait_ms: None,
+    };
+    let courtesy = CourtesySettings {
+        link: Some(media(0.3, 2)),
+        ..CourtesySettings::default()
+    };
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ..ControllerSettings::default()
+        },
+        vec![id],
+        vec![],
+        courtesy,
+    )
+    .unwrap();
+    node.telemetry.active = Some(telemetry::Source::Identifier(0));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!node.ctcss_enabled());
+    node.telemetry.active = Some(telemetry::Source::Courtesy(0));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    assert!(!node.ctcss_enabled());
 }
 
 #[test]

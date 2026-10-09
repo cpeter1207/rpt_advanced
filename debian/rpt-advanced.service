@@ -1,0 +1,34 @@
+[Unit]
+Description=RPT Advanced standalone radio controller
+Wants=network-online.target
+After=network-online.target sound.target
+ConditionPathExists=/etc/rpt_advanced/rpt_advanced.conf
+
+[Service]
+Type=simple
+User=rpt-advanced
+Group=rpt-advanced
+SupplementaryGroups=audio
+ExecStart=/usr/bin/rpt-advanced --foreground /etc/rpt_advanced/rpt_advanced.conf
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+StateDirectory=rpt-advanced
+LogsDirectory=rpt-advanced
+RuntimeDirectory=rpt-advanced
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

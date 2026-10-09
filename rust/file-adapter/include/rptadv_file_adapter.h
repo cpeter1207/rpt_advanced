@@ -1,5 +1,5 @@
 /** @file
- * @brief Independently replaceable ABI 1 local-file preparation capability.
+ * @brief Independently replaceable ABI 2 local-file streaming capability.
  */
 #ifndef RPTADV_FILE_ADAPTER_H
 #define RPTADV_FILE_ADAPTER_H
@@ -18,12 +18,15 @@ struct rptadv_file_descriptor {
     int32_t (*create)(const struct rptadv_media_config *config, void **context);
     /** @brief Destroy after all preparations stop; null is harmless. */
     void (*destroy)(void *context);
-    /** @brief Decode an opened local file at source rate; failure empties output. */
-    int32_t (*prepare_file)(const void *context, const char *path,
-                            const struct rptadv_media_cancellation *cancellation,
-                            struct rptadv_media_audio *output);
-    /** @brief Return this provider's audio handle exactly once; null is harmless. */
-    void (*release_audio)(void *handle);
+    /** @brief Open a local file stream at source rate. */
+    int32_t (*open_file)(const void *context, const char *path,
+                         const struct rptadv_media_cancellation *cancellation,
+                         struct rptadv_media_stream *output);
+    /** @brief Read on the media worker; may wait for data, zero count means clean EOF. */
+    int32_t (*read_stream)(void *handle, const struct rptadv_media_cancellation *cancellation,
+                           float *output, size_t capacity, size_t *read_count);
+    /** @brief Close this provider's stream exactly once; null is harmless. */
+    void (*close_stream)(void *handle);
 };
 /** @brief Return an immutable process-lifetime descriptor, never freed by callers. */
 /** @return Immutable process-lifetime file capability table. */

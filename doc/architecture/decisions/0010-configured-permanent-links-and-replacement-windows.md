@@ -11,32 +11,50 @@ path, or make link state depend on an Asterisk restart.
 
 ## Decision
 
-Use `[permanent node label]` with one required `remote_node` for each
-configuration-owned permanent direct peer. On module start and a successful
-configuration reload, runtime derives the desired permanent-peer operations
-from those sections and uses the existing permanent link recovery behavior. A
-permanent route may name an ordered fallback list. Runtime attempts a fallback
-only when the primary cannot be reconnected, and withdraws an active fallback
-before reconnecting a recovered primary so the two never create a topology
-overlap.
+Use `[permanent node label]` with `remote_node` containing one decimal peer or
+an ordered comma-separated list for a permanent link group. A group may have a
+`group_name`; unnamed groups use their section label. On module start and a
+successful configuration reload, runtime
+derives the desired permanent-peer operations from those sections and uses the
+existing permanent link recovery behavior. All group members are connected
+independently and retried silently. Members are receive-only except for the
+highest-priority reachable member, which is transceive. The active member may
+change atomically only while no local-receiver or linked-peer input is active;
+transmitter PTT state alone does not prevent a change. Switching never waits
+for hangtime or transmitter unkey. Group member media is admitted to the
+transmit mix only from the active member.
 
-Use `[schedule node label]` to replace one same-node permanent link during a
-bounded local-time window. Its settings are `remote_node`,
-`replace_permanent`, `days`, `dates`, `start_time`, `end_time`, and
-`end_inactivity_ms`. The schedule names an existing same-node permanent label,
-uses an inclusive-start/exclusive-end same-day local window, and may select
-either weekdays or explicit Gregorian dates, not both.
+In status publication, a connected non-selected group member is reported as
+local-only (`L`), while the active member retains its configured mode. The
+topology advertisement lists that standby as a direct `L` peer and does not
+claim routes through it. Disconnected retry entries remain `C`. These are
+reporting labels only; they do not change runtime media routing or retry policy.
+
+Use `[schedule node label]` to replace one same-node permanent link group during
+a bounded local-time window. Its `remote_node` accepts one decimal peer or an
+ordered comma-separated list, and an optional `group_name` identifies the
+scheduled group. The remaining settings are `replace_permanent`, `days`,
+`dates`, `start_time`, `end_time`, and `end_inactivity_ms`. The schedule names
+an existing same-node permanent label, uses an inclusive-start/exclusive-end
+same-day local window, and may select either weekdays or explicit Gregorian
+dates, not both.
+
+Each scheduled-group member connects and retries independently. The highest-
+priority reachable member is transceive; all other connected members are
+receive-only. A scheduled group replaces every member of the named permanent
+group as one policy transition. Its operator-facing name defaults to the
+schedule section label when `group_name` is omitted.
 
 At a window start, a schedule may first disconnect all links, temporary links,
-permanent links, or no existing links before it attaches its scheduled peer.
+permanent links, or no existing links before it attaches its scheduled group.
 Normal topology admission remains the final conflict gate.
 
-While a window is active, runtime first withdraws the named permanent route and
-then attaches the replacement. At the end, it withdraws the replacement before
-restoring the named permanent route. Zero `end_inactivity_ms` restores at the
-window end. A nonzero value means the window has stopped requiring the
-replacement, but it remains connected after local or linked receive activity
-until the configured quiet interval expires. The runtime
+While a window is active, runtime first withdraws the named permanent group and
+then attaches the scheduled group. At the end, it withdraws the scheduled group
+before restoring the named permanent group. Zero `end_inactivity_ms` restores
+at the window end. A nonzero value means the window has stopped requiring the
+replacement, but its group remains connected after local or linked receive
+activity until the configured quiet interval expires. The runtime
 reads that activity lock-free and performs all time evaluation and link work on
 the serialized control plane. A cold start within the quiet interval after a
 selected window retains the replacement for only the wall-clock interval still
@@ -44,9 +62,10 @@ remaining; later qualifying activity replaces that conservative estimate.
 
 Each copied configured-link transition carries its schedule generation, route
 slot, and one-use reservation nonce. The runtime validates that identity before
-preparing, attaching, retaining, or withdrawing a link. `*806` disconnects and
-holds permanent links only, allowing permitted manual links to remain usable.
-`*816` withdraws, re-evaluates, and reconnects permanent links only. A
+preparing, attaching, retaining, or withdrawing a link. `*806` disconnects all
+current links and holds configuration-owned routes; permitted manual links may
+still be connected while that hold is active. `*816` re-evaluates current
+configured-link policy and restores links saved by disconnect-all. A
 replacement configuration can still withdraw an issued route its current
 policy suppresses. This protects scheduler transitions from stale operations.
 The final hub-retry gate and continuous route-ownership rule are defined by
@@ -63,10 +82,34 @@ route and window model.
 
 Configuration reload reevaluates current local-time membership without
 redialing an unchanged issued route. Configuration errors reject self-links,
-duplicate configured remote identities for a node, unknown replacement labels,
-and a replacement that names its permanent peer again. Multiple matching
-replacement windows intentionally form a union: every matching or deferred
-replacement is requested and every named primary is suppressed. They have no
+permanent-link duplicates, a scheduled peer that duplicates a permanent peer,
+and a scheduled peer repeated in overlapping windows. The same scheduled peer
+may be reused by distinct non-overlapping windows. Empty or malformed group
+members, unknown replacement labels, and a replacement group that contains a
+member of its permanent group are also rejected.
+Multiple matching replacement windows intentionally form a union: every
+matching or deferred replacement is requested and every named primary is
+suppressed. They have no
 exclusive arbitration beyond normal direct-link topology admission; an overlap
-must not be used to select one replacement route. Warning timing and civil-time
-behavior are defined by ADRs 0009 and 0017.
+must not be used to select one replacement route. Group members bypass
+advertised-topology loop rejection so every configured member can remain
+available for priority selection. Direct self/duplicate identity checks and
+allow/deny policy remain in force. Warning timing and civil-time behavior are
+defined by ADRs 0009 and 0017.
+
+## Implementation status — 2026-10-05
+
+Ordered permanent and scheduled groups, independent retries, silent standby
+membership, atomic input-idle winner selection, local-only topology/status
+reporting for connected standby members, full-group schedule replacement, and
+configured disconnect-mode choices are implemented. The same scheduled peer
+is accepted in multiple windows only when those windows are disjoint; duplicate
+peer routes in overlapping windows remain invalid. Schema, scheduler, and
+configuration-integration tests cover that distinction. Five disjoint net
+windows are configured on node 524950, including the adjacent weekday
+Coffee Break and Handiham windows. DTMF `*806` pauses and disconnects permanent
+links while leaving temporary links connected. `*816` re-evaluates configured
+link policy and resumes only permanent retry intent; temporary links and
+retries are unchanged. `*813 <node>` can resume one permanent retry paused by
+`*806` without resuming other permanent routes. Scheduled `disconnect_all`
+retains its separate all-link behavior.

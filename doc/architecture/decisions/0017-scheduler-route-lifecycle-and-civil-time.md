@@ -37,7 +37,12 @@ rather than an ordinary rapid retry state. It remains blocked until fresh
 peer-advertised topology changes the relevant topology generation, a
 configuration reload changes the route policy, or an operator explicitly
 retries it. Locally generated lifecycle changes alone must not repeatedly
-unblock the route.
+unblock the route. Members of a configured priority group are the specific
+exception: permanent and scheduled-group routes bypass advertised-topology loop
+rejection and remain eligible for silent background retry and priority
+selection. This exception does not bypass self-link checks, direct duplicate
+checks, allow/deny policy, or final current-policy validation, and does not
+apply to routes outside a configured group.
 
 Hub-visible local identity is stable hub-owned storage or is published through
 the hub routing synchronization. A reload may not update a pointer observed by
@@ -102,3 +107,12 @@ than host timezone assumptions.
 These rules deliberately favor predictable current-time behavior over replaying
 past RF or link operations. Persistent once-ever events, overnight windows, and
 durable telemetry delivery are separate requirements.
+
+## Implementation status — 2026-10-04
+
+The group-specific topology exception, final current-policy gate, continuous
+route ownership, topology-blocked retry, input-activity idle handoff, and
+scheduled replacement lifecycle are implemented and covered by runtime and
+integration tests. Same-peer schedule reuse is allowed only across disjoint
+windows; overlapping duplicate scheduled peers are rejected by configuration
+validation, with boundary and integration coverage.

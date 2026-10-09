@@ -20,27 +20,3 @@ pub enum MediaError {
     /// Descriptor does not provide the requested ABI.
     IncompatibleAdapter,
 }
-
-#[derive(Debug, PartialEq)]
-pub(crate) struct PreparedAudio {
-    rate: u32,
-    samples: Vec<f32>,
-}
-impl PreparedAudio {
-    pub(crate) fn new(rate: u32, samples: Vec<f32>) -> Result<Self, MediaError> {
-        if rate == 0 || samples.is_empty() || samples.iter().any(|sample| !sample.is_finite()) {
-            return Err(MediaError::InvalidOutput);
-        }
-        Ok(Self { rate, samples })
-    }
-    pub(crate) fn samples(&self) -> &[f32] {
-        &self.samples
-    }
-    pub(crate) fn sample_rate_hz(&self) -> u32 {
-        self.rate
-    }
-}
-
-#[cfg(test)]
-#[path = "result_tests.rs"]
-mod tests;

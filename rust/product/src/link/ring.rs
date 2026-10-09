@@ -12,12 +12,26 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RingError;
 
+/// Immutable source policy selected while preparing a ring generation.
+#[derive(Clone, Copy)]
+pub enum InboundPolicy {
+    /// Decoded network PCM uses G.711 PLC and the peer playout target.
+    Peer,
+    /// Local RF uses silence on shortfall and only its captured squelch delay.
+    Local {
+        /// Delay captured at worker construction; changing it requires a new ring.
+        squelch_delay_ms: u64,
+    },
+    /// Finite file/speech media: immediate playout, no PLC, and no clock target.
+    Media,
+}
+
 /// Individually current released-ring diagnostics; fields are not transactional.
-pub type Observation = ffi::rpcr2_observation;
+pub type Observation = ffi::rpcr3_observation;
 
 struct Shared {
-    handle: NonNull<ffi::rpcr2_ring>,
-    api: &'static ffi::rpcr2_descriptor,
+    handle: NonNull<ffi::rpcr3_ring>,
+    api: &'static ffi::rpcr3_descriptor,
     input_rate: u32,
     signals: PeerSignals,
 }
@@ -64,17 +78,25 @@ impl InboundObserver {
     }
 }
 impl InboundRing {
-    /// Create one released ring per peer at its negotiated decoded input rate.
-    pub fn open(input_rate: u32) -> Result<(InboundProducer, InboundConsumer), RingError> {
+    /// Prepare one released ring with fixed source timing and 4096-sample block bounds.
+    pub fn open(
+        input_rate: u32,
+        policy: InboundPolicy,
+    ) -> Result<(InboundProducer, InboundConsumer), RingError> {
         // SAFETY: the linked provider retains its immutable descriptor for process lifetime.
-        unsafe { Self::from_descriptor(input_rate, ffi::rpcr2_descriptor()) }
+        unsafe { Self::from_descriptor(input_rate, policy, ffi::rpcr3_descriptor()) }
     }
     // The provider retains the descriptor and callback code until all endpoints are dropped.
     unsafe fn from_descriptor(
         input_rate: u32,
-        pointer: *const ffi::rpcr2_descriptor,
+        policy: InboundPolicy,
+        pointer: *const ffi::rpcr3_descriptor,
     ) -> Result<(InboundProducer, InboundConsumer), RingError> {
-        if input_rate == 0 || input_rate > 48000 {
+        let media_rate = matches!(policy, InboundPolicy::Media);
+        if input_rate == 0
+            || (!media_rate && input_rate > 48000)
+            || (media_rate && !(8000..=192000).contains(&input_rate))
+        {
             return Err(RingError);
         }
         // SAFETY: linked released library guarantees a process-lifetime descriptor header.
@@ -84,8 +106,8 @@ impl InboundRing {
             }
             // Inspect the header before borrowing the complete current function table.
             if ptr::addr_of!((*pointer).struct_size).read()
-                < size_of::<ffi::rpcr2_descriptor>() as u32
-                || ptr::addr_of!((*pointer).abi_version).read() != 2
+                < size_of::<ffi::rpcr3_descriptor>() as u32
+                || ptr::addr_of!((*pointer).abi_version).read() != ffi::RPCR3_ABI_VERSION
             {
                 return Err(RingError);
             }
@@ -96,18 +118,41 @@ impl InboundRing {
                 || api.ring_destroy.is_none()
                 || api.ring_producer_push.is_none()
                 || api.ring_consumer_render.is_none()
+                || api.ring_consumer_render_sample.is_none()
                 || api.ring_consumer_reset.is_none()
+                || api.ring_output_delay.is_none()
                 || api.ring_observe.is_none()
             {
                 return Err(RingError);
             }
-            let config = ffi::rpcr2_config {
-                struct_size: size_of::<ffi::rpcr2_config>() as u32,
-                abi_version: 2,
-                capacity_samples: (u64::from(input_rate) * 300 / 1000).max(512),
+            let rate = u64::from(input_rate);
+            let (reserve, target, capacity, plc_mode) = match policy {
+                InboundPolicy::Peer => {
+                    // Input is at most 48 kHz, so qmin's 1/256 floor is inactive.
+                    // Include one maximum callback at -1000 ppm and its successor.
+                    let budget = (4096 * rate * 1000).div_ceil(48000 * 999) + 1;
+                    let reserve = (rate * 60 / 1000).max(budget);
+                    let target = rate * 260 / 1000;
+                    let capacity = (rate * 300 / 1000).max(512).max(target + 4096);
+                    (reserve, target, capacity, 1)
+                }
+                InboundPolicy::Local { squelch_delay_ms } => {
+                    let delay = rate.checked_mul(squelch_delay_ms).ok_or(RingError)? / 1000;
+                    (delay, delay, 14400, 0)
+                }
+                InboundPolicy::Media => (0, 0, 8192, 0),
+            };
+            let config = ffi::rpcr3_config {
+                struct_size: size_of::<ffi::rpcr3_config>() as u32,
+                abi_version: ffi::RPCR3_ABI_VERSION,
+                capacity_samples: capacity,
                 input_rate_hz: input_rate,
                 output_rate_hz: 48000,
-                quality: 2,
+                reserve_samples: reserve,
+                target_samples: target,
+                max_producer_samples: 4096,
+                max_output_samples: 4096,
+                plc_mode,
             };
             let mut handle = ptr::null_mut();
             if api.ring_create.unwrap()(&config, &mut handle) != 0 {
@@ -157,6 +202,10 @@ impl InboundProducer {
             Err(RingError)
         }
     }
+    /// Intrinsic resampler delay in native output samples for end-padding finite media.
+    pub fn output_delay_samples(&self) -> Result<u64, RingError> {
+        self.0.output_delay_samples()
+    }
 }
 impl Drop for InboundProducer {
     fn drop(&mut self) {
@@ -179,28 +228,15 @@ impl PeerInput for InboundConsumer {
     }
 }
 impl InboundConsumer {
-    /// Render the requested native block; the library counts concealment exactly once.
+    /// Render with the prepared immutable policy; the library classifies real PCM.
     pub fn render(&mut self, samples: &mut [f32]) -> Result<usize, RingError> {
-        self.render_with_timing(samples, 60, 260)
-    }
-    /// Render with a caller-owned native delay policy. Local RF uses this same
-    /// released ring as its squelch-delay line rather than a second PCM queue.
-    pub fn render_with_timing(
-        &mut self,
-        samples: &mut [f32],
-        reserve_ms: u64,
-        target_ms: u64,
-    ) -> Result<usize, RingError> {
         let mut real = 0;
-        let rate = u64::from(self.0.input_rate);
         // SAFETY: the unique consumer owns conversion state and this output slice.
         let code = unsafe {
             (self.0.api.ring_consumer_render.unwrap())(
                 self.0.handle.as_ptr(),
                 samples.as_mut_ptr(),
                 samples.len() as u64,
-                rate.saturating_mul(reserve_ms) / 1000,
-                rate.saturating_mul(target_ms.max(reserve_ms)) / 1000,
                 &mut real,
             )
         };
@@ -208,6 +244,24 @@ impl InboundConsumer {
             Ok(real as usize)
         } else {
             samples.fill(0.0);
+            Err(RingError)
+        }
+    }
+    /// Render one native sample without creating a synthetic media sample on shortfall.
+    pub fn render_sample(&mut self) -> Result<Option<f32>, RingError> {
+        let mut sample = 0.0;
+        let mut real = false;
+        // SAFETY: this endpoint is the unique consumer and both outputs are writable.
+        let code = unsafe {
+            (self.0.api.ring_consumer_render_sample.unwrap())(
+                self.0.handle.as_ptr(),
+                &mut sample,
+                &mut real,
+            )
+        };
+        if code == 0 {
+            Ok(real.then_some(sample))
+        } else {
             Err(RingError)
         }
     }
@@ -222,6 +276,14 @@ impl InboundConsumer {
     }
 }
 impl Shared {
+    fn output_delay_samples(&self) -> Result<u64, RingError> {
+        let mut delay = 0;
+        // SAFETY: the ring remains live and delay is writable output storage.
+        let code =
+            unsafe { (self.api.ring_output_delay.unwrap())(self.handle.as_ptr(), &mut delay) };
+        (code == 0).then_some(delay).ok_or(RingError)
+    }
+
     fn observe(&self) -> Result<Observation, RingError> {
         // SAFETY: observation is plain integer ABI storage initialized with caller size.
         let mut observation: Observation = unsafe { std::mem::zeroed() };

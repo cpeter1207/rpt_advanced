@@ -1,3 +1,4 @@
-usr/lib/*/asterisk/modules/app_rpt_advanced.so
-usr/lib/*/rpt_advanced/librptadv_asterisk_adapter.so.1*
+usr/bin/rpt-advanced
 usr/share/doc/rpt-advanced/**
+usr/share/doc/rpt-advanced/examples/rpt_advanced.conf etc/rpt_advanced
+usr/share/rpt-advanced/messages/en-US.ftl

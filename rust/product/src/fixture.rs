@@ -68,23 +68,8 @@ pub static LOCAL_TIME_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static NOTICE_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIAL_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIAL_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
-/// Fail only the next preparation handshake, never an active reader's control text.
+/// Fail only the next peer preparation handshake, never active control text.
 pub static PEER_PREPARE_TEXT_RESULT: AtomicUsize = AtomicUsize::new(0);
-/// Wait for real reader termination before refresh to exercise the publication race.
-pub static PEER_WAIT_FOR_END: AtomicUsize = AtomicUsize::new(0);
-
-pub(crate) fn wait_for_peer_end(reader: &crate::link::session::PeerReader) {
-    if PEER_WAIT_FOR_END.swap(0, Ordering::AcqRel) != 0 {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !reader.ended() && std::time::Instant::now() < deadline {
-            std::thread::yield_now();
-        }
-        assert!(
-            reader.ended(),
-            "peer must terminate through its real read failure"
-        );
-    }
-}
 pub static PEER_DIGITS: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 pub static RADIO_READY: AtomicUsize = AtomicUsize::new(0);
 
@@ -150,8 +135,8 @@ unsafe extern "C" fn lookup(
 }
 unsafe extern "C" fn radio_open(
     _: *mut c_void,
-    _: *const c_char,
-    _: usize,
+    name: *const c_char,
+    length: usize,
     _: usize,
     output: *mut *mut c_void,
 ) -> i32 {
@@ -164,6 +149,10 @@ unsafe extern "C" fn radio_open(
     }
     RADIO_OPENS.fetch_add(1, Ordering::Relaxed);
     *output = Box::into_raw(Box::new(FakeRadio {
+        name: String::from_utf8(
+            unsafe { std::slice::from_raw_parts(name.cast(), length) }.to_vec(),
+        )
+        .unwrap(),
         stop: Default::default(),
         thread: None,
     }))
@@ -171,7 +160,6 @@ unsafe extern "C" fn radio_open(
     0
 }
 unsafe extern "C" fn peer_ready(_: *mut c_void, _: *mut c_void) -> i32 {
-    std::thread::sleep(std::time::Duration::from_millis(1));
     i32::from(
         !PEER_DIGITS
             .lock()
@@ -180,8 +168,15 @@ unsafe extern "C" fn peer_ready(_: *mut c_void, _: *mut c_void) -> i32 {
     )
 }
 struct FakeRadio {
+    name: String,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+pub(crate) unsafe fn radio_name(handle: *mut c_void) -> String {
+    unsafe { &*handle.cast::<FakeRadio>() }.name.clone()
+}
+unsafe extern "C" fn peer_bind_radio(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> i32 {
+    0
 }
 pub static RADIO_ACTIVATE_RESULT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -190,7 +185,7 @@ unsafe extern "C" fn radio_activate(
     handle: *mut c_void,
     receive: crate::abi::rptadv_radio_receive_v2,
     receive_context: *mut c_void,
-    transmit: crate::abi::rptadv_radio_transmit_v2,
+    transmit: crate::abi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
 ) -> i32 {
     if RADIO_ACTIVATE_RESULT.swap(0, Ordering::AcqRel) != 0 {
@@ -208,6 +203,7 @@ unsafe extern "C" fn radio_activate(
             if always || RADIO_READY.load(Ordering::Acquire) != 0 {
                 let mut samples = [0.0; 8];
                 let mut keyed = 0;
+                let mut ctcss_enabled = 0;
                 unsafe {
                     receive(contexts.0 as *mut c_void, 0, samples.as_mut_ptr(), 8);
                     transmit(
@@ -215,6 +211,7 @@ unsafe extern "C" fn radio_activate(
                         samples.as_mut_ptr(),
                         8,
                         &mut keyed,
+                        &mut ctcss_enabled,
                     );
                 }
             }
@@ -311,10 +308,10 @@ unsafe extern "C" fn peer_destroy(_: *mut c_void, handle: *mut c_void) {
     }
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v2 = crate::abi::rptadv_host_services_v2 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v2>() as u32,
-    abi_version: 2,
-    capability: *b"rptadv.hst2\0",
+static mut HOST: crate::abi::rptadv_host_services_v4 = crate::abi::rptadv_host_services_v4 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v4>() as u32,
+    abi_version: 4,
+    capability: *b"rptadv.hst4\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -325,6 +322,7 @@ static mut HOST: crate::abi::rptadv_host_services_v2 = crate::abi::rptadv_host_s
     radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
     peer_dial: Some(peer_dial),
+    peer_bind_radio: Some(peer_bind_radio),
     peer_rate: Some(peer_rate),
     peer_ready: Some(peer_ready),
     peer_read: Some(peer_read),
@@ -334,7 +332,7 @@ static mut HOST: crate::abi::rptadv_host_services_v2 = crate::abi::rptadv_host_s
     peer_destroy: Some(peer_destroy),
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v2 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v4 {
     &raw const HOST
 }
 

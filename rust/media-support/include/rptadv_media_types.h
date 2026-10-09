@@ -1,5 +1,5 @@
 /** @file
- * @brief ABI 1 for offline file and speech preparation at decoded source rate.
+ * @brief ABI 2 for streaming file and speech PCM at decoded source rate.
  *
  * No function may be called by an audio worker. The host keeps the adapter and
  * callback code loaded until all calls and handles are finished; replacements
@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 /** @brief Current incompatible-artifact discriminator. */
-#define RPTADV_MEDIA_ABI_VERSION 1U
+#define RPTADV_MEDIA_ABI_VERSION 2U
 
 /** @brief Stable status values returned by preparation and creation. */
 enum rptadv_media_status {
@@ -33,13 +33,12 @@ enum rptadv_media_status {
 
 /** @brief Immutable local execution settings copied during create. */
 struct rptadv_media_config {
-    uint32_t struct_size;            /**< Complete structure size. */
-    uint32_t abi_version;            /**< Required ABI version. */
-    const char *executable;          /**< Selected executable name/path; never a shell command. */
-    const char *temporary_directory; /**< Existing service-owned directory. */
-    uint32_t timeout_ms;             /**< Nonzero budget for each child, normally 30000. */
-    void (*reaper_acquire)(void);    /**< Optional host exclusion before spawn. */
-    void (*reaper_release)(void);    /**< Paired restoration after reap/failure. */
+    uint32_t struct_size;         /**< Complete structure size. */
+    uint32_t abi_version;         /**< Required ABI version. */
+    const char *executable;       /**< Selected executable name/path; never a shell command. */
+    uint32_t timeout_ms;          /**< Nonzero budget for each child, normally 30000. */
+    void (*reaper_acquire)(void); /**< Optional host exclusion before spawn. */
+    void (*reaper_release)(void); /**< Paired restoration after reap/failure. */
 };
 
 /** @brief Borrowed request cancellation. Callback must not block or unwind. */
@@ -56,11 +55,9 @@ struct rptadv_media_speech_request {
     int32_t level_db;       /**< Inclusive range -60 through 0; speech only. */
 };
 
-/** @brief Immutable mono source-rate F32 output, owned by this adapter. */
-struct rptadv_media_audio {
-    void *handle;            /**< Release exactly once through the originating descriptor. */
-    const float *samples;    /**< View valid until handle release. */
-    size_t sample_count;     /**< Nonzero count of mono samples. */
+/** @brief Open mono stream and immutable source-rate metadata. */
+struct rptadv_media_stream {
+    void *handle;            /**< Close exactly once through the originating descriptor. */
     uint32_t sample_rate_hz; /**< Source rate; telemetry ring owns conversion. */
 };
 

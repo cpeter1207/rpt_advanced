@@ -30,7 +30,7 @@ additional converter precedes receive DSP. Each connected peer has a
 **receive-program ring** after its receive worker has passed packets through its
 jitter buffer and decoder. The ring converts decoded peer program audio to the
 node's native radio-port rate. One serialized **station-telemetry audio
-worker** writes speech and sound-file samples at their source rate to a
+worker** writes speech, sound-file, Morse, and tone samples at their source rate to a
 **telemetry-program ring**, which likewise produces native-rate audio for
 the native transmit mixer. The telemetry-program ring is also called the
 telemetry playout ring; these names do not describe two buffering stages.
@@ -51,8 +51,8 @@ Neither radio-port worker waits for peer transmission work or manages
 peer-specific block ownership.
 
 Network jitter buffering happens before decode and is not a replacement for
-rate recovery. Native-rate Morse and tone generation within the radio-port
-transmit worker does not need a ring. The ring never owns codec packetization,
+rate recovery. All telemetry, including native-rate Morse and tone, traverses
+the telemetry ring. The ring never owns codec packetization,
 jitter policy, RF signaling, or hardware I/O.
 
 The DAC/adapter-clocked transmit worker requests a setup-bounded native frame count.
@@ -79,3 +79,55 @@ the ring's public ABI require coordinated consumer builds and releases.
 Local receive inbound, linked-peer receive-program, telemetry-program, and
 program-audio loopback rings require observable occupancy, shortfall, and
 clock-recovery statistics.
+
+## ABI 3 caller policy (2026-09-25)
+
+The product requires `rate_adjusting_pcm_ring3` with SONAME 3. There is no
+ABI-2 ring compatibility shim. Reserve, target, block bounds and PLC selection
+are captured at creation. Changes to these settings require a new prepared ring.
+
+Incoming peer rings enable G.711 Appendix I PLC with its separate 3.75 ms
+output delay. Producer and output block maxima are 4096 samples. Reserve is
+the larger of 60 ms of input and one maximum callback's conservative input
+budget, including rate-correction rounding. The existing 260 ms
+target remains; capacity is the largest of 300 ms of input, 512 samples and
+target plus one maximum producer write. At 8 kHz, reserve/target/capacity are
+685/2080/6176 input samples; at 48 kHz they are 4102/12480/16576.
+
+Local receive disables PLC and retains capacity 14400 and block maxima 4096.
+Reserve and target equal the squelch delay captured when its worker is
+prepared. The existing same-device reload lifetime is unchanged. Offline file
+and speech conversion also disables PLC, with zero reserve and target and a
+preloaded source plus bounded converter padding. It retains only real PCM,
+returns the exact requested duration, and rejects incomplete conversion.
+
+Bindings, descriptor validation and Debian runtime/development dependencies
+move together to ABI 3 so a mixed installation cannot call an incompatible
+function table. This migration changes neither native routing nor signaling,
+generation ownership, or callback pacing.
+
+## libswresample conversion (2026-09-28)
+
+The ring uses samplerate adapter ABI 2, backed by dynamically linked FFmpeg
+`libswresample`. The adapter is shared with app_rpt and peer egress converters;
+no project-owned conversion uses libsamplerate. Stock distribution libraries
+may independently depend on it; this does not authorize a second owned path.
+
+The filter is fixed to `filter_size=16`, `cutoff=0.985` and
+`SWR_FILTER_TYPE_KAISER`. Persistent soft compensation through
+`swr_set_compensation` follows the ring's existing filtered-occupancy controller,
+including independent clocks with equal nominal rates. No quality selector is
+added. Nominal rates and maximum input/output counts are supplied at creation,
+so filter setup, history and working storage are prepared before callbacks.
+
+Accepted input may remain inside the converter. Its bounded queued-input
+measurement contributes to controller occupancy, excluding the intrinsic FIR
+lookahead; the public FIFO-available statistic still reports the FIFO itself.
+Empty input drains available converted output without flushing end-of-stream.
+Burst reset discards old audio while retaining preallocated converter storage.
+Conversion, compensation and reset remain allocation-free and lock-free.
+
+Filter delay is distinct from jitter reserve and PLC delay. Tests cover startup,
+burst reset, callback partitioning, drift direction, backlog bounds and media
+duration. Adapter ABI/SONAME 2 and all descriptor clients are upgraded together;
+the ring's public ABI remains 3.

@@ -103,6 +103,8 @@ pub struct State {
     tokens: Box<[u64; 4]>,
     pub refs: HashMap<usize, i32>,
     pub channels: usize,
+    pub read_rates: HashMap<usize, u32>,
+    pub write_rates: HashMap<usize, u32>,
     pub freed: usize,
     pub writes: Vec<Vec<i16>>,
     pub write_types: Vec<u32>,
@@ -138,6 +140,8 @@ impl Default for State {
             tokens: Box::new([0; 4]),
             refs: HashMap::new(),
             channels: 0,
+            read_rates: HashMap::new(),
+            write_rates: HashMap::new(),
             freed: 0,
             writes: vec![],
             write_types: vec![],
@@ -155,7 +159,7 @@ impl State {
     pub fn format(&mut self, index: usize) -> *mut ast_format {
         (&mut self.rates[index] as *mut u32).cast()
     }
-    fn token<T>(&mut self, index: usize) -> *mut T {
+    pub(crate) fn token<T>(&mut self, index: usize) -> *mut T {
         (&mut self.tokens[index] as *mut u64).cast()
     }
     fn reference<T>(&mut self, value: *mut T) -> *mut T {
@@ -187,6 +191,7 @@ impl State {
             4 => frame.datalen -= 1,
             5 => frame.subclass.__bindgen_anon_1.format = self.format(1),
             6 => frame.samples = -1,
+            7 => frame.datalen = -1,
             _ => (),
         }
         self.queue.push_back(Pending {
@@ -261,7 +266,7 @@ unsafe extern "C" fn ast_format_cap_get_format(
     assert_eq!(index, 0);
     host(|s| {
         assert_eq!(cap, s.token(3));
-        assert_eq!(s.channels, 1);
+        assert!(s.channels > 0);
         if s.failure == 2 || s.failure == 26 {
             return ptr::null_mut();
         }
@@ -272,7 +277,7 @@ unsafe extern "C" fn ast_format_cap_get_format(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_channel_nativeformats(_: *const ast_channel) -> *mut ast_format_cap {
     host(|s| {
-        assert_eq!(s.channels, 1);
+        assert!(s.channels > 0);
         if s.failure == 23 {
             ptr::null_mut()
         } else {
@@ -350,17 +355,38 @@ unsafe extern "C" fn ast_request(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_hangup(_: *mut ast_channel) {
     host(|s| {
-        assert_eq!(s.channels, 1);
+        assert!(s.channels > 0);
         s.channels -= 1;
     });
 }
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ast_set_read_format(_: *mut ast_channel, _: *mut ast_format) -> i32 {
-    host(|s| if s.failure == 5 { -1 } else { 0 })
+unsafe extern "C" fn ast_set_read_format(
+    channel: *mut ast_channel,
+    format: *mut ast_format,
+) -> i32 {
+    host(|s| {
+        if s.failure == 5 {
+            -1
+        } else {
+            s.read_rates.insert(channel as usize, *format.cast::<u32>());
+            0
+        }
+    })
 }
 #[unsafe(no_mangle)]
-unsafe extern "C" fn ast_set_write_format(_: *mut ast_channel, _: *mut ast_format) -> i32 {
-    host(|s| if s.failure == 6 { -1 } else { 0 })
+unsafe extern "C" fn ast_set_write_format(
+    channel: *mut ast_channel,
+    format: *mut ast_format,
+) -> i32 {
+    host(|s| {
+        if s.failure == 6 {
+            -1
+        } else {
+            s.write_rates
+                .insert(channel as usize, *format.cast::<u32>());
+            0
+        }
+    })
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_codec_get_max() -> i32 {
@@ -520,8 +546,9 @@ unsafe extern "C" fn ast_translate(
     } else {
         host(|state| match state.failure {
             35 => {
-                (*frame).samples = 0;
+                (*frame).samples = 160;
                 (*frame).datalen = 0;
+                (*frame).data.ptr = ptr::null_mut();
             }
             36 => (*frame).frametype = AST_FRAME_TEXT,
             37 => (*frame).subclass.__bindgen_anon_1.format = state.format(0),

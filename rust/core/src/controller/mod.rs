@@ -1,7 +1,8 @@
-//! Node transmit ownership and serialized prepared telemetry at 48 kHz.
+//! Node transmit ownership and serialized producer-backed telemetry at 48 kHz.
 
 mod announcement;
 mod courtesy;
+mod parrot;
 mod telemetry;
 mod timeout;
 
@@ -10,6 +11,12 @@ pub use announcement::Announcement;
 use announcement::AnnouncementState;
 use courtesy::CourtesyPlanner;
 pub use courtesy::CourtesySettings;
+pub use parrot::{CapturedParrot, ParrotLevels};
+use parrot::{ParrotAck, ParrotCapture, ParrotLifecycle, ParrotRequest};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 pub use telemetry::{
     ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PreparedMedia,
     StatusRejected,
@@ -40,10 +47,16 @@ pub struct Identifier {
 /// Resolved node timing and transmit settings; native audio is always 48 kHz.
 #[derive(Default)]
 pub struct ControllerSettings {
+    /// Enable fixed-capacity receive burst capture for parrot playback.
+    pub parrot_enabled: bool,
     /// Allow local receive while transmitting and repeat local receive audio.
     pub full_duplex: bool,
     /// Ordinary transmitter hang time.
     pub hang_ms: u64,
+    /// Restrict transmitted CTCSS to received traffic and command responses.
+    pub ctcss_encode_on_input: bool,
+    /// Retain received-traffic CTCSS after unkey, bounded by transmitter hang.
+    pub ctcss_hang_ms: u64,
     /// Maximum continuous keyed interval without any source unkey; zero disables.
     pub transmit_timeout_ms: u64,
     /// Post-timeout lockout; recovery additionally requires receive inactivity.
@@ -56,6 +69,12 @@ pub struct ControllerSettings {
     pub telemetry_duck_db: i8,
     /// Status Morse fallback parameters.
     pub status_morse: MorseSettings,
+}
+
+/// Callback-owned samples and block-level routing state for isolated parrot fanout.
+pub(crate) struct ParrotOutput<'a> {
+    pub samples: &'a mut [f32],
+    pub active: &'a mut bool,
 }
 
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
@@ -85,8 +104,14 @@ pub struct NodeController {
     keyed: bool,
     last_audio: u64,
     release_hang: u64,
+    ctcss_hang_until: u64,
+    ctcss_enabled: bool,
     release_pending: bool,
     suppress_release: bool,
+    parrot_capture: Option<parrot::ParrotCapture>,
+    parrot_lifecycle: ParrotLifecycle,
+    parrot_enabled_flag: Arc<AtomicBool>,
+    parrot_pending_ack: Option<ParrotAck>,
 }
 
 impl NodeController {
@@ -105,12 +130,14 @@ impl NodeController {
         }
         let durations = [
             settings.hang_ms,
+            settings.ctcss_hang_ms,
             settings.transmit_timeout_ms,
             settings.timeout_lockout_ms,
             settings.kerchunk_max_ms,
             settings.courtesy_delay_ms,
         ];
         if !(-60..=0).contains(&settings.telemetry_duck_db)
+            || settings.ctcss_hang_ms > settings.hang_ms
             || durations.iter().any(|d| *d > u64::MAX / 48)
             || ids.iter().any(|id| {
                 id.interval_ms > u64::MAX / 48
@@ -145,8 +172,25 @@ impl NodeController {
         let identifiers = IdentifierPolicy::new(&rules);
         let satisfied = vec![0; ids.len()];
         let first_due = vec![0; ids.len()];
-        let (telemetry, control) =
+        let (telemetry, mut control) =
             TelemetryPlanner::new(settings.status_morse, settings.telemetry_duck_db);
+        let (parrot_requests, parrot_acknowledgements, parrot_lifecycle) =
+            ParrotCapture::lifecycle();
+        let parrot_enabled_flag = Arc::new(AtomicBool::new(settings.parrot_enabled));
+        control.configure_parrot_lifecycle(
+            parrot_requests,
+            parrot_acknowledgements,
+            parrot_enabled_flag.clone(),
+        );
+        let parrot_capture = if settings.parrot_enabled {
+            let (capture, capture_control) = parrot::ParrotCapture::new();
+            control.parrot = Some(capture_control);
+            Some(capture)
+        } else {
+            None
+        };
+        let ctcss_enabled = !settings.ctcss_encode_on_input;
+        control.parrot_enabled = settings.parrot_enabled;
         Ok((
             Self {
                 settings,
@@ -178,8 +222,14 @@ impl NodeController {
                 keyed: false,
                 last_audio: 0,
                 release_hang: 0,
+                ctcss_hang_until: 0,
+                ctcss_enabled,
                 release_pending: false,
                 suppress_release: false,
+                parrot_capture,
+                parrot_lifecycle,
+                parrot_enabled_flag,
+                parrot_pending_ack: None,
             },
             control,
         ))
@@ -189,6 +239,20 @@ impl NodeController {
     #[must_use]
     pub fn activity(&self) -> ActivitySnapshot {
         self.activity.clone()
+    }
+
+    /// Feed the already mixed receive tap to the preallocated parrot capture owner.
+    pub fn observe_parrot(&mut self, active: bool, samples: &[f32]) {
+        self.sync_parrot_lifecycle();
+        if let Some(capture) = &mut self.parrot_capture {
+            capture.observe(active, samples);
+        }
+    }
+
+    /// Whether a parrot segment currently owns the transmitter media slot.
+    #[cfg(test)]
+    pub(crate) fn parrot_playback_active(&self) -> bool {
+        self.telemetry.active == Some(Source::Parrot)
     }
 
     /// Cancel only the resumed direct peer's pending courtesy; active playback continues.
@@ -215,7 +279,27 @@ impl NodeController {
 
     /// Apply a sample-free receive edge without advancing playback or elapsed time.
     pub fn process_event(&mut self, receiving: bool, linked: bool) -> bool {
-        self.step(receiving, linked, None, 0.0);
+        self.process_event_with_activity(receiving, linked, receiving || linked)
+    }
+
+    /// Whether the current native output tick should transmit the configured CTCSS tone.
+    ///
+    /// Disabled activity scoping preserves the radio's existing tone behavior.
+    #[must_use]
+    pub fn ctcss_enabled(&self) -> bool {
+        self.ctcss_enabled
+    }
+
+    fn process_event_with_activity(
+        &mut self,
+        receiving: bool,
+        linked: bool,
+        source_activity: bool,
+    ) -> bool {
+        self.sync_parrot_lifecycle();
+        self.apply_parrot_disable();
+        self.activity.set_active(source_activity);
+        self.step(receiving, linked, source_activity, None, 0.0, None);
         self.keyed
     }
 
@@ -231,30 +315,116 @@ impl NodeController {
         link_audio: &[f32],
         audio: &mut [f32],
     ) -> bool {
-        self.process_audio_outputs(receiving, linked, link_audio, audio)
+        self.process_audio_outputs(
+            receiving,
+            linked,
+            receiving || linked,
+            link_audio,
+            audio,
+            None,
+        )
+    }
+
+    /// Render radio output and a separate parrot bus for local-plus-all-peer distribution.
+    pub(crate) fn process_audio_with_parrot(
+        &mut self,
+        receiving: bool,
+        linked: bool,
+        source_activity: bool,
+        link_audio: &[f32],
+        audio: &mut [f32],
+        parrot: ParrotOutput<'_>,
+    ) -> bool {
+        self.process_audio_outputs(
+            receiving,
+            linked,
+            source_activity,
+            link_audio,
+            audio,
+            Some(parrot),
+        )
     }
 
     fn process_audio_outputs(
         &mut self,
         receiving: bool,
         linked: bool,
+        source_activity: bool,
         link_audio: &[f32],
         audio: &mut [f32],
+        mut parrot_output: Option<ParrotOutput<'_>>,
     ) -> bool {
+        self.sync_parrot_lifecycle();
+        self.apply_parrot_disable();
+        if let Some(output) = &mut parrot_output {
+            *output.active = false;
+        }
         if audio.is_empty() {
-            return self.process_event(receiving, linked);
+            return self.process_event_with_activity(receiving, linked, source_activity);
+        }
+        if parrot_output
+            .as_ref()
+            .is_some_and(|output| output.samples.len() != audio.len())
+        {
+            return self.process_event_with_activity(receiving, linked, source_activity);
+        }
+        self.activity.set_active(source_activity);
+        if let Some(output) = &mut parrot_output {
+            output.samples.fill(0.0);
         }
         for (offset, sample) in audio.iter_mut().enumerate() {
+            let parrot_sample = parrot_output
+                .as_mut()
+                .map(|output| (&mut output.samples[offset], &mut *output.active));
             let rf = self.step(
                 receiving,
                 linked,
+                source_activity,
                 Some(*sample),
                 link_audio.get(offset).copied().unwrap_or(0.0),
+                parrot_sample,
             );
             *sample = rf;
             self.now = self.now.saturating_add(1);
         }
         self.keyed
+    }
+
+    fn sync_parrot_lifecycle(&mut self) {
+        if let Some(acknowledgement) = self.parrot_pending_ack.take() {
+            if let Err(rtrb::PushError::Full(acknowledgement)) =
+                self.parrot_lifecycle.acknowledgements.push(acknowledgement)
+            {
+                self.parrot_pending_ack = Some(acknowledgement);
+                return;
+            }
+        }
+        let acknowledgement = match self.parrot_lifecycle.requests.pop() {
+            Ok(ParrotRequest::Enable(capture)) => {
+                self.parrot_capture = Some(capture);
+                ParrotAck::Enabled
+            }
+            Ok(ParrotRequest::Disable) => {
+                self.telemetry.disable_parrot();
+                let capture = self
+                    .parrot_capture
+                    .take()
+                    .expect("disable requests follow an acknowledged enable");
+                ParrotAck::Disabled(capture)
+            }
+            Err(_) => return,
+        };
+        if let Err(rtrb::PushError::Full(acknowledgement)) =
+            self.parrot_lifecycle.acknowledgements.push(acknowledgement)
+        {
+            self.parrot_pending_ack = Some(acknowledgement);
+        }
+    }
+
+    fn apply_parrot_disable(&mut self) {
+        if !self.parrot_enabled_flag.load(Ordering::Acquire) {
+            self.telemetry.disable_parrot();
+        }
     }
 
     fn id_ready(&self, selected: usize, busy: bool) -> bool {
@@ -275,10 +445,22 @@ impl NodeController {
         })
     }
 
-    fn step(&mut self, receiving: bool, linked: bool, input: Option<f32>, link_sample: f32) -> f32 {
+    fn step(
+        &mut self,
+        receiving: bool,
+        linked: bool,
+        source_activity: bool,
+        input: Option<f32>,
+        link_sample: f32,
+        parrot_output: Option<(&mut f32, &mut bool)>,
+    ) -> f32 {
         let receive = receiving || linked;
         let idle = self.now.saturating_sub(self.last_activity);
         if receive {
+            self.ctcss_hang_until = self
+                .now
+                .saturating_add(1)
+                .saturating_add(samples(self.settings.ctcss_hang_ms));
             if !self.receiver && !self.linked {
                 self.key_idle = idle;
                 self.suppress_release = false;
@@ -312,6 +494,9 @@ impl NodeController {
         self.linked = linked;
         let may_transmit = self.settings.full_duplex || !receiving;
         let active_before = self.telemetry.active;
+        if source_activity && self.telemetry.parrot_pending() {
+            self.telemetry.discard_pending_parrot();
+        }
         if receive || matches!(active_before, Some(Source::Status | Source::Courtesy(_))) {
             self.release_pending = false;
         }
@@ -340,6 +525,7 @@ impl NodeController {
         let pending_status = self.telemetry.status_pending();
         let status_ready =
             !receive && self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status;
+        let parrot_ready = !source_activity && self.telemetry.parrot_pending();
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
         if may_transmit && self.telemetry.active.is_none() {
             if courtesy_ready {
@@ -351,22 +537,58 @@ impl NodeController {
                 });
             } else if status_ready {
                 self.telemetry.start_status();
+            } else if parrot_ready {
+                self.telemetry.start_parrot();
+                self.telemetry.active = self.telemetry.parrot.as_ref().map(|_| Source::Parrot);
             }
         }
-        let busy =
-            receive || pending_status || self.courtesy.pending() || self.telemetry.active.is_some();
+        let busy = receive
+            || pending_status
+            || parrot_ready
+            || self.courtesy.pending()
+            || self.telemetry.active.is_some();
         let after_hang =
             announcement_due.is_none() || !self.keyed || release_expired || self.release_pending;
         let mut selected =
             self.identifiers
                 .select(&self.rules, self.now, receiving, self.settings.full_duplex);
         let mut ready = selected.is_some_and(|id| self.id_ready(id, busy)) && after_hang;
+        let active_stream = match active_before {
+            Some(Source::Status) => self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|m| m.0.is_streaming()),
+            Some(Source::Parrot) => self
+                .telemetry
+                .parrot
+                .as_ref()
+                .is_some_and(|m| m.0.is_streaming()),
+            Some(Source::Courtesy(index)) => self
+                .courtesy
+                .media
+                .get(index)
+                .is_some_and(|m| m.0.is_streaming()),
+            Some(Source::Identifier(index)) => self
+                .ids
+                .get(index)
+                .is_some_and(|id| id.media.0.is_streaming()),
+            Some(Source::Announcement(index)) => self
+                .announcements
+                .get(index)
+                .is_some_and(|a| a.announcement.media.0.is_streaming()),
+            None => false,
+        };
+        let selected_stream = selected
+            .and_then(|index| self.ids.get(index))
+            .is_some_and(|id| id.media.0.is_streaming());
         let demand = linked
             || (self.settings.full_duplex && receiving)
-            || self.telemetry.active.is_some()
+            || (self.telemetry.active.is_some() && !active_stream)
             || self.courtesy.pending()
+            || parrot_ready
             // A ready status has already become active above when transmission is allowed.
-            || (input.is_some() && ready)
+            || (input.is_some() && ready && !selected_stream)
             || (self.release_pending && announcement_due.is_some());
         if may_transmit && demand && !self.keyed {
             let key_idle = self.key_idle.max(idle);
@@ -404,8 +626,18 @@ impl NodeController {
             }
         }
         let rendered_source = self.telemetry.active;
+        self.ctcss_enabled = if !self.settings.ctcss_encode_on_input {
+            true
+        } else {
+            match rendered_source {
+                Some(Source::Status) => true,
+                Some(_) => false,
+                None => pending_status || receive || self.now < self.ctcss_hang_until,
+            }
+        };
         let playback = match rendered_source {
             Some(Source::Status) => self.telemetry.status.as_mut().map(|m| &mut m.0),
+            Some(Source::Parrot) => self.telemetry.parrot.as_mut().map(|m| &mut m.0),
             Some(Source::Courtesy(index)) => self.courtesy.media.get_mut(index).map(|m| &mut m.0),
             Some(Source::Identifier(index)) => self.ids.get_mut(index).map(|id| &mut id.media.0),
             Some(Source::Announcement(index)) => self
@@ -416,17 +648,20 @@ impl NodeController {
         };
         let mut telemetry_sample = [0.0];
         let mut made = 0;
+        let mut waiting_for_media = false;
         if let Some(playback) = playback {
-            let interrupt = receive
+            let interrupt = (receive
                 && matches!(
                     rendered_source,
                     Some(Source::Identifier(_) | Source::Status)
-                );
+                ))
+                || (source_activity && rendered_source == Some(Source::Parrot));
             if may_transmit && input.is_some() {
                 made = playback.render(interrupt, &mut telemetry_sample);
             } else {
                 playback.render(interrupt, &mut []);
             }
+            waiting_for_media = playback.waiting_for_stream();
             if playback.is_finished() {
                 self.telemetry.active = None;
                 match rendered_source {
@@ -452,6 +687,7 @@ impl NodeController {
                         });
                     }
                     Some(Source::Status) => self.telemetry.finish_status(),
+                    Some(Source::Parrot) => self.telemetry.finish_parrot(),
                     _ => {}
                 }
             }
@@ -470,7 +706,9 @@ impl NodeController {
             || (self.settings.full_duplex && receiving)
             || self.courtesy.pending()
             || status_ready;
-        let transmit = other || telemetry_audio || self.telemetry.active.is_some();
+        let transmit = other
+            || telemetry_audio
+            || (self.telemetry.active.is_some() && !waiting_for_media && !active_stream);
         let hang = if short_tail && !other {
             2400
         } else {
@@ -526,6 +764,16 @@ impl NodeController {
             0.0
         };
         let telemetry = telemetry_sample[0] * gain;
+        if let Some((output, active)) = parrot_output {
+            if rendered_source == Some(Source::Parrot) && made != 0 {
+                *active = true;
+            }
+            *output = if rendered_source == Some(Source::Parrot) && made != 0 {
+                telemetry
+            } else {
+                0.0
+            };
+        }
         (local + link + telemetry).clamp(-1.0, 1.0)
     }
 }

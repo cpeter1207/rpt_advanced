@@ -137,6 +137,41 @@ fn windows_support_date_selectors_and_inclusive_start_exclusive_end() {
 }
 
 #[test]
+fn scheduled_windows_detect_time_and_calendar_overlap() {
+    let coffee = ScheduledWindow::parse(Some("Monday-Friday"), None, "09:30", "11:00").unwrap();
+    let monday_evening = ScheduledWindow::parse(Some("Monday"), None, "20:00", "21:30").unwrap();
+    let weekday_lunch =
+        ScheduledWindow::parse(Some("Monday-Friday"), None, "11:00", "12:00").unwrap();
+    let explicit_monday =
+        ScheduledWindow::parse(None, Some("2026-10-05"), "10:00", "10:30").unwrap();
+    let explicit_sunday =
+        ScheduledWindow::parse(None, Some("2026-10-04"), "10:00", "10:30").unwrap();
+    let explicit_monday_again =
+        ScheduledWindow::parse(None, Some("2026-10-05"), "10:15", "10:45").unwrap();
+    let daily = ScheduledWindow::parse(None, None, "10:00", "10:30").unwrap();
+    let saturday = ScheduledWindow::parse(Some("Saturday"), None, "10:00", "10:30").unwrap();
+
+    assert!(!coffee.overlaps(&monday_evening));
+    assert!(!coffee.overlaps(&weekday_lunch));
+    assert!(coffee.overlaps(&explicit_monday));
+    assert!(explicit_monday.overlaps(&coffee));
+    assert!(!coffee.overlaps(&explicit_sunday));
+    assert!(explicit_monday.overlaps(&explicit_monday_again));
+    assert!(!explicit_monday.overlaps(&explicit_sunday));
+    assert!(daily.overlaps(&coffee));
+    assert!(!coffee.overlaps(&saturday));
+}
+
+#[test]
+fn date_only_window_does_not_overlap_a_weekday_window_on_another_weekday() {
+    let date = ScheduledWindow::parse(None, Some("2026-09-15"), "09:00", "10:00").unwrap();
+    let wednesday = ScheduledWindow::parse(Some("Wednesday"), None, "09:00", "10:00").unwrap();
+    assert!(!date.overlaps(&wednesday));
+    let every_day = ScheduledWindow::parse(None, None, "09:00", "10:00").unwrap();
+    assert!(date.overlaps(&every_day));
+}
+
+#[test]
 fn windows_accept_case_insensitive_wrapping_weekday_ranges_and_reject_malformed_selectors() {
     let window = ScheduledWindow::parse(Some(" Friday - Monday "), None, "00:00", "00:01").unwrap();
     for weekday in [
@@ -222,6 +257,58 @@ fn immutable_windows_validate_selectors_once_and_match_every_weekday_boundary() 
         assert!(ScheduledEvent::from_str(text).is_err(), "{text}");
     }
     assert!(ScheduledWindow::parse(Some("Monday-Tuesday-Friday"), None, "11:00", "12:00").is_err());
+}
+
+#[test]
+fn window_warning_boundaries_respect_weekdays_dates_and_midnight_end() {
+    let weekday = ScheduledWindow::parse(Some("Monday-Friday"), None, "12:00", "13:00").unwrap();
+    assert_eq!(
+        weekday
+            .next_start(
+                &CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 58).unwrap(),
+                0,
+            )
+            .map(|(_, remaining)| remaining),
+        Some(120_000)
+    );
+    assert_eq!(
+        weekday
+            .next_start(
+                &CivilTime::new(2026, 9, 18, Weekday::Friday, 12, 1).unwrap(),
+                0,
+            )
+            .map(|(_, remaining)| remaining),
+        Some(3 * 86_400_000 - 60_000)
+    );
+
+    let date = ScheduledWindow::parse(None, Some("2026-09-18"), "12:00", "13:00").unwrap();
+    assert_eq!(
+        date.next_start(
+            &CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 0).unwrap(),
+            0,
+        )
+        .map(|(_, remaining)| remaining),
+        Some(3 * 86_400_000 + 60 * 60_000)
+    );
+
+    let midnight = ScheduledWindow::parse(Some("Monday"), None, "23:00", "24:00").unwrap();
+    assert_eq!(
+        midnight
+            .next_end(
+                &CivilTime::new(2026, 9, 14, Weekday::Monday, 23, 59).unwrap(),
+                0,
+            )
+            .map(|(_, remaining)| remaining),
+        Some(60_000)
+    );
+}
+
+#[test]
+fn scheduled_window_rejects_seconds_outside_a_civil_minute() {
+    let window = ScheduledWindow::parse(Some("Monday-Friday"), None, "12:00", "13:00").unwrap();
+    let local = CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 58).unwrap();
+    assert_eq!(window.next_start(&local, 60), None);
+    assert_eq!(window.next_end(&local, 60), None);
 }
 #[test]
 fn civil_validation_and_occurrence_comparison_check_each_calendar_component() {

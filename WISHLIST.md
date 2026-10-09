@@ -7,108 +7,10 @@ for it, and unresolved decisions needed before implementation. Ask for the
 unresolved material decisions before starting the work. Remove the entry when
 the requirement is implemented.
 
+DTMF parrot enable/disable controls are implemented per ADRs 0023 and 0025 and
+are intentionally absent from the open entries below.
+
 ## Entries
-
-### Activity-scoped CTCSS encode and decode
-
-**Requirements**
-
-- Add independent per-node controls that restrict CTCSS encode and CTCSS decode
-  to active received traffic from the local receiver or a connected peer.
-- When enabled, hangtime alone must not cause CTCSS encode or decode. IDs and
-  courtesy tones must likewise run without CTCSS.
-- Telemetry that responds to a command must retain CTCSS from command receipt
-  through the response's actual playout, including any waiting interval before
-  that playout begins.
-- Preserve the existing CTCSS behavior when either control is disabled.
-
-**Decisions recorded**
-
-- The controls are per-node and independently enableable for encode and decode.
-- Both controls default disabled, retaining current behavior until enabled.
-- A live local-receiver or connected-peer transmission qualifies the policy;
-  transmitter hangtime by itself does not.
-- A pending command response is a qualifying telemetry interval from accepted
-  command receipt until response playout completes. IDs and courtesy tones are
-  never qualifying intervals when this policy is enabled.
-
-**Material decisions needed before implementation**
-
-None.
-
-### rpt_advanced parrot with spoken audio-level report
-
-**Requirements**
-
-- Add an enableable parrot mode owned by rpt_advanced. While enabled, record
-  received audio from the local receiver or any connected peer.
-- When the originating source unkeys (local receiver or linked peer), play a
-  spoken message reporting the recording's peak and RMS audio levels, followed
-  by the recorded audio. Send both the message and recording through the local
-  transmitter and to all connected peers, including the originating peer if
-  it remains connected.
-- Record PCM at the node's native sample rate (currently 48 kHz). Keep that
-  native-rate recording for local playout; convert to each peer's negotiated
-  sample rate at send time through its media egress, not by storing a separate
-  lower-rate recording for each peer.
-- Limit each recording to 30 seconds or less. Reaching the recording limit
-  does not replace the source-unkey trigger for the response.
-- Preserve the established lock-free audio, bounded storage, serialized
-  telemetry, RF-safety, and generation-safe reload/teardown contracts. Speech
-  preparation and peer encoding/sending remain outside the real-time workers.
-
-**Decisions recorded**
-
-- Requested feature, not implemented. No code, installed configuration, or
-  running node changes are part of adding this wishlist item.
-- This is controller-owned rpt_advanced functionality, not reinstatement of
-  the USBRadioPlus native software-repeat or native parrot modes retired by
-  [ADR 0039](doc/architecture/decisions/0039-retire-usbradioplus-native-mode.md).
-- Playback order is spoken peak/RMS statistics first, recording second. The
-  30-second maximum applies to the recording.
-
-**Material decisions needed before implementation**
-
-- How simultaneous local/peer transmissions are recorded and sequenced, and
-  whether a new signal interrupts, queues behind, or is ignored during replay.
-- The recording/measurement tap relative to receive processing and gain;
-  spoken units and precision; and whether reported statistics cover only the
-  retained recording or the entire transmission when it exceeds the limit.
-- The duration setting/default within the 30-second cap, whether over-limit
-  audio retains the beginning or end, and whether truncation is announced.
-- How the mode is enabled/disabled and scoped, how a disconnected or stuck-keyed
-  source is handled, and how replay recapture/peer echo loops are prevented.
-- What happens if the spoken statistics cannot be prepared; do not silently
-  substitute a different response for the requested spoken report.
-
-### Remove USBRadioPlus native mode and native parrot
-
-**Requirements**
-
-- Implement [ADR 0039](doc/architecture/decisions/0039-retire-usbradioplus-native-mode.md):
-  remove driver-native software local repeat and native parrot, including their
-  mode-specific state, routes, controls, and obsolete tests. Neither mode is
-  required by rpt_advanced or retained as a supported ASL3 option.
-- Preserve ordinary app_rpt/legacy echo, hardware local repeat, shared native
-  DSP/audio adapters, diagnostics, and the distinct controller transport.
-- Silently ignore `duplexmode` and the retired `duplex_local_repeat_mode`
-  selection. Keep `duplex3` hardware-only at its configured level, including
-  load, reload, and tuning persistence; do not retain a software-mode selector.
-  Update documentation and tests with the implementation. Under ADR 0040,
-  remove unused shared operations rather than retaining alpha compatibility
-  shims; version/package checks must reject mismatched artifacts safely.
-
-**Decisions recorded**
-
-- Candidate source removal is under verification. Keep this item until the
-  matching shared-library/driver integration is verified. Alpha18 and all
-  running nodes are unchanged.
-- This does not remove rpt_advanced's native receive/transmit workers or the
-  verified shared-clock fast path. Appliance native PCM/hardware is unaffected.
-
-**Material decisions needed before implementation**
-
-None.
 
 ### Split native receive and transmit workers
 
@@ -122,6 +24,10 @@ None.
   receive, per-link inbound, and telemetry playout rings; add profile-selected
   DCS or CTCSS; fill the adapter-owned output buffer directly (PortAudio's
   callback output buffer for that adapter).
+- Render all telemetry—including Morse and tone—on the separate
+  station-telemetry worker and stream its PCM through the telemetry ring. The
+  transmit worker consumes PCM only; the control-message queue is not an audio
+  ring. This telemetry-routing requirement is implemented.
 - Assign all inbound source-rate conversion and drift correction to those
   rings. Do not keep a second raw-capture converter, resample the transmit mix,
   or add a PortAudio output ring/timer. Preserve routing, receive qualification,
@@ -129,12 +35,26 @@ None.
 - Validate unequal RX/TX frame counts, independent clock drift, stalled input
   or output, per-owner DSP/event queues, and coherent generation adoption and
   safe reload/unload across both workers.
+- Verify the optional shared-clock receive-then-transmit path only when the
+  adapter can prove and supply aligned frames; unknown clock relationships
+  remain independently paced.
+- Publish RF edge events immediately and meter/FIFO/status snapshots on the
+  separately configured per-node interval with global fallback, default 50 ms.
 
 **Decisions recorded**
 
-- Accepted design, pending implementation. Released USBRadioPlus alpha18 still
-  uses its playback-driven combined native tick; no deployed behavior changes
-  with this documentation amendment.
+- The RPT Advanced product has independent receive/transmit callbacks, local
+  and per-peer inbound rings, and the program-audio loopback. Status, speech,
+  file, Morse, and tone media now use the station producer and telemetry PCM
+  ring; transmit playback only consumes that ring. Other split-worker items
+  below remain pending.
+- The current RPT Advanced radio adapter does not yet invoke the shared-clock
+  paired-owner path. The configurable snapshot interval is implemented as
+  `status_snapshot_interval_ms`, with per-node override, `[general]` fallback,
+  and a 50 ms default. RX and TX publish independently on the first callback
+  ending at or after each sample-count deadline; control retains each latest
+  snapshot for CLI status. The optional shared-clock paired-owner path remains
+  pending.
 - The existing supported native rate remains 48 kHz. The adapter supplies its
   clock/cadence; the transmit worker has no separate pacing source.
 - Outbound codec conversion and detector-private decimation remain separate
@@ -149,23 +69,6 @@ None.
   delay adds no local-ring delay. Keep one coherent generation across the pair.
   This is not a promise of zero device/DSP latency. Unknown clock relationships
   remain asynchronous; independent link and telemetry rings keep their recovery.
-
-**Material decisions needed before implementation**
-
-None.
-
-### External-load xrun diagnostics
-
-**Requirements**
-
-- Investigate output underruns caused or aggravated by high activity outside
-  Asterisk. Compare quiescent and CPU/I/O-loaded operation and correlate xrun
-  timestamps with host scheduling and system load before changing audio code.
-
-**Decisions recorded**
-
-- Use the adapter's per-callback scheduling and xrun statistics when comparing
-  quiescent and loaded operation; do not infer a cause from an xrun alone.
 
 **Material decisions needed before implementation**
 
@@ -230,63 +133,6 @@ None.
   reference. It carries both UDP audio and control traffic and preserves enough
   source identity for inbound-call access control. No proxy is shipped or
   operated by rpt_advanced.
-
-**Material decisions needed before implementation**
-
-None.
-
-### Fallback links and remaining scheduled-link policy
-
-**Requirements**
-
-- Allow a primary permanent link to name an ordered set of fallback links. A
-  fallback is attempted when the primary link cannot be reconnected.
-- At a scheduled link-window start, allow configuration to disconnect all links,
-  temporary links only, permanent links only, or no existing links before it
-  connects the scheduled peer.
-
-**Decisions recorded**
-
-- Fallback links are used only when the primary link cannot be reconnected.
-- When a primary becomes available, disconnect its active fallback before
-  reconnecting the primary to avoid network topology loops.
-- Future permanent-only semantics: `*806` will disconnect only permanent links
-  so any permitted peer can be linked manually, and `*816` will disconnect and
-  then reconnect only permanent links. Current all-link disconnect/reconnect
-  behavior remains documented in the configuration manual.
-
-**Material decisions needed before implementation**
-
-None.
-
-### Scheduled-link warnings
-
-**Requirements**
-
-- Allow each scheduled event to configure one or more warnings before its start
-  and before its end or disconnect.
-- Warning lead times are individually configurable, allowing patterns such as
-  60, 30, 15, 10, 5, and 1 minute before start and 10, 5, and 1 minute before
-  disconnect.
-- Each event provides its own configurable warning message.
-- For inactivity-based schedules, calculate warnings from the expected
-  inactivity-timer expiration. Reset the pending warning schedule whenever
-  qualifying activity resets that inactivity timer.
-
-**Decisions recorded**
-
-- Warnings are required before scheduled event starts and before scheduled
-  event ends.
-- Inactivity-based warnings follow the expected inactivity deadline rather
-  than a fixed calendar end.
-- Each event uses one configurable warning-message template. `${time_remaining}`
-  is replaced with the natural-language time remaining for the warning.
-- A warning that becomes due during local-receiver or linked-peer activity is
-  skipped rather than delayed or transmitted over the activity.
-- A qualifying activity reset begins a new inactivity interval; warnings that
-  played during the preceding quiet interval are eligible again.
-- A warning due at or after its related start, end, or inactivity deadline is
-  skipped.
 
 **Material decisions needed before implementation**
 
@@ -630,6 +476,12 @@ None.
 - A verified shared-clock adapter may invoke those workers back-to-back in one
   full-duplex callback with a local-ring target reserve equal only to configured
   squelch delay under ADR 0027.
+- Implementation status — 2026-10-04: `librptadvradio` and the versioned
+  PortAudio/ALSA adapter exist as separately packaged shared objects, and
+  USBRadioPlus dynamically links them. `rpt_advanced` still integrates with
+  USBRadioPlus through the `RadioPlusAdvanced` Asterisk channel and does not
+  directly link/use those two components. This entry remains partial until
+  that adapter boundary is implemented and verified.
 
 ### Independently versioned radio components
 
@@ -667,6 +519,12 @@ None.
   adapter-supplied pin I/O, rather than direct Linux device access.
 - Extraction order is squelch, CTCSS, DCS, then GPIO/parallel-port control.
   Audio-device control remains deferred until its boundary is defined.
+- Implementation status — 2026-10-04: independently released PCM-ring,
+  samplerate, FFmpeg, RNNoise, GPIO/parallel, PortAudio/ALSA, and portable radio
+  core components are present. Squelch, CTCSS encode/decode, and DCS
+  encode/decode remain implemented inside `librptadvradio`. The generic
+  audio-device control component remains deferred under ADR 0011. Keep this
+  entry open for those boundaries only.
 
 ### Independently versioned controller components
 
@@ -702,63 +560,11 @@ None.
   values.
 - Extraction order is tone generation, Morse, DTMF, message templating, then
   scheduling.
-
-### Rust-owned implementation migration
-
-**Requirements**
-
-- Migrate all substantive owned implementation in USBRadioPlus,
-  `rate_adjusting_pcm_ring`, `librptadvradio`, rpt_advanced, and future
-  extracted components to Rust.
-- Preserve stable C ABI entry points and shared-library SONAME compatibility
-  where existing adapters or released packages consume them.
-- Use Rust FFI for external C APIs, including Asterisk, PortAudio, ALSA,
-  FFmpeg, Hamlib, and Piper, only through versioned adapter shared objects.
-- Do not retain duplicate C implementations of controller, radio, audio, or
-  policy logic after a component is migrated.
-
-**Decisions recorded**
-
-- Deliberately separated private rpt_advanced components are Rust `dylib`s.
-  Their Rust ABI is private to project-owned Rust callers built with compatible
-  pinned Rust inputs.
-- Every Rust--C boundary is a separate versioned Rust `dylib` adapter shared
-  object with only the smallest required stable C-compatible
-  descriptor/function-table interface. A tiny C Asterisk loader is permitted
-  when macro-generated module metadata or loader ABI requires it; an
-  equivalent adapter may serve a PortAudio callback when necessary. The
-  adapter forwards to Rust and contains no substantive application logic.
-- Internal Rust components use adapter-neutral ports and do not expose external
-  C types or adapter-specific policy. An adapter can be removed without
-  modifying internal Rust component code.
-- Every outbound call to an external C implementation uses its own removable,
-  versioned adapter shared object. FFmpeg graph, sample-rate conversion,
-  Hamlib, speech synthesis, PortAudio/ALSA, control-path execution, and similar
-  dependencies are not imported by internal Rust components or combined into
-  one aggregate adapter.
-  The Asterisk entry adapter is independently versioned under the same
-  capability-per-adapter rule. The generic speech adapter hides whether Piper
-  uses a library or a subprocess.
-- Each selected product composition has a complete required-adapter manifest.
-  Startup and reload reject a missing or ABI-incompatible listed adapter rather
-  than offering a reduced feature set or direct fallback. A standalone
-  composition does not list the Asterisk entry adapter or an Asterisk-backed
-  control-path adapter.
-- Adapter replacement occurs only during a controlled module reload or process
-  restart after all related callbacks and contexts stop. Runtime hot
-  replacement and code loading or unloading from a real-time tick are not
-  supported.
-- Every real-time-capable adapter separates setup/control from a preallocated,
-  lock-free tick that never allocates, blocks, logs, runs a process, loads code,
-  or takes a lock.
-- Standalone binaries have no project C implementation or Asterisk shim.
-- Rust audio ticks preserve the lock-free real-time restrictions and never
-  allow a panic to cross an FFI boundary.
-- Rust formatting, Clippy, Rustdoc, coverage, and the existing native Debian
-  matrix become part of the component quality gate during migration.
-- Every external/system dependency and separately released project component
-  is dynamically linked and packaged. Rust leaf implementation crates that are
-  not deliberately separated components may compile into their owning artifact.
+- Implementation status — 2026-10-04: these functions currently remain Rust
+  modules within `rpt_advanced`; none is an independently versioned shared
+  component. The component-extraction work has not started. Keep this entry
+  open for the requested separations, not for the already implemented
+  controller behavior.
 
 ### Standalone lock-free controller
 
@@ -794,6 +600,11 @@ None.
   The current Asterisk module is outside this new standalone-only requirement
   and retains its existing narrow ingress-mutex exception (ADR 0037).
 - IAX2 interoperability targets AllStarLink.
+- Implement IAX2 in our own independently versioned `librptadviax2` library.
+  Keep packet/session logic separate from datagram I/O, and keep codec adapters
+  separate from protocol logic. Use released codec libraries through plug-in
+  adapters wherever possible; do not write codecs when a suitable released
+  implementation exists.
 - Small binary size, low CPU use, and low memory use are first-class design
   constraints.
 - The Asterisk module and standalone application share as much controller code

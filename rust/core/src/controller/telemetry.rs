@@ -1,10 +1,15 @@
 //! Control-prepared playback and bounded status ownership transfer.
 
-use crate::audio::{MorseRenderer, Playback};
+use super::parrot::{
+    CapturedParrot, ParrotAck, ParrotCapture, ParrotCaptureControl, ParrotRequest,
+};
+#[cfg(test)]
+use crate::audio::{MorseRenderer, PcmRead, ToneSequence};
+use crate::audio::{PcmStreamReader, Playback};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// Settings shared by control-prepared Morse fallbacks.
@@ -33,12 +38,49 @@ impl Default for MorseSettings {
 pub struct ControllerError;
 
 /// Media validated and allocated exclusively by the control owner.
-pub struct PreparedMedia(pub(super) Playback, pub(super) bool);
+pub struct PreparedMedia(pub(super) Playback, pub(super) bool, pub(super) MediaKind);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+/// Output routing behavior attached to prepared playback.
+pub(super) enum MediaKind {
+    Status,
+    Parrot,
+}
 
 impl PreparedMedia {
-    /// Prepare fixed-48-kHz normalized PCM and its Morse fallback.
+    /// Attach a producer-backed native PCM stream to controller playback.
+    pub fn new_stream(stream: Box<dyn PcmStreamReader>) -> Result<Self, ControllerError> {
+        Ok(Self(Playback::new_stream(stream), true, MediaKind::Status))
+    }
+
+    /// Construct the spoken-report then recording sequence for local parrot playback.
+    pub fn new_parrot_stream(
+        report: Option<Box<dyn PcmStreamReader>>,
+        recording: Box<dyn PcmStreamReader>,
+    ) -> Self {
+        let stream = ParrotSequence::new(report, recording);
+        Self(
+            Playback::new_stream(Box::new(stream)),
+            true,
+            MediaKind::Parrot,
+        )
+    }
+
+    /// Build deterministic in-memory media for controller unit tests only.
+    #[cfg(test)]
     pub fn new(
         audio: Option<Vec<f32>>,
+        text: &str,
+        settings: MorseSettings,
+    ) -> Result<Self, ControllerError> {
+        Self::new_with_tone(audio, None, text, settings)
+    }
+
+    /// Build deterministic in-memory media for controller unit tests only.
+    #[cfg(test)]
+    pub(crate) fn new_with_tone(
+        audio: Option<Vec<f32>>,
+        tone: Option<ToneSequence>,
         text: &str,
         settings: MorseSettings,
     ) -> Result<Self, ControllerError> {
@@ -47,17 +89,25 @@ impl PreparedMedia {
         }) {
             return Err(ControllerError);
         }
-        let available = audio.is_some() || !text.is_empty();
-        Playback::new(
-            audio,
-            text,
-            settings.speed_wpm,
-            settings.frequency_hz,
-            settings.level_db,
-            false,
-        )
-        .map(|playback| Self(playback, available))
-        .map_err(|_| ControllerError)
+        let available = audio.is_some() || tone.is_some() || !text.is_empty();
+        let fallback = render_morse(text, settings)?;
+        let primary = if let Some(audio) = audio {
+            audio
+        } else if let Some(mut tone) = tone {
+            render_source(&mut tone)?
+        } else {
+            fallback.clone()
+        };
+        Ok(Self(
+            Playback::new_stream(Box::new(TestPcmStream {
+                primary,
+                fallback,
+                offset: 0,
+                use_fallback: false,
+            })),
+            available,
+            MediaKind::Status,
+        ))
     }
 }
 
@@ -70,19 +120,34 @@ pub struct StatusRejected {
 
 /// Lock-free qualifying-receive snapshot shared with the control owner.
 #[derive(Clone)]
-pub struct ActivitySnapshot(Arc<AtomicU64>);
+pub struct ActivitySnapshot {
+    last_sample: Arc<AtomicU64>,
+    active: Arc<AtomicBool>,
+}
 
 impl ActivitySnapshot {
     pub(super) fn new() -> Self {
-        Self(Arc::new(AtomicU64::new(0)))
+        Self {
+            last_sample: Arc::new(AtomicU64::new(0)),
+            active: Arc::new(AtomicBool::new(false)),
+        }
     }
     pub(super) fn publish(&self, sample: u64) {
-        self.0.store(sample.saturating_add(1), Ordering::Release);
+        self.last_sample
+            .store(sample.saturating_add(1), Ordering::Release);
+    }
+    pub(super) fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Release);
     }
     /// Last local or linked receive sample since startup; telemetry never updates it.
     #[must_use]
     pub fn last_sample(&self) -> Option<u64> {
-        self.0.load(Ordering::Acquire).checked_sub(1)
+        self.last_sample.load(Ordering::Acquire).checked_sub(1)
+    }
+    /// Whether a local-receiver or linked-peer signal is active in the current callback.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
     }
 }
 
@@ -90,12 +155,136 @@ impl ActivitySnapshot {
 pub struct ControllerControl {
     pending: Producer<PreparedMedia>,
     completed: Consumer<PreparedMedia>,
+    #[cfg(test)]
     settings: MorseSettings,
     outstanding: usize,
+    pub(super) parrot: Option<ParrotCaptureControl>,
+    parrot_pending: Producer<PreparedMedia>,
+    parrot_completed: Consumer<PreparedMedia>,
+    parrot_busy: Arc<AtomicBool>,
+    pub(super) parrot_enabled: bool,
+    parrot_requests: Option<Producer<ParrotRequest>>,
+    parrot_acknowledgements: Option<Consumer<ParrotAck>>,
+    pending_parrot_control: Option<ParrotCaptureControl>,
+    parrot_lifecycle_pending: bool,
+    parrot_flag: Arc<AtomicBool>,
 }
 
 impl ControllerControl {
+    pub(super) fn configure_parrot_lifecycle(
+        &mut self,
+        requests: Producer<ParrotRequest>,
+        acknowledgements: Consumer<ParrotAck>,
+        flag: Arc<AtomicBool>,
+    ) {
+        self.parrot_requests = Some(requests);
+        self.parrot_acknowledgements = Some(acknowledgements);
+        self.parrot_flag = flag;
+    }
+
+    /// Request live capture allocation or reclamation without work or ownership changes on audio.
+    pub fn set_parrot_enabled(&mut self, enabled: bool) -> bool {
+        self.reclaim_parrot_lifecycle();
+        if enabled == self.parrot_enabled {
+            return true;
+        }
+        if self.parrot_lifecycle_pending {
+            return false;
+        }
+        let Some(requests) = &mut self.parrot_requests else {
+            return false;
+        };
+        if enabled {
+            let (capture, control) = ParrotCapture::new();
+            if let Err(rtrb::PushError::Full(ParrotRequest::Enable(_))) =
+                requests.push(ParrotRequest::Enable(capture))
+            {
+                return false;
+            }
+            self.pending_parrot_control = Some(control);
+        } else if requests.push(ParrotRequest::Disable).is_err() {
+            return false;
+        }
+        self.parrot_enabled = enabled;
+        self.parrot_flag.store(enabled, Ordering::Release);
+        self.parrot_lifecycle_pending = true;
+        true
+    }
+
+    fn reclaim_parrot_lifecycle(&mut self) {
+        while let Some(acknowledgements) = &mut self.parrot_acknowledgements {
+            let Ok(acknowledgement) = acknowledgements.pop() else {
+                break;
+            };
+            match acknowledgement {
+                ParrotAck::Enabled => {
+                    self.parrot = self.pending_parrot_control.take();
+                }
+                ParrotAck::Disabled(capture) => {
+                    self.parrot.take();
+                    drop(capture);
+                }
+            }
+            self.parrot_lifecycle_pending = false;
+        }
+    }
+
+    /// Current live switch state (separate from the file value restored on reload).
+    #[must_use]
+    pub fn parrot_enabled(&self) -> bool {
+        self.parrot_enabled
+    }
+
+    /// Take a completed parrot burst without entering the callback owner.
+    pub fn take_parrot_capture(&mut self) -> Option<CapturedParrot> {
+        self.parrot.as_mut()?.take_completed()
+    }
+
+    /// Recycle a capture slot after control/media has finished with its samples.
+    pub fn recycle_parrot_capture(&mut self, clip: CapturedParrot) {
+        if let Some(parrot) = &mut self.parrot {
+            parrot.recycle(clip);
+        }
+    }
+
+    /// Enqueue producer-backed status media prepared by the station owner.
+    pub fn queue_prepared_status(&mut self, media: PreparedMedia) -> bool {
+        if self.outstanding == 4 {
+            return false;
+        }
+        if self.pending.push(media).is_err() {
+            return false;
+        }
+        self.outstanding += 1;
+        true
+    }
+
+    /// Queue one completed recording for serialized parrot playback.
+    pub fn queue_prepared_parrot(&mut self, media: PreparedMedia) -> bool {
+        if !self.parrot_enabled
+            || media.2 != MediaKind::Parrot
+            || self
+                .parrot_busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        if self.parrot_pending.push(media).is_err() {
+            self.parrot_busy.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    /// Whether another prepared status can be queued without exceeding the bounded ring.
+    #[must_use]
+    pub fn can_queue_status(&self) -> bool {
+        self.outstanding < 4
+    }
+
     /// Prepare and enqueue printable status, retaining input ownership on failure.
+    #[cfg(test)]
     pub fn queue_status(
         &mut self,
         text: &str,
@@ -103,16 +292,16 @@ impl ControllerControl {
     ) -> Result<(), StatusRejected> {
         let valid = !text.is_empty()
             && text.len() < 128
-            && audio.as_ref().is_none_or(|pcm| {
-                !pcm.is_empty() && pcm.iter().all(|v| v.is_finite() && v.abs() <= 1.0)
-            })
             && MorseRenderer::new(
                 text,
                 self.settings.speed_wpm,
                 self.settings.frequency_hz,
                 self.settings.level_db,
             )
-            .is_ok();
+            .is_ok()
+            && audio.as_ref().is_none_or(|pcm| {
+                !pcm.is_empty() && pcm.iter().all(|v| v.is_finite() && v.abs() <= 1.0)
+            });
         if !valid || self.outstanding == 4 {
             return Err(StatusRejected { audio });
         }
@@ -125,17 +314,89 @@ impl ControllerControl {
 
     /// Reclaim completed media on the control owner; dropping each item releases its PCM.
     pub fn reclaim(&mut self) -> impl Iterator<Item = PreparedMedia> + '_ {
+        self.reclaim_parrot_lifecycle();
         std::iter::from_fn(|| {
-            let media = self.completed.pop().ok()?;
-            self.outstanding -= 1;
+            if let Ok(media) = self.completed.pop() {
+                self.outstanding -= 1;
+                return Some(media);
+            }
+            let media = self.parrot_completed.pop().ok()?;
+            self.parrot_busy.store(false, Ordering::Release);
             Some(media)
         })
+    }
+}
+
+/// Optional speech prefix followed by the captured native-rate recording.
+struct ParrotSequence {
+    report: Option<Box<dyn PcmStreamReader>>,
+    recording: Box<dyn PcmStreamReader>,
+    report_started: bool,
+}
+
+impl ParrotSequence {
+    fn new(report: Option<Box<dyn PcmStreamReader>>, recording: Box<dyn PcmStreamReader>) -> Self {
+        Self {
+            report,
+            recording,
+            report_started: false,
+        }
+    }
+
+    fn start_recording(&mut self) {
+        self.recording.start();
+    }
+}
+
+impl PcmStreamReader for ParrotSequence {
+    fn start(&mut self) {
+        self.report_started = false;
+        if let Some(report) = &mut self.report {
+            report.start();
+            self.report_started = true;
+        } else {
+            self.start_recording();
+        }
+    }
+
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        if output.is_empty() {
+            return crate::audio::PcmRead::Pending;
+        }
+        if self.report_started {
+            match self
+                .report
+                .as_mut()
+                .expect("started report exists")
+                .render(output)
+            {
+                crate::audio::PcmRead::Samples(count)
+                | crate::audio::PcmRead::FinalSamples(count) => {
+                    if count != 0 {
+                        return crate::audio::PcmRead::Samples(count.min(output.len()));
+                    }
+                }
+                crate::audio::PcmRead::Pending => return crate::audio::PcmRead::Pending,
+                crate::audio::PcmRead::Finished | crate::audio::PcmRead::Failed => {}
+            }
+            self.report_started = false;
+            self.start_recording();
+        }
+        self.recording.render(output)
+    }
+
+    fn cancel(&mut self) {
+        if let Some(report) = &mut self.report {
+            report.cancel();
+        }
+        self.recording.cancel();
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Source {
     Status,
+    Parrot,
     Courtesy(usize),
     Identifier(usize),
     Announcement(usize),
@@ -146,33 +407,82 @@ pub(super) struct TelemetryPlanner {
     pub status: Option<PreparedMedia>,
     pending: Consumer<PreparedMedia>,
     completed: Producer<PreparedMedia>,
+    parrot_pending: Consumer<PreparedMedia>,
+    parrot_completed: Producer<PreparedMedia>,
+    pub parrot: Option<PreparedMedia>,
     pub gain: f32,
     duck_gain: f32,
 }
 
 impl TelemetryPlanner {
     pub fn new(settings: MorseSettings, duck_db: i8) -> (Self, ControllerControl) {
+        #[cfg(not(test))]
+        let _ = settings;
         let (producer, pending) = RingBuffer::new(4);
         let (completed, consumer) = RingBuffer::new(4);
+        let (parrot_pending, parrot_consumer) = RingBuffer::new(1);
+        let (parrot_completed, parrot_reclaimer) = RingBuffer::new(1);
+        let parrot_busy = Arc::new(AtomicBool::new(false));
         (
             Self {
                 active: None,
                 status: None,
                 pending,
                 completed,
+                parrot_pending: parrot_consumer,
+                parrot_completed,
+                parrot: None,
                 gain: 1.0,
                 duck_gain: 10_f32.powf(f32::from(duck_db) / 20.0),
             },
             ControllerControl {
                 pending: producer,
                 completed: consumer,
+                #[cfg(test)]
                 settings,
                 outstanding: 0,
+                parrot: None,
+                parrot_pending,
+                parrot_completed: parrot_reclaimer,
+                parrot_busy,
+                parrot_enabled: false,
+                parrot_requests: None,
+                parrot_acknowledgements: None,
+                pending_parrot_control: None,
+                parrot_lifecycle_pending: false,
+                parrot_flag: Arc::new(AtomicBool::new(false)),
             },
         )
     }
     pub fn status_pending(&self) -> bool {
         self.status.is_some() || !self.pending.is_empty()
+    }
+    pub fn parrot_pending(&self) -> bool {
+        self.parrot.is_some() || !self.parrot_pending.is_empty()
+    }
+    pub fn start_parrot(&mut self) {
+        self.parrot = self.parrot_pending.pop().ok();
+        if let Some(media) = &mut self.parrot {
+            media.0.restart(false);
+        }
+    }
+    pub fn discard_pending_parrot(&mut self) {
+        if let Ok(media) = self.parrot_pending.pop() {
+            let _ = self.parrot_completed.push(media);
+        }
+    }
+    /// Interrupt live parrot playback and return queued media to control for reclamation.
+    pub fn disable_parrot(&mut self) {
+        self.discard_pending_parrot();
+        if self.active == Some(Source::Parrot) {
+            self.active = None;
+            self.finish_parrot();
+        }
+    }
+    pub fn finish_parrot(&mut self) {
+        if let Some(media) = self.parrot.take() {
+            let _ = self.parrot_completed.push(media);
+        }
     }
     pub fn start_status(&mut self) {
         self.status = self.pending.pop().ok();
@@ -195,3 +505,73 @@ impl TelemetryPlanner {
         self.gain
     }
 }
+
+#[cfg(test)]
+struct TestPcmStream {
+    primary: Vec<f32>,
+    fallback: Vec<f32>,
+    offset: usize,
+    use_fallback: bool,
+}
+
+#[cfg(test)]
+impl PcmStreamReader for TestPcmStream {
+    fn start(&mut self) {
+        self.offset = 0;
+    }
+    fn render(&mut self, output: &mut [f32]) -> PcmRead {
+        let source = if self.use_fallback {
+            &self.fallback
+        } else {
+            &self.primary
+        };
+        let count = output.len().min(source.len().saturating_sub(self.offset));
+        output[..count].copy_from_slice(&source[self.offset..self.offset + count]);
+        self.offset += count;
+        if count == 0 {
+            PcmRead::Finished
+        } else if self.offset == source.len() {
+            PcmRead::FinalSamples(count)
+        } else {
+            PcmRead::Samples(count)
+        }
+    }
+    fn select_morse_fallback(&mut self) -> bool {
+        self.use_fallback = true;
+        self.offset = 0;
+        !self.fallback.is_empty()
+    }
+}
+
+#[cfg(test)]
+fn render_morse(text: &str, settings: MorseSettings) -> Result<Vec<f32>, ControllerError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut source = MorseRenderer::new(
+        text,
+        settings.speed_wpm,
+        settings.frequency_hz,
+        settings.level_db,
+    )
+    .map_err(|_| ControllerError)?;
+    render_source(&mut source)
+}
+
+#[cfg(test)]
+fn render_source(source: &mut impl crate::audio::AudioSource) -> Result<Vec<f32>, ControllerError> {
+    let mut result = Vec::new();
+    let mut block = [0.0; 2048];
+    loop {
+        let count = source.render(&mut block);
+        result.try_reserve(count).map_err(|_| ControllerError)?;
+        result.extend_from_slice(&block[..count]);
+        if count < block.len() {
+            return Ok(result);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "telemetry_tests.rs"]
+mod tests;

@@ -20,6 +20,22 @@ fn fixture_program(name: &str) -> std::path::PathBuf {
         .with_file_name(format!("rptadv-{name}-{}", std::process::id()))
 }
 
+#[cfg(speech_adapter)]
+fn write_model_config(model: &Path) {
+    fs::write(model, b"fixture model").unwrap();
+    let mut config = model.as_os_str().to_os_string();
+    config.push(".json");
+    fs::write(config, br#"{"audio":{"sample_rate":22050}}"#).unwrap();
+}
+
+#[cfg(speech_adapter)]
+fn remove_model_config(model: &Path) {
+    fs::remove_file(model).unwrap();
+    let mut config = model.as_os_str().to_os_string();
+    config.push(".json");
+    fs::remove_file(config).unwrap();
+}
+
 #[test]
 #[cfg(file_adapter)]
 fn decodes_opened_local_wave_at_source_rate_with_normalized_pcm() {
@@ -36,7 +52,6 @@ fn decodes_opened_local_wave_at_source_rate_with_normalized_pcm() {
         ffmpeg: Path::new("ffmpeg").into(),
         #[cfg(speech_adapter)]
         piper: Path::new("missing-piper").into(),
-        temporary_directory: directory.clone(),
         process_timeout: Duration::from_secs(30),
         child_reaper: None,
     })
@@ -85,22 +100,23 @@ fn synthesizes_literal_text_with_speed_and_speech_only_gain() {
         ffmpeg: "must-not-run-ffmpeg-for-speech".into(),
         #[cfg(speech_adapter)]
         piper: program.clone(),
-        temporary_directory: directory.clone(),
         process_timeout: Duration::from_secs(30),
         child_reaper: None,
     })
     .unwrap();
-    for (speed, model) in [
+    for (speed, scale) in [
         (1, "100.000000"),
         (50, "002.000000"),
         (100, "001.000000"),
         (1000, "000.100000"),
         (333, "000.300300"),
     ] {
+        let model = directory.join(format!("{scale}.onnx"));
+        write_model_config(&model);
         let audio = adapter
             .prepare_speech(&SpeechRequest {
                 text: "Identifier; $(not a command)\n",
-                model: Path::new(model),
+                model: &model,
                 speed_percent: speed,
                 level_db: -20,
                 cancellation: &Cancellation::default(),
@@ -109,6 +125,7 @@ fn synthesizes_literal_text_with_speed_and_speech_only_gain() {
         assert_eq!(audio.sample_rate_hz(), 22050);
         assert_eq!(audio.samples().len(), 2205);
         assert!((audio.samples()[1102] - 0.0030517578).abs() < 0.000000001);
+        remove_model_config(&model);
     }
     fs::remove_file(program).unwrap();
     assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
@@ -122,7 +139,6 @@ fn rejects_bad_settings_and_reports_individual_media_failures() {
         ffmpeg: "missing-ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "missing-piper".into(),
-        temporary_directory: std::env::temp_dir(),
         process_timeout: Duration::from_secs(30),
         child_reaper: None,
     })
@@ -201,7 +217,7 @@ fn rejects_bad_settings_and_reports_individual_media_failures() {
 
 #[test]
 #[cfg(speech_adapter)]
-fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_removed() {
+fn failed_timed_out_and_cancelled_streams_are_reaped_without_files() {
     let directory =
         std::env::temp_dir().join(format!("rptadv-lifecycle-test-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
@@ -222,9 +238,11 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
             .success()
     );
     let marker = directory.join("child-pid");
-    for (model, expected) in [
+    let model = directory.join("002.000000.onnx");
+    write_model_config(&model);
+    for (text, expected) in [
         ("fail", MediaError::ProcessFailed),
-        ("invalid", MediaError::ProcessFailed),
+        ("invalid", MediaError::InvalidOutput),
         ("empty", MediaError::ProcessFailed),
     ] {
         let adapter = MediaAdapter::new(Config {
@@ -232,15 +250,14 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
             ffmpeg: "ffmpeg".into(),
             #[cfg(speech_adapter)]
             piper: program.clone(),
-            temporary_directory: directory.clone(),
             process_timeout: Duration::from_secs(5),
             child_reaper: None,
         })
         .unwrap();
         assert_eq!(
             adapter.prepare_speech(&SpeechRequest {
-                text: "anything",
-                model: Path::new(model),
+                text,
+                model: &model,
                 speed_percent: 50,
                 level_db: 0,
                 cancellation: &Cancellation::default()
@@ -253,25 +270,24 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
         }
         assert_eq!(
             fs::read_dir(&directory).unwrap().count(),
-            0,
-            "temporary output leaked after {model}"
+            2,
+            "unexpected file appeared after {text}"
         );
     }
-    let waiting_model = format!("wait={}", marker.display());
+    let waiting_text = format!("wait={}", marker.display());
     let adapter = MediaAdapter::new(Config {
         #[cfg(file_adapter)]
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: program.clone(),
-        temporary_directory: directory.clone(),
         process_timeout: Duration::from_millis(200),
         child_reaper: None,
     })
     .unwrap();
     assert_eq!(
         adapter.prepare_speech(&SpeechRequest {
-            text: "anything",
-            model: Path::new(&waiting_model),
+            text: &waiting_text,
+            model: &model,
             speed_percent: 50,
             level_db: 0,
             cancellation: &Cancellation::default()
@@ -280,7 +296,7 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
     );
     assert_reaped(&marker);
     fs::remove_file(&marker).unwrap();
-    assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
     let token = Cancellation::default();
     let cancellation = token.clone();
     let adapter = MediaAdapter::new(Config {
@@ -288,15 +304,16 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: program.clone(),
-        temporary_directory: directory.clone(),
         process_timeout: Duration::from_secs(30),
         child_reaper: None,
     })
     .unwrap();
+    let worker_model = model.clone();
+    let worker_text = waiting_text.clone();
     let worker = std::thread::spawn(move || {
         adapter.prepare_speech(&SpeechRequest {
-            text: "anything",
-            model: Path::new(&waiting_model),
+            text: &worker_text,
+            model: &worker_model,
             speed_percent: 50,
             level_db: 0,
             cancellation: &cancellation,
@@ -313,6 +330,7 @@ fn failed_timed_out_and_cancelled_children_are_reaped_and_temporary_files_remove
     assert_reaped(&marker);
     fs::remove_file(marker).unwrap();
     fs::remove_file(program).unwrap();
+    remove_model_config(&model);
     assert_eq!(fs::read_dir(&directory).unwrap().count(), 0);
     fs::remove_dir(directory).unwrap();
 }
@@ -359,7 +377,6 @@ fn host_reaper_guards_spawn_failure_and_success_while_source_is_opened_once() {
         ffmpeg: "ffmpeg".into(),
         #[cfg(speech_adapter)]
         piper: "missing-piper".into(),
-        temporary_directory: directory.clone(),
         process_timeout: Duration::from_secs(30),
         child_reaper: Some(provider::ChildReaper { acquire, release }),
     })

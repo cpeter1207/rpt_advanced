@@ -52,9 +52,9 @@ headers must name an existing node where their syntax includes a node name, whic
 declared later in the file.
 Repeated ordinary section headers merge options without creating duplicate nodes or media
 sets. A repeated named template, macro, event, permanent-link, or schedule header is instead
-rejected as a duplicate definition. Except for retired local-media selectors described below,
-unknown options and invalid values are rejected even if a later entry would override them. There
-is no fixed limit on the number of nodes, identifiers,
+rejected as a duplicate definition. Unknown options are ignored with a warning; an invalid
+recognized value warns and uses its inherited default. A configuration is rejected only when
+safe deterministic settings cannot be constructed. There is no fixed limit on the number of nodes, identifiers,
 announcements, courtesy tones, templates, macros, events, permanent links, or schedules.
 
 ## Node settings
@@ -62,9 +62,11 @@ announcements, courtesy tones, templates, macros, events, permanent links, or sc
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `node_enabled` | yes | Start the configured node. |
+| `language` | `en-US` | Select built-in RF wording from a Fluent locale catalog. `[general]` supplies the shared default; a node section may override it. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `dtmf_muting` | yes | Silence qualified local in-band DTMF tone audio before command completion. Qualification adds no lookback, so the initial tone prefix can pass. DTMF command decoding remains active when disabled. |
 | `squelch_delay_ms` | 0 | Delay local receive playout in its PCM ring by this many milliseconds. Immediate receiver unkey cancels the buffered tail; rapid rekey cannot replay the previous burst. Inherits from `[general]` to each node; zero adds no delay. |
+| `status_snapshot_interval_ms` | 50 | Publish RX/TX audio meters and local receive-ring statistics at this interval. Must be a positive integer; each worker reports on its first callback at or after the sample-count deadline. Set in `[general]` and override in a node section. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
 | `transmit_timeout_ms` | 180000 | Maximum keyed interval in milliseconds without an individual local-receiver or direct-link unkey. Each such unkey restarts the watchdog even if hang time or another source keeps PTT asserted. Zero disables it. A source that never unkeys expires; on expiry, PTT releases immediately and remains blocked until the active receiver/link source clears and `timeout_lockout_ms` has elapsed. |
 | `timeout_lockout_ms` | 30000 | Post-watchdog lockout in milliseconds. Zero permits recovery as soon as the timed-out source unkeys. |
@@ -109,6 +111,77 @@ before IAX sees it. Each connected peer uses its negotiated PCM rate, and the
 link adapter resamples between it and the local 48 kHz radio rate. A peer can
 therefore negotiate a rate at or below 48 kHz without requiring
 `codec_resample` for the peer-to-radio conversion.
+
+## Standalone radio settings
+
+The standalone service owns local audio-device selection and CM119 signaling.
+Flat `[radio]` values are shared defaults; `[radio <node>]` overrides them for
+one node. These settings are independent of `radio_channel`, which is used only
+by the optional Asterisk adapter. The native audio rate is 48 kHz. Processing
+graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `device_selection` | `exact` | Select `exact` for an identified device, or `automatic_lowest_alsa_card` to choose the lowest ALSA card. Automatic selection is intended for a host with one radio. |
+| `device_identifier` | empty | PortAudio device name or stable USB/ALSA identifier. Used with `usb_serial` when selecting an exact device. |
+| `usb_serial` | empty | Optional exact CM119 USB serial-number match. |
+| `input_device_channels` | `1` | Physical capture channel count; accepted values are 1 or 2. |
+| `output_device_channels` | `1` | Physical playback channel count; accepted values are 1 or 2. |
+| `input_extra_buffer_ms` | `0` | Additional capture buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
+| `output_extra_buffer_ms` | `0` | Additional playback buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
+| `receive_graph` | `anull` | FFmpeg chain applied to mono 48 kHz receiver audio. |
+| `transmit_graph` | `anull` | FFmpeg chain applied to mono 48 kHz transmitter audio. |
+| `cm119_profile` | `dudeusb` | CM119 wiring profile: `dudeusb`, `sphusb`, `nhrc`, or `custom`. |
+| `cm119_ptt_inverted` | `no` | Invert the CM119 PTT output polarity. |
+| `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
+| `cm119_clip_led_gpio` | `0` | GPIO number for the clipping indicator; 0 disables it, 1–8 selects a pin. |
+
+Receive signaling options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `receive_audio` | `flat` | Receiver audio source: `disabled`, speaker audio (`speaker`), or flat discriminator audio with deemphasis (`flat`). |
+| `receive_signaling` | `carrier` | Receive qualification: carrier only (`carrier`), CTCSS (`ctcss`), or DCS (`dcs`). |
+| `carrier_source` | `dsp` | Carrier indication from `disabled`, DSP noise squelch (`dsp`), VOX (`vox`), CM119 GPIO (`cm119`/`cm119_inverted`), or parallel input (`parallel`/`parallel_inverted`). |
+| `ctcss_source` | `dsp` | CTCSS/DCS indication source: `disabled`, `dsp`, CM119 GPIO, or parallel input; GPIO and parallel sources accept normal or inverted polarity. |
+| `receive_ctcss_tones_hz` | `100.0` | Comma-separated allowed CTCSS tones from the supported decoder table. |
+| `ctcss_decoder_gain_db` | `0` | Gain applied before native CTCSS decoding; −60 to +24 dB. |
+| `ctcss_relaxed` | `yes` | Enable relaxed CTCSS decode tolerance. |
+| `ctcss_override` | `no` | Permit carrier qualification without a decoded CTCSS tone when override behavior is requested. |
+| `dcs_receive_code` | `023N` | Three-digit octal DCS code and polarity (`N` normal or `I` inverted). |
+| `squelch_level` | `500` | Native DSP noise-squelch threshold on the 0–999 scale. |
+| `squelch_hysteresis` | `3000` | DSP noise-squelch closing hysteresis in PCM codes (0–32767). |
+| `noise_filter` | `standard` | Native discriminator-noise detector response: `standard` or `alternate`. |
+| `vox_threshold` | `0` | VOX detector threshold in PCM codes (0–32767). |
+| `vox_hang_ms` | `2000` | VOX hold time after received audio ends (0–32767 ms). |
+| `receive_on_delay_ms` | `0` | Ignore receiver keying for this interval after transmitter release (0–65535 ms). |
+| `radio_duplex_mode` | `half` | Physical radio capability: `half` or `full` duplex. |
+
+Transmit signaling options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `transmit_signaling` | `carrier` | Transmit carrier only (`carrier`), CTCSS (`ctcss`), or DCS (`dcs`). |
+| `transmit_ctcss_tones_hz` | `100.0` | Comma-separated CTCSS tones permitted for transmission. |
+| `transmit_ctcss_default_hz` | `100.0` | CTCSS tone used when no selected mapping overrides it. |
+| `transmit_ctcss_level_dbfs` | `-24` | CTCSS peak level (−60 to 0 dBFS). |
+| `transmit_ctcss_turnoff_mode` | `phase_shift` | CTCSS turnoff: `none`, `phase_shift`, `tone_remove`, or `tail_tone`. |
+| `transmit_ctcss_phase_shift_degrees` | `120` | Phase shift for reverse-burst turnoff (0–360 degrees). |
+| `transmit_ctcss_turnoff_duration_ms` | `180` | CTCSS turnoff duration (0–1000 ms). |
+| `transmit_ctcss_tail_tone_hz` | `55` | Replacement low-frequency tail tone for `tail_tone` mode (0–300 Hz). |
+| `transmit_dcs_code` | `023N` | Transmitted three-digit octal DCS code and polarity. |
+| `transmit_dcs_level_dbfs` | `-24` | DCS peak level (−60 to 0 dBFS). |
+| `transmit_dcs_turnoff_enabled` | `yes` | Send DCS turnoff signaling when transmission ends. |
+| `transmit_dcs_turnoff_duration_ms` | `180` | DCS turnoff interval (150–200 ms). |
+| `transmit_settle_ms` | `500` | Delay after PTT assertion before program audio starts (0–32767 ms). |
+| `transmit_receive_blanking_ms` | `0` | Blank receive qualification while transmitting (0–32767 ms). |
+| `transmit_off_delay_ms` | `0` | Ignore receiver activity for this interval after transmit release (0–32767 ms). |
+
+The complete commented example is installed at
+`share/doc/rpt-advanced/examples/rpt_advanced.conf`. Run
+`rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf` before
+restarting the standalone service. Inherited or invalid radio values use the
+documented defaults with a warning; unsafe configurations are rejected.
 
 ## Courtesy tones
 
@@ -432,7 +505,18 @@ active.
 
 | Option | Required | Meaning |
 | --- | --- | --- |
-| `remote_node` | yes | Decimal identity of the permanent direct peer. It must not be the local node or duplicate any configured permanent or schedule route for that node. |
+| `remote_node` | yes | One decimal node identity, or a comma-separated priority list of permanent group members. Each must differ from the local node and every other configured permanent or schedule route for that node. The first reachable member has highest priority. |
+| `group_name` | empty | Optional display name for a priority group, used in its selection/unavailable telemetry. |
+
+When `remote_node` has multiple members, rpt_advanced keeps each member
+connected independently. Only the highest-priority reachable member is
+transceive; all other group members are receive-only and their audio is not
+forwarded. A recovered higher-priority member takes over once local and linked
+inputs are idle; the former winner then becomes receive-only. Retries continue
+silently. The group is announced only when a member is first selected or when
+all members become unavailable—not for retries, standby connections, or later
+winner changes. A one-member list is valid and behaves as an ordinary permanent
+link.
 
 `[schedule node label]` temporarily replaces one same-node configured
 permanent peer with another direct peer during a bounded local-time window. It
@@ -454,6 +538,17 @@ later reload.
 | `start_time` | required | Exact 24-hour local `HH:MM` inclusive window start. |
 | `end_time` | required | Exact 24-hour local `HH:MM` exclusive window end, later than `start_time` on the same date. `24:00` is accepted only here to mean the end of the selected date. Overnight windows are invalid. |
 | `end_inactivity_ms` | `0` | Post-window quiet interval in milliseconds. Zero restores the replaced permanent peer when the window ends. A nonzero value keeps the replacement after observed local-receiver or linked-peer activity until that activity has been quiet for this interval. |
+| `warning_before_start_ms` | absent | Optional comma-separated positive millisecond lead times for warnings before each start. The configured order is retained. |
+| `warning_before_end_ms` | absent | Optional comma-separated positive millisecond lead times before the expected disconnect. For inactivity-based disconnects, each warning is based on the current expected inactivity deadline. |
+| `warning_message_id` | absent | Fluent catalog message ID for warnings. Required with any valid warning lead; currently `scheduled-link-change`. Warnings remain disabled when omitted. |
+
+Warnings use the localized message selected by `warning_message_id`, with
+`${time_remaining}` formatted from the remaining time. Due warnings are skipped
+while the local receiver or any linked peer is active. A qualifying activity
+reset starts a new inactivity period, making that period's warnings eligible
+again. A warning at or after its related start/disconnect deadline is skipped.
+Warnings enter the same serialized telemetry queue as other status messages;
+they do not interrupt active audio.
 
 When a window becomes active, rpt_advanced detaches its named permanent peer
 before attaching the replacement. When the window ends, it detaches the
@@ -487,6 +582,7 @@ conflict gate, so do not rely on an overlap to select one replacement route.
 ```ini
 [permanent 524950 primary]
 remote_node = 506315
+group_name = The Blind Hams Network
 
 [schedule 524950 weekday_net]
 remote_node = 2627
@@ -495,7 +591,30 @@ days = Monday-Friday
 start_time = 11:00
 end_time = 12:00
 end_inactivity_ms = 300000
+warning_before_start_ms = 3600000,1800000,900000,600000,300000,60000
+warning_before_end_ms = 600000,300000,60000
+warning_message_id = scheduled-link-change
 ```
+
+For a single permanent peer, use a one-entry `remote_node` value; `group_name`
+is optional. For example:
+
+```ini
+[permanent 524950 primary]
+remote_node = 506315
+```
+
+## Localized built-in messages
+
+`[general] language` selects the shared message locale and a node's `language`
+overrides it. The package ships English at
+`/usr/share/asterisk/rpt_advanced/messages/en-US.ftl`; administrator catalogs
+may be installed under `/etc/asterisk/rpt_advanced/messages/<locale>.ftl`.
+An absent translation falls back to English independently for text, speech,
+and Morse. An invalid localized entry also falls back for that entry. Invalid
+required English content rejects a candidate reload, preserving the active
+configuration and catalog. Built-in wording is edited in the selected FTL
+bundle, not embedded in source or copied into each node section.
 
 ## Link lifetime, recovery, and duplex
 

@@ -1,0 +1,2 @@
+# CM119 HID control interface used for PTT, COR, and GPIO.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0d8c", ATTR{idProduct}=="013c", GROUP="rpt-advanced", MODE="0660"
