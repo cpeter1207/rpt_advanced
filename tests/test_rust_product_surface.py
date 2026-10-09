@@ -101,6 +101,10 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
             )
         needed = dynamic(path, "NEEDED")
         assert needed - system == dependencies, f"incorrect NEEDED for {name}: {needed}"
+        if name == "app_rpt_advanced.so":
+            assert "libc.so.6" in needed, (
+                "Asterisk loader must link its libc comparison"
+            )
         symbols = command("nm", "--defined-only", "--demangle", str(path))
         assert not re.search(
             r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor)$",
@@ -109,6 +113,9 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
         ), f"static external adapter in {name}"
         if name != PRODUCT:
             assert "rpt_advanced_core::" not in symbols, f"duplicated core in {name}"
+        assert not re.search(r"\busbradioplus_\w+::", symbols), (
+            f"duplicated radio product in {name}"
+        )
     assert dynamic(directory / "app_rpt_advanced.so", "RUNPATH") == {runpath}, (
         "loader must resolve the configured private-library directory"
     )
@@ -118,6 +125,11 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     assert not any(
         "asterisk" in name.lower() or "asl3" in name.lower() for name in needed
     ), f"standalone executable has an Asterisk/ASL3 dependency: {needed}"
+    symbols = command("nm", "--defined-only", "--demangle", str(standalone))
+    assert "rpt_advanced_core::" not in symbols, "duplicated core in standalone"
+    assert not re.search(r"\busbradioplus_\w+::", symbols), (
+        "duplicated radio product in standalone"
+    )
 
 
 def staged(
@@ -256,6 +268,7 @@ def package(control: Path) -> None:
         "dh-sequence-asterisk",
         "librate-adjusting-pcm-ring3-dev",
         "librptadv-samplerate-adapter-dev",
+        "libusbradioplus-product-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
         "${asterisk:Depends}",
@@ -279,6 +292,7 @@ def package(control: Path) -> None:
         "standalone package depends on Asterisk"
     )
     assert "${asterisk:Depends}" in adapter, "Asterisk adapter lost its dependency"
+    assert "libusbradioplus-product1" in standalone, "missing dynamic radio product"
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 
 
@@ -562,6 +576,7 @@ def verify_artifact_policy() -> None:
                 tables[name]["SONAME"] = {name}
         write(root, STANDALONE_BINARY)
         tables[STANDALONE_BINARY] = {"NEEDED": set()}
+        tables["app_rpt_advanced.so"]["NEEDED"].add("libc.so.6")
         tables["app_rpt_advanced.so"]["RUNPATH"] = {"$ORIGIN/../../rpt_advanced"}
 
         def read_table(path: Path, tag: str) -> set[str]:
@@ -590,6 +605,9 @@ def verify_artifact_policy() -> None:
             artifacts(root, "$ORIGIN/../../test-linux-gnu/rpt_advanced")
             rejected()
             tables["app_rpt_advanced.so"]["RUNPATH"] = {"$ORIGIN/../../rpt_advanced"}
+            tables["app_rpt_advanced.so"]["NEEDED"].remove("libc.so.6")
+            rejected()
+            tables["app_rpt_advanced.so"]["NEEDED"].add("libc.so.6")
             for name, table in tables.items():
                 for tag in table:
                     previous = table[tag]
@@ -611,6 +629,27 @@ def verify_artifact_policy() -> None:
                     else inspect(*arguments)
                 )
                 rejected()
+            symbols.side_effect = inspect
+
+            for name in (*ELF_DEPENDENCIES, STANDALONE_BINARY):
+                for duplicate in (
+                    "rpt_advanced_core::controller",
+                    "usbradioplus_product::native_station",
+                    "usbradioplus_station::Station",
+                    "usbradioplus_core::Config",
+                    "usbradioplus_radio::Radio",
+                ):
+                    if name == PRODUCT and duplicate.startswith("rpt_advanced_core::"):
+                        continue
+                    symbols.side_effect = (
+                        lambda *arguments, value=duplicate, target=name: (
+                            value
+                            if arguments[:2] == ("nm", "--defined-only")
+                            and Path(arguments[-1]).name == target
+                            else inspect(*arguments)
+                        )
+                    )
+                    rejected()
             symbols.side_effect = inspect
 
         report = root / "coverage.json"

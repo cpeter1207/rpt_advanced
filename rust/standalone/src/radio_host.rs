@@ -25,7 +25,7 @@ pub enum ReservationError {
 }
 
 /// Resolved radio settings held while the product opens and activates a radio.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RadioReservation {
     /// Node and hardware/signaling settings selected by the request.
     pub radio: ResolvedRadioNode,
@@ -323,15 +323,11 @@ mod tests {
         radio_destroy, radio_open, reserve_radio,
     };
     use crate::resolve_radio_nodes;
-    use rpt_advanced_core::config::ConfigDocument;
 
     #[test]
     fn reserves_an_enabled_radio_by_channel_or_node_without_opening_hardware() {
-        let document = ConfigDocument::parse(
-            "[1000]\nradio_channel=vhf\n[radio 1000]\n[2000]\nradio_channel=uhf\nnode_enabled=no\n[radio 2000]\n",
-        )
-        .unwrap();
-        let radios = resolve_radio_nodes(&document).unwrap().value;
+        let document = "[1000]\nradio_channel=vhf\n[radio 1000]\n[2000]\nradio_channel=uhf\nnode_enabled=no\n[radio 2000]\n";
+        let radios = resolve_radio_nodes(document).unwrap();
 
         let by_channel = reserve_radio(&radios, "vhf", 960).unwrap();
         assert_eq!(by_channel.radio.node.as_str(), "1000");
@@ -347,11 +343,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_ambiguous_and_out_of_range_radio_reservations() {
-        let document = ConfigDocument::parse(
-            "[1000]\nradio_channel=shared\n[radio 1000]\n[2000]\nradio_channel=shared\n[radio 2000]\n",
-        )
-        .unwrap();
-        let radios = resolve_radio_nodes(&document).unwrap().value;
+        let document = "[1000]\nradio_channel=shared\n[radio 1000]\n[2000]\nradio_channel=shared\n[radio 2000]\n";
+        let radios = resolve_radio_nodes(document).unwrap();
 
         assert_eq!(
             reserve_radio(&radios, "missing", 960),
@@ -373,12 +366,10 @@ mod tests {
 
     #[test]
     fn staged_radio_reservations_are_attempted_once_and_validate_channel_names() {
-        let initial =
-            ConfigDocument::parse("[1000]\nradio_channel=vhf\n[2000]\nradio_channel=uhf\n")
-                .unwrap();
-        let candidate = ConfigDocument::parse("[1000]\nradio_channel=uhf\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&initial).unwrap().value, None);
-        assert!(host.stage_radios(resolve_radio_nodes(&candidate).unwrap().value));
+        let initial = "[1000]\nradio_channel=vhf\n[2000]\nradio_channel=uhf\n";
+        let candidate = "[1000]\nradio_channel=uhf\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(initial).unwrap(), None);
+        assert!(host.stage_radios(resolve_radio_nodes(candidate).unwrap()));
 
         let selected = host.reservation("1000", 960).unwrap();
         assert_eq!(selected.radio.channel, "uhf");
@@ -400,8 +391,8 @@ mod tests {
             Err(ReservationError::UnknownRadio)
         );
 
-        let mismatch = RadioHostContext::new(resolve_radio_nodes(&initial).unwrap().value, None);
-        assert!(mismatch.stage_radios(resolve_radio_nodes(&candidate).unwrap().value));
+        let mismatch = RadioHostContext::new(resolve_radio_nodes(initial).unwrap(), None);
+        assert!(mismatch.stage_radios(resolve_radio_nodes(candidate).unwrap()));
         assert_eq!(
             mismatch.reservation("1000\0wrong", 960),
             Err(ReservationError::UnknownRadio)
@@ -410,18 +401,18 @@ mod tests {
 
     #[test]
     fn radio_settings_stage_commit_and_discard_have_single_candidate_semantics() {
-        let initial = ConfigDocument::parse("[1000]\nradio_channel=vhf\n").unwrap();
-        let candidate = ConfigDocument::parse("[1000]\nradio_channel=uhf\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&initial).unwrap().value, None);
+        let initial = "[1000]\nradio_channel=vhf\n";
+        let candidate = "[1000]\nradio_channel=uhf\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(initial).unwrap(), None);
         host.commit_radios();
         host.discard_staged_radios();
 
-        assert!(host.stage_radios(resolve_radio_nodes(&candidate).unwrap().value));
+        assert!(host.stage_radios(resolve_radio_nodes(candidate).unwrap()));
         assert!(!host.stage_radios(Vec::new()));
         host.discard_staged_radios();
         assert_eq!(host.reservation("1000", 960).unwrap().radio.channel, "vhf");
 
-        assert!(host.stage_radios(resolve_radio_nodes(&candidate).unwrap().value));
+        assert!(host.stage_radios(resolve_radio_nodes(candidate).unwrap()));
         host.commit_radios();
         assert_eq!(host.reservation("1000", 960).unwrap().radio.channel, "uhf");
     }
@@ -430,8 +421,8 @@ mod tests {
     fn product_open_callback_returns_a_reservation_and_destroy_releases_it() {
         use std::ffi::c_void;
 
-        let document = ConfigDocument::parse("[1000]\nradio_channel=vhf\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&document).unwrap().value, None);
+        let document = "[1000]\nradio_channel=vhf\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(document).unwrap(), None);
         let mut reservation: *mut c_void = std::ptr::null_mut();
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
 
@@ -450,8 +441,8 @@ mod tests {
     fn product_open_rejects_invalid_pointers_names_utf8_and_reservations() {
         use std::ffi::c_void;
 
-        let document = ConfigDocument::parse("[1000]\nradio_channel=vhf\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&document).unwrap().value, None);
+        let document = "[1000]\nradio_channel=vhf\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(document).unwrap(), None);
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         let mut handle = 1_usize as *mut c_void;
 
@@ -513,8 +504,8 @@ mod tests {
         use std::ffi::c_void;
 
         unsafe { radio_destroy(std::ptr::null_mut(), std::ptr::null_mut()) };
-        let document = ConfigDocument::parse("[1000]\nradio_channel=vhf\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&document).unwrap().value, None);
+        let document = "[1000]\nradio_channel=vhf\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(document).unwrap(), None);
         let mut handle = std::ptr::null_mut();
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         assert_eq!(
@@ -542,11 +533,10 @@ mod tests {
     fn updated_radio_settings_are_used_by_candidate_and_committed_after_reload() {
         use std::ffi::c_void;
 
-        let initial =
-            ConfigDocument::parse("[1000]\n[radio 1000]\ncm119_profile=sphusb\n").unwrap();
-        let updated = ConfigDocument::parse("[1000]\n[radio 1000]\ncm119_profile=nhrc\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&initial).unwrap().value, None);
-        assert!(host.stage_radios(resolve_radio_nodes(&updated).unwrap().value));
+        let initial = "[1000]\n[radio 1000]\ncm119_profile=sphusb\n";
+        let updated = "[1000]\n[radio 1000]\ncm119_profile=nhrc\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(initial).unwrap(), None);
+        assert!(host.stage_radios(resolve_radio_nodes(updated).unwrap()));
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         let mut reservation = std::ptr::null_mut();
 
@@ -556,8 +546,8 @@ mod tests {
         );
         let handle = unsafe { &*reservation.cast::<RadioHandle>() };
         assert_eq!(
-            handle.reservation.radio.settings.cm119_profile,
-            rpt_advanced_core::config::Cm119Profile::Nhrc
+            handle.reservation.radio.radio.request().cm119_profile,
+            crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_NHRC
         );
         unsafe { radio_destroy(context, reservation) };
         host.commit_radios();
@@ -568,8 +558,8 @@ mod tests {
         );
         let handle = unsafe { &*reservation.cast::<RadioHandle>() };
         assert_eq!(
-            handle.reservation.radio.settings.cm119_profile,
-            rpt_advanced_core::config::Cm119Profile::Nhrc
+            handle.reservation.radio.radio.request().cm119_profile,
+            crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_NHRC
         );
         unsafe { radio_destroy(context, reservation) };
     }
@@ -578,11 +568,10 @@ mod tests {
     fn failed_candidate_handoff_reopens_with_active_radio_settings() {
         use std::ffi::c_void;
 
-        let initial =
-            ConfigDocument::parse("[1000]\n[radio 1000]\ncm119_profile=sphusb\n").unwrap();
-        let updated = ConfigDocument::parse("[1000]\n[radio 1000]\ncm119_profile=nhrc\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&initial).unwrap().value, None);
-        assert!(host.stage_radios(resolve_radio_nodes(&updated).unwrap().value));
+        let initial = "[1000]\n[radio 1000]\ncm119_profile=sphusb\n";
+        let updated = "[1000]\n[radio 1000]\ncm119_profile=nhrc\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(initial).unwrap(), None);
+        assert!(host.stage_radios(resolve_radio_nodes(updated).unwrap()));
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         let mut candidate = std::ptr::null_mut();
         assert_eq!(
@@ -593,9 +582,10 @@ mod tests {
             unsafe { &*candidate.cast::<RadioHandle>() }
                 .reservation
                 .radio
-                .settings
+                .radio
+                .request()
                 .cm119_profile,
-            rpt_advanced_core::config::Cm119Profile::Nhrc
+            crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_NHRC
         );
         unsafe { radio_destroy(context, candidate) };
 
@@ -609,9 +599,10 @@ mod tests {
             unsafe { &*rollback.cast::<RadioHandle>() }
                 .reservation
                 .radio
-                .settings
+                .radio
+                .request()
                 .cm119_profile,
-            rpt_advanced_core::config::Cm119Profile::SphUsb
+            crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_SPHUSB
         );
         unsafe { radio_destroy(context, rollback) };
         host.discard_staged_radios();
@@ -621,15 +612,10 @@ mod tests {
     fn rollback_uses_node_identity_when_channel_changes() {
         use std::ffi::c_void;
 
-        let initial = ConfigDocument::parse(
-            "[1000]\nradio_channel=old\n[radio 1000]\ncm119_profile=sphusb\n",
-        )
-        .unwrap();
-        let updated =
-            ConfigDocument::parse("[1000]\nradio_channel=new\n[radio 1000]\ncm119_profile=nhrc\n")
-                .unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&initial).unwrap().value, None);
-        assert!(host.stage_radios(resolve_radio_nodes(&updated).unwrap().value));
+        let initial = "[1000]\nradio_channel=old\n[radio 1000]\ncm119_profile=sphusb\n";
+        let updated = "[1000]\nradio_channel=new\n[radio 1000]\ncm119_profile=nhrc\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(initial).unwrap(), None);
+        assert!(host.stage_radios(resolve_radio_nodes(updated).unwrap()));
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         let mut candidate = std::ptr::null_mut();
         assert_eq!(
@@ -648,9 +634,10 @@ mod tests {
             unsafe { &*candidate.cast::<RadioHandle>() }
                 .reservation
                 .radio
-                .settings
+                .radio
+                .request()
                 .cm119_profile,
-            rpt_advanced_core::config::Cm119Profile::Nhrc
+            crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_NHRC
         );
         unsafe { radio_destroy(context, candidate) };
 
@@ -662,8 +649,8 @@ mod tests {
         let handle = unsafe { &*rollback.cast::<RadioHandle>() };
         assert_eq!(handle.reservation.radio.channel, "old");
         assert_eq!(
-            handle.reservation.radio.settings.cm119_profile,
-            rpt_advanced_core::config::Cm119Profile::SphUsb
+            handle.reservation.radio.radio.request().cm119_profile,
+            crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_SPHUSB
         );
         unsafe { radio_destroy(context, rollback) };
         host.discard_staged_radios();
@@ -686,8 +673,8 @@ mod tests {
             0
         }
 
-        let document = ConfigDocument::parse("[1000]\nradio_channel=vhf\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&document).unwrap().value, None);
+        let document = "[1000]\nradio_channel=vhf\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(document).unwrap(), None);
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         let mut handle = std::ptr::null_mut();
         assert_eq!(
@@ -729,8 +716,8 @@ mod tests {
             0
         }
 
-        let document = ConfigDocument::parse("[1000]\n").unwrap();
-        let host = RadioHostContext::new(resolve_radio_nodes(&document).unwrap().value, None);
+        let document = "[1000]\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(document).unwrap(), None);
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         let empty = || unsafe {
             radio_activate(
@@ -782,9 +769,9 @@ mod tests {
 
     #[test]
     fn activation_completion_commits_only_successful_radio_ownership() {
-        let document = ConfigDocument::parse("[1000]\n").unwrap();
+        let document = "[1000]\n";
         let reservation =
-            reserve_radio(&resolve_radio_nodes(&document).unwrap().value, "1000", 960).unwrap();
+            reserve_radio(&resolve_radio_nodes(document).unwrap(), "1000", 960).unwrap();
         let mut handle = RadioHandle {
             reservation,
             active: None,
@@ -816,9 +803,7 @@ mod tests {
         assert_eq!(
             finish_activation(
                 &mut failed,
-                Err(crate::radio_activation::RadioActivationError::Callback(
-                    crate::audio_callbacks::AudioCallbackError::InvalidFrame,
-                ))
+                Err(crate::radio_activation::RadioActivationError::InvalidCallbacks)
             ),
             -1
         );
@@ -843,11 +828,8 @@ mod tests {
         }
 
         let providers = Box::leak(Box::new(crate::providers::ProviderSet::load().unwrap()));
-        let document = ConfigDocument::parse("[1000]\n").unwrap();
-        let host = RadioHostContext::new(
-            resolve_radio_nodes(&document).unwrap().value,
-            Some(providers),
-        );
+        let document = "[1000]\n";
+        let host = RadioHostContext::new(resolve_radio_nodes(document).unwrap(), Some(providers));
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
         let mut reservation = std::ptr::null_mut();
         assert_eq!(

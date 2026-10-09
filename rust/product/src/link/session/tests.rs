@@ -544,14 +544,14 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
     assert_eq!(output.write(&[0.5]), 0);
     session.step(0).unwrap();
-    // Accepted sub-frame input stays inside the converter until it can produce
-    // an output frame; it must not create an empty network write.
+    // A warmed converter may emit immediately or retain sub-frame input. Neither
+    // case may create an empty network write; filter latency is not an ABI contract.
     let writes = state.lock().unwrap().writes.clone();
-    assert!(writes.is_empty());
+    assert!(writes.iter().all(|count| *count > 0));
     assert_eq!(output.write(&[0.5]), 0);
     session.step(20).unwrap();
     let writes = state.lock().unwrap().writes.clone();
-    assert!(writes.is_empty());
+    assert!(writes.iter().all(|count| *count > 0));
     assert_eq!(output.write(&[0.5; 960]), 0);
     session.step(40).unwrap();
     let writes = state.lock().unwrap().writes.clone();

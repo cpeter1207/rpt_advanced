@@ -118,10 +118,10 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
     crate::fixture::RADIO_DROPS.store(0, Ordering::Relaxed);
     crate::fixture::PEER_DROPS.store(0, Ordering::Relaxed);
     crate::fixture::PEER_OPENS.store(0, Ordering::Relaxed);
+    let radio_ready_before = crate::fixture::RADIO_READY.swap(1, Ordering::AcqRel);
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
     let configuration = "[1000]\nradio_channel=usb\nduplex=full\n";
     assert_eq!(unsafe { start(configuration) }, 0);
-    std::thread::sleep(Duration::from_millis(5));
     assert_eq!(
         unsafe {
             descriptor().authorize_incoming.unwrap()(
@@ -129,7 +129,7 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
                 4,
                 c"2000".as_ptr(),
                 4,
-                c"192.0.2.1".as_ptr(),
+                c"127.0.0.1".as_ptr(),
                 9,
             )
         },
@@ -143,7 +143,7 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
                 4,
                 c"2000".as_ptr(),
                 4,
-                c"192.0.2.1".as_ptr(),
+                c"127.0.0.1".as_ptr(),
                 9,
                 peer,
             )
@@ -155,19 +155,27 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
         let status = unsafe { &mut *context.cast::<Vec<u8>>() };
         status.extend_from_slice(unsafe { std::slice::from_raw_parts(text.cast(), length) });
     }
-    assert_eq!(
-        unsafe {
-            descriptor().link_status.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                Some(sink),
-                ptr::from_mut(&mut status).cast(),
-            )
-        },
-        0
-    );
-    let status = String::from_utf8(status).unwrap();
-    assert!(status.contains("2000"), "unexpected link status: {status}");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        status.clear();
+        assert_eq!(
+            unsafe {
+                descriptor().link_status.unwrap()(
+                    c"1000".as_ptr(),
+                    4,
+                    Some(sink),
+                    ptr::from_mut(&mut status).cast(),
+                )
+            },
+            0
+        );
+        let text = std::str::from_utf8(&status).unwrap();
+        if text.contains("2000") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "unexpected link status: {text}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let rejected = crate::fixture::peer();
     assert_eq!(
         unsafe {
@@ -184,6 +192,7 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
         -1
     );
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    crate::fixture::RADIO_READY.store(radio_ready_before, Ordering::Release);
     assert_eq!(
         crate::fixture::RADIO_DROPS.load(Ordering::Relaxed),
         crate::fixture::RADIO_OPENS.load(Ordering::Relaxed)
@@ -209,6 +218,51 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
         1
     );
     unsafe { crate::fixture::release_peer(peer) };
+}
+
+#[test]
+fn incoming_peer_is_rejected_and_released_when_refresh_cannot_prepare_audio() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    crate::fixture::PEER_DROPS.store(0, Ordering::Relaxed);
+    crate::fixture::PEER_OPENS.store(0, Ordering::Relaxed);
+    let configuration = "[1000]\nradio_channel=usb\nduplex=full\nkerchunk_max_ms=4294967296\n";
+    assert_eq!(unsafe { start(configuration) }, 0);
+    assert_eq!(
+        unsafe {
+            descriptor().authorize_incoming.unwrap()(
+                c"1000".as_ptr(),
+                4,
+                c"2000".as_ptr(),
+                4,
+                c"127.0.0.1".as_ptr(),
+                9,
+            )
+        },
+        0
+    );
+    let peer = crate::fixture::peer();
+    assert_eq!(
+        unsafe {
+            descriptor().incoming.unwrap()(
+                c"1000".as_ptr(),
+                4,
+                c"2000".as_ptr(),
+                4,
+                c"127.0.0.1".as_ptr(),
+                9,
+                peer,
+            )
+        },
+        -1
+    );
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(
+        crate::fixture::PEER_DROPS.load(Ordering::Relaxed),
+        crate::fixture::PEER_OPENS.load(Ordering::Relaxed)
+    );
 }
 
 #[test]

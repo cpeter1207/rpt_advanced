@@ -6,6 +6,8 @@
 #include "../speech-adapter/include/rptadv_speech_adapter.h"
 #include "../control-standalone-adapter/include/rptadv_control_standalone_adapter.h"
 #include <rptadvradio/rptadvradio.h>
+#include <usbradioplus_product.h>
 #include <rptadv_portaudio_alsa_adapter/rptadv_portaudio_alsa_adapter.h>
 #include <rptadv_gpio_adapter/rptadv_gpio_adapter.h>
 #include <rptadv_ffmpeg_adapter/rptadv_ffmpeg_adapter.h>
+#include <resolv.h>

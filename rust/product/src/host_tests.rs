@@ -24,7 +24,7 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v4 =
+    let mut table: abi::rptadv_host_services_v5 =
         unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -49,7 +49,7 @@ fn clock() -> RuntimeClock {
 }
 fn document(device: &str, extra: &str) -> ConfigDocument {
     ConfigDocument::parse(&format!(
-        "[1000]\nradio_channel={device}\nduplex=full\n{extra}"
+        "[1000]\nradio_channel={device}\nduplex=full\nlink_static_directory_file=fixture\n{extra}"
     ))
     .unwrap()
 }
@@ -95,6 +95,17 @@ fn pump_until(host: &mut Host, mut condition: impl FnMut(&mut Host) -> bool) {
     }
     panic!("host did not reach expected state");
 }
+fn named_peer_ready(host: &Host, remote: &str) -> bool {
+    host.peers.iter().any(|peer| {
+        peer.local == "1000"
+            && peer.remote == remote
+            && peer.control.owner_thread().is_some()
+            && peer
+                .control
+                .snapshot()
+                .is_ok_and(|snapshot| !snapshot.ended)
+    })
+}
 fn operation(action: LinkAction, remote: &str) -> DigitOperation {
     DigitOperation::new(
         Command {
@@ -125,14 +136,19 @@ fn attach(
     let (io, state) = peer(48000);
     host.attach_peer("1000", remote, mode, io, clock()).unwrap();
     pump_until(host, |host| {
-        host.peers
-            .iter()
-            .all(|peer| !peer.control.snapshot().unwrap().ended)
+        named_peer_ready(host, remote)
+            && host.peers.iter().all(|peer| {
+                peer.control
+                    .snapshot()
+                    .is_ok_and(|snapshot| !snapshot.ended)
+            })
             && host
                 .runtime
                 .status(clock().now_ms)
                 .iter()
-                .all(|(_, status)| status.retiring.is_none())
+                .any(|(node, status)| {
+                    node == "1000" && status.active.is_some() && status.retiring.is_none()
+                })
     });
     state
 }
@@ -459,20 +475,28 @@ fn host_audio_owner_publishes_one_configured_group_winner_to_status() {
     .unwrap();
     let mut host = Host::start(config, media(), services(), Instant::now(), clock()).unwrap();
     let mut states = Vec::new();
-    for remote in ["2000", "3000"] {
+    for (index, remote) in ["2000", "3000"].into_iter().enumerate() {
         host.runtime.incoming("1000", remote, true).unwrap();
         let (io, state) = peer(48000);
         host.attach_peer("1000", remote, Mode::TRANSCEIVE, io, clock())
             .unwrap();
         states.push(state);
+        let expected = &["2000", "3000"][..=index];
         pump_until(&mut host, |host| {
-            host.runtime
-                .status(10)
-                .iter()
-                .all(|(_, status)| status.retiring.is_none())
+            expected.iter().all(|remote| named_peer_ready(host, remote))
+                && host.runtime.status(10).iter().any(|(node, status)| {
+                    node == "1000" && status.active.is_some() && status.retiring.is_none()
+                })
         });
     }
-    let selection = host.peers[0].group.as_ref().unwrap().selection().clone();
+    let selection = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .and_then(|peer| peer.group.as_ref())
+        .expect("configured group member is published")
+        .selection()
+        .clone();
 
     let lease = Arc::clone(&host.leases[0].1);
     assert!(lease.lock().unwrap().quiesce());

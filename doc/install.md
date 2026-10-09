@@ -3,12 +3,17 @@
 Debian 13 amd64 and arm64 packages are the supported release targets. Install
 the standalone controller or the optional Asterisk adapter; neither package
 requires the other. The standalone runtime has no Asterisk or ASL3 dependency.
+It does require the separately released `libusbradioplus-product1` shared radio
+runtime, which also has no Asterisk dependency.
 
 ## Standalone controller
 
-Download all Debian 13 runtime packages for the target architecture from the
-same release into an otherwise empty directory, then install the package set so
-APT can resolve its shared-library dependencies:
+Configure the signed USBRadioPlus package repository for the target architecture
+as described in the [USBRadioPlus installation guide](https://github.com/cpeter1207/USBRadioPlus/blob/main/INSTALL.md),
+so APT can obtain `libusbradioplus-product1`.
+Download the rpt_advanced Debian 13 runtime packages from the same rpt_advanced
+release into an otherwise empty directory, then install the package set with
+APT resolving the separately released shared-library dependencies:
 
 ```sh
 sudo apt-get install ./*.deb
@@ -58,8 +63,8 @@ purging it or before changing hardware ownership.
 `app-rpt-advanced` is a deprecated compatibility adapter for ASL3 Asterisk. It
 is packaged separately and may be installed without the standalone controller.
 It requires ASL3 Asterisk and a matching USBRadioPlus `RadioPlusAdvanced`
-channel adapter. Install all Debian 13 runtime packages from the same release,
-including their shared-library dependencies, with `apt-get install ./*.deb`.
+channel adapter. Install its Debian 13 packages from the same rpt_advanced
+release, with APT resolving their shared-library dependencies.
 
 For the Asterisk path, the local RadioPlusAdvanced exchange is fixed at 48 kHz
 signed-linear PCM. IAX peer codecs are negotiated separately and converted at
@@ -101,9 +106,12 @@ configuration, and restart Asterisk as needed.
 
 Use the package release for routine installation. A source build requires Rust
 1.85/Cargo, a C compiler, `libclang-dev`, `pkg-config`, FFmpeg, and the matching
-development packages for the versioned radio, GPIO, audio, IAX2, samplerate,
-and PCM-ring libraries. An Asterisk build additionally requires the public ASL3
-Asterisk development headers; a full Asterisk source tree is not used.
+`libusbradioplus-product-dev` package, including
+`/usr/include/usbradioplus_product.h` and the `usbradioplus_product` pkg-config
+file. It also requires the development packages for the versioned radio, GPIO,
+audio, IAX2, samplerate, and PCM-ring libraries. An Asterisk build additionally
+requires the public ASL3 Asterisk development headers; a full Asterisk source
+tree is not used.
 
 Build the standalone binary package without the Asterisk adapter:
 

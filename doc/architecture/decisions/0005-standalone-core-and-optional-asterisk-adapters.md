@@ -112,6 +112,43 @@ separate from REST/WebSocket administrative identities.
 
 ## Consequences
 
+### Shared product extraction (2026-10-09)
+
+The approved extraction places USBRadioPlus's adapter-neutral driver, native
+station composition, graph preparation, and hardware-provider lifecycle in
+`libusbradioplus_product.so.1`. Its C-compatible `usbradioplus.product1`
+descriptor owns opaque handles. The ASL3 module supplies Asterisk channel,
+frame, option, and delivery services; standalone calls the native station
+operations without supplying Asterisk services. Neither consumer statically
+embeds the radio product implementation. Native calls retain the existing
+callback topology and introduce no program queue or extra audio conversion.
+
+`librptadv_product.so.1` owns controller configuration parsing and inheritance
+once. Product ABI 4 (`rptadv.prod4`) adds synchronous configuration and secrets
+inspection. Visitors receive typed resolved records and borrowed UTF-8 spans,
+valid only during the call. Standalone copies those records; no Rust parser
+layout crosses the boundary. Configuration inspection does not create workers,
+open devices, alter mixers, or require Asterisk. Secure secrets-file opening and
+mode/owner validation remain host I/O. Secret diagnostics never contain input.
+
+The product rejects old descriptors before invoking their operations. This is
+an initial-alpha table revision under ADR 0040, not an additional compatibility
+implementation. The existing controller-product SONAME remains 1; its shipped
+hosts require the matching package build and exact product ABI 4. The new radio
+product has separate runtime and development packages, without Asterisk or
+controller dependencies. A module installation may require that runtime, but
+installing the standalone service must not require either Asterisk module.
+
+The native request preserves the current standalone radio-session settings,
+explicit processing graphs, gain scales, and one/two-channel physical routing.
+It does not apply USBRadioPlus configuration defaults or start touching hardware
+mixers that standalone previously left unchanged. This is an ownership refactor,
+not a configuration migration or new processing mode.
+
+The extraction is under targeted validation. Dynamic-load, independent-install,
+reload/rollback, and RF-safe partial-start tests are required before deployment;
+this amendment does not claim live acceptance or the complete hosted gate.
+
 No Asterisk type, lock, callback, or lifecycle rule may enter the shared core.
 The Debian packages for rpt_advanced and USBRadioPlus must use exact matching
 versions. IAX2 and ASL HTTP-registration support belong to standalone

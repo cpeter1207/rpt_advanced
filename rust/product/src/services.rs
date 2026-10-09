@@ -1,6 +1,9 @@
 //! Validated host-services clients; native handles never cross into core policy.
 
-use crate::{Error, abi};
+use crate::{
+    Error, abi,
+    directory::{Backend, BackendError, DirectoryResolver},
+};
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
@@ -25,20 +28,137 @@ pub enum PeerInput<'a> {
 
 /// Validated process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(&'static abi::rptadv_host_services_v4);
+pub struct HostServices(&'static abi::rptadv_host_services_v5);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
 // SAFETY: the immutable table and context may be copied; object operations remain serialized.
 unsafe impl Sync for HostServices {}
 
-fn complete(api: &abi::rptadv_host_services_v4) -> bool {
+#[derive(Default)]
+struct DirectoryResults {
+    values: Vec<String>,
+    port: u16,
+    valid: bool,
+}
+impl DirectoryResults {
+    fn new() -> Self {
+        Self {
+            valid: true,
+            ..Self::default()
+        }
+    }
+    fn finish(self, code: i32) -> Result<Self, BackendError> {
+        if !self.valid || code < 0 {
+            Err(BackendError::Rejected)
+        } else if code > 0 {
+            Err(BackendError::Unavailable)
+        } else {
+            Ok(self)
+        }
+    }
+    fn single(mut self) -> Result<Option<String>, BackendError> {
+        if self.values.len() > 1 {
+            Err(BackendError::Rejected)
+        } else {
+            Ok(self.values.pop())
+        }
+    }
+}
+
+unsafe extern "C" fn directory_text(
+    context: *mut c_void,
+    text: *const std::ffi::c_char,
+    length: usize,
+) {
+    // SAFETY: callbacks borrow this exact stack-owned collector synchronously.
+    let results = unsafe { &mut *context.cast::<DirectoryResults>() };
+    if text.is_null() && length != 0 {
+        results.valid = false;
+        return;
+    }
+    let bytes = if length == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) }
+    };
+    match std::str::from_utf8(bytes) {
+        Ok(value) => results.values.push(value.to_owned()),
+        Err(_) => results.valid = false,
+    }
+}
+unsafe extern "C" fn directory_srv(
+    context: *mut c_void,
+    host: *const std::ffi::c_char,
+    length: usize,
+    port: u16,
+) {
+    unsafe { directory_text(context, host, length) };
+    unsafe { (*context.cast::<DirectoryResults>()).port = port };
+}
+
+impl Backend for HostServices {
+    fn record(&self, path: &str, node: &str) -> Result<Option<String>, BackendError> {
+        let mut result = DirectoryResults::new();
+        let code = unsafe {
+            self.0.directory_record.unwrap()(
+                self.0.context,
+                path.as_ptr().cast(),
+                path.len(),
+                node.as_ptr().cast(),
+                node.len(),
+                Some(directory_text),
+                ptr::from_mut(&mut result).cast(),
+            )
+        };
+        result.finish(code)?.single()
+    }
+    fn srv(&self, service: &str) -> Result<Option<(String, u16)>, BackendError> {
+        let mut result = DirectoryResults::new();
+        let code = unsafe {
+            self.0.directory_srv.unwrap()(
+                self.0.context,
+                service.as_ptr().cast(),
+                service.len(),
+                Some(directory_srv),
+                ptr::from_mut(&mut result).cast(),
+            )
+        };
+        let result = result.finish(code)?;
+        let port = result.port;
+        result.single().map(|host| host.map(|host| (host, port)))
+    }
+    fn addresses(&self, host: &str, port: u16) -> Result<Vec<std::net::IpAddr>, BackendError> {
+        let mut result = DirectoryResults::new();
+        let code = unsafe {
+            self.0.directory_addresses.unwrap()(
+                self.0.context,
+                host.as_ptr().cast(),
+                host.len(),
+                port,
+                Some(directory_text),
+                ptr::from_mut(&mut result).cast(),
+            )
+        };
+        result
+            .finish(code)?
+            .values
+            .iter()
+            .map(|value| value.parse().map_err(|_| BackendError::Rejected))
+            .collect()
+    }
+}
+
+fn complete(api: &abi::rptadv_host_services_v5) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
         api.reaper_acquire.is_some(),
         api.reaper_release.is_some(),
-        api.directory_lookup.is_some(),
+        api.directory_record.is_some(),
+        api.directory_srv.is_some(),
+        api.directory_addresses.is_some(),
+        api.directory_notice.is_some(),
         api.radio_open.is_some(),
         api.radio_activate.is_some(),
         api.radio_destroy.is_some(),
@@ -65,16 +185,16 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v4) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v5) -> Result<Self, Error> {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-                < size_of::<abi::rptadv_host_services_v4>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 4
+                < size_of::<abi::rptadv_host_services_v5>() as u32
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 5
         {
             return Err(Error::Admission);
         }
         let api = unsafe { &*pointer };
-        if api.capability != *b"rptadv.hst4\0" || !complete(api) {
+        if api.capability != *b"rptadv.hst5\0" || !complete(api) {
             return Err(Error::Admission);
         }
         Ok(Self(api))
@@ -131,7 +251,7 @@ impl HostServices {
     pub fn reaper_release(&self) -> unsafe extern "C" fn() {
         self.0.reaper_release.unwrap()
     }
-    /// Resolve one requested ASL destination through the host's public directory facilities.
+    /// Apply shared directory policy over the selected host's I/O operations.
     pub fn lookup(
         &self,
         method: u32,
@@ -140,32 +260,16 @@ impl HostServices {
         remote: &str,
         source: Option<&str>,
     ) -> Result<String, Error> {
-        let mut output = [0_u8; 1024];
-        let mut written = 0;
-        let source = source.unwrap_or("");
-        let code = unsafe {
-            self.0.directory_lookup.unwrap()(
-                self.0.context,
-                method,
-                static_file.as_ptr().cast(),
-                static_file.len(),
-                external_file.as_ptr().cast(),
-                external_file.len(),
-                remote.as_ptr().cast(),
-                remote.len(),
-                source.as_ptr().cast(),
-                source.len(),
-                output.as_mut_ptr().cast(),
-                output.len(),
-                &mut written,
-            )
-        };
-        if code != 0 || written > output.len() {
-            return Err(Error::Operation);
+        let result = DirectoryResolver::new(*self, method, static_file, external_file)
+            .lookup(remote, source.filter(|source| !source.is_empty()));
+        match result {
+            Ok(destination) if destination.len() <= 1024 => Ok(destination),
+            Ok(_) => Err(Error::Operation),
+            Err(error) => {
+                unsafe { self.0.directory_notice.unwrap()(self.0.context, error as u32) };
+                Err(Error::Operation)
+            }
         }
-        std::str::from_utf8(&output[..written])
-            .map(str::to_owned)
-            .map_err(|_| Error::Operation)
     }
     /// Reserve one uniquely owned radio without starting callbacks. The host receives the node
     /// identity and adapter-selected channel separated by a NUL byte in the length-delimited name.

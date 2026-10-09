@@ -11,6 +11,133 @@ pub(crate) fn valid_record() {
     MODE.set(5);
 }
 
+unsafe extern "C" fn collect(context: *mut c_void, value: *const c_char, length: usize) {
+    unsafe { &mut *context.cast::<Vec<String>>() }
+        .push(unsafe { text(value, length) }.unwrap().into());
+}
+unsafe extern "C" fn collect_srv(
+    context: *mut c_void,
+    value: *const c_char,
+    length: usize,
+    port: u16,
+) {
+    assert_eq!(port, 4570);
+    unsafe { collect(context, value, length) };
+}
+
+#[test]
+fn backend_callbacks_deliver_raw_results_and_retain_authoritative_errors() {
+    let null = ptr::null_mut();
+    let mut values = Vec::<String>::new();
+    let context = ptr::from_mut(&mut values).cast();
+    valid_record();
+    assert_eq!(
+        unsafe {
+            directory_record(
+                null,
+                c"static".as_ptr(),
+                6,
+                c"123".as_ptr(),
+                3,
+                Some(collect),
+                context,
+            )
+        },
+        0
+    );
+    assert_eq!(values, ["radio@host/123,192.0.2.1"]);
+    assert_eq!(
+        unsafe {
+            directory_record(
+                null,
+                ptr::null(),
+                1,
+                c"123".as_ptr(),
+                3,
+                Some(collect),
+                context,
+            )
+        },
+        -1
+    );
+    assert_eq!(
+        unsafe { directory_record(null, ptr::null(), 0, c"123".as_ptr(), 3, None, context) },
+        -1
+    );
+    assert_eq!(
+        unsafe { directory_srv(null, ptr::null(), 1, Some(collect_srv), context) },
+        -1
+    );
+    assert_eq!(
+        unsafe { directory_addresses(null, ptr::null(), 1, 4569, Some(collect), context) },
+        -1
+    );
+    MODE.set(4);
+    assert_eq!(
+        unsafe {
+            directory_record(
+                null,
+                c"static".as_ptr(),
+                6,
+                c"123".as_ptr(),
+                3,
+                Some(collect),
+                context,
+            )
+        },
+        -1
+    );
+    let invalid_host = b"bad\0host";
+    assert_eq!(
+        unsafe {
+            directory_addresses(
+                null,
+                invalid_host.as_ptr().cast(),
+                invalid_host.len(),
+                4569,
+                Some(collect),
+                context,
+            )
+        },
+        -1
+    );
+    MODE.set(0);
+    assert_eq!(
+        unsafe {
+            directory_record(
+                null,
+                c"static".as_ptr(),
+                6,
+                c"123".as_ptr(),
+                3,
+                Some(collect),
+                context,
+            )
+        },
+        0
+    );
+    assert_eq!(values, ["radio@host/123,192.0.2.1"]);
+    values.clear();
+    for (mode, expected) in [(0, 0), (1, -1), (2, -1), (3, 0)] {
+        MODE.set(mode);
+        assert_eq!(
+            unsafe { directory_srv(null, c"service".as_ptr(), 7, Some(collect_srv), context) },
+            expected
+        );
+    }
+    assert_eq!(values, ["srv.example"]);
+    values.clear();
+    for mode in 0..=2 {
+        MODE.set(mode);
+        assert_eq!(
+            unsafe { directory_addresses(null, c"host".as_ptr(), 4, 4569, Some(collect), context) },
+            0
+        );
+    }
+    assert_eq!(values, ["192.0.2.1", "2001:db8::1"]);
+    unsafe { directory_notice(null, 1) };
+}
+
 #[test]
 fn native_directory_copies_owned_results_and_cleans_all_resolver_outcomes() {
     let directory = AsteriskDirectory;

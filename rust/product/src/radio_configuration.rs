@@ -1,9 +1,9 @@
 //! Translate resolved node policy to the released native radio-session ABI.
 
-use crate::{ResolvedRadioNode, abi};
+use crate::abi;
 use rpt_advanced_core::config::{
-    CtcssTurnoffMode, RadioCarrierSource, RadioDuplexMode, RadioNoiseFilter,
-    RadioReceiveAudioSource, RadioSignalingMode, RadioSubaudibleSource,
+    CtcssTurnoffMode, RadioCarrierSource, RadioDuplexMode, RadioNoiseFilter, RadioOutputAssignment,
+    RadioReceiveAudioSource, RadioSignalingMode, RadioSubaudibleSource, ResolvedRadioSettings,
 };
 use std::mem::size_of;
 
@@ -15,7 +15,7 @@ const CTCSS_TONES_TENTHS_HZ: [u16; 38] = [
 
 /// Build a native radio-core configuration from one resolved channel.
 pub fn radio_session_config(
-    radio: &ResolvedRadioNode,
+    radio: &ResolvedRadioSettings,
     generation_id: u64,
     maximum_frames: u32,
     publication_interval_ms: u32,
@@ -23,7 +23,7 @@ pub fn radio_session_config(
     if generation_id == 0 || maximum_frames == 0 {
         return Err(RadioConfigError::InvalidBounds);
     }
-    let settings = &radio.settings.signaling;
+    let settings = &radio.signaling;
     let receive_ctcss = settings.receive_mode == RadioSignalingMode::Ctcss
         && settings.receive_subaudible_source == RadioSubaudibleSource::Dsp;
     let receive_dcs = settings.receive_mode == RadioSignalingMode::Dcs
@@ -53,7 +53,7 @@ pub fn radio_session_config(
         receive_input_gain: if settings.receive_audio_source == RadioReceiveAudioSource::Disabled {
             0.0
         } else {
-            1.0
+            db_to_linear(radio.receive_input_gain_db)
         },
         receive: abi::rptadv_radio_receive_config {
             noise_filter_profile: match settings.noise_filter {
@@ -107,8 +107,8 @@ pub fn radio_session_config(
             dcs_inverted: u32::from(settings.transmit_dcs_code.inverted),
             dcs_peak: db_to_linear(settings.transmit_dcs_level_dbfs),
             ctcss_peak: db_to_linear(settings.transmit_ctcss_level_dbfs),
-            output_a_route: 3,
-            output_b_route: 0,
+            output_a_route: output_assignment(settings.transmit_output_a_assignment),
+            output_b_route: output_assignment(settings.transmit_output_b_assignment),
             output_a_tone_gain: 1.0,
             output_a_tone_bias: 0.0,
             output_b_tone_gain: 1.0,
@@ -117,7 +117,18 @@ pub fn radio_session_config(
     })
 }
 
-fn tone_index(tenths_hz: u16) -> Result<usize, RadioConfigError> {
+fn output_assignment(assignment: RadioOutputAssignment) -> u32 {
+    match assignment {
+        RadioOutputAssignment::Disabled => 0,
+        RadioOutputAssignment::Voice => 1,
+        RadioOutputAssignment::Tone => 2,
+        RadioOutputAssignment::Composite => 3,
+        RadioOutputAssignment::AuxiliaryVoice => 4,
+    }
+}
+
+/// Resolve the released radio core's CTCSS table index for configuration and processor ports.
+pub(crate) fn tone_index(tenths_hz: u16) -> Result<usize, RadioConfigError> {
     CTCSS_TONES_TENTHS_HZ
         .iter()
         .position(|tone| *tone == tenths_hz)
@@ -183,14 +194,34 @@ impl std::error::Error for RadioConfigError {}
 #[cfg(test)]
 mod tests {
     use super::{RadioConfigError, radio_session_config};
-    use crate::resolve_radio_nodes;
-    use rpt_advanced_core::config::ConfigDocument;
+    use rpt_advanced_core::config::{ConfigDocument, NodeId, ResolvedNodeSettings};
+
+    fn resolve(document: &ConfigDocument) -> super::ResolvedRadioSettings {
+        ResolvedNodeSettings::resolve(document, &NodeId::new("1000").unwrap())
+            .unwrap()
+            .value
+            .radio
+    }
 
     fn map(overrides: &str) -> Result<crate::abi::rptadv_radio_session_config, RadioConfigError> {
         let document = ConfigDocument::parse(&format!("[1000]\n[radio]\n{overrides}"))
             .expect("valid radio configuration");
-        let radio = resolve_radio_nodes(&document).unwrap().value.remove(0);
+        let radio = resolve(&document);
         radio_session_config(&radio, 1, 960, 50)
+    }
+
+    #[test]
+    fn maps_receive_input_gain_without_changing_detector_calibration() {
+        for (options, expected) in [
+            ("", 1.0),
+            ("receive_input_gain_db=-2\n", 0.794_328_2),
+            ("receive_input_gain_db=6\n", 1.995_262_3),
+            ("receive_audio=disabled\nreceive_input_gain_db=6\n", 0.0),
+        ] {
+            let config = map(options).unwrap();
+            assert!((config.receive_input_gain - expected).abs() < 0.000_001);
+            assert_eq!(config.receive.ctcss_decoder_gain, 1.0);
+        }
     }
 
     #[test]
@@ -253,6 +284,26 @@ mod tests {
     }
 
     #[test]
+    fn maps_configured_transmit_output_assignments() {
+        let document = ConfigDocument::parse(
+            "[radio]\ntransmit_output_b_assignment=voice\n[1000]\n[radio 1000]\ntransmit_output_a_assignment=disabled\ntransmit_output_b_assignment=composite\n",
+        )
+        .expect("valid radio configuration");
+        let radio = resolve(&document);
+        let config = radio_session_config(&radio, 1, 960, 50).unwrap();
+
+        assert_eq!(config.transmit.output_a_route, 0);
+        assert_eq!(config.transmit.output_b_route, 3);
+        assert_eq!(
+            map("transmit_output_a_assignment=auxiliary_voice\n")
+                .unwrap()
+                .transmit
+                .output_a_route,
+            4
+        );
+    }
+
+    #[test]
     fn maps_dcs_and_disabled_receive_audio() {
         let config = map(
             "receive_audio=disabled\nreceive_signaling=dcs\ndcs_receive_code=023N\
@@ -273,7 +324,7 @@ mod tests {
     #[test]
     fn rejects_zero_generation_or_frame_bound() {
         let document = ConfigDocument::parse("[1000]\n[radio]\n").unwrap();
-        let radio = resolve_radio_nodes(&document).unwrap().value.remove(0);
+        let radio = resolve(&document);
         assert!(matches!(
             radio_session_config(&radio, 0, 960, 50),
             Err(RadioConfigError::InvalidBounds)
@@ -287,12 +338,8 @@ mod tests {
     #[test]
     fn rejects_tones_outside_the_radio_core_table() {
         let document = ConfigDocument::parse("[1000]\n[radio]\nreceive_signaling=ctcss\n").unwrap();
-        let mut radio = resolve_radio_nodes(&document).unwrap().value.remove(0);
-        radio
-            .settings
-            .signaling
-            .receive_ctcss_tones_tenths_hz
-            .push(1010);
+        let mut radio = resolve(&document);
+        radio.signaling.receive_ctcss_tones_tenths_hz.push(1010);
         assert!(matches!(
             radio_session_config(&radio, 1, 960, 50),
             Err(RadioConfigError::UnsupportedTone)

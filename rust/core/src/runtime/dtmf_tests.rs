@@ -60,6 +60,38 @@ fn real_native_audio_publishes_every_keypad_symbol_in_order() {
 }
 
 #[test]
+fn final_digit_precedes_unkey_terminator_with_twenty_millisecond_callbacks() {
+    let (mut worker, mut dispatcher) = DtmfWorker::new(7, true);
+    let mut elapsed_samples = 0;
+    for (receiving, frequencies) in [
+        (true, Some((941.0_f32, 1209.0_f32))), // '*'
+        (true, None),
+        (true, Some((697.0, 1336.0))), // '2', held until unkey
+        (false, None),
+    ] {
+        for _ in 0..2 {
+            let mut audio = std::array::from_fn::<_, 960, _>(|offset| {
+                frequencies.map_or(0.0, |(row, column)| {
+                    let phase =
+                        std::f32::consts::TAU * (elapsed_samples + offset) as f32 / 48_000.0;
+                    0.031 * ((phase * row).sin() + (phase * column).sin())
+                })
+            });
+            elapsed_samples += audio.len();
+            worker.process(receiving, &mut audio, elapsed_samples as u64 / 48);
+        }
+    }
+    let mut digits = Vec::new();
+    while let Some(event) = dispatcher.next(7) {
+        let DigitEvent::Digit { digit, .. } = event else {
+            panic!("digit queue overflowed")
+        };
+        digits.push(digit);
+    }
+    assert_eq!(digits, ['*', '2', '#']);
+}
+
+#[test]
 fn worker_reports_qualified_dtmf_muting_until_the_tone_leaves() {
     let (mut worker, _) = DtmfWorker::new(7, true);
     assert!(!worker.suppressing());

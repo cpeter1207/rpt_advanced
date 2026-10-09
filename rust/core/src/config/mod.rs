@@ -22,7 +22,7 @@ pub use schema::Schema;
 pub use settings::{
     Cm119GpioMode, Cm119Profile, CtcssTurnoffMode, DcsCode, LinkLookupMethod, NodeId,
     RadioCarrierSource, RadioDeviceSelection, RadioDuplexMode, RadioNoiseFilter,
-    RadioReceiveAudioSource, RadioSignalingMode, RadioSubaudibleSource,
+    RadioOutputAssignment, RadioReceiveAudioSource, RadioSignalingMode, RadioSubaudibleSource,
     ResolvedAnnouncementSettings, ResolvedCourtesySettings, ResolvedEventSettings,
     ResolvedIdentifierSettings, ResolvedMacroSettings, ResolvedMorseSettings, ResolvedNodeSettings,
     ResolvedPermanentLinkSettings, ResolvedRadioSettings, ResolvedRadioSignalingSettings,

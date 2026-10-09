@@ -209,6 +209,22 @@ pub enum RadioDuplexMode {
     Full,
 }
 
+/// Program and subaudible-signal routing for one CM119 transmit output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadioOutputAssignment {
+    /// Keep this output silent.
+    Disabled,
+    /// Route voice/program audio only.
+    #[default]
+    Voice,
+    /// Route CTCSS/DCS only.
+    Tone,
+    /// Route program audio with CTCSS/DCS.
+    Composite,
+    /// Route auxiliary program audio.
+    AuxiliaryVoice,
+}
+
 /// CTCSS action before transmitter unkey.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CtcssTurnoffMode {
@@ -267,6 +283,10 @@ pub struct ResolvedRadioSignalingSettings {
     pub receive_on_delay_ms: u32,
     /// Whether the radio supports full-duplex operation.
     pub radio_duplex_mode: RadioDuplexMode,
+    /// Signal assignment for transmit output A.
+    pub transmit_output_a_assignment: RadioOutputAssignment,
+    /// Signal assignment for transmit output B.
+    pub transmit_output_b_assignment: RadioOutputAssignment,
     /// Transmit signaling mode.
     pub transmit_mode: RadioSignalingMode,
     /// Transmitted CTCSS tone-map values in tenths of a hertz.
@@ -323,6 +343,8 @@ impl Default for ResolvedRadioSignalingSettings {
             vox_hang_ms: 2_000,
             receive_on_delay_ms: 0,
             radio_duplex_mode: RadioDuplexMode::Half,
+            transmit_output_a_assignment: RadioOutputAssignment::Voice,
+            transmit_output_b_assignment: RadioOutputAssignment::Tone,
             transmit_mode: RadioSignalingMode::Carrier,
             transmit_ctcss_tones_tenths_hz: vec![tone],
             transmit_ctcss_default_tenths_hz: tone,
@@ -359,6 +381,11 @@ pub struct ResolvedRadioSettings {
     pub input_extra_buffer_ms: u32,
     /// Additional playback buffering requested from PortAudio, 0 through 500 ms.
     pub output_extra_buffer_ms: u32,
+    /// Receive gain after deemphasis/gating and before receive filters, -30 through 30 dB.
+    pub receive_input_gain_db: i64,
+    /// Receive gain after filters/optional processing and before the controller receive ring.
+    /// Accepted range is -30 through 30 dB.
+    pub receive_output_gain_db: i64,
     /// Mono 48 kHz receive-processing graph.
     pub receive_graph: String,
     /// Mono 48 kHz transmit-processing graph.
@@ -385,6 +412,8 @@ impl Default for ResolvedRadioSettings {
             output_device_channels: 1,
             input_extra_buffer_ms: 0,
             output_extra_buffer_ms: 0,
+            receive_input_gain_db: 0,
+            receive_output_gain_db: 0,
             receive_graph: "anull".to_owned(),
             transmit_graph: "anull".to_owned(),
             cm119_profile: Cm119Profile::DudeUsb,
@@ -497,6 +526,16 @@ impl ResolvedRadioSettings {
         number!(output_device_channels, "output_device_channels", 1, 2);
         number!(input_extra_buffer_ms, "input_extra_buffer_ms", 0, 500);
         number!(output_extra_buffer_ms, "output_extra_buffer_ms", 0, 500);
+        for (key, gain) in [
+            ("receive_input_gain_db", &mut value.receive_input_gain_db),
+            ("receive_output_gain_db", &mut value.receive_output_gain_db),
+        ] {
+            if let Some(parsed) =
+                lookup_valid(document, key, &scopes, |raw| parse::signed(raw, -30, 30))
+            {
+                *gain = parsed;
+            }
+        }
         value.signaling = ResolvedRadioSignalingSettings::from_document(document, &scopes);
         value
     }
@@ -579,6 +618,16 @@ impl ResolvedRadioSignalingSettings {
             "full" => Some(RadioDuplexMode::Full),
             _ => None,
         });
+        enum_value!(
+            transmit_output_a_assignment,
+            "transmit_output_a_assignment",
+            parse_output_assignment
+        );
+        enum_value!(
+            transmit_output_b_assignment,
+            "transmit_output_b_assignment",
+            parse_output_assignment
+        );
         enum_value!(transmit_mode, "transmit_signaling", parse_signaling_mode);
         if let Some(parsed) = lookup_valid(
             document,
@@ -664,6 +713,17 @@ fn parse_signaling_mode(raw: &str) -> Option<RadioSignalingMode> {
         "carrier" => Some(RadioSignalingMode::Carrier),
         "ctcss" => Some(RadioSignalingMode::Ctcss),
         "dcs" => Some(RadioSignalingMode::Dcs),
+        _ => None,
+    }
+}
+
+fn parse_output_assignment(raw: &str) -> Option<RadioOutputAssignment> {
+    match raw {
+        "disabled" => Some(RadioOutputAssignment::Disabled),
+        "voice" => Some(RadioOutputAssignment::Voice),
+        "tone" => Some(RadioOutputAssignment::Tone),
+        "composite" => Some(RadioOutputAssignment::Composite),
+        "auxiliary_voice" => Some(RadioOutputAssignment::AuxiliaryVoice),
         _ => None,
     }
 }

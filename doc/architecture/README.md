@@ -25,7 +25,7 @@ The native radio transmit callback returns PTT and CTCSS enable separately; its
 activity policy remains in the controller, as specified by
 [ADR 0042](decisions/0042-activity-scoped-ctcss-encode.md).
 Before either incoming or outgoing peer media starts, the product binds it to
-its node's existing radio lease. Host-services ABI 4 forwards this control-only
+its node's existing radio lease. Host-services ABI 5 forwards this control-only
 operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
 USBRadioPlus retains ownership of the configured per-peer graph and its reload
 lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
@@ -89,7 +89,7 @@ Rust's private ABI.
 | `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |
 | `librptadv_gpio_adapter.so.1` | CM119 HID signaling and GPIO I/O |
 | `librptadviax2.so.1` | Asterisk-independent IAX2 packet protocol used by the standalone network client |
-| `librptadv_asterisk_adapter.so.1` | Public Asterisk application/CLI, channel, codec, directory, and frame services |
+| `librptadv_asterisk_adapter.so.1` | Public Asterisk application/CLI, channel, codec, directory I/O, and frame services |
 | `librptadv_control_asterisk_adapter.so.1` | Replaceable serialized control executor backed by Asterisk's taskprocessor |
 | `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
 | `librptadv_speech_adapter.so.1` | Offline Piper synthesis, direct WAV reading, and speech-only level adjustment |
@@ -315,11 +315,11 @@ defines the full reload, hardware-handoff, and failure policy.
 
 - `module/app_rpt_advanced_loader.c` supplies only Asterisk module metadata and
   passes selected descriptors to the versioned Rust Asterisk entry adapter.
-- `rust/product/` owns product lifecycle, node/radio/peer workers, runtime
+- `rust/product/` owns product lifecycle, directory policy, node/radio/peer workers, runtime
   composition, and clients of the host, control, file, and speech descriptors.
   It embeds the controller core once and imports no Asterisk API.
 - `rust/asterisk/` owns public-Asterisk registration and host services:
-  applications, CLI, channels, frames, codec selection, directory lookup, and
+  applications, CLI, channels, frames, codec selection, directory I/O, and
   radio reservation. It does not embed the controller core.
 - `rust/control-asterisk-adapter/` owns only control-executor backend resources.
   `rust/file-adapter/` and `rust/speech-adapter/` compile the private
@@ -495,6 +495,48 @@ defines the full reload, hardware-handoff, and failure policy.
    software architecture, ADRs, wishlist, appliance PRD, and hardware
    architecture. Record and resolve any inconsistency before considering the
    architecture change complete.
+
+## Shared-product build prerequisites
+
+The shared-radio extraction adds `libusbradioplus-product-dev` to the controller
+build dependencies and `libusbradioplus-product1` to the standalone runtime.
+Neither the portable controller package nor its Asterisk adapter depends on the
+USBRadioPlus integration package. Local candidate packages are verification
+artifacts, not published releases.
+
+As of the 2026-10-09 extraction, hosted verification needs this ordered handoff:
+
+1. Merge the companion workflow changes: USBRadioPlus quality installs all three
+   package outputs, and its package workflow publishes the product outputs and
+   verifies lower-provider dependencies on the product runtime package.
+2. Complete USBRadioPlus's required pull-request gate and publish its matching
+   native Debian 13 amd64/arm64 product runtime/development packages through the
+   approved release process. Record the actual package version; do not invent a
+   future minimum or reuse an earlier ABI-incompatible artifact.
+3. Use the controller workflow's
+   `.github/actions/install-shared-dependencies/action.yml` signed-APT download
+   step to obtain the product packages and their RNNoise runtime dependencies.
+   It verifies the existing signing-key fingerprint and uses isolated APT
+   sources/lists; no second GitHub-release-asset distribution path is added.
+4. Refresh `rpt_advanced-workflows/.github/workflows/images.yml` using the
+   controller's intended dependency inputs on both native architectures. Verify
+   `/usr/include/usbradioplus_product.h`, pkg-config `usbradioplus_product` with
+   `abi_version=1`, and `libusbradioplus_product.so.1` in addition to the existing
+   provider checks before publishing the prepared image manifest. Then run the
+   controller's hosted checks. Its release package job also relies on this
+   prepared image.
+
+The existing immutable candidate builder's repository allowlist does not include
+USBRadioPlus. This extraction therefore uses the signed-APT release path above,
+not a candidate manifest entry or release-version placeholder. Enabling the
+candidate alternative requires a separately verified source/package input;
+source vendoring is not a substitute.
+
+Native Debian 13 amd64 candidate installation has verified standalone without
+Asterisk, USBRadioPlus without controller packages, the controller's Asterisk
+adapter alone, and both Asterisk adapters together. Installed descriptors and
+shared-library resolution pass. These hardware-free checks do not replace the
+hosted platform gate or live callback/reload acceptance on an approved test node.
 
 ## Decisions
 

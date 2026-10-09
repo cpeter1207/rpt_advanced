@@ -5,11 +5,16 @@ fn main() {
     println!("cargo:rerun-if-changed=include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
     println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_product.so.1");
+    println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
+    let radio_include =
+        env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned());
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg("-I../media-support/include")
         .clang_arg("-I../control-abi/include")
+        .clang_arg(format!("-I{radio_include}"))
         .allowlist_type("rptadv_.*")
+        .allowlist_type("UrpNativeStationConfig")
         .allowlist_function("rpcr3_descriptor")
         .allowlist_function("rptadv_samplerate_adapter_descriptor")
         .allowlist_var("RPCR3_.*")

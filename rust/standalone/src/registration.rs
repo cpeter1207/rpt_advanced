@@ -1,8 +1,8 @@
 //! ASL3-compatible HTTPS node registration outside audio callbacks.
 
+use crate::configuration::ConfigError;
 use crate::secrets::SecretsFile;
 use crossbeam_queue::ArrayQueue;
-use rpt_advanced_core::config::{ConfigDocument, ConfigError, NodeId, ResolvedNodeSettings};
 use std::{
     io::Read,
     sync::{
@@ -15,6 +15,16 @@ use std::{
 
 const RESPONSE_LIMIT: u64 = 64 * 1024;
 const UPDATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Safe diagnostics contain no credentials, URLs, or untrusted response text.
+#[derive(Debug, PartialEq, Eq)]
+enum RegistrationError {
+    HttpStatus(u16),
+    Transport(ureq::ErrorKind),
+    Read(std::io::ErrorKind),
+    InvalidResponse,
+    Rejected,
+}
 
 /// One enabled node's registration details. Secret contents are never formatted or exposed.
 #[derive(Clone)]
@@ -53,26 +63,23 @@ pub fn targets(
     configuration: &str,
     secrets: &SecretsFile,
 ) -> Result<Vec<RegistrationTarget>, ConfigError> {
-    let document = ConfigDocument::parse(configuration)?;
     let mut targets = Vec::new();
-    for node in document.nodes() {
-        let node = NodeId::new(node.to_owned())?;
-        let settings = ResolvedNodeSettings::resolve(&document, &node)?.value;
-        if !settings.enabled || settings.iax_registration_url.is_empty() {
+    for node in crate::configuration::resolve_radio_nodes(configuration)? {
+        if !node.enabled || node.registration_url.is_empty() {
             continue;
         }
-        let Some(secret) = secrets.for_node(node.as_str()) else {
+        let Some(secret) = secrets.for_node(&node.node) else {
             eprintln!(
                 "node {}: HTTPS registration skipped; no IAX secret is configured",
-                node.as_str()
+                node.node
             );
             continue;
         };
         targets.push(RegistrationTarget {
-            node: node.as_str().to_owned(),
-            url: settings.iax_registration_url,
-            local_port: settings.iax_local_port,
-            interval_seconds: settings.iax_registration_interval_s,
+            node: node.node,
+            url: node.registration_url,
+            local_port: node.iax_port,
+            interval_seconds: node.registration_interval_seconds,
             secret: secret.to_owned(),
         });
     }
@@ -146,6 +153,7 @@ fn registration_loop(
         .timeout_write(Duration::from_secs(15))
         .build();
     let mut due = vec![Instant::now(); targets.len()];
+    let mut registered = vec![false; targets.len()];
 
     loop {
         if stopping.load(Ordering::Acquire) {
@@ -154,6 +162,7 @@ fn registration_loop(
         if let Some(replacement) = updates.pop() {
             targets = replacement;
             due = vec![Instant::now(); targets.len()];
+            registered = vec![false; targets.len()];
         }
         let Some((index, deadline)) = due.iter().enumerate().min_by_key(|(_, when)| **when) else {
             thread::sleep(UPDATE_POLL_INTERVAL);
@@ -167,27 +176,46 @@ fn registration_loop(
         let target = targets[index].clone();
         let interval = Duration::from_secs(target.interval_seconds);
 
-        let refresh = post_registration(&agent, &target);
-        if refresh.is_none() {
-            eprintln!("node {}: HTTPS registration failed", target.node);
-        }
-        due[index] = Instant::now() + refresh.unwrap_or(interval);
+        let refresh = match post_registration(&agent, &target) {
+            Ok(refresh) => {
+                if !registered[index] {
+                    eprintln!("node {}: HTTPS registration succeeded", target.node);
+                }
+                registered[index] = true;
+                refresh
+            }
+            Err(error) => {
+                registered[index] = false;
+                eprintln!("node {}: HTTPS registration failed: {error:?}", target.node);
+                interval
+            }
+        };
+        due[index] = Instant::now() + refresh;
     }
 }
 
-fn post_registration(agent: &ureq::Agent, target: &RegistrationTarget) -> Option<Duration> {
+fn post_registration(
+    agent: &ureq::Agent,
+    target: &RegistrationTarget,
+) -> Result<Duration, RegistrationError> {
     let body = request_body(target);
     let response = agent
         .post(&target.url)
         .set("Content-Type", "application/json")
         .send_bytes(&body)
-        .ok()?;
+        .map_err(|error| match error {
+            ureq::Error::Status(status, _) => RegistrationError::HttpStatus(status),
+            ureq::Error::Transport(transport) => RegistrationError::Transport(transport.kind()),
+        })?;
+    if !(200..300).contains(&response.status()) {
+        return Err(RegistrationError::HttpStatus(response.status()));
+    }
     let mut response_body = Vec::new();
     response
         .into_reader()
         .take(RESPONSE_LIMIT)
         .read_to_end(&mut response_body)
-        .ok()?;
+        .map_err(|error| RegistrationError::Read(error.kind()))?;
     response_refresh(&response_body, target.interval_seconds)
 }
 
@@ -203,9 +231,12 @@ fn request_body(target: &RegistrationTarget) -> Vec<u8> {
     .expect("registration request contains only JSON-compatible values")
 }
 
-fn response_refresh(body: &[u8], fallback_seconds: u64) -> Option<Duration> {
-    let response: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let data = response.get("data")?;
+fn response_refresh(body: &[u8], fallback_seconds: u64) -> Result<Duration, RegistrationError> {
+    let response: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| RegistrationError::InvalidResponse)?;
+    let data = response
+        .get("data")
+        .ok_or(RegistrationError::InvalidResponse)?;
     let detail = match data {
         serde_json::Value::String(value) => {
             serde_json::from_str(value).unwrap_or_else(|_| data.clone())
@@ -217,9 +248,9 @@ fn response_refresh(body: &[u8], fallback_seconds: u64) -> Option<Duration> {
         .to_ascii_lowercase()
         .contains("successfully registered")
     {
-        return None;
+        return Err(RegistrationError::Rejected);
     }
-    Some(Duration::from_secs(
+    Ok(Duration::from_secs(
         response
             .get("refresh")
             .and_then(serde_json::Value::as_u64)
@@ -230,7 +261,7 @@ fn response_refresh(body: &[u8], fallback_seconds: u64) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegistrationTarget, request_body, response_refresh, targets};
+    use super::{RegistrationError, RegistrationTarget, request_body, response_refresh, targets};
     use crate::secrets::SecretsFile;
     use std::time::Duration;
 
@@ -287,11 +318,11 @@ mod tests {
     fn response_uses_server_refresh_after_confirmed_registration() {
         assert_eq!(
             response_refresh(br#"{"refresh":75,"data":"successfully registered"}"#, 60),
-            Some(Duration::from_secs(75))
+            Ok(Duration::from_secs(75))
         );
         assert_eq!(
             response_refresh(br#"{"refresh":75,"data":"registration denied"}"#, 60),
-            None
+            Err(RegistrationError::Rejected)
         );
     }
 
@@ -302,16 +333,19 @@ mod tests {
                 br#"{"refresh":45,"data":"{\"result\":\"successfully registered\"}"}"#,
                 60,
             ),
-            Some(Duration::from_secs(45))
+            Ok(Duration::from_secs(45))
         );
     }
 
     #[test]
     fn malformed_or_unbounded_server_refresh_is_rejected() {
-        assert_eq!(response_refresh(b"not json", 60), None);
+        assert_eq!(
+            response_refresh(b"not json", 60),
+            Err(RegistrationError::InvalidResponse)
+        );
         assert_eq!(
             response_refresh(br#"{"refresh":86401,"data":"successfully registered"}"#, 60),
-            Some(Duration::from_secs(60))
+            Ok(Duration::from_secs(60))
         );
     }
 
@@ -322,9 +356,12 @@ mod tests {
             br#"{"refresh":0,"data":"successfully registered"}"#,
             br#"{"refresh":"45","data":"successfully registered"}"#,
         ] {
-            assert_eq!(response_refresh(body, 60), Some(Duration::from_secs(60)));
+            assert_eq!(response_refresh(body, 60), Ok(Duration::from_secs(60)));
         }
-        assert_eq!(response_refresh(br#"{"data":"not-json"}"#, 60), None);
+        assert_eq!(
+            response_refresh(br#"{"data":"not-json"}"#, 60),
+            Err(RegistrationError::Rejected)
+        );
     }
 
     #[test]
@@ -389,7 +426,7 @@ mod tests {
 
         assert_eq!(
             super::post_registration(&agent, &target),
-            Some(Duration::from_secs(45))
+            Ok(Duration::from_secs(45))
         );
         server.join().unwrap();
     }
@@ -406,7 +443,10 @@ mod tests {
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_millis(100))
             .build();
-        assert_eq!(super::post_registration(&agent, &unreachable), None);
+        assert!(matches!(
+            super::post_registration(&agent, &unreachable),
+            Err(RegistrationError::Transport(_))
+        ));
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut malformed = target();
@@ -424,13 +464,32 @@ mod tests {
             stream.write_all(body).unwrap();
         });
 
-        assert_eq!(super::post_registration(&agent, &malformed), None);
+        assert_eq!(
+            super::post_registration(&agent, &malformed),
+            Err(RegistrationError::InvalidResponse)
+        );
         server.join().unwrap();
     }
 
     #[test]
+    fn registration_classifies_http_status_without_exposing_response() {
+        for status in [302, 403] {
+            let result = post_loopback_response(status, br#"{"error":"test-secret denied"}"#);
+            assert_eq!(result, Err(RegistrationError::HttpStatus(status)));
+            assert!(!format!("{result:?}").contains("test-secret"));
+        }
+    }
+
+    #[test]
+    fn registration_classifies_valid_rejection_without_exposing_response() {
+        let result = post_loopback_response(200, br#"{"data":"test-secret registration denied"}"#);
+        assert_eq!(result, Err(RegistrationError::Rejected));
+        assert!(!format!("{result:?}").contains("test-secret"));
+    }
+
+    #[test]
     fn registration_read_timeout_bounds_a_stalled_server() {
-        use std::{net::TcpListener, thread, time::Instant};
+        use std::{io::Write, net::TcpListener, thread, time::Instant};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut target = target();
@@ -438,6 +497,9 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             read_registration_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n")
+                .unwrap();
             thread::sleep(Duration::from_millis(200));
         });
         let agent = ureq::AgentBuilder::new()
@@ -445,7 +507,10 @@ mod tests {
             .build();
         let started = Instant::now();
 
-        assert_eq!(super::post_registration(&agent, &target), None);
+        assert!(matches!(
+            super::post_registration(&agent, &target),
+            Err(RegistrationError::Read(_))
+        ));
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().unwrap();
     }
@@ -509,6 +574,49 @@ mod tests {
         worker.replace(Vec::new());
         thread::sleep(Duration::from_millis(100));
         worker.stop();
+    }
+
+    #[test]
+    fn registration_worker_refreshes_an_already_registered_target() {
+        use std::{io::Write, net::TcpListener, thread, time::Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut configured = target();
+        configured.url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut count = 0;
+            while count < 2 && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        read_registration_request(&mut stream);
+                        let body = br#"{"refresh":1,"data":"successfully registered"}"#;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .unwrap();
+                        stream.write_all(body).unwrap();
+                        count += 1;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("registration listener failed: {error}"),
+                }
+            }
+            count
+        });
+
+        let mut worker = super::RegistrationWorker::start(vec![configured]).unwrap();
+        let requests = server.join().unwrap();
+        worker.stop();
+        assert_eq!(
+            requests, 2,
+            "the registered target must refresh successfully"
+        );
     }
 
     #[test]
@@ -577,5 +685,31 @@ mod tests {
         }
         let mut body = vec![0; content_length];
         reader.read_exact(&mut body).unwrap();
+    }
+
+    fn post_loopback_response(
+        status: u16,
+        body: &'static [u8],
+    ) -> Result<Duration, RegistrationError> {
+        use std::{io::Write, net::TcpListener, thread};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut configured = target();
+        configured.url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_registration_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let result = super::post_registration(&agent, &configured);
+        server.join().unwrap();
+        result
     }
 }

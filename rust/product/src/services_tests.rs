@@ -9,6 +9,107 @@ static LOCAL_TIME_MODE: AtomicU8 = AtomicU8::new(0);
 static LOOKUP_MODE: AtomicU8 = AtomicU8::new(0);
 static RADIO_OPEN_MODE: AtomicU8 = AtomicU8::new(0);
 static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
+static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
+
+#[test]
+fn directory_host_revision_and_every_backend_callback_are_required() {
+    let fixture = unsafe { crate::fixture::host_descriptor().read() };
+    let mut old = fixture;
+    old.abi_version = 4;
+    assert!(matches!(
+        unsafe { HostServices::open(&old) },
+        Err(Error::Admission)
+    ));
+    for missing in 0..4 {
+        let mut table = fixture;
+        match missing {
+            0 => table.directory_record = None,
+            1 => table.directory_srv = None,
+            2 => table.directory_addresses = None,
+            _ => table.directory_notice = None,
+        }
+        assert!(matches!(
+            unsafe { HostServices::open(&table) },
+            Err(Error::Admission)
+        ));
+    }
+}
+
+unsafe extern "C" fn unavailable_srv(
+    _: *mut c_void,
+    _: *const c_char,
+    _: usize,
+    _: abi::rptadv_directory_srv_sink_v1,
+    _: *mut c_void,
+) -> i32 {
+    1
+}
+unsafe extern "C" fn directory_notice(_: *mut c_void, reason: u32) {
+    DIRECTORY_NOTICE.store(reason as u8, Ordering::Relaxed);
+}
+
+#[test]
+fn directory_backend_failures_keep_host_diagnostics_and_selected_fallback() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let services = host_services(|table| {
+        table.directory_srv = Some(unavailable_srv);
+        table.directory_notice = Some(directory_notice);
+    });
+    assert_eq!(
+        services.lookup(1, "", "external", "123", None),
+        Err(Error::Operation)
+    );
+    assert_eq!(DIRECTORY_NOTICE.load(Ordering::Relaxed), 4);
+    assert_eq!(
+        services.lookup(0, "", "external", "123", None),
+        Ok("radio@fixture/123".into())
+    );
+    assert_eq!(
+        services.lookup(2, "static", "", "123", Some("")),
+        Ok("radio@fixture/123".into())
+    );
+    assert_eq!(
+        services.lookup(2, "static", "", "123", Some("192.0.2.2")),
+        Err(Error::Operation)
+    );
+    assert_eq!(DIRECTORY_NOTICE.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        services.lookup(2, "", "", "123", None),
+        Err(Error::Operation)
+    );
+    assert_eq!(DIRECTORY_NOTICE.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn borrowed_directory_results_validate_strings_cardinality_and_status() {
+    let mut results = DirectoryResults::new();
+    unsafe { directory_text(ptr::from_mut(&mut results).cast(), ptr::null(), 0) };
+    assert_eq!(
+        results.finish(0).unwrap().single().unwrap(),
+        Some(String::new())
+    );
+    assert!(matches!(
+        DirectoryResults::new().finish(-1),
+        Err(BackendError::Rejected)
+    ));
+    assert!(matches!(
+        DirectoryResults::new().finish(1),
+        Err(BackendError::Unavailable)
+    ));
+    let mut results = DirectoryResults::new();
+    unsafe {
+        directory_srv(
+            ptr::from_mut(&mut results).cast(),
+            c"srv.example".as_ptr(),
+            11,
+            4571,
+        )
+    };
+    assert_eq!(results.port, 4571);
+    assert_eq!(results.single().unwrap(), Some("srv.example".into()));
+}
 
 #[test]
 fn obsolete_exchange_host_revision_is_rejected_before_callbacks() {
@@ -28,7 +129,7 @@ fn host_without_radio_link_binding_is_rejected_before_callbacks() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 4;
+    table.abi_version = 5;
     table.peer_bind_radio = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -53,7 +154,7 @@ fn direct_table_requires_both_activation_and_destroy() {
     ));
 }
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v4)) -> HostServices {
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v5)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -93,46 +194,39 @@ unsafe extern "C" fn local_time_mode(
 
 unsafe extern "C" fn lookup_mode(
     _: *mut c_void,
-    _: u32,
     _: *const c_char,
     _: usize,
     _: *const c_char,
     _: usize,
-    _: *const c_char,
-    _: usize,
-    _: *const c_char,
-    _: usize,
-    output: *mut c_char,
-    _: usize,
-    written: *mut usize,
+    sink: abi::rptadv_text_sink_v1,
+    context: *mut c_void,
 ) -> i32 {
-    let Some(written) = (unsafe { written.as_mut() }) else {
-        return -1;
-    };
+    let sink = sink.unwrap();
     match LOOKUP_MODE.load(Ordering::Relaxed) {
         1 => -1,
         2 => {
-            *written = 1025;
+            let record = format!("radio@{}/123,192.0.2.1", "x".repeat(1024));
+            unsafe { sink(context, record.as_ptr().cast(), record.len()) };
             0
         }
         3 => {
-            let Some(output) = (unsafe { output.cast::<u8>().as_mut() }) else {
-                return -1;
+            unsafe { sink(context, c"\xff".as_ptr(), 1) };
+            0
+        }
+        4 => {
+            unsafe { sink(context, ptr::null(), 1) };
+            0
+        }
+        5 => {
+            unsafe {
+                sink(context, c"a".as_ptr(), 1);
+                sink(context, c"b".as_ptr(), 1);
             };
-            *output = 0xff;
-            *written = 1;
             0
         }
         _ => {
-            if output.is_null() {
-                return -1;
-            }
-            let output = output.cast::<u8>();
-            unsafe {
-                output.write(b'o');
-                output.add(1).write(b'k');
-            }
-            *written = 2;
+            let record = "radio@ok/123,192.0.2.1";
+            unsafe { sink(context, record.as_ptr().cast(), record.len()) };
             0
         }
     }
@@ -273,19 +367,19 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v4>() as u32;
+    table.struct_size = size_of::<abi::rptadv_host_services_v5>() as u32;
     table.abi_version = 1;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 4;
+    table.abi_version = 5;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.hst4\0";
+    table.capability = *b"rptadv.hst5\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -299,7 +393,7 @@ fn host_table_validation_and_value_conversions_fail_closed() {
     );
     assert_eq!(second, 3);
     assert_eq!(
-        services.lookup(0, "", "", "2000", None).unwrap(),
+        services.lookup(0, "static", "", "2000", None).unwrap(),
         "radio@fixture/2000"
     );
     services.command_notice("1000", true);
@@ -321,18 +415,18 @@ fn lookup_and_handle_admission_errors_are_rejected_without_ownership_transfer() 
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let services = host_services(|table| table.directory_lookup = Some(lookup_mode));
-    for mode in [1, 2, 3] {
+    let services = host_services(|table| table.directory_record = Some(lookup_mode));
+    for mode in [1, 2, 3, 4, 5] {
         LOOKUP_MODE.store(mode, Ordering::Relaxed);
         assert_eq!(
-            services.lookup(0, "static", "external", "remote", Some("source")),
+            services.lookup(0, "static", "external", "123", Some("192.0.2.1")),
             Err(Error::Operation)
         );
     }
     LOOKUP_MODE.store(0, Ordering::Relaxed);
     assert_eq!(
-        services.lookup(0, "static", "external", "remote", Some("source")),
-        Ok("ok".into())
+        services.lookup(0, "static", "external", "123", Some("192.0.2.1")),
+        Ok("radio@ok/123".into())
     );
     assert!(matches!(
         unsafe { services.peer(ptr::null_mut()) },
