@@ -55,12 +55,24 @@ def test_standalone_package_declares_its_native_runtime_providers() -> None:
     runtime = depends(package_stanzas()["rpt-advanced"])
 
     for package in (
+        "libusbradioplus-product1",
         "librptadv-portaudio-alsa-adapter2",
         "librptadv-gpio-adapter1",
         "librptadv-ffmpeg-adapter1",
         "librptadv-iax2-client1",
     ):
         assert package in runtime
+
+
+def test_radio_product_dependency_does_not_require_the_asterisk_integration() -> None:
+    stanzas = package_stanzas()
+    source = (ROOT / "debian/control").read_text().split("\n\n", 1)[0]
+    assert "libusbradioplus-product-dev" in source
+    standalone = depends(stanzas["rpt-advanced"])
+    assert "libusbradioplus-product1" in standalone
+    assert "usbradioplus" not in standalone.replace("libusbradioplus-product1", "")
+    for package in ("app-rpt-advanced", "librptadv-product1"):
+        assert "usbradioplus" not in depends(stanzas[package])
 
 
 def test_standalone_package_declares_its_service_account_provisioner() -> None:
@@ -85,6 +97,7 @@ if __name__ == "__main__":
         test_standalone_package_is_independent_from_asterisk_adapter,
         test_each_install_set_contains_only_its_entrypoint,
         test_standalone_package_declares_its_native_runtime_providers,
+        test_radio_product_dependency_does_not_require_the_asterisk_integration,
         test_standalone_package_declares_its_service_account_provisioner,
         test_standalone_build_profile_excludes_asterisk_adapter_packages,
     )

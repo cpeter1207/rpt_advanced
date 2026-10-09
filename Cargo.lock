@@ -568,7 +568,6 @@ dependencies = [
  "crossbeam-queue",
  "libc",
  "libloading",
- "rpt-advanced-core",
  "serde_json",
  "ureq",
 ]

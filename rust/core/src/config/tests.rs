@@ -215,6 +215,58 @@ fn radio_settings_inherit_defaults_and_allow_node_overrides() {
 }
 
 #[test]
+fn radio_receive_gains_resolve_defaults_inheritance_and_node_overrides() {
+    for (source, expected, warning_count) in [
+        ("[1000]\n", (0, 0), 0),
+        (
+            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n",
+            (-2, -6),
+            0,
+        ),
+        (
+            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n[radio 1000]\nreceive_input_gain_db=30\nreceive_output_gain_db=-30\n",
+            (30, -30),
+            0,
+        ),
+        (
+            "[radio]\nreceive_input_gain_db=-30\nreceive_output_gain_db=30\n[1000]\n",
+            (-30, 30),
+            0,
+        ),
+        (
+            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n[radio 1000]\nreceive_input_gain_db=-31\nreceive_output_gain_db=31\n",
+            (-2, -6),
+            2,
+        ),
+        (
+            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n[radio 1000]\nreceive_input_gain_db=-2.5\nreceive_output_gain_db=invalid\n",
+            (-2, -6),
+            2,
+        ),
+        (
+            "[radio]\nreceive_input_gain_db=-31\nreceive_output_gain_db=31\n[1000]\n",
+            (0, 0),
+            2,
+        ),
+    ] {
+        let resolved = ResolvedRadioSettings::resolve(
+            &ConfigDocument::parse(source).unwrap(),
+            &NodeId::new("1000").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                resolved.value.receive_input_gain_db,
+                resolved.value.receive_output_gain_db,
+            ),
+            expected,
+            "{source}"
+        );
+        assert_eq!(resolved.warnings.len(), warning_count, "{source}");
+    }
+}
+
+#[test]
 fn radio_signaling_options_are_supported_in_default_and_node_scopes() {
     let document = ConfigDocument::parse(
         "[radio]\nreceive_audio=flat\nreceive_signaling=ctcss\ncarrier_source=dsp\nctcss_source=dsp\nreceive_ctcss_tones_hz=100.0,103.5\nctcss_relaxed=yes\nctcss_decoder_gain_db=0\ndcs_receive_code=023N\nsquelch_level=500\nsquelch_hysteresis=3000\nnoise_filter=standard\nvox_threshold=0\nvox_hang_ms=2000\nreceive_on_delay_ms=0\nradio_duplex_mode=half\ntransmit_signaling=ctcss\ntransmit_ctcss_tones_hz=100.0\ntransmit_ctcss_default_hz=100.0\ntransmit_ctcss_level_dbfs=-24\ntransmit_ctcss_turnoff_mode=phase_shift\ntransmit_ctcss_phase_shift_degrees=120\ntransmit_ctcss_turnoff_duration_ms=180\ntransmit_ctcss_tail_tone_hz=55\ntransmit_dcs_code=023N\ntransmit_dcs_level_dbfs=-24\ntransmit_dcs_turnoff_enabled=yes\ntransmit_dcs_turnoff_duration_ms=180\ntransmit_settle_ms=500\ntransmit_receive_blanking_ms=0\ntransmit_off_delay_ms=0\n[1000]\n[radio 1000]\nreceive_signaling=dcs\ndcs_receive_code=047I\ntransmit_signaling=dcs\ntransmit_dcs_code=047I\n",

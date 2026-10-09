@@ -109,6 +109,9 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
         ), f"static external adapter in {name}"
         if name != PRODUCT:
             assert "rpt_advanced_core::" not in symbols, f"duplicated core in {name}"
+        assert not re.search(r"\busbradioplus_\w+::", symbols), (
+            f"duplicated radio product in {name}"
+        )
     assert dynamic(directory / "app_rpt_advanced.so", "RUNPATH") == {runpath}, (
         "loader must resolve the configured private-library directory"
     )
@@ -118,6 +121,11 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     assert not any(
         "asterisk" in name.lower() or "asl3" in name.lower() for name in needed
     ), f"standalone executable has an Asterisk/ASL3 dependency: {needed}"
+    symbols = command("nm", "--defined-only", "--demangle", str(standalone))
+    assert "rpt_advanced_core::" not in symbols, "duplicated core in standalone"
+    assert not re.search(r"\busbradioplus_\w+::", symbols), (
+        "duplicated radio product in standalone"
+    )
 
 
 def staged(
@@ -256,6 +264,7 @@ def package(control: Path) -> None:
         "dh-sequence-asterisk",
         "librate-adjusting-pcm-ring3-dev",
         "librptadv-samplerate-adapter-dev",
+        "libusbradioplus-product-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
         "${asterisk:Depends}",
@@ -279,6 +288,7 @@ def package(control: Path) -> None:
         "standalone package depends on Asterisk"
     )
     assert "${asterisk:Depends}" in adapter, "Asterisk adapter lost its dependency"
+    assert "libusbradioplus-product1" in standalone, "missing dynamic radio product"
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 
 
@@ -611,6 +621,27 @@ def verify_artifact_policy() -> None:
                     else inspect(*arguments)
                 )
                 rejected()
+            symbols.side_effect = inspect
+
+            for name in (*ELF_DEPENDENCIES, STANDALONE_BINARY):
+                for duplicate in (
+                    "rpt_advanced_core::controller",
+                    "usbradioplus_product::native_station",
+                    "usbradioplus_station::Station",
+                    "usbradioplus_core::Config",
+                    "usbradioplus_radio::Radio",
+                ):
+                    if name == PRODUCT and duplicate.startswith("rpt_advanced_core::"):
+                        continue
+                    symbols.side_effect = (
+                        lambda *arguments, value=duplicate, target=name: (
+                            value
+                            if arguments[:2] == ("nm", "--defined-only")
+                            and Path(arguments[-1]).name == target
+                            else inspect(*arguments)
+                        )
+                    )
+                    rejected()
             symbols.side_effect = inspect
 
         report = root / "coverage.json"

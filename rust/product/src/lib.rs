@@ -7,11 +7,14 @@ pub(crate) mod abi {
     include!(concat!(env!("OUT_DIR"), "/abi.rs"));
 }
 
+mod configuration;
 pub mod control;
+pub mod directory;
 pub mod host;
 pub mod lifecycle;
 pub mod link;
 pub mod media;
+mod radio_configuration;
 pub mod services;
 pub(crate) mod status_post;
 pub mod worker;

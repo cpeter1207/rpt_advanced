@@ -189,6 +189,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                     | "output_device_channels"
                     | "input_extra_buffer_ms"
                     | "output_extra_buffer_ms"
+                    | "receive_input_gain_db"
+                    | "receive_output_gain_db"
                     | "receive_graph"
                     | "transmit_graph"
                     | "cm119_profile"
@@ -401,6 +403,9 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "input_extra_buffer_ms" | "output_extra_buffer_ms" => {
             parse::unsigned(value, 0, 500).is_some()
         }
+        "receive_input_gain_db" | "receive_output_gain_db" => {
+            parse::signed(value, -30, 30).is_some()
+        }
         "receive_graph" | "transmit_graph" => !value.is_empty() && value.len() <= 4096,
         "statpost_url" => {
             if value.is_empty() {
@@ -543,7 +548,10 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         ) => "1",
         (
             ScopeKind::RadioDefault | ScopeKind::RadioNode,
-            "input_extra_buffer_ms" | "output_extra_buffer_ms",
+            "input_extra_buffer_ms"
+            | "output_extra_buffer_ms"
+            | "receive_input_gain_db"
+            | "receive_output_gain_db",
         ) => "0",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "receive_graph" | "transmit_graph") => {
             "anull"

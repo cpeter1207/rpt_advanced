@@ -24,7 +24,7 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v4 =
+    let mut table: abi::rptadv_host_services_v5 =
         unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -49,7 +49,7 @@ fn clock() -> RuntimeClock {
 }
 fn document(device: &str, extra: &str) -> ConfigDocument {
     ConfigDocument::parse(&format!(
-        "[1000]\nradio_channel={device}\nduplex=full\n{extra}"
+        "[1000]\nradio_channel={device}\nduplex=full\nlink_static_directory_file=fixture\n{extra}"
     ))
     .unwrap()
 }

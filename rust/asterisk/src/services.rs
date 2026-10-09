@@ -4,7 +4,7 @@ use crate::{
     bindings as ffi,
     connection::Connection,
     link::{
-        directory::{AsteriskDirectory, DirectoryResolver, Method},
+        directory,
         peer_io::{Input, PeerIo},
     },
     radio::Radio,
@@ -16,7 +16,7 @@ use std::{
     ptr,
 };
 
-unsafe fn text<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
+pub(crate) unsafe fn text<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
     if pointer.is_null() && length != 0 {
         return None;
     }
@@ -28,7 +28,7 @@ unsafe fn text<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
     std::str::from_utf8(bytes).ok()
 }
 
-fn boundary<T>(fallback: T, operation: impl FnOnce() -> T) -> T {
+pub(crate) fn boundary<T>(fallback: T, operation: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(operation)).unwrap_or(fallback)
 }
 
@@ -95,56 +95,6 @@ unsafe extern "C" fn command_notice(
             );
         }
     });
-}
-unsafe extern "C" fn directory_lookup(
-    context: *mut c_void,
-    method: u32,
-    static_file: *const c_char,
-    static_length: usize,
-    external_file: *const c_char,
-    external_length: usize,
-    remote: *const c_char,
-    remote_length: usize,
-    source: *const c_char,
-    source_length: usize,
-    output: *mut c_char,
-    capacity: usize,
-    written: *mut usize,
-) -> i32 {
-    boundary(-1, || {
-        let _ = context;
-        let values = unsafe {
-            (
-                text(static_file, static_length),
-                text(external_file, external_length),
-                text(remote, remote_length),
-                text(source, source_length),
-            )
-        };
-        let (Some(static_file), Some(external_file), Some(remote), Some(source)) = values else {
-            return -1;
-        };
-        let method = match method {
-            0 => Method::Both,
-            1 => Method::Dns,
-            2 => Method::File,
-            _ => return -1,
-        };
-        let Ok(destination) =
-            DirectoryResolver::new(AsteriskDirectory, method, static_file, external_file)
-                .lookup(remote, (!source.is_empty()).then_some(source))
-        else {
-            return -1;
-        };
-        if output.is_null() || written.is_null() || destination.len() > capacity {
-            return -1;
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(destination.as_ptr(), output.cast(), destination.len());
-            written.write(destination.len());
-        }
-        0
-    })
 }
 struct ReservedRadio {
     radio: Option<Radio>,
@@ -387,20 +337,23 @@ unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     });
 }
 
-struct Services(ffi::rptadv_host_services_v4);
+struct Services(ffi::rptadv_host_services_v5);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v4 {
-    struct_size: size_of::<ffi::rptadv_host_services_v4>() as u32,
-    abi_version: 4,
-    capability: *b"rptadv.hst4\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v5 {
+    struct_size: size_of::<ffi::rptadv_host_services_v5>() as u32,
+    abi_version: 5,
+    capability: *b"rptadv.hst5\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
     reaper_acquire: Some(ffi::ast_replace_sigchld),
     reaper_release: Some(ffi::ast_unreplace_sigchld),
-    directory_lookup: Some(directory_lookup),
+    directory_record: Some(directory::directory_record),
+    directory_srv: Some(directory::directory_srv),
+    directory_addresses: Some(directory::directory_addresses),
+    directory_notice: Some(directory::directory_notice),
     radio_open: Some(radio_open),
     radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
@@ -416,7 +369,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v4 {
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v4 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v5 {
     &SERVICES.0
 }
 

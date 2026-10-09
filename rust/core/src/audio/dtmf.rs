@@ -134,11 +134,23 @@ impl DtmfDetector {
     /// Muting starts after two matching analysis intervals qualify a digit and ends
     /// after the first unlike interval. It adds no lookback delay, so the qualifying
     /// prefix can pass and at most 612 post-tone samples (12.75 ms) can be silenced;
-    /// later completion audio is never muted.
+    /// later completion audio is never muted. Carrier loss completes the qualified
+    /// digit immediately, before the caller publishes its unkey command terminator.
     pub fn process(&mut self, receiving: bool, audio: &mut [f32], mut emit: impl FnMut(DtmfDigit)) {
+        if !receiving {
+            if let Some(digit) = self.active.take() {
+                emit(digit);
+            }
+            self.last_hit = None;
+            self.hits = 0;
+            self.misses = 0;
+            self.suppressing = false;
+            self.reset_interval();
+            return;
+        }
         for sample in &mut *audio {
-            let input = if receiving { f64::from(*sample) } else { 0.0 };
-            if receiving && self.muting && self.suppressing {
+            let input = f64::from(*sample);
+            if self.muting && self.suppressing {
                 *sample = 0.0;
             }
             self.energy += input * input;
@@ -183,13 +195,17 @@ impl DtmfDetector {
             }
         }
         self.suppressing = hit.is_some() && hit == self.active;
+        self.reset_interval();
+        completed
+    }
+
+    fn reset_interval(&mut self) {
         self.samples = 0;
         self.energy = 0.0;
         for filter in &mut self.filters {
             filter.previous = 0.0;
             filter.before = 0.0;
         }
-        completed
     }
 
     fn classify(&self) -> Option<DtmfDigit> {

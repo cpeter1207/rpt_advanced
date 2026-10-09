@@ -5,3 +5,5 @@
 #include "../speech-adapter/include/rptadv_speech_adapter.h"
 #include <rate_adjusting_pcm_ring3/rate_adjusting_pcm_ring3.h>
 #include <rptadv_samplerate_adapter/rptadv_samplerate_adapter.h>
+#include <rptadvradio/rptadvradio.h>
+#include <usbradioplus_product.h>

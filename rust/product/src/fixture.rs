@@ -103,36 +103,46 @@ unsafe extern "C" fn notice(_: *mut c_void, _: *const c_char, _: usize, _: u32) 
     NOTICE_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 unsafe extern "C" fn reaper() {}
-unsafe extern "C" fn lookup(
+unsafe extern "C" fn directory_record(
     _: *mut c_void,
-    _: u32,
-    _: *const c_char,
-    _: usize,
     _: *const c_char,
     _: usize,
     remote: *const c_char,
     remote_length: usize,
-    _: *const c_char,
-    _: usize,
-    output: *mut c_char,
-    capacity: usize,
-    written: *mut usize,
+    sink: crate::abi::rptadv_text_sink_v1,
+    context: *mut c_void,
 ) -> i32 {
-    if remote.is_null() || output.is_null() || written.is_null() {
+    let Some(sink) = sink else {
         return -1;
-    }
+    };
     let remote = unsafe { std::slice::from_raw_parts(remote.cast::<u8>(), remote_length) };
     let mut destination = b"radio@fixture/".to_vec();
     destination.extend_from_slice(remote);
-    if destination.len() > capacity {
-        return -1;
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(destination.as_ptr(), output.cast(), destination.len());
-        written.write(destination.len());
-    }
+    destination.extend_from_slice(b",127.0.0.1");
+    unsafe { sink(context, destination.as_ptr().cast(), destination.len()) };
     0
 }
+unsafe extern "C" fn directory_srv(
+    _: *mut c_void,
+    _: *const c_char,
+    _: usize,
+    _: crate::abi::rptadv_directory_srv_sink_v1,
+    _: *mut c_void,
+) -> i32 {
+    0
+}
+unsafe extern "C" fn directory_addresses(
+    _: *mut c_void,
+    _: *const c_char,
+    _: usize,
+    _: u16,
+    sink: crate::abi::rptadv_text_sink_v1,
+    context: *mut c_void,
+) -> i32 {
+    unsafe { sink.unwrap()(context, c"127.0.0.1".as_ptr(), 9) };
+    0
+}
+unsafe extern "C" fn directory_notice(_: *mut c_void, _: u32) {}
 unsafe extern "C" fn radio_open(
     _: *mut c_void,
     name: *const c_char,
@@ -308,16 +318,19 @@ unsafe extern "C" fn peer_destroy(_: *mut c_void, handle: *mut c_void) {
     }
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v4 = crate::abi::rptadv_host_services_v4 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v4>() as u32,
-    abi_version: 4,
-    capability: *b"rptadv.hst4\0",
+static mut HOST: crate::abi::rptadv_host_services_v5 = crate::abi::rptadv_host_services_v5 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v5>() as u32,
+    abi_version: 5,
+    capability: *b"rptadv.hst5\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
     reaper_acquire: Some(reaper),
     reaper_release: Some(reaper),
-    directory_lookup: Some(lookup),
+    directory_record: Some(directory_record),
+    directory_srv: Some(directory_srv),
+    directory_addresses: Some(directory_addresses),
+    directory_notice: Some(directory_notice),
     radio_open: Some(radio_open),
     radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
@@ -332,7 +345,7 @@ static mut HOST: crate::abi::rptadv_host_services_v4 = crate::abi::rptadv_host_s
     peer_destroy: Some(peer_destroy),
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v4 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v5 {
     &raw const HOST
 }
 

@@ -381,6 +381,11 @@ pub struct ResolvedRadioSettings {
     pub input_extra_buffer_ms: u32,
     /// Additional playback buffering requested from PortAudio, 0 through 500 ms.
     pub output_extra_buffer_ms: u32,
+    /// Receive gain after deemphasis/gating and before receive filters, -30 through 30 dB.
+    pub receive_input_gain_db: i64,
+    /// Receive gain after filters/optional processing and before the controller receive ring.
+    /// Accepted range is -30 through 30 dB.
+    pub receive_output_gain_db: i64,
     /// Mono 48 kHz receive-processing graph.
     pub receive_graph: String,
     /// Mono 48 kHz transmit-processing graph.
@@ -407,6 +412,8 @@ impl Default for ResolvedRadioSettings {
             output_device_channels: 1,
             input_extra_buffer_ms: 0,
             output_extra_buffer_ms: 0,
+            receive_input_gain_db: 0,
+            receive_output_gain_db: 0,
             receive_graph: "anull".to_owned(),
             transmit_graph: "anull".to_owned(),
             cm119_profile: Cm119Profile::DudeUsb,
@@ -519,6 +526,16 @@ impl ResolvedRadioSettings {
         number!(output_device_channels, "output_device_channels", 1, 2);
         number!(input_extra_buffer_ms, "input_extra_buffer_ms", 0, 500);
         number!(output_extra_buffer_ms, "output_extra_buffer_ms", 0, 500);
+        for (key, gain) in [
+            ("receive_input_gain_db", &mut value.receive_input_gain_db),
+            ("receive_output_gain_db", &mut value.receive_output_gain_db),
+        ] {
+            if let Some(parsed) =
+                lookup_valid(document, key, &scopes, |raw| parse::signed(raw, -30, 30))
+            {
+                *gain = parsed;
+            }
+        }
         value.signaling = ResolvedRadioSignalingSettings::from_document(document, &scopes);
         value
     }

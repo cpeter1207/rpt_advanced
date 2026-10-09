@@ -20,12 +20,12 @@ impl Product {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
                 != size_of::<ffi::rptadv_product_descriptor_v1>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 3
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 4
         {
             return None;
         }
         let descriptor = unsafe { &*pointer };
-        (descriptor.capability == *b"rptadv.prod3\0\0\0\0"
+        (descriptor.capability == *b"rptadv.prod4\0\0\0\0"
             && descriptor.start.is_some()
             && descriptor.reload.is_some()
             && descriptor.stop.is_some()
@@ -33,7 +33,9 @@ impl Product {
             && descriptor.incoming.is_some()
             && descriptor.link_command.is_some()
             && descriptor.link_status.is_some()
-            && descriptor.digit.is_some())
+            && descriptor.digit.is_some()
+            && descriptor.inspect_configuration.is_some()
+            && descriptor.inspect_secrets.is_some())
         .then_some(Self(descriptor))
     }
     /// Start the portable owner with validated provider tables and copied configuration.
@@ -43,7 +45,7 @@ impl Product {
     /// remains loaded until a successful product stop.
     pub unsafe fn start(
         &self,
-        host: *const ffi::rptadv_host_services_v4,
+        host: *const ffi::rptadv_host_services_v5,
         control: *const ffi::rptadv_control_descriptor_v1,
         file: *const ffi::rptadv_file_descriptor,
         speech: *const ffi::rptadv_speech_descriptor,

@@ -26,9 +26,9 @@ INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH" RPT_ADVANCED_LIBDIR="$(CURDIR)/build"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
-DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c examples doc debian messages README.md QUALITY.md WISHLIST.md
+DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c examples doc debian messages README.md QUALITY.md WISHLIST.md
 
-.PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
+.PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface product-abi-check rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
 .PHONY: build/app_rpt_advanced.so
 all: build/app_rpt_advanced.so
@@ -58,7 +58,7 @@ standalone-build: | build
 			"build/librptadv_$${name}_adapter.so.1"; \
 		done
 
-standalone-check:
+standalone-check: standalone-build
 	$(TEST_ENV) $(CARGO) test --locked -p rpt-advanced-standalone
 	python3 tests/test_standalone_service.py
 	python3 tests/test_package_combinations.py
@@ -71,7 +71,7 @@ build/app_rpt_advanced.so: $(LOADER) $(HEADERS) $(LIBRARIES)
 		-Lbuild -Wl,--enable-new-dtags,-rpath,'$(LOADER_RUNPATH)' \
 		$(addprefix -l:,$(notdir $(LIBRARIES))) -o $@
 
-artifacts: all
+artifacts: all product-abi-check
 	python3 tests/test_rust_product_surface.py --artifacts build --asteriskmoddir "$(asteriskmoddir)" --libdir "$(libdir)"
 	python3 tests/test_rust_product_surface.py --package debian/control
 
@@ -83,7 +83,7 @@ dependency-boundary:
 
 lint:
 	$(CARGO) fmt --all -- --check
-	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c
+	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -137,6 +137,12 @@ build/test_loader.o: tests/test_loader.c $(HEADERS) | build
 
 build/test_loader: build/test_loader.o build/loader-coverage.o
 	$(CC) $^ --coverage -o $@
+
+build/test_product_abi: tests/test_product_abi.c rust/product/include/rptadv_product.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror $< -ldl -o $@
+
+product-abi-check: build/test_product_abi build/librptadv_product.so.1
+	./build/test_product_abi "$(CURDIR)/build/librptadv_product.so.1"
 
 loader-check: build/test_loader
 	./build/test_loader

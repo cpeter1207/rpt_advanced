@@ -137,7 +137,13 @@ def check_rust_source(root: Path) -> list[str]:
             if FORBIDDEN_RUST_ADAPTER.search(source.read_text(encoding="utf-8")):
                 violations.append(f"{source.relative_to(root)} imports ASL-private API")
 
-    for name in ("file-adapter", "speech-adapter", "control-asterisk-adapter"):
+    for name in (
+        "file-adapter",
+        "speech-adapter",
+        "control-asterisk-adapter",
+        "asterisk",
+        "standalone",
+    ):
         manifest = root / "rust" / name / "Cargo.toml"
         if not manifest.exists():
             continue
@@ -261,6 +267,21 @@ def verify_examples() -> None:
             "[dev-dependencies]\nrpt-advanced-core = { path = '../core' }\n",
         )
         check_tree(root)
+
+        for name in ("standalone", "asterisk"):
+            write(
+                root,
+                f"rust/{name}/Cargo.toml",
+                "[dependencies]\nrpt-advanced-core = { path = '../core' }\n",
+            )
+            expect_violation(root, "embeds controller core")
+            write(
+                root,
+                f"rust/{name}/Cargo.toml",
+                "[dependencies]\nlibc = '1'\n"
+                "[dev-dependencies]\nrpt-advanced-core = { path = '../core' }\n",
+            )
+            check_tree(root)
 
         write(root, "rust/asterisk/src/lib.rs", "fn bad() { res_usbradio(); }\n")
         expect_violation(root, "imports ASL-private API")

@@ -72,7 +72,7 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let registrations = crate::registration::targets(&text, &secrets)
             .map_err(|error| ForegroundError::Configuration(error.to_string()))?;
         let providers = crate::providers::ProviderSet::load().map_err(ForegroundError::Provider)?;
-        let mut iax_listeners = bind_iax_listeners(&text, &radios)?;
+        let mut iax_listeners = bind_iax_listeners(&radios)?;
         let mut runtime =
             crate::runtime::ProductRuntime::start_with_providers(&text, radios, secrets, providers)
                 .map_err(ForegroundError::Runtime)?;
@@ -88,7 +88,7 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
                     Ok(updated)
                 }) {
                     Ok(updated) => match resolve_radios(&updated).and_then(|radios| {
-                        let nodes = resolve_listener_nodes(&updated, &radios)?;
+                        let nodes = resolve_listener_nodes(&radios);
                         update_iax_listeners(&mut iax_listeners, nodes, || {
                             runtime
                                 .reload_with_radios(&updated, radios)
@@ -121,29 +121,21 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
     }
 }
 
-fn resolve_listener_nodes(
-    text: &str,
-    radios: &[crate::ResolvedRadioNode],
-) -> Result<BTreeMap<u16, Vec<String>>, ForegroundError> {
-    let document = rpt_advanced_core::config::ConfigDocument::parse(text)
-        .map_err(|error| ForegroundError::Configuration(error.to_string()))?;
+fn resolve_listener_nodes(radios: &[crate::ResolvedRadioNode]) -> BTreeMap<u16, Vec<String>> {
     let mut listeners = BTreeMap::<u16, Vec<String>>::new();
     for radio in radios.iter().filter(|radio| radio.enabled) {
-        let node = rpt_advanced_core::config::ResolvedNodeSettings::resolve(&document, &radio.node)
-            .map_err(|error| ForegroundError::Configuration(error.to_string()))?;
         listeners
-            .entry(node.value.iax_local_port)
+            .entry(radio.iax_port)
             .or_default()
             .push(radio.node.as_str().to_owned());
     }
-    Ok(listeners)
+    listeners
 }
 
 fn bind_iax_listeners(
-    text: &str,
     radios: &[crate::ResolvedRadioNode],
 ) -> Result<BTreeMap<u16, crate::iax::IaxServer>, ForegroundError> {
-    resolve_listener_nodes(text, radios)?
+    resolve_listener_nodes(radios)
         .into_iter()
         .map(|(port, nodes)| Ok((port, bind_iax_listener(port, &nodes)?)))
         .collect()
@@ -315,10 +307,7 @@ fn registration_targets(
 }
 
 fn resolve_radios(text: &str) -> Result<Vec<crate::ResolvedRadioNode>, ForegroundError> {
-    let document = rpt_advanced_core::config::ConfigDocument::parse(text)
-        .map_err(|error| ForegroundError::Configuration(error.to_string()))?;
-    crate::resolve_radio_nodes(&document)
-        .map(|resolution| resolution.value)
+    crate::resolve_radio_nodes(text)
         .map_err(|error| ForegroundError::Configuration(error.to_string()))
 }
 
@@ -561,7 +550,7 @@ mod tests {
         };
 
         unsafe extern "C" fn start(
-            _: *const crate::abi::rptadv_host_services_v4,
+            _: *const crate::abi::rptadv_host_services_v5,
             _: *const crate::abi::rptadv_control_descriptor_v1,
             _: *const crate::abi::rptadv_file_descriptor,
             _: *const crate::abi::rptadv_speech_descriptor,
@@ -601,8 +590,8 @@ mod tests {
 
         let descriptor = Box::leak(Box::new(crate::abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<crate::abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 3,
-            capability: *b"rptadv.prod3\0\0\0\0",
+            abi_version: 4,
+            capability: *b"rptadv.prod4\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
@@ -611,6 +600,8 @@ mod tests {
             link_command: None,
             link_status: None,
             digit: None,
+            inspect_configuration: None,
+            inspect_secrets: None,
         }));
         let host = crate::host_services::HostServicesOwner::new(
             Vec::new(),
@@ -1060,7 +1051,7 @@ mod tests {
     fn inbound_listener_settings_group_nodes_by_effective_iax_port() {
         let text = "[general]\nnode_enabled=yes\niax_local_port=4569\n[1000]\n[radio 1000]\n[2000]\niax_local_port=4570\n[radio 2000]\n";
         let radios = super::resolve_radios(text).unwrap();
-        let listeners = super::resolve_listener_nodes(text, &radios).unwrap();
+        let listeners = super::resolve_listener_nodes(&radios);
 
         assert_eq!(listeners.get(&4569).unwrap(), &["1000"]);
         assert_eq!(listeners.get(&4570).unwrap(), &["2000"]);

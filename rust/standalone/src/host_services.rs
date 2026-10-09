@@ -24,7 +24,7 @@ pub struct StandaloneHostContext {
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
-    descriptor: Box<abi::rptadv_host_services_v4>,
+    descriptor: Box<abi::rptadv_host_services_v5>,
 }
 
 impl HostServicesOwner {
@@ -38,16 +38,19 @@ impl HostServicesOwner {
             radio: RadioHostContext::new(radios, providers),
             secrets,
         });
-        let descriptor = Box::new(abi::rptadv_host_services_v4 {
-            struct_size: size_of::<abi::rptadv_host_services_v4>() as u32,
-            abi_version: 4,
-            capability: *b"rptadv.hst4\0",
+        let descriptor = Box::new(abi::rptadv_host_services_v5 {
+            struct_size: size_of::<abi::rptadv_host_services_v5>() as u32,
+            abi_version: 5,
+            capability: *b"rptadv.hst5\0",
             context: ptr::from_mut(context.as_mut()).cast(),
             local_time: Some(local_time),
             command_notice: Some(command_notice),
             reaper_acquire: Some(noop),
             reaper_release: Some(noop),
-            directory_lookup: Some(directory_lookup),
+            directory_record: Some(directory::directory_record),
+            directory_srv: Some(directory::directory_srv),
+            directory_addresses: Some(directory::directory_addresses),
+            directory_notice: Some(directory::directory_notice),
             radio_open: Some(open_radio),
             radio_activate: Some(activate_radio),
             radio_destroy: Some(destroy_radio),
@@ -68,7 +71,7 @@ impl HostServicesOwner {
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
-    pub fn descriptor(&self) -> &abi::rptadv_host_services_v4 {
+    pub fn descriptor(&self) -> &abi::rptadv_host_services_v5 {
         let _keep_context_alive = &self.context;
         self.descriptor.as_ref()
     }
@@ -103,11 +106,11 @@ impl HostServicesOwner {
 
 struct PeerHandle(IaxPeer);
 
-fn boundary<T>(fallback: T, operation: impl FnOnce() -> T) -> T {
+pub(crate) fn boundary<T>(fallback: T, operation: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(operation)).unwrap_or(fallback)
 }
 
-unsafe fn input<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
+pub(crate) unsafe fn input<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
     if pointer.is_null() && length != 0 {
         return None;
     }
@@ -168,50 +171,6 @@ unsafe extern "C" fn local_time(
         result.minute = local.tm_min as u8;
         result.second = local.tm_sec as u8;
         result.valid = 1;
-        0
-    })
-}
-
-unsafe extern "C" fn directory_lookup(
-    _: *mut c_void,
-    method: u32,
-    static_file: *const c_char,
-    static_length: usize,
-    external_file: *const c_char,
-    external_length: usize,
-    remote: *const c_char,
-    remote_length: usize,
-    source: *const c_char,
-    source_length: usize,
-    output: *mut c_char,
-    capacity: usize,
-    written: *mut usize,
-) -> i32 {
-    boundary(-1, || {
-        let (Some(static_file), Some(external_file), Some(remote), Some(source), Some(written)) = (
-            unsafe { input(static_file, static_length) },
-            unsafe { input(external_file, external_length) },
-            unsafe { input(remote, remote_length) },
-            unsafe { input(source, source_length) },
-            unsafe { written.as_mut() },
-        ) else {
-            return -1;
-        };
-        let resolved = directory::lookup(
-            method,
-            static_file,
-            external_file,
-            remote,
-            (!source.is_empty()).then_some(source),
-        );
-        let Ok(resolved) = resolved else {
-            return -1;
-        };
-        if output.is_null() || resolved.len() > capacity {
-            return -1;
-        }
-        unsafe { ptr::copy_nonoverlapping(resolved.as_ptr(), output.cast(), resolved.len()) };
-        *written = resolved.len();
         0
     })
 }
@@ -294,17 +253,22 @@ unsafe extern "C" fn peer_dial(
             return -1;
         }
         let Some((address, remote)) = parse_destination(destination) else {
+            eprintln!("rpt-advanced: IAX2 destination validation or address resolution failed");
             return -1;
         };
-        let Ok(peer) = dial_peer(
+        let peer = match dial_peer(
             Path::new("librptadviax2.so.1"),
             address,
             local,
             &remote,
             &context.secrets,
             5000,
-        ) else {
-            return -1;
+        ) {
+            Ok(peer) => peer,
+            Err(error) => {
+                eprintln!("rpt-advanced: IAX2 outbound dial failed: {error}");
+                return -1;
+            }
         };
         if unsafe { current(current_context) } == 0 {
             drop(peer);
@@ -328,15 +292,24 @@ fn dial_peer(
 
 fn parse_destination(value: &str) -> Option<(SocketAddr, String)> {
     let (address, remote) = value.strip_prefix("radio@")?.rsplit_once('/')?;
-    if remote.is_empty() || !remote.bytes().all(|byte| byte.is_ascii_digit()) {
+    if remote.is_empty() || remote.len() > 63 || !remote.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let address: SocketAddr = if let Ok(address) = address.parse() {
         address
+    } else if let Ok(ip) = address
+        .strip_prefix('[')
+        .and_then(|address| address.strip_suffix(']'))
+        .unwrap_or(address)
+        .parse::<std::net::IpAddr>()
+    {
+        SocketAddr::new(ip, 4569)
+    } else if address.contains(':') {
+        address.to_socket_addrs().ok()?.next()?
     } else {
         (address, 4569).to_socket_addrs().ok()?.next()?
     };
-    Some((address, remote.to_owned()))
+    (address.port() != 0).then(|| (address, remote.to_owned()))
 }
 
 unsafe extern "C" fn peer_rate(_: *mut c_void, peer: *const c_void) -> u32 {
@@ -457,9 +430,9 @@ mod tests {
     use super::{HostServicesOwner, boundary, dial_peer, input, parse_destination, peer_dial};
     use crate::{iax::IaxError, secrets::SecretsFile};
     use std::{
-        ffi::{c_char, c_void},
+        ffi::c_void,
         mem::size_of,
-        net::UdpSocket,
+        net::{SocketAddr, UdpSocket},
         path::Path,
         ptr,
         sync::atomic::{AtomicUsize, Ordering},
@@ -538,56 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn host_table_resolves_static_directory_and_copies_result_to_product() {
-        let path = std::env::temp_dir().join(format!(
-            "rpt-advanced-host-directory-{}.conf",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            "[extnodes]\n506315=radio@192.0.2.5:4569/506315,192.0.2.5\n",
-        )
-        .unwrap();
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
-        let api = owner.descriptor();
-        let mut output = [c_char::default(); 128];
-        let mut written = 0;
-        let path = path.to_string_lossy();
-        let status = unsafe {
-            api.directory_lookup.unwrap()(
-                api.context,
-                0,
-                path.as_ptr().cast(),
-                path.len(),
-                ptr::null(),
-                0,
-                c"506315".as_ptr(),
-                6,
-                ptr::null(),
-                0,
-                output.as_mut_ptr(),
-                output.len(),
-                &mut written,
-            )
-        };
-        let bytes = unsafe { std::slice::from_raw_parts(output.as_ptr().cast::<u8>(), written) };
-        assert_eq!(status, 0);
-        assert_eq!(written, "radio@192.0.2.5:4569/506315".len());
-        assert_eq!(bytes, b"radio@192.0.2.5:4569/506315");
-        drop(owner);
-        std::fs::remove_file(path.as_ref()).unwrap();
-    }
-
-    #[test]
     fn host_services_table_is_complete_and_uses_its_owned_context() {
         let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
-            size_of::<crate::abi::rptadv_host_services_v4>() as u32
+            size_of::<crate::abi::rptadv_host_services_v5>() as u32
         );
-        assert_eq!(api.abi_version, 4);
-        assert_eq!(api.capability, *b"rptadv.hst4\0");
+        assert_eq!(api.abi_version, 5);
+        assert_eq!(api.capability, *b"rptadv.hst5\0");
         assert!(!api.context.is_null());
         assert!(api.local_time.is_some());
         assert!(api.peer_dial.is_some());
@@ -665,17 +597,35 @@ mod tests {
 
     #[test]
     fn destination_parser_checks_scheme_node_and_address() {
+        let (address, node) = parse_destination("radio@localhost:4571/506316")
+            .expect("explicit hostname port must resolve");
+        assert!(address.ip().is_loopback());
+        assert_eq!(address.port(), 4571);
+        assert_eq!(node, "506316");
         assert_eq!(
             parse_destination("radio@127.0.0.1:4569/506315"),
             Some(("127.0.0.1:4569".parse().unwrap(), "506315".into()))
         );
         assert!(parse_destination("radio@127.0.0.1/506315").is_some());
+        for (target, expected) in [
+            ("radio@[::1]:4571/506315", "[::1]:4571"),
+            ("radio@[::1]/506315", "[::1]:4569"),
+            ("radio@::1/506315", "[::1]:4569"),
+        ] {
+            assert_eq!(
+                parse_destination(target).unwrap().0,
+                expected.parse::<SocketAddr>().unwrap()
+            );
+        }
         for invalid in [
             "",
             "127.0.0.1/506315",
             "radio@127.0.0.1",
             "radio@127.0.0.1/",
             "radio@127.0.0.1/not-a-node",
+            "radio@localhost:65536/506315",
+            "radio@localhost:invalid/506315",
+            "radio@127.0.0.1:0/506315",
         ] {
             assert_eq!(parse_destination(invalid), None, "accepted {invalid:?}");
         }
@@ -707,7 +657,7 @@ mod tests {
                 &secrets,
                 50,
             ),
-            Err(IaxError::Dial)
+            Err(IaxError::Timeout | IaxError::Network)
         ));
     }
 
@@ -957,190 +907,6 @@ mod tests {
         owner.discard_staged_radios();
         assert!(owner.stage_radios(Vec::new()));
         owner.discard_staged_radios();
-    }
-
-    #[test]
-    fn directory_callback_rejects_lookup_and_output_failures() {
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
-        let callback = owner.descriptor().directory_lookup.unwrap();
-        let context = owner.descriptor().context;
-        let valid_static = c"/tmp/not-used";
-        let valid_external = c"";
-        let valid_remote = c"506315";
-        let mut output = [c_char::default(); 1];
-        let mut written = 0;
-        let written_pointer = ptr::from_mut(&mut written);
-        let valid_static_length = valid_static.to_bytes().len();
-        let valid_remote_length = valid_remote.to_bytes().len();
-        assert_eq!(
-            unsafe {
-                callback(
-                    context,
-                    99,
-                    valid_static.as_ptr(),
-                    valid_static_length,
-                    valid_external.as_ptr(),
-                    0,
-                    valid_remote.as_ptr(),
-                    valid_remote_length,
-                    ptr::null(),
-                    0,
-                    output.as_mut_ptr(),
-                    output.len(),
-                    &mut written,
-                )
-            },
-            -1
-        );
-        let invalid_inputs = [
-            (
-                ptr::null(),
-                1,
-                valid_external.as_ptr(),
-                0,
-                valid_remote.as_ptr(),
-                valid_remote_length,
-                ptr::null(),
-                0,
-                written_pointer,
-            ),
-            (
-                valid_static.as_ptr(),
-                valid_static_length,
-                ptr::null(),
-                1,
-                valid_remote.as_ptr(),
-                valid_remote_length,
-                ptr::null(),
-                0,
-                written_pointer,
-            ),
-            (
-                valid_static.as_ptr(),
-                valid_static_length,
-                valid_external.as_ptr(),
-                0,
-                ptr::null(),
-                1,
-                ptr::null(),
-                0,
-                written_pointer,
-            ),
-            (
-                valid_static.as_ptr(),
-                valid_static_length,
-                valid_external.as_ptr(),
-                0,
-                valid_remote.as_ptr(),
-                valid_remote_length,
-                ptr::null(),
-                1,
-                written_pointer,
-            ),
-            (
-                valid_static.as_ptr(),
-                valid_static_length,
-                valid_external.as_ptr(),
-                0,
-                valid_remote.as_ptr(),
-                valid_remote_length,
-                ptr::null(),
-                0,
-                ptr::null_mut(),
-            ),
-        ];
-        for (
-            static_file,
-            static_length,
-            external_file,
-            external_length,
-            remote,
-            remote_length,
-            source,
-            source_length,
-            written_pointer,
-        ) in invalid_inputs
-        {
-            assert_eq!(
-                unsafe {
-                    callback(
-                        context,
-                        0,
-                        static_file,
-                        static_length,
-                        external_file,
-                        external_length,
-                        remote,
-                        remote_length,
-                        source,
-                        source_length,
-                        output.as_mut_ptr(),
-                        output.len(),
-                        written_pointer,
-                    )
-                },
-                -1
-            );
-        }
-
-        let missing = c"/no/such/rpt-advanced-directory";
-        let extnodes = c"";
-        let remote = c"506315";
-        assert_eq!(
-            unsafe {
-                callback(
-                    owner.descriptor().context,
-                    0,
-                    missing.as_ptr(),
-                    missing.to_bytes().len(),
-                    extnodes.as_ptr(),
-                    0,
-                    remote.as_ptr(),
-                    remote.to_bytes().len(),
-                    ptr::null(),
-                    0,
-                    ptr::null_mut(),
-                    0,
-                    &mut written,
-                )
-            },
-            -1
-        );
-
-        let path = std::env::temp_dir().join(format!(
-            "rpt-advanced-host-directory-short-{}.conf",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            "[extnodes]\n506315=radio@192.0.2.5:4569/506315,192.0.2.5\n",
-        )
-        .unwrap();
-        let path_text = path.to_string_lossy();
-        let mut output = [c_char::default(); 1];
-        for (output_pointer, capacity) in [(ptr::null_mut(), 128), (output.as_mut_ptr(), 0)] {
-            assert_eq!(
-                unsafe {
-                    callback(
-                        owner.descriptor().context,
-                        0,
-                        path_text.as_ptr().cast(),
-                        path_text.len(),
-                        ptr::null(),
-                        0,
-                        remote.as_ptr(),
-                        remote.to_bytes().len(),
-                        ptr::null(),
-                        0,
-                        output_pointer,
-                        capacity,
-                        &mut written,
-                    )
-                },
-                -1
-            );
-        }
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

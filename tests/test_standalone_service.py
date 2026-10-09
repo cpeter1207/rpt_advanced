@@ -3,6 +3,7 @@
 """Check standalone service isolation and package boundaries."""
 
 import json
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +97,18 @@ def test_standalone_build_profile_omits_asterisk_build_and_adapter() -> None:
     assert "standalone-install" in rules
 
 
+def test_standalone_check_builds_the_product_before_loading_it() -> None:
+    plan = subprocess.check_output(
+        ["make", "--no-print-directory", "-n", "standalone-check"],
+        cwd=ROOT,
+        text=True,
+    )
+    build = plan.find("build --locked --release -p rpt-advanced-standalone")
+    stage = plan.find('"build/librptadv_product.so.1"')
+    test = plan.find("test --locked -p rpt-advanced-standalone")
+    assert 0 <= build < stage < test, "standalone tests need the current shared product"
+
+
 def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
     rules = (ROOT / "debian/rules").read_text(encoding="utf-8")
     assignment = next(
@@ -124,6 +137,7 @@ if __name__ == "__main__":
         test_standalone_package_grants_service_user_cm119_usb_access,
         test_asterisk_adapter_is_separately_installable,
         test_standalone_build_profile_omits_asterisk_build_and_adapter,
+        test_standalone_check_builds_the_product_before_loading_it,
         test_shlibdeps_searches_every_private_adapter_library_directory,
     ):
         test()

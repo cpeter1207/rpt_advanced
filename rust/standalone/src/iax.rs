@@ -121,6 +121,18 @@ pub enum IaxError {
     IncompatibleAdapter,
     /// The call setup failed or returned no peer.
     Dial,
+    /// The adapter rejected invalid dial parameters.
+    InvalidParameters,
+    /// The network adapter could not exchange datagrams.
+    Network,
+    /// The remote did not complete setup within the dial deadline.
+    Timeout,
+    /// The remote rejected the call.
+    Rejected,
+    /// The peer could not negotiate a supported codec.
+    Codec,
+    /// Call setup encountered an invalid protocol exchange.
+    Protocol,
     /// The inbound UDP listener could not bind or returned no handle.
     Bind,
     /// A peer operation failed or returned malformed output.
@@ -134,6 +146,12 @@ impl std::fmt::Display for IaxError {
             Self::MissingSymbol => "IAX2 client descriptor is missing",
             Self::IncompatibleAdapter => "IAX2 client ABI is incompatible",
             Self::Dial => "IAX2 call setup failed",
+            Self::InvalidParameters => "IAX2 invalid dial parameters",
+            Self::Network => "IAX2 network failure",
+            Self::Timeout => "IAX2 call setup timed out",
+            Self::Rejected => "IAX2 call rejected",
+            Self::Codec => "IAX2 codec negotiation failed",
+            Self::Protocol => "IAX2 protocol failure",
             Self::Bind => "cannot bind the IAX2 listener",
             Self::Operation => "IAX2 peer operation failed",
         })
@@ -409,7 +427,15 @@ fn dial_handle(
     // SAFETY: the options and their borrowed UTF-8 strings live for this synchronous call.
     let result = unsafe { api.dial.unwrap()(&options, &mut handle) };
     if result != 0 {
-        return Err(IaxError::Dial);
+        return Err(match result {
+            -1 => IaxError::InvalidParameters,
+            -2 => IaxError::Network,
+            -3 => IaxError::Timeout,
+            -4 => IaxError::Rejected,
+            -5 => IaxError::Codec,
+            -6 => IaxError::Protocol,
+            _ => IaxError::Dial,
+        });
     }
     NonNull::new(handle).ok_or(IaxError::Dial)
 }
@@ -1182,6 +1208,36 @@ pub(crate) mod tests {
         );
         DIAL_NULL_HANDLE.with(|value| value.set(false));
         NEXT_CALL_NUMBER.store(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn dial_preserves_safe_abi_failure_reasons() {
+        let _guard = dial_test_guard();
+        for (status, reason) in [
+            (-1, "IAX2 invalid dial parameters"),
+            (-2, "IAX2 network failure"),
+            (-3, "IAX2 call setup timed out"),
+            (-4, "IAX2 call rejected"),
+            (-5, "IAX2 codec negotiation failed"),
+            (-6, "IAX2 protocol failure"),
+        ] {
+            DIAL_RESULT.with(|value| value.set(status as u32));
+            let error = IaxClient {
+                _library: None,
+                api: descriptor(),
+            }
+            .dial(
+                "127.0.0.1:4569".parse().unwrap(),
+                "524950",
+                "506315",
+                "secret",
+                1000,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.to_string(), reason);
+        }
+        DIAL_RESULT.with(|value| value.set(0));
     }
 
     #[test]

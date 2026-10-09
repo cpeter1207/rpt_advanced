@@ -1,20 +1,19 @@
 //! Dynamic provider loading and descriptor compatibility checks.
 
 use libloading::Library;
-use rpt_advanced_core::config::{Cm119Profile, RadioDeviceSelection};
 use std::{
-    ffi::{CStr, CString, c_char, c_void},
+    ffi::{CStr, c_char, c_void},
     marker::PhantomData,
     path::Path,
     ptr::NonNull,
 };
 
-const PROVIDERS: [ProviderSpec; 9] = [
+const PROVIDERS: [ProviderSpec; 10] = [
     inline(
         "librptadv_product.so.1",
         "rptadv_product_descriptor_v1",
-        3,
-        b"rptadv.prod3",
+        4,
+        b"rptadv.prod4",
     ),
     private(pointer(
         "librptadv_control_standalone_adapter.so.1",
@@ -41,6 +40,13 @@ const PROVIDERS: [ProviderSpec; 9] = [
         1,
         b"rptadv.iax2.v1",
     )),
+    pointer(
+        "libusbradioplus_product.so.1",
+        "usbradioplus_product_descriptor_v1",
+        1,
+        b"usbradioplus.product1",
+        DescriptorLayout::Named,
+    ),
     pointer(
         "librptadvradio.so.4",
         "rptadv_radio_descriptor",
@@ -70,6 +76,48 @@ const PROVIDERS: [ProviderSpec; 9] = [
         DescriptorLayout::Named,
     ),
 ];
+
+/// A product-only load for configuration checking, before device providers are needed.
+pub(crate) struct ProductInspection {
+    _library: ProviderLibrary,
+    api: NonNull<crate::abi::rptadv_product_descriptor_v1>,
+}
+
+impl ProductInspection {
+    pub(crate) fn open() -> Result<Self, ProviderError> {
+        let spec = PROVIDERS[0];
+        let library = ProviderLibrary::open(spec, None)?;
+        let descriptor = library
+            .descriptor(spec.symbol)
+            .ok_or(ProviderError::MissingDescriptor(spec.library))?;
+        if !valid_descriptor(descriptor, spec) {
+            return Err(ProviderError::IncompatibleDescriptor(spec.library));
+        }
+        if descriptor_size(descriptor, spec.layout)
+            != std::mem::size_of::<crate::abi::rptadv_product_descriptor_v1>()
+        {
+            return Err(ProviderError::IncompleteDescriptor(spec.library));
+        }
+        let api = NonNull::new(
+            descriptor
+                .cast_mut()
+                .cast::<crate::abi::rptadv_product_descriptor_v1>(),
+        )
+        .expect("descriptor was checked for null");
+        if !product_functions_complete(unsafe { api.as_ref() }) {
+            return Err(ProviderError::IncompleteDescriptor(spec.library));
+        }
+        Ok(Self {
+            _library: library,
+            api,
+        })
+    }
+
+    pub(crate) fn api(&self) -> &crate::abi::rptadv_product_descriptor_v1 {
+        // The retained library keeps the complete immutable descriptor loaded.
+        unsafe { self.api.as_ref() }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct ProviderSpec {
@@ -179,68 +227,6 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-/// A CM119 identity selected consistently by the audio and GPIO adapters.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedCm119Device {
-    /// Stable USB interface path used to identify the ALSA audio device.
-    pub usb_interface_path: String,
-    /// Linux USB topology path used to identify the HID/GPIO device.
-    pub usb_port_path: String,
-    /// USB serial reported for the selected interface, when present.
-    pub usb_serial: Option<String>,
-    /// ALSA card selected by the PortAudio adapter.
-    pub alsa_card_index: u32,
-    /// PortAudio capture endpoint selected by the adapter.
-    pub input_device_index: i32,
-    /// PortAudio playback endpoint selected by the adapter.
-    pub output_device_index: i32,
-    /// USB vendor ID observed by the GPIO adapter.
-    pub gpio_vendor_id: u16,
-    /// USB product ID observed by the GPIO adapter.
-    pub gpio_product_id: u16,
-}
-
-/// A required CM119 adapter operation failed or returned an invalid identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Cm119DeviceError {
-    /// The selected audio or GPIO provider does not expose the needed operation.
-    IncompleteProvider,
-    /// Exact device selection has no identifier or the configured identity contains NUL.
-    InvalidIdentity,
-    /// The audio adapter could not find or select the configured USB audio device.
-    AudioSelectionFailed,
-    /// The audio adapter returned malformed selection data.
-    InvalidAudioSelection,
-    /// The configured USB serial differs from the selected interface's serial.
-    AudioSerialMismatch,
-    /// The GPIO adapter could not query the selected interface.
-    GpioProbeFailed(i32),
-    /// The selected interface is not visible to the GPIO adapter.
-    GpioDeviceNotPresent,
-    /// The GPIO adapter reports a different serial for the selected interface.
-    GpioSerialMismatch,
-}
-
-impl std::fmt::Display for Cm119DeviceError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::IncompleteProvider => "CM119 audio or GPIO provider is incomplete",
-            Self::InvalidIdentity => "CM119 selection needs a valid device identifier or serial",
-            Self::AudioSelectionFailed => "PortAudio adapter could not select the CM119 device",
-            Self::InvalidAudioSelection => "PortAudio adapter returned an invalid CM119 selection",
-            Self::AudioSerialMismatch => "selected CM119 serial does not match configuration",
-            Self::GpioProbeFailed(result) => {
-                return write!(formatter, "GPIO adapter probe failed with code {result}");
-            }
-            Self::GpioDeviceNotPresent => "selected CM119 device is not present on GPIO",
-            Self::GpioSerialMismatch => "audio and GPIO adapters selected different CM119 devices",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for Cm119DeviceError {}
-
 /// All standalone runtime libraries, kept loaded for the product's full lifetime.
 pub struct ProviderSet {
     _libraries: Vec<Library>,
@@ -249,6 +235,8 @@ pub struct ProviderSet {
 
 /// Native provider descriptors needed to activate one standalone radio.
 pub struct RadioRuntimeDescriptors {
+    /// Shared native station owner.
+    pub product: &'static crate::abi::UrpAstDescriptor,
     /// Radio-core session API.
     pub radio: &'static crate::abi::rptadv_radio_descriptor,
     /// PortAudio/ALSA stream API.
@@ -394,35 +382,7 @@ impl ProviderSet {
                 "librptadv_speech_adapter.so.1",
             ));
         }
-        let radio =
-            self.typed_descriptor::<crate::abi::rptadv_radio_descriptor>("librptadvradio.so.4")?;
-        if !radio_functions_complete(radio) {
-            return Err(ProviderError::IncompleteDescriptor("librptadvradio.so.4"));
-        }
-        let audio = self.typed_descriptor::<crate::abi::rptadv_audio_adapter_descriptor>(
-            "librptadv_portaudio_alsa_adapter.so.2",
-        )?;
-        if !audio_functions_complete(audio) {
-            return Err(ProviderError::IncompleteDescriptor(
-                "librptadv_portaudio_alsa_adapter.so.2",
-            ));
-        }
-        let gpio = self.typed_descriptor::<crate::abi::rptadv_gpio_adapter_descriptor>(
-            "librptadv_gpio_adapter.so.1",
-        )?;
-        if !gpio_functions_complete(gpio) {
-            return Err(ProviderError::IncompleteDescriptor(
-                "librptadv_gpio_adapter.so.1",
-            ));
-        }
-        let ffmpeg = self.typed_descriptor::<crate::abi::rptadv_ffmpeg_adapter_descriptor>(
-            "librptadv_ffmpeg_adapter.so.1",
-        )?;
-        if !ffmpeg_functions_complete(ffmpeg) {
-            return Err(ProviderError::IncompleteDescriptor(
-                "librptadv_ffmpeg_adapter.so.1",
-            ));
-        }
+        self.native_product_descriptor()?;
         Ok(())
     }
 
@@ -431,6 +391,7 @@ impl ProviderSet {
         &'static self,
     ) -> Result<RadioRuntimeDescriptors, ProviderError> {
         Ok(RadioRuntimeDescriptors {
+            product: self.native_product_descriptor()?,
             radio: self.typed_descriptor("librptadvradio.so.4")?,
             audio: self.typed_descriptor("librptadv_portaudio_alsa_adapter.so.2")?,
             gpio: self.typed_descriptor("librptadv_gpio_adapter.so.1")?,
@@ -467,22 +428,14 @@ impl ProviderSet {
         })
     }
 
-    /// Resolve one node's configured CM119 identity across the audio and GPIO adapters.
-    pub fn resolve_cm119_device(
-        &self,
-        radio: &crate::ResolvedRadioNode,
-    ) -> Result<ResolvedCm119Device, Cm119DeviceError> {
-        let audio = self
-            .typed_descriptor::<crate::abi::rptadv_audio_adapter_descriptor>(
-                "librptadv_portaudio_alsa_adapter.so.2",
-            )
-            .map_err(|_| Cm119DeviceError::IncompleteProvider)?;
-        let gpio = self
-            .typed_descriptor::<crate::abi::rptadv_gpio_adapter_descriptor>(
-                "librptadv_gpio_adapter.so.1",
-            )
-            .map_err(|_| Cm119DeviceError::IncompleteProvider)?;
-        resolve_cm119_device(audio, gpio, radio)
+    fn native_product_descriptor(&self) -> Result<&crate::abi::UrpAstDescriptor, ProviderError> {
+        let api = self.typed_descriptor("libusbradioplus_product.so.1")?;
+        if !native_product_functions_complete(api) {
+            return Err(ProviderError::IncompleteDescriptor(
+                "libusbradioplus_product.so.1",
+            ));
+        }
+        Ok(api)
     }
 
     fn typed_descriptor<T>(&self, library: &'static str) -> Result<&T, ProviderError> {
@@ -498,132 +451,6 @@ impl ProviderSet {
         // each caller uses the corresponding public C header's generated Rust type.
         Ok(unsafe { provider.descriptor.cast::<T>().as_ref() })
     }
-}
-
-fn resolve_cm119_device(
-    audio: &crate::abi::rptadv_audio_adapter_descriptor,
-    gpio: &crate::abi::rptadv_gpio_adapter_descriptor,
-    radio: &crate::ResolvedRadioNode,
-) -> Result<ResolvedCm119Device, Cm119DeviceError> {
-    let request = radio
-        .audio_device_request()
-        .map_err(|_| Cm119DeviceError::InvalidIdentity)?;
-    let identifier = request
-        .device_identifier
-        .map(CString::new)
-        .transpose()
-        .map_err(|_| Cm119DeviceError::InvalidIdentity)?;
-    let serial = request
-        .usb_serial
-        .as_deref()
-        .map(CString::new)
-        .transpose()
-        .map_err(|_| Cm119DeviceError::InvalidIdentity)?;
-    let Some(select) = audio.usb_device_select else {
-        return Err(Cm119DeviceError::IncompleteProvider);
-    };
-    let mut audio_match: crate::abi::rptadv_audio_usb_device_match = unsafe { std::mem::zeroed() };
-    audio_match.struct_size = std::mem::size_of_val(&audio_match) as u32;
-    audio_match.abi_version = 2;
-    let selector = crate::abi::rptadv_audio_usb_device_selector {
-        struct_size: std::mem::size_of::<crate::abi::rptadv_audio_usb_device_selector>() as u32,
-        selection_policy: match request.policy {
-            RadioDeviceSelection::Exact => {
-                crate::abi::rptadv_audio_usb_selection_policy_RPTADV_AUDIO_USB_SELECTION_EXACT
-            }
-            RadioDeviceSelection::AutomaticLowestAlsaCard => crate::abi::rptadv_audio_usb_selection_policy_RPTADV_AUDIO_USB_SELECTION_AUTOMATIC_LOWEST_ALSA_CARD,
-        },
-        device_identifier: identifier.as_ref().map_or(std::ptr::null(), |value| value.as_ptr()),
-        usb_serial: serial.as_ref().map_or(std::ptr::null(), |value| value.as_ptr()),
-        input_device_channels: request.input_channels,
-        output_device_channels: request.output_channels,
-    };
-    if unsafe { select(&selector, &mut audio_match) } != 0 {
-        return Err(Cm119DeviceError::AudioSelectionFailed);
-    }
-    if audio_match.struct_size < std::mem::size_of_val(&audio_match) as u32
-        || audio_match.abi_version != 2
-        || audio_match.selection.struct_size
-            < std::mem::size_of::<crate::abi::rptadv_audio_usb_device_selection>() as u32
-        || audio_match.selection.abi_version != 2
-    {
-        return Err(Cm119DeviceError::InvalidAudioSelection);
-    }
-    let usb_interface_path = c_string_field(&audio_match.usb_interface_path)
-        .filter(|path| !path.is_empty())
-        .ok_or(Cm119DeviceError::InvalidAudioSelection)?;
-    let usb_port_path = usb_interface_path
-        .split(':')
-        .next()
-        .filter(|path| !path.is_empty())
-        .ok_or(Cm119DeviceError::InvalidAudioSelection)?
-        .to_owned();
-    let audio_serial = c_string_field(&audio_match.usb_serial).filter(|value| !value.is_empty());
-    if serial.is_some() && audio_serial.as_deref() != request.usb_serial.as_deref() {
-        return Err(Cm119DeviceError::AudioSerialMismatch);
-    }
-    let path = CString::new(usb_port_path.as_bytes())
-        .map_err(|_| Cm119DeviceError::InvalidAudioSelection)?;
-    let hardware = radio.cm119_hardware_request();
-    let gpio_config = crate::abi::rptadv_gpio_device_config {
-        struct_size: std::mem::size_of::<crate::abi::rptadv_gpio_device_config>() as u32,
-        abi_version: 1,
-        usb_port_path: path.as_ptr(),
-        vendor_id: 0,
-        product_id: 0,
-        profile: match hardware.profile {
-            Cm119Profile::DudeUsb => {
-                crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_DUDEUSB
-            }
-            Cm119Profile::SphUsb => crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_SPHUSB,
-            Cm119Profile::Nhrc => crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_NHRC,
-            Cm119Profile::Custom => crate::abi::rptadv_gpio_cm119_profile_RPTADV_GPIO_CM119_CUSTOM,
-        },
-        ptt_inverted: u32::from(hardware.ptt_inverted),
-        gpio_output_enable_mask: u32::from(hardware.output_enable_mask),
-        gpio_output_initial_mask: u32::from(hardware.initial_output_mask),
-    };
-    let Some(probe) = gpio.device_probe else {
-        return Err(Cm119DeviceError::IncompleteProvider);
-    };
-    let mut gpio_info: crate::abi::rptadv_gpio_device_info = unsafe { std::mem::zeroed() };
-    gpio_info.struct_size = std::mem::size_of_val(&gpio_info) as u32;
-    gpio_info.abi_version = 1;
-    let probe_result = unsafe { probe(&gpio_config, &mut gpio_info) };
-    if probe_result != 0 {
-        return Err(Cm119DeviceError::GpioProbeFailed(probe_result));
-    }
-    if gpio_info.struct_size < std::mem::size_of_val(&gpio_info) as u32
-        || gpio_info.abi_version != 1
-    {
-        return Err(Cm119DeviceError::IncompleteProvider);
-    }
-    if gpio_info.present == 0 {
-        return Err(Cm119DeviceError::GpioDeviceNotPresent);
-    }
-    let gpio_serial = c_string_field(&gpio_info.serial).filter(|value| !value.is_empty());
-    if let (Some(audio_serial), Some(gpio_serial)) = (&audio_serial, &gpio_serial) {
-        if audio_serial != gpio_serial {
-            return Err(Cm119DeviceError::GpioSerialMismatch);
-        }
-    }
-    Ok(ResolvedCm119Device {
-        usb_interface_path,
-        usb_port_path,
-        usb_serial: audio_serial.or(gpio_serial),
-        alsa_card_index: audio_match.selection.alsa_card_index,
-        input_device_index: audio_match.selection.input_device_index,
-        output_device_index: audio_match.selection.output_device_index,
-        gpio_vendor_id: gpio_info.vendor_id,
-        gpio_product_id: gpio_info.product_id,
-    })
-}
-
-fn c_string_field<const N: usize>(value: &[c_char; N]) -> Option<String> {
-    let bytes = unsafe { std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), N) };
-    CStr::from_bytes_until_nul(bytes)
-        .ok()
-        .map(|value| value.to_string_lossy().into_owned())
 }
 
 fn descriptor_size(pointer: *const c_void, layout: DescriptorLayout) -> usize {
@@ -653,45 +480,15 @@ fn product_functions_complete(api: &crate::abi::rptadv_product_descriptor_v1) ->
         && api.link_command.is_some()
         && api.link_status.is_some()
         && api.digit.is_some()
+        && api.inspect_configuration.is_some()
+        && api.inspect_secrets.is_some()
 }
 
-fn radio_functions_complete(api: &crate::abi::rptadv_radio_descriptor) -> bool {
-    api.session_create.is_some()
-        && api.session_warm.is_some()
-        && api.session_receive.is_some()
-        && api.session_transmit.is_some()
-        && api.session_snapshot.is_some()
-        && api.session_pop_receive_event.is_some()
-        && api.session_pop_transmit_event.is_some()
-        && api.session_destroy.is_some()
-        && api.session_prepare_update.is_some()
-        && api.session_apply_receive_update.is_some()
-        && api.session_apply_transmit_update.is_some()
-        && api.session_destroy_update.is_some()
-}
-
-fn audio_functions_complete(api: &crate::abi::rptadv_audio_adapter_descriptor) -> bool {
-    api.stream_create.is_some()
-        && api.stream_start.is_some()
-        && api.stream_stop.is_some()
-        && api.stream_get_stats.is_some()
-        && api.stream_destroy.is_some()
-        && api.usb_device_select.is_some()
-        && api.stream_get_timing.is_some()
-}
-
-fn gpio_functions_complete(api: &crate::abi::rptadv_gpio_adapter_descriptor) -> bool {
-    api.device_probe.is_some()
-        && api.device_open.is_some()
-        && api.device_publish_outputs.is_some()
-        && api.device_service.is_some()
-        && api.device_get_inputs.is_some()
-        && api.device_get_stats.is_some()
-        && api.device_close.is_some()
-}
-
-fn ffmpeg_functions_complete(api: &crate::abi::rptadv_ffmpeg_adapter_descriptor) -> bool {
-    api.create.is_some() && api.destroy.is_some() && api.process_block.is_some()
+fn native_product_functions_complete(api: &crate::abi::UrpAstDescriptor) -> bool {
+    api.native_create.is_some()
+        && api.native_start.is_some()
+        && api.native_stop.is_some()
+        && api.native_destroy.is_some()
 }
 
 struct ProviderLibrary(Library);
@@ -797,11 +594,10 @@ fn named_descriptor_matches(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cm119DeviceError, DescriptorLayout, ProviderError, ProviderLibrary, ProviderSpec,
-        audio_functions_complete, ffmpeg_functions_complete, gpio_functions_complete,
-        radio_functions_complete, resolve_cm119_device, valid_descriptor,
+        DescriptorLayout, ProviderError, ProviderLibrary, ProviderSpec,
+        native_product_functions_complete, valid_descriptor,
     };
-    use std::ffi::{CStr, c_char, c_void};
+    use std::ffi::{c_char, c_void};
     use std::path::Path;
 
     macro_rules! missing_fields {
@@ -815,62 +611,46 @@ mod tests {
         };
     }
 
-    impl super::ProviderSet {
-        pub(crate) fn for_radio_activation_tests(
-            radio: &'static crate::abi::rptadv_radio_descriptor,
-            audio: &'static crate::abi::rptadv_audio_adapter_descriptor,
-            gpio: &'static crate::abi::rptadv_gpio_adapter_descriptor,
-            ffmpeg: &'static crate::abi::rptadv_ffmpeg_adapter_descriptor,
-        ) -> Self {
-            let entries = [
-                (
-                    "librptadvradio.so.4",
-                    radio as *const _ as *const c_void,
-                    std::mem::size_of_val(radio),
-                ),
-                (
-                    "librptadv_portaudio_alsa_adapter.so.2",
-                    audio as *const _ as *const c_void,
-                    std::mem::size_of_val(audio),
-                ),
-                (
-                    "librptadv_gpio_adapter.so.1",
-                    gpio as *const _ as *const c_void,
-                    std::mem::size_of_val(gpio),
-                ),
-                (
-                    "librptadv_ffmpeg_adapter.so.1",
-                    ffmpeg as *const _ as *const c_void,
-                    std::mem::size_of_val(ffmpeg),
-                ),
-            ];
-            Self {
-                _libraries: Vec::new(),
-                descriptors: entries
-                    .into_iter()
-                    .map(|(library, descriptor, size)| super::LoadedProvider {
-                        library,
-                        size,
-                        descriptor: std::ptr::NonNull::new(descriptor.cast_mut())
-                            .expect("static descriptor"),
-                    })
-                    .collect(),
-            }
-        }
-    }
-
     #[test]
-    fn runtime_rejects_native_descriptors_without_required_operations() {
-        let radio: crate::abi::rptadv_radio_descriptor = unsafe { std::mem::zeroed() };
-        let audio: crate::abi::rptadv_audio_adapter_descriptor = unsafe { std::mem::zeroed() };
-        let gpio: crate::abi::rptadv_gpio_adapter_descriptor = unsafe { std::mem::zeroed() };
-        let ffmpeg: crate::abi::rptadv_ffmpeg_adapter_descriptor = unsafe { std::mem::zeroed() };
+    fn native_runtime_rejects_missing_lifecycle_operations() {
+        let mut api: crate::abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        assert!(!native_product_functions_complete(&api));
+        api.native_create = Some(fake_native_create);
+        api.native_start = Some(fake_native_control);
+        api.native_stop = Some(fake_native_control);
+        api.native_destroy = Some(fake_native_destroy);
 
-        assert!(!radio_functions_complete(&radio));
-        assert!(!audio_functions_complete(&audio));
-        assert!(!gpio_functions_complete(&gpio));
-        assert!(!ffmpeg_functions_complete(&ffmpeg));
+        assert!(native_product_functions_complete(&api));
+        missing_fields!(api, native_product_functions_complete, native_create native_start native_stop native_destroy);
+        let mut incomplete = api;
+        incomplete.native_start = None;
+        let providers = Box::leak(Box::new(super::ProviderSet {
+            _libraries: Vec::new(),
+            descriptors: vec![loaded_provider(
+                "libusbradioplus_product.so.1",
+                Box::leak(Box::new(incomplete)),
+            )],
+        }));
+        assert_eq!(
+            providers.radio_runtime_descriptors().err(),
+            Some(ProviderError::IncompleteDescriptor(
+                "libusbradioplus_product.so.1"
+            ))
+        );
     }
+
+    unsafe extern "C" fn fake_native_create(
+        _: *const crate::abi::UrpNativeCreateArgs,
+        _: *mut *mut c_void,
+    ) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn fake_native_control(_: *mut c_void) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn fake_native_destroy(_: *mut c_void) {}
 
     #[test]
     fn provider_error_messages_are_stable() {
@@ -890,46 +670,6 @@ mod tests {
             (
                 ProviderError::IncompleteDescriptor("incomplete"),
                 "required provider incomplete has an incomplete runtime descriptor",
-            ),
-        ] {
-            assert_eq!(error.to_string(), expected);
-        }
-    }
-
-    #[test]
-    fn cm119_error_messages_are_stable() {
-        for (error, expected) in [
-            (
-                Cm119DeviceError::IncompleteProvider,
-                "CM119 audio or GPIO provider is incomplete",
-            ),
-            (
-                Cm119DeviceError::InvalidIdentity,
-                "CM119 selection needs a valid device identifier or serial",
-            ),
-            (
-                Cm119DeviceError::AudioSelectionFailed,
-                "PortAudio adapter could not select the CM119 device",
-            ),
-            (
-                Cm119DeviceError::InvalidAudioSelection,
-                "PortAudio adapter returned an invalid CM119 selection",
-            ),
-            (
-                Cm119DeviceError::AudioSerialMismatch,
-                "selected CM119 serial does not match configuration",
-            ),
-            (
-                Cm119DeviceError::GpioProbeFailed(-4),
-                "GPIO adapter probe failed with code -4",
-            ),
-            (
-                Cm119DeviceError::GpioDeviceNotPresent,
-                "selected CM119 device is not present on GPIO",
-            ),
-            (
-                Cm119DeviceError::GpioSerialMismatch,
-                "audio and GPIO adapters selected different CM119 devices",
             ),
         ] {
             assert_eq!(error.to_string(), expected);
@@ -964,6 +704,20 @@ mod tests {
     }
 
     #[test]
+    fn native_product_uses_the_shared_system_descriptor() {
+        let provider = super::PROVIDERS
+            .iter()
+            .find(|provider| provider.library == "libusbradioplus_product.so.1")
+            .expect("the standalone runtime requires the shared radio product");
+
+        assert_eq!(provider.symbol, "usbradioplus_product_descriptor_v1");
+        assert_eq!(provider.abi_version, 1);
+        assert_eq!(provider.capability, b"usbradioplus.product1");
+        assert!(matches!(provider.layout, DescriptorLayout::Named));
+        assert!(matches!(provider.location, super::LibraryLocation::System));
+    }
+
+    #[test]
     fn missing_provider_library_returns_a_safe_load_error() {
         let provider = ProviderSpec {
             library: "/rpt-advanced-test-only/missing-provider.so",
@@ -980,17 +734,17 @@ mod tests {
 
     #[test]
     fn descriptor_contract_checks_abi_and_capability() {
-        let capability = b"rptadv.prod3\0\0\0\0";
+        let capability = b"rptadv.prod4\0\0\0\0";
         let descriptor = InlineDescriptor {
             struct_size: std::mem::size_of::<InlineDescriptor>() as u32,
-            abi_version: 3,
+            abi_version: 4,
             capability: *capability,
         };
         let provider = ProviderSpec {
             library: "test",
             symbol: "test",
-            abi_version: 3,
-            capability: b"rptadv.prod3",
+            abi_version: 4,
+            capability: b"rptadv.prod4",
             layout: DescriptorLayout::Inline,
             location: super::LibraryLocation::Private,
         };
@@ -1000,7 +754,7 @@ mod tests {
             provider
         ));
         let mut incompatible = descriptor;
-        incompatible.abi_version = 4;
+        incompatible.abi_version = 5;
         assert!(!valid_descriptor(
             (&incompatible as *const InlineDescriptor).cast(),
             provider
@@ -1137,534 +891,19 @@ mod tests {
     }
 
     #[test]
-    fn cm119_resolution_passes_node_settings_to_audio_and_gpio_adapters() {
-        let document = rpt_advanced_core::config::ConfigDocument::parse(
-            "[radio]\ndevice_identifier=3-1\nusb_serial=SERIAL-A\ncm119_profile=nhrc\ncm119_ptt_inverted=yes\ncm119_gpio_1_mode=out1\ncm119_clip_led_gpio=2\n[1000]\n",
-        )
-        .unwrap();
-        let radio = &crate::resolve_radio_nodes(&document).unwrap().value[0];
-        let audio = crate::abi::rptadv_audio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_audio_adapter_descriptor>() as u32,
-            abi_version: 2,
-            capability_name: c"rptadv.portaudio-alsa-audio".as_ptr(),
-            usb_device_select: Some(fake_audio_device_select),
-            ..unsafe { std::mem::zeroed() }
-        };
-        let gpio = crate::abi::rptadv_gpio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_gpio_adapter_descriptor>() as u32,
-            abi_version: 1,
-            capability_name: c"rptadv.cm119-hid-gpio".as_ptr(),
-            device_probe: Some(fake_gpio_probe),
-            ..unsafe { std::mem::zeroed() }
-        };
-
-        let selected = super::resolve_cm119_device(&audio, &gpio, radio).unwrap();
-
-        assert_eq!(selected.usb_interface_path, "3-1:1.0");
-        assert_eq!(selected.usb_port_path, "3-1");
-        assert_eq!(selected.usb_serial.as_deref(), Some("SERIAL-A"));
-        assert_eq!(selected.alsa_card_index, 4);
-        assert_eq!(selected.input_device_index, 6);
-        assert_eq!(selected.output_device_index, 7);
-        assert_eq!(selected.gpio_vendor_id, 0x0d8c);
-        assert_eq!(selected.gpio_product_id, 0x013c);
-    }
-
-    #[test]
-    fn cm119_resolution_uses_the_configured_automatic_audio_selection() {
-        let document = rpt_advanced_core::config::ConfigDocument::parse(
-            "[radio]\ndevice_selection=automatic_lowest_alsa_card\ncm119_profile=nhrc\ncm119_ptt_inverted=yes\ncm119_gpio_1_mode=out1\n[1000]\n",
-        )
-        .unwrap();
-        let radio = &crate::resolve_radio_nodes(&document).unwrap().value[0];
-        let audio = crate::abi::rptadv_audio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_audio_adapter_descriptor>() as u32,
-            abi_version: 2,
-            capability_name: c"rptadv.portaudio-alsa-audio".as_ptr(),
-            usb_device_select: Some(fake_audio_automatic_select),
-            ..unsafe { std::mem::zeroed() }
-        };
-        let gpio = crate::abi::rptadv_gpio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_gpio_adapter_descriptor>() as u32,
-            abi_version: 1,
-            capability_name: c"rptadv.cm119-hid-gpio".as_ptr(),
-            device_probe: Some(fake_gpio_probe),
-            ..unsafe { std::mem::zeroed() }
-        };
-
-        let selected = resolve_cm119_device(&audio, &gpio, radio).unwrap();
-        assert_eq!(selected.usb_serial.as_deref(), Some("SERIAL-A"));
-
-        let gpio = crate::abi::rptadv_gpio_adapter_descriptor {
-            device_probe: Some(fake_gpio_no_serial),
-            ..gpio
-        };
-        let selected = resolve_cm119_device(&audio, &gpio, radio).unwrap();
-        assert_eq!(selected.usb_serial.as_deref(), Some("SERIAL-A"));
-    }
-
-    #[test]
-    fn provider_set_resolves_cm119_and_reports_missing_adapter_descriptors() {
-        let document = rpt_advanced_core::config::ConfigDocument::parse(
-            "[radio]\ndevice_identifier=3-1\nusb_serial=SERIAL-A\ncm119_profile=nhrc\ncm119_ptt_inverted=yes\ncm119_gpio_1_mode=out1\n[1000]\n",
-        )
-        .unwrap();
-        let radio = &crate::resolve_radio_nodes(&document).unwrap().value[0];
-        let audio = Box::leak(Box::new(crate::abi::rptadv_audio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_audio_adapter_descriptor>() as u32,
-            abi_version: 2,
-            capability_name: c"rptadv.portaudio-alsa-audio".as_ptr(),
-            usb_device_select: Some(fake_audio_device_select),
-            ..unsafe { std::mem::zeroed() }
-        }));
-        let gpio = Box::leak(Box::new(crate::abi::rptadv_gpio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_gpio_adapter_descriptor>() as u32,
-            abi_version: 1,
-            capability_name: c"rptadv.cm119-hid-gpio".as_ptr(),
-            device_probe: Some(fake_gpio_probe),
-            ..unsafe { std::mem::zeroed() }
-        }));
-
-        let empty = super::ProviderSet {
-            _libraries: Vec::new(),
-            descriptors: Vec::new(),
-        };
-        assert_eq!(
-            empty.resolve_cm119_device(radio),
-            Err(Cm119DeviceError::IncompleteProvider)
-        );
-        let audio_only = super::ProviderSet {
-            _libraries: Vec::new(),
-            descriptors: vec![loaded_provider(
-                "librptadv_portaudio_alsa_adapter.so.2",
-                audio,
-            )],
-        };
-        assert_eq!(
-            audio_only.resolve_cm119_device(radio),
-            Err(Cm119DeviceError::IncompleteProvider)
-        );
-        let complete = super::ProviderSet {
-            _libraries: Vec::new(),
-            descriptors: vec![
-                loaded_provider("librptadv_portaudio_alsa_adapter.so.2", audio),
-                loaded_provider("librptadv_gpio_adapter.so.1", gpio),
-            ],
-        };
-        assert!(complete.resolve_cm119_device(radio).is_ok());
-    }
-
-    #[test]
-    fn cm119_resolution_rejects_incomplete_or_mismatched_adapters() {
-        let document = rpt_advanced_core::config::ConfigDocument::parse(
-            "[radio]\ndevice_identifier=3-1\nusb_serial=SERIAL-A\ncm119_profile=nhrc\ncm119_ptt_inverted=yes\ncm119_gpio_1_mode=out1\n[1000]\n",
-        )
-        .unwrap();
-        let radio = &crate::resolve_radio_nodes(&document).unwrap().value[0];
-        let mut audio = crate::abi::rptadv_audio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_audio_adapter_descriptor>() as u32,
-            abi_version: 2,
-            capability_name: c"rptadv.portaudio-alsa-audio".as_ptr(),
-            usb_device_select: Some(fake_audio_device_select),
-            ..unsafe { std::mem::zeroed() }
-        };
-        let mut gpio = crate::abi::rptadv_gpio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_gpio_adapter_descriptor>() as u32,
-            abi_version: 1,
-            capability_name: c"rptadv.cm119-hid-gpio".as_ptr(),
-            device_probe: Some(fake_gpio_probe),
-            ..unsafe { std::mem::zeroed() }
-        };
-
-        audio.usb_device_select = None;
-        assert_eq!(
-            resolve_cm119_device(&audio, &gpio, radio),
-            Err(Cm119DeviceError::IncompleteProvider)
-        );
-        audio.usb_device_select = Some(fake_audio_device_select);
-        gpio.device_probe = None;
-        assert_eq!(
-            resolve_cm119_device(&audio, &gpio, radio),
-            Err(Cm119DeviceError::IncompleteProvider)
-        );
-        gpio.device_probe = Some(fake_gpio_probe);
-
-        let mut no_identity = radio.clone();
-        no_identity.settings.device_identifier.clear();
-        no_identity.settings.usb_serial.clear();
-        assert_eq!(
-            resolve_cm119_device(&audio, &gpio, &no_identity),
-            Err(Cm119DeviceError::InvalidIdentity)
-        );
-
-        for (select, expected) in [
-            (
-                fake_audio_failure as _,
-                Cm119DeviceError::AudioSelectionFailed,
-            ),
-            (
-                fake_audio_invalid_output as _,
-                Cm119DeviceError::InvalidAudioSelection,
-            ),
-            (
-                fake_audio_invalid_version as _,
-                Cm119DeviceError::InvalidAudioSelection,
-            ),
-            (
-                fake_audio_invalid_selection_size as _,
-                Cm119DeviceError::InvalidAudioSelection,
-            ),
-            (
-                fake_audio_invalid_selection_version as _,
-                Cm119DeviceError::InvalidAudioSelection,
-            ),
-            (
-                fake_audio_wrong_serial as _,
-                Cm119DeviceError::AudioSerialMismatch,
-            ),
-        ] {
-            audio.usb_device_select = Some(select);
-            assert_eq!(resolve_cm119_device(&audio, &gpio, radio), Err(expected));
-        }
-        audio.usb_device_select = Some(fake_audio_device_select);
-
-        for (probe, expected) in [
-            (
-                fake_gpio_failure as _,
-                Cm119DeviceError::GpioProbeFailed(-1),
-            ),
-            (
-                fake_gpio_absent as _,
-                Cm119DeviceError::GpioDeviceNotPresent,
-            ),
-            (
-                fake_gpio_wrong_serial as _,
-                Cm119DeviceError::GpioSerialMismatch,
-            ),
-        ] {
-            gpio.device_probe = Some(probe);
-            assert_eq!(resolve_cm119_device(&audio, &gpio, radio), Err(expected));
-        }
-        for probe in [fake_gpio_short_info as _, fake_gpio_wrong_version as _] {
-            gpio.device_probe = Some(probe);
-            assert_eq!(
-                resolve_cm119_device(&audio, &gpio, radio),
-                Err(Cm119DeviceError::IncompleteProvider)
-            );
-        }
-    }
-
-    #[test]
-    fn cm119_profile_mapping_covers_all_supported_profiles() {
-        let document = rpt_advanced_core::config::ConfigDocument::parse(
-            "[radio]\ndevice_identifier=3-1\nusb_serial=SERIAL-A\ncm119_ptt_inverted=yes\ncm119_gpio_1_mode=out1\n[1000]\n",
-        )
-        .unwrap();
-        let mut radio = crate::resolve_radio_nodes(&document).unwrap().value[0].clone();
-        let audio = crate::abi::rptadv_audio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_audio_adapter_descriptor>() as u32,
-            abi_version: 2,
-            capability_name: c"rptadv.portaudio-alsa-audio".as_ptr(),
-            usb_device_select: Some(fake_audio_device_select),
-            ..unsafe { std::mem::zeroed() }
-        };
-        let gpio = crate::abi::rptadv_gpio_adapter_descriptor {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_gpio_adapter_descriptor>() as u32,
-            abi_version: 1,
-            capability_name: c"rptadv.cm119-hid-gpio".as_ptr(),
-            device_probe: Some(fake_gpio_probe),
-            ..unsafe { std::mem::zeroed() }
-        };
-        for (profile, probe) in [
-            (
-                rpt_advanced_core::config::Cm119Profile::DudeUsb,
-                fake_gpio_dudeusb as _,
-            ),
-            (
-                rpt_advanced_core::config::Cm119Profile::SphUsb,
-                fake_gpio_sphusb as _,
-            ),
-            (
-                rpt_advanced_core::config::Cm119Profile::Nhrc,
-                fake_gpio_probe as _,
-            ),
-            (
-                rpt_advanced_core::config::Cm119Profile::Custom,
-                fake_gpio_custom as _,
-            ),
-        ] {
-            radio.settings.cm119_profile = profile;
-            let mut profile_gpio = gpio;
-            profile_gpio.device_probe = Some(probe);
-            assert!(resolve_cm119_device(&audio, &profile_gpio, &radio).is_ok());
-        }
-    }
-
-    unsafe extern "C" fn fake_audio_device_select(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 0) }
-    }
-
-    unsafe extern "C" fn fake_audio_failure(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 1) }
-    }
-
-    unsafe extern "C" fn fake_audio_invalid_output(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 2) }
-    }
-
-    unsafe extern "C" fn fake_audio_wrong_serial(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 3) }
-    }
-
-    unsafe extern "C" fn fake_audio_invalid_version(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 4) }
-    }
-
-    unsafe extern "C" fn fake_audio_invalid_selection_size(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 5) }
-    }
-
-    unsafe extern "C" fn fake_audio_invalid_selection_version(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 6) }
-    }
-
-    unsafe extern "C" fn fake_audio_automatic_select(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-    ) -> crate::abi::rptadv_audio_result {
-        unsafe { audio_select(selector, matched, 8) }
-    }
-
-    unsafe fn audio_select(
-        selector: *const crate::abi::rptadv_audio_usb_device_selector,
-        matched: *mut crate::abi::rptadv_audio_usb_device_match,
-        mode: u32,
-    ) -> crate::abi::rptadv_audio_result {
-        let Some(selector) = (unsafe { selector.as_ref() }) else {
-            return -1;
-        };
-        if mode == 1 {
-            return -1;
-        }
-        let automatic = mode == 8;
-        let id_matches = if automatic {
-            selector.device_identifier.is_null()
-        } else {
-            !selector.device_identifier.is_null()
-                && unsafe { CStr::from_ptr(selector.device_identifier) }.to_bytes() == b"3-1"
-        };
-        let serial_matches = if automatic {
-            selector.usb_serial.is_null()
-        } else {
-            !selector.usb_serial.is_null()
-                && unsafe { CStr::from_ptr(selector.usb_serial) }.to_bytes() == b"SERIAL-A"
-        };
-        let expected_policy = if automatic {
-            crate::abi::rptadv_audio_usb_selection_policy_RPTADV_AUDIO_USB_SELECTION_AUTOMATIC_LOWEST_ALSA_CARD
-        } else {
-            crate::abi::rptadv_audio_usb_selection_policy_RPTADV_AUDIO_USB_SELECTION_EXACT
-        };
-        if !id_matches
-            || !serial_matches
-            || selector.selection_policy != expected_policy
-            || selector.input_device_channels != 1
-            || selector.output_device_channels != 1
-            || matched.is_null()
-        {
-            return -1;
-        }
-        let matched = unsafe { &mut *matched };
-        if mode == 2 {
-            matched.struct_size = 0;
-            return 0;
-        }
-        matched.struct_size = std::mem::size_of_val(matched) as u32;
-        matched.abi_version = 2;
-        if mode == 4 {
-            matched.abi_version = 3;
-        }
-        copy_c_string(&mut matched.usb_interface_path, b"3-1:1.0");
-        copy_c_string(
-            &mut matched.usb_serial,
-            if mode == 3 {
-                &b"OTHER"[..]
-            } else {
-                &b"SERIAL-A"[..]
-            },
-        );
-        matched.selection = crate::abi::rptadv_audio_usb_device_selection {
-            struct_size: std::mem::size_of::<crate::abi::rptadv_audio_usb_device_selection>()
-                as u32,
-            abi_version: 2,
-            alsa_card_index: 4,
-            input_device_index: 6,
-            output_device_index: 7,
-        };
-        if mode == 5 {
-            matched.selection.struct_size = 0;
-        } else if mode == 6 {
-            matched.selection.abi_version = 3;
-        }
-        0
-    }
-
-    unsafe extern "C" fn fake_gpio_probe(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 2, 0) }
-    }
-
-    unsafe extern "C" fn fake_gpio_failure(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 2, 1) }
-    }
-
-    unsafe extern "C" fn fake_gpio_absent(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 2, 2) }
-    }
-
-    unsafe extern "C" fn fake_gpio_wrong_serial(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 2, 3) }
-    }
-
-    unsafe extern "C" fn fake_gpio_short_info(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 2, 4) }
-    }
-
-    unsafe extern "C" fn fake_gpio_wrong_version(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 2, 5) }
-    }
-
-    unsafe extern "C" fn fake_gpio_no_serial(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 2, 6) }
-    }
-
-    unsafe extern "C" fn fake_gpio_dudeusb(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 0, 0) }
-    }
-
-    unsafe extern "C" fn fake_gpio_sphusb(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 1, 0) }
-    }
-
-    unsafe extern "C" fn fake_gpio_custom(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-    ) -> crate::abi::rptadv_gpio_result {
-        unsafe { gpio_probe(config, info, 3, 0) }
-    }
-
-    unsafe fn gpio_probe(
-        config: *const crate::abi::rptadv_gpio_device_config,
-        info: *mut crate::abi::rptadv_gpio_device_info,
-        expected_profile: u32,
-        mode: u32,
-    ) -> crate::abi::rptadv_gpio_result {
-        let Some(config) = (unsafe { config.as_ref() }) else {
-            return -1;
-        };
-        let path_matches = !config.usb_port_path.is_null()
-            && unsafe { CStr::from_ptr(config.usb_port_path) }.to_bytes() == b"3-1";
-        if !path_matches
-            || config.profile != expected_profile
-            || config.ptt_inverted != 1
-            || config.gpio_output_enable_mask != 1
-            || config.gpio_output_initial_mask != 1
-            || info.is_null()
-        {
-            return -1;
-        }
-        if mode == 1 {
-            return -1;
-        }
-        let info = unsafe { &mut *info };
-        info.struct_size = std::mem::size_of_val(info) as u32;
-        info.abi_version = 1;
-        if mode == 4 {
-            info.struct_size = 0;
-        } else if mode == 5 {
-            info.abi_version = 2;
-        }
-        info.present = u32::from(mode != 2);
-        info.vendor_id = 0x0d8c;
-        info.product_id = 0x013c;
-        copy_c_string(
-            &mut info.serial,
-            match mode {
-                3 => &b"OTHER"[..],
-                6 => &b""[..],
-                _ => &b"SERIAL-A"[..],
-            },
-        );
-        0
-    }
-
-    fn copy_c_string<const N: usize>(destination: &mut [c_char; N], value: &[u8]) {
-        assert!(value.len() < N);
-        for (target, source) in destination.iter_mut().zip(value.iter().copied().chain([0])) {
-            *target = source as c_char;
-        }
-    }
-
-    #[test]
     fn runtime_product_validation_rejects_missing_lifecycle_operations() {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 3;
-        descriptor.capability = *b"rptadv.prod3\0\0\0\0";
+        descriptor.abi_version = 4;
+        descriptor.capability = *b"rptadv.prod4\0\0\0\0";
         assert!(!super::product_functions_complete(&descriptor));
     }
 
     #[cfg(unix)]
     #[test]
     fn product_runtime_descriptors_reject_incomplete_product_tables() {
-        let directory = ProviderFixture::new(3, false, false);
+        let directory = ProviderFixture::new(4, false, false);
         let providers = Box::leak(Box::new(
             super::ProviderSet::load_from_directory(directory.path()).unwrap(),
         ));
@@ -1683,8 +922,8 @@ mod tests {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 3;
-        descriptor.capability = *b"rptadv.prod3\0\0\0\0";
+        descriptor.abi_version = 4;
+        descriptor.capability = *b"rptadv.prod4\0\0\0\0";
         replace_descriptor(&mut providers, "librptadv_product.so.1", descriptor);
         let providers = Box::leak(Box::new(providers));
 
@@ -1699,10 +938,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn provider_set_loads_only_matching_native_descriptors() {
-        let directory = ProviderFixture::new(3, false, false);
+        let directory = ProviderFixture::new(4, false, false);
         let providers = super::ProviderSet::load_from_directory(directory.path()).unwrap();
         assert!(providers.descriptor("librptadv_product.so.1").is_some());
         assert!(providers.descriptor("librptadviax2.so.1").is_some());
+        assert!(
+            providers
+                .descriptor("libusbradioplus_product.so.1")
+                .is_some()
+        );
         assert!(providers.descriptor("missing-provider.so").is_none());
         assert_eq!(
             providers.validate_runtime(),
@@ -1711,13 +955,13 @@ mod tests {
             ))
         );
 
-        let missing = ProviderFixture::new(3, true, false);
+        let missing = ProviderFixture::new(4, true, false);
         assert_eq!(
             super::ProviderSet::load_from_directory(missing.path()).err(),
             Some(ProviderError::MissingDescriptor("librptadv_product.so.1"))
         );
 
-        let incompatible = ProviderFixture::new(4, false, false);
+        let incompatible = ProviderFixture::new(5, false, false);
         assert_eq!(
             super::ProviderSet::load_from_directory(incompatible.path()).err(),
             Some(ProviderError::IncompatibleDescriptor(
@@ -1725,7 +969,7 @@ mod tests {
             ))
         );
 
-        let null = ProviderFixture::new(3, false, true);
+        let null = ProviderFixture::new(4, false, true);
         assert_eq!(
             super::ProviderSet::load_from_directory(null.path()).err(),
             Some(ProviderError::MissingDescriptor("librptadv_product.so.1"))
@@ -1739,7 +983,7 @@ mod tests {
 
         providers.validate_runtime().unwrap();
         let radio = providers.radio_runtime_descriptors().unwrap();
-        assert!(radio.radio.session_create.is_some());
+        assert!(radio.product.native_create.is_some());
         let product = providers.product_runtime_descriptors().unwrap();
         assert!(product.product.start.is_some());
     }
@@ -1751,35 +995,8 @@ mod tests {
         let mut product = *providers
             .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.1")
             .unwrap();
-        let mut radio = *providers
-            .typed_descriptor::<crate::abi::rptadv_radio_descriptor>("librptadvradio.so.4")
-            .unwrap();
-        let mut audio = *providers
-            .typed_descriptor::<crate::abi::rptadv_audio_adapter_descriptor>(
-                "librptadv_portaudio_alsa_adapter.so.2",
-            )
-            .unwrap();
-        let mut gpio = *providers
-            .typed_descriptor::<crate::abi::rptadv_gpio_adapter_descriptor>(
-                "librptadv_gpio_adapter.so.1",
-            )
-            .unwrap();
-        let mut ffmpeg = *providers
-            .typed_descriptor::<crate::abi::rptadv_ffmpeg_adapter_descriptor>(
-                "librptadv_ffmpeg_adapter.so.1",
-            )
-            .unwrap();
-
         assert!(super::product_functions_complete(&product));
-        missing_fields!(product, super::product_functions_complete, start reload stop authorize_incoming incoming link_command link_status digit);
-        assert!(super::radio_functions_complete(&radio));
-        missing_fields!(radio, super::radio_functions_complete, session_create session_warm session_receive session_transmit session_snapshot session_pop_receive_event session_pop_transmit_event session_destroy session_prepare_update session_apply_receive_update session_apply_transmit_update session_destroy_update);
-        assert!(super::audio_functions_complete(&audio));
-        missing_fields!(audio, super::audio_functions_complete, stream_create stream_start stream_stop stream_get_stats stream_destroy usb_device_select stream_get_timing);
-        assert!(super::gpio_functions_complete(&gpio));
-        missing_fields!(gpio, super::gpio_functions_complete, device_probe device_open device_publish_outputs device_service device_get_inputs device_get_stats device_close);
-        assert!(super::ffmpeg_functions_complete(&ffmpeg));
-        missing_fields!(ffmpeg, super::ffmpeg_functions_complete, create destroy process_block);
+        missing_fields!(product, super::product_functions_complete, start reload stop authorize_incoming incoming link_command link_status digit inspect_configuration inspect_secrets);
     }
 
     #[cfg(unix)]
@@ -1802,23 +1019,8 @@ mod tests {
                 "librptadv_speech_adapter.so.1",
             )
             .unwrap();
-        let valid_radio = *providers
-            .typed_descriptor::<crate::abi::rptadv_radio_descriptor>("librptadvradio.so.4")
-            .unwrap();
-        let valid_audio = *providers
-            .typed_descriptor::<crate::abi::rptadv_audio_adapter_descriptor>(
-                "librptadv_portaudio_alsa_adapter.so.2",
-            )
-            .unwrap();
-        let valid_gpio = *providers
-            .typed_descriptor::<crate::abi::rptadv_gpio_adapter_descriptor>(
-                "librptadv_gpio_adapter.so.1",
-            )
-            .unwrap();
-        let valid_ffmpeg = *providers
-            .typed_descriptor::<crate::abi::rptadv_ffmpeg_adapter_descriptor>(
-                "librptadv_ffmpeg_adapter.so.1",
-            )
+        let valid_native = *providers
+            .typed_descriptor::<crate::abi::UrpAstDescriptor>("libusbradioplus_product.so.1")
             .unwrap();
 
         replace_descriptor(&mut providers, "librptadv_product.so.1", unsafe {
@@ -1885,57 +1087,16 @@ mod tests {
         }
         replace_descriptor(&mut providers, speech_library, valid_speech);
 
-        replace_descriptor(&mut providers, "librptadvradio.so.4", unsafe {
-            std::mem::zeroed::<crate::abi::rptadv_radio_descriptor>()
-        });
-        assert_eq!(
-            providers.validate_runtime(),
-            Err(ProviderError::IncompleteDescriptor("librptadvradio.so.4"))
-        );
-        replace_descriptor(&mut providers, "librptadvradio.so.4", valid_radio);
-
-        replace_descriptor(
-            &mut providers,
-            "librptadv_portaudio_alsa_adapter.so.2",
-            unsafe { std::mem::zeroed::<crate::abi::rptadv_audio_adapter_descriptor>() },
-        );
-        assert_eq!(
-            providers.validate_runtime(),
-            Err(ProviderError::IncompleteDescriptor(
-                "librptadv_portaudio_alsa_adapter.so.2"
-            ))
-        );
-        replace_descriptor(
-            &mut providers,
-            "librptadv_portaudio_alsa_adapter.so.2",
-            valid_audio,
-        );
-
-        replace_descriptor(&mut providers, "librptadv_gpio_adapter.so.1", unsafe {
-            std::mem::zeroed::<crate::abi::rptadv_gpio_adapter_descriptor>()
+        replace_descriptor(&mut providers, "libusbradioplus_product.so.1", unsafe {
+            std::mem::zeroed::<crate::abi::UrpAstDescriptor>()
         });
         assert_eq!(
             providers.validate_runtime(),
             Err(ProviderError::IncompleteDescriptor(
-                "librptadv_gpio_adapter.so.1"
+                "libusbradioplus_product.so.1"
             ))
         );
-        replace_descriptor(&mut providers, "librptadv_gpio_adapter.so.1", valid_gpio);
-
-        replace_descriptor(&mut providers, "librptadv_ffmpeg_adapter.so.1", unsafe {
-            std::mem::zeroed::<crate::abi::rptadv_ffmpeg_adapter_descriptor>()
-        });
-        assert_eq!(
-            providers.validate_runtime(),
-            Err(ProviderError::IncompleteDescriptor(
-                "librptadv_ffmpeg_adapter.so.1"
-            ))
-        );
-        replace_descriptor(
-            &mut providers,
-            "librptadv_ffmpeg_adapter.so.1",
-            valid_ffmpeg,
-        );
+        replace_descriptor(&mut providers, "libusbradioplus_product.so.1", valid_native);
     }
 
     fn replace_descriptor<T>(providers: &mut super::ProviderSet, library: &str, descriptor: T) {
@@ -2016,7 +1177,7 @@ mod tests {
             #include <stddef.h>
             #include <stdint.h>
             #ifndef PRODUCT_VERSION
-            #define PRODUCT_VERSION 3
+            #define PRODUCT_VERSION 4
             #endif
             typedef struct { uint32_t size, version; char capability[16]; } Inline;
             typedef struct { uint32_t size, version; const char *capability; } Named;
@@ -2030,13 +1191,14 @@ mod tests {
             #ifdef NULL_PRODUCT
             void *rptadv_product_descriptor_v1(void) { return NULL; }
             #elif !defined(OMIT_PRODUCT)
-            INLINE(product, rptadv_product_descriptor_v1, PRODUCT_VERSION, "rptadv.prod3")
+            INLINE(product, rptadv_product_descriptor_v1, PRODUCT_VERSION, "rptadv.prod4")
             #endif
             static Control control = { 1, sizeof(Control), "rptadv.control" };
             void *rptadv_control_standalone_descriptor_v1(void) { return &control; }
             INLINE(file, rptadv_file_adapter_descriptor, 2, "rptadv.file")
             INLINE(speech, rptadv_speech_adapter_descriptor, 2, "rptadv.speech")
             INLINE(iax2, rptadv_iax2_client_descriptor_v1, 1, "rptadv.iax2.v1")
+            NAMED(native, usbradioplus_product_descriptor_v1, 1, "usbradioplus.product1")
             NAMED(radio, rptadv_radio_descriptor, 4, "rptadv.radio-core")
             NAMED(audio, rptadv_portaudio_alsa_adapter_descriptor, 2, "rptadv.portaudio-alsa-audio")
             NAMED(ffmpeg, rptadv_ffmpeg_adapter_descriptor, 1, "rptadv.ffmpeg")

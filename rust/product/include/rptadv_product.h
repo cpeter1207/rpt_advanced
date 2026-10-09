@@ -17,13 +17,13 @@ struct rptadv_file_descriptor;
 struct rptadv_speech_descriptor;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 3U
+#define RPTADV_PRODUCT_ABI_VERSION 4U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod3"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod4"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 4U
+#define RPTADV_HOST_ABI_VERSION 5U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst4"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst5"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -92,8 +92,33 @@ typedef uint32_t (*rptadv_current_v1)(void *context);
 typedef void (*rptadv_peer_event_v1)(void *context, uint32_t kind, const void *data, size_t count);
 /** Borrowed status text sink. */
 typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t length);
+struct UrpNativeStationConfig;
+/** Resolved host requirements, borrowed only during the configuration visitor. */
+struct rptadv_node_host_configuration {
+    uint32_t struct_size; /**< Complete readable record size. */
+    const char *node; /**< Node identity; not NUL terminated. */
+    size_t node_length; /**< Node identity byte count. */
+    const char *channel; /**< Radio channel; not NUL terminated. */
+    size_t channel_length; /**< Channel byte count. */
+    uint32_t enabled; /**< Zero for disabled nodes, which are still reported. */
+    uint16_t iax_port; /**< Effective UDP listener and registration port. */
+    const char *registration_url; /**< HTTPS endpoint; empty disables registration. */
+    size_t registration_url_length; /**< Endpoint byte count. */
+    uint64_t registration_interval_seconds; /**< Effective registration interval. */
+    const struct UrpNativeStationConfig *radio; /**< Borrowed native station request. */
+};
+/** Copy one node's requirements; return nonzero to abort inspection. */
+typedef int (*rptadv_configuration_sink)(void *context,
+                                        const struct rptadv_node_host_configuration *node);
+/** Copy one validated secret; node is "general" for the shared default.
+ * No secret or input text is included in diagnostics. Return nonzero to abort. */
+typedef int (*rptadv_secret_sink)(void *context, const char *node, size_t node_length,
+                                 const char *secret, size_t secret_length);
+/** Borrow one selected DNS SRV target and port for the synchronous backend call. */
+typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, size_t length,
+                                             uint16_t port);
 
-/** Public-Asterisk primitives consumed by the portable product owner.
+/** Host I/O primitives consumed by the portable product owner.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
  * handle is uniquely owned and used serially until its destroy callback. Open/dial
@@ -106,9 +131,13 @@ typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t leng
  * F32 with exactly the stated count. Radio transmit returns key and CTCSS-enable
  * decisions through separate output pointers. Peer text/audio data and DTMF byte
  * are borrowed for the callback; radio key/unkey events have null data and zero
- * count. Directory methods are 0 both, 1 DNS, 2 file.
+ * count. Directory backends return zero after delivering borrowed results, negative
+ * on authoritative rejection, or positive on recoverable DNS failure. Record and
+ * SRV callbacks emit at most one result; no result means absent. Address callbacks
+ * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
+ * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v4 {
+struct rptadv_host_services_v5 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -124,11 +153,18 @@ struct rptadv_host_services_v4 {
     /** Restore the host child reaper. */
     void (*reaper_release)(void);
 
-    /** Resolve one peer destination into caller storage. */
-    int (*directory_lookup)(void *context, uint32_t method, const char *static_file,
-                            size_t static_length, const char *external_file, size_t external_length,
-                            const char *remote, size_t remote_length, const char *source,
-                            size_t source_length, char *output, size_t capacity, size_t *written);
+    /** Read a raw extnodes record. Unavailable files emit no result and succeed. */
+    int (*directory_record)(void *context, const char *path, size_t path_length,
+                            const char *node, size_t node_length, rptadv_text_sink_v1 sink,
+                            void *sink_context);
+    /** Read one backend-selected SRV target; an absent record uses the ordinary hostname. */
+    int (*directory_srv)(void *context, const char *service, size_t service_length,
+                         rptadv_directory_srv_sink_v1 sink, void *sink_context);
+    /** Resolve numeric addresses for the selected host and port. */
+    int (*directory_addresses)(void *context, const char *host, size_t host_length,
+                               uint16_t port, rptadv_text_sink_v1 sink, void *sink_context);
+    /** Preserve host diagnostics: 1 invalid record, 2 source mismatch, 3 not found, 4 DNS failed. */
+    void (*directory_notice)(void *context, uint32_t reason);
 
     /** Reserve one uniquely owned radio without starting it. The length-delimited name contains
      * local-node, NUL, then adapter-selected channel; older single-name test providers may use
@@ -181,7 +217,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v4 *host,
+    int (*start)(const struct rptadv_host_services_v5 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,
@@ -203,6 +239,17 @@ struct rptadv_product_descriptor_v1 {
                        void *sink_context);
     /** Feed one validated DTMF digit. */
     int (*digit)(const char *local, size_t local_length, uint8_t digit, uint32_t *completed);
+    /** Resolve host requirements without starting workers or opening hardware.
+     * Validate the whole document before emitting records. Diagnostics are warnings
+     * on success and a safe error on failure. Null node sink validates only. */
+    int (*inspect_configuration)(const char *configuration, size_t configuration_length,
+                                 rptadv_configuration_sink node, void *node_context,
+                                 rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
+    /** Parse secrets without file I/O; the host still enforces ownership/mode 0600.
+     * Validate the whole document before emitting records. No callback may unwind. */
+    int (*inspect_secrets)(const char *configuration, size_t configuration_length,
+                           rptadv_secret_sink secret, void *secret_context,
+                           rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
 };
 
 /** Return immutable process-lifetime product metadata.

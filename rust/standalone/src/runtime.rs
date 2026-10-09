@@ -61,8 +61,8 @@ impl ProductRuntime {
             return Err(RuntimeError::InvalidDescriptor);
         };
         if product.struct_size < size_of::<abi::rptadv_product_descriptor_v1>() as u32
-            || product.abi_version != 3
-            || product.capability != *b"rptadv.prod3\0\0\0\0"
+            || product.abi_version != 4
+            || product.capability != *b"rptadv.prod4\0\0\0\0"
         {
             return Err(RuntimeError::InvalidDescriptor);
         }
@@ -264,7 +264,7 @@ mod tests {
     static ACCEPTED_PEER: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn start_without_counts(
-        _: *const abi::rptadv_host_services_v4,
+        _: *const abi::rptadv_host_services_v5,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -280,7 +280,7 @@ mod tests {
     static AUTHORIZED: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" fn start(
-        _: *const abi::rptadv_host_services_v4,
+        _: *const abi::rptadv_host_services_v5,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -293,7 +293,7 @@ mod tests {
     }
 
     unsafe extern "C" fn fail_start(
-        _: *const abi::rptadv_host_services_v4,
+        _: *const abi::rptadv_host_services_v5,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -366,7 +366,7 @@ mod tests {
 
     fn descriptor(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v4,
+            *const abi::rptadv_host_services_v5,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -390,7 +390,7 @@ mod tests {
 
     fn descriptor_with_reload(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v4,
+            *const abi::rptadv_host_services_v5,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -412,8 +412,8 @@ mod tests {
     ) -> &'static abi::rptadv_product_descriptor_v1 {
         Box::leak(Box::new(abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 3,
-            capability: *b"rptadv.prod3\0\0\0\0",
+            abi_version: 4,
+            capability: *b"rptadv.prod4\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
@@ -422,6 +422,8 @@ mod tests {
             link_command: None,
             link_status: None,
             digit: None,
+            inspect_configuration: None,
+            inspect_secrets: None,
         }))
     }
 
@@ -474,9 +476,8 @@ mod tests {
     }
 
     fn host_with_configuration(configuration: &str) -> HostServicesOwner {
-        let document = rpt_advanced_core::config::ConfigDocument::parse(configuration).unwrap();
         HostServicesOwner::new(
-            crate::resolve_radio_nodes(&document).unwrap().value,
+            crate::resolve_radio_nodes(configuration).unwrap(),
             None,
             SecretsFile::parse("").unwrap(),
         )
@@ -521,14 +522,7 @@ mod tests {
         assert!(radio_channel_available(&process, "old"));
         assert!(
             process
-                .reload_with_radios(
-                    candidate,
-                    crate::resolve_radio_nodes(
-                        &rpt_advanced_core::config::ConfigDocument::parse(candidate).unwrap()
-                    )
-                    .unwrap()
-                    .value,
-                )
+                .reload_with_radios(candidate, crate::resolve_radio_nodes(candidate).unwrap(),)
                 .is_ok()
         );
         assert!(!radio_channel_available(&process, "old"));
@@ -558,14 +552,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            process.reload_with_radios(
-                candidate,
-                crate::resolve_radio_nodes(
-                    &rpt_advanced_core::config::ConfigDocument::parse(candidate).unwrap()
-                )
-                .unwrap()
-                .value,
-            ),
+            process.reload_with_radios(candidate, crate::resolve_radio_nodes(candidate).unwrap(),),
             Err(RuntimeError::Reload)
         ));
         assert!(radio_channel_available(&process, "old"));

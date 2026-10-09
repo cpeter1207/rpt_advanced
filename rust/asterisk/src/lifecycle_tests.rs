@@ -18,7 +18,7 @@ pub(crate) fn incoming_result(result: i32) {
 static DIGITS: Mutex<String> = Mutex::new(String::new());
 
 unsafe extern "C" fn start(
-    _: *const ffi::rptadv_host_services_v4,
+    _: *const ffi::rptadv_host_services_v5,
     _: *const ffi::rptadv_control_descriptor_v1,
     _: *const ffi::rptadv_file_descriptor,
     _: *const ffi::rptadv_speech_descriptor,
@@ -151,8 +151,8 @@ unsafe extern "C" fn digit(
 
 static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<ffi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 3,
-    capability: *b"rptadv.prod3\0\0\0\0",
+    abi_version: 4,
+    capability: *b"rptadv.prod4\0\0\0\0",
     start: Some(start),
     reload: Some(reload),
     stop: Some(stop),
@@ -161,7 +161,31 @@ static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descr
     link_command: Some(link_command),
     link_status: Some(link_status),
     digit: Some(digit),
+    inspect_configuration: Some(inspect_configuration),
+    inspect_secrets: Some(inspect_secrets),
 };
+
+unsafe extern "C" fn inspect_configuration(
+    _: *const std::ffi::c_char,
+    _: usize,
+    _: ffi::rptadv_configuration_sink,
+    _: *mut std::ffi::c_void,
+    _: ffi::rptadv_text_sink_v1,
+    _: *mut std::ffi::c_void,
+) -> i32 {
+    0
+}
+
+unsafe extern "C" fn inspect_secrets(
+    _: *const std::ffi::c_char,
+    _: usize,
+    _: ffi::rptadv_secret_sink,
+    _: *mut std::ffi::c_void,
+    _: ffi::rptadv_text_sink_v1,
+    _: *mut std::ffi::c_void,
+) -> i32 {
+    0
+}
 
 struct Clear;
 impl Drop for Clear {
@@ -192,7 +216,7 @@ pub(crate) fn with_running(operation: impl FnOnce()) {
 #[test]
 fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() {
     assert!(unsafe { Product::open(ptr::null()) }.is_none());
-    for field in 0..11 {
+    for field in 0..13 {
         let mut descriptor = DESCRIPTOR;
         match field {
             0 => descriptor.struct_size -= 1,
@@ -205,7 +229,9 @@ fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() 
             7 => descriptor.incoming = None,
             8 => descriptor.link_command = None,
             9 => descriptor.link_status = None,
-            _ => descriptor.digit = None,
+            10 => descriptor.digit = None,
+            11 => descriptor.inspect_configuration = None,
+            _ => descriptor.inspect_secrets = None,
         }
         assert!(
             unsafe { Product::open(&descriptor) }.is_none(),

@@ -119,6 +119,44 @@ fn radio_schema_accepts_each_carrier_source_and_uses_radio_defaults() {
 }
 
 #[test]
+fn radio_receive_gains_accept_bounded_integers_in_both_scopes() {
+    for section in ["radio", "radio 1000"] {
+        for gain in [-30, -2, 0, 30] {
+            let document = ConfigDocument::parse(&format!(
+                "[1000]\n[{section}]\nreceive_input_gain_db={gain}\nreceive_output_gain_db={gain}\n"
+            ))
+            .unwrap();
+            let result = Schema::validate(&document).unwrap();
+            assert!(result.warnings.is_empty(), "{section}/{gain}: {result:?}");
+        }
+    }
+}
+
+#[test]
+fn invalid_radio_receive_gains_warn_with_inherited_or_unity_fallbacks() {
+    for key in ["receive_input_gain_db", "receive_output_gain_db"] {
+        for invalid in ["-31", "31", "-2.5", "invalid"] {
+            for (defaults, fallback) in [("", "0"), ("-6", "-6")] {
+                let global = if defaults.is_empty() {
+                    String::new()
+                } else {
+                    format!("[radio]\n{key}={defaults}\n")
+                };
+                let document = ConfigDocument::parse(&format!(
+                    "{global}[1000]\n[radio 1000]\n{key}={invalid}\n"
+                ))
+                .unwrap();
+                let warnings = Schema::validate(&document).unwrap().warnings;
+                assert_eq!(warnings.len(), 1, "{key}={invalid}");
+                assert_eq!(warnings[0].key, key);
+                assert_eq!(warnings[0].message, "invalid option value");
+                assert_eq!(warnings[0].fallback, fallback);
+            }
+        }
+    }
+}
+
+#[test]
 fn iax_registration_url_accepts_empty_value_and_rejects_credentials() {
     let empty = ConfigDocument::parse("[general]\niax_registration_url=\n").unwrap();
     assert!(Schema::validate(&empty).unwrap().warnings.is_empty());

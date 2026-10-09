@@ -103,6 +103,28 @@ or alpha compatibility path is introduced.
 The later transmit-CTCSS output extends this table to ABI 4; see ADR 0042. The
 peer-binding operation and its version-1 option payload are unchanged.
 
+### Shared directory policy (2026-10-09)
+
+Host-services ABI 5 (`rptadv.hst5`) replaces the resolved-directory callback
+with raw extnodes, selected SRV target/port, and numeric-address callbacks.
+The product owns static/DNS/external precedence, record validation, and source-IP
+authentication once. Asterisk owns config/DNS allocation and cleanup; standalone
+owns filesystem/system-resolution I/O and its existing SRV packet decoder.
+Borrowed results live only during each synchronous callback; no native object or
+Rust layout crosses the boundary. The host keeps its existing diagnostics.
+
+Backend result translation preserves current behavior: authoritative malformed
+Asterisk answers reject lookup, while standalone DNS failures permit external-file
+fallback only when both sources are selected. An authoritative source mismatch
+never falls back. This extraction does not standardize those backend outcomes.
+
+The new host table rejects ABI 4 before callbacks. Update product, standalone, and
+Asterisk consumers together under ADR 0040; no old-alpha table is retained. The
+host-services contract is exchanged through the existing product start operation,
+not a separately exported DSO symbol, so this host-table change alone does not
+change a SONAME or invent a package release minimum. Existing product/integration
+packages continue requiring their matching builds.
+
 AllStarLink wire-protocol, directory, topology, and control interoperability
 remain required features. Matching ASL3 behavior on those interfaces is not a
 software dependency on ASL3. Do not remove that behavior to satisfy a linker

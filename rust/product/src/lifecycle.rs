@@ -665,7 +665,7 @@ unsafe fn incoming_identity(
 /// # Safety
 /// The complete descriptor/code allocations must remain live through successful stop.
 unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v4,
+    host: *const abi::rptadv_host_services_v5,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
@@ -963,8 +963,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 3,
-    capability: *b"rptadv.prod3\0\0\0\0",
+    abi_version: 4,
+    capability: *b"rptadv.prod4\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),
@@ -973,6 +973,8 @@ static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descr
     link_command: Some(rptadv_product_link_command),
     link_status: Some(rptadv_product_link_status),
     digit: Some(rptadv_product_digit),
+    inspect_configuration: Some(crate::configuration::inspect_configuration),
+    inspect_secrets: Some(crate::configuration::inspect_secrets),
 };
 
 /// Return immutable process-lifetime product metadata.

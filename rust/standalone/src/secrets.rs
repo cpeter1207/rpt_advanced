@@ -1,7 +1,5 @@
 use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
 
-use rpt_advanced_core::config::ConfigDocument;
-
 /// IAX secrets parsed from an owner-only configuration file.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SecretsFile {
@@ -12,28 +10,17 @@ pub struct SecretsFile {
 impl SecretsFile {
     /// Parse global and per-node IAX secrets without exposing values in errors.
     pub fn parse(text: &str) -> Result<Self, SecretError> {
-        let document = ConfigDocument::parse(text).map_err(|_| SecretError("invalid syntax"))?;
+        let records =
+            crate::configuration::secrets(text).map_err(|error| SecretError(error.to_string()))?;
         let mut secrets = Self {
             general: None,
             nodes: BTreeMap::new(),
         };
-        for entry in document.entries() {
-            if entry.key != "iax_secret" {
-                return Err(SecretError("unknown option"));
-            }
-            if entry.value.is_empty() {
-                return Err(SecretError("empty secret"));
-            }
-            if entry.section == "general" {
-                secrets.general = Some(entry.value.clone());
-            } else if entry.section.len() <= 63
-                && entry.section.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                secrets
-                    .nodes
-                    .insert(entry.section.clone(), entry.value.clone());
+        for (node, value) in records {
+            if node == "general" {
+                secrets.general = Some(value);
             } else {
-                return Err(SecretError("invalid section"));
+                secrets.nodes.insert(node, value);
             }
         }
         Ok(secrets)
@@ -58,11 +45,11 @@ impl SecretsFile {
         }
         let mut file = options
             .open(path)
-            .map_err(|_| SecretError("cannot open secrets file"))?;
+            .map_err(|_| SecretError("cannot open secrets file".into()))?;
         validate_file(&file)?;
         let mut text = String::new();
         file.read_to_string(&mut text)
-            .map_err(|_| SecretError("cannot read secrets file"))?;
+            .map_err(|_| SecretError("cannot read secrets file".into()))?;
         Self::parse(&text)
     }
 }
@@ -73,13 +60,13 @@ fn validate_file(file: &File) -> Result<(), SecretError> {
         use std::os::unix::fs::MetadataExt;
         let metadata = file
             .metadata()
-            .map_err(|_| SecretError("cannot inspect secrets file"))?;
+            .map_err(|_| SecretError("cannot inspect secrets file".into()))?;
         if !metadata.file_type().is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
             || metadata.mode() & 0o7777 != 0o600
         {
             return Err(SecretError(
-                "secrets file must be owned by this user with mode 0600",
+                "secrets file must be owned by this user with mode 0600".into(),
             ));
         }
         Ok(())
@@ -87,17 +74,17 @@ fn validate_file(file: &File) -> Result<(), SecretError> {
     #[cfg(not(unix))]
     {
         let _ = file;
-        Err(SecretError("secrets files require Unix permissions"))
+        Err(SecretError("secrets files require Unix permissions".into()))
     }
 }
 
 /// A safe-to-display secrets-file validation error that never includes a secret.
 #[derive(Debug, PartialEq, Eq)]
-pub struct SecretError(&'static str);
+pub struct SecretError(String);
 
 impl fmt::Display for SecretError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
+        formatter.write_str(&self.0)
     }
 }
 

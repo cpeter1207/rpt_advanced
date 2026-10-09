@@ -3,8 +3,10 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    println!("cargo:rustc-link-lib=resolv");
     println!("cargo:rerun-if-env-changed=DEB_HOST_MULTIARCH");
     println!("cargo:rerun-if-env-changed=RPT_ADVANCED_LIBDIR");
+    println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
@@ -33,6 +35,7 @@ fn main() {
     println!("cargo:rustc-env=RPT_ADVANCED_LIBDIR={library_directory}");
 
     let bindings = bindgen::Builder::default()
+        .derive_partialeq(true)
         .header("wrapper.h")
         .clang_arg("-I../product/include")
         .clang_arg("-I../control-abi/include")
@@ -41,8 +44,17 @@ fn main() {
         .clang_arg("-I../speech-adapter/include")
         .clang_arg("-I../control-standalone-adapter/include")
         .clang_arg("-I/usr/include")
+        .clang_arg(format!(
+            "-I{}",
+            env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())
+        ))
         .allowlist_type("rptadv_.*")
+        .allowlist_type("Urp.*")
         .allowlist_function("rptadv_product_descriptor_v1")
+        .allowlist_function("res_query")
+        .allowlist_function("ns_initparse")
+        .allowlist_function("ns_parserr")
+        .allowlist_function("dn_expand")
         .layout_tests(false)
         .generate_comments(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

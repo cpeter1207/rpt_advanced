@@ -96,13 +96,14 @@ impl NativeMediaPreparer {
         // SAFETY: validated sizes back the complete tables.
         let file_api = unsafe { file.read() };
         let speech_api = unsafe { speech.read() };
-        if file_api.capability.map(|v| v as u8) != *b"rptadv.file\0\0\0\0\0"
+        // C char is signed on x86 and unsigned on ARM; compare its byte representation.
+        if file_api.capability.map(|v| v.to_ne_bytes()[0]) != *b"rptadv.file\0\0\0\0\0"
             || file_api.create.is_none()
             || file_api.destroy.is_none()
             || file_api.open_file.is_none()
             || file_api.read_stream.is_none()
             || file_api.close_stream.is_none()
-            || speech_api.capability.map(|v| v as u8) != *b"rptadv.speech\0\0\0"
+            || speech_api.capability.map(|v| v.to_ne_bytes()[0]) != *b"rptadv.speech\0\0\0"
             || speech_api.create.is_none()
             || speech_api.destroy.is_none()
             || speech_api.open_speech.is_none()

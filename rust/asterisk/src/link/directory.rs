@@ -1,133 +1,17 @@
-//! Authoritative static/DNS/file ASL directory resolution and source verification.
+//! Public Asterisk directory I/O; product owns ordering and authentication.
 use crate::bindings as ffi;
+use crate::services::{boundary, text};
 use std::{
-    ffi::{CStr, CString},
-    net::{IpAddr, SocketAddr},
+    ffi::{CStr, CString, c_char, c_void},
+    net::IpAddr,
     ptr,
 };
 
-/// Directory ordering selected by the current configuration.
-#[derive(Clone, Copy)]
-pub enum Method {
-    /// Static, then DNS, then external file.
-    Both,
-    /// Static then DNS.
-    Dns,
-    /// Static then external file.
-    File,
-}
-
-/// Lookup failed without producing an authenticated destination.
+/// An authoritative native resolver result cannot be represented safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectoryError {
-    /// Invalid identity, address, or authoritative record.
+    /// Invalid backend input or result.
     Rejected,
-    /// No selected source has this identity.
-    Absent,
-}
-
-/// External directory operations; called only from the Asterisk control owner.
-pub trait Backend {
-    /// Read an optional extnodes value; unavailable files are absent.
-    fn record(&self, path: &str, node: &str) -> Result<Option<String>, DirectoryError>;
-    /// Read an optional SRV target and port.
-    fn srv(&self, service: &str) -> Result<Option<(String, u16)>, DirectoryError>;
-    /// Resolve all addresses for a DNS host, preserving family information.
-    fn addresses(&self, host: &str) -> Result<Vec<IpAddr>, DirectoryError>;
-}
-
-/// Directory lookup with explicit authority and no contradiction fallback.
-pub struct DirectoryResolver<B> {
-    /// External I/O owner.
-    pub backend: B,
-    method: Method,
-    static_file: String,
-    external_file: String,
-}
-impl<B: Backend> DirectoryResolver<B> {
-    /// Select sources before accepting incoming links.
-    pub fn new(backend: B, method: Method, static_file: &str, external_file: &str) -> Self {
-        Self {
-            backend,
-            method,
-            static_file: static_file.into(),
-            external_file: external_file.into(),
-        }
-    }
-    /// Resolve one decimal ASL node, optionally authenticating its numeric source IP.
-    pub fn lookup(&self, node: &str, source: Option<&str>) -> Result<String, DirectoryError> {
-        if node.is_empty() || node.len() > 63 || !node.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(DirectoryError::Rejected);
-        }
-        let source = source
-            .map(|ip| {
-                ip.parse::<IpAddr>()
-                    .map(normalize)
-                    .map_err(|_| DirectoryError::Rejected)
-            })
-            .transpose()?;
-        if let Some(destination) = self.file(&self.static_file, node, source)? {
-            return Ok(destination);
-        }
-        if !matches!(self.method, Method::File) {
-            let (host, port) = self
-                .backend
-                .srv(&format!("_iax._udp.{node}.nodes.allstarlink.org"))?
-                .unwrap_or_else(|| (format!("{node}.nodes.allstarlink.org"), 4569));
-            let addresses = self.backend.addresses(&host)?;
-            if let Some(address) = addresses
-                .iter()
-                .find(|ip| source.is_none_or(|source| source == normalize(**ip)))
-            {
-                return Ok(format!("radio@{}/{node}", SocketAddr::new(*address, port)));
-            }
-            if source.is_some() && !addresses.is_empty() {
-                return Err(DirectoryError::Rejected);
-            }
-        }
-        if !matches!(self.method, Method::Dns) {
-            if let Some(destination) = self.file(&self.external_file, node, source)? {
-                return Ok(destination);
-            }
-        }
-        Err(DirectoryError::Absent)
-    }
-    fn file(
-        &self,
-        path: &str,
-        node: &str,
-        source: Option<IpAddr>,
-    ) -> Result<Option<String>, DirectoryError> {
-        if path.is_empty() {
-            return Ok(None);
-        }
-        let Some(record) = self.backend.record(path, node)? else {
-            return Ok(None);
-        };
-        let (target, address) = record.split_once(',').ok_or(DirectoryError::Rejected)?;
-        let host = target
-            .strip_prefix("radio@")
-            .and_then(|target| target.strip_suffix(&format!("/{node}")))
-            .ok_or(DirectoryError::Rejected)?;
-        let address = normalize(
-            address
-                .parse::<IpAddr>()
-                .map_err(|_| DirectoryError::Rejected)?,
-        );
-        if host.is_empty()
-            || record.bytes().any(|b| b.is_ascii_whitespace() || b == 0)
-            || source.is_some_and(|source| source != address)
-        {
-            return Err(DirectoryError::Rejected);
-        }
-        Ok(Some(target.into()))
-    }
-}
-fn normalize(address: IpAddr) -> IpAddr {
-    match address {
-        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(address),
-        _ => address,
-    }
 }
 fn cstring(value: &str) -> Result<CString, DirectoryError> {
     CString::new(value).map_err(|_| DirectoryError::Rejected)
@@ -135,7 +19,7 @@ fn cstring(value: &str) -> Result<CString, DirectoryError> {
 
 /// Public Asterisk config, SRV and address resolver implementation.
 pub struct AsteriskDirectory;
-impl Backend for AsteriskDirectory {
+impl AsteriskDirectory {
     fn record(&self, path: &str, node: &str) -> Result<Option<String>, DirectoryError> {
         let path = cstring(path)?;
         let node = cstring(node)?;
@@ -219,6 +103,80 @@ impl Backend for AsteriskDirectory {
 unsafe extern "C" {
     fn free(pointer: *mut std::ffi::c_void);
 }
+
+/// Copy one raw Asterisk extnodes value through the borrowed result sink.
+pub(crate) unsafe extern "C" fn directory_record(
+    _: *mut c_void,
+    path: *const c_char,
+    path_length: usize,
+    node: *const c_char,
+    node_length: usize,
+    sink: ffi::rptadv_text_sink_v1,
+    context: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(path), Some(node), Some(sink)) = (
+            unsafe { text(path, path_length) },
+            unsafe { text(node, node_length) },
+            sink,
+        ) else {
+            return -1;
+        };
+        let Ok(record) = AsteriskDirectory.record(path, node) else {
+            return -1;
+        };
+        if let Some(record) = record {
+            unsafe { sink(context, record.as_ptr().cast(), record.len()) };
+        }
+        0
+    })
+}
+/// Preserve Asterisk's SRV absence versus malformed-result distinction.
+pub(crate) unsafe extern "C" fn directory_srv(
+    _: *mut c_void,
+    service: *const c_char,
+    length: usize,
+    sink: ffi::rptadv_directory_srv_sink_v1,
+    context: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(service), Some(sink)) = (unsafe { text(service, length) }, sink) else {
+            return -1;
+        };
+        let Ok(record) = AsteriskDirectory.srv(service) else {
+            return -1;
+        };
+        if let Some((host, port)) = record {
+            unsafe { sink(context, host.as_ptr().cast(), host.len(), port) };
+        }
+        0
+    })
+}
+/// Copy numeric addresses in Asterisk resolver order, retaining empty-answer behavior.
+pub(crate) unsafe extern "C" fn directory_addresses(
+    _: *mut c_void,
+    host: *const c_char,
+    length: usize,
+    _: u16,
+    sink: ffi::rptadv_text_sink_v1,
+    context: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(host), Some(sink)) = (unsafe { text(host, length) }, sink) else {
+            return -1;
+        };
+        let Ok(addresses) = AsteriskDirectory.addresses(host) else {
+            return -1;
+        };
+        for address in addresses {
+            let address = address.to_string();
+            unsafe { sink(context, address.as_ptr().cast(), address.len()) };
+        }
+        0
+    })
+}
+/// Asterisk did not emit a directory-specific failure diagnostic.
+pub(crate) unsafe extern "C" fn directory_notice(_: *mut c_void, _: u32) {}
 
 #[cfg(test)]
 #[path = "directory_tests.rs"]

@@ -56,13 +56,37 @@ between the manual and source here.
 
 ## Current implementation slice
 
+Standalone directory lookup honors `_iax._udp.<node>.nodes.allstarlink.org`
+SRV target and port before resolving the destination address, with the ordinary
+4569 fallback when no SRV record exists. Static directory entries remain
+authoritative. Hostnames with explicit ports retain that port. HTTPS registration
+and dialing report safe failure categories without logging credentials, request
+bodies, or untrusted response text.
+
+Setup ACKs stop retransmitting the acknowledged request while retaining the
+call's original timeout. ACCEPT establishes the codec but does not complete
+outbound dialing: the client waits for a sequence-validated IAX ANSWER before
+publishing the peer to product control. Early application events are retained
+in a bounded queue in receive order while transport ACKs continue normally.
+This keeps the initial ASL keying handshake after the remote application has
+answered; sending NEWKEY1 before ANSWER can leave the remote in its continuous-
+PCM timeout mode while the local endpoint expects activity-only PCM.
+An unanswered accepted call still uses the original dial timeout, and a
+pre-answer hangup fails dialing. No C ABI change is required.
+Outbound voice starts with a sequenced full ULAW frame
+and refreshes the full timestamp when its 16-bit mini-frame epoch changes.
+Incoming full voice participates in the same sequence/ACK state as control;
+retransmissions are acknowledged without replaying their PCM. Cumulative ACKs
+may lag when the two directions cross in flight, independently of receive order.
+Loopback regressions cover these exchanges; they do not replace live ASL testing.
+
 The sibling `librptadviax2` crate currently parses and serializes RFC full- and
 mini-frame packets, parses and serializes generic length-delimited IEs, validates
 UTF-8 text frames, builds initial NEW packets with a final empty CALLTOKEN IE,
 parses AUTHREQ method/challenge IEs, replaces Asterisk's final empty CALLTOKEN IE
 with an opaque peer token and builds the sequence-reset NEW retry, constructs
 and verifies MD5 AUTHREP authentication, handles outbound ACCEPT/REJECT and
-established-call PING/PONG/ACK control, rejects malformed lengths and invalid
+established-call PING/PONG/ACK and LAGRQ/LAGRP control, rejects malformed lengths and invalid
 call identities, and expands/encodes subclass C-bit values using Asterisk's
 canonical rules. It caches replies to retransmitted setup and PING frames. A
 separate nonblocking UDP endpoint sends and receives datagrams without parsing
