@@ -11,7 +11,10 @@ below; they do not replace the fresh full gate or live verification listed later
 
 The current branch also adds the separately packaged `rpt-advanced` standalone
 service, direct PortAudio/ALSA and CM119 provider loading, standalone radio
-settings, and IAX2 shared-library client. Synthetic lifecycle and package-boundary
+settings, and IAX2 shared-library client. The standalone service loads the
+versioned `libusbradioplus_product.so.1` for adapter-neutral radio processing;
+the USBRadioPlus Asterisk channel is not a standalone dependency. Synthetic
+lifecycle and package-boundary
 tests are present. This branch has not yet passed its full hosted pull-request
 gate or current hardware/peer acceptance; do not treat a package build alone as
 standalone deployment approval.
@@ -60,7 +63,7 @@ standalone deployment approval.
   executable; they do not claim verification of a real Piper voice model.
 - Independent FFmpeg file adapter preparing mono PCM at the decoded source rate.
   It shares private process/WAV source with the speech provider, not a combined
-  runtime capability. The product uses the released ring2 for finite source-rate
+  runtime capability. The product uses the released ring3 for finite source-rate
   conversion to 48 kHz; short-impulse and nonintegral-rate tests check duration
   and sample level. Neither provider embeds controller code or a resampler.
 - Runtime file-to-speech-to-Morse preparation, checked PCM loading, bounded child
@@ -136,9 +139,11 @@ standalone deployment approval.
   documentation is published to GitHub Pages after the main-branch quality gate
   passes.
 
-The build produces `app_rpt_advanced.so`, `librptadv_product.so.1`, and the four
-versioned Asterisk, control, file, and speech adapter DSOs; it
-does not ship a static controller library or legacy controller headers. The
+The build produces the standalone service, `librptadv_product.so.1`, the
+versioned control, file, and speech adapter DSOs, and the optional
+`app_rpt_advanced.so` Asterisk adapter. It uses the separately released
+`libusbradioplus_product.so.1` and does not ship a static controller library
+or legacy controller headers. The
 module starts named radio workers with inherited, prepared file/speech/Morse IDs,
 announcements, and courtesy tones. Invalid configuration leaves the running
 generation untouched; a valid reload publishes a prepared replacement and uses
@@ -189,6 +194,14 @@ prevents rapid rekey from replaying the preceding burst, and exposes ring fault
 counters. These observations are scoped manual evidence; the release still
 requires its complete pull-request gate and remaining hardware/interoperability
 acceptance.
+
+## Refactored standalone manual check, 2026-10-09
+
+The owner reported healthy repeat audio, courtesy output, and time announcements
+after the standalone shared-product refactor. This is scoped listening evidence
+from an earlier approved check. It does not verify the current package split,
+fresh hosted quality gate, or every hardware and peer case. No node
+configuration was changed for this documentation update.
 
 ## Historical local-radio test, 2026-09-07
 

@@ -67,7 +67,8 @@ $(LIBRARIES): rust-build
 	@test -f $@
 
 build/app_rpt_advanced.so: $(LOADER) $(HEADERS) $(LIBRARIES)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) \
+	# Keep the capability validation's real libc comparison visible to the linker.
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fno-builtin-memcmp -fPIC -shared $< $(LDFLAGS) \
 		-Lbuild -Wl,--enable-new-dtags,-rpath,'$(LOADER_RUNPATH)' \
 		$(addprefix -l:,$(notdir $(LIBRARIES))) -o $@
 

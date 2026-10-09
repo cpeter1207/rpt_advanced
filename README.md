@@ -6,7 +6,10 @@ An optional, deprecated Asterisk adapter is packaged separately for existing ASL
 
 Install the `rpt-advanced` Debian package to run the standalone system service, or
 `app-rpt-advanced` to use the Asterisk adapter. The packages can be installed
-independently; shared runtime libraries are versioned dependencies. See the
+independently. Standalone radio I/O uses the separately packaged
+`libusbradioplus-product1` shared runtime, without installing the USBRadioPlus
+Asterisk channel. Source builds also require `libusbradioplus-product-dev`.
+Other shared runtime libraries are versioned dependencies. See the
 [installation guide](doc/install.md) before selecting either path.
 
 Configuration is documented in the [configuration reference](doc/configuration.md).

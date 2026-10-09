@@ -101,6 +101,10 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
             )
         needed = dynamic(path, "NEEDED")
         assert needed - system == dependencies, f"incorrect NEEDED for {name}: {needed}"
+        if name == "app_rpt_advanced.so":
+            assert "libc.so.6" in needed, (
+                "Asterisk loader must link its libc comparison"
+            )
         symbols = command("nm", "--defined-only", "--demangle", str(path))
         assert not re.search(
             r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor)$",
@@ -572,6 +576,7 @@ def verify_artifact_policy() -> None:
                 tables[name]["SONAME"] = {name}
         write(root, STANDALONE_BINARY)
         tables[STANDALONE_BINARY] = {"NEEDED": set()}
+        tables["app_rpt_advanced.so"]["NEEDED"].add("libc.so.6")
         tables["app_rpt_advanced.so"]["RUNPATH"] = {"$ORIGIN/../../rpt_advanced"}
 
         def read_table(path: Path, tag: str) -> set[str]:
@@ -600,6 +605,9 @@ def verify_artifact_policy() -> None:
             artifacts(root, "$ORIGIN/../../test-linux-gnu/rpt_advanced")
             rejected()
             tables["app_rpt_advanced.so"]["RUNPATH"] = {"$ORIGIN/../../rpt_advanced"}
+            tables["app_rpt_advanced.so"]["NEEDED"].remove("libc.so.6")
+            rejected()
+            tables["app_rpt_advanced.so"]["NEEDED"].add("libc.so.6")
             for name, table in tables.items():
                 for tag in table:
                     previous = table[tag]
