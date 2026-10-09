@@ -95,25 +95,25 @@ typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t leng
 struct UrpNativeStationConfig;
 /** Resolved host requirements, borrowed only during the configuration visitor. */
 struct rptadv_node_host_configuration {
-    uint32_t struct_size; /**< Complete readable record size. */
-    const char *node; /**< Node identity; not NUL terminated. */
-    size_t node_length; /**< Node identity byte count. */
-    const char *channel; /**< Radio channel; not NUL terminated. */
-    size_t channel_length; /**< Channel byte count. */
-    uint32_t enabled; /**< Zero for disabled nodes, which are still reported. */
-    uint16_t iax_port; /**< Effective UDP listener and registration port. */
-    const char *registration_url; /**< HTTPS endpoint; empty disables registration. */
+    uint32_t struct_size;           /**< Complete readable record size. */
+    const char *node;               /**< Node identity; not NUL terminated. */
+    size_t node_length;             /**< Node identity byte count. */
+    const char *channel;            /**< Radio channel; not NUL terminated. */
+    size_t channel_length;          /**< Channel byte count. */
+    uint32_t enabled;               /**< Zero for disabled nodes, which are still reported. */
+    uint16_t iax_port;              /**< Effective UDP listener and registration port. */
+    const char *registration_url;   /**< HTTPS endpoint; empty disables registration. */
     size_t registration_url_length; /**< Endpoint byte count. */
-    uint64_t registration_interval_seconds; /**< Effective registration interval. */
+    uint64_t registration_interval_seconds;     /**< Effective registration interval. */
     const struct UrpNativeStationConfig *radio; /**< Borrowed native station request. */
 };
 /** Copy one node's requirements; return nonzero to abort inspection. */
 typedef int (*rptadv_configuration_sink)(void *context,
-                                        const struct rptadv_node_host_configuration *node);
+                                         const struct rptadv_node_host_configuration *node);
 /** Copy one validated secret; node is "general" for the shared default.
  * No secret or input text is included in diagnostics. Return nonzero to abort. */
 typedef int (*rptadv_secret_sink)(void *context, const char *node, size_t node_length,
-                                 const char *secret, size_t secret_length);
+                                  const char *secret, size_t secret_length);
 /** Borrow one selected DNS SRV target and port for the synchronous backend call. */
 typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, size_t length,
                                              uint16_t port);
@@ -154,16 +154,16 @@ struct rptadv_host_services_v5 {
     void (*reaper_release)(void);
 
     /** Read a raw extnodes record. Unavailable files emit no result and succeed. */
-    int (*directory_record)(void *context, const char *path, size_t path_length,
-                            const char *node, size_t node_length, rptadv_text_sink_v1 sink,
-                            void *sink_context);
+    int (*directory_record)(void *context, const char *path, size_t path_length, const char *node,
+                            size_t node_length, rptadv_text_sink_v1 sink, void *sink_context);
     /** Read one backend-selected SRV target; an absent record uses the ordinary hostname. */
     int (*directory_srv)(void *context, const char *service, size_t service_length,
                          rptadv_directory_srv_sink_v1 sink, void *sink_context);
     /** Resolve numeric addresses for the selected host and port. */
-    int (*directory_addresses)(void *context, const char *host, size_t host_length,
-                               uint16_t port, rptadv_text_sink_v1 sink, void *sink_context);
-    /** Preserve host diagnostics: 1 invalid record, 2 source mismatch, 3 not found, 4 DNS failed. */
+    int (*directory_addresses)(void *context, const char *host, size_t host_length, uint16_t port,
+                               rptadv_text_sink_v1 sink, void *sink_context);
+    /** Preserve host diagnostics: 1 invalid record, 2 source mismatch, 3 not found, 4 DNS failed.
+     */
     void (*directory_notice)(void *context, uint32_t reason);
 
     /** Reserve one uniquely owned radio without starting it. The length-delimited name contains
