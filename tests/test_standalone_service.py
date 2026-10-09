@@ -27,6 +27,7 @@ def test_standalone_service_runs_as_dedicated_unprivileged_user() -> None:
     assert "Restart=on-failure" in service
     assert "NoNewPrivileges=yes" in service
     assert "ProtectSystem=strict" in service
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK" in service
 
 
 def test_standalone_package_installs_the_service_configuration_as_a_conffile() -> None:
