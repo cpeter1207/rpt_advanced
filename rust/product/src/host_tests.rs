@@ -75,6 +75,9 @@ fn peer_capacity_rejects_the_first_peer_over_the_bound() {
 
 #[test]
 fn parrot_live_state_effect_needs_no_external_host_action() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut host = host();
     assert!(
         host.immediate("1000", LinkEffect::ParrotEnabled(true), clock())
