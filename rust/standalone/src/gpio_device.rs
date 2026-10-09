@@ -74,7 +74,7 @@ impl Cm119GpioDevice {
         ) else {
             return Err(GpioError::IncompleteAdapter);
         };
-        let path = CString::new(device.usb_interface_path.as_bytes())
+        let path = CString::new(device.usb_port_path.as_bytes())
             .map_err(|_| GpioError::InvalidIdentity)?;
         let hardware = radio.cm119_hardware_request();
         let config = abi::rptadv_gpio_device_config {
@@ -369,7 +369,7 @@ mod tests {
         reset_adapter_results();
         let api = fake_api();
         let mut invalid_device = device();
-        invalid_device.usb_interface_path = "bad\0path".into();
+        invalid_device.usb_port_path = "bad\0path".into();
         assert!(matches!(
             Cm119GpioDevice::open(&api, &radio(), &invalid_device),
             Err(GpioError::InvalidIdentity)
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(config.abi_version, 1);
         assert_eq!(
             unsafe { std::ffi::CStr::from_ptr(config.usb_port_path) },
-            c"3-1:1.0"
+            c"3-1"
         );
         assert_eq!(config.vendor_id, 0x0d8c);
         assert_eq!(config.product_id, 0x013c);
@@ -707,6 +707,7 @@ mod tests {
     fn device() -> ResolvedCm119Device {
         ResolvedCm119Device {
             usb_interface_path: "3-1:1.0".into(),
+            usb_port_path: "3-1".into(),
             usb_serial: Some("SERIAL-A".into()),
             alsa_card_index: 4,
             input_device_index: 6,

@@ -736,6 +736,7 @@ mod tests {
     fn device() -> ResolvedCm119Device {
         ResolvedCm119Device {
             usb_interface_path: "3-1:1.0".into(),
+            usb_port_path: "3-1".into(),
             usb_serial: Some("SERIAL-A".into()),
             alsa_card_index: 4,
             input_device_index: 6,

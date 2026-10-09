@@ -182,8 +182,10 @@ impl std::error::Error for ProviderError {}
 /// A CM119 identity selected consistently by the audio and GPIO adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedCm119Device {
-    /// Stable USB interface path shared by both hardware adapters.
+    /// Stable USB interface path used to identify the ALSA audio device.
     pub usb_interface_path: String,
+    /// Linux USB topology path used to identify the HID/GPIO device.
+    pub usb_port_path: String,
     /// USB serial reported for the selected interface, when present.
     pub usb_serial: Option<String>,
     /// ALSA card selected by the PortAudio adapter.
@@ -548,11 +550,17 @@ fn resolve_cm119_device(
     let usb_interface_path = c_string_field(&audio_match.usb_interface_path)
         .filter(|path| !path.is_empty())
         .ok_or(Cm119DeviceError::InvalidAudioSelection)?;
+    let usb_port_path = usb_interface_path
+        .split(':')
+        .next()
+        .filter(|path| !path.is_empty())
+        .ok_or(Cm119DeviceError::InvalidAudioSelection)?
+        .to_owned();
     let audio_serial = c_string_field(&audio_match.usb_serial).filter(|value| !value.is_empty());
     if serial.is_some() && audio_serial.as_deref() != request.usb_serial.as_deref() {
         return Err(Cm119DeviceError::AudioSerialMismatch);
     }
-    let path = CString::new(usb_interface_path.as_bytes())
+    let path = CString::new(usb_port_path.as_bytes())
         .map_err(|_| Cm119DeviceError::InvalidAudioSelection)?;
     let hardware = radio.cm119_hardware_request();
     let gpio_config = crate::abi::rptadv_gpio_device_config {
@@ -598,6 +606,7 @@ fn resolve_cm119_device(
     }
     Ok(ResolvedCm119Device {
         usb_interface_path,
+        usb_port_path,
         usb_serial: audio_serial.or(gpio_serial),
         alsa_card_index: audio_match.selection.alsa_card_index,
         input_device_index: audio_match.selection.input_device_index,
@@ -1149,6 +1158,7 @@ mod tests {
         let selected = super::resolve_cm119_device(&audio, &gpio, radio).unwrap();
 
         assert_eq!(selected.usb_interface_path, "3-1:1.0");
+        assert_eq!(selected.usb_port_path, "3-1");
         assert_eq!(selected.usb_serial.as_deref(), Some("SERIAL-A"));
         assert_eq!(selected.alsa_card_index, 4);
         assert_eq!(selected.input_device_index, 6);
@@ -1593,7 +1603,7 @@ mod tests {
             return -1;
         };
         let path_matches = !config.usb_port_path.is_null()
-            && unsafe { CStr::from_ptr(config.usb_port_path) }.to_bytes() == b"3-1:1.0";
+            && unsafe { CStr::from_ptr(config.usb_port_path) }.to_bytes() == b"3-1";
         if !path_matches
             || config.profile != expected_profile
             || config.ptt_inverted != 1
