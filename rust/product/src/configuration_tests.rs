@@ -191,6 +191,11 @@ fn secret_records_keep_node_overrides_and_redact_all_invalid_input() {
         assert!(output.secrets.is_empty());
         assert_eq!(output.diagnostics, vec![message]);
     }
+    let overlong_section = format!("[{}]\niax_secret=secret\n", "1".repeat(64));
+    let (result, output) = inspect(&overlong_section, true);
+    assert_eq!(result, -1);
+    assert!(output.secrets.is_empty());
+    assert_eq!(output.diagnostics, ["invalid section"]);
 }
 
 #[test]

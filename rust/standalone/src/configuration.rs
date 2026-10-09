@@ -37,7 +37,7 @@ impl fmt::Display for ConfigError {
 }
 impl std::error::Error for ConfigError {}
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Inspection {
     nodes: Vec<ResolvedRadioNode>,
     diagnostics: Vec<String>,
@@ -85,6 +85,10 @@ fn inspect(text: &str, nodes: bool, secrets: bool) -> Result<Inspection, ConfigE
             )
         }
     };
+    finish_inspection(output, result)
+}
+
+fn finish_inspection(mut output: Inspection, result: i32) -> Result<Inspection, ConfigError> {
     if result != 0 || output.invalid_record {
         return Err(ConfigError(output.diagnostics.pop().unwrap_or_else(|| {
             "product configuration inspection failed".into()
@@ -170,6 +174,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inspection_without_a_diagnostic_reports_a_safe_fallback() {
+        assert_eq!(
+            finish_inspection(Inspection::default(), -1).unwrap_err(),
+            ConfigError("product configuration inspection failed".into())
+        );
+        assert_eq!(
+            finish_inspection(
+                Inspection {
+                    invalid_record: true,
+                    ..Inspection::default()
+                },
+                0
+            )
+            .unwrap_err(),
+            ConfigError("product configuration inspection failed".into())
+        );
+    }
+
+    #[test]
     fn hardware_free_inspection_uses_the_dynamic_product_and_copies_native_records() {
         let source = String::from(
             "[general]\niax_local_port=4570\n[radio]\ndevice_identifier=3-1\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\nradio_channel=vhf\n[2000]\nnode_enabled=no\n",
@@ -213,5 +236,33 @@ mod tests {
                 .to_string()
                 .contains("unknown node")
         );
+    }
+
+    #[test]
+    fn inspection_callbacks_reject_malformed_borrowed_records() {
+        let mut output = Inspection::default();
+        let context = (&mut output as *mut Inspection).cast();
+        assert_eq!(unsafe { copy_node(context, std::ptr::null()) }, -1);
+        assert!(output.invalid_record);
+        output.invalid_record = false;
+        // SAFETY: the C record contains only scalar fields and nullable pointers.
+        let node: abi::rptadv_node_host_configuration = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { copy_node(context, &node) }, -1);
+        assert!(output.invalid_record);
+        output.invalid_record = false;
+
+        assert_eq!(unsafe { text(std::ptr::null(), 1) }, Err(()));
+        assert_eq!(
+            unsafe { text(c"x".as_ptr(), isize::MAX as usize + 1) },
+            Err(())
+        );
+        assert_eq!(
+            unsafe { copy_secret(context, std::ptr::null(), 1, c"x".as_ptr(), 1) },
+            -1
+        );
+        assert!(output.invalid_record);
+        output.invalid_record = false;
+        unsafe { copy_diagnostic(context, std::ptr::null(), 1) };
+        assert!(output.invalid_record);
     }
 }

@@ -294,6 +294,13 @@ mod tests {
 
         assert_eq!(config.transmit.output_a_route, 0);
         assert_eq!(config.transmit.output_b_route, 3);
+        assert_eq!(
+            map("transmit_output_a_assignment=auxiliary_voice\n")
+                .unwrap()
+                .transmit
+                .output_a_route,
+            4
+        );
     }
 
     #[test]

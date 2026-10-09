@@ -282,4 +282,52 @@ pub(crate) mod tests {
             CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected_calls));
         }
     }
+
+    #[test]
+    fn native_client_rejects_missing_callbacks_and_operations_before_creation() {
+        CALLS.with(|calls| calls.borrow_mut().clear());
+        // SAFETY: these C records contain only nullable pointers and scalar values.
+        let (mut api, providers, config): (
+            abi::UrpAstDescriptor,
+            abi::UrpAstProviderManifest,
+            abi::UrpNativeStationConfig,
+        ) = unsafe { std::mem::zeroed() };
+        api.native_create = Some(create);
+        api.native_start = Some(start);
+        api.native_stop = Some(stop);
+        api.native_destroy = Some(destroy);
+        let callbacks = || ProductRadioCallbacks {
+            receive: Some(receive),
+            receive_context: std::ptr::null_mut(),
+            transmit: Some(transmit),
+            transmit_context: std::ptr::null_mut(),
+        };
+        let mut missing_receive = callbacks();
+        missing_receive.receive = None;
+        assert!(matches!(
+            ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, missing_receive),
+            Err(RadioActivationError::InvalidCallbacks)
+        ));
+        let mut missing_transmit = callbacks();
+        missing_transmit.transmit = None;
+        assert!(matches!(
+            ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, missing_transmit),
+            Err(RadioActivationError::InvalidCallbacks)
+        ));
+        assert!(matches!(
+            ActiveRadio::open_with_api(&api, &providers, &config, 73, 0, callbacks()),
+            Err(RadioActivationError::InvalidCallbacks)
+        ));
+        api.native_start = None;
+        assert!(matches!(
+            ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks()),
+            Err(RadioActivationError::Product(-2))
+        ));
+        assert_eq!(
+            RadioActivationError::Provider(crate::providers::ProviderError::Load("radio"))
+                .to_string(),
+            "cannot load required provider radio"
+        );
+        CALLS.with(|calls| assert!(calls.borrow().is_empty()));
+    }
 }

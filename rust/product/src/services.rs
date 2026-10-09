@@ -73,24 +73,18 @@ unsafe extern "C" fn directory_text(
 ) {
     // SAFETY: callbacks borrow this exact stack-owned collector synchronously.
     let results = unsafe { &mut *context.cast::<DirectoryResults>() };
-    if catch_unwind(AssertUnwindSafe(|| {
-        if text.is_null() && length != 0 {
-            results.valid = false;
-            return;
-        }
-        let bytes = if length == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) }
-        };
-        match std::str::from_utf8(bytes) {
-            Ok(value) => results.values.push(value.to_owned()),
-            Err(_) => results.valid = false,
-        }
-    }))
-    .is_err()
-    {
+    if text.is_null() && length != 0 {
         results.valid = false;
+        return;
+    }
+    let bytes = if length == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) }
+    };
+    match std::str::from_utf8(bytes) {
+        Ok(value) => results.values.push(value.to_owned()),
+        Err(_) => results.valid = false,
     }
 }
 unsafe extern "C" fn directory_srv(

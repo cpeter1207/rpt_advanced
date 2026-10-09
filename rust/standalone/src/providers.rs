@@ -90,23 +90,7 @@ impl ProductInspection {
         let descriptor = library
             .descriptor(spec.symbol)
             .ok_or(ProviderError::MissingDescriptor(spec.library))?;
-        if !valid_descriptor(descriptor, spec) {
-            return Err(ProviderError::IncompatibleDescriptor(spec.library));
-        }
-        if descriptor_size(descriptor, spec.layout)
-            != std::mem::size_of::<crate::abi::rptadv_product_descriptor_v1>()
-        {
-            return Err(ProviderError::IncompleteDescriptor(spec.library));
-        }
-        let api = NonNull::new(
-            descriptor
-                .cast_mut()
-                .cast::<crate::abi::rptadv_product_descriptor_v1>(),
-        )
-        .expect("descriptor was checked for null");
-        if !product_functions_complete(unsafe { api.as_ref() }) {
-            return Err(ProviderError::IncompleteDescriptor(spec.library));
-        }
+        let api = inspection_api(descriptor, spec)?;
         Ok(Self {
             _library: library,
             api,
@@ -117,6 +101,30 @@ impl ProductInspection {
         // The retained library keeps the complete immutable descriptor loaded.
         unsafe { self.api.as_ref() }
     }
+}
+
+fn inspection_api(
+    descriptor: *const c_void,
+    spec: ProviderSpec,
+) -> Result<NonNull<crate::abi::rptadv_product_descriptor_v1>, ProviderError> {
+    if !valid_descriptor(descriptor, spec) {
+        return Err(ProviderError::IncompatibleDescriptor(spec.library));
+    }
+    if descriptor_size(descriptor, spec.layout)
+        != std::mem::size_of::<crate::abi::rptadv_product_descriptor_v1>()
+    {
+        return Err(ProviderError::IncompleteDescriptor(spec.library));
+    }
+    let api = NonNull::new(
+        descriptor
+            .cast_mut()
+            .cast::<crate::abi::rptadv_product_descriptor_v1>(),
+    )
+    .expect("descriptor was checked for null");
+    if !product_functions_complete(unsafe { api.as_ref() }) {
+        return Err(ProviderError::IncompleteDescriptor(spec.library));
+    }
+    Ok(api)
 }
 
 #[derive(Clone, Copy)]
@@ -898,6 +906,32 @@ mod tests {
         descriptor.abi_version = 4;
         descriptor.capability = *b"rptadv.prod4\0\0\0\0";
         assert!(!super::product_functions_complete(&descriptor));
+    }
+
+    #[test]
+    fn configuration_only_product_rejects_incompatible_and_incomplete_tables() {
+        let spec = super::PROVIDERS[0];
+        // SAFETY: the descriptor consists only of scalar fields and nullable function pointers.
+        let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
+            unsafe { std::mem::zeroed() };
+        descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
+        descriptor.abi_version = 4;
+        descriptor.capability = *b"rptadv.prod4\0\0\0\0";
+        let pointer = (&descriptor as *const crate::abi::rptadv_product_descriptor_v1).cast();
+        assert_eq!(
+            super::inspection_api(pointer, spec).err(),
+            Some(ProviderError::IncompleteDescriptor(spec.library))
+        );
+        descriptor.struct_size = std::mem::size_of::<super::InlineDescriptorHeader>() as u32;
+        assert_eq!(
+            super::inspection_api(pointer, spec).err(),
+            Some(ProviderError::IncompleteDescriptor(spec.library))
+        );
+        descriptor.abi_version = 5;
+        assert_eq!(
+            super::inspection_api(pointer, spec).err(),
+            Some(ProviderError::IncompatibleDescriptor(spec.library))
+        );
     }
 
     #[cfg(unix)]

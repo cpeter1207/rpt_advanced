@@ -607,6 +607,13 @@ mod tests {
             Some(("127.0.0.1:4569".parse().unwrap(), "506315".into()))
         );
         assert!(parse_destination("radio@127.0.0.1/506315").is_some());
+        assert_eq!(
+            parse_destination("radio@localhost/506315")
+                .expect("localhost must resolve through the system resolver")
+                .0
+                .port(),
+            4569
+        );
         for (target, expected) in [
             ("radio@[::1]:4571/506315", "[::1]:4571"),
             ("radio@[::1]/506315", "[::1]:4569"),
@@ -623,6 +630,7 @@ mod tests {
             "radio@127.0.0.1",
             "radio@127.0.0.1/",
             "radio@127.0.0.1/not-a-node",
+            "radio@127.0.0.1/1111111111111111111111111111111111111111111111111111111111111111",
             "radio@localhost:65536/506315",
             "radio@localhost:invalid/506315",
             "radio@127.0.0.1:0/506315",

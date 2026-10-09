@@ -15,18 +15,27 @@ use std::{
 
 /// Use the system resolver and its configured DNS servers on the control plane.
 fn resolve_srv(service: &str) -> io::Result<Option<(String, u16)>> {
+    resolve_srv_with(service, |service, answer| {
+        // SAFETY: the query and writable answer buffer remain live for this synchronous call.
+        unsafe {
+            crate::abi::res_query(
+                service.as_ptr(),
+                1,
+                33,
+                answer.as_mut_ptr(),
+                answer.len() as i32,
+            )
+        }
+    })
+}
+
+fn resolve_srv_with(
+    service: &str,
+    query: impl FnOnce(&CStr, &mut [u8]) -> i32,
+) -> io::Result<Option<(String, u16)>> {
     let service = CString::new(service).map_err(|_| io::ErrorKind::InvalidInput)?;
     let mut answer = [0_u8; 65535];
-    // SAFETY: the query and writable answer buffer remain live for this synchronous call.
-    let length = unsafe {
-        crate::abi::res_query(
-            service.as_ptr(),
-            1,
-            33,
-            answer.as_mut_ptr(),
-            answer.len() as i32,
-        )
-    };
+    let length = query(&service, &mut answer);
     if length < 0 {
         return Ok(None);
     }
@@ -34,6 +43,10 @@ fn resolve_srv(service: &str) -> io::Result<Option<(String, u16)>> {
         .get(..length as usize)
         .ok_or(io::ErrorKind::InvalidData)?;
     srv_record(answer, RandomState::new().build_hasher().finish())
+}
+
+fn valid_srv_host(host: &str) -> bool {
+    !host.is_empty() && host != "."
 }
 
 /// Decode with libresolv, then apply SRV priority and weighted selection.
@@ -88,7 +101,7 @@ fn srv_record(answer: &[u8], choice: u64) -> io::Result<Option<(String, u16)>> {
         let host = unsafe { CStr::from_ptr(host.as_ptr()) }
             .to_str()
             .map_err(|_| invalid())?;
-        if host.is_empty() || host == "." {
+        if !valid_srv_host(host) {
             return Err(invalid());
         }
         records.push((priority, weight, host.to_owned(), port));
@@ -100,13 +113,14 @@ fn srv_record(answer: &[u8], choice: u64) -> io::Result<Option<(String, u16)>> {
     records.retain(|record| record.0 == priority);
     let total: u64 = records.iter().map(|record| u64::from(record.1)).sum();
     let mut selected = choice % (total + 1);
-    for (_, weight, host, port) in records {
+    Ok(records.into_iter().find_map(|(_, weight, host, port)| {
         if selected <= u64::from(weight) {
-            return Ok(Some((host, port)));
+            Some((host, port))
+        } else {
+            selected -= u64::from(weight);
+            None
         }
-        selected -= u64::from(weight);
-    }
-    unreachable!("SRV cumulative weights include the selected value")
+    }))
 }
 
 fn file_record(path: &str, remote: &str) -> Option<String> {
@@ -140,6 +154,40 @@ fn addresses(host: &str, port: u16) -> io::Result<Vec<IpAddr>> {
     format!("{host}:{port}")
         .to_socket_addrs()
         .map(|addresses| addresses.map(|address| address.ip()).collect())
+}
+
+fn send_srv(
+    record: io::Result<Option<(String, u16)>>,
+    sink: unsafe extern "C" fn(*mut c_void, *const c_char, usize, u16),
+    context: *mut c_void,
+) -> i32 {
+    let Ok(record) = record else {
+        return 1;
+    };
+    if let Some((host, port)) = record {
+        // SAFETY: the owned host bytes stay live for the synchronous sink call.
+        unsafe { sink(context, host.as_ptr().cast(), host.len(), port) };
+    }
+    0
+}
+
+fn send_addresses(
+    addresses: io::Result<Vec<IpAddr>>,
+    sink: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+    context: *mut c_void,
+) -> i32 {
+    let Ok(addresses) = addresses else {
+        return 1;
+    };
+    if addresses.is_empty() {
+        return 1;
+    }
+    for address in addresses {
+        let address = address.to_string();
+        // SAFETY: the owned address bytes stay live for the synchronous sink call.
+        unsafe { sink(context, address.as_ptr().cast(), address.len()) };
+    }
+    0
 }
 
 /// Read the existing extnodes file format without interpreting directory policy.
@@ -178,13 +226,7 @@ pub(crate) unsafe extern "C" fn directory_srv(
         let (Some(service), Some(sink)) = (unsafe { input(service, length) }, sink) else {
             return -1;
         };
-        let Ok(record) = resolve_srv(service) else {
-            return 1;
-        };
-        if let Some((host, port)) = record {
-            unsafe { sink(context, host.as_ptr().cast(), host.len(), port) };
-        }
-        0
+        send_srv(resolve_srv(service), sink, context)
     })
 }
 /// Resolve addresses on the control plane; unavailable and empty answers permit fallback.
@@ -200,17 +242,7 @@ pub(crate) unsafe extern "C" fn directory_addresses(
         let (Some(host), Some(sink)) = (unsafe { input(host, length) }, sink) else {
             return -1;
         };
-        let Ok(addresses) = addresses(host, port) else {
-            return 1;
-        };
-        if addresses.is_empty() {
-            return 1;
-        }
-        for address in addresses {
-            let address = address.to_string();
-            unsafe { sink(context, address.as_ptr().cast(), address.len()) };
-        }
-        0
+        send_addresses(addresses(host, port), sink, context)
     })
 }
 /// Retain standalone's existing directory failure wording outside the product.
@@ -241,11 +273,31 @@ mod tests {
         panic!("invalid DNS input must not deliver a target");
     }
 
+    unsafe extern "C" fn collect_srv(
+        context: *mut c_void,
+        text: *const c_char,
+        length: usize,
+        port: u16,
+    ) {
+        unsafe { &mut *context.cast::<Vec<(String, u16)>>() }
+            .push((unsafe { input(text, length) }.unwrap().into(), port));
+    }
+
+    fn srv_packet() -> Vec<u8> {
+        // Two IN/SRV answers: priority20/weight1/4569 and priority10/weight10/4571.
+        // The second target points to the first target's a.test label at byte29.
+        vec![
+            0, 1, 0x81, 0x80, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 33, 0, 1, 0, 0, 0, 60, 0, 14, 0, 20, 0,
+            1, 0x11, 0xd9, 1, b'a', 4, b't', b'e', b's', b't', 0, 0, 0, 33, 0, 1, 0, 0, 0, 60, 0,
+            8, 0, 10, 0, 10, 0x11, 0xdb, 0xc0, 29,
+        ]
+    }
+
     #[test]
     fn file_backend_keeps_raw_records_and_existing_unavailable_file_behavior() {
         let path =
             std::env::temp_dir().join(format!("rpt-directory-backend-{}.conf", std::process::id()));
-        fs::write(&path, "[other]\n123=wrong\n[extnodes]\n; comment\n# comment\nnot-a-record\n999=ignored\n123 = raw-record\n").unwrap();
+        fs::write(&path, "[other]\n123=wrong\n[extnodes]\n\n; comment\n# comment\n[not-a-section\nnot-a-record\n999=ignored\n123 = raw-record\n").unwrap();
         let path = path.to_str().unwrap();
         let mut results = Vec::<String>::new();
         let context = ptr::from_mut(&mut results).cast();
@@ -265,6 +317,20 @@ mod tests {
         );
         assert_eq!(results, ["raw-record"]);
         assert_eq!(file_record(path, "456"), None);
+        assert_eq!(
+            unsafe {
+                directory_record(
+                    ptr::null_mut(),
+                    path.as_ptr().cast(),
+                    path.len(),
+                    c"456".as_ptr(),
+                    3,
+                    Some(collect),
+                    context,
+                )
+            },
+            0
+        );
         assert_eq!(file_record("", "123"), None);
         fs::remove_file(path).unwrap();
         assert_eq!(file_record(path, "123"), None);
@@ -354,18 +420,12 @@ mod tests {
 
     #[test]
     fn srv_packet_uses_priority_port_and_compressed_target() {
-        // Two IN/SRV answers: priority20/weight1/4569 and priority10/weight10/4571.
-        // The second target points to the first target's a.test label at byte29.
-        let packet = [
-            0, 1, 0x81, 0x80, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 33, 0, 1, 0, 0, 0, 60, 0, 14, 0, 20, 0,
-            1, 0x11, 0xd9, 1, b'a', 4, b't', b'e', b's', b't', 0, 0, 0, 33, 0, 1, 0, 0, 0, 60, 0,
-            8, 0, 10, 0, 10, 0x11, 0xdb, 0xc0, 29,
-        ];
+        let packet = srv_packet();
         assert_eq!(
             super::srv_record(&packet, 0).unwrap(),
             Some(("a.test".into(), 4571))
         );
-        let mut weighted = packet;
+        let mut weighted = packet.clone();
         weighted[24] = 10;
         assert_eq!(
             super::srv_record(&weighted, 0).unwrap(),
@@ -381,11 +441,11 @@ mod tests {
                 "accepted length {end}"
             );
         }
-        let mut unavailable = packet;
+        let mut unavailable = packet.clone();
         unavailable[54] = 0;
         unavailable[55] = 0;
         assert!(super::srv_record(&unavailable, 0).is_err());
-        let mut zero_port = packet;
+        let mut zero_port = packet.clone();
         zero_port[52] = 0;
         zero_port[53] = 0;
         assert!(super::srv_record(&zero_port, 0).is_err());
@@ -393,5 +453,114 @@ mod tests {
             super::srv_record(&[0, 1, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 0], 0).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn resolver_checks_query_lengths_and_parses_a_successful_answer() {
+        let packet = srv_packet();
+        let expected = ("a.test".to_owned(), 4571);
+        assert_eq!(
+            resolve_srv_with("_asl._tcp.test", |service, answer| {
+                assert_eq!(service.to_str().unwrap(), "_asl._tcp.test");
+                answer[..packet.len()].copy_from_slice(&packet);
+                packet.len() as i32
+            })
+            .unwrap(),
+            Some(expected)
+        );
+        assert!(matches!(
+            resolve_srv_with("bad\0service", |_, _| panic!("invalid name reached resolver")),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(resolve_srv_with("missing", |_, _| -1).unwrap(), None);
+        assert!(matches!(
+            resolve_srv_with("oversized", |_, _| 65536),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[test]
+    fn directory_sinks_preserve_not_found_errors_and_addresses() {
+        let mut srv = Vec::<(String, u16)>::new();
+        let context = ptr::from_mut(&mut srv).cast();
+        assert_eq!(
+            send_srv(Ok(Some(("a.test".into(), 4571))), collect_srv, context),
+            0
+        );
+        assert_eq!(srv, [("a.test".into(), 4571)]);
+        assert_eq!(send_srv(Ok(None), unexpected_srv, ptr::null_mut()), 0);
+        assert_eq!(
+            send_srv(
+                Err(io::ErrorKind::InvalidData.into()),
+                unexpected_srv,
+                ptr::null_mut()
+            ),
+            1
+        );
+
+        let mut results = Vec::<String>::new();
+        let context = ptr::from_mut(&mut results).cast();
+        assert_eq!(send_addresses(Ok(vec![]), collect, context), 1);
+        assert_eq!(
+            send_addresses(Err(io::ErrorKind::NotFound.into()), collect, context),
+            1
+        );
+        assert_eq!(
+            send_addresses(
+                Ok(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]),
+                collect,
+                context
+            ),
+            0
+        );
+        assert_eq!(results, ["127.0.0.1"]);
+    }
+
+    #[test]
+    fn srv_packet_rejects_other_records_and_invalid_targets() {
+        let mut wrong_type = srv_packet();
+        wrong_type[39] = 1;
+        assert_eq!(
+            srv_record(&wrong_type, 0).unwrap(),
+            Some(("a.test".into(), 4569))
+        );
+
+        let mut wrong_class = srv_packet();
+        wrong_class[41] = 3;
+        assert_eq!(
+            srv_record(&wrong_class, 0).unwrap(),
+            Some(("a.test".into(), 4569))
+        );
+
+        let mut short_data = srv_packet();
+        short_data[22] = 6;
+        short_data.drain(29..37);
+        assert!(srv_record(&short_data, 0).is_err());
+
+        let mut empty_host = srv_packet();
+        empty_host[22] = 7;
+        empty_host.drain(29..36);
+        assert!(srv_record(&empty_host, 0).is_err());
+
+        let mut extra_target_data = srv_packet();
+        extra_target_data[22] = 15;
+        extra_target_data.insert(37, 0);
+        assert!(srv_record(&extra_target_data, 0).is_err());
+
+        let mut invalid_pointer = srv_packet();
+        invalid_pointer[54] = 0xff;
+        invalid_pointer[55] = 0xff;
+        assert!(srv_record(&invalid_pointer, 0).is_err());
+
+        assert!(!valid_srv_host(""));
+        assert!(!valid_srv_host("."));
+        assert!(valid_srv_host("a.test"));
+
+        let mut looping_owner = srv_packet();
+        looping_owner[37] = 0xc0;
+        looping_owner.insert(38, 37);
+        assert!(srv_record(&looping_owner, 0).is_err());
+
+        assert_eq!(resolve_srv("").unwrap(), None);
     }
 }

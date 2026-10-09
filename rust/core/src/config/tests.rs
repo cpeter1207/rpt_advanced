@@ -267,6 +267,58 @@ fn radio_receive_gains_resolve_defaults_inheritance_and_node_overrides() {
 }
 
 #[test]
+fn radio_output_assignments_resolve_both_scopes_and_invalid_fallbacks() {
+    use super::RadioOutputAssignment as Assignment;
+
+    let node = NodeId::new("1000").unwrap();
+    for scope in ["radio", "radio 1000"] {
+        for (name, expected) in [
+            ("disabled", Assignment::Disabled),
+            ("voice", Assignment::Voice),
+            ("tone", Assignment::Tone),
+            ("composite", Assignment::Composite),
+            ("auxiliary_voice", Assignment::AuxiliaryVoice),
+        ] {
+            let document = ConfigDocument::parse(&format!(
+                "[1000]\n[{scope}]\ntransmit_output_a_assignment={name}\ntransmit_output_b_assignment={name}\n"
+            ))
+            .unwrap();
+            let resolved = ResolvedRadioSettings::resolve(&document, &node).unwrap();
+            assert!(resolved.warnings.is_empty(), "{scope}/{name}");
+            assert_eq!(
+                resolved.value.signaling.transmit_output_a_assignment,
+                expected
+            );
+            assert_eq!(
+                resolved.value.signaling.transmit_output_b_assignment,
+                expected
+            );
+        }
+    }
+    for (defaults, expected) in [
+        ("", (Assignment::Voice, Assignment::Tone)),
+        (
+            "[radio]\ntransmit_output_a_assignment=composite\ntransmit_output_b_assignment=disabled\n",
+            (Assignment::Composite, Assignment::Disabled),
+        ),
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "{defaults}[1000]\n[radio 1000]\ntransmit_output_a_assignment=invalid\ntransmit_output_b_assignment=invalid\n"
+        ))
+        .unwrap();
+        let resolved = ResolvedRadioSettings::resolve(&document, &node).unwrap();
+        assert_eq!(resolved.warnings.len(), 2);
+        assert_eq!(
+            (
+                resolved.value.signaling.transmit_output_a_assignment,
+                resolved.value.signaling.transmit_output_b_assignment,
+            ),
+            expected,
+        );
+    }
+}
+
+#[test]
 fn radio_signaling_options_are_supported_in_default_and_node_scopes() {
     let document = ConfigDocument::parse(
         "[radio]\nreceive_audio=flat\nreceive_signaling=ctcss\ncarrier_source=dsp\nctcss_source=dsp\nreceive_ctcss_tones_hz=100.0,103.5\nctcss_relaxed=yes\nctcss_decoder_gain_db=0\ndcs_receive_code=023N\nsquelch_level=500\nsquelch_hysteresis=3000\nnoise_filter=standard\nvox_threshold=0\nvox_hang_ms=2000\nreceive_on_delay_ms=0\nradio_duplex_mode=half\ntransmit_signaling=ctcss\ntransmit_ctcss_tones_hz=100.0\ntransmit_ctcss_default_hz=100.0\ntransmit_ctcss_level_dbfs=-24\ntransmit_ctcss_turnoff_mode=phase_shift\ntransmit_ctcss_phase_shift_degrees=120\ntransmit_ctcss_turnoff_duration_ms=180\ntransmit_ctcss_tail_tone_hz=55\ntransmit_dcs_code=023N\ntransmit_dcs_level_dbfs=-24\ntransmit_dcs_turnoff_enabled=yes\ntransmit_dcs_turnoff_duration_ms=180\ntransmit_settle_ms=500\ntransmit_receive_blanking_ms=0\ntransmit_off_delay_ms=0\n[1000]\n[radio 1000]\nreceive_signaling=dcs\ndcs_receive_code=047I\ntransmit_signaling=dcs\ntransmit_dcs_code=047I\n",

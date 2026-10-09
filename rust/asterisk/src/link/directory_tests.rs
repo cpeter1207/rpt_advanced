@@ -72,6 +72,51 @@ fn backend_callbacks_deliver_raw_results_and_retain_authoritative_errors() {
         unsafe { directory_addresses(null, ptr::null(), 1, 4569, Some(collect), context) },
         -1
     );
+    MODE.set(4);
+    assert_eq!(
+        unsafe {
+            directory_record(
+                null,
+                c"static".as_ptr(),
+                6,
+                c"123".as_ptr(),
+                3,
+                Some(collect),
+                context,
+            )
+        },
+        -1
+    );
+    let invalid_host = b"bad\0host";
+    assert_eq!(
+        unsafe {
+            directory_addresses(
+                null,
+                invalid_host.as_ptr().cast(),
+                invalid_host.len(),
+                4569,
+                Some(collect),
+                context,
+            )
+        },
+        -1
+    );
+    MODE.set(0);
+    assert_eq!(
+        unsafe {
+            directory_record(
+                null,
+                c"static".as_ptr(),
+                6,
+                c"123".as_ptr(),
+                3,
+                Some(collect),
+                context,
+            )
+        },
+        0
+    );
+    assert_eq!(values, ["radio@host/123,192.0.2.1"]);
     values.clear();
     for (mode, expected) in [(0, 0), (1, -1), (2, -1), (3, 0)] {
         MODE.set(mode);

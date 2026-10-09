@@ -165,4 +165,48 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn copied_native_request_rejects_incompatible_templates_and_missing_text() {
+        // SAFETY: these ABI records contain only scalar fields and nullable pointers.
+        let (mut radio, mut request): (
+            abi::rptadv_radio_session_config,
+            abi::UrpNativeStationConfig,
+        ) = unsafe { std::mem::zeroed() };
+        radio.struct_size = std::mem::size_of_val(&radio) as u32;
+        radio.abi_version = 4;
+        request.struct_size = std::mem::size_of_val(&request) as u32;
+        request.abi_version = 1;
+        request.radio = &radio;
+
+        request.abi_version = 2;
+        assert_eq!(
+            unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
+            "incompatible native radio configuration"
+        );
+        request.abi_version = 1;
+        request.radio = std::ptr::null();
+        assert_eq!(
+            unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
+            "incompatible native radio configuration"
+        );
+        request.radio = &radio;
+        radio.struct_size = 4;
+        assert_eq!(
+            unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
+            "short native radio session template"
+        );
+        radio.struct_size = std::mem::size_of_val(&radio) as u32;
+        radio.abi_version = 3;
+        assert_eq!(
+            unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
+            "incompatible native radio session template"
+        );
+        radio.abi_version = 4;
+        request.device_identifier_length = 1;
+        assert_eq!(
+            unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
+            "missing native request text"
+        );
+    }
 }

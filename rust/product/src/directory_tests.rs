@@ -112,6 +112,11 @@ fn dns_precedence_uses_srv_port_any_matching_address_and_ipv6() {
 
 #[test]
 fn backend_error_translation_preserves_dns_fallback_and_diagnostics() {
+    assert_eq!(
+        resolver(0).lookup("123", Some("192.0.2.1")),
+        Ok("radio@external/123".into()),
+        "an empty DNS answer permits an authenticated external-file fallback"
+    );
     for method in 0..=2 {
         let mut directory = resolver(method);
         let fallback = Ok("radio@external/123".into());

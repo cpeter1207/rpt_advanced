@@ -577,6 +577,49 @@ mod tests {
     }
 
     #[test]
+    fn registration_worker_refreshes_an_already_registered_target() {
+        use std::{io::Write, net::TcpListener, thread, time::Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut configured = target();
+        configured.url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut count = 0;
+            while count < 2 && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        read_registration_request(&mut stream);
+                        let body = br#"{"refresh":1,"data":"successfully registered"}"#;
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .unwrap();
+                        stream.write_all(body).unwrap();
+                        count += 1;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("registration listener failed: {error}"),
+                }
+            }
+            count
+        });
+
+        let mut worker = super::RegistrationWorker::start(vec![configured]).unwrap();
+        let requests = server.join().unwrap();
+        worker.stop();
+        assert_eq!(
+            requests, 2,
+            "the registered target must refresh successfully"
+        );
+    }
+
+    #[test]
     fn registration_worker_backs_off_after_an_invalid_response() {
         use std::{io::Write, net::TcpListener, thread};
 
