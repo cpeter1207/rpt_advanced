@@ -482,8 +482,7 @@ fn parrot_bypasses_monitor_and_fallback_peer_routing_only_for_its_audio() {
         CourtesySettings::default(),
     )
     .unwrap();
-    let media =
-        PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 })).unwrap();
+    let media = PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 }));
     assert!(control.queue_prepared_parrot(media));
 
     let mut local = [0.0; 2];
@@ -536,9 +535,12 @@ fn parrot_final_callback_block_reaches_every_peer() {
         CourtesySettings::default(),
     )
     .unwrap();
-    assert!(control.queue_prepared_parrot(
-        PreparedMedia::new_parrot_stream(None, Box::new(OneSampleParrot)).unwrap()
-    ));
+    assert!(
+        control.queue_prepared_parrot(PreparedMedia::new_parrot_stream(
+            None,
+            Box::new(OneSampleParrot)
+        ))
+    );
 
     links.process(&mut node, false, &mut [0.0]).unwrap();
     assert!(!node.parrot_playback_active());
@@ -549,7 +551,7 @@ fn parrot_final_callback_block_reaches_every_peer() {
 }
 
 fn queued_parrot() -> PreparedMedia {
-    PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 })).unwrap()
+    PreparedMedia::new_parrot_stream(None, Box::new(ParrotSamples { offset: 0 }))
 }
 
 #[test]

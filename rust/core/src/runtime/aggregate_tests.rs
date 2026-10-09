@@ -39,6 +39,12 @@ impl StationMediaSession for TestStation {
         }
         Ok(Box::new(TestPcm(0)))
     }
+    fn register_prepared(
+        &mut self,
+        _: PreparedAudio,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        Ok(Box::new(TestPcm(0)))
+    }
     fn start(&mut self) -> Result<(), MediaError> {
         Ok(())
     }
@@ -1780,6 +1786,62 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
 }
 
 #[test]
+fn priority_group_event_reports_a_full_status_queue() {
+    use super::links::LinkEffect;
+
+    let media = CapturingMedia(Arc::new(Mutex::new(Vec::new())));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[permanent 1000 network]\nremote_node=2000,3000\ngroup_name=Network\n",
+        )
+        .unwrap(),
+        &media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    for _ in ["2000", "3000"] {
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("configured group dial")
+        };
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, true, clock()),
+            Ok(true)
+        );
+    }
+    runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .group_member("2000")
+        .unwrap()
+        .selection()
+        .callback_slot(true);
+    for _ in 0..4 {
+        runtime.queue_link_event("7000", "8000", true).unwrap();
+    }
+    assert_eq!(
+        runtime.queue_link_event("7000", "8000", true),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.node("1000").unwrap().links().priority_groups()[0].selected,
+        Some("2000".to_owned())
+    );
+
+    assert_eq!(
+        runtime.queue_priority_group_events(),
+        Err(RuntimeError::Rejected)
+    );
+    for remote in ["2000", "3000"] {
+        runtime.node("1000").unwrap().links().ended(remote);
+        runtime.peer_detached("1000", remote, 0);
+    }
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn completed_parrot_capture_is_measured_localized_and_queued_for_playback() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
@@ -1806,6 +1868,119 @@ fn completed_parrot_capture_is_measured_localized_and_queued_for_playback() {
         *messages.lock().unwrap(),
         ["Peak level -6 dBFS. RMS level -8 dBFS."]
     );
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn parrot_capture_waits_for_receive_to_end_and_reuses_the_deferred_buffer() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        callback
+            .transmit()
+            .controller
+            .observe_parrot(true, &[0.5, 0.25]);
+        callback.transmit().controller.observe_parrot(false, &[]);
+        callback.transmit().controller.process_event(true, false);
+    }
+    runtime.tick_links(clock());
+    assert!(messages.lock().unwrap().is_empty());
+
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        callback.transmit().controller.process_event(false, false);
+        callback
+            .transmit()
+            .controller
+            .observe_parrot(true, &[0.5, 0.25]);
+        callback.transmit().controller.observe_parrot(false, &[]);
+    }
+    runtime.tick_links(clock());
+    assert_eq!(messages.lock().unwrap().len(), 1);
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn parrot_capture_drops_a_second_prepared_burst_while_playback_is_pending() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nparrot_enabled=yes\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (mut receive, mut transmit) = runtime.node("1000").unwrap().register_audio().unwrap();
+    {
+        let mut callback = receive.acquire_pair(&mut transmit).unwrap();
+        for _ in 0..2 {
+            callback
+                .transmit()
+                .controller
+                .observe_parrot(true, &[0.5, 0.25]);
+            callback.transmit().controller.observe_parrot(false, &[]);
+        }
+    }
+    runtime.tick_links(clock());
+    assert_eq!(messages.lock().unwrap().len(), 2);
+    assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn parrot_command_rejects_a_second_toggle_until_callback_acknowledges_enable() {
+    use super::dtmf::DigitEvent;
+    use super::links::LinkEffect;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let hash = |code: &[u8], salt: &str| {
+        Argon2::default()
+            .hash_password(code, &SaltString::from_b64(salt).unwrap())
+            .unwrap()
+            .to_string()
+    };
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.node("1000").unwrap().links().configure_admin(
+        &hash(b"1234", "c29tZXNhbHQ"),
+        &hash(b"5678", "bG9ja3NhbHQ"),
+        60_000,
+    );
+    let feed = |runtime: &mut Runtime, sequence: &str, now_ms: u64| {
+        let mut operation = None;
+        for digit in sequence.chars() {
+            operation = runtime
+                .digit("1000", DigitEvent::Digit { digit, now_ms })
+                .or(operation);
+        }
+        operation
+    };
+    assert!(feed(&mut runtime, "*8001234#", 1000).is_none());
+    let enabled = feed(&mut runtime, "*804", 1001).unwrap();
+    assert!(matches!(
+        runtime.command("1000", enabled, clock(), false),
+        Ok(LinkEffect::ParrotEnabled(true))
+    ));
+    let disabled = feed(&mut runtime, "*805", 1002).unwrap();
+    assert!(matches!(
+        runtime.command("1000", disabled, clock(), false),
+        Err(RuntimeError::Rejected)
+    ));
     assert!(runtime.stop(clock().now_ms));
 }
 

@@ -223,15 +223,13 @@ impl PeerIoWorker {
     /// Transfer a prepared peer without blocking or growing the bounded queue.
     pub fn attach(&mut self, session: PeerSession) -> Result<(), Box<PeerSession>> {
         let session = Box::new(session);
-        if self.thread.as_ref().is_none_or(JoinHandle::is_finished) {
+        let Some(thread) = self.thread.as_ref().filter(|thread| !thread.is_finished()) else {
             return Err(session);
-        }
+        };
         self.pending
             .push(session)
             .map_err(|rtrb::PushError::Full(session)| session)?;
-        if let Some(thread) = &self.thread {
-            thread.thread().unpark();
-        }
+        thread.thread().unpark();
         Ok(())
     }
 
@@ -357,9 +355,9 @@ impl PeerSession {
                 digit,
                 ..
             } if destination == &self.local && source == &self.remote => {
-                if self.peer.digit(digit, now_ms) {
-                    self.event(Event::Digit(digit))?;
-                }
+                // Protocol::parse admits only conventional DTMF digits.
+                let _ = self.peer.digit(digit, now_ms);
+                self.event(Event::Digit(digit))?;
             }
             Protocol::RemoteDigit { .. } => (),
             _ => self.event(Event::Text(bytes))?,

@@ -302,30 +302,20 @@ impl DtmfCommands {
                 return None;
             }
             LinkAction::ParrotEnable | LinkAction::ParrotDisable => {
-                if self.admin_until_ms == 0 || now_ms >= self.admin_until_ms {
+                if self.admin_until_ms == 0 {
                     return None;
                 }
                 admin_authorized = true;
             }
             _ => {}
         }
-        if command.node == "0"
-            && !matches!(
-                command.action,
-                LinkAction::AdminUnlock | LinkAction::AdminLock
-            )
-        {
+        if command.node == "0" {
             if self.last_node.is_empty() {
                 return None;
             }
             command.node = self.last_node.clone();
         }
-        if !command.node.is_empty()
-            && !matches!(
-                command.action,
-                LinkAction::AdminUnlock | LinkAction::AdminLock
-            )
-        {
+        if !command.node.is_empty() {
             self.last_node.clone_from(&command.node);
         }
         Some(DigitOperation {
@@ -345,11 +335,8 @@ impl DtmfCommands {
     }
 
     /// Reset the inactivity deadline only after link and parrot-control owners accept the action.
-    pub(crate) fn confirm_parrot_action(&mut self, action: LinkAction, now_ms: u64) {
-        if matches!(action, LinkAction::ParrotEnable | LinkAction::ParrotDisable)
-            && self.admin_until_ms != 0
-            && now_ms < self.admin_until_ms
-        {
+    pub(crate) fn confirm_parrot_action(&mut self, now_ms: u64) {
+        if self.admin_until_ms != 0 && now_ms < self.admin_until_ms {
             self.admin_until_ms = now_ms.saturating_add(self.admin_timeout_ms);
         }
     }

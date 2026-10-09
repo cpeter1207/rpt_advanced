@@ -428,6 +428,7 @@ mod tests {
     #[test]
     fn callback_boundaries_reject_invalid_spans_and_contexts() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        PROCESSED.store(0, Ordering::Relaxed);
         let api = adapter();
         let mut graph = FfmpegProcessor::create(&api, "anull", 8).unwrap();
         let port = graph.as_mut().port();

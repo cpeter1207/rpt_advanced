@@ -219,6 +219,10 @@ unsafe extern "C" fn peer_events(
         event(context, 3, audio.as_ptr().cast(), audio.len());
         event(context, 4, ptr::null(), 0);
         event(context, 5, ptr::null(), 0);
+        event(context, 4, ptr::from_ref(&digit).cast(), 1);
+        event(context, 4, ptr::null(), 1);
+        event(context, 5, ptr::from_ref(&digit).cast(), 1);
+        event(context, 5, ptr::null(), 1);
         event(context, 0, ptr::null(), 0);
         event(context, 1, ptr::null(), 1);
         event(context, 2, ptr::null(), 1);

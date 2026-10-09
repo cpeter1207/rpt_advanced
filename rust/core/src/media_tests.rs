@@ -29,3 +29,21 @@ fn prepared_audio_rejects_unplayable_data_and_retains_source_rate() {
     assert_eq!(retained.sample_rate_hz(), 22050);
     assert_eq!(retained.samples(), &[-1.0, 0.9999695]);
 }
+
+#[test]
+fn prepared_pcm_requires_station_adapter_support() {
+    struct LegacyStation;
+    impl StationMediaSession for LegacyStation {
+        fn register(&mut self, _: MediaSource) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+            Err(MediaError::Unavailable)
+        }
+        fn start(&mut self) -> Result<(), MediaError> {
+            Ok(())
+        }
+    }
+
+    assert!(matches!(
+        LegacyStation.register_prepared(PreparedAudio::new(48_000, vec![0.5]).unwrap()),
+        Err(MediaError::IncompatibleAdapter)
+    ));
+}

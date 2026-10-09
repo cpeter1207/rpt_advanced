@@ -163,6 +163,15 @@ fn scheduled_windows_detect_time_and_calendar_overlap() {
 }
 
 #[test]
+fn date_only_window_does_not_overlap_a_weekday_window_on_another_weekday() {
+    let date = ScheduledWindow::parse(None, Some("2026-09-15"), "09:00", "10:00").unwrap();
+    let wednesday = ScheduledWindow::parse(Some("Wednesday"), None, "09:00", "10:00").unwrap();
+    assert!(!date.overlaps(&wednesday));
+    let every_day = ScheduledWindow::parse(None, None, "09:00", "10:00").unwrap();
+    assert!(date.overlaps(&every_day));
+}
+
+#[test]
 fn windows_accept_case_insensitive_wrapping_weekday_ranges_and_reject_malformed_selectors() {
     let window = ScheduledWindow::parse(Some(" Friday - Monday "), None, "00:00", "00:01").unwrap();
     for weekday in [

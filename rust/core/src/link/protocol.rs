@@ -159,6 +159,7 @@ mod tests {
     fn rejects_malformed_asl_remote_dtmf_text() {
         for input in [
             &b"D 1000 2000 x 5"[..],
+            b"D bad! 2000 1 5",
             b"D 1000 2000 1 E",
             b"D 1000 2000 1 55",
             b"D 1000 2000 1 5 extra",

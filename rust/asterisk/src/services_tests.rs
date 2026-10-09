@@ -236,6 +236,18 @@ fn peer_binding_requires_radio_option_acknowledgment_and_preserves_owners() {
 }
 
 #[test]
+fn destroy_raw_releases_a_peer_retained_by_the_adapter() {
+    reset();
+    // SAFETY: the fixture owns the fake channel, and the raw peer is destroyed once.
+    unsafe {
+        let peer = PeerIo::dial(c"radio@host/200", c"100", 8, || true).unwrap();
+        let peer = into_raw(peer);
+        destroy_raw(peer);
+    }
+    host(|state| state.clean());
+}
+
+#[test]
 fn radio_service_validates_handles_and_releases_each_successful_open() {
     reset();
     let null = ptr::null_mut();
@@ -244,6 +256,23 @@ fn radio_service_validates_handles_and_releases_each_successful_open() {
         let mut radio = ptr::dangling_mut();
         assert_eq!(radio_open(null, ptr::null(), 1, 8, &mut radio), -1);
         assert!(radio.is_null());
+        for identity in [
+            b"\0usb".as_slice(),
+            b"node\0".as_slice(),
+            b"node\0usb\0other",
+        ] {
+            assert_eq!(
+                radio_open(
+                    null,
+                    identity.as_ptr().cast(),
+                    identity.len(),
+                    8,
+                    &mut radio
+                ),
+                -1
+            );
+            assert!(radio.is_null());
+        }
         host(|state| state.failure = 1);
         assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), -1);
         assert!(radio.is_null());

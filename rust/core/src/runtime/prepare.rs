@@ -161,7 +161,7 @@ pub(super) fn streamed_parrot(
     let recording = station
         .register_prepared(recording)
         .map_err(|_| RuntimeError::Preparation)?;
-    PreparedMedia::new_parrot_stream(report, recording).map_err(|_| RuntimeError::Preparation)
+    Ok(PreparedMedia::new_parrot_stream(report, recording))
 }
 
 fn source_with_station(

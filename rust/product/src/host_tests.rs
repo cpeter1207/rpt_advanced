@@ -65,6 +65,15 @@ fn host() -> Host {
 }
 
 #[test]
+fn peer_capacity_rejects_the_first_peer_over_the_bound() {
+    assert!(ensure_peer_capacity(MAX_PEER_SESSIONS - 1).is_ok());
+    assert_eq!(
+        ensure_peer_capacity(MAX_PEER_SESSIONS),
+        Err(RuntimeError::Rejected)
+    );
+}
+
+#[test]
 fn parrot_live_state_effect_needs_no_external_host_action() {
     let mut host = host();
     assert!(
@@ -1051,6 +1060,23 @@ fn rejected_radio_binding_drops_peer_without_starting_media_or_admitting_it() {
         assert_eq!(state.input.len(), 1, "no frame may be read before binding");
         assert_eq!(state.drops, 1);
     }
+    assert!(host.stop(20));
+}
+
+#[test]
+fn stopped_peer_io_owner_rejects_and_releases_a_prepared_session() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    host.peer_io.stop();
+    let (io, state) = peer(48000);
+    assert_eq!(
+        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock()),
+        Err(RuntimeError::Rejected)
+    );
+    assert!(host.peers.is_empty());
+    assert_eq!(state.lock().unwrap().drops, 1);
     assert!(host.stop(20));
 }
 

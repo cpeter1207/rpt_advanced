@@ -70,7 +70,7 @@ impl PcmStreamReader for PendingOnceReader {
 }
 
 fn parrot_media(samples: &[f32]) -> PreparedMedia {
-    PreparedMedia::new_parrot_stream(None, sequence_reader(samples, false)).unwrap()
+    PreparedMedia::new_parrot_stream(None, sequence_reader(samples, false))
 }
 
 #[test]

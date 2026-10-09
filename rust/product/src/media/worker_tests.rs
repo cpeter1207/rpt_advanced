@@ -41,6 +41,21 @@ fn fixture(rate: u32, first_count: usize, sample: f32) -> Fixture {
     }
 }
 
+#[test]
+fn job_cancellation_checks_stop_generation_and_explicit_cancel() {
+    let control = JobControl::default();
+    let stopping = AtomicBool::new(false);
+    control.requested.store(7, Ordering::Release);
+    assert!(!control.is_cancelled(&stopping, 7));
+    assert!(control.is_cancelled(&stopping, 8));
+
+    control.cancelled.store(7, Ordering::Release);
+    assert!(control.is_cancelled(&stopping, 7));
+    control.cancelled.store(0, Ordering::Release);
+    stopping.store(true, Ordering::Release);
+    assert!(control.is_cancelled(&stopping, 7));
+}
+
 fn fixture_context(fixture: Fixture, open_file: bool, open_speech: bool) -> Arc<Context> {
     let handle = Box::into_raw(Box::new(fixture)).cast::<c_void>();
     Arc::new(Context {
@@ -400,6 +415,102 @@ fn file_open_failure_falls_back_to_streamed_speech_with_provider_gain() {
 }
 
 #[test]
+fn worker_loop_reclaims_consumer_after_stream_generation_is_cancelled() {
+    READS.store(0, Ordering::Release);
+    READING.store(false, Ordering::Release);
+    RELEASE_READ.store(false, Ordering::Release);
+    let _release = ReleaseRead;
+    let file = context(Some(open_test_file));
+    let speech = context(None);
+    let mut session =
+        StationSession::new("1000".into(), 1, Arc::clone(&file), Arc::clone(&speech)).unwrap();
+    let mut reader = session
+        .register(MediaSource {
+            file: Some("memory.wav".into()),
+            ..MediaSource::default()
+        })
+        .unwrap();
+    let job = session.jobs.pop().unwrap();
+    reader.start();
+    let control = Arc::clone(&job.control);
+    let stopping = Arc::new(AtomicBool::new(false));
+    let worker_stopping = Arc::clone(&stopping);
+    let (_, requests) = RingBuffer::new(1);
+    let worker =
+        thread::spawn(move || worker_loop(vec![job], requests, file, speech, worker_stopping));
+
+    for _ in 0..1_000 {
+        if READING.load(Ordering::Acquire) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(READING.load(Ordering::Acquire));
+    assert!(matches!(
+        reader.render(&mut [0.0; 64]),
+        PcmRead::Samples(64)
+    ));
+    control.cancelled.store(1, Ordering::Release);
+    assert_eq!(reader.render(&mut [0.0; 64]), PcmRead::Pending);
+
+    for _ in 0..1_000 {
+        if !control.consumer_outstanding.load(Ordering::Acquire) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!control.consumer_outstanding.load(Ordering::Acquire));
+    stopping.store(true, Ordering::Release);
+    worker.join().unwrap();
+}
+
+#[test]
+fn producer_cancelled_during_a_failed_stream_write_is_not_reported_as_failure() {
+    let mut later = fixture(48000, 8, 0.25);
+    later.later_count = 8;
+    let (session, mut job, mut reader) = registered_file_job(later);
+    reader.start();
+    crate::link::ring::tests::set_cancel_on_failed_push(&job.control.cancelled, 1, 1);
+
+    run_job(
+        &mut job,
+        1,
+        &session.file,
+        &session.speech,
+        &session.stopping,
+        crate::link::ring::tests::cancel_on_push_open,
+    );
+
+    assert_eq!(job.control.cancelled.load(Ordering::Acquire), 1);
+    assert_eq!(job.control.failed.load(Ordering::Acquire), 0);
+    assert_eq!(job.control.completed.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn cancellation_releases_a_completed_job_waiting_for_reader_retirement() {
+    let (session, mut job, mut reader) = registered_file_job(fixture(48000, 8, 0.25));
+    reader.start();
+    let control = Arc::clone(&job.control);
+    let file = Arc::clone(&session.file);
+    let speech = Arc::clone(&session.speech);
+    let stopping = Arc::clone(&session.stopping);
+    let worker = thread::spawn(move || {
+        run_job(&mut job, 1, &file, &speech, &stopping, InboundRing::open);
+    });
+
+    for _ in 0..1_000 {
+        if control.completed.load(Ordering::Acquire) == 1 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(control.completed.load(Ordering::Acquire), 1);
+    control.cancelled.store(1, Ordering::Release);
+    worker.join().unwrap();
+    drop(reader);
+}
+
+#[test]
 fn empty_file_output_falls_back_to_speech() {
     let file = fixture_context(fixture(48000, 0, 0.0), true, false);
     let speech = fixture_context(fixture(48000, 16, 0.25), false, true);
@@ -695,6 +806,62 @@ fn prepared_native_parrot_recording_uses_the_station_media_ring() {
     let samples = collect_samples(reader.as_mut(), &mut [0.0; 64]);
     assert!(samples.len() >= 512);
     assert!(samples.iter().any(|sample| (*sample - 0.25).abs() < 0.003));
+}
+
+#[test]
+fn prepared_media_rejects_registration_before_start_after_stop_and_out_of_range_rate() {
+    let audio = PreparedAudio::new(48_000, vec![0.25; 8]).unwrap();
+    let mut before_start =
+        StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    assert_eq!(
+        before_start.register_prepared(audio.clone()).err(),
+        Some(MediaError::InvalidRequest)
+    );
+
+    let mut stopped = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    stopped.start().unwrap();
+    stopped.stopping.store(true, Ordering::Release);
+    assert_eq!(
+        stopped.register_prepared(audio).err(),
+        Some(MediaError::InvalidRequest)
+    );
+    drop(stopped);
+
+    let mut invalid_rate =
+        StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    invalid_rate.start().unwrap();
+    assert_eq!(
+        invalid_rate
+            .register_prepared(PreparedAudio::new(7_999, vec![0.25; 8]).unwrap())
+            .err(),
+        Some(MediaError::InvalidRequest)
+    );
+}
+
+#[test]
+fn media_worker_reclaims_retired_consumer_after_one_shot_playback() {
+    let (session, mut job, mut reader) = registered_file_job(fixture(48_000, 8, 0.25));
+    job.one_shot = true;
+    reader.start();
+    let control = Arc::clone(&job.control);
+    let file = Arc::clone(&session.file);
+    let speech = Arc::clone(&session.speech);
+    let stopping = Arc::new(AtomicBool::new(false));
+    let worker_stopping = Arc::clone(&stopping);
+    let (_, requests) = RingBuffer::new(1);
+    let worker =
+        thread::spawn(move || worker_loop(vec![job], requests, file, speech, worker_stopping));
+
+    assert!(!collect_samples(reader.as_mut(), &mut [0.0; 64]).is_empty());
+    for _ in 0..1_000 {
+        if !control.consumer_outstanding.load(Ordering::Acquire) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!control.consumer_outstanding.load(Ordering::Acquire));
+    stopping.store(true, Ordering::Release);
+    worker.join().unwrap();
 }
 
 #[test]
@@ -1533,6 +1700,13 @@ fn session_rejects_invalid_media_and_duplicate_start_or_persistent_registration(
                 text: "E".into(),
                 speed_wpm: 20,
                 frequency_hz: 800.0,
+                level_db: -6,
+            }),
+            ..MediaSource::default()
+        },
+        MediaSource {
+            tone: Some(rpt_advanced_core::media::ToneSource {
+                sequence: "invalid".into(),
                 level_db: -6,
             }),
             ..MediaSource::default()

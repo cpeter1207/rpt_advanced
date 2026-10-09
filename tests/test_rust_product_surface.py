@@ -385,6 +385,7 @@ def get_test_only_ranges(filename: str) -> list[tuple[int, int]]:
 def test_separate_rust_test_source_is_not_production_coverage() -> None:
     assert is_test_source("/workspace/rust/control-standalone-adapter/src/tests.rs")
     assert is_test_source("/workspace/rust/core/src/runtime/aggregate_tests.rs")
+    assert is_test_source("/workspace/rust/asterisk/src/fixture.rs")
     assert not is_test_source("/workspace/rust/core/src/runtime/aggregate.rs")
 
 
@@ -421,7 +422,11 @@ def is_test_source(filename: str) -> bool:
     """Identify separately compiled Rust test sources outside production coverage."""
     path = filename.replace("\\", "/")
     name = path.rsplit("/", 1)[-1]
-    return "/tests/" in path or name == "tests.rs" or name.endswith("_tests.rs")
+    return (
+        "/tests/" in path
+        or name in {"fixture.rs", "tests.rs"}
+        or name.endswith("_tests.rs")
+    )
 
 
 def coverage(report: Path) -> None:

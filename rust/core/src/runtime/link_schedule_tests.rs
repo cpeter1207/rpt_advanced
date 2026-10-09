@@ -716,7 +716,7 @@ fn scheduled_replacement_suppresses_and_restores_every_group_member() {
 fn changed_windows_preserve_activity_but_not_previous_window_state() {
     let mut old = scheduler();
     old.tick(civil(12, 0), 0, 1000, |_| Some(900), |_| false);
-    for change in ["time", "inactivity", "replacement", "primary"] {
+    for change in ["time", "inactivity", "replacement", "primary", "group"] {
         let mut routes = old.route_specs();
         let mut windows = old.window_specs();
         match change {
@@ -725,6 +725,7 @@ fn changed_windows_preserve_activity_but_not_previous_window_state() {
             }
             "inactivity" => windows[0].end_inactivity_ms = 30000,
             "replacement" => routes[1].remote = "4000".into(),
+            "group" => routes[1].group_label = Some("other-group".into()),
             _ => routes[0].remote = "4000".into(),
         }
         let mut next = LinkScheduler::new(2, routes, windows, Some(&old)).unwrap();
@@ -761,4 +762,130 @@ fn changed_warning_configuration_does_not_reuse_a_previous_window() {
         assert_eq!(next.windows[0].start_warned, Vec::<u64>::new());
         assert_eq!(next.windows[0].end_warned, Vec::<u64>::new());
     }
+}
+
+#[test]
+fn duplicate_routes_reject_permanent_same_group_and_missing_windows() {
+    let duplicate = |permanent, group: Option<&str>| RouteSpec {
+        local: "524950".into(),
+        remote: "3000".into(),
+        permanent,
+        group_label: group.map(str::to_owned),
+        group_name: None,
+        group_priority: None,
+    };
+    let empty_window = ReplacementSpec {
+        routes: vec![],
+        replaced: vec![],
+        window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
+        end_inactivity_ms: 0,
+        warning_before_start_ms: Vec::new(),
+        warning_before_end_ms: Vec::new(),
+        warning_message_id: None,
+    };
+
+    for (routes, windows) in [
+        (vec![duplicate(true, None), duplicate(false, None)], vec![]),
+        (
+            vec![
+                duplicate(false, Some("same")),
+                duplicate(false, Some("same")),
+            ],
+            vec![],
+        ),
+        (
+            vec![
+                duplicate(false, Some("first")),
+                duplicate(false, Some("second")),
+            ],
+            vec![],
+        ),
+        (
+            vec![
+                duplicate(false, Some("first")),
+                duplicate(false, Some("second")),
+            ],
+            vec![ReplacementSpec {
+                routes: vec![0],
+                ..empty_window.clone()
+            }],
+        ),
+        (
+            vec![
+                duplicate(false, Some("first")),
+                duplicate(false, Some("second")),
+            ],
+            vec![ReplacementSpec {
+                routes: vec![1],
+                ..empty_window.clone()
+            }],
+        ),
+    ] {
+        assert!(LinkScheduler::new(1, routes, windows, None).is_err());
+    }
+}
+
+#[test]
+fn schedule_validation_rejects_permanent_and_malformed_group_replacements() {
+    let mut routes = scheduler().route_specs();
+    let mut windows = scheduler().window_specs();
+    windows[0].routes = vec![0];
+    windows[0].replaced = vec![1];
+    assert!(LinkScheduler::new(1, routes.clone(), windows.clone(), None).is_err());
+
+    routes[1].group_label = Some("fallback".into());
+    routes[1].group_name = Some("Fallback".into());
+    routes[1].group_priority = Some(0);
+    routes.push(RouteSpec {
+        local: "524950".into(),
+        remote: "4000".into(),
+        permanent: true,
+        group_label: Some("fallback".into()),
+        group_name: Some("Fallback".into()),
+        group_priority: Some(1),
+    });
+    windows[0].routes = vec![1, 2];
+    windows[0].replaced = vec![0];
+    assert!(LinkScheduler::new(1, routes, windows, None).is_err());
+}
+
+#[test]
+fn route_count_change_does_not_reuse_previous_window_state() {
+    let old = scheduler();
+    let mut routes = old.route_specs();
+    routes[1].group_label = Some("fallback".into());
+    routes[1].group_name = Some("Fallback".into());
+    routes[1].group_priority = Some(0);
+    routes.push(RouteSpec {
+        local: "524950".into(),
+        remote: "4000".into(),
+        permanent: false,
+        group_label: Some("fallback".into()),
+        group_name: Some("Fallback".into()),
+        group_priority: Some(1),
+    });
+    let mut windows = old.window_specs();
+    windows[0].routes = vec![1, 2];
+
+    let next = LinkScheduler::new(2, routes, windows, Some(&old)).unwrap();
+    assert!(!next.windows[0].initialized);
+}
+
+#[test]
+fn changed_permanence_is_a_different_route_identity() {
+    let original = RouteSpec {
+        local: "524950".into(),
+        remote: "3000".into(),
+        permanent: false,
+        group_label: None,
+        group_name: None,
+        group_priority: None,
+    };
+    let mut old = LinkScheduler::new(1, vec![original.clone()], vec![], None).unwrap();
+    old.routes[0].paused = true;
+    let mut changed = original;
+    changed.permanent = true;
+    let next = LinkScheduler::new(2, vec![changed], vec![], Some(&old)).unwrap();
+
+    assert!(!next.routes[0].paused);
 }

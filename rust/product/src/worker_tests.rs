@@ -280,6 +280,12 @@ fn malformed_callback_pointers_fail_without_publishing_audio_or_keying() {
             transmit_callback(transmit, null, 8, &mut keyed, &mut ctcss_enabled),
             -1
         );
+        keyed = 99;
+        assert_eq!(
+            transmit_callback(transmit, null, 8, &mut keyed, null.cast()),
+            -1
+        );
+        assert_eq!(keyed, 0);
         assert_eq!(
             transmit_callback(transmit, null, 8, null.cast(), &mut ctcss_enabled),
             -1
@@ -474,6 +480,29 @@ fn meter_ignores_empty_calls_sanitizes_nonfinite_samples_and_saturates_deadlines
     saturated.samples = u64::MAX - 1;
     assert!(saturated.observe(&[0.0]).is_some());
     assert_eq!(saturated.next_snapshot_sample, u64::MAX);
+}
+
+#[test]
+fn meter_status_formats_linear_levels_as_dbfs_and_silence_as_negative_infinity() {
+    let active = RadioWorker::format_meter(
+        "tx",
+        Some(MeterSnapshot {
+            peak: 0.5,
+            rms: 0.25,
+            ..MeterSnapshot::default()
+        }),
+    );
+    assert!(active.contains("peak=-6.0dBFS rms=-12.0dBFS"));
+
+    let silence = RadioWorker::format_meter(
+        "tx",
+        Some(MeterSnapshot {
+            peak: 0.0,
+            rms: 0.0,
+            ..MeterSnapshot::default()
+        }),
+    );
+    assert!(silence.contains("peak=-inf dBFS") || silence.contains("peak=-infdBFS"));
 }
 
 #[test]

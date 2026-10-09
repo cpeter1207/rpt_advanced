@@ -58,6 +58,26 @@ fn real_native_audio_publishes_every_keypad_symbol_in_order() {
     assert_eq!(found, expected);
     assert_eq!(dispatcher.next(7), None);
 }
+
+#[test]
+fn worker_reports_qualified_dtmf_muting_until_the_tone_leaves() {
+    let (mut worker, _) = DtmfWorker::new(7, true);
+    assert!(!worker.suppressing());
+    let mut tone = (0..1224)
+        .map(|offset| {
+            let time = offset as f32 / 48_000.0;
+            0.031
+                * ((std::f32::consts::TAU * 697.0 * time).sin()
+                    + (std::f32::consts::TAU * 1209.0 * time).sin())
+        })
+        .collect::<Vec<_>>();
+    worker.process(true, &mut tone, 1);
+    assert!(worker.suppressing());
+    let mut silence = vec![0.0; 612];
+    worker.process(true, &mut silence, 2);
+    assert!(!worker.suppressing());
+}
+
 #[test]
 fn suppressed_control_discards_queued_prefix_but_accepts_later_digits() {
     let (mut worker, mut dispatcher) = DtmfPublisher::new(7);
@@ -226,12 +246,48 @@ fn parrot_dtmf_requires_both_argon2id_codes_and_expires_after_idle_timeout() {
     assert_eq!(enabled.command.action, LinkAction::ParrotEnable);
     assert!(commands.consume_parrot_authorization(enabled.admin_authorized, 6));
     assert!(!commands.consume_parrot_authorization(false, 6));
+    assert!(!commands.consume_parrot_authorization(false, 2006));
     assert!(enter(&mut commands, "*805", 1005).is_none());
     assert!(enter(&mut commands, "*800123456#", 1006).is_none());
     assert!(enter(&mut commands, "*801000000#", 1007).is_none());
     assert!(enter(&mut commands, "*805", 1008).is_some());
     assert!(enter(&mut commands, "*801654321#", 1009).is_none());
     assert!(enter(&mut commands, "*804", 1010).is_none());
+}
+
+#[test]
+fn parrot_authorization_handles_disabled_timeout_and_deadline_boundaries() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let digest = |code: &[u8], salt: &str| {
+        Argon2::default()
+            .hash_password(code, &SaltString::from_b64(salt).unwrap())
+            .unwrap()
+            .to_string()
+    };
+    let unlock_hash = digest(b"1234", "c29tZXNhbHQ");
+    let lock_hash = digest(b"5678", "bG9ja3NhbHQ");
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+
+    commands.configure_admin(&unlock_hash, &lock_hash, 0);
+    assert!(enter(&mut commands, "*8001234#", 10).is_none());
+    assert!(enter(&mut commands, "*804", 11).is_none());
+    assert!(!commands.consume_parrot_authorization(true, 11));
+    commands.confirm_parrot_action(11);
+    assert!(enter(&mut commands, "*8015678#", 12).is_none());
+
+    commands.configure_admin(&unlock_hash, &lock_hash, 100);
+    assert!(enter(&mut commands, "*8001234#", 20).is_none());
+    assert!(commands.consume_parrot_authorization(true, 119));
+    assert!(!commands.consume_parrot_authorization(true, 120));
+    assert_eq!(commands.admin_until_ms, 0);
+
+    commands.configure_admin(&unlock_hash, &lock_hash, 100);
+    assert!(enter(&mut commands, "*8001234#", 30).is_none());
+    commands.confirm_parrot_action(40);
+    assert_eq!(commands.admin_until_ms, 140);
+    commands.confirm_parrot_action(140);
+    assert_eq!(commands.admin_until_ms, 140);
 }
 
 fn enter(commands: &mut DtmfCommands, input: &str, now_ms: u64) -> Option<DigitOperation> {

@@ -207,6 +207,16 @@ pub(crate) fn set_cancel_on_push(
     PUSH_CANCEL.with(|cancel| cancel.set(Some((cancelled, generation, call))));
 }
 
+pub(crate) fn set_cancel_on_failed_push(
+    cancelled: &std::sync::atomic::AtomicU64,
+    generation: u64,
+    call: usize,
+) {
+    PUSH_CALLS.with(|calls| calls.set(0));
+    PUSH_SCRIPT.with(|script| script.set(3));
+    PUSH_CANCEL.with(|cancel| cancel.set(Some((cancelled, generation, call))));
+}
+
 fn scripted_cancel_on_push_endpoints() -> Result<(InboundProducer, InboundConsumer), RingError> {
     // SAFETY: install a copied immutable descriptor; the thread-local cancellation target remains
     // valid for the synchronous producer callback in the owning worker test.

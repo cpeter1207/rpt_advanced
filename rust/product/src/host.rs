@@ -134,6 +134,14 @@ struct PeerOwner {
     control: PeerControl,
 }
 
+fn ensure_peer_capacity(count: usize) -> Result<(), RuntimeError> {
+    if count >= MAX_PEER_SESSIONS {
+        Err(RuntimeError::Rejected)
+    } else {
+        Ok(())
+    }
+}
+
 /// Product runtime; every method is invoked by the selected serialized control executor.
 pub struct Host {
     /// Core configuration, controller, schedule, and link-policy aggregate.
@@ -350,9 +358,7 @@ impl Host {
         mut io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        if self.peers.len() >= MAX_PEER_SESSIONS {
-            return Err(RuntimeError::Rejected);
-        }
+        ensure_peer_capacity(self.peers.len())?;
         {
             let (_, lease) = self
                 .leases

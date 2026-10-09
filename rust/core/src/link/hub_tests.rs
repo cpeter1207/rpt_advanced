@@ -55,3 +55,39 @@ fn topology_marks_fallback_standby_local_only_without_changing_its_runtime_mode(
             .any(|link| link.name == "3000" && link.mode == Mode::MONITOR && link.local_only)
     );
 }
+
+#[test]
+fn disconnect_permanent_all_pauses_and_invalidates_inflight_retries() {
+    let mut hub = LinkManager::new("1000").unwrap();
+    hub.retain_retry("2000", Mode::TRANSCEIVE, 0).unwrap();
+    let attempt = hub.take_retry(0).unwrap();
+
+    assert!(hub.disconnect_permanent_all().is_empty());
+    assert_eq!(hub.publish_retry(&attempt), Err(AdmissionError::Stale));
+    assert!(
+        hub.snapshot()
+            .iter()
+            .any(|peer| peer.name == "2000" && peer.paused)
+    );
+}
+
+#[test]
+fn explicit_reconnect_resumes_only_a_matching_paused_permanent_retry() {
+    let mut hub = LinkManager::new("1000").unwrap();
+    hub.attach("2000", Mode::MONITOR, false).unwrap();
+    hub.disconnect_all();
+
+    assert!(!hub.resume_permanent_retry("3000", Mode::TRANSCEIVE, 10));
+    assert!(!hub.resume_permanent_retry("2000", Mode::TRANSCEIVE, 10));
+    assert!(hub.snapshot().iter().any(|peer| peer.name == "2000"));
+
+    hub.retain_retry("4000", Mode::TRANSCEIVE, 0).unwrap();
+    assert!(!hub.resume_permanent_retry("4000", Mode::TRANSCEIVE, 10));
+    hub.pause_retries();
+    assert!(hub.resume_permanent_retry("4000", Mode::MONITOR, 20));
+    let attempt = hub.take_retry(20).unwrap();
+    assert_eq!(
+        (attempt.name.as_str(), attempt.mode),
+        ("4000", Mode::MONITOR)
+    );
+}

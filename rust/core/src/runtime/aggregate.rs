@@ -1207,7 +1207,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             if !node.control.telemetry.set_parrot_enabled(*enabled) {
                 return Err(RuntimeError::Rejected);
             }
-            node.links.confirm_parrot_command(*enabled, clock.now_ms);
+            node.links.confirm_parrot_command(clock.now_ms);
         }
         self.track_detach(local, &effect);
         Ok(effect)

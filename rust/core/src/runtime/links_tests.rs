@@ -91,7 +91,7 @@ fn parrot_actions_require_a_valid_admin_unlock_and_use_live_typed_effects() {
         links.command(enabled.unwrap(), host.control().work().unwrap(), 6, false),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
-    links.confirm_parrot_command(true, 6);
+    links.confirm_parrot_command(6);
     assert!(matches!(
         links.command(
             operation(LinkAction::ParrotDisable, ""),
@@ -115,6 +115,42 @@ fn parrot_actions_require_a_valid_admin_unlock_and_use_live_typed_effects() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn authorized_parrot_disable_confirms_the_disabled_state() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut links = links();
+    links.configure_admin(&digest, &digest, 60_000);
+    let mut host = NodeHost::new(generation(1));
+    for digit in "*8001234#".chars() {
+        let _ = links.digit(DigitEvent::Digit { digit, now_ms: 1 });
+    }
+    let mut disable = None;
+    for digit in "*805".chars() {
+        disable = links
+            .digit(DigitEvent::Digit { digit, now_ms: 2 })
+            .or(disable);
+    }
+    assert!(matches!(
+        links.command(disable.unwrap(), host.control().work().unwrap(), 3, false),
+        Ok(LinkEffect::ParrotEnabled(false))
+    ));
+    links.confirm_parrot_command(3);
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::AdminUnlock, ""),
+            host.control().work().unwrap(),
+            4,
+            false,
+        ),
+        Err(AdmissionError::Denied)
+    ));
 }
 
 #[test]
@@ -1305,5 +1341,138 @@ fn scheduled_cancel_clock_failure_and_window_withdrawal_release_exact_reservatio
     assert!(matches!(
         links.next_scheduled(control.work().unwrap()),
         Some(LinkEffect::Connect(_))
+    ));
+}
+
+#[test]
+fn reconnect_permanent_all_detaches_scheduled_route_outside_its_window() {
+    use super::super::link_schedule::{ReplacementSpec, RouteSpec};
+    use crate::schedule::{ScheduledWindow, Weekday};
+
+    let clock = |hour| CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, 0).unwrap();
+    let routes = vec![
+        RouteSpec {
+            local: "524950".into(),
+            remote: "2000".into(),
+            permanent: true,
+            group_label: None,
+            group_name: None,
+            group_priority: None,
+        },
+        RouteSpec {
+            local: "524950".into(),
+            remote: "3000".into(),
+            permanent: false,
+            group_label: None,
+            group_name: None,
+            group_priority: None,
+        },
+    ];
+    let schedule = LinkScheduler::new(
+        1,
+        routes,
+        vec![ReplacementSpec {
+            routes: vec![1],
+            replaced: vec![0],
+            window: ScheduledWindow::parse(None, None, "12:00", "13:00").unwrap(),
+            end_inactivity_ms: 0,
+            warning_before_start_ms: Vec::new(),
+            warning_before_end_ms: Vec::new(),
+            warning_message_id: None,
+        }],
+        None,
+    )
+    .unwrap();
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        Some(schedule),
+    )
+    .unwrap();
+    let mut host = NodeHost::new(generation(1));
+    links.tick(clock(12), 0, 0, |_| None);
+    let LinkEffect::Connect(attempt) = links
+        .next_scheduled(host.control().work().unwrap())
+        .unwrap()
+    else {
+        panic!("scheduled replacement should connect");
+    };
+    assert!(
+        links
+            .finish_connect_at(attempt, true, 0, Some((clock(12), 0)), |_| None)
+            .unwrap()
+    );
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::DisconnectPermanentAll, ""),
+            host.control().work().unwrap(),
+            1,
+            false,
+        ),
+        Ok(LinkEffect::Detach(names)) if names == ["3000"]
+    ));
+    links.tick(clock(13), 0, 1, |_| None);
+
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::ReconnectPermanentAll, ""),
+            host.control().work().unwrap(),
+            2,
+            false,
+        ),
+        Ok(LinkEffect::Detach(names)) if names == ["3000"]
+    ));
+}
+
+#[test]
+fn connect_commands_distinguish_temporary_links_and_existing_loops() {
+    let mut links = links();
+    let mut host = NodeHost::new(generation(1));
+
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::Transceive, "2000"),
+            host.control().work().unwrap(),
+            1,
+            false,
+        ),
+        Ok(LinkEffect::Connect(attempt)) if attempt.remote() == "2000" && !attempt.permanent()
+    ));
+
+    links
+        .manager
+        .attach("3000", Mode::TRANSCEIVE, false)
+        .unwrap();
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::Transceive, "3000"),
+            host.control().work().unwrap(),
+            2,
+            false,
+        ),
+        Err(AdmissionError::Loop)
+    ));
+    links
+        .manager
+        .attach("4000", Mode::TRANSCEIVE, true)
+        .unwrap();
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::PermanentTransceive, "4000"),
+            host.control().work().unwrap(),
+            3,
+            false,
+        ),
+        Err(AdmissionError::Loop)
+    ));
+    assert!(matches!(
+        links.command(
+            operation(LinkAction::Transceive, "524950"),
+            host.control().work().unwrap(),
+            4,
+            false,
+        ),
+        Err(AdmissionError::Loop)
     ));
 }

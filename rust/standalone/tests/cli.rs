@@ -72,6 +72,20 @@ fn help_exits_successfully() {
 }
 
 #[test]
+fn check_providers_validates_the_installed_runtime_composition() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rpt-advanced"))
+        .arg("--check-providers")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("runtime providers valid"));
+}
+
+#[test]
 fn invalid_arguments_are_rejected() {
     let binary = env!("CARGO_BIN_EXE_rpt-advanced");
     for arguments in [vec![], vec!["--unsupported".to_owned()]] {
@@ -120,11 +134,28 @@ fn invalid_arguments_are_rejected() {
             "/etc/rpt.conf".to_owned(),
             "--secrets-file".to_owned(),
         ],
+        vec![
+            "--foreground".to_owned(),
+            "/etc/rpt.conf".to_owned(),
+            "--secrets-file".to_owned(),
+            "/tmp/secrets.conf".to_owned(),
+            "extra".to_owned(),
+        ],
     ] {
         let output = Command::new(binary).args(arguments).output().unwrap();
         assert_eq!(output.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&output.stderr).contains("--foreground"));
     }
+    let output = Command::new(binary)
+        .args([
+            "--foreground",
+            "/missing/rpt_advanced.conf",
+            "--secrets-file",
+            "/missing/rpt_advanced-secrets.conf",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
     let output = Command::new(binary)
         .args(["--check-providers", "extra"])
         .output()

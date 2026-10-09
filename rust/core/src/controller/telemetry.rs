@@ -57,13 +57,13 @@ impl PreparedMedia {
     pub fn new_parrot_stream(
         report: Option<Box<dyn PcmStreamReader>>,
         recording: Box<dyn PcmStreamReader>,
-    ) -> Result<Self, ControllerError> {
+    ) -> Self {
         let stream = ParrotSequence::new(report, recording);
-        Ok(Self(
+        Self(
             Playback::new_stream(Box::new(stream)),
             true,
             MediaKind::Parrot,
-        ))
+        )
     }
 
     /// Build deterministic in-memory media for controller unit tests only.

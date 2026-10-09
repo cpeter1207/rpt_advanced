@@ -571,7 +571,7 @@ impl<R: Send, T: Send> Shared<R, T> {
         for _ in 0..2 {
             let candidate = self.active.load(Ordering::SeqCst);
             self.hazards[slot].store(candidate, Ordering::SeqCst);
-            if !candidate.is_null() && self.active.load(Ordering::SeqCst) == candidate {
+            if candidate_is_current(candidate, self.active.load(Ordering::SeqCst)) {
                 // SAFETY: the slot was published before validation and remains protected.
                 let id = unsafe { (*candidate).id };
                 self.adopted[slot].store(id, Ordering::Release);
@@ -582,6 +582,14 @@ impl<R: Send, T: Send> Shared<R, T> {
         None
     }
 }
+
+/// Verify that a hazard-protected generation is still the active publication.
+fn candidate_is_current<T>(candidate: *mut T, active: *mut T) -> bool {
+    !candidate.is_null() && candidate == active
+}
+
+#[cfg(test)]
+mod tests;
 
 /// Guard for one complete callback. Dropping only clears its fixed hazard slot.
 pub struct GenerationGuard<'a, R: Send, T: Send, const RX: bool> {

@@ -55,6 +55,16 @@ impl StationMediaSession for Session {
             started: Arc::clone(&self.started),
         }))
     }
+    fn register_prepared(
+        &mut self,
+        audio: PreparedAudio,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        Ok(Box::new(StreamReader {
+            samples: audio.samples().to_vec(),
+            offset: 0,
+            started: Arc::clone(&self.started),
+        }))
+    }
     fn start(&mut self) -> Result<(), MediaError> {
         if self.fail_start {
             return Err(MediaError::Io);
@@ -119,6 +129,7 @@ fn every_telemetry_source_is_registered_with_the_station_pcm_producer() {
     let config = ConfigDocument::parse(
         "[1000]\n\
          [identifier 1000 id]\nsound_file=id.wav\nspeech_text=ID\nmorse_text=ID\n\
+         [announcement 1000 news]\nmorse_text=NEWS\n\
          [courtesy 1000 link]\ninput=link\ntone_sequence=500/10\nmorse_text=L\n",
     )
     .unwrap();
@@ -128,15 +139,16 @@ fn every_telemetry_source_is_registered_with_the_station_pcm_producer() {
     controller(&config, &node, &resolved, &media, 7).unwrap();
     assert!(media.started.load(Ordering::Acquire));
     let sources = media.sources.lock().unwrap();
-    assert_eq!(sources.len(), 2);
+    assert_eq!(sources.len(), 3);
     assert_eq!(
         sources[0].file.as_deref(),
         Some(std::path::Path::new("id.wav"))
     );
     assert_eq!(sources[0].speech.as_ref().unwrap().text, "ID");
     assert_eq!(sources[0].morse.as_ref().unwrap().text, "ID");
-    assert_eq!(sources[1].tone.as_ref().unwrap().sequence, "500/10");
-    assert_eq!(sources[1].morse.as_ref().unwrap().text, "L");
+    assert_eq!(sources[1].morse.as_ref().unwrap().text, "NEWS");
+    assert_eq!(sources[2].tone.as_ref().unwrap().sequence, "500/10");
+    assert_eq!(sources[2].morse.as_ref().unwrap().text, "L");
 }
 
 #[test]
@@ -175,6 +187,50 @@ fn status_speech_and_morse_are_registered_as_one_producer_owned_chain() {
     let source = media.sources.lock().unwrap().pop().unwrap();
     assert_eq!(source.speech.unwrap().text, "Connected");
     assert_eq!(source.morse.unwrap().text, "L");
+}
+
+#[test]
+fn parrot_recording_is_prepared_without_a_spoken_report() {
+    let media = media(false, false);
+    let mut station = media.station("1000", 7).unwrap();
+    let playback = streamed_parrot(
+        &mut *station,
+        &settings(),
+        "",
+        PreparedAudio::new(48_000, vec![0.5, 0.25]).unwrap(),
+    );
+    assert!(playback.is_ok());
+    assert!(media.sources.lock().unwrap().is_empty());
+}
+
+#[test]
+fn parrot_report_is_omitted_when_no_speech_model_is_configured() {
+    let config = ConfigDocument::parse("[1000]\n[speech]\nvoice=\n").unwrap();
+    let settings =
+        ResolvedIdentifierSettings::resolve(&config, &NodeId::new("1000").unwrap(), None)
+            .unwrap()
+            .value;
+    let media = media(false, false);
+    let mut station = media.station("1000", 7).unwrap();
+
+    let playback = streamed_parrot(
+        &mut *station,
+        &settings,
+        "Peak level -3 dBFS",
+        PreparedAudio::new(48_000, vec![0.5, 0.25]).unwrap(),
+    );
+
+    assert!(playback.is_ok());
+    assert!(media.sources.lock().unwrap().is_empty());
+}
+
+#[test]
+fn config_failures_convert_to_the_runtime_error_boundary() {
+    let error = ConfigDocument::parse("[unterminated").unwrap_err();
+    assert_eq!(
+        RuntimeError::from(error.clone()),
+        RuntimeError::Config(error)
+    );
 }
 
 #[test]
