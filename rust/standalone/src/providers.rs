@@ -214,7 +214,7 @@ pub enum Cm119DeviceError {
     /// The configured USB serial differs from the selected interface's serial.
     AudioSerialMismatch,
     /// The GPIO adapter could not query the selected interface.
-    GpioProbeFailed,
+    GpioProbeFailed(i32),
     /// The selected interface is not visible to the GPIO adapter.
     GpioDeviceNotPresent,
     /// The GPIO adapter reports a different serial for the selected interface.
@@ -229,7 +229,9 @@ impl std::fmt::Display for Cm119DeviceError {
             Self::AudioSelectionFailed => "PortAudio adapter could not select the CM119 device",
             Self::InvalidAudioSelection => "PortAudio adapter returned an invalid CM119 selection",
             Self::AudioSerialMismatch => "selected CM119 serial does not match configuration",
-            Self::GpioProbeFailed => "GPIO adapter could not probe the selected CM119 device",
+            Self::GpioProbeFailed(result) => {
+                return write!(formatter, "GPIO adapter probe failed with code {result}");
+            }
             Self::GpioDeviceNotPresent => "selected CM119 device is not present on GPIO",
             Self::GpioSerialMismatch => "audio and GPIO adapters selected different CM119 devices",
         };
@@ -587,8 +589,9 @@ fn resolve_cm119_device(
     let mut gpio_info: crate::abi::rptadv_gpio_device_info = unsafe { std::mem::zeroed() };
     gpio_info.struct_size = std::mem::size_of_val(&gpio_info) as u32;
     gpio_info.abi_version = 1;
-    if unsafe { probe(&gpio_config, &mut gpio_info) } != 0 {
-        return Err(Cm119DeviceError::GpioProbeFailed);
+    let probe_result = unsafe { probe(&gpio_config, &mut gpio_info) };
+    if probe_result != 0 {
+        return Err(Cm119DeviceError::GpioProbeFailed(probe_result));
     }
     if gpio_info.struct_size < std::mem::size_of_val(&gpio_info) as u32
         || gpio_info.abi_version != 1
@@ -917,8 +920,8 @@ mod tests {
                 "selected CM119 serial does not match configuration",
             ),
             (
-                Cm119DeviceError::GpioProbeFailed,
-                "GPIO adapter could not probe the selected CM119 device",
+                Cm119DeviceError::GpioProbeFailed(-4),
+                "GPIO adapter probe failed with code -4",
             ),
             (
                 Cm119DeviceError::GpioDeviceNotPresent,
@@ -1326,7 +1329,10 @@ mod tests {
         audio.usb_device_select = Some(fake_audio_device_select);
 
         for (probe, expected) in [
-            (fake_gpio_failure as _, Cm119DeviceError::GpioProbeFailed),
+            (
+                fake_gpio_failure as _,
+                Cm119DeviceError::GpioProbeFailed(-1),
+            ),
             (
                 fake_gpio_absent as _,
                 Cm119DeviceError::GpioDeviceNotPresent,
