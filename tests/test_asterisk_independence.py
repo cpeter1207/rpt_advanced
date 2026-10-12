@@ -43,6 +43,7 @@ PORTABLE_DESCRIPTOR_CLIENTS = {
     "rust/core/src/audio/tone.rs": "rptadv_tone_descriptor",
     "rust/core/src/audio/morse.rs": "rptadv_morse_descriptor",
     "rust/core/src/audio/dtmf.rs": "rptadv_dtmf_descriptor",
+    "rust/core/src/template.rs": "rptadv_template_descriptor",
 }
 PORTABLE_CALLBACK_TESTS = {
     "rust/core/src/audio/tone_tests.rs",
@@ -264,6 +265,11 @@ def verify_examples() -> None:
                 f"rust/core/src/audio/{name}.rs",
                 f'unsafe extern "C" {{ fn rptadv_{name}_descriptor(); }}\n',
             )
+        write(
+            root,
+            "rust/core/src/template.rs",
+            'unsafe extern "C" { fn rptadv_template_descriptor(); }\n',
+        )
         for name in ("tone_tests", "morse_tests"):
             write(
                 root,
@@ -328,6 +334,15 @@ def verify_examples() -> None:
             root,
             "rust/core/src/audio/tone_tests.rs",
             'unsafe extern "C" fn fake_callback() {}\n',
+        )
+        write(
+            root, "rust/core/src/template.rs", 'unsafe extern "C" { fn arbitrary(); }\n'
+        )
+        expect_violation(root, "imports a C ABI")
+        write(
+            root,
+            "rust/core/src/template.rs",
+            'unsafe extern "C" { fn rptadv_template_descriptor(); }\n',
         )
 
         write(

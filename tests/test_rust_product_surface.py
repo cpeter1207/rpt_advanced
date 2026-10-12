@@ -28,6 +28,7 @@ SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha1"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha1-1"
+TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
@@ -38,6 +39,7 @@ ELF_DEPENDENCIES = {
         "librptadvtone.so.1",
         "librptadvmorse.so.1",
         "librptadvdtmf.so.1",
+        "librptadvtemplate.so.1",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
@@ -113,7 +115,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
             )
         symbols = command("nm", "--defined-only", "--demangle", str(path))
         assert not re.search(
-            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor|rptadv_tone_descriptor|rptadv_morse_descriptor)$",
+            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor|rptadv_tone_descriptor|rptadv_morse_descriptor|rptadv_template_descriptor)$",
             symbols,
             re.MULTILINE,
         ), f"static external adapter in {name}"
@@ -277,6 +279,7 @@ def package(control: Path) -> None:
         "librptadvtone-dev",
         "librptadvmorse-dev",
         "librptadvdtmf-dev",
+        "librptadvtemplate-dev",
         "libusbradioplus-product-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
@@ -294,6 +297,8 @@ def package(control: Path) -> None:
         f"librptadvmorse1 (>= {MORSE_MINIMUM_VERSION})",
         f"librptadvdtmf-dev (>= {DTMF_MINIMUM_VERSION})",
         f"librptadvdtmf1 (>= {DTMF_MINIMUM_VERSION})",
+        f"librptadvtemplate-dev (>= {TEMPLATE_MINIMUM_VERSION})",
+        f"librptadvtemplate1 (>= {TEMPLATE_MINIMUM_VERSION})",
     ):
         assert token in contents, f"missing compatible audio provider: {token}"
     stanzas = {
@@ -317,6 +322,9 @@ def package(control: Path) -> None:
     )
     assert f"librptadvdtmf1 (>= {DTMF_MINIMUM_VERSION})" in product, (
         "product must depend directly on the released DTMF runtime"
+    )
+    assert f"librptadvtemplate1 (>= {TEMPLATE_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released template runtime"
     )
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 

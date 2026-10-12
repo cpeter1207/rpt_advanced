@@ -1,6 +1,8 @@
 //! Strict, bounded scheduled-message templates.
 
+use std::ffi::{CStr, c_char};
 use std::fmt;
+use std::sync::OnceLock;
 
 /// Maximum rendered payload size, excluding C's equivalent trailing NUL byte.
 const MAX_OUTPUT_BYTES: usize = 127;
@@ -56,117 +58,255 @@ impl fmt::Display for TemplateError {
 
 impl std::error::Error for TemplateError {}
 
+/// The required shared template provider is absent or incompatible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TemplateProviderError;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Span {
+    data: *const u8,
+    length: usize,
+}
+
+impl Span {
+    fn of(text: &str) -> Self {
+        Self {
+            data: text.as_ptr(),
+            length: text.len(),
+        }
+    }
+}
+
+#[repr(C)]
+struct KeyLimit {
+    name: Span,
+    maximum: usize,
+}
+
+#[repr(C)]
+struct KeyValue {
+    name: Span,
+    value: Span,
+}
+
+type Validate = unsafe extern "C" fn(Span, *const KeyLimit, usize, usize) -> i32;
+type Render = unsafe extern "C" fn(Span, *const KeyValue, usize, *mut u8, usize, *mut usize) -> i32;
+
+#[repr(C)]
+struct Descriptor {
+    struct_size: u32,
+    abi_version: u32,
+    capability_name: *const c_char,
+    validate: Option<Validate>,
+    render: Option<Render>,
+}
+
+#[derive(Clone, Copy)]
+struct TemplateApi {
+    validate: Validate,
+    render: Render,
+}
+
+unsafe extern "C" {
+    fn rptadv_template_descriptor() -> *const Descriptor;
+}
+
+static API: OnceLock<Result<TemplateApi, TemplateProviderError>> = OnceLock::new();
+
+fn provider_api() -> Result<TemplateApi, TemplateProviderError> {
+    *API.get_or_init(|| unsafe { validate_descriptor(rptadv_template_descriptor()) })
+}
+
+/// Check the size prefix before reading the complete immutable table.
+///
+/// # Safety
+/// `pointer` must address a readable ABI prefix and, if its size suffices,
+/// a complete process-lifetime descriptor.
+unsafe fn validate_descriptor(
+    pointer: *const Descriptor,
+) -> Result<TemplateApi, TemplateProviderError> {
+    if pointer.is_null() {
+        return Err(TemplateProviderError);
+    }
+    let size = unsafe { std::ptr::addr_of!((*pointer).struct_size).read() };
+    if size < std::mem::size_of::<Descriptor>() as u32 {
+        return Err(TemplateProviderError);
+    }
+    let abi = unsafe { std::ptr::addr_of!((*pointer).abi_version).read() };
+    if abi != 1 {
+        return Err(TemplateProviderError);
+    }
+    let descriptor = unsafe { &*pointer };
+    if descriptor.capability_name.is_null()
+        || unsafe { CStr::from_ptr(descriptor.capability_name) } != c"rptadv.template"
+    {
+        return Err(TemplateProviderError);
+    }
+    Ok(TemplateApi {
+        validate: descriptor.validate.ok_or(TemplateProviderError)?,
+        render: descriptor.render.ok_or(TemplateProviderError)?,
+    })
+}
+
+fn status_result(status: i32) -> Result<(), TemplateError> {
+    match status {
+        0 => Ok(()),
+        2 => Err(TemplateError::OutputTooLong),
+        // The ABI's invalid-argument status is unreachable for valid Rust inputs.
+        // Any unexpected failure remains fail-closed under the existing API.
+        _ => Err(TemplateError::InvalidSyntax),
+    }
+}
+
 impl MessageTemplate {
+    /// Validate the mandatory stateless descriptor before loading configuration.
+    pub fn provider_ready() -> Result<(), TemplateProviderError> {
+        provider_api().map(|_| ())
+    }
+
     /// Parse a template and reject malformed, unknown, or conservatively oversized output.
     pub fn parse(text: &str) -> Result<Self, TemplateError> {
-        let mut maximum = 0;
-        visit_template(text, |part| {
-            maximum = checked_total(maximum, part.maximum_length())?;
-            Ok(())
+        let api = provider_api().map_err(|_| TemplateError::InvalidSyntax)?;
+        let limits = [
+            KeyLimit {
+                name: Span::of("day_of_week"),
+                maximum: WEEKDAY_MAX,
+            },
+            KeyLimit {
+                name: Span::of("date"),
+                maximum: DATE_MAX,
+            },
+            KeyLimit {
+                name: Span::of("time"),
+                maximum: TIME_MAX,
+            },
+            KeyLimit {
+                name: Span::of("greeting"),
+                maximum: GREETING_MAX,
+            },
+            KeyLimit {
+                name: Span::of("link_status"),
+                maximum: LINK_STATUS_MAX,
+            },
+            KeyLimit {
+                name: Span::of("node"),
+                maximum: NODE_NAME_MAX,
+            },
+            KeyLimit {
+                name: Span::of("callsign"),
+                maximum: NODE_NAME_MAX,
+            },
+        ];
+        status_result(unsafe {
+            (api.validate)(
+                Span::of(text),
+                limits.as_ptr(),
+                limits.len(),
+                MAX_OUTPUT_BYTES,
+            )
         })?;
         Ok(Self(text.to_owned()))
     }
 
     /// Render the template completely, returning an error instead of truncated output.
     pub fn render(&self, values: &TemplateValues<'_>) -> Result<String, TemplateError> {
-        let mut output = String::new();
-        visit_template(&self.0, |part| {
-            let text = match part {
-                TemplatePart::Literal(text) => text,
-                TemplatePart::Substitution(name) => replacement(name, values),
-            };
-            checked_total(output.len(), text.len())?;
-            output.push_str(text);
-            Ok(())
+        let api = provider_api().map_err(|_| TemplateError::InvalidSyntax)?;
+        let substitutions = [
+            KeyValue {
+                name: Span::of("day_of_week"),
+                value: Span::of(values.day_of_week),
+            },
+            KeyValue {
+                name: Span::of("date"),
+                value: Span::of(values.date),
+            },
+            KeyValue {
+                name: Span::of("time"),
+                value: Span::of(values.time),
+            },
+            KeyValue {
+                name: Span::of("greeting"),
+                value: Span::of(values.greeting),
+            },
+            KeyValue {
+                name: Span::of("link_status"),
+                value: Span::of(values.link_status),
+            },
+            KeyValue {
+                name: Span::of("node"),
+                value: Span::of(values.node),
+            },
+            KeyValue {
+                name: Span::of("callsign"),
+                value: Span::of(values.callsign),
+            },
+        ];
+        let mut output = [0u8; MAX_OUTPUT_BYTES];
+        let mut written = 0;
+        status_result(unsafe {
+            (api.render)(
+                Span::of(&self.0),
+                substitutions.as_ptr(),
+                substitutions.len(),
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+            )
         })?;
-        Ok(output)
+        let bytes = output.get(..written).ok_or(TemplateError::InvalidSyntax)?;
+        let text = std::str::from_utf8(bytes).map_err(|_| TemplateError::InvalidSyntax)?;
+        Ok(text.to_owned())
     }
 }
 
-#[derive(Clone, Copy)]
-enum TemplatePart<'a> {
-    Literal(&'a str),
-    Substitution(Substitution),
-}
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
 
-impl TemplatePart<'_> {
-    fn maximum_length(self) -> usize {
-        match self {
-            Self::Literal(text) => text.len(),
-            Self::Substitution(substitution) => substitution.maximum_length(),
-        }
+    unsafe extern "C" fn validate(_: Span, _: *const KeyLimit, _: usize, _: usize) -> i32 {
+        0
     }
-}
-
-#[derive(Clone, Copy)]
-enum Substitution {
-    DayOfWeek,
-    Date,
-    Time,
-    Greeting,
-    LinkStatus,
-    Node,
-    Callsign,
-}
-
-impl Substitution {
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "day_of_week" => Some(Self::DayOfWeek),
-            "date" => Some(Self::Date),
-            "time" => Some(Self::Time),
-            "greeting" => Some(Self::Greeting),
-            "link_status" => Some(Self::LinkStatus),
-            "node" => Some(Self::Node),
-            "callsign" => Some(Self::Callsign),
-            _ => None,
-        }
+    unsafe extern "C" fn render(
+        _: Span,
+        _: *const KeyValue,
+        _: usize,
+        _: *mut u8,
+        _: usize,
+        _: *mut usize,
+    ) -> i32 {
+        0
     }
 
-    fn maximum_length(self) -> usize {
-        match self {
-            Self::DayOfWeek => WEEKDAY_MAX,
-            Self::Date => DATE_MAX,
-            Self::Time => TIME_MAX,
-            Self::Greeting => GREETING_MAX,
-            Self::LinkStatus => LINK_STATUS_MAX,
-            Self::Node | Self::Callsign => NODE_NAME_MAX,
-        }
+    #[test]
+    fn descriptor_rejects_short_wrong_or_missing_fields() {
+        let mut descriptor = Descriptor {
+            struct_size: std::mem::size_of::<Descriptor>() as u32,
+            abi_version: 1,
+            capability_name: c"rptadv.template".as_ptr(),
+            validate: Some(validate),
+            render: Some(render),
+        };
+        assert!(unsafe { validate_descriptor(&descriptor) }.is_ok());
+        descriptor.struct_size -= 1;
+        assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
+        descriptor.struct_size += 1;
+        descriptor.abi_version = 2;
+        assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
+        descriptor.abi_version = 1;
+        descriptor.capability_name = c"other".as_ptr();
+        assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
+        descriptor.capability_name = c"rptadv.template".as_ptr();
+        descriptor.render = None;
+        assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
     }
-}
 
-fn visit_template<'a>(
-    text: &'a str,
-    mut visit: impl FnMut(TemplatePart<'a>) -> Result<(), TemplateError>,
-) -> Result<(), TemplateError> {
-    let mut remaining = text;
-    while let Some(start) = remaining.find("${") {
-        visit(TemplatePart::Literal(&remaining[..start]))?;
-        let substitution = &remaining[start + 2..];
-        let end = substitution.find('}').ok_or(TemplateError::InvalidSyntax)?;
-        let name = &substitution[..end];
-        let parsed = Substitution::parse(name).ok_or(TemplateError::InvalidSyntax)?;
-        visit(TemplatePart::Substitution(parsed))?;
-        remaining = &substitution[end + 1..];
+    #[test]
+    fn status_translation_preserves_two_public_outcomes() {
+        assert_eq!(status_result(0), Ok(()));
+        assert_eq!(status_result(1), Err(TemplateError::InvalidSyntax));
+        assert_eq!(status_result(2), Err(TemplateError::OutputTooLong));
+        assert_eq!(status_result(3), Err(TemplateError::InvalidSyntax));
+        assert_eq!(status_result(99), Err(TemplateError::InvalidSyntax));
     }
-    visit(TemplatePart::Literal(remaining))
-}
-
-fn replacement<'a>(substitution: Substitution, values: &TemplateValues<'a>) -> &'a str {
-    match substitution {
-        Substitution::DayOfWeek => values.day_of_week,
-        Substitution::Date => values.date,
-        Substitution::Time => values.time,
-        Substitution::Greeting => values.greeting,
-        Substitution::LinkStatus => values.link_status,
-        Substitution::Node => values.node,
-        Substitution::Callsign => values.callsign,
-    }
-}
-
-fn checked_total(used: usize, added: usize) -> Result<usize, TemplateError> {
-    if added > MAX_OUTPUT_BYTES - used {
-        return Err(TemplateError::OutputTooLong);
-    }
-    Ok(used + added)
 }

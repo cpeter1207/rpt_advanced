@@ -1,4 +1,4 @@
-//! Select released audio libraries and reject incompatible installed ABIs.
+//! Select released functional libraries and reject incompatible installed ABIs.
 
 use std::process::Command;
 
@@ -6,10 +6,10 @@ fn pkg_config(args: &[&str]) -> String {
     let output = Command::new("pkg-config")
         .args(args)
         .output()
-        .expect("pkg-config is required for released audio providers");
+        .expect("pkg-config is required for released providers");
     assert!(
         output.status.success(),
-        "released audio provider development package is required: pkg-config {args:?}"
+        "released provider development package is required: pkg-config {args:?}"
     );
     String::from_utf8(output.stdout)
         .expect("pkg-config UTF-8")
@@ -18,7 +18,7 @@ fn pkg_config(args: &[&str]) -> String {
 }
 
 fn main() {
-    for provider in ["rptadvtone", "rptadvmorse", "rptadvdtmf"] {
+    for provider in ["rptadvtone", "rptadvmorse", "rptadvdtmf", "rptadvtemplate"] {
         assert_eq!(
             pkg_config(&["--variable=abi_version", provider]),
             "1",

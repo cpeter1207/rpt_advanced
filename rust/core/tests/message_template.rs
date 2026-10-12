@@ -126,3 +126,68 @@ fn reports_stable_template_errors() {
         "message template output is too long"
     );
 }
+
+#[test]
+fn released_template_provider_is_ready() {
+    MessageTemplate::provider_ready().unwrap();
+}
+
+#[test]
+fn shared_template_matches_captured_boundary_behavior() {
+    assert!(MessageTemplate::parse("${link_status} ${date} ${time}x").is_ok());
+    assert_eq!(
+        MessageTemplate::parse("${link_status} ${date} ${time}xx"),
+        Err(TemplateError::OutputTooLong)
+    );
+    for invalid in ["${unknown}", "${node", "${}"] {
+        assert_eq!(
+            MessageTemplate::parse(invalid),
+            Err(TemplateError::InvalidSyntax)
+        );
+    }
+    let values = TemplateValues {
+        day_of_week: "",
+        date: "",
+        time: "",
+        greeting: "",
+        link_status: &"x".repeat(107),
+        node: "",
+        callsign: "",
+    };
+    assert_eq!(
+        MessageTemplate::parse("$x }")
+            .unwrap()
+            .render(&values)
+            .unwrap(),
+        "$x }"
+    );
+    assert_eq!(
+        MessageTemplate::parse("é")
+            .unwrap()
+            .render(&values)
+            .unwrap(),
+        "é"
+    );
+    assert!(MessageTemplate::parse(&format!("{}é", "x".repeat(125))).is_ok());
+    assert_eq!(
+        MessageTemplate::parse(&format!("{}é", "x".repeat(126))),
+        Err(TemplateError::OutputTooLong)
+    );
+    assert_eq!(
+        MessageTemplate::parse("${link_status}")
+            .unwrap()
+            .render(&values)
+            .unwrap()
+            .len(),
+        107
+    );
+    assert_eq!(
+        MessageTemplate::parse("${link_status}")
+            .unwrap()
+            .render(&TemplateValues {
+                link_status: &"x".repeat(128),
+                ..values
+            }),
+        Err(TemplateError::OutputTooLong)
+    );
+}
