@@ -1,62 +1,126 @@
-//! Streaming 48 kHz courtesy-tone sequence renderer.
+//! Streaming courtesy tones supplied by the released ABI 1 tone library.
 
 use super::AudioSource;
+use std::ffi::{CStr, c_char, c_void};
+use std::ptr::NonNull;
+use std::sync::OnceLock;
 
-/// Fixed native audio rate used by tone rendering.
-const SAMPLE_RATE_HZ: usize = 48_000;
-const MAX_SEGMENTS: usize = 256;
-const MAX_DURATION_MS: usize = 60_000;
-const MAX_SAMPLES: usize = 5_760_000;
-
-/// A rejected tone sequence.
+/// A rejected tone sequence or unavailable/incompatible tone provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToneError;
 
-struct Segment {
-    first_hz: f32,
-    second_hz: f32,
-    samples: usize,
-    amplitude: f32,
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ToneDescriptor {
+    struct_size: u32,
+    abi_version: u32,
+    capability_name: *const c_char,
+    sequence_create: Option<unsafe extern "C" fn(*const u8, usize, i8, *mut *mut c_void) -> i32>,
+    sequence_rendered_samples: Option<unsafe extern "C" fn(*const c_void, *mut usize) -> i32>,
+    sequence_render: Option<unsafe extern "C" fn(*mut c_void, *mut f32, usize, *mut usize) -> i32>,
+    sequence_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+    oscillator_create: Option<unsafe extern "C" fn(f32, f32, *mut *mut c_void) -> i32>,
+    oscillator_reset: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+    oscillator_render: Option<unsafe extern "C" fn(*mut c_void, *mut f32, usize) -> i32>,
+    oscillator_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+#[derive(Clone, Copy)]
+struct ToneApi {
+    create: unsafe extern "C" fn(*const u8, usize, i8, *mut *mut c_void) -> i32,
+    rendered_samples: unsafe extern "C" fn(*const c_void, *mut usize) -> i32,
+    render: unsafe extern "C" fn(*mut c_void, *mut f32, usize, *mut usize) -> i32,
+    destroy: unsafe extern "C" fn(*mut c_void),
+}
+
+unsafe extern "C" {
+    fn rptadv_tone_descriptor() -> *const ToneDescriptor;
+}
+
+static API: OnceLock<Result<ToneApi, ToneError>> = OnceLock::new();
+
+fn provider_api() -> Result<ToneApi, ToneError> {
+    *API.get_or_init(|| unsafe { validate_descriptor(rptadv_tone_descriptor()) })
+}
+
+/// Check only the size prefix before reading the complete ABI table.
+///
+/// # Safety
+/// `pointer` must address a readable ABI descriptor prefix and, when its reported
+/// size is sufficient, a complete immutable descriptor during this call.
+unsafe fn validate_descriptor(pointer: *const ToneDescriptor) -> Result<ToneApi, ToneError> {
+    if pointer.is_null() {
+        return Err(ToneError);
+    }
+    let size = unsafe { std::ptr::addr_of!((*pointer).struct_size).read() };
+    if size < std::mem::size_of::<ToneDescriptor>() as u32 {
+        return Err(ToneError);
+    }
+    let abi = unsafe { std::ptr::addr_of!((*pointer).abi_version).read() };
+    if abi != 1 {
+        return Err(ToneError);
+    }
+    let descriptor = unsafe { &*pointer };
+    if descriptor.capability_name.is_null()
+        || unsafe { CStr::from_ptr(descriptor.capability_name) } != c"rptadv.tone"
+        || descriptor.oscillator_create.is_none()
+        || descriptor.oscillator_reset.is_none()
+        || descriptor.oscillator_render.is_none()
+        || descriptor.oscillator_destroy.is_none()
+    {
+        return Err(ToneError);
+    }
+    Ok(ToneApi {
+        create: descriptor.sequence_create.ok_or(ToneError)?,
+        rendered_samples: descriptor.sequence_rendered_samples.ok_or(ToneError)?,
+        render: descriptor.sequence_render.ok_or(ToneError)?,
+        destroy: descriptor.sequence_destroy.ok_or(ToneError)?,
+    })
 }
 
 /// A bounded tone sequence rendered incrementally without allocating PCM storage.
 pub struct ToneSequence {
-    segments: Vec<Segment>,
+    handle: NonNull<c_void>,
     rendered_samples: usize,
-    segment_index: usize,
-    segment_offset: usize,
-    first_phase: f32,
-    second_phase: f32,
+    render: unsafe extern "C" fn(*mut c_void, *mut f32, usize, *mut usize) -> i32,
+    destroy: unsafe extern "C" fn(*mut c_void),
 }
 
+// Each handle has unique ownership; the producer transfers it between threads,
+// never using it concurrently. Cached entrypoints remain valid for the DSO lifetime.
+unsafe impl Send for ToneSequence {}
+
 impl ToneSequence {
+    /// Validate the released provider during startup, even without configured tones.
+    pub fn provider_ready() -> Result<(), ToneError> {
+        provider_api().map(|_| ())
+    }
+
     /// Parse one bounded tone sequence at the fixed native rate.
     pub fn new(text: &str, default_level_db: i8) -> Result<Self, ToneError> {
-        if !(-60..=0).contains(&default_level_db) || text.trim().is_empty() {
+        Self::from_api(provider_api()?, text, default_level_db)
+    }
+
+    fn from_api(api: ToneApi, text: &str, default_level_db: i8) -> Result<Self, ToneError> {
+        let mut raw = std::ptr::null_mut();
+        if unsafe { (api.create)(text.as_ptr(), text.len(), default_level_db, &mut raw) } != 0 {
+            if let Some(handle) = NonNull::new(raw) {
+                unsafe { (api.destroy)(handle.as_ptr()) };
+            }
             return Err(ToneError);
         }
-        let mut segments = Vec::new();
-        for part in text.split(',') {
-            if part.trim().is_empty() || segments.len() == MAX_SEGMENTS {
-                return Err(ToneError);
-            }
-            segments.push(parse_segment(part, default_level_db)?);
+        let handle = NonNull::new(raw).ok_or(ToneError)?;
+        let mut rendered_samples = 0;
+        let status = unsafe { (api.rendered_samples)(handle.as_ptr(), &mut rendered_samples) };
+        if status != 0 {
+            unsafe { (api.destroy)(handle.as_ptr()) };
+            return Err(ToneError);
         }
-        let total = segments
-            .iter()
-            .try_fold(0_usize, |total, segment| {
-                total
-                    .checked_add(segment.samples)
-                    .filter(|total| *total <= MAX_SAMPLES)
-            })
-            .ok_or(ToneError)?;
         Ok(Self {
-            segments,
-            rendered_samples: total,
-            segment_index: 0,
-            segment_offset: 0,
-            first_phase: 0.0,
-            second_phase: 0.0,
+            handle,
+            rendered_samples,
+            render: api.render,
+            destroy: api.destroy,
         })
     }
 
@@ -68,32 +132,28 @@ impl ToneSequence {
     /// Render the next samples into the telemetry producer's bounded PCM chunk.
     pub fn render(&mut self, output: &mut [f32]) -> usize {
         let mut written = 0;
-        while written < output.len() && self.segment_index < self.segments.len() {
-            let segment = &self.segments[self.segment_index];
-            let count = (segment.samples - self.segment_offset).min(output.len() - written);
-            for sample in &mut output[written..written + count] {
-                *sample = 0.0;
-                if segment.first_hz != 0.0 {
-                    *sample +=
-                        segment.amplitude * (core::f32::consts::TAU * self.first_phase).sin();
-                    self.first_phase =
-                        (self.first_phase + segment.first_hz / SAMPLE_RATE_HZ as f32).fract();
-                }
-                if segment.second_hz != 0.0 {
-                    *sample +=
-                        segment.amplitude * (core::f32::consts::TAU * self.second_phase).sin();
-                    self.second_phase =
-                        (self.second_phase + segment.second_hz / SAMPLE_RATE_HZ as f32).fract();
-                }
-            }
-            written += count;
-            self.segment_offset += count;
-            if self.segment_offset == segment.samples {
-                self.segment_index += 1;
-                self.segment_offset = 0;
-            }
+        // The validated table and uniquely owned handle are cached at setup.
+        let status = unsafe {
+            (self.render)(
+                self.handle.as_ptr(),
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+            )
+        };
+        // A valid owned handle and Rust slice cannot be rejected by ABI 1. If a
+        // broken provider nevertheless does so, return no samples without
+        // allocating, logging, or unwinding on the producer path.
+        if status != 0 {
+            return 0;
         }
-        written
+        written.min(output.len())
+    }
+}
+
+impl Drop for ToneSequence {
+    fn drop(&mut self) {
+        unsafe { (self.destroy)(self.handle.as_ptr()) };
     }
 }
 
@@ -101,100 +161,6 @@ impl AudioSource for ToneSequence {
     fn render(&mut self, output: &mut [f32]) -> usize {
         self.render(output)
     }
-}
-
-fn parse_segment(text: &str, default_level_db: i8) -> Result<Segment, ToneError> {
-    let fields: Vec<_> = text.split('/').map(str::trim).collect();
-    if !(2..=3).contains(&fields.len()) || fields.iter().any(|field| field.is_empty()) {
-        return Err(ToneError);
-    }
-    let (frequencies, compact_level) = match fields[0].split_once('@') {
-        Some((frequencies, level)) if !level.contains('@') => {
-            (frequencies.trim(), Some(parse_level(level)?))
-        }
-        Some(_) => return Err(ToneError),
-        None => (fields[0], None),
-    };
-    if compact_level.is_some() && fields.len() == 3 {
-        return Err(ToneError);
-    }
-    let (first_hz, second_hz) = match frequencies.split_once('+') {
-        Some((first, second)) if !second.contains('+') => {
-            let first_hz = parse_frequency(first)?;
-            let second_hz = parse_frequency(second)?;
-            if first_hz == 0.0 || second_hz == 0.0 {
-                return Err(ToneError);
-            }
-            (first_hz, second_hz)
-        }
-        Some(_) => return Err(ToneError),
-        None => (parse_frequency(frequencies)?, 0.0),
-    };
-    if first_hz >= 24_000.0 || second_hz >= 24_000.0 {
-        return Err(ToneError);
-    }
-    let duration_ms = parse_duration(fields[1])?;
-    let level_db = compact_level
-        .or_else(|| fields.get(2).and_then(|level| parse_level(level).ok()))
-        .unwrap_or(default_level_db);
-    if fields.len() == 3 && parse_level(fields[2]).is_err() {
-        return Err(ToneError);
-    }
-    Ok(Segment {
-        first_hz,
-        second_hz,
-        samples: duration_ms * 48,
-        amplitude: 10_f32.powf(f32::from(level_db) / 20.0)
-            / if second_hz == 0.0 { 1.0 } else { 2.0 },
-    })
-}
-
-fn parse_frequency(text: &str) -> Result<f32, ToneError> {
-    let text = text.trim();
-    if text.eq_ignore_ascii_case("silence") {
-        return Ok(0.0);
-    }
-    let text = strip_suffix_case(text, "hz").unwrap_or(text).trim();
-    if text.is_empty()
-        || text.len() > 64
-        || !text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'.')
-        || text.bytes().filter(|byte| *byte == b'.').count() > 1
-    {
-        return Err(ToneError);
-    }
-    let frequency: f32 = text.parse().map_err(|_| ToneError)?;
-    frequency.is_finite().then_some(frequency).ok_or(ToneError)
-}
-
-fn parse_duration(text: &str) -> Result<usize, ToneError> {
-    let text = strip_suffix_case(text.trim(), "ms")
-        .unwrap_or(text.trim())
-        .trim();
-    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(ToneError);
-    }
-    let duration = text.parse().map_err(|_| ToneError)?;
-    (1..=MAX_DURATION_MS)
-        .contains(&duration)
-        .then_some(duration)
-        .ok_or(ToneError)
-}
-
-fn parse_level(text: &str) -> Result<i8, ToneError> {
-    let text = strip_suffix_case(text.trim(), "dbfs")
-        .or_else(|| strip_suffix_case(text.trim(), "db"))
-        .unwrap_or(text.trim())
-        .trim();
-    let level: i8 = text.parse().map_err(|_| ToneError)?;
-    (-60..=0).contains(&level).then_some(level).ok_or(ToneError)
-}
-
-fn strip_suffix_case<'a>(text: &'a str, suffix: &str) -> Option<&'a str> {
-    let split = text.len().checked_sub(suffix.len())?;
-    let (prefix, found) = text.split_at_checked(split)?;
-    found.eq_ignore_ascii_case(suffix).then_some(prefix)
 }
 
 #[cfg(test)]

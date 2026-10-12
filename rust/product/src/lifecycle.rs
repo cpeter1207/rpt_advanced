@@ -7,17 +7,18 @@ use crate::{
     services::HostServices,
 };
 use rpt_advanced_core::{
+    audio::ToneSequence,
+    config::{ConfigDocument, Schema},
+    control::{ControlExecutor, ControlTask},
+    runtime::{RuntimeClock, RuntimeError},
+};
+use rpt_advanced_core::{
     command::LinkAction,
     runtime::{
         RuntimeDispatch,
         dtmf::DigitOperation,
         links::{ConnectAttempt, LinkEffect, RetryWork},
     },
-};
-use rpt_advanced_core::{
-    config::{ConfigDocument, Schema},
-    control::{ControlExecutor, ControlTask},
-    runtime::{RuntimeClock, RuntimeError},
 };
 use std::{
     any::Any,
@@ -699,6 +700,7 @@ unsafe extern "C" fn rptadv_product_start(
                 .map_err(|_| RuntimeError::Preparation)?,
         );
         drop(crate::link::egress::Egress::new(48000, 960).map_err(|_| RuntimeError::Preparation)?);
+        ToneSequence::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let origin = Instant::now();
         let clock = capture(origin, services);

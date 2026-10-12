@@ -8,8 +8,11 @@ Install the `rpt-advanced` Debian package to run the standalone system service, 
 `app-rpt-advanced` to use the Asterisk adapter. The packages can be installed
 independently. Standalone radio I/O uses the separately packaged
 `libusbradioplus-product1` shared runtime, without installing the USBRadioPlus
-Asterisk channel. Source builds also require `libusbradioplus-product-dev`.
-Other shared runtime libraries are versioned dependencies. See the
+Asterisk channel. Source builds also require `libusbradioplus-product-dev`
+and the released `librptadvtone-dev` (ABI 1). The product links
+`librptadvtone.so.1` for bounded 48 kHz courtesy tones; the Rust core obtains
+the linker directory and ABI version from the installed `rptadvtone.pc`, not a
+sibling checkout. Other shared runtime libraries are versioned dependencies. See the
 [installation guide](doc/install.md) before selecting either path.
 
 Configuration is documented in the [configuration reference](doc/configuration.md).

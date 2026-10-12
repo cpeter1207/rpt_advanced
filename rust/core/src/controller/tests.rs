@@ -1751,10 +1751,15 @@ fn audio_path_never_allocates_or_reclaims_prepared_media() {
 #[test]
 fn tone_configuration_does_not_allocate_duration_sized_pcm() {
     AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
-    let tone = crate::audio::ToneSequence::new("1000/60000", -6).unwrap();
+    let mut tone = crate::audio::ToneSequence::new("1000/60000", -6).unwrap();
     let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(tone.rendered_samples(), 2_880_000);
-    assert_eq!(calls, Some(3));
+    // The released DSO owns setup allocations; this Rust allocator sees none.
+    assert!(calls.unwrap() <= 3);
+    let mut output = [0.0; 48];
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    assert_eq!(tone.render(&mut output), 48);
+    assert_eq!(AUDIO_ALLOCATIONS.with(|count| count.replace(None)), Some(0));
 }
 
 #[test]
