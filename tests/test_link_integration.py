@@ -286,12 +286,25 @@ def rate_adapter(modules):
                 result = cli(first[0], "rpt_advanced link disconnect 524950 508422")
                 assert "completed" in result, result
                 deadline = time.monotonic() + 5
-                while any(
-                    "IAX2/" in cli(configuration, "core show channels concise")
-                    for configuration, _ in (first, second)
-                ):
+                while True:
+                    states = [
+                        (
+                            node,
+                            cli(configuration, "core show channels concise"),
+                            cli(configuration, f"rpt_advanced link status {node}"),
+                        )
+                        for configuration, node in (
+                            (first[0], "524950"),
+                            (second[0], "508422"),
+                        )
+                    ]
+                    if all(
+                        reverse_ready(channels, status, node)
+                        for node, channels, status in states
+                    ):
+                        break
                     assert time.monotonic() < deadline, (
-                        "peer was not released before reverse dial"
+                        f"peer was not released before reverse dial: {states}"
                     )
                     time.sleep(0.05)
                 result = cli(second[0], "rpt_advanced link connect 508422 524950")
