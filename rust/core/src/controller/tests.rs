@@ -33,6 +33,51 @@ fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
 }
 
+#[test]
+fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
+    let signal = crate::link::PeerSignals::new();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for ended in [false, true] {
+        assert!(control.queue_prepared_status(media(0.4, 1).reply_to(Some(signal.reply_target()))));
+        if ended {
+            signal.end();
+        }
+        let mut radio = [0.0];
+        let mut parrot = [0.0];
+        let mut active = false;
+        let mut replies = [PeerReplySample::default()];
+        AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+        let keyed = node.process_audio_with_parrot(
+            false,
+            false,
+            false,
+            &[],
+            &mut radio,
+            ParrotOutput {
+                samples: &mut parrot,
+                active: &mut active,
+                replies: Some(&mut replies),
+            },
+        );
+        let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
+        assert_eq!(allocations, 0);
+        assert!(!keyed);
+        assert!(!node.ctcss_enabled());
+        assert_eq!(radio, [0.0]);
+        assert_eq!(replies[0].sample, if ended { 0.0 } else { 0.4 });
+        assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
 struct PendingMedia;
 
 impl crate::audio::PcmStreamReader for PendingMedia {
@@ -150,6 +195,7 @@ fn parrot_output_size_mismatch_skips_sample_processing() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut active,
+            replies: None,
         },
     );
 
@@ -580,6 +626,7 @@ fn receive_activity_discards_a_queued_parrot_before_playback() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut parrot_active,
+            replies: None,
         },
     );
 
@@ -614,6 +661,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut parrot_active,
+            replies: None,
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -628,6 +676,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut parrot_active,
+            replies: None,
         },
     );
 
@@ -662,6 +711,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut active,
+            replies: None,
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -676,6 +726,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut active,
+            replies: None,
         },
     );
     assert_eq!(parrot, [0.0]);

@@ -71,10 +71,24 @@ pub struct ControllerSettings {
     pub status_morse: MorseSettings,
 }
 
-/// Callback-owned samples and block-level routing state for isolated parrot fanout.
+/// Callback-owned parrot fanout and per-sample addressed command replies.
 pub(crate) struct ParrotOutput<'a> {
     pub samples: &'a mut [f32],
     pub active: &'a mut bool,
+    pub replies: Option<&'a mut [PeerReplySample]>,
+}
+
+/// Per-sample addressed media, independent of RF and ordinary mix-minus routing.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PeerReplySample {
+    pub target: usize,
+    pub sample: f32,
+}
+
+struct ProgramSample<'a> {
+    parrot: &'a mut f32,
+    parrot_active: &'a mut bool,
+    reply: Option<&'a mut PeerReplySample>,
 }
 
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
@@ -325,7 +339,7 @@ impl NodeController {
         )
     }
 
-    /// Render radio output and a separate parrot bus for local-plus-all-peer distribution.
+    /// Render RF, parrot fanout, and addressed replies into separate preallocated outputs.
     pub(crate) fn process_audio_with_parrot(
         &mut self,
         receiving: bool,
@@ -373,9 +387,14 @@ impl NodeController {
             output.samples.fill(0.0);
         }
         for (offset, sample) in audio.iter_mut().enumerate() {
-            let parrot_sample = parrot_output
-                .as_mut()
-                .map(|output| (&mut output.samples[offset], &mut *output.active));
+            let parrot_sample = parrot_output.as_mut().map(|output| ProgramSample {
+                parrot: &mut output.samples[offset],
+                parrot_active: &mut *output.active,
+                reply: output
+                    .replies
+                    .as_deref_mut()
+                    .and_then(|replies| replies.get_mut(offset)),
+            });
             let rf = self.step(
                 receiving,
                 linked,
@@ -452,8 +471,9 @@ impl NodeController {
         source_activity: bool,
         input: Option<f32>,
         link_sample: f32,
-        parrot_output: Option<(&mut f32, &mut bool)>,
+        parrot_output: Option<ProgramSample<'_>>,
     ) -> f32 {
+        self.telemetry.poll_status();
         let receive = receiving || linked;
         let idle = self.now.saturating_sub(self.last_activity);
         if receive {
@@ -494,18 +514,23 @@ impl NodeController {
         self.linked = linked;
         let may_transmit = self.settings.full_duplex || !receiving;
         let active_before = self.telemetry.active;
+        let peer_before =
+            active_before == Some(Source::Status) && self.telemetry.peer_status().is_some();
         if source_activity && self.telemetry.parrot_pending() {
             self.telemetry.discard_pending_parrot();
         }
-        if receive || matches!(active_before, Some(Source::Status | Source::Courtesy(_))) {
+        if receive
+            || (!peer_before && matches!(active_before, Some(Source::Status | Source::Courtesy(_))))
+        {
             self.release_pending = false;
         }
         let announcement_due = self.announcements.iter().position(|a| a.due(self.now));
         let ordinary = receive
-            || matches!(
-                active_before,
-                Some(Source::Status | Source::Courtesy(_) | Source::Identifier(_))
-            );
+            || (!peer_before
+                && matches!(
+                    active_before,
+                    Some(Source::Status | Source::Courtesy(_) | Source::Identifier(_))
+                ));
         let release_expired = self.keyed
             && !ordinary
             && active_before.is_none()
@@ -522,13 +547,20 @@ impl NodeController {
                 self.release_pending = true;
             }
         }
-        let pending_status = self.telemetry.status_pending();
-        let status_ready =
-            !receive && self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status;
+        let pending_status =
+            self.telemetry.status_pending() && self.telemetry.peer_status().is_none();
+        let peer_ready = self
+            .telemetry
+            .peer_status()
+            .is_some_and(|peer| !peer.active());
+        let status_ready = peer_ready
+            || (!receive
+                && self.now.saturating_sub(self.receiver_unkey) >= 12_000
+                && pending_status);
         let parrot_ready = !source_activity && self.telemetry.parrot_pending();
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
-        if may_transmit && self.telemetry.active.is_none() {
-            if courtesy_ready {
+        if (may_transmit || peer_ready) && self.telemetry.active.is_none() {
+            if courtesy_ready && may_transmit {
                 self.telemetry.active = self.courtesy.pop().and_then(|index| {
                     self.courtesy.media.get_mut(index).map(|media| {
                         media.0.restart(false);
@@ -537,11 +569,14 @@ impl NodeController {
                 });
             } else if status_ready {
                 self.telemetry.start_status();
-            } else if parrot_ready {
+            } else if parrot_ready && may_transmit {
                 self.telemetry.start_parrot();
                 self.telemetry.active = self.telemetry.parrot.as_ref().map(|_| Source::Parrot);
             }
         }
+        let peer_status =
+            self.telemetry.active == Some(Source::Status) && self.telemetry.peer_status().is_some();
+        let local_telemetry = self.telemetry.active.is_some() && !peer_status;
         let busy = receive
             || pending_status
             || parrot_ready
@@ -584,7 +619,7 @@ impl NodeController {
             .is_some_and(|id| id.media.0.is_streaming());
         let demand = linked
             || (self.settings.full_duplex && receiving)
-            || (self.telemetry.active.is_some() && !active_stream)
+            || (local_telemetry && !active_stream)
             || self.courtesy.pending()
             || parrot_ready
             // A ready status has already become active above when transmission is allowed.
@@ -626,11 +661,18 @@ impl NodeController {
             }
         }
         let rendered_source = self.telemetry.active;
+        let reply_target = if peer_status {
+            self.telemetry
+                .peer_status()
+                .map(|peer| (peer.identity(), peer.active()))
+        } else {
+            None
+        };
         self.ctcss_enabled = if !self.settings.ctcss_encode_on_input {
             true
         } else {
             match rendered_source {
-                Some(Source::Status) => true,
+                Some(Source::Status) if !peer_status => true,
                 Some(_) => false,
                 None => pending_status || receive || self.now < self.ctcss_hang_until,
             }
@@ -650,13 +692,19 @@ impl NodeController {
         let mut made = 0;
         let mut waiting_for_media = false;
         if let Some(playback) = playback {
-            let interrupt = (receive
+            let interrupt = (!peer_status
+                && receive
                 && matches!(
                     rendered_source,
                     Some(Source::Identifier(_) | Source::Status)
                 ))
                 || (source_activity && rendered_source == Some(Source::Parrot));
-            if may_transmit && input.is_some() {
+            if (if peer_status {
+                peer_ready
+            } else {
+                may_transmit
+            }) && input.is_some()
+            {
                 made = playback.render(interrupt, &mut telemetry_sample);
             } else {
                 playback.render(interrupt, &mut []);
@@ -697,7 +745,7 @@ impl NodeController {
         {
             self.release_pending = false;
         }
-        let telemetry_audio = made != 0;
+        let telemetry_audio = made != 0 && !peer_status;
         let short_tail = matches!(
             rendered_source,
             Some(Source::Identifier(_) | Source::Announcement(_))
@@ -705,10 +753,13 @@ impl NodeController {
         let other = linked
             || (self.settings.full_duplex && receiving)
             || self.courtesy.pending()
-            || status_ready;
+            || (status_ready && !peer_status);
         let transmit = other
             || telemetry_audio
-            || (self.telemetry.active.is_some() && !waiting_for_media && !active_stream);
+            || (self.telemetry.active.is_some()
+                && !peer_status
+                && !waiting_for_media
+                && !active_stream);
         let hang = if short_tail && !other {
             2400
         } else {
@@ -763,16 +814,31 @@ impl NodeController {
         } else {
             0.0
         };
-        let telemetry = telemetry_sample[0] * gain;
-        if let Some((output, active)) = parrot_output {
+        let telemetry = if peer_status {
+            0.0
+        } else {
+            telemetry_sample[0] * gain
+        };
+        if let Some(output) = parrot_output {
             if rendered_source == Some(Source::Parrot) && made != 0 {
-                *active = true;
+                *output.parrot_active = true;
             }
-            *output = if rendered_source == Some(Source::Parrot) && made != 0 {
+            *output.parrot = if rendered_source == Some(Source::Parrot) && made != 0 {
                 telemetry
             } else {
                 0.0
             };
+            if let Some(reply) = output.reply {
+                *reply = PeerReplySample::default();
+                if let Some((target, false)) = reply_target {
+                    if made != 0 {
+                        *reply = PeerReplySample {
+                            target,
+                            sample: telemetry_sample[0],
+                        };
+                    }
+                }
+            }
         }
         (local + link + telemetry).clamp(-1.0, 1.0)
     }

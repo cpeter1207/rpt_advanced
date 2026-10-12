@@ -232,6 +232,9 @@ the receive or transmit call that detects them. Each publisher has its own
 bounded SPSC event queue to the control owner. Meter, FIFO, and periodic status
 snapshots use `status_snapshot_interval_ms`, configured per node with a
 `[general]` fallback and a 50 ms default. Values must be positive integers.
+Same-device reloads apply the new interval independently at each worker's next
+generation boundary. A changed interval starts a fresh measurement window while
+preserving the elapsed-sample clock; it does not reopen the hardware stream.
 Each independently paced worker accumulates its own elapsed samples and
 publishes on the first call ending at or after its deadline. Control drains the
 bounded queues and retains the latest RX and TX snapshots separately; their

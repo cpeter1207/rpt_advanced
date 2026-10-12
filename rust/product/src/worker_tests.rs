@@ -88,6 +88,31 @@ fn audio_owners_with_config(maximum: usize, configuration: &str) -> (Runtime<Aud
     let owners = runtime.node("1000").unwrap().register_audio().unwrap();
     (runtime, owners)
 }
+fn reload_audio(runtime: &mut Runtime<Audio>, extra: &str) -> u64 {
+    runtime
+        .reload(
+            ConfigDocument::parse(&format!("[1000]\nradio_channel=usb\nduplex=full\n{extra}"))
+                .unwrap(),
+            &Media,
+            |_, _| {
+                let (state, _) = Audio::new(Vec::new(), 8).unwrap();
+                Ok(PreparedAdapter {
+                    state,
+                    control: (),
+                    receive_maximum: 8,
+                    transmit_maximum: 8,
+                })
+            },
+            |_, _| Ok(Box::new(Device) as Box<dyn DeviceHandoff>),
+            RuntimeClock {
+                now_ms: 1,
+                wall_seconds: 0,
+                civil: None,
+            },
+        )
+        .unwrap();
+    runtime.status(1)[0].1.active.unwrap()
+}
 fn worker() -> RadioWorker {
     worker_with_status(RadioStatus::default())
 }
@@ -252,7 +277,15 @@ fn absent_owners_and_invalid_sizes_fail_silent_and_unkeyed() {
         worker.receive.status.snapshot().0,
         "gated generation must retain physical COS"
     );
+    assert_eq!(worker.handoff.token.load(Ordering::Acquire), 1);
     assert_eq!(samples, [0.0; 8]);
+    assert_eq!(rx(&worker, false, &mut samples), 0);
+    assert!(!worker.receive.status.snapshot().0);
+    assert_eq!(
+        worker.handoff.token.load(Ordering::Acquire),
+        2,
+        "gated unkey must close the old ring tail and request its reset"
+    );
     samples.fill(0.25);
     assert_eq!(tx(&worker, &mut samples), (0, 0));
     assert_eq!(samples, [0.0; 8]);
@@ -362,8 +395,8 @@ fn provider_failures_remain_silent_and_observable_without_losing_control() {
     let mut worker = worker();
     let (producer, consumer) = crate::link::ring::tests::failed_endpoints();
     worker.observer = producer.observer();
-    worker.receive.state.get_mut().producer = producer;
-    *worker.transmit.consumer.get_mut() = consumer;
+    worker.receive.state.get_mut().ring.current.producer = producer;
+    worker.transmit.ring.get_mut().current.consumer = consumer;
     assert!(worker.attach(owners).is_ok());
     assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
     let mut output = [0.25; 8];
@@ -538,6 +571,119 @@ fn callback_meter_snapshots_are_bounded_and_control_keeps_latest() {
     assert!(status.contains("transmit-audio: at="));
     assert!(status.contains("dropped-snapshots=2"));
     drop(worker.stop());
+}
+
+#[test]
+fn reload_applies_snapshot_interval_at_each_callback_boundary() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    for _ in 0..6 {
+        assert_eq!(rx(&worker, false, &mut [0.0; 8]), 0);
+        assert_eq!(tx(&worker, &mut [0.0; 8]).0, 0);
+    }
+    reload_audio(&mut runtime, "status_snapshot_interval_ms=1\n");
+    for _ in 0..6 {
+        assert_eq!(rx(&worker, false, &mut [0.0; 8]), 0);
+        assert_eq!(tx(&worker, &mut [0.0; 8]).0, 0);
+    }
+    worker.collect_snapshots();
+    assert_eq!(worker.latest_receive.map(|value| value.samples), Some(48));
+    assert_eq!(worker.latest_transmit.map(|value| value.samples), Some(48));
+    drop(worker.stop());
+    assert!(runtime.stop(2));
+}
+
+#[test]
+fn reload_local_ring_waits_for_both_owners_and_discards_previous_audio() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for receive_first in [true, false] {
+        let (mut runtime, owners) = audio_owners();
+        let mut worker = worker();
+        assert!(worker.attach(owners).is_ok());
+        for _ in 0..256 {
+            assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+        }
+        let original = worker.observer.clone();
+        let generation = reload_audio(&mut runtime, "squelch_delay_ms=20\n");
+        let mut output = [9.0; 8];
+        assert_eq!(tx_with_ctcss(&worker, &mut output), (0, 0, 0));
+        assert_eq!(
+            output, [0.0; 8],
+            "awaiting a new ring must not replay old audio"
+        );
+        assert!(
+            worker
+                .update_local_ring(generation, LocalRingUpdate::prepare(20).unwrap())
+                .is_ok()
+        );
+        assert!(
+            worker
+                .update_local_ring(generation, LocalRingUpdate::prepare(30).unwrap())
+                .is_err()
+        );
+        if receive_first {
+            assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
+        } else {
+            assert_eq!(tx(&worker, &mut output), (0, 0));
+        }
+        assert!(!worker.local_ring_applied(generation));
+        assert!(worker.observer.same_generation(&original));
+        if receive_first {
+            assert_eq!(tx(&worker, &mut output).0, 0);
+        } else {
+            assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
+        }
+        assert!(worker.local_ring_applied(generation));
+        assert!(!worker.observer.same_generation(&original));
+        assert_eq!(worker.observer.observe().unwrap().reserve_samples, 960);
+        assert_eq!(
+            output, [0.0; 8],
+            "the new ring must exclude the retired burst"
+        );
+        assert!(
+            worker.receive.status.snapshot().0,
+            "ring adoption must retain physical carrier"
+        );
+        drop(worker.stop());
+        assert!(runtime.stop(2));
+    }
+}
+
+#[test]
+fn replacement_endpoints_are_never_destroyed_during_callback_adoption() {
+    struct Resource(Arc<AtomicU64>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let drops = Arc::new(AtomicU64::new(0));
+    let (mut owner, mut control) = EndpointOwner::new(Resource(drops.clone()));
+    assert!(control.ready.push((2, Resource(drops.clone()))).is_ok());
+    owner.adopt(1);
+    assert_eq!(control.adopted.load(Ordering::Acquire), 0);
+    owner.adopt(2);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    // Even a full return queue retains the next candidate until control drains it.
+    assert!(control.ready.push((3, Resource(drops.clone()))).is_ok());
+    owner.adopt(3);
+    assert_eq!(control.adopted.load(Ordering::Acquire), 2);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    control.reclaim();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    owner.adopt(3);
+    assert_eq!(control.adopted.load(Ordering::Acquire), 3);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    control.reclaim();
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+    drop(owner);
+    assert_eq!(drops.load(Ordering::Relaxed), 3);
 }
 
 #[test]

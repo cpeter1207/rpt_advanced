@@ -191,6 +191,8 @@ pub struct DigitOperation {
     pub command: Command,
     /// Remote-command symbol, absent for ordinary link operations.
     pub digit: Option<char>,
+    /// Exact originating peer; absent for the existing local/CLI path.
+    pub reply: Option<crate::link::PeerReply>,
     pub(crate) admin_authorized: bool,
 }
 
@@ -200,6 +202,7 @@ impl DigitOperation {
         Self {
             command,
             digit,
+            reply: None,
             admin_authorized: false,
         }
     }
@@ -217,6 +220,16 @@ pub struct DtmfCommands {
     admin_until_ms: u64,
 }
 impl DtmfCommands {
+    /// Create independent collection and authorization state with the same resolved policy.
+    pub(super) fn for_source(&self) -> Self {
+        let mut commands = Self::new(self.map.clone());
+        commands.configure_admin(
+            &self.admin_unlock_hash,
+            &self.admin_lock_hash,
+            self.admin_timeout_ms,
+        );
+        commands
+    }
     /// Start with the resolved current command map.
     pub fn new(map: DtmfCommandMap) -> Self {
         let collector = map.collector();
@@ -270,6 +283,7 @@ impl DtmfCommands {
                     node: self.remote.clone(),
                 },
                 digit: Some(digit),
+                reply: None,
                 admin_authorized: false,
             });
         }
@@ -321,6 +335,7 @@ impl DtmfCommands {
         Some(DigitOperation {
             command,
             digit: None,
+            reply: None,
             admin_authorized,
         })
     }

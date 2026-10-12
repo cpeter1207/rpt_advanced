@@ -9,8 +9,8 @@ use crate::{
     access::AccessPolicy,
     command::{DtmfCommandMap, LinkAction},
     link::{
-        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, Protocol,
-        RetryAttempt, TopologyManager,
+        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, PeerReply,
+        Protocol, RetryAttempt, TopologyManager,
     },
     schedule::CivilTime,
 };
@@ -81,7 +81,7 @@ pub enum LinkEffect {
     /// Remote-command mode was selected without transmitting a digit.
     SelectedRemote,
     /// Prepare existing status/topology/time telemetry outside audio.
-    Telemetry(LinkAction),
+    Telemetry(LinkAction, Option<PeerReply>),
     /// Change the live node's parrot state; apply buffer lifecycle work on control.
     ParrotEnabled(bool),
     /// No physical operation is needed (for example resumed retry intent).
@@ -94,6 +94,7 @@ pub struct NodeLinkControl {
     manager: LinkManager,
     policy: AccessPolicy,
     commands: DtmfCommands,
+    peer_commands: Vec<(String, PeerReply, DtmfCommands)>,
     schedule: Option<LinkScheduler>,
     groups: Vec<ConfiguredGroup>,
     topology: TopologyManager,
@@ -168,6 +169,7 @@ impl NodeLinkControl {
             manager: LinkManager::new(local)?,
             policy,
             commands: DtmfCommands::new(commands),
+            peer_commands: Vec::new(),
             schedule,
             groups,
             topology: TopologyManager::default(),
@@ -186,16 +188,28 @@ impl NodeLinkControl {
         self.manager.invalidate_generation();
         self.policy = policy;
         self.commands = DtmfCommands::new(commands);
+        self.peer_commands.clear();
         self.schedule = schedule;
     }
     /// Configure per-node Argon2id credentials; missing either digest disables admin DTMF.
     pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
         self.commands
             .configure_admin(unlock_hash, lock_hash, timeout_ms);
+        self.peer_commands.clear();
     }
     /// Renew the DTMF administration window only after the parrot toggle is accepted.
     pub(crate) fn confirm_parrot_command(&mut self, now_ms: u64) {
         self.commands.confirm_parrot_action(now_ms);
+    }
+    /// Renew only the collector that authorized a successfully applied peer command.
+    pub(crate) fn confirm_peer_parrot_command(&mut self, reply: &PeerReply, now_ms: u64) {
+        if let Some((_, _, commands)) = self
+            .peer_commands
+            .iter_mut()
+            .find(|(_, source, _)| source == reply)
+        {
+            commands.confirm_parrot_action(now_ms);
+        }
     }
     /// Immutable current hub view for status/topology publication.
     pub fn manager(&self) -> &LinkManager {
@@ -362,11 +376,32 @@ impl NodeLinkControl {
         self.commands.feed(event)
     }
     /// Interpret a peer digit only while its direct connection and current policy allow it.
-    pub fn peer_digit(&mut self, remote: &str, digit: char, now_ms: u64) -> Option<DigitOperation> {
-        if !self.manager.remote_digit(remote, digit, &self.policy) {
+    pub fn peer_digit(
+        &mut self,
+        remote: &str,
+        digit: char,
+        now_ms: u64,
+        reply: PeerReply,
+    ) -> Option<DigitOperation> {
+        if reply.ended() || !self.manager.remote_digit(remote, digit, &self.policy) {
             return None;
         }
-        self.commands.feed(DigitEvent::Digit { digit, now_ms })
+        self.peer_commands
+            .retain(|(name, source, _)| name != remote || source == &reply);
+        let index = self
+            .peer_commands
+            .iter()
+            .position(|(_, source, _)| source == &reply)
+            .unwrap_or_else(|| {
+                self.peer_commands
+                    .push((remote.into(), reply.clone(), self.commands.for_source()));
+                self.peer_commands.len() - 1
+            });
+        let mut operation = self.peer_commands[index]
+            .2
+            .feed(DigitEvent::Digit { digit, now_ms })?;
+        operation.reply = Some(reply);
+        Some(operation)
     }
     /// Apply policy, returning external work without doing a dial, media operation, or write.
     /// `directory_verified` is needed only when selecting a remote-command peer.
@@ -378,6 +413,9 @@ impl NodeLinkControl {
         directory_verified: bool,
     ) -> Result<LinkEffect, AdmissionError> {
         if !self.admitting || !work.is_current() {
+            return Err(AdmissionError::Stale);
+        }
+        if operation.reply.as_ref().is_some_and(PeerReply::ended) {
             return Err(AdmissionError::Stale);
         }
         let remote = operation.command.node;
@@ -506,19 +544,36 @@ impl NodeLinkControl {
                 if let Some(digit) = operation.digit {
                     LinkEffect::RemoteDigit { remote, digit }
                 } else {
-                    self.commands.select_remote(&remote);
+                    if let Some(reply) = &operation.reply {
+                        if let Some((_, _, commands)) = self
+                            .peer_commands
+                            .iter_mut()
+                            .find(|(_, source, _)| source == reply)
+                        {
+                            commands.select_remote(&remote);
+                        }
+                    } else {
+                        self.commands.select_remote(&remote);
+                    }
                     LinkEffect::SelectedRemote
                 }
             }
             action @ (LinkAction::Status
             | LinkAction::LastKeyed
             | LinkAction::FullStatus
-            | LinkAction::Time) => LinkEffect::Telemetry(action),
+            | LinkAction::Time) => LinkEffect::Telemetry(action, operation.reply),
             action @ (LinkAction::ParrotEnable | LinkAction::ParrotDisable) => {
-                if !self
-                    .commands
-                    .consume_parrot_authorization(operation.admin_authorized, now_ms)
-                {
+                let commands = if let Some(reply) = &operation.reply {
+                    self.peer_commands
+                        .iter_mut()
+                        .find(|(_, source, _)| source == reply)
+                        .map(|(_, _, commands)| commands)
+                } else {
+                    Some(&mut self.commands)
+                };
+                if !commands.is_some_and(|commands| {
+                    commands.consume_parrot_authorization(operation.admin_authorized, now_ms)
+                }) {
                     return Err(AdmissionError::Denied);
                 }
                 LinkEffect::ParrotEnabled(action == LinkAction::ParrotEnable)
@@ -707,6 +762,10 @@ impl NodeLinkControl {
     }
     /// Suppress a failed reader immediately; its identity remains reserved until quiescence.
     pub fn ended(&mut self, remote: &str) {
+        self.peer_commands.retain(|(name, _, _)| name != remote);
+        for (_, _, commands) in &mut self.peer_commands {
+            commands.disconnect(remote);
+        }
         self.commands.disconnect(remote);
         self.manager.end(remote);
     }

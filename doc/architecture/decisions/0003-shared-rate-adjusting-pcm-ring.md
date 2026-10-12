@@ -95,8 +95,12 @@ target plus one maximum producer write. At 8 kHz, reserve/target/capacity are
 685/2080/6176 input samples; at 48 kHz they are 4102/12480/16576.
 
 Local receive disables PLC and retains capacity 14400 and block maxima 4096.
-Reserve and target equal the squelch delay captured when its worker is
-prepared. The existing same-device reload lifetime is unchanged. Offline file
+Reserve and target equal the squelch delay captured when the ring is prepared.
+Changing that delay on a same-device reload prepares a replacement pair on
+control. RX and TX adopt their generation-tagged endpoints at callback
+boundaries and return the old endpoints for control-side reclamation; the
+hardware stream is not reopened. Retirement waits for both endpoint
+acknowledgments. Offline file
 and speech conversion also disables PLC, with zero reserve and target and a
 preloaded source plus bounded converter padding. It retains only real PCM,
 returns the exact requested duration, and rejects incomplete conversion.

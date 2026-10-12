@@ -122,16 +122,17 @@ impl Engine {
         self: &Arc<Self>,
         local: String,
         operation: DigitOperation,
-        local_rf_source: bool,
+        dtmf_source: bool,
     ) -> Result<(), RuntimeError> {
         let revision = self.revision.load(Ordering::Acquire);
         let peer = operation.command.node.clone();
+        let reply = operation.reply.clone();
         match self.operation(&local, operation) {
             Ok(effect) => self.effect(local, effect, revision),
             Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
-                if local_rf_source =>
+                if dtmf_source =>
             {
-                self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer))
+                self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer, reply))
             }
             Err(error) => Err(error),
         }

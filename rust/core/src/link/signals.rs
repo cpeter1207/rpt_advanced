@@ -1,13 +1,45 @@
 //! Bounded lock-free snapshots between one audio consumer and one channel owner.
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+};
+
+#[derive(Debug)]
+struct ReplyState {
+    ended: AtomicBool,
+    radio_keyed: AtomicBool,
+    edge: AtomicU64,
+}
+
+/// Exact peer connection retained by control-prepared responses until off-audio reclamation.
+#[derive(Clone, Debug)]
+pub struct PeerReply(Arc<ReplyState>);
+impl PartialEq for PeerReply {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for PeerReply {}
+impl PeerReply {
+    /// Stable identity while the prepared response retains this connection.
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+    /// A response waits for transport keying and buffered receive activity to clear.
+    pub fn active(&self) -> bool {
+        self.0.radio_keyed.load(Ordering::Acquire) || self.0.edge.load(Ordering::Acquire) & 1 != 0
+    }
+    /// Ended connections cannot receive a delayed response.
+    pub fn ended(&self) -> bool {
+        self.0.ended.load(Ordering::Acquire)
+    }
+}
 
 /// PCM publication, terminal EOF, activity edges and advisory selected source.
 /// Audio is the sole activity writer; the channel owner is the sole source writer.
 pub struct PeerSignals {
     pcm: AtomicU64,
-    ended: AtomicBool,
-    radio_keyed: AtomicBool,
-    edge: AtomicU64,
+    reply: PeerReply,
     source_version: AtomicU64,
     source_edge: AtomicU64,
     source: [AtomicU8; 64],
@@ -22,9 +54,11 @@ impl PeerSignals {
     pub fn new() -> Self {
         Self {
             pcm: AtomicU64::new(0),
-            ended: AtomicBool::new(false),
-            radio_keyed: AtomicBool::new(false),
-            edge: AtomicU64::new(0),
+            reply: PeerReply(Arc::new(ReplyState {
+                ended: AtomicBool::new(false),
+                radio_keyed: AtomicBool::new(false),
+                edge: AtomicU64::new(0),
+            })),
             source_version: AtomicU64::new(0),
             source_edge: AtomicU64::new(0),
             source: std::array::from_fn(|_| AtomicU8::new(0)),
@@ -40,33 +74,41 @@ impl PeerSignals {
     }
     /// Mark terminal transport failure before detachment or reclaim.
     pub fn end(&self) {
-        self.ended.store(true, Ordering::Release);
+        self.reply.0.ended.store(true, Ordering::Release);
     }
     /// Terminal failure wins over any buffered activity.
     pub fn ended(&self) -> bool {
-        self.ended.load(Ordering::Acquire)
+        self.reply.ended()
     }
     /// Publish a transport radio-key edge independently of decoded PCM arrival.
     pub fn set_radio_keyed(&self, keyed: bool) {
-        self.radio_keyed.store(keyed, Ordering::Release);
+        self.reply.0.radio_keyed.store(keyed, Ordering::Release);
     }
     /// Read the latest transport radio-key state without waiting for the peer owner.
     pub fn radio_keyed(&self) -> bool {
-        self.radio_keyed.load(Ordering::Acquire)
+        self.reply.0.radio_keyed.load(Ordering::Acquire)
     }
     /// Audio-owner activity edge; an odd serial means active. No allocation or wait.
     pub fn set_active(&self, active: bool) -> u64 {
-        let edge = self.edge.load(Ordering::Relaxed);
+        let edge = self.reply.0.edge.load(Ordering::Relaxed);
         if (edge & 1 != 0) == active {
             return edge;
         }
         let next = edge.wrapping_add(1);
-        self.edge.store(next, Ordering::Release);
+        self.reply.0.edge.store(next, Ordering::Release);
         next
     }
     /// Channel-owner snapshot used to cancel queries at unkey or a newer burst.
     pub fn activity_edge(&self) -> u64 {
-        self.edge.load(Ordering::Acquire)
+        self.reply.0.edge.load(Ordering::Acquire)
+    }
+    /// Clone a connection token on the control plane, never on an audio callback.
+    pub fn reply_target(&self) -> PeerReply {
+        self.reply.clone()
+    }
+    /// Match addressed PCM without reference-count work on the audio callback.
+    pub fn reply_identity(&self) -> usize {
+        self.reply.identity()
     }
     /// Publish a source only for the still-current active receive burst.
     pub fn select_source(&self, edge: u64, source: &str) -> bool {

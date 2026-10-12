@@ -1456,13 +1456,17 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
             clock(),
         )
         .unwrap();
-        runtime.queue_status("1000", action, last, clock()).unwrap();
+        runtime
+            .queue_status("1000", action, last, clock(), None)
+            .unwrap();
         assert_eq!(*media.0.lock().unwrap(), [expected]);
         for _ in 0..3 {
-            runtime.queue_status("1000", action, last, clock()).unwrap();
+            runtime
+                .queue_status("1000", action, last, clock(), None)
+                .unwrap();
         }
         assert_eq!(
-            runtime.queue_status("1000", action, last, clock()),
+            runtime.queue_status("1000", action, last, clock(), None),
             Err(RuntimeError::Rejected)
         );
         let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
@@ -1480,11 +1484,11 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
         let mut invalid_clock = clock();
         invalid_clock.civil = None;
         assert_eq!(
-            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock),
+            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock, None),
             Err(RuntimeError::Clock)
         );
         assert_eq!(
-            runtime.queue_status("missing", action, last, clock()),
+            runtime.queue_status("missing", action, last, clock(), None),
             Err(RuntimeError::MissingNode)
         );
         assert!(runtime.stop(0));
@@ -1522,7 +1526,7 @@ fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
     )
     .unwrap();
 
-    runtime.queue_loop_rejected("1000", "2000").unwrap();
+    runtime.queue_loop_rejected("1000", "2000", None).unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         ["Connection to node,2,0,0,0 rejected because it would create a link loop"]
