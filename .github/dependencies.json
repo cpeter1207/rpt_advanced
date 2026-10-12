@@ -1,21 +1,11 @@
 [
   {
-    "repository": "librptadvradio",
-    "sha": "d55f5f1a7f41cb3eef62bdfe7bece1a8a5046cdb",
-    "packages": ["librptadvradio4", "librptadvradio-dev"]
-  },
-  {
     "repository": "rptadv-portaudio-alsa-adapter",
     "sha": "411dc1e9e4285c7140e975bbadf7d7ce3efea220",
     "packages": [
       "librptadv-portaudio-alsa-adapter2",
       "librptadv-portaudio-alsa-adapter-dev"
     ]
-  },
-  {
-    "repository": "rptadv-gpio-adapter",
-    "sha": "3e662f9be4f6b9731cc4380165afe998e3fda642",
-    "packages": ["librptadv-gpio-adapter1", "librptadv-gpio-adapter-dev"]
   },
   {
     "repository": "rptadv-ffmpeg-adapter",
