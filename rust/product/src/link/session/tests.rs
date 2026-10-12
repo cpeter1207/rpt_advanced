@@ -319,6 +319,30 @@ fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProd
 }
 
 #[test]
+fn shared_peer_io_stop_signals_active_session_before_drop() {
+    let (session, control, state, _output) = make_session("1000");
+    let pause = Arc::new(std::sync::Barrier::new(2));
+    state.lock().unwrap().pause = Some(pause.clone());
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.attach(session).ok().unwrap();
+
+    // The real I/O owner has moved this session into its active vector and is
+    // inside its first step. Keep it there until shutdown has been published.
+    pause.wait();
+    let owner = control.owner_thread();
+    let stopped_before_shutdown = control.stop.load(Ordering::Acquire);
+    worker.stop.store(true, Ordering::Release);
+    pause.wait();
+    worker.stop();
+
+    assert!(owner.is_some());
+    assert!(!stopped_before_shutdown);
+    assert!(control.stop.load(Ordering::Acquire));
+    assert!(control.snapshot().unwrap().ended);
+    assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
 fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     let (mut session, mut control, state, mut output) = make_session("1000");
     assert_eq!(state.lock().unwrap().texts, [b"!NEWKEY1!".to_vec()]);

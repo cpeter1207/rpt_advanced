@@ -23,6 +23,28 @@ def port():
         return endpoint.getsockname()[1]
 
 
+def reverse_ready(channels: str, status: str, node: str) -> bool:
+    """Require the previous IAX call to be gone before reversing its direction."""
+    return (
+        "IAX2/" not in channels
+        and f"rpt_advanced: {node} has no active links\n" in status
+    )
+
+
+def verify_reverse_ready() -> None:
+    """An empty Asterisk channel list must not mask a retained controller peer."""
+    states = [
+        ("", "rpt_advanced: 508422 has 1 link\n"),
+        ("", "rpt_advanced: 508422 has no active links\n"),
+    ]
+    assert [
+        reverse_ready(channels, status, "508422") for channels, status in states
+    ] == [
+        False,
+        True,
+    ]
+
+
 @contextlib.contextmanager
 def server(
     directory,
@@ -359,6 +381,7 @@ def main():
     """! @brief Test narrowband and wideband IAX audio plus connected reload cleanup.
     @return None; assertions require bidirectional remote audio.
     """
+    verify_reverse_ready()
     modules = Path(os.environ["RPT_TEST_MODULE_DIR"]).resolve()
     candidates = list(Path("/usr/lib").glob("*/asterisk/modules/chan_iax2.so"))
     candidates += list(Path("/usr/lib/asterisk/modules").glob("chan_iax2.so"))
@@ -437,11 +460,26 @@ def main():
                 result = cli(first[0], "rpt_advanced link disconnect 524950 508422")
                 assert "completed" in result, result
                 deadline = time.monotonic() + 5
-                while any(
-                    "IAX2/" in cli(configuration, "core show channels concise")
-                    for configuration, _ in (first, second)
-                ):
-                    assert time.monotonic() < deadline, "remote hangup was not reaped"
+                while True:
+                    states = [
+                        (
+                            node,
+                            cli(configuration, "core show channels concise"),
+                            cli(configuration, f"rpt_advanced link status {node}"),
+                        )
+                        for configuration, node in (
+                            (first[0], "524950"),
+                            (second[0], "508422"),
+                        )
+                    ]
+                    if all(
+                        reverse_ready(channels, status, node)
+                        for node, channels, status in states
+                    ):
+                        break
+                    assert time.monotonic() < deadline, (
+                        f"remote peer was not reaped: {states}"
+                    )
                     time.sleep(0.05)
                 result = cli(second[0], "rpt_advanced link connect 508422 524950")
                 assert "completed" in result, result
