@@ -288,12 +288,15 @@ mod descriptor_tests {
             render: Some(render),
         };
         assert!(unsafe { validate_descriptor(&descriptor) }.is_ok());
+        assert!(unsafe { validate_descriptor(std::ptr::null()) }.is_err());
         descriptor.struct_size -= 1;
         assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
         descriptor.struct_size += 1;
         descriptor.abi_version = 2;
         assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
         descriptor.abi_version = 1;
+        descriptor.capability_name = std::ptr::null();
+        assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
         descriptor.capability_name = c"other".as_ptr();
         assert!(unsafe { validate_descriptor(&descriptor) }.is_err());
         descriptor.capability_name = c"rptadv.template".as_ptr();

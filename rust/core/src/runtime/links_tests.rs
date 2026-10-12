@@ -97,12 +97,15 @@ fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
         links.command(allowed.clone(), host.control().work().unwrap(), 4, false),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
+    links.confirm_peer_parrot_command(&first, 4);
     signal.end();
+    assert!(links.peer_digit("2000", '1', 5, first.clone()).is_none());
     assert!(matches!(
         links.command(allowed, host.control().work().unwrap(), 5, false),
         Err(AdmissionError::Stale)
     ));
     let replacement = crate::link::PeerSignals::new().reply_target();
+    links.confirm_peer_parrot_command(&replacement, 5);
     for digit in "*804".chars() {
         assert!(
             links
@@ -110,6 +113,43 @@ fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
                 .is_none()
         );
     }
+}
+
+#[test]
+fn peer_remote_selection_and_disconnect_use_the_exact_collector() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    links.accept("3000", true).unwrap();
+    let first = crate::link::PeerSignals::new().reply_target();
+    let second = crate::link::PeerSignals::new().reply_target();
+    assert!(links.peer_digit("2000", '*', 0, first.clone()).is_none());
+    assert!(links.peer_digit("3000", '*', 0, second.clone()).is_none());
+    let mut host = NodeHost::new(generation(1));
+    let mut selected = operation(LinkAction::Command, "3000");
+    selected.reply = Some(first.clone());
+    assert!(matches!(
+        links.command(selected, host.control().work().unwrap(), 1, true),
+        Ok(LinkEffect::SelectedRemote)
+    ));
+    let mut untracked = operation(LinkAction::Command, "3000");
+    untracked.reply = Some(crate::link::PeerSignals::new().reply_target());
+    assert!(matches!(
+        links.command(untracked, host.control().work().unwrap(), 2, true),
+        Ok(LinkEffect::SelectedRemote)
+    ));
+    links.ended("2000");
+    assert!(
+        links
+            .peer_commands
+            .iter()
+            .all(|(_, source, _)| source != &first)
+    );
+    assert!(
+        links
+            .peer_commands
+            .iter()
+            .any(|(_, source, _)| source == &second)
+    );
 }
 
 #[test]

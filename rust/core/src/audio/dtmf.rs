@@ -193,6 +193,9 @@ mod lifecycle_tests {
     unsafe extern "C" fn create_null(_: u32, _: *mut *mut c_void) -> i32 {
         0
     }
+    unsafe extern "C" fn create_error_null(_: u32, _: *mut *mut c_void) -> i32 {
+        -1
+    }
     unsafe extern "C" fn destroy(_: *mut c_void) {
         DESTROYS.fetch_add(1, Ordering::SeqCst);
     }
@@ -221,6 +224,17 @@ mod lifecycle_tests {
         };
         DESTROYS.store(0, Ordering::SeqCst);
         assert!(DtmfDetector::from_api(api, false).is_err());
+        assert_eq!(DESTROYS.load(Ordering::SeqCst), 1);
+        assert!(
+            DtmfDetector::from_api(
+                DtmfApi {
+                    create: create_error_null,
+                    ..api
+                },
+                false,
+            )
+            .is_err()
+        );
         assert_eq!(DESTROYS.load(Ordering::SeqCst), 1);
         assert!(
             DtmfDetector::from_api(

@@ -1989,6 +1989,54 @@ fn parrot_command_rejects_a_second_toggle_until_callback_acknowledges_enable() {
 }
 
 #[test]
+fn accepted_peer_parrot_command_confirms_only_its_source() {
+    use super::links::LinkEffect;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.incoming("1000", "2000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    let operation = {
+        let links = runtime.node("1000").unwrap().links();
+        links.configure_admin(&digest, &digest, 60_000);
+        for digit in "*8001234#".chars() {
+            assert!(
+                links
+                    .peer_digit("2000", digit, 1001, reply.clone())
+                    .is_none()
+            );
+        }
+        let mut operation = None;
+        for digit in "*804".chars() {
+            operation = links
+                .peer_digit("2000", digit, 1002, reply.clone())
+                .or(operation);
+        }
+        operation.unwrap()
+    };
+    let mut now = clock();
+    now.now_ms = 1003;
+    assert!(matches!(
+        runtime.command("1000", operation, now, false),
+        Ok(LinkEffect::ParrotEnabled(true))
+    ));
+    runtime.node("1000").unwrap().links().ended("2000");
+    runtime.peer_detached("1000", "2000", now.now_ms);
+    assert!(runtime.stop(now.now_ms));
+}
+
+#[test]
 fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct PausingDevice(Arc<AtomicBool>);

@@ -3,6 +3,55 @@ use super::{
     end_time_valid, start_time_valid, weekday_selector_valid,
 };
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static DESTROYS: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn destroy_fault_handle(_: *mut std::ffi::c_void) {
+    DESTROYS.fetch_add(1, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn create_fault_handle(
+    _: u32,
+    _: *const std::ffi::c_char,
+    _: u32,
+    _: *const std::ffi::c_char,
+    _: *const std::ffi::c_char,
+    _: *const std::ffi::c_char,
+    out: *mut *mut std::ffi::c_void,
+) -> i32 {
+    unsafe { *out = std::ptr::NonNull::<u8>::dangling().cast().as_ptr() };
+    -1
+}
+
+unsafe extern "C" fn fail_equal(
+    _: *const std::ffi::c_void,
+    _: *const std::ffi::c_void,
+    _: *mut u32,
+) -> i32 {
+    -2
+}
+
+unsafe extern "C" fn fail_elapsed(
+    _: *const std::ffi::c_void,
+    _: *const super::ScheduleCivil,
+    _: u8,
+    _: *mut u32,
+    _: *mut u64,
+) -> i32 {
+    -2
+}
+
+unsafe extern "C" fn fail_boundary(
+    _: *const std::ffi::c_void,
+    _: *const super::ScheduleCivil,
+    _: u8,
+    _: *mut u32,
+    _: *mut u64,
+    _: *mut u64,
+) -> i32 {
+    -2
+}
 
 #[test]
 fn scheduled_actions_accept_only_the_controller_vocabulary() {
@@ -32,14 +81,34 @@ fn released_schedule_descriptor_is_required_before_configuration() {
     bad.abi_version = 2;
     assert!(unsafe { super::validate_descriptor(&bad) }.is_err());
     bad = *descriptor;
+    bad.capability_name = std::ptr::null();
+    assert!(unsafe { super::validate_descriptor(&bad) }.is_err());
+    bad = *descriptor;
     bad.capability_name = c"other.schedule".as_ptr();
     assert!(unsafe { super::validate_descriptor(&bad) }.is_err());
-    bad = *descriptor;
-    bad.window_create = None;
-    assert!(unsafe { super::validate_descriptor(&bad) }.is_err());
-    bad = *descriptor;
-    bad.event_occurrence = None;
-    assert!(unsafe { super::validate_descriptor(&bad) }.is_err());
+    let missing: [fn(&mut super::ScheduleDescriptor); 16] = [
+        |item| item.civil_new = None,
+        |item| item.event_parse = None,
+        |item| item.event_occurrence = None,
+        |item| item.start_time_valid = None,
+        |item| item.end_time_valid = None,
+        |item| item.weekday_selector_valid = None,
+        |item| item.date_selector_valid = None,
+        |item| item.window_create = None,
+        |item| item.window_destroy = None,
+        |item| item.window_clone = None,
+        |item| item.window_equal = None,
+        |item| item.window_matches = None,
+        |item| item.window_overlaps = None,
+        |item| item.window_elapsed_after_end = None,
+        |item| item.window_next_start = None,
+        |item| item.window_next_end = None,
+    ];
+    for remove in missing {
+        bad = *descriptor;
+        remove(&mut bad);
+        assert!(unsafe { super::validate_descriptor(&bad) }.is_err());
+    }
 }
 
 #[test]
@@ -54,8 +123,39 @@ fn foreign_constructor_statuses_distinguish_invalid_input_from_contract_failure(
 
 #[test]
 fn released_records_keep_civil_components_and_public_invalid_events_absent() {
+    for (index, weekday) in [
+        Weekday::Sunday,
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(Weekday::from_index(index as u8), Some(weekday));
+    }
+    assert_eq!(Weekday::from_index(7), None);
+    assert_eq!(
+        ScheduledEvent::from_record(super::ScheduleEventRecord {
+            kind: 99,
+            ..Default::default()
+        }),
+        Err(super::ScheduleError::Invalid)
+    );
     let local = CivilTime::new(2028, 2, 29, Weekday::Tuesday, 23, 59).unwrap();
     assert_eq!(local.components(), (2028, 2, 29, Weekday::Tuesday, 23, 59));
+    assert_eq!(
+        ScheduledEvent::Weekly {
+            weekday: Weekday::Tuesday,
+            hour: 23,
+            minute: 59,
+        }
+        .occurrence(&local),
+        Some(1_214_988_479)
+    );
     assert_eq!(
         ScheduledEvent::from_str("once 2028-02-29 23:59")
             .unwrap()
@@ -94,6 +194,7 @@ fn released_records_keep_civil_components_and_public_invalid_events_absent() {
 #[test]
 fn released_window_preserves_owned_equality_and_boundary_presence() {
     let source = ScheduledWindow::parse(None, Some("2028-02-29"), "23:59", "24:00").unwrap();
+    assert_eq!(format!("{source:?}"), "ScheduledWindow { .. }");
     let cloned = source.clone();
     assert_eq!(source, cloned);
     drop(source);
@@ -106,6 +207,50 @@ fn released_window_preserves_owned_equality_and_boundary_presence() {
         ScheduledWindow::parse(None, None, "23:59", "24:00").unwrap(),
         ScheduledWindow::parse(Some(""), Some(""), "23:59", "24:00").unwrap()
     );
+}
+
+#[test]
+fn owned_window_contract_errors_remain_visible_and_failed_create_cleans_up() {
+    let mut api = unsafe { *super::rptadv_schedule_descriptor() };
+    api.window_create = Some(create_fault_handle);
+    api.window_destroy = Some(destroy_fault_handle);
+    let api = Box::leak(Box::new(api));
+    DESTROYS.store(0, Ordering::SeqCst);
+    assert!(ScheduledWindow::parse_with_api(api, None, None, "12:00", "13:00").is_err());
+    assert_eq!(DESTROYS.load(Ordering::SeqCst), 1);
+
+    let mut api = *api;
+    api.window_equal = Some(fail_equal);
+    api.window_elapsed_after_end = Some(fail_elapsed);
+    api.window_next_start = Some(fail_boundary);
+    api.window_next_end = Some(fail_boundary);
+    let api = Box::leak(Box::new(api));
+    let window = ScheduledWindow {
+        api,
+        handle: std::ptr::NonNull::<u8>::dangling().cast(),
+    };
+    let local = CivilTime::new(2028, 2, 29, Weekday::Tuesday, 23, 59).unwrap();
+    for case in 0..4 {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match case {
+                0 => {
+                    let _ = window == window;
+                }
+                1 => {
+                    let _ = window.elapsed_after_end(&local, 0);
+                }
+                2 => {
+                    let _ = window.next_start(&local, 0);
+                }
+                _ => {
+                    let _ = window.next_end(&local, 0);
+                }
+            }))
+            .is_err()
+        );
+    }
+    drop(window);
+    assert_eq!(DESTROYS.load(Ordering::SeqCst), 2);
 }
 
 #[test]

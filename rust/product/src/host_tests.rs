@@ -97,6 +97,39 @@ fn same_device_reload_refreshes_local_ring_without_reopening_radio() {
 }
 
 #[test]
+fn local_ring_reload_retains_update_until_worker_can_accept_it() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let initial = host.runtime.status(10)[0].1.active.unwrap();
+    {
+        let mut lease = host.leases[0].1.lock().unwrap();
+        assert!(
+            lease
+                .worker
+                .as_mut()
+                .unwrap()
+                .update_local_ring(initial, LocalRingUpdate::prepare(0).unwrap())
+                .is_ok()
+        );
+    }
+    host.reload(document("usb", "squelch_delay_ms=20\n"), clock())
+        .unwrap();
+    let active = host.runtime.status(10)[0].1.active.unwrap();
+    let control = host.runtime.adapter_control_mut("1000", active).unwrap();
+    assert!(control.awaiting_local);
+    assert!(control.local_update.is_some());
+
+    assert!(host.leases[0].1.lock().unwrap().quiesce());
+    host.pump(clock()).unwrap();
+    let control = host.runtime.adapter_control_mut("1000", active).unwrap();
+    assert!(control.awaiting_local);
+    assert!(control.local_update.is_some());
+    assert!(host.stop(20));
+}
+
+#[test]
 fn failed_local_ring_reload_preserves_the_active_configuration() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -693,6 +726,51 @@ fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments
     assert_eq!(state.lock().unwrap().drops, 1);
     host.reject_peer("1000", "missing", 12);
     assert!(host.stop(13));
+}
+
+#[test]
+fn withdrawn_peer_clears_a_queued_redirect_and_acknowledgment() {
+    struct Resume(Arc<Barrier>);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            self.0.wait();
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let state = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let pause = Arc::new(Barrier::new(2));
+    state.lock().unwrap().pause = Some(pause.clone());
+    pause.wait();
+    let resume = Resume(pause);
+    for _ in 0..64 {
+        host.peers[0]
+            .control
+            .send(PeerCommand::Digit('1'))
+            .ok()
+            .unwrap();
+    }
+    host.reload(document("usb", "callsign=W1NEW\n"), clock())
+        .unwrap();
+    let active = host.runtime.status(10)[0].1.active.unwrap();
+    assert_eq!(
+        host.runtime
+            .adapter_control_mut("1000", active)
+            .unwrap()
+            .redirects
+            .len(),
+        1
+    );
+    host.reject_peer("1000", "2000", 12);
+    host.pump(clock()).unwrap();
+    let control = host.runtime.adapter_control_mut("1000", active).unwrap();
+    assert!(control.redirects.is_empty());
+    assert!(control.awaiting.is_empty());
+    drop(resume);
+    assert!(host.stop(13));
+    assert_eq!(state.lock().unwrap().drops, 1);
 }
 
 #[test]

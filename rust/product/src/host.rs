@@ -738,16 +738,19 @@ impl Host {
                 .expect("snapshot generation retains its adapter control");
             control.dispatcher.dispatch(2);
             if control.awaiting_local {
-                if let Some((_, lease)) = self.leases.iter().rev().find(|(name, _)| name == &local)
-                {
-                    let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
-                    if let Some(worker) = &mut lease.worker {
-                        if let Some(update) = control.local_update.take() {
-                            control.local_update =
-                                worker.update_local_ring(generation, update).err();
-                        }
-                        control.awaiting_local = !worker.local_ring_applied(generation);
+                // Runtime retains the device for every active or retiring generation.
+                let (_, lease) = self
+                    .leases
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == &local)
+                    .expect("runtime node retains its device lease");
+                let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(worker) = &mut lease.worker {
+                    if let Some(update) = control.local_update.take() {
+                        control.local_update = worker.update_local_ring(generation, update).err();
                     }
+                    control.awaiting_local = !worker.local_ring_applied(generation);
                 }
             }
             let mut pending = Vec::new();

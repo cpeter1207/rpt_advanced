@@ -87,6 +87,48 @@ impl crate::audio::PcmStreamReader for PendingMedia {
 }
 
 #[test]
+fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
+    let signal = crate::link::PeerSignals::new();
+    let courtesy = CourtesySettings {
+        link: Some(media(0.2, 1)),
+        ..CourtesySettings::default()
+    };
+    let (mut node, mut control) =
+        NodeController::new(ControllerSettings::default(), vec![], vec![], courtesy).unwrap();
+    node.link_unkeyed("peer", "", false);
+    assert!(node.courtesy.ready(node.now));
+    let pending = PreparedMedia::new_stream(Box::new(PendingMedia))
+        .unwrap()
+        .reply_to(Some(signal.reply_target()));
+    assert!(control.queue_prepared_status(pending));
+    let mut radio = [0.0];
+    let mut parrot = [0.0];
+    let mut active = false;
+    let mut replies = [PeerReplySample::default()];
+    let mut process = |node: &mut NodeController, replies: &mut [PeerReplySample; 1]| {
+        node.process_audio_with_parrot(
+            true,
+            false,
+            false,
+            &[],
+            &mut radio,
+            ParrotOutput {
+                samples: &mut parrot,
+                active: &mut active,
+                replies: Some(replies),
+            },
+        )
+    };
+    assert!(!process(&mut node, &mut replies));
+    assert_eq!(replies[0].sample, 0.0);
+    assert!(node.telemetry.active == Some(telemetry::Source::Status));
+    signal.end();
+    assert!(!process(&mut node, &mut replies));
+    assert!(node.telemetry.active.is_none());
+    assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
 fn pending_media_does_not_key_transmitter_while_producer_starts() {
     let media = PreparedMedia::new_stream(Box::new(PendingMedia)).unwrap();
     let id = Identifier {

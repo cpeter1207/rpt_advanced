@@ -49,6 +49,7 @@ PORTABLE_DESCRIPTOR_CLIENTS = {
 PORTABLE_CALLBACK_TESTS = {
     "rust/core/src/audio/tone_tests.rs",
     "rust/core/src/audio/morse_tests.rs",
+    "rust/core/src/schedule/tests.rs",
 }
 FORBIDDEN_RUST_ADAPTER = re.compile(
     r"\b(?:ast_radio_[A-Za-z0-9_]*|res_usbradio|app_rpt\.h|"
@@ -358,6 +359,15 @@ def verify_examples() -> None:
             root,
             "rust/core/src/schedule.rs",
             'unsafe extern "C" { fn rptadv_schedule_descriptor(); }\n',
+        )
+        write(
+            root, "rust/core/src/schedule/tests.rs", 'extern "C" { fn arbitrary(); }\n'
+        )
+        expect_violation(root, "imports a C ABI")
+        write(
+            root,
+            "rust/core/src/schedule/tests.rs",
+            'unsafe extern "C" fn fake_callback() {}\n',
         )
 
         write(

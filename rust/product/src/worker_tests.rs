@@ -611,6 +611,9 @@ fn reload_local_ring_waits_for_both_owners_and_discards_previous_audio() {
         }
         let original = worker.observer.clone();
         let generation = reload_audio(&mut runtime, "squelch_delay_ms=20\n");
+        let mut input = [0.5; 8];
+        assert_eq!(rx(&worker, true, &mut input), 0);
+        assert_eq!(input, [0.0; 8], "RX must wait for the matching local ring");
         let mut output = [9.0; 8];
         assert_eq!(tx_with_ctcss(&worker, &mut output), (0, 0, 0));
         assert_eq!(
@@ -640,6 +643,7 @@ fn reload_local_ring_waits_for_both_owners_and_discards_previous_audio() {
             assert_eq!(rx(&worker, true, &mut [0.5; 8]), 0);
         }
         assert!(worker.local_ring_applied(generation));
+        assert!(worker.local_ring_applied(generation));
         assert!(!worker.observer.same_generation(&original));
         assert_eq!(worker.observer.observe().unwrap().reserve_samples, 960);
         assert_eq!(
@@ -652,6 +656,41 @@ fn reload_local_ring_waits_for_both_owners_and_discards_previous_audio() {
         );
         drop(worker.stop());
         assert!(runtime.stop(2));
+    }
+}
+
+#[test]
+fn local_ring_update_retries_when_either_endpoint_queue_is_full() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for receive_full in [true, false] {
+        let mut worker = worker();
+        let queued = LocalRingUpdate::prepare(20).unwrap();
+        if receive_full {
+            assert!(
+                worker
+                    .receive_updates
+                    .ready
+                    .push((2, queued.receive))
+                    .is_ok()
+            );
+        } else {
+            assert!(
+                worker
+                    .transmit_updates
+                    .ready
+                    .push((2, queued.transmit))
+                    .is_ok()
+            );
+        }
+        assert!(
+            worker
+                .update_local_ring(2, LocalRingUpdate::prepare(20).unwrap())
+                .is_err()
+        );
+        assert!(worker.pending_update.is_none());
+        drop(worker.stop());
     }
 }
 

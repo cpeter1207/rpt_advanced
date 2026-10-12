@@ -560,7 +560,7 @@ impl NodeController {
         let parrot_ready = !source_activity && self.telemetry.parrot_pending();
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
         if (may_transmit || peer_ready) && self.telemetry.active.is_none() {
-            if courtesy_ready && may_transmit {
+            if courtesy_ready {
                 self.telemetry.active = self.courtesy.pop().and_then(|index| {
                     self.courtesy.media.get_mut(index).map(|media| {
                         media.0.restart(false);
@@ -569,7 +569,7 @@ impl NodeController {
                 });
             } else if status_ready {
                 self.telemetry.start_status();
-            } else if parrot_ready && may_transmit {
+            } else if parrot_ready {
                 self.telemetry.start_parrot();
                 self.telemetry.active = self.telemetry.parrot.as_ref().map(|_| Source::Parrot);
             }

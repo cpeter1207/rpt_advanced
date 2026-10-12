@@ -330,6 +330,28 @@ pub enum ScheduledEvent {
 }
 
 impl ScheduledEvent {
+    fn from_record(record: ScheduleEventRecord) -> Result<Self, ScheduleError> {
+        Ok(match record.kind {
+            1 => Self::Daily {
+                hour: record.hour,
+                minute: record.minute,
+            },
+            2 => Self::Weekly {
+                weekday: Weekday::from_index(record.weekday).ok_or(ScheduleError::Invalid)?,
+                hour: record.hour,
+                minute: record.minute,
+            },
+            3 => Self::Once {
+                year: record.year,
+                month: record.month,
+                day: record.day,
+                hour: record.hour,
+                minute: record.minute,
+            },
+            _ => return Err(ScheduleError::Invalid),
+        })
+    }
+
     /// Return this event's local calendar-minute occurrence when it is due.
     pub fn occurrence(&self, local: &CivilTime) -> Option<u64> {
         let api = provider_api().expect("schedule provider validated at setup");
@@ -397,25 +419,7 @@ impl FromStr for ScheduledEvent {
         let status =
             unsafe { api.event_parse.expect("validated schedule ABI")(text.as_ptr(), &mut record) };
         input_status(status)?;
-        Ok(match record.kind {
-            1 => Self::Daily {
-                hour: record.hour,
-                minute: record.minute,
-            },
-            2 => Self::Weekly {
-                weekday: Weekday::from_index(record.weekday).ok_or(ScheduleError::Invalid)?,
-                hour: record.hour,
-                minute: record.minute,
-            },
-            3 => Self::Once {
-                year: record.year,
-                month: record.month,
-                day: record.day,
-                hour: record.hour,
-                minute: record.minute,
-            },
-            _ => return Err(ScheduleError::Invalid),
-        })
+        Self::from_record(record)
     }
 }
 
@@ -486,6 +490,16 @@ impl ScheduledWindow {
         end: &str,
     ) -> Result<Self, ScheduleError> {
         let api = provider_api().map_err(|_| ScheduleError::Invalid)?;
+        Self::parse_with_api(api, days, dates, start, end)
+    }
+
+    fn parse_with_api(
+        api: &'static ScheduleDescriptor,
+        days: Option<&str>,
+        dates: Option<&str>,
+        start: &str,
+        end: &str,
+    ) -> Result<Self, ScheduleError> {
         let days_text = days
             .map(CString::new)
             .transpose()
