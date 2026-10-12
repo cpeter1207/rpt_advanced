@@ -491,6 +491,12 @@ def coverage(report: Path) -> None:
     branches = {}
     assert data["data"], "missing coverage instrumentation"
     for unit in data["data"]:
+        code_regions = {
+            (function["filenames"][region[5]], *region[:4])
+            for function in unit.get("functions", [])
+            for region in function["regions"]
+            if region[7] == 0 and 0 < region[4] < 2**63 - 1
+        }
         for source in unit["files"]:
             if is_test_source(source["filename"]):
                 continue
@@ -513,7 +519,12 @@ def coverage(report: Path) -> None:
                     if any(start <= line <= end for start, end in test_ranges):
                         continue
                     key = (source["filename"], line)
-                    lines[key] = lines.get(key, False) or segment[2] > 0
+                    lines[key] = (
+                        lines.get(key, False)
+                        or segment[2] > 0
+                        or (source["filename"], *segment[:2], *following[:2])
+                        in code_regions
+                    )
             for branch in source.get("branches", []):
                 if any(start <= branch[0] <= end for start, end in test_ranges):
                     continue
@@ -864,6 +875,69 @@ def verify_artifact_policy() -> None:
             ),
         ):
             write(root, report.name, json.dumps({"data": [{"files": sources}]}))
+            try:
+                coverage(report)
+            except AssertionError:
+                assert not accepted
+            else:
+                assert accepted
+
+        # Hosted LLVM export can assign zero to a merged file segment while
+        # retaining a positive code region for that exact half-open interval.
+        observed = root / "observed.rs"
+        other = root / "other.rs"
+        write(
+            root,
+            observed.name,
+            "pub fn observed() {\n" + "    let _x = 1;\n" * 200 + "}\n",
+        )
+        write(root, other.name, "pub fn other() {}\n")
+        segments = [
+            [198, 1, 1, True, True, False],
+            [199, 50, 0, True, True, False],
+            [201, 26, 0, False, False, False],
+        ]
+        code = [199, 50, 201, 26, 12, 0, 0, 0]
+        for region, filenames, arms, accepted in (
+            (code, [str(observed)], [1, 1], True),
+            ([198, 1, 201, 26, 12, 0, 0, 0], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 25, 12, 0, 0, 0], [str(observed)], [1, 1], False),
+            (code, [str(other)], [1, 1], False),
+            (
+                [199, 50, 201, 26, 12, 1, 0, 0],
+                [str(observed), str(other)],
+                [1, 1],
+                False,
+            ),
+            ([199, 50, 201, 26, 12, 0, 0, 1], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 12, 0, 0, 2], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 12, 0, 0, 3], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 2**63 - 1, 0, 0, 0], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 0, 0, 0, 0], [str(observed)], [1, 1], False),
+            (code, [str(observed)], [1, 0], False),
+        ):
+            write(
+                root,
+                report.name,
+                json.dumps(
+                    {
+                        "data": [
+                            {
+                                "files": [
+                                    {
+                                        "filename": str(observed),
+                                        "segments": segments,
+                                        "branches": [[198, 1, 198, 10, *arms]],
+                                    }
+                                ],
+                                "functions": [
+                                    {"filenames": filenames, "regions": [region]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+            )
             try:
                 coverage(report)
             except AssertionError:
