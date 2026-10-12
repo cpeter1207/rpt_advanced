@@ -1,8 +1,8 @@
 # Move existing functional implementations into released shared libraries
 
-Status: Draft for written review. The extraction scope and permission to create,
-validate, merge, and release prerequisite libraries are approved. No production
-implementation or node deployment is authorized by this document alone.
+Status: Approved by the user on 2026-10-12. Permission includes creating,
+validating, merging, and releasing prerequisite libraries. Implementation-plan
+review precedes production work; node deployment remains out of scope.
 
 ## Outcome and scope
 
