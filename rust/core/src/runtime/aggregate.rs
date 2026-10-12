@@ -336,7 +336,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
         )
         .map_err(|_| RuntimeError::Preparation)?;
         let activity = controller.activity();
-        let (receive, digits) = DtmfWorker::new(generation, node.settings.dtmf_muting);
+        let (receive, digits) = DtmfWorker::new(generation, node.settings.dtmf_muting)
+            .map_err(|_| RuntimeError::Preparation)?;
         let candidate = RuntimeGeneration::prepare(
             generation,
             node.bounds.clone(),
@@ -521,7 +522,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
             let (controller, telemetry, status, media_session) =
                 prepare::controller(&document, &id, &settings, media, generation_id)?;
             let activity = controller.activity();
-            let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting);
+            let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
+                .map_err(|_| RuntimeError::Preparation)?;
             let prepared = adapter(name, &settings)?;
             let bounds = GenerationSettings {
                 node: name.into(),

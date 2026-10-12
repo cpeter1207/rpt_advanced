@@ -1,4 +1,4 @@
-//! Select the released tone library and reject an incompatible installed ABI.
+//! Select released audio libraries and reject incompatible installed ABIs.
 
 use std::process::Command;
 
@@ -18,7 +18,7 @@ fn pkg_config(args: &[&str]) -> String {
 }
 
 fn main() {
-    for provider in ["rptadvtone", "rptadvmorse"] {
+    for provider in ["rptadvtone", "rptadvmorse", "rptadvdtmf"] {
         assert_eq!(
             pkg_config(&["--variable=abi_version", provider]),
             "1",

@@ -1,7 +1,7 @@
 //! Bounded radio-to-control digit handoff and existing linking command policy.
 
 use crate::{
-    audio::{DtmfDetector, DtmfDigit},
+    audio::{DtmfDetector, DtmfError},
     command::{Command, CommandCollector, DtmfCommandMap, LinkAction},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -85,21 +85,21 @@ pub struct DtmfWorker {
 }
 impl DtmfWorker {
     /// Allocate the fixed 256-event queue and return its separate control consumer.
-    pub fn new(generation: u64, muting: bool) -> (Self, DtmfDispatcher) {
+    pub fn new(generation: u64, muting: bool) -> Result<(Self, DtmfDispatcher), DtmfError> {
         let (publisher, dispatcher) = DtmfPublisher::new(generation);
-        (
+        Ok((
             Self {
-                detector: DtmfDetector::new(muting),
+                detector: DtmfDetector::new(muting)?,
                 publisher,
             },
             dispatcher,
-        )
+        ))
     }
     /// Decode every digit completion and publish without allocation, submission, or locks.
     pub fn process(&mut self, receiving: bool, audio: &mut [f32], now_ms: u64) {
         let mut emitted = false;
         self.detector.process(receiving, audio, |digit| {
-            self.publisher.decoded(character(digit), now_ms);
+            self.publisher.decoded(digit, now_ms);
             emitted = true;
         });
         self.publisher.finish_frame(receiving, now_ms, emitted);
@@ -109,27 +109,6 @@ impl DtmfWorker {
     #[must_use]
     pub fn suppressing(&self) -> bool {
         self.detector.suppressing()
-    }
-}
-
-fn character(digit: DtmfDigit) -> char {
-    match digit {
-        DtmfDigit::One => '1',
-        DtmfDigit::Two => '2',
-        DtmfDigit::Three => '3',
-        DtmfDigit::Four => '4',
-        DtmfDigit::Five => '5',
-        DtmfDigit::Six => '6',
-        DtmfDigit::Seven => '7',
-        DtmfDigit::Eight => '8',
-        DtmfDigit::Nine => '9',
-        DtmfDigit::Zero => '0',
-        DtmfDigit::Star => '*',
-        DtmfDigit::Hash => '#',
-        DtmfDigit::A => 'A',
-        DtmfDigit::B => 'B',
-        DtmfDigit::C => 'C',
-        DtmfDigit::D => 'D',
     }
 }
 

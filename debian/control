@@ -8,6 +8,7 @@ Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha1),
  librptadvtone-dev (>= 0.1.0~alpha1),
  librptadvmorse-dev (>= 0.1.0~alpha1-1),
+ librptadvdtmf-dev (>= 0.1.0~alpha1-1),
  libusbradioplus-product-dev,
  librptadvradio-dev (>= 0.1.0~alpha6),
  librptadv-portaudio-alsa-adapter-dev (>= 0.2.0~alpha3),
@@ -57,7 +58,8 @@ Depends: ${misc:Depends}, ${shlibs:Depends},
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha2),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha1),
  librptadvtone1 (>= 0.1.0~alpha1),
- librptadvmorse1 (>= 0.1.0~alpha1-1)
+ librptadvmorse1 (>= 0.1.0~alpha1-1),
+ librptadvdtmf1 (>= 0.1.0~alpha1-1)
 Description: portable controller product for rpt_advanced
  Versioned Rust C-ABI product that owns configuration, controller policy,
  workers, and portable host-service clients.

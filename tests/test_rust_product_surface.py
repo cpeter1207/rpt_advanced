@@ -27,6 +27,7 @@ RING_MINIMUM_VERSION = "3.0.0~alpha2"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha1"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
+DTMF_MINIMUM_VERSION = "0.1.0~alpha1-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
@@ -36,6 +37,7 @@ ELF_DEPENDENCIES = {
         "librptadv_samplerate_adapter.so.2",
         "librptadvtone.so.1",
         "librptadvmorse.so.1",
+        "librptadvdtmf.so.1",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
@@ -274,6 +276,7 @@ def package(control: Path) -> None:
         "librptadv-samplerate-adapter-dev",
         "librptadvtone-dev",
         "librptadvmorse-dev",
+        "librptadvdtmf-dev",
         "libusbradioplus-product-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
@@ -289,6 +292,8 @@ def package(control: Path) -> None:
         f"librptadvtone1 (>= {TONE_MINIMUM_VERSION})",
         f"librptadvmorse-dev (>= {MORSE_MINIMUM_VERSION})",
         f"librptadvmorse1 (>= {MORSE_MINIMUM_VERSION})",
+        f"librptadvdtmf-dev (>= {DTMF_MINIMUM_VERSION})",
+        f"librptadvdtmf1 (>= {DTMF_MINIMUM_VERSION})",
     ):
         assert token in contents, f"missing compatible audio provider: {token}"
     stanzas = {
@@ -309,6 +314,9 @@ def package(control: Path) -> None:
     )
     assert f"librptadvmorse1 (>= {MORSE_MINIMUM_VERSION})" in product, (
         "product must depend directly on the released Morse runtime"
+    )
+    assert f"librptadvdtmf1 (>= {DTMF_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released DTMF runtime"
     )
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 

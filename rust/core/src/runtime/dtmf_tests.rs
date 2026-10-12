@@ -27,7 +27,7 @@ fn destination_limit_is_stricter_than_the_collector_and_zero_requires_a_previous
 
 #[test]
 fn real_native_audio_publishes_every_keypad_symbol_in_order() {
-    let (mut worker, mut dispatcher) = DtmfWorker::new(7, false);
+    let (mut worker, mut dispatcher) = DtmfWorker::new(7, false).unwrap();
     let expected = [
         '1', '2', '3', 'A', '4', '5', '6', 'B', '7', '8', '9', 'C', '*', '0', '#', 'D',
     ];
@@ -61,7 +61,7 @@ fn real_native_audio_publishes_every_keypad_symbol_in_order() {
 
 #[test]
 fn final_digit_precedes_unkey_terminator_with_twenty_millisecond_callbacks() {
-    let (mut worker, mut dispatcher) = DtmfWorker::new(7, true);
+    let (mut worker, mut dispatcher) = DtmfWorker::new(7, true).unwrap();
     let mut elapsed_samples = 0;
     for (receiving, frequencies) in [
         (true, Some((941.0_f32, 1209.0_f32))), // '*'
@@ -93,7 +93,7 @@ fn final_digit_precedes_unkey_terminator_with_twenty_millisecond_callbacks() {
 
 #[test]
 fn worker_reports_qualified_dtmf_muting_until_the_tone_leaves() {
-    let (mut worker, _) = DtmfWorker::new(7, true);
+    let (mut worker, _) = DtmfWorker::new(7, true).unwrap();
     assert!(!worker.suppressing());
     let mut tone = (0..1224)
         .map(|offset| {

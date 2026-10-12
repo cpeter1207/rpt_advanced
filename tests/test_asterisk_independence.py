@@ -38,6 +38,16 @@ NON_CODE = re.compile(
 ## @brief Removes C comments while retaining quoted include paths.
 COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 RUST_FFI = re.compile(r'\bextern\s*"C"|#\s*\[\s*link\s*\(')
+RUST_IMPORT_BLOCK = re.compile(r'\bextern\s*"C"\s*\{([^{}]*)\}', re.DOTALL)
+PORTABLE_DESCRIPTOR_CLIENTS = {
+    "rust/core/src/audio/tone.rs": "rptadv_tone_descriptor",
+    "rust/core/src/audio/morse.rs": "rptadv_morse_descriptor",
+    "rust/core/src/audio/dtmf.rs": "rptadv_dtmf_descriptor",
+}
+PORTABLE_CALLBACK_TESTS = {
+    "rust/core/src/audio/tone_tests.rs",
+    "rust/core/src/audio/morse_tests.rs",
+}
 FORBIDDEN_RUST_ADAPTER = re.compile(
     r"\b(?:ast_radio_[A-Za-z0-9_]*|res_usbradio|app_rpt\.h|"
     r"chan_(?:usbradio|simpleusb|voter|echolink|irlp)\.h|asl3)\b",
@@ -118,13 +128,35 @@ def check_module_source(root: Path) -> list[str]:
 
 
 def check_rust_source(root: Path) -> list[str]:
-    """Reject host FFI from core and ASL-private imports from Rust adapters."""
+    """Permit only released portable descriptors, never host or arbitrary core FFI."""
     violations: list[str] = []
     core = root / "rust" / "core"
     if core.exists():
         for source in sorted((core / "src").rglob("*.rs")):
-            if RUST_FFI.search(source.read_text(encoding="utf-8")):
-                violations.append(f"{source.relative_to(root)} imports a C ABI")
+            relative = source.relative_to(root).as_posix()
+            contents = source.read_text(encoding="utf-8")
+            allowed = (
+                relative in PORTABLE_DESCRIPTOR_CLIENTS
+                or relative in PORTABLE_CALLBACK_TESTS
+            )
+            if allowed and FORBIDDEN_RUST_ADAPTER.search(NON_CODE.sub("", contents)):
+                violations.append(f"{relative} imports host API")
+            if not allowed:
+                if RUST_FFI.search(contents):
+                    violations.append(f"{relative} imports a C ABI")
+                continue
+            expected = PORTABLE_DESCRIPTOR_CLIENTS.get(relative)
+            for body in RUST_IMPORT_BLOCK.findall(contents):
+                declaration = (
+                    rf"\s*fn\s+{expected}\s*\(\s*\)\s*"
+                    r"(?:->\s*\*const\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;\s*"
+                    if expected
+                    else ""
+                )
+                if not expected or re.fullmatch(declaration, body) is None:
+                    violations.append(f"{relative} imports a C ABI")
+            if re.search(r"#\s*\[\s*link\s*\(", contents):
+                violations.append(f"{relative} imports a C ABI")
         manifest = (core / "Cargo.toml").read_text(encoding="utf-8")
         if FORBIDDEN_RUST_ADAPTER.search(manifest):
             violations.append("rust/core/Cargo.toml imports a host dependency")
@@ -225,6 +257,19 @@ def verify_examples() -> None:
             "#include <asterisk/module.h>\n"
             'struct descriptor value = {.optional_modules = "chan_usbradioplus"};\n',
         )
+        write(root, "rust/core/Cargo.toml", "[dependencies]\nrtrb = '1'\n")
+        for name in ("tone", "morse", "dtmf"):
+            write(
+                root,
+                f"rust/core/src/audio/{name}.rs",
+                f'unsafe extern "C" {{ fn rptadv_{name}_descriptor(); }}\n',
+            )
+        for name in ("tone_tests", "morse_tests"):
+            write(
+                root,
+                f"rust/core/src/audio/{name}.rs",
+                'unsafe extern "C" fn fake_callback() {}\n',
+            )
         check_tree(root)
 
         write(root, "src/controller.c", "#include <asterisk/channel.h>\n")
@@ -253,6 +298,37 @@ def verify_examples() -> None:
         write(root, "rust/core/src/lib.rs", 'extern "C" { fn host(); }\n')
         expect_violation(root, "imports a C ABI")
         write(root, "rust/core/src/lib.rs", "pub fn portable() {}\n")
+
+        write(
+            root,
+            "rust/core/src/audio/tone.rs",
+            'unsafe extern "C" { fn arbitrary(); }\n',
+        )
+        expect_violation(root, "imports a C ABI")
+        write(
+            root,
+            "rust/core/src/audio/tone.rs",
+            'unsafe extern "C" { fn ast_radio_get_state(); }\n',
+        )
+        expect_violation(root, "imports host API")
+        write(root, "rust/core/src/audio/tone.rs", '#[link(name = "host")]\n')
+        expect_violation(root, "imports a C ABI")
+        write(
+            root,
+            "rust/core/src/audio/tone.rs",
+            'unsafe extern "C" { fn rptadv_tone_descriptor(); }\n',
+        )
+        write(
+            root,
+            "rust/core/src/audio/tone_tests.rs",
+            'extern "C" { fn arbitrary(); }\n',
+        )
+        expect_violation(root, "imports a C ABI")
+        write(
+            root,
+            "rust/core/src/audio/tone_tests.rs",
+            'unsafe extern "C" fn fake_callback() {}\n',
+        )
 
         write(
             root,
