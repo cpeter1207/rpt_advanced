@@ -9,10 +9,12 @@ Install the `rpt-advanced` Debian package to run the standalone system service, 
 independently. Standalone radio I/O uses the separately packaged
 `libusbradioplus-product1` shared runtime, without installing the USBRadioPlus
 Asterisk channel. Source builds also require `libusbradioplus-product-dev`
-and the released `librptadvtone-dev` (ABI 1). The product links
-`librptadvtone.so.1` for bounded 48 kHz courtesy tones; the Rust core obtains
-the linker directory and ABI version from the installed `rptadvtone.pc`, not a
-sibling checkout. Other shared runtime libraries are versioned dependencies. See the
+and the released `librptadvtone-dev` and `librptadvmorse-dev` (ABI 1). The
+product links `librptadvtone.so.1` for bounded 48 kHz courtesy tones and
+`librptadvmorse.so.1` for Morse; Morse itself uses the released tone oscillator.
+The Rust core obtains linker directories and ABI versions from the installed
+pkg-config files, not sibling checkouts. Other shared runtime libraries are
+versioned dependencies. See the
 [installation guide](doc/install.md) before selecting either path.
 
 Configuration is documented in the [configuration reference](doc/configuration.md).

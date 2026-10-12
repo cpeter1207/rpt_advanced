@@ -7,7 +7,7 @@ use crate::{
     services::HostServices,
 };
 use rpt_advanced_core::{
-    audio::ToneSequence,
+    audio::{MorseRenderer, ToneSequence},
     config::{ConfigDocument, Schema},
     control::{ControlExecutor, ControlTask},
     runtime::{RuntimeClock, RuntimeError},
@@ -701,6 +701,7 @@ unsafe extern "C" fn rptadv_product_start(
         );
         drop(crate::link::egress::Egress::new(48000, 960).map_err(|_| RuntimeError::Preparation)?);
         ToneSequence::provider_ready().map_err(|_| RuntimeError::Preparation)?;
+        MorseRenderer::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let origin = Instant::now();
         let clock = capture(origin, services);

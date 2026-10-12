@@ -719,25 +719,32 @@ fn active_producer_streams_tone_and_morse_fallback() {
     )
     .unwrap();
     session.start().unwrap();
+    let source = MediaSource {
+        tone: Some(rpt_advanced_core::media::ToneSource {
+            sequence: "500/100".into(),
+            level_db: -6,
+        }),
+        morse: Some(rpt_advanced_core::media::MorseSource {
+            text: "E".into(),
+            speed_wpm: 20,
+            frequency_hz: 800.0,
+            level_db: -6,
+        }),
+        ..MediaSource::default()
+    };
     let mut reader = session
-        .register_once(MediaSource {
-            tone: Some(rpt_advanced_core::media::ToneSource {
-                sequence: "500/100".into(),
-                level_db: -6,
-            }),
-            morse: Some(rpt_advanced_core::media::MorseSource {
-                text: "E".into(),
-                speed_wpm: 20,
-                frequency_hz: 800.0,
-                level_db: -6,
-            }),
-            ..MediaSource::default()
-        })
+        .register_once(source.clone())
         .expect("runtime telemetry can be submitted to the active producer");
     reader.start();
 
     let mut output = [0.0; 64];
     assert!((4_800..=4_802).contains(&collect_stream(reader.as_mut(), &mut output)));
+    drop(reader);
+
+    let mut reader = session
+        .register_once(source)
+        .expect("a fresh telemetry stream can be submitted to the active producer");
+    reader.start();
     assert!(reader.select_morse_fallback());
     assert!((2_880..=2_882).contains(&collect_stream(reader.as_mut(), &mut output)));
 }

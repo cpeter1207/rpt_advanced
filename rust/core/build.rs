@@ -6,10 +6,10 @@ fn pkg_config(args: &[&str]) -> String {
     let output = Command::new("pkg-config")
         .args(args)
         .output()
-        .expect("pkg-config is required for librptadvtone-dev");
+        .expect("pkg-config is required for released audio providers");
     assert!(
         output.status.success(),
-        "released librptadvtone-dev is required: pkg-config {args:?}"
+        "released audio provider development package is required: pkg-config {args:?}"
     );
     String::from_utf8(output.stdout)
         .expect("pkg-config UTF-8")
@@ -18,13 +18,18 @@ fn pkg_config(args: &[&str]) -> String {
 }
 
 fn main() {
-    assert_eq!(
-        pkg_config(&["--variable=abi_version", "rptadvtone"]),
-        "1",
-        "tone ABI major"
-    );
-    let libdir = pkg_config(&["--variable=libdir", "rptadvtone"]);
-    assert!(!libdir.is_empty(), "tone library directory is missing");
-    println!("cargo:rustc-link-search=native={libdir}");
-    println!("cargo:rustc-link-lib=dylib=rptadvtone");
+    for provider in ["rptadvtone", "rptadvmorse"] {
+        assert_eq!(
+            pkg_config(&["--variable=abi_version", provider]),
+            "1",
+            "{provider} ABI major"
+        );
+        let libdir = pkg_config(&["--variable=libdir", provider]);
+        assert!(
+            !libdir.is_empty(),
+            "{provider} library directory is missing"
+        );
+        println!("cargo:rustc-link-search=native={libdir}");
+        println!("cargo:rustc-link-lib=dylib={provider}");
+    }
 }

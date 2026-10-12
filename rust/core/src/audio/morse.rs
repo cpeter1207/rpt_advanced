@@ -1,32 +1,93 @@
-//! Streaming 48 kHz Morse renderer.
+//! Streaming Morse audio supplied by the released ABI 1 Morse library.
 
 use super::AudioSource;
+use std::ffi::{CStr, c_char, c_void};
+use std::ptr::NonNull;
+use std::sync::OnceLock;
 
-/// Fixed native audio rate used by Morse rendering.
-const SAMPLE_RATE_HZ: u64 = 48_000;
-
-/// A rejected Morse configuration.
+/// A rejected Morse configuration or unavailable/incompatible provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MorseError;
 
+#[repr(C)]
 #[derive(Clone, Copy)]
-enum Segment {
-    Tone(u64),
-    Gap(u64),
+struct MorseDescriptor {
+    struct_size: u32,
+    abi_version: u32,
+    capability_name: *const c_char,
+    create: Option<unsafe extern "C" fn(*const u8, usize, u32, f32, i8, *mut *mut c_void) -> i32>,
+    render: Option<unsafe extern "C" fn(*mut c_void, *mut f32, usize, *mut usize) -> i32>,
+    restart: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
+    destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
-/// Prevalidated, allocation-free-at-render-time Morse audio source.
-pub struct MorseRenderer {
-    segments: Vec<Segment>,
-    segment: usize,
-    remaining: u64,
-    keyed: bool,
-    phase: f32,
-    step: f32,
-    amplitude: f32,
+#[derive(Clone, Copy)]
+struct MorseApi {
+    create: unsafe extern "C" fn(*const u8, usize, u32, f32, i8, *mut *mut c_void) -> i32,
+    render: unsafe extern "C" fn(*mut c_void, *mut f32, usize, *mut usize) -> i32,
+    restart: unsafe extern "C" fn(*mut c_void) -> i32,
+    destroy: unsafe extern "C" fn(*mut c_void),
 }
+
+unsafe extern "C" {
+    fn rptadv_morse_descriptor() -> *const MorseDescriptor;
+}
+
+static API: OnceLock<Result<MorseApi, MorseError>> = OnceLock::new();
+
+fn provider_api() -> Result<MorseApi, MorseError> {
+    *API.get_or_init(|| unsafe { validate_descriptor(rptadv_morse_descriptor()) })
+}
+
+/// Check the size prefix before reading the complete ABI table.
+///
+/// # Safety
+/// `pointer` must address a readable prefix and, when its reported size is
+/// sufficient, a complete immutable descriptor for this call.
+unsafe fn validate_descriptor(pointer: *const MorseDescriptor) -> Result<MorseApi, MorseError> {
+    if pointer.is_null() {
+        return Err(MorseError);
+    }
+    let size = unsafe { std::ptr::addr_of!((*pointer).struct_size).read() };
+    if size < std::mem::size_of::<MorseDescriptor>() as u32 {
+        return Err(MorseError);
+    }
+    let abi = unsafe { std::ptr::addr_of!((*pointer).abi_version).read() };
+    if abi != 1 {
+        return Err(MorseError);
+    }
+    let descriptor = unsafe { &*pointer };
+    if descriptor.capability_name.is_null()
+        || unsafe { CStr::from_ptr(descriptor.capability_name) } != c"rptadv.morse"
+    {
+        return Err(MorseError);
+    }
+    Ok(MorseApi {
+        create: descriptor.create.ok_or(MorseError)?,
+        render: descriptor.render.ok_or(MorseError)?,
+        restart: descriptor.restart.ok_or(MorseError)?,
+        destroy: descriptor.destroy.ok_or(MorseError)?,
+    })
+}
+
+/// Prevalidated Morse source with provider operations cached before rendering.
+pub struct MorseRenderer {
+    handle: NonNull<c_void>,
+    render: unsafe extern "C" fn(*mut c_void, *mut f32, usize, *mut usize) -> i32,
+    restart: unsafe extern "C" fn(*mut c_void) -> i32,
+    destroy: unsafe extern "C" fn(*mut c_void),
+}
+
+// The uniquely owned handle can move between threads, but is never used by
+// concurrent producers. Cached entrypoints remain valid for the DSO lifetime.
+unsafe impl Send for MorseRenderer {}
 
 impl MorseRenderer {
+    /// Validate the mandatory released provider even without configured Morse.
+    pub fn provider_ready() -> Result<(), MorseError> {
+        provider_api().map(|_| ())
+    }
+
     /// Validate and prepare one ASCII Morse message for fixed 48 kHz rendering.
     pub fn new(
         text: &str,
@@ -34,179 +95,75 @@ impl MorseRenderer {
         frequency_hz: f32,
         level_db: i8,
     ) -> Result<Self, MorseError> {
-        if !(1..=100).contains(&speed_wpm)
-            || !frequency_hz.is_finite()
-            || frequency_hz <= 0.0
-            || frequency_hz >= 24_000.0
-            || !(-60..=0).contains(&level_db)
-        {
+        Self::from_api(provider_api()?, text, speed_wpm, frequency_hz, level_db)
+    }
+
+    fn from_api(
+        api: MorseApi,
+        text: &str,
+        speed_wpm: u32,
+        frequency_hz: f32,
+        level_db: i8,
+    ) -> Result<Self, MorseError> {
+        let mut raw = std::ptr::null_mut();
+        let status = unsafe {
+            (api.create)(
+                text.as_ptr(),
+                text.len(),
+                speed_wpm,
+                frequency_hz,
+                level_db,
+                &mut raw,
+            )
+        };
+        if status != 0 {
+            if let Some(handle) = NonNull::new(raw) {
+                unsafe { (api.destroy)(handle.as_ptr()) };
+            }
             return Err(MorseError);
         }
-        let words: Vec<_> = text
-            .split(is_separator)
-            .filter(|word| !word.is_empty())
-            .collect();
-        if words
-            .iter()
-            .any(|word| word.chars().any(|character| pattern(character).is_none()))
-        {
-            return Err(MorseError);
-        }
-        let denominator = u64::from(5 * speed_wpm);
-        let mut fraction = 0;
-        let mut segments = Vec::new();
-        for (word_index, word) in words.iter().enumerate() {
-            for (character_index, character) in word.chars().enumerate() {
-                let code = pattern(character).expect("validated Morse character");
-                for (symbol_index, symbol) in code.bytes().enumerate() {
-                    segments.push(Segment::Tone(samples(
-                        symbol == b'.',
-                        denominator,
-                        &mut fraction,
-                    )));
-                    if symbol_index + 1 != code.len() {
-                        segments.push(Segment::Gap(samples_units(1, denominator, &mut fraction)));
-                    }
-                }
-                if character_index + 1 != word.len() {
-                    segments.push(Segment::Gap(samples_units(3, denominator, &mut fraction)));
-                }
-            }
-            if word_index + 1 != words.len() {
-                segments.push(Segment::Gap(samples_units(7, denominator, &mut fraction)));
-            }
-        }
+        let handle = NonNull::new(raw).ok_or(MorseError)?;
         Ok(Self {
-            segments,
-            segment: 0,
-            remaining: 0,
-            keyed: false,
-            phase: 0.0,
-            step: frequency_hz / SAMPLE_RATE_HZ as f32,
-            amplitude: 10_f32.powf(f32::from(level_db) / 20.0),
+            handle,
+            render: api.render,
+            restart: api.restart,
+            destroy: api.destroy,
         })
     }
 
-    /// Render as many samples as fit, returning the number written.
+    /// Render as many samples as fit without setup work on the producer path.
     pub fn render(&mut self, output: &mut [f32]) -> usize {
         let mut written = 0;
-        while written != output.len() {
-            if self.remaining == 0 {
-                let Some(segment) = self.segments.get(self.segment).copied() else {
-                    break;
-                };
-                self.segment += 1;
-                match segment {
-                    Segment::Tone(samples) => {
-                        self.keyed = true;
-                        self.phase = 0.0;
-                        self.remaining = samples;
-                    }
-                    Segment::Gap(samples) => {
-                        self.keyed = false;
-                        self.remaining = samples;
-                    }
-                }
-            }
-            output[written] = if self.keyed {
-                let sample = self.amplitude * (core::f32::consts::TAU * self.phase).sin();
-                self.phase = (self.phase + self.step).fract();
-                sample
-            } else {
-                0.0
-            };
-            self.remaining -= 1;
-            written += 1;
+        let status = unsafe {
+            (self.render)(
+                self.handle.as_ptr(),
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+            )
+        };
+        if status != 0 {
+            return 0;
         }
-        written
+        written.min(output.len())
     }
 
     /// Reset this validated renderer to the start without allocating.
     pub fn restart(&mut self) {
-        self.segment = 0;
-        self.remaining = 0;
-        self.keyed = false;
-        self.phase = 0.0;
+        // The owned handle is valid; ABI 1 reports no other restart failure.
+        let _ = unsafe { (self.restart)(self.handle.as_ptr()) };
+    }
+}
+
+impl Drop for MorseRenderer {
+    fn drop(&mut self) {
+        unsafe { (self.destroy)(self.handle.as_ptr()) };
     }
 }
 
 impl AudioSource for MorseRenderer {
     fn render(&mut self, output: &mut [f32]) -> usize {
         self.render(output)
-    }
-}
-
-fn is_separator(character: char) -> bool {
-    matches!(character, ' ' | '\t' | '\r' | '\n')
-}
-
-fn samples(dot: bool, denominator: u64, fraction: &mut u64) -> u64 {
-    samples_units(if dot { 1 } else { 3 }, denominator, fraction)
-}
-
-fn samples_units(units: u64, denominator: u64, fraction: &mut u64) -> u64 {
-    let numerator = units * SAMPLE_RATE_HZ * 6 + *fraction;
-    *fraction = numerator % denominator;
-    numerator / denominator
-}
-
-fn pattern(character: char) -> Option<&'static str> {
-    match character.to_ascii_uppercase() {
-        'A' => Some(".-"),
-        'B' => Some("-..."),
-        'C' => Some("-.-."),
-        'D' => Some("-.."),
-        'E' => Some("."),
-        'F' => Some("..-."),
-        'G' => Some("--."),
-        'H' => Some("...."),
-        'I' => Some(".."),
-        'J' => Some(".---"),
-        'K' => Some("-.-"),
-        'L' => Some(".-.."),
-        'M' => Some("--"),
-        'N' => Some("-."),
-        'O' => Some("---"),
-        'P' => Some(".--."),
-        'Q' => Some("--.-"),
-        'R' => Some(".-."),
-        'S' => Some("..."),
-        'T' => Some("-"),
-        'U' => Some("..-"),
-        'V' => Some("...-"),
-        'W' => Some(".--"),
-        'X' => Some("-..-"),
-        'Y' => Some("-.--"),
-        'Z' => Some("--.."),
-        '0' => Some("-----"),
-        '1' => Some(".----"),
-        '2' => Some("..---"),
-        '3' => Some("...--"),
-        '4' => Some("....-"),
-        '5' => Some("....."),
-        '6' => Some("-...."),
-        '7' => Some("--..."),
-        '8' => Some("---.."),
-        '9' => Some("----."),
-        '/' => Some("-..-."),
-        '.' => Some(".-.-.-"),
-        ',' => Some("--..--"),
-        '?' => Some("..--.."),
-        '-' => Some("-....-"),
-        '=' => Some("-...-"),
-        '+' => Some(".-.-."),
-        '@' => Some(".--.-."),
-        '(' => Some("-.--."),
-        ')' => Some("-.--.-"),
-        '\'' => Some(".----."),
-        '!' => Some("-.-.--"),
-        '"' => Some(".-..-."),
-        ':' => Some("---..."),
-        ';' => Some("-.-.-."),
-        '_' => Some("..--.-"),
-        '$' => Some("...-..-"),
-        '&' => Some(".-..."),
-        _ => None,
     }
 }
 
