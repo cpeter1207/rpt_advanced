@@ -421,7 +421,15 @@ fn idle_post_worker_waits_and_skips_malformed_endpoints() {
 
 #[test]
 fn reload_preserves_sequence_and_empty_url_disables_publication() {
-    let mut service = super::StatusPostService::default();
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let mut service = super::StatusPostService {
+        worker: Some(super::StatusPostWorker {
+            mailbox: Arc::new((Mutex::new(super::Mailbox::default()), Condvar::new())),
+            thread: None,
+        }),
+        ..super::StatusPostService::default()
+    };
     let config = || {
         vec![super::PostConfig {
             node: "1000".into(),
