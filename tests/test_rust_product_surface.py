@@ -117,7 +117,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
             )
         symbols = command("nm", "--defined-only", "--demangle", str(path))
         assert not re.search(
-            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor|rptadv_tone_descriptor|rptadv_morse_descriptor|rptadv_template_descriptor)$",
+            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor|rptadv_tone_descriptor|rptadv_morse_descriptor|rptadv_dtmf_descriptor|rptadv_template_descriptor|rptadv_schedule_descriptor)$",
             symbols,
             re.MULTILINE,
         ), f"static external adapter in {name}"
@@ -662,6 +662,8 @@ def verify_artifact_policy() -> None:
                 write(root, name)
             for duplicate in (
                 "0000 T rpcr3_descriptor\n",
+                "0000 T rptadv_dtmf_descriptor\n",
+                "0000 T rptadv_schedule_descriptor\n",
                 "rpt_advanced_core::controller",
             ):
                 symbols.side_effect = lambda *arguments, value=duplicate: (
