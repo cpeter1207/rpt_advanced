@@ -18,7 +18,13 @@ fn pkg_config(args: &[&str]) -> String {
 }
 
 fn main() {
-    for provider in ["rptadvtone", "rptadvmorse", "rptadvdtmf", "rptadvtemplate"] {
+    for provider in [
+        "rptadvtone",
+        "rptadvmorse",
+        "rptadvdtmf",
+        "rptadvtemplate",
+        "rptadvschedule",
+    ] {
         assert_eq!(
             pkg_config(&["--variable=abi_version", provider]),
             "1",

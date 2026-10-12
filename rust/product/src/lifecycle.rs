@@ -11,6 +11,7 @@ use rpt_advanced_core::{
     config::{ConfigDocument, Schema},
     control::{ControlExecutor, ControlTask},
     runtime::{RuntimeClock, RuntimeError},
+    schedule,
     template::MessageTemplate,
 };
 use rpt_advanced_core::{
@@ -705,6 +706,7 @@ unsafe extern "C" fn rptadv_product_start(
         MorseRenderer::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         DtmfDetector::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         MessageTemplate::provider_ready().map_err(|_| RuntimeError::Preparation)?;
+        schedule::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let origin = Instant::now();
         let clock = capture(origin, services);

@@ -1,6 +1,10 @@
-//! Deterministic parsers and matchers for local civil-time scheduling.
+//! Controller-facing civil scheduling backed by the released schedule ABI.
 
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::fmt;
+use std::ptr::{self, NonNull};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 /// A schedule parsing or validation failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,6 +12,10 @@ pub enum ScheduleError {
     /// The supplied value is outside the deliberately small schedule grammar.
     Invalid,
 }
+
+/// The mandatory shared schedule provider is absent or incompatible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduleProviderError;
 
 /// Sunday-zero local weekdays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,25 +38,164 @@ pub enum Weekday {
 }
 
 impl Weekday {
-    fn parse(text: &str) -> Result<Self, ScheduleError> {
-        if text.eq_ignore_ascii_case("sunday") {
-            Ok(Self::Sunday)
-        } else if text.eq_ignore_ascii_case("monday") {
-            Ok(Self::Monday)
-        } else if text.eq_ignore_ascii_case("tuesday") {
-            Ok(Self::Tuesday)
-        } else if text.eq_ignore_ascii_case("wednesday") {
-            Ok(Self::Wednesday)
-        } else if text.eq_ignore_ascii_case("thursday") {
-            Ok(Self::Thursday)
-        } else if text.eq_ignore_ascii_case("friday") {
-            Ok(Self::Friday)
-        } else if text.eq_ignore_ascii_case("saturday") {
-            Ok(Self::Saturday)
-        } else {
-            Err(ScheduleError::Invalid)
-        }
+    fn from_index(index: u8) -> Option<Self> {
+        Some(match index {
+            0 => Self::Sunday,
+            1 => Self::Monday,
+            2 => Self::Tuesday,
+            3 => Self::Wednesday,
+            4 => Self::Thursday,
+            5 => Self::Friday,
+            6 => Self::Saturday,
+            _ => return None,
+        })
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScheduleCivil {
+    year: u16,
+    month: u8,
+    day: u8,
+    weekday: u8,
+    hour: u8,
+    minute: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScheduleEventRecord {
+    kind: u32,
+    year: u16,
+    month: u8,
+    day: u8,
+    weekday: u8,
+    hour: u8,
+    minute: u8,
+}
+
+type Boundary = unsafe extern "C" fn(
+    *const c_void,
+    *const ScheduleCivil,
+    u8,
+    *mut u32,
+    *mut u64,
+    *mut u64,
+) -> i32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ScheduleDescriptor {
+    struct_size: u32,
+    abi_version: u32,
+    capability_name: *const c_char,
+    civil_new: Option<unsafe extern "C" fn(u16, u8, u8, u8, u8, u8, *mut ScheduleCivil) -> i32>,
+    event_parse: Option<unsafe extern "C" fn(*const c_char, *mut ScheduleEventRecord) -> i32>,
+    event_occurrence: Option<
+        unsafe extern "C" fn(
+            *const ScheduleEventRecord,
+            *const ScheduleCivil,
+            *mut u32,
+            *mut u64,
+        ) -> i32,
+    >,
+    start_time_valid: Option<unsafe extern "C" fn(*const c_char) -> u32>,
+    end_time_valid: Option<unsafe extern "C" fn(*const c_char) -> u32>,
+    weekday_selector_valid: Option<unsafe extern "C" fn(*const c_char) -> u32>,
+    date_selector_valid: Option<unsafe extern "C" fn(*const c_char) -> u32>,
+    window_create: Option<
+        unsafe extern "C" fn(
+            u32,
+            *const c_char,
+            u32,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *mut *mut c_void,
+        ) -> i32,
+    >,
+    window_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+    window_clone: Option<unsafe extern "C" fn(*const c_void, *mut *mut c_void) -> i32>,
+    window_equal: Option<unsafe extern "C" fn(*const c_void, *const c_void, *mut u32) -> i32>,
+    window_matches:
+        Option<unsafe extern "C" fn(*const c_void, *const ScheduleCivil, *mut u32) -> i32>,
+    window_overlaps: Option<unsafe extern "C" fn(*const c_void, *const c_void, *mut u32) -> i32>,
+    window_elapsed_after_end: Option<
+        unsafe extern "C" fn(*const c_void, *const ScheduleCivil, u8, *mut u32, *mut u64) -> i32,
+    >,
+    window_next_start: Option<Boundary>,
+    window_next_end: Option<Boundary>,
+}
+
+// The released descriptor is immutable and remains valid for the DSO lifetime.
+unsafe impl Sync for ScheduleDescriptor {}
+
+unsafe extern "C" {
+    fn rptadv_schedule_descriptor() -> *const ScheduleDescriptor;
+}
+
+static API: OnceLock<Result<&'static ScheduleDescriptor, ScheduleProviderError>> = OnceLock::new();
+
+fn provider_api() -> Result<&'static ScheduleDescriptor, ScheduleProviderError> {
+    *API.get_or_init(|| unsafe { validate_descriptor(rptadv_schedule_descriptor()) })
+}
+
+/// Validate the mandatory provider during product setup, even without schedules.
+pub fn provider_ready() -> Result<(), ScheduleProviderError> {
+    provider_api().map(|_| ())
+}
+
+fn input_status(status: i32) -> Result<(), ScheduleError> {
+    match status {
+        0 => Ok(()),
+        -1 => Err(ScheduleError::Invalid),
+        unexpected => panic!("schedule provider contract failure: {unexpected}"),
+    }
+}
+
+/// Check the size prefix before reading the complete immutable ABI table.
+///
+/// # Safety
+/// `pointer` must address a readable prefix and, if its size suffices, a
+/// complete process-lifetime descriptor.
+unsafe fn validate_descriptor<'a>(
+    pointer: *const ScheduleDescriptor,
+) -> Result<&'a ScheduleDescriptor, ScheduleProviderError> {
+    if pointer.is_null() {
+        return Err(ScheduleProviderError);
+    }
+    let size = unsafe { std::ptr::addr_of!((*pointer).struct_size).read() };
+    if size < std::mem::size_of::<ScheduleDescriptor>() as u32 {
+        return Err(ScheduleProviderError);
+    }
+    let abi = unsafe { std::ptr::addr_of!((*pointer).abi_version).read() };
+    if abi != 1 {
+        return Err(ScheduleProviderError);
+    }
+    let descriptor = unsafe { &*pointer };
+    if descriptor.capability_name.is_null()
+        || unsafe { CStr::from_ptr(descriptor.capability_name) } != c"rptadv.schedule"
+        || descriptor.civil_new.is_none()
+        || descriptor.event_parse.is_none()
+        || descriptor.event_occurrence.is_none()
+        || descriptor.start_time_valid.is_none()
+        || descriptor.end_time_valid.is_none()
+        || descriptor.weekday_selector_valid.is_none()
+        || descriptor.date_selector_valid.is_none()
+        || descriptor.window_create.is_none()
+        || descriptor.window_destroy.is_none()
+        || descriptor.window_clone.is_none()
+        || descriptor.window_equal.is_none()
+        || descriptor.window_matches.is_none()
+        || descriptor.window_overlaps.is_none()
+        || descriptor.window_elapsed_after_end.is_none()
+        || descriptor.window_next_start.is_none()
+        || descriptor.window_next_end.is_none()
+    {
+        return Err(ScheduleProviderError);
+    }
+    Ok(descriptor)
 }
 
 /// One validated local civil minute, independent of a host time zone.
@@ -74,6 +221,7 @@ impl CivilTime {
             self.minute,
         )
     }
+
     /// Construct one validated local civil minute.
     pub fn new(
         year: u16,
@@ -83,38 +231,39 @@ impl CivilTime {
         hour: u8,
         minute: u8,
     ) -> Result<Self, ScheduleError> {
-        let date = CivilDate { year, month, day };
-        if !date.valid() || hour >= 24 || minute >= 60 {
-            return Err(ScheduleError::Invalid);
-        }
+        let api = provider_api().map_err(|_| ScheduleError::Invalid)?;
+        let mut record = ScheduleCivil::default();
+        let status = unsafe {
+            api.civil_new.expect("validated schedule ABI")(
+                year,
+                month,
+                day,
+                weekday as u8,
+                hour,
+                minute,
+                &mut record,
+            )
+        };
+        input_status(status)?;
         Ok(Self {
-            year,
-            month,
-            day,
-            weekday,
-            hour,
-            minute,
+            year: record.year,
+            month: record.month,
+            day: record.day,
+            weekday: Weekday::from_index(record.weekday).ok_or(ScheduleError::Invalid)?,
+            hour: record.hour,
+            minute: record.minute,
         })
     }
 
-    fn minute_of_day(self) -> u16 {
-        u16::from(self.hour) * 60 + u16::from(self.minute)
-    }
-
-    fn occurrence(self) -> u64 {
-        ((((u64::from(self.year) * 13 + u64::from(self.month)) * 32 + u64::from(self.day)) * 24
-            + u64::from(self.hour))
-            * 60)
-            + u64::from(self.minute)
-    }
-
-    fn date_ordinal(self) -> u64 {
-        CivilDate {
+    fn record(&self) -> ScheduleCivil {
+        ScheduleCivil {
             year: self.year,
             month: self.month,
             day: self.day,
+            weekday: self.weekday as u8,
+            hour: self.hour,
+            minute: self.minute,
         }
-        .ordinal()
     }
 }
 
@@ -183,28 +332,57 @@ pub enum ScheduledEvent {
 impl ScheduledEvent {
     /// Return this event's local calendar-minute occurrence when it is due.
     pub fn occurrence(&self, local: &CivilTime) -> Option<u64> {
-        let matches = match *self {
-            Self::Daily { hour, minute } => local.hour == hour && local.minute == minute,
+        let api = provider_api().expect("schedule provider validated at setup");
+        let record = match *self {
+            Self::Daily { hour, minute } => ScheduleEventRecord {
+                kind: 1,
+                hour,
+                minute,
+                ..ScheduleEventRecord::default()
+            },
             Self::Weekly {
                 weekday,
                 hour,
                 minute,
-            } => local.weekday == weekday && local.hour == hour && local.minute == minute,
+            } => ScheduleEventRecord {
+                kind: 2,
+                weekday: weekday as u8,
+                hour,
+                minute,
+                ..ScheduleEventRecord::default()
+            },
             Self::Once {
                 year,
                 month,
                 day,
                 hour,
                 minute,
-            } => {
-                local.year == year
-                    && local.month == month
-                    && local.day == day
-                    && local.hour == hour
-                    && local.minute == minute
-            }
+            } => ScheduleEventRecord {
+                kind: 3,
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                ..ScheduleEventRecord::default()
+            },
         };
-        matches.then(|| local.occurrence())
+        let mut present = 0;
+        let mut occurrence = 0;
+        let status = unsafe {
+            api.event_occurrence.expect("validated schedule ABI")(
+                &record,
+                &local.record(),
+                &mut present,
+                &mut occurrence,
+            )
+        };
+        // Public enum variants permit invalid fields; the old matcher returned None.
+        if status == -1 {
+            return None;
+        }
+        assert_eq!(status, 0, "schedule provider event contract failure");
+        (present != 0).then_some(occurrence)
     }
 }
 
@@ -213,370 +391,278 @@ impl FromStr for ScheduledEvent {
 
     /// Parse one exact daily, weekly, or one-time local event trigger.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if let Some(clock) = text.strip_prefix("daily ") {
-            let (hour, minute) = parse_clock(clock)?;
-            return Ok(Self::Daily { hour, minute });
-        }
-        if let Some(rest) = text.strip_prefix("weekly ") {
-            let (weekday, clock) = rest.split_once(' ').ok_or(ScheduleError::Invalid)?;
-            let (hour, minute) = parse_clock(clock)?;
-            return Ok(Self::Weekly {
-                weekday: Weekday::parse(weekday)?,
-                hour,
-                minute,
-            });
-        }
-        if let Some(rest) = text.strip_prefix("once ") {
-            let (date, clock) = rest.split_once(' ').ok_or(ScheduleError::Invalid)?;
-            let date = CivilDate::parse(date)?;
-            let (hour, minute) = parse_clock(clock)?;
-            return Ok(Self::Once {
-                year: date.year,
-                month: date.month,
-                day: date.day,
-                hour,
-                minute,
-            });
-        }
-        Err(ScheduleError::Invalid)
+        let api = provider_api().map_err(|_| ScheduleError::Invalid)?;
+        let text = CString::new(text).map_err(|_| ScheduleError::Invalid)?;
+        let mut record = ScheduleEventRecord::default();
+        let status =
+            unsafe { api.event_parse.expect("validated schedule ABI")(text.as_ptr(), &mut record) };
+        input_status(status)?;
+        Ok(match record.kind {
+            1 => Self::Daily {
+                hour: record.hour,
+                minute: record.minute,
+            },
+            2 => Self::Weekly {
+                weekday: Weekday::from_index(record.weekday).ok_or(ScheduleError::Invalid)?,
+                hour: record.hour,
+                minute: record.minute,
+            },
+            3 => Self::Once {
+                year: record.year,
+                month: record.month,
+                day: record.day,
+                hour: record.hour,
+                minute: record.minute,
+            },
+            _ => return Err(ScheduleError::Invalid),
+        })
     }
 }
 
-/// A bounded same-date local civil-time window.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A bounded same-date local civil-time window owned by the schedule provider.
 pub struct ScheduledWindow {
-    start_minute: u16,
-    end_minute: u16,
-    weekday_mask: u8,
-    dates: Vec<CivilDate>,
+    api: &'static ScheduleDescriptor,
+    handle: NonNull<c_void>,
+}
+
+// The control owner transfers unique handles between threads and serializes
+// all operations. Clones have independent handles; the DSO stays loaded.
+unsafe impl Send for ScheduledWindow {}
+
+impl Clone for ScheduledWindow {
+    fn clone(&self) -> Self {
+        let mut raw = ptr::null_mut();
+        let status = unsafe {
+            self.api.window_clone.expect("validated schedule ABI")(self.handle.as_ptr(), &mut raw)
+        };
+        assert_eq!(status, 0, "schedule provider rejected owned window clone");
+        Self {
+            api: self.api,
+            handle: NonNull::new(raw).expect("schedule provider returned null clone"),
+        }
+    }
+}
+
+impl fmt::Debug for ScheduledWindow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScheduledWindow")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ScheduledWindow {
+    fn eq(&self, other: &Self) -> bool {
+        let mut equal = 0;
+        let status = unsafe {
+            self.api.window_equal.expect("validated schedule ABI")(
+                self.handle.as_ptr(),
+                other.handle.as_ptr(),
+                &mut equal,
+            )
+        };
+        assert_eq!(
+            status, 0,
+            "schedule provider rejected owned window comparison"
+        );
+        equal != 0
+    }
+}
+
+impl Eq for ScheduledWindow {}
+
+impl Drop for ScheduledWindow {
+    fn drop(&mut self) {
+        unsafe { self.api.window_destroy.expect("validated schedule ABI")(self.handle.as_ptr()) };
+    }
 }
 
 impl ScheduledWindow {
-    /// Whether two bounded same-date windows can be active at the same local civil minute.
-    pub fn overlaps(&self, other: &Self) -> bool {
-        if self.start_minute >= other.end_minute || other.start_minute >= self.end_minute {
-            return false;
-        }
-        match (self.dates.is_empty(), other.dates.is_empty()) {
-            (false, false) => self.dates.iter().any(|date| other.dates.contains(date)),
-            (false, true) => self
-                .dates
-                .iter()
-                .any(|date| other.matches_date_weekday(*date)),
-            (true, false) => other
-                .dates
-                .iter()
-                .any(|date| self.matches_date_weekday(*date)),
-            (true, true) => {
-                selected_weekdays(self.weekday_mask) & selected_weekdays(other.weekday_mask) != 0
-            }
-        }
-    }
-
-    fn matches_date_weekday(&self, date: CivilDate) -> bool {
-        self.weekday_mask == 0 || self.weekday_mask & (1 << date.weekday()) != 0
-    }
-
-    /// Milliseconds until the next selected inclusive start and its date identity.
-    pub(crate) fn next_start(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
-        self.next_boundary(local, second, u64::from(self.start_minute) * 60)
-    }
-
-    /// Milliseconds until the next selected exclusive end and its date identity.
-    pub(crate) fn next_end(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
-        self.next_boundary(local, second, u64::from(self.end_minute) * 60)
-    }
-
-    fn next_boundary(
-        &self,
-        local: &CivilTime,
-        second: u8,
-        target_second: u64,
-    ) -> Option<(u64, u64)> {
-        if second >= 60 {
-            return None;
-        }
-        let today = local.date_ordinal();
-        let current_second = u64::from(local.minute_of_day()) * 60 + u64::from(second);
-        if !self.dates.is_empty() {
-            return self
-                .dates
-                .iter()
-                .filter_map(|date| {
-                    let date = date.ordinal();
-                    let days = date.checked_sub(today)?;
-                    let remaining = days
-                        .checked_mul(86_400)?
-                        .checked_add(target_second)?
-                        .checked_sub(current_second)?;
-                    Some((date, remaining))
-                })
-                .filter(|(_, remaining)| *remaining > 0)
-                .min_by_key(|(_, remaining)| *remaining)
-                .map(|(date, remaining)| (date, remaining * 1000));
-        }
-        (0..=7).find_map(|days| {
-            let weekday = (local.weekday as u8 + days) % 7;
-            if self.weekday_mask != 0 && self.weekday_mask & (1 << weekday) == 0 {
-                return None;
-            }
-            let remaining = (days as u64 * 86_400 + target_second).checked_sub(current_second)?;
-            (remaining > 0).then_some((today + days as u64, remaining * 1000))
-        })
-    }
-
-    /// Elapsed wall-clock milliseconds after this selected date's window end.
-    /// Returns `None` before the end, on another selected date, or for invalid seconds.
-    pub fn elapsed_after_end(&self, local: &CivilTime, second: u8) -> Option<u64> {
-        if second >= 60 {
-            return None;
-        }
-        if self.end_minute == 24 * 60 {
-            if self.matches(local) {
-                return None;
-            }
-            let previous = previous_civil_day(*local)?;
-            return self
-                .matches(&previous)
-                .then(|| (u64::from(local.minute_of_day()) * 60 + u64::from(second)) * 1000);
-        }
-        if local.minute_of_day() < self.end_minute {
-            return None;
-        }
-        let inside = CivilTime {
-            hour: ((self.end_minute - 1) / 60) as u8,
-            minute: ((self.end_minute - 1) % 60) as u8,
-            ..*local
-        };
-        self.matches(&inside).then(|| {
-            (u64::from(local.minute_of_day() - self.end_minute) * 60 + u64::from(second)) * 1000
-        })
-    }
-
-    /// Parse optional weekday or date selectors and a same-date local time range.
+    /// Parse optional weekday/date selectors and a same-date local time range.
     pub fn parse(
         days: Option<&str>,
         dates: Option<&str>,
         start: &str,
         end: &str,
     ) -> Result<Self, ScheduleError> {
-        let start_minute = clock_minute(start)?;
-        let end_minute = end_clock_minute(end)?;
-        let weekday_mask = parse_weekdays(days.unwrap_or(""))?;
-        let dates = parse_dates(dates.unwrap_or(""))?;
-        if start_minute >= end_minute || (weekday_mask != 0 && !dates.is_empty()) {
-            return Err(ScheduleError::Invalid);
+        let api = provider_api().map_err(|_| ScheduleError::Invalid)?;
+        let days_text = days
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| ScheduleError::Invalid)?;
+        let dates_text = dates
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| ScheduleError::Invalid)?;
+        let start = CString::new(start).map_err(|_| ScheduleError::Invalid)?;
+        let end = CString::new(end).map_err(|_| ScheduleError::Invalid)?;
+        let mut raw = ptr::null_mut();
+        let status = unsafe {
+            api.window_create.expect("validated schedule ABI")(
+                u32::from(days.is_some()),
+                days_text.as_ref().map_or(ptr::null(), |text| text.as_ptr()),
+                u32::from(dates.is_some()),
+                dates_text
+                    .as_ref()
+                    .map_or(ptr::null(), |text| text.as_ptr()),
+                start.as_ptr(),
+                end.as_ptr(),
+                &mut raw,
+            )
+        };
+        if status != 0 {
+            if let Some(handle) = NonNull::new(raw) {
+                unsafe { api.window_destroy.expect("validated schedule ABI")(handle.as_ptr()) };
+            }
         }
+        input_status(status)?;
         Ok(Self {
-            start_minute,
-            end_minute,
-            weekday_mask,
-            dates,
+            api,
+            handle: NonNull::new(raw).expect("schedule provider returned null owned window"),
         })
     }
 
     /// Test whether this window selects the supplied local civil minute.
     pub fn matches(&self, local: &CivilTime) -> bool {
-        local.minute_of_day() >= self.start_minute
-            && local.minute_of_day() < self.end_minute
-            && (self.weekday_mask == 0 || self.weekday_mask & (1 << local.weekday as u8) != 0)
-            && (self.dates.is_empty()
-                || self.dates.iter().any(|date| {
-                    date.year == local.year && date.month == local.month && date.day == local.day
-                }))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CivilDate {
-    year: u16,
-    month: u8,
-    day: u8,
-}
-
-impl CivilDate {
-    fn parse(text: &str) -> Result<Self, ScheduleError> {
-        let bytes = text.as_bytes();
-        if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-            return Err(ScheduleError::Invalid);
-        }
-        let date = Self {
-            year: parse_digits(&bytes[0..4])? as u16,
-            month: parse_digits(&bytes[5..7])? as u8,
-            day: parse_digits(&bytes[8..10])? as u8,
+        let mut matches = 0;
+        let status = unsafe {
+            self.api.window_matches.expect("validated schedule ABI")(
+                self.handle.as_ptr(),
+                &local.record(),
+                &mut matches,
+            )
         };
-        date.valid().then_some(date).ok_or(ScheduleError::Invalid)
+        assert_eq!(status, 0, "schedule provider rejected owned window match");
+        matches != 0
     }
 
-    fn valid(&self) -> bool {
-        (1..=9_999).contains(&self.year)
-            && self.month >= 1
-            && self.month <= 12
-            && self.day >= 1
-            && self.day <= month_days(self.year, self.month)
+    /// Whether two bounded same-date windows can be active at the same local civil minute.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        let mut overlaps = 0;
+        let status = unsafe {
+            self.api.window_overlaps.expect("validated schedule ABI")(
+                self.handle.as_ptr(),
+                other.handle.as_ptr(),
+                &mut overlaps,
+            )
+        };
+        assert_eq!(status, 0, "schedule provider rejected owned window overlap");
+        overlaps != 0
     }
 
-    fn ordinal(&self) -> u64 {
-        let year = u64::from(self.year - 1);
-        let leap_days = year / 4 - year / 100 + year / 400;
-        let month_days: u64 = (1..self.month)
-            .map(|month| u64::from(month_days(self.year, month)))
-            .sum();
-        365 * year + leap_days + month_days + u64::from(self.day - 1)
+    /// Elapsed wall-clock milliseconds after this selected date's window end.
+    pub fn elapsed_after_end(&self, local: &CivilTime, second: u8) -> Option<u64> {
+        let mut present = 0;
+        let mut elapsed = 0;
+        let status = unsafe {
+            self.api
+                .window_elapsed_after_end
+                .expect("validated schedule ABI")(
+                self.handle.as_ptr(),
+                &local.record(),
+                second,
+                &mut present,
+                &mut elapsed,
+            )
+        };
+        assert_eq!(
+            status, 0,
+            "schedule provider rejected owned window elapsed time"
+        );
+        (present != 0).then_some(elapsed)
     }
 
-    fn weekday(&self) -> u8 {
-        ((self.ordinal() + 1) % 7) as u8
+    /// Milliseconds until the next selected inclusive start and its date identity.
+    pub(crate) fn next_start(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
+        self.next_boundary(
+            local,
+            second,
+            self.api.window_next_start.expect("validated schedule ABI"),
+        )
+    }
+
+    /// Milliseconds until the next selected exclusive end and its date identity.
+    pub(crate) fn next_end(&self, local: &CivilTime, second: u8) -> Option<(u64, u64)> {
+        self.next_boundary(
+            local,
+            second,
+            self.api.window_next_end.expect("validated schedule ABI"),
+        )
+    }
+
+    fn next_boundary(
+        &self,
+        local: &CivilTime,
+        second: u8,
+        operation: Boundary,
+    ) -> Option<(u64, u64)> {
+        let mut present = 0;
+        let mut identity = 0;
+        let mut remaining = 0;
+        let status = unsafe {
+            operation(
+                self.handle.as_ptr(),
+                &local.record(),
+                second,
+                &mut present,
+                &mut identity,
+                &mut remaining,
+            )
+        };
+        assert_eq!(
+            status, 0,
+            "schedule provider rejected owned window boundary"
+        );
+        (present != 0).then_some((identity, remaining))
     }
 }
 
-fn selected_weekdays(mask: u8) -> u8 {
-    if mask == 0 { 0x7f } else { mask }
-}
-
-fn parse_clock(text: &str) -> Result<(u8, u8), ScheduleError> {
-    let bytes = text.as_bytes();
-    if bytes.len() != 5 || bytes[2] != b':' {
-        return Err(ScheduleError::Invalid);
-    }
-    let hour = parse_digits(&bytes[..2])? as u8;
-    let minute = parse_digits(&bytes[3..])? as u8;
-    if minute >= 60 || hour >= 24 {
-        return Err(ScheduleError::Invalid);
-    }
-    Ok((hour, minute))
-}
-
-fn clock_minute(text: &str) -> Result<u16, ScheduleError> {
-    let (hour, minute) = parse_clock(text)?;
-    Ok(u16::from(hour) * 60 + u16::from(minute))
-}
-
-fn end_clock_minute(text: &str) -> Result<u16, ScheduleError> {
-    if text == "24:00" {
-        Ok(24 * 60)
-    } else {
-        clock_minute(text)
-    }
+fn valid_selector(text: &str, operation: unsafe extern "C" fn(*const c_char) -> u32) -> bool {
+    CString::new(text).is_ok_and(|text| unsafe { operation(text.as_ptr()) != 0 })
 }
 
 /// Check one inclusive start boundary.
 pub(crate) fn start_time_valid(text: &str) -> bool {
-    clock_minute(text).is_ok()
+    valid_selector(
+        text,
+        provider_api()
+            .expect("schedule provider validated at setup")
+            .start_time_valid
+            .expect("validated schedule ABI"),
+    )
 }
 
 /// Check one exclusive end boundary.
 pub(crate) fn end_time_valid(text: &str) -> bool {
-    end_clock_minute(text).is_ok()
-}
-
-fn previous_civil_day(local: CivilTime) -> Option<CivilTime> {
-    let (year, month, day) = if local.day > 1 {
-        (local.year, local.month, local.day - 1)
-    } else if local.month > 1 {
-        let month = local.month - 1;
-        (local.year, month, month_days(local.year, month))
-    } else if local.year > 1 {
-        (local.year - 1, 12, 31)
-    } else {
-        return None;
-    };
-    let weekday = match local.weekday {
-        Weekday::Sunday => Weekday::Saturday,
-        Weekday::Monday => Weekday::Sunday,
-        Weekday::Tuesday => Weekday::Monday,
-        Weekday::Wednesday => Weekday::Tuesday,
-        Weekday::Thursday => Weekday::Wednesday,
-        Weekday::Friday => Weekday::Thursday,
-        Weekday::Saturday => Weekday::Friday,
-    };
-    Some(CivilTime {
-        year,
-        month,
-        day,
-        weekday,
-        hour: 23,
-        minute: 59,
-    })
-}
-
-fn parse_digits(bytes: &[u8]) -> Result<u32, ScheduleError> {
-    bytes.iter().try_fold(0_u32, |value, byte| {
-        byte.is_ascii_digit()
-            .then(|| value * 10 + u32::from(byte - b'0'))
-            .ok_or(ScheduleError::Invalid)
-    })
-}
-
-fn parse_weekdays(text: &str) -> Result<u8, ScheduleError> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(0);
-    }
-    text.split(',').try_fold(0_u8, |mask, term| {
-        let term = term.trim();
-        if term.is_empty() {
-            return Err(ScheduleError::Invalid);
-        }
-        let (first, last) = match term.split_once('-') {
-            Some((first, last)) if !last.contains('-') => {
-                (Weekday::parse(first.trim())?, Weekday::parse(last.trim())?)
-            }
-            Some(_) => return Err(ScheduleError::Invalid),
-            None => {
-                let weekday = Weekday::parse(term)?;
-                (weekday, weekday)
-            }
-        };
-        let mut updated = mask;
-        let mut day = first as u8;
-        loop {
-            updated |= 1 << day;
-            if day == last as u8 {
-                return Ok(updated);
-            }
-            day = (day + 1) % 7;
-        }
-    })
+    valid_selector(
+        text,
+        provider_api()
+            .expect("schedule provider validated at setup")
+            .end_time_valid
+            .expect("validated schedule ABI"),
+    )
 }
 
 /// Check one optional weekday selector.
 pub(crate) fn weekday_selector_valid(text: &str) -> bool {
-    parse_weekdays(text).is_ok()
-}
-
-fn parse_dates(text: &str) -> Result<Vec<CivilDate>, ScheduleError> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-    let dates: Result<Vec<_>, _> = text
-        .split(',')
-        .map(|term| CivilDate::parse(term.trim()))
-        .collect();
-    let dates = dates?;
-    (dates.len() <= 64)
-        .then_some(dates)
-        .ok_or(ScheduleError::Invalid)
+    valid_selector(
+        text,
+        provider_api()
+            .expect("schedule provider validated at setup")
+            .weekday_selector_valid
+            .expect("validated schedule ABI"),
+    )
 }
 
 /// Check one optional bounded date selector.
 pub(crate) fn date_selector_valid(text: &str) -> bool {
-    parse_dates(text).is_ok()
-}
-
-fn month_days(year: u16, month: u8) -> u8 {
-    const DAYS: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    // CivilDate::valid checks the month range before calling this helper.
-    if month == 2 && leap_year(year) {
-        29
-    } else {
-        DAYS[usize::from(month - 1)]
-    }
-}
-
-fn leap_year(year: u16) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    valid_selector(
+        text,
+        provider_api()
+            .expect("schedule provider validated at setup")
+            .date_selector_valid
+            .expect("validated schedule ABI"),
+    )
 }
 
 #[cfg(test)]

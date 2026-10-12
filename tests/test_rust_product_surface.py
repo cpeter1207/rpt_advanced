@@ -29,6 +29,7 @@ TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha1-1"
 TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
+SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
@@ -40,6 +41,7 @@ ELF_DEPENDENCIES = {
         "librptadvmorse.so.1",
         "librptadvdtmf.so.1",
         "librptadvtemplate.so.1",
+        "librptadvschedule.so.1",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
@@ -280,6 +282,7 @@ def package(control: Path) -> None:
         "librptadvmorse-dev",
         "librptadvdtmf-dev",
         "librptadvtemplate-dev",
+        "librptadvschedule-dev",
         "libusbradioplus-product-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
@@ -299,8 +302,10 @@ def package(control: Path) -> None:
         f"librptadvdtmf1 (>= {DTMF_MINIMUM_VERSION})",
         f"librptadvtemplate-dev (>= {TEMPLATE_MINIMUM_VERSION})",
         f"librptadvtemplate1 (>= {TEMPLATE_MINIMUM_VERSION})",
+        f"librptadvschedule-dev (>= {SCHEDULE_MINIMUM_VERSION})",
+        f"librptadvschedule1 (>= {SCHEDULE_MINIMUM_VERSION})",
     ):
-        assert token in contents, f"missing compatible audio provider: {token}"
+        assert token in contents, f"missing compatible shared provider: {token}"
     stanzas = {
         stanza.splitlines()[0].removeprefix("Package: ").split()[0]: stanza
         for stanza in contents.split("\n\n")
@@ -325,6 +330,9 @@ def package(control: Path) -> None:
     )
     assert f"librptadvtemplate1 (>= {TEMPLATE_MINIMUM_VERSION})" in product, (
         "product must depend directly on the released template runtime"
+    )
+    assert f"librptadvschedule1 (>= {SCHEDULE_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released schedule runtime"
     )
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 

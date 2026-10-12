@@ -44,6 +44,7 @@ PORTABLE_DESCRIPTOR_CLIENTS = {
     "rust/core/src/audio/morse.rs": "rptadv_morse_descriptor",
     "rust/core/src/audio/dtmf.rs": "rptadv_dtmf_descriptor",
     "rust/core/src/template.rs": "rptadv_template_descriptor",
+    "rust/core/src/schedule.rs": "rptadv_schedule_descriptor",
 }
 PORTABLE_CALLBACK_TESTS = {
     "rust/core/src/audio/tone_tests.rs",
@@ -270,6 +271,11 @@ def verify_examples() -> None:
             "rust/core/src/template.rs",
             'unsafe extern "C" { fn rptadv_template_descriptor(); }\n',
         )
+        write(
+            root,
+            "rust/core/src/schedule.rs",
+            'unsafe extern "C" { fn rptadv_schedule_descriptor(); }\n',
+        )
         for name in ("tone_tests", "morse_tests"):
             write(
                 root,
@@ -343,6 +349,15 @@ def verify_examples() -> None:
             root,
             "rust/core/src/template.rs",
             'unsafe extern "C" { fn rptadv_template_descriptor(); }\n',
+        )
+        write(
+            root, "rust/core/src/schedule.rs", 'unsafe extern "C" { fn arbitrary(); }\n'
+        )
+        expect_violation(root, "imports a C ABI")
+        write(
+            root,
+            "rust/core/src/schedule.rs",
+            'unsafe extern "C" { fn rptadv_schedule_descriptor(); }\n',
         )
 
         write(
