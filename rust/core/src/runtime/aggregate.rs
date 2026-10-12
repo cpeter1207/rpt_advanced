@@ -32,9 +32,11 @@ fn queue_status_media(
     settings: &ResolvedIdentifierSettings,
     morse: &str,
     speech: &str,
+    reply: Option<crate::link::PeerReply>,
 ) -> Result<(), RuntimeError> {
     let station = station.as_mut().ok_or(RuntimeError::Preparation)?;
-    let prepared = prepare::streamed_status(station.as_mut(), settings, morse, speech)?;
+    let prepared =
+        prepare::streamed_status(station.as_mut(), settings, morse, speech)?.reply_to(reply);
     telemetry.reclaim().for_each(drop);
     if telemetry.queue_prepared_status(prepared) {
         Ok(())
@@ -334,7 +336,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
         )
         .map_err(|_| RuntimeError::Preparation)?;
         let activity = controller.activity();
-        let (receive, digits) = DtmfWorker::new(generation, node.settings.dtmf_muting);
+        let (receive, digits) = DtmfWorker::new(generation, node.settings.dtmf_muting)
+            .map_err(|_| RuntimeError::Preparation)?;
         let candidate = RuntimeGeneration::prepare(
             generation,
             node.bounds.clone(),
@@ -519,7 +522,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
             let (controller, telemetry, status, media_session) =
                 prepare::controller(&document, &id, &settings, media, generation_id)?;
             let activity = controller.activity();
-            let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting);
+            let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
+                .map_err(|_| RuntimeError::Preparation)?;
             let prepared = adapter(name, &settings)?;
             let bounds = GenerationSettings {
                 node: name.into(),
@@ -826,6 +830,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                             &node.status,
                             &forms.morse,
                             &spoken,
+                            None,
                         )
                     });
                 let _ = queued;
@@ -941,6 +946,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &node.status,
             morse,
             dispatch.speech().unwrap_or(""),
+            None,
         )?;
         scheduler.message_queued(&dispatch.token);
         Ok(())
@@ -958,6 +964,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         action: LinkAction,
         last_keyed: Option<&str>,
         clock: RuntimeClock,
+        reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
         let node = self
             .nodes
@@ -1007,10 +1014,16 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &node.status,
             &text,
             &spoken,
+            reply,
         )
     }
-    /// Queue a topology-loop explanation to the local transmitter for a local RF command.
-    pub fn queue_loop_rejected(&mut self, local: &str, peer: &str) -> Result<(), RuntimeError> {
+    /// Queue a topology-loop explanation to the issuing RF or peer endpoint.
+    pub fn queue_loop_rejected(
+        &mut self,
+        local: &str,
+        peer: &str,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
         let node = self
             .nodes
             .iter_mut()
@@ -1028,6 +1041,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &node.status,
             &forms.morse,
             &spoken,
+            reply,
         )
     }
     /// Queue one direct-link lifecycle event from every configured node's perspective.
@@ -1077,6 +1091,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                         &node.status,
                         &forms.morse,
                         &spoken,
+                        None,
                     )
                 });
             if let Err(error) = queued {
@@ -1132,6 +1147,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                                 &node.status,
                                 &forms.morse,
                                 &spoken,
+                                None,
                             )
                         });
                     if let Err(error) = queued {
@@ -1199,6 +1215,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         }
         let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
         let work = node.work().ok_or(RuntimeError::Rejected)?;
+        let reply = operation.reply.clone();
         let effect = node
             .links
             .command(operation, work, clock.now_ms, directory_verified)
@@ -1207,7 +1224,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
             if !node.control.telemetry.set_parrot_enabled(*enabled) {
                 return Err(RuntimeError::Rejected);
             }
-            node.links.confirm_parrot_command(clock.now_ms);
+            if let Some(reply) = &reply {
+                node.links.confirm_peer_parrot_command(reply, clock.now_ms);
+            } else {
+                node.links.confirm_parrot_command(clock.now_ms);
+            }
         }
         self.track_detach(local, &effect);
         Ok(effect)

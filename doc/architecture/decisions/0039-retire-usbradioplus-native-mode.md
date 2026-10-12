@@ -1,11 +1,11 @@
 # ADR 0039: Retire USBRadioPlus native mode and native parrot
 
-Status: Accepted — implemented in the alpha19 candidate; source audit confirmed 2026-10-04
+Status: Implemented (2026-10-12); source audit confirmed 2026-10-04
 
 ## Context
 
-USBRadioPlus provides a driver-owned native-rate software local-repeat mode
-and native parrot recording/playback. Neither is needed by rpt_advanced,
+USBRadioPlus previously provided a driver-owned native-rate software local-repeat
+mode and native parrot recording/playback. Neither is needed by rpt_advanced,
 which owns its controller routing and uses the shared radio/audio components.
 The product owner has ended future ASL3 support for these modes.
 
@@ -17,9 +17,9 @@ distinct from the operating modes being retired.
 
 Remove USBRadioPlus's native software local-repeat mode, including native
 parrot. Do not retain either as an optional ASL3 feature, hidden setting, or
-rpt_advanced prerequisite. In the current implementation, software local
-repeat is selected by `duplex_local_repeat_mode=software`; native parrot uses
-that route with echo enabled. There is no separate `native_mode` config key.
+rpt_advanced prerequisite. The retired implementation selected software local
+repeat with `duplex_local_repeat_mode=software`; native parrot used
+that route with echo enabled. There was no separate `native_mode` config key.
 
 The implementation must remove mode-specific routing, recording/playback
 storage and state, admission/PTT special cases, configuration selections,
@@ -71,7 +71,7 @@ USBRadioPlus, and ordinary app_rpt audio, legacy echo, hardware local repeat,
 signaling, diagnostics, reload, and rpt_advanced transport still work. Retain
 the current external interoperability, packaging, and full quality requirements.
 
-The USBRadioPlus and shared-library candidate sources implement the removal;
-integration and release verification remain in progress. Released alpha18,
-installed configurations, and running nodes remain unchanged. A candidate test
-does not authorize deployment or replace the full release gate.
+The USBRadioPlus and shared-library sources implement the removal, including
+mode-specific controls, storage, routing, and documentation. Controller-owned
+rpt_advanced parrot remains a separate feature under ADR 0025. Implementation
+status does not authorize deployment or replace the full release gate.

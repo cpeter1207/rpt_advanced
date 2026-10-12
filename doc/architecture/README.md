@@ -33,13 +33,21 @@ lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
 Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that
 policy remains in the controller are defined by [ADR 0011](decisions/0011-versioned-functional-components.md).
-Those planned libraries are not current runtime dependencies until an
-extraction is complete.
+The nine existing-function components are released runtime dependencies. Direct
+dynamic links are `librptadvradio.so.4` to `librptadvsquelch.so.2`,
+`librptadvctcss.so.2`, and `librptadvdcs.so.1`;
+`librptadv_gpio_adapter.so.1` to `librptadvsignaling.so.1`;
+`librptadv_product.so.1` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
+`librptadvdtmf.so.1`, `librptadvtemplate.so.1`, and
+`librptadvschedule.so.1`; and `librptadvmorse.so.1` to
+`librptadvtone.so.1`. Hardware I/O and controller policy remain with their
+existing owners. ADR 0011's further directions are tracked separately from
+this extraction.
 
 The USBRadioPlus hardware cutover uses one channel implementation backed by
 the dynamic PortAudio/ALSA and GPIO adapters, with no `res_usbradio` imports or
 module requirement. Released alpha18's combined native tick runs in the
-PortAudio playback callback. The current Rust migration instead implements
+PortAudio playback callback. The Rust implementation instead provides
 independently paced PortAudio input and output callback entry points; Asterisk
 frame delivery and device-control I/O remain outside those callbacks. The
 `app_rpt` 8 kHz and `RadioPlusAdvanced` 48 kHz protocols remain separate.
@@ -47,17 +55,18 @@ The audio, radio-control, and GPIO boundaries are defined by
 [ADR 0028](decisions/0028-remove-res-usbradio-through-hardware-adapters.md).
 The accepted 2026-09-13 amendment splits that tick into an input-driven local
 receive worker and a DAC/adapter-output-clocked transmit worker. The callback
-split is implemented in USBRadioPlus's Rust migration. The rpt_advanced Rust
+split is implemented in USBRadioPlus. The rpt_advanced Rust
 product now implements generational `NodeHost` ownership, coherent paired
-receive/transmit calls, per-peer inbound rings, and the program-audio loopback
-dispatcher. This does not claim completion of USBRadioPlus's separate
-direct-hardware local/telemetry-ring topology or shared-clock adapter cutover;
+receive/transmit calls, local and per-peer inbound rings, telemetry streaming
+through its ring, and the program-audio loopback dispatcher. This does not
+claim completion of USBRadioPlus's separate direct-hardware local/telemetry-ring
+topology or shared-clock adapter cutover;
 none of those changes was part of released alpha18.
 Separately, [ADR 0039](decisions/0039-retire-usbradioplus-native-mode.md)
 retires USBRadioPlus's driver-native software-repeat and native parrot modes.
-They are not rpt_advanced prerequisites and will no longer be supported for
-ASL3. The candidate removal under verification does not remove the native DSP engine, the new
-receive/transmit worker design, or the separate `RadioPlusAdvanced` transport.
+They are removed from ASL3 support and are not rpt_advanced prerequisites.
+Their removal preserves the native DSP engine, the receive/transmit worker
+design, and the separate `RadioPlusAdvanced` transport.
 Appliance emissions/immunity acceptance targets and its signed-update trust
 roles are defined by [ADR 0030](decisions/0030-appliance-update-trust-and-compliance.md).
 The fully populated appliance interface, power, and thermal ceilings are
@@ -129,7 +138,7 @@ WebSocket is intentionally status-streaming only as defined by
 
 External and separately released project components are dynamic dependencies.
 Deliberately separated private Rust components use `dylib`. Every C-facing
-boundary is a separate versioned Rust `dylib` adapter shared object with only
+boundary is a separate versioned Rust `cdylib` adapter shared object with only
 its required stable C-compatible descriptor/function-table interface. External
 C dependencies are reachable only through their corresponding adapter; leaf
 implementation crates that are not component boundaries may remain internal to

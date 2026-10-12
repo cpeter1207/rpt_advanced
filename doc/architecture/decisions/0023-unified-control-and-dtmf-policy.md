@@ -30,6 +30,14 @@ only to that originating peer. It waits for the originating source to unkey
 when that source has an unkey state. Replies to CLI and REST commands remain
 on the requesting control interface and are not injected into RF.
 
+Peer command collection and prepared replies retain the originating connection,
+not merely its node number. Each receive source has independent partial-command and
+administrative-unlock state. A disconnected or replaced connection cannot
+receive an old reply. Addressed reply PCM carries its destination through the
+existing program-audio dispatcher; it is excluded from local transmitter demand
+and from every other peer's output. Prepared-media ownership is reclaimed on
+control, never by an audio callback.
+
 Identifiers are separate from command replies. Periodic, first-key, and other
 configured identifiers are sent only to the local transmitter; they are never
 forwarded to linked peers.

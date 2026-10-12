@@ -1456,13 +1456,17 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
             clock(),
         )
         .unwrap();
-        runtime.queue_status("1000", action, last, clock()).unwrap();
+        runtime
+            .queue_status("1000", action, last, clock(), None)
+            .unwrap();
         assert_eq!(*media.0.lock().unwrap(), [expected]);
         for _ in 0..3 {
-            runtime.queue_status("1000", action, last, clock()).unwrap();
+            runtime
+                .queue_status("1000", action, last, clock(), None)
+                .unwrap();
         }
         assert_eq!(
-            runtime.queue_status("1000", action, last, clock()),
+            runtime.queue_status("1000", action, last, clock(), None),
             Err(RuntimeError::Rejected)
         );
         let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
@@ -1480,11 +1484,11 @@ fn status_actions_register_speech_with_station_and_queue_ring_playback() {
         let mut invalid_clock = clock();
         invalid_clock.civil = None;
         assert_eq!(
-            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock),
+            runtime.queue_status("1000", LinkAction::Time, None, invalid_clock, None),
             Err(RuntimeError::Clock)
         );
         assert_eq!(
-            runtime.queue_status("missing", action, last, clock()),
+            runtime.queue_status("missing", action, last, clock(), None),
             Err(RuntimeError::MissingNode)
         );
         assert!(runtime.stop(0));
@@ -1522,7 +1526,7 @@ fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
     )
     .unwrap();
 
-    runtime.queue_loop_rejected("1000", "2000").unwrap();
+    runtime.queue_loop_rejected("1000", "2000", None).unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         ["Connection to node,2,0,0,0 rejected because it would create a link loop"]
@@ -1982,6 +1986,54 @@ fn parrot_command_rejects_a_second_toggle_until_callback_acknowledges_enable() {
         Err(RuntimeError::Rejected)
     ));
     assert!(runtime.stop(clock().now_ms));
+}
+
+#[test]
+fn accepted_peer_parrot_command_confirms_only_its_source() {
+    use super::links::LinkEffect;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.incoming("1000", "2000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    let operation = {
+        let links = runtime.node("1000").unwrap().links();
+        links.configure_admin(&digest, &digest, 60_000);
+        for digit in "*8001234#".chars() {
+            assert!(
+                links
+                    .peer_digit("2000", digit, 1001, reply.clone())
+                    .is_none()
+            );
+        }
+        let mut operation = None;
+        for digit in "*804".chars() {
+            operation = links
+                .peer_digit("2000", digit, 1002, reply.clone())
+                .or(operation);
+        }
+        operation.unwrap()
+    };
+    let mut now = clock();
+    now.now_ms = 1003;
+    assert!(matches!(
+        runtime.command("1000", operation, now, false),
+        Ok(LinkEffect::ParrotEnabled(true))
+    ));
+    runtime.node("1000").unwrap().links().ended("2000");
+    runtime.peer_detached("1000", "2000", now.now_ms);
+    assert!(runtime.stop(now.now_ms));
 }
 
 #[test]

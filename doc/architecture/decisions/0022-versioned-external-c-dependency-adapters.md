@@ -13,7 +13,7 @@ controller.
 ## Decision
 
 Every call from owned Rust code to an external implementation goes through a
-separate, removable, versioned Rust `dylib` adapter shared object. An adapter
+separate, removable, versioned Rust `cdylib` adapter shared object. An adapter
 owns the external library's headers, FFI bindings, process protocol when
 applicable, callbacks, lifetime rules, and error translation. Internal Rust
 code uses only its adapter-neutral port and cannot import external-library

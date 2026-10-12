@@ -109,7 +109,12 @@ Use the package release for routine installation. A source build requires Rust
 `libusbradioplus-product-dev` package, including
 `/usr/include/usbradioplus_product.h` and the `usbradioplus_product` pkg-config
 file. It also requires the development packages for the versioned radio, GPIO,
-audio, IAX2, samplerate, and PCM-ring libraries. An Asterisk build additionally
+audio, IAX2, samplerate, PCM-ring, `librptadvtone-dev`,
+`librptadvmorse-dev`, `librptadvdtmf-dev`, `librptadvtemplate-dev`, and
+`librptadvschedule-dev`
+(ABI 1) libraries. The corresponding `librptadvtone1`, `librptadvmorse1`,
+`librptadvdtmf1`, `librptadvtemplate1`, and `librptadvschedule1`
+runtimes are direct product dependencies. An Asterisk build additionally
 requires the public ASL3 Asterisk development headers; a full Asterisk source
 tree is not used.
 

@@ -38,7 +38,12 @@ impl Default for MorseSettings {
 pub struct ControllerError;
 
 /// Media validated and allocated exclusively by the control owner.
-pub struct PreparedMedia(pub(super) Playback, pub(super) bool, pub(super) MediaKind);
+pub struct PreparedMedia(
+    pub(super) Playback,
+    pub(super) bool,
+    pub(super) MediaKind,
+    pub(super) Option<crate::link::PeerReply>,
+);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 /// Output routing behavior attached to prepared playback.
@@ -50,7 +55,18 @@ pub(super) enum MediaKind {
 impl PreparedMedia {
     /// Attach a producer-backed native PCM stream to controller playback.
     pub fn new_stream(stream: Box<dyn PcmStreamReader>) -> Result<Self, ControllerError> {
-        Ok(Self(Playback::new_stream(stream), true, MediaKind::Status))
+        Ok(Self(
+            Playback::new_stream(stream),
+            true,
+            MediaKind::Status,
+            None,
+        ))
+    }
+
+    /// Retain the originating endpoint through playback and control-side reclamation.
+    pub fn reply_to(mut self, peer: Option<crate::link::PeerReply>) -> Self {
+        self.3 = peer;
+        self
     }
 
     /// Construct the spoken-report then recording sequence for local parrot playback.
@@ -63,6 +79,7 @@ impl PreparedMedia {
             Playback::new_stream(Box::new(stream)),
             true,
             MediaKind::Parrot,
+            None,
         )
     }
 
@@ -107,6 +124,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
         ))
     }
 }
@@ -457,6 +475,29 @@ impl TelemetryPlanner {
     pub fn status_pending(&self) -> bool {
         self.status.is_some() || !self.pending.is_empty()
     }
+    /// Move the next status into the audio owner; ended endpoints return to control untouched.
+    pub fn poll_status(&mut self) {
+        loop {
+            if self.status.is_none() {
+                self.status = self.pending.pop().ok();
+            }
+            if !self
+                .status
+                .as_ref()
+                .and_then(|media| media.3.as_ref())
+                .is_some_and(|peer| peer.ended())
+            {
+                break;
+            }
+            if self.active == Some(Source::Status) {
+                self.active = None;
+            }
+            self.finish_status();
+        }
+    }
+    pub fn peer_status(&self) -> Option<&crate::link::PeerReply> {
+        self.status.as_ref().and_then(|media| media.3.as_ref())
+    }
     pub fn parrot_pending(&self) -> bool {
         self.parrot.is_some() || !self.parrot_pending.is_empty()
     }
@@ -485,7 +526,7 @@ impl TelemetryPlanner {
         }
     }
     pub fn start_status(&mut self) {
-        self.status = self.pending.pop().ok();
+        self.poll_status();
         self.active = self.status.as_ref().map(|_| Source::Status);
     }
     pub fn finish_status(&mut self) {

@@ -1,6 +1,11 @@
 # ADR 0005: Standalone core and optional Asterisk adapters
 
-Status: Accepted
+Status: Implemented — standalone execution (2026-10-12)
+
+The standalone service uses the shared controller and radio products without
+Asterisk. Local repeat, courtesy tone, and spoken telemetry were accepted on
+node 524950 after the shared-product refactor. Planned appliance and ingress
+features remain governed by their separate ADRs and wishlist entries.
 
 ## Context
 
@@ -40,8 +45,9 @@ identities.
 behavior shared by USBRadioPlus and rpt_advanced. It does not depend
 on OSS or PortAudio. Radio adapters own CM119 mixer, GPIO, PTT, COR, EEPROM,
 and device-selection I/O through a platform-neutral callback contract.
-`app_rpt_advanced` links `librptadvradio` and the PortAudio adapter, which alone
-links PortAudio and ALSA.
+Standalone `rpt-advanced` selects the `librptadvradio` and PortAudio adapter
+descriptors; the adapter alone links PortAudio and ALSA. The optional
+`app_rpt_advanced.so` uses `RadioPlusAdvanced` instead.
 
 The shared core, PCM rings, and adapter contracts use canonical normalized
 `f32` PCM. Asterisk conversion remains at the Asterisk adapter boundary.
@@ -63,10 +69,10 @@ inbound rings, and the telemetry playout ring, then adds profile-selected
 CTCSS/DCS and fills PortAudio's output buffer directly. Inbound rings alone
 own source-rate and drift correction. Neither callback performs controller,
 configuration, or blocking work; their frame counts are independently bounded.
-The current USBRadioPlus migration implements the independently paced callback
-entry points. The local/link/telemetry inbound-ring topology and generational
-station-host lifecycle described here remain pending and were not part of
-released alpha18.
+USBRadioPlus implements the independently paced callback entry points. The
+controller product implements local, linked-peer, and telemetry inbound rings
+and generational station-host ownership. This does not mark the separate
+USBRadioPlus direct-hardware ring topology or shared-clock adapter work complete.
 
 Where the adapter knows capture and playback share a clock and can present
 aligned frames, it may invoke receive then transmit in the same callback.
@@ -80,17 +86,17 @@ the ADR 0028 cutover. It owns Asterisk/`f32` PCM conversion and fixed
 Asterisk-frame assembly. The audio adapter owns hardware callback I/O; neither
 boundary makes either shared radio worker depend on Asterisk frame size or APIs.
 
-ADR 0039 retires USBRadioPlus's native software-repeat and native parrot modes
-from future ASL3 support. rpt_advanced requires neither mode. This does not
+ADR 0039 removes USBRadioPlus's native software-repeat and native parrot modes
+from ASL3 support. rpt_advanced requires neither mode. This does not
 remove the shared native DSP, hardware adapters, or the separate controller
 transport; ordinary app_rpt compatibility remains outside those retired modes.
 
-ADR 0028 defines the staged replacement of the current `res_usbradio`
+ADR 0028 records the completed replacement of `res_usbradio`
 hardware ownership with the shared audio, radio-control, and GPIO adapters.
-That extraction must preserve compatibility behavior while leaving
+That extraction preserves compatibility behavior while leaving
 `librptadvradio` and standalone operation independent of Asterisk.
 Every supported CM119 path uses the PortAudio/ALSA audio adapter; no OSS
-fallback remains after the migration.
+fallback remains.
 
 Standalone IAX2 interoperability targets current ASL3 behavior, including
 ASL's HTTPS registration mechanism rather than retired IAX registration. NAT
@@ -145,9 +151,10 @@ It does not apply USBRadioPlus configuration defaults or start touching hardware
 mixers that standalone previously left unchanged. This is an ownership refactor,
 not a configuration migration or new processing mode.
 
-The extraction is under targeted validation. Dynamic-load, independent-install,
-reload/rollback, and RF-safe partial-start tests are required before deployment;
-this amendment does not claim live acceptance or the complete hosted gate.
+The shared-product extraction is implemented and has live standalone acceptance
+on node 524950. Dynamic-load, independent-install, reload/rollback, and RF-safe
+partial-start tests remain regression requirements; implementation status does
+not replace the release quality gate or authorize deployment.
 
 No Asterisk type, lock, callback, or lifecycle rule may enter the shared core.
 The Debian packages for rpt_advanced and USBRadioPlus must use exact matching

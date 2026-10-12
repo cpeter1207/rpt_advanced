@@ -33,12 +33,99 @@ fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
 }
 
+#[test]
+fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
+    let signal = crate::link::PeerSignals::new();
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for ended in [false, true] {
+        assert!(control.queue_prepared_status(media(0.4, 1).reply_to(Some(signal.reply_target()))));
+        if ended {
+            signal.end();
+        }
+        let mut radio = [0.0];
+        let mut parrot = [0.0];
+        let mut active = false;
+        let mut replies = [PeerReplySample::default()];
+        AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+        let keyed = node.process_audio_with_parrot(
+            false,
+            false,
+            false,
+            &[],
+            &mut radio,
+            ParrotOutput {
+                samples: &mut parrot,
+                active: &mut active,
+                replies: Some(&mut replies),
+            },
+        );
+        let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
+        assert_eq!(allocations, 0);
+        assert!(!keyed);
+        assert!(!node.ctcss_enabled());
+        assert_eq!(radio, [0.0]);
+        assert_eq!(replies[0].sample, if ended { 0.0 } else { 0.4 });
+        assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
 struct PendingMedia;
 
 impl crate::audio::PcmStreamReader for PendingMedia {
     fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
         crate::audio::PcmRead::Pending
     }
+}
+
+#[test]
+fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
+    let signal = crate::link::PeerSignals::new();
+    let courtesy = CourtesySettings {
+        link: Some(media(0.2, 1)),
+        ..CourtesySettings::default()
+    };
+    let (mut node, mut control) =
+        NodeController::new(ControllerSettings::default(), vec![], vec![], courtesy).unwrap();
+    node.link_unkeyed("peer", "", false);
+    assert!(node.courtesy.ready(node.now));
+    let pending = PreparedMedia::new_stream(Box::new(PendingMedia))
+        .unwrap()
+        .reply_to(Some(signal.reply_target()));
+    assert!(control.queue_prepared_status(pending));
+    let mut radio = [0.0];
+    let mut parrot = [0.0];
+    let mut active = false;
+    let mut replies = [PeerReplySample::default()];
+    let mut process = |node: &mut NodeController, replies: &mut [PeerReplySample; 1]| {
+        node.process_audio_with_parrot(
+            true,
+            false,
+            false,
+            &[],
+            &mut radio,
+            ParrotOutput {
+                samples: &mut parrot,
+                active: &mut active,
+                replies: Some(replies),
+            },
+        )
+    };
+    assert!(!process(&mut node, &mut replies));
+    assert_eq!(replies[0].sample, 0.0);
+    assert!(node.telemetry.active == Some(telemetry::Source::Status));
+    signal.end();
+    assert!(!process(&mut node, &mut replies));
+    assert!(node.telemetry.active.is_none());
+    assert_eq!(control.reclaim().count(), 1);
 }
 
 #[test]
@@ -150,6 +237,7 @@ fn parrot_output_size_mismatch_skips_sample_processing() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut active,
+            replies: None,
         },
     );
 
@@ -580,6 +668,7 @@ fn receive_activity_discards_a_queued_parrot_before_playback() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut parrot_active,
+            replies: None,
         },
     );
 
@@ -614,6 +703,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut parrot_active,
+            replies: None,
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -628,6 +718,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut parrot_active,
+            replies: None,
         },
     );
 
@@ -662,6 +753,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut active,
+            replies: None,
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -676,6 +768,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
         ParrotOutput {
             samples: &mut parrot,
             active: &mut active,
+            replies: None,
         },
     );
     assert_eq!(parrot, [0.0]);
@@ -1700,10 +1793,15 @@ fn audio_path_never_allocates_or_reclaims_prepared_media() {
 #[test]
 fn tone_configuration_does_not_allocate_duration_sized_pcm() {
     AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
-    let tone = crate::audio::ToneSequence::new("1000/60000", -6).unwrap();
+    let mut tone = crate::audio::ToneSequence::new("1000/60000", -6).unwrap();
     let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(tone.rendered_samples(), 2_880_000);
-    assert_eq!(calls, Some(3));
+    // The released DSO owns setup allocations; this Rust allocator sees none.
+    assert!(calls.unwrap() <= 3);
+    let mut output = [0.0; 48];
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    assert_eq!(tone.render(&mut output), 48);
+    assert_eq!(AUDIO_ALLOCATIONS.with(|count| count.replace(None)), Some(0));
 }
 
 #[test]

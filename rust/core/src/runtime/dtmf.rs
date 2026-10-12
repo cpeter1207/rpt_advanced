@@ -1,7 +1,7 @@
 //! Bounded radio-to-control digit handoff and existing linking command policy.
 
 use crate::{
-    audio::{DtmfDetector, DtmfDigit},
+    audio::{DtmfDetector, DtmfError},
     command::{Command, CommandCollector, DtmfCommandMap, LinkAction},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -85,21 +85,21 @@ pub struct DtmfWorker {
 }
 impl DtmfWorker {
     /// Allocate the fixed 256-event queue and return its separate control consumer.
-    pub fn new(generation: u64, muting: bool) -> (Self, DtmfDispatcher) {
+    pub fn new(generation: u64, muting: bool) -> Result<(Self, DtmfDispatcher), DtmfError> {
         let (publisher, dispatcher) = DtmfPublisher::new(generation);
-        (
+        Ok((
             Self {
-                detector: DtmfDetector::new(muting),
+                detector: DtmfDetector::new(muting)?,
                 publisher,
             },
             dispatcher,
-        )
+        ))
     }
     /// Decode every digit completion and publish without allocation, submission, or locks.
     pub fn process(&mut self, receiving: bool, audio: &mut [f32], now_ms: u64) {
         let mut emitted = false;
         self.detector.process(receiving, audio, |digit| {
-            self.publisher.decoded(character(digit), now_ms);
+            self.publisher.decoded(digit, now_ms);
             emitted = true;
         });
         self.publisher.finish_frame(receiving, now_ms, emitted);
@@ -109,27 +109,6 @@ impl DtmfWorker {
     #[must_use]
     pub fn suppressing(&self) -> bool {
         self.detector.suppressing()
-    }
-}
-
-fn character(digit: DtmfDigit) -> char {
-    match digit {
-        DtmfDigit::One => '1',
-        DtmfDigit::Two => '2',
-        DtmfDigit::Three => '3',
-        DtmfDigit::Four => '4',
-        DtmfDigit::Five => '5',
-        DtmfDigit::Six => '6',
-        DtmfDigit::Seven => '7',
-        DtmfDigit::Eight => '8',
-        DtmfDigit::Nine => '9',
-        DtmfDigit::Zero => '0',
-        DtmfDigit::Star => '*',
-        DtmfDigit::Hash => '#',
-        DtmfDigit::A => 'A',
-        DtmfDigit::B => 'B',
-        DtmfDigit::C => 'C',
-        DtmfDigit::D => 'D',
     }
 }
 
@@ -191,6 +170,8 @@ pub struct DigitOperation {
     pub command: Command,
     /// Remote-command symbol, absent for ordinary link operations.
     pub digit: Option<char>,
+    /// Exact originating peer; absent for the existing local/CLI path.
+    pub reply: Option<crate::link::PeerReply>,
     pub(crate) admin_authorized: bool,
 }
 
@@ -200,6 +181,7 @@ impl DigitOperation {
         Self {
             command,
             digit,
+            reply: None,
             admin_authorized: false,
         }
     }
@@ -217,6 +199,16 @@ pub struct DtmfCommands {
     admin_until_ms: u64,
 }
 impl DtmfCommands {
+    /// Create independent collection and authorization state with the same resolved policy.
+    pub(super) fn for_source(&self) -> Self {
+        let mut commands = Self::new(self.map.clone());
+        commands.configure_admin(
+            &self.admin_unlock_hash,
+            &self.admin_lock_hash,
+            self.admin_timeout_ms,
+        );
+        commands
+    }
     /// Start with the resolved current command map.
     pub fn new(map: DtmfCommandMap) -> Self {
         let collector = map.collector();
@@ -270,6 +262,7 @@ impl DtmfCommands {
                     node: self.remote.clone(),
                 },
                 digit: Some(digit),
+                reply: None,
                 admin_authorized: false,
             });
         }
@@ -321,6 +314,7 @@ impl DtmfCommands {
         Some(DigitOperation {
             command,
             digit: None,
+            reply: None,
             admin_authorized,
         })
     }

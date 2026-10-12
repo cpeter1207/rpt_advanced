@@ -12,7 +12,7 @@ being retired as the standalone implementation replaces an outer integration.
 ## Decision
 
 Every boundary where C calls an owned Rust component is a separate, versioned
-Rust `dylib` adapter shared object. The adapter exposes only the smallest C-ABI
+Rust `cdylib` adapter shared object. The adapter exposes only the smallest C-ABI
 function set needed for that interoperability and imports only the external C
 API it needs. It has a normal SONAME, Debian runtime package, development
 package when an external consumer needs headers, and

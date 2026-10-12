@@ -13,7 +13,7 @@ pub use audio::{
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use peer::{Peer, ReceiveState};
 pub use protocol::{Protocol, Route};
-pub use signals::PeerSignals;
+pub use signals::{PeerReply, PeerSignals};
 pub use topology::TopologyManager;
 
 fn identity(name: &str) -> bool {

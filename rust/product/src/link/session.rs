@@ -90,6 +90,10 @@ pub struct PeerControl {
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
 }
 impl PeerControl {
+    /// Capture this exact inbound endpoint for source-addressed command replies.
+    pub fn reply_target(&self) -> rpt_advanced_core::link::PeerReply {
+        self.observer.signals().reply_target()
+    }
     /// Queue bounded work, returning ownership to the caller when full.
     pub fn send(&mut self, command: Command) -> Result<(), Command> {
         self.commands

@@ -36,6 +36,123 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn interleaved_peer_and_local_commands_keep_their_collectors() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    links.accept("3000", true).unwrap();
+    let first = crate::link::PeerSignals::new().reply_target();
+    let second = crate::link::PeerSignals::new().reply_target();
+    assert!(links.peer_digit("2000", '*', 1, first.clone()).is_none());
+    assert!(links.peer_digit("2000", '7', 2, first.clone()).is_none());
+    for digit in "*722".chars() {
+        links.peer_digit("3000", digit, 3, second.clone());
+    }
+    for digit in "*70".chars() {
+        links.digit(DigitEvent::Digit { digit, now_ms: 4 });
+    }
+    let reply = links.peer_digit("2000", '0', 5, first.clone());
+    assert!(
+        reply.is_some(),
+        "another input must not consume this peer's partial command"
+    );
+    let reply = reply.unwrap();
+    assert_eq!(reply.command.action, LinkAction::Status);
+    assert_eq!(reply.reply, Some(first));
+}
+
+#[test]
+fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut links = links();
+    links.configure_admin(&digest, &digest, 60_000);
+    links.accept("2000", true).unwrap();
+    links.accept("3000", true).unwrap();
+    let signal = crate::link::PeerSignals::new();
+    let first = signal.reply_target();
+    let second = crate::link::PeerSignals::new().reply_target();
+    for digit in "*8001234#".chars() {
+        assert!(links.peer_digit("2000", digit, 1, first.clone()).is_none());
+    }
+    for digit in "*804".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 2 })
+                .is_none()
+        );
+        assert!(links.peer_digit("3000", digit, 2, second.clone()).is_none());
+    }
+    let mut allowed = None;
+    for digit in "*804".chars() {
+        allowed = links
+            .peer_digit("2000", digit, 3, first.clone())
+            .or(allowed);
+    }
+    let allowed = allowed.unwrap();
+    let mut host = NodeHost::new(generation(1));
+    assert!(matches!(
+        links.command(allowed.clone(), host.control().work().unwrap(), 4, false),
+        Ok(LinkEffect::ParrotEnabled(true))
+    ));
+    links.confirm_peer_parrot_command(&first, 4);
+    signal.end();
+    assert!(links.peer_digit("2000", '1', 5, first.clone()).is_none());
+    assert!(matches!(
+        links.command(allowed, host.control().work().unwrap(), 5, false),
+        Err(AdmissionError::Stale)
+    ));
+    let replacement = crate::link::PeerSignals::new().reply_target();
+    links.confirm_peer_parrot_command(&replacement, 5);
+    for digit in "*804".chars() {
+        assert!(
+            links
+                .peer_digit("2000", digit, 6, replacement.clone())
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn peer_remote_selection_and_disconnect_use_the_exact_collector() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    links.accept("3000", true).unwrap();
+    let first = crate::link::PeerSignals::new().reply_target();
+    let second = crate::link::PeerSignals::new().reply_target();
+    assert!(links.peer_digit("2000", '*', 0, first.clone()).is_none());
+    assert!(links.peer_digit("3000", '*', 0, second.clone()).is_none());
+    let mut host = NodeHost::new(generation(1));
+    let mut selected = operation(LinkAction::Command, "3000");
+    selected.reply = Some(first.clone());
+    assert!(matches!(
+        links.command(selected, host.control().work().unwrap(), 1, true),
+        Ok(LinkEffect::SelectedRemote)
+    ));
+    let mut untracked = operation(LinkAction::Command, "3000");
+    untracked.reply = Some(crate::link::PeerSignals::new().reply_target());
+    assert!(matches!(
+        links.command(untracked, host.control().work().unwrap(), 2, true),
+        Ok(LinkEffect::SelectedRemote)
+    ));
+    links.ended("2000");
+    assert!(
+        links
+            .peer_commands
+            .iter()
+            .all(|(_, source, _)| source != &first)
+    );
+    assert!(
+        links
+            .peer_commands
+            .iter()
+            .any(|(_, source, _)| source == &second)
+    );
+}
+
+#[test]
 fn parrot_actions_require_a_valid_admin_unlock_and_use_live_typed_effects() {
     use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 
@@ -1071,7 +1188,7 @@ fn dial_modes_failed_temporary_calls_and_telemetry_preserve_command_semantics() 
         LinkAction::Time,
     ] {
         assert!(
-            matches!(links.command(operation(action, ""), control.work().unwrap(), 0, false), Ok(LinkEffect::Telemetry(found)) if found == action)
+            matches!(links.command(operation(action, ""), control.work().unwrap(), 0, false), Ok(LinkEffect::Telemetry(found, None)) if found == action)
         );
     }
     assert!(
@@ -1108,8 +1225,9 @@ fn remote_selection_forwards_digits_and_temporary_disconnect_preserves_permanent
         .manager
         .attach("3000", Mode::TRANSCEIVE, true)
         .unwrap();
-    assert!(links.peer_digit("missing", '*', 0).is_none());
-    assert!(links.peer_digit("2000", '*', 0).is_none());
+    let reply = crate::link::PeerSignals::new().reply_target();
+    assert!(links.peer_digit("missing", '*', 0, reply.clone()).is_none());
+    assert!(links.peer_digit("2000", '*', 0, reply).is_none());
     assert!(matches!(
         links.command(
             operation(LinkAction::Command, "2000"),

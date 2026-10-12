@@ -10,7 +10,7 @@ use crate::{
     media::NativeMediaPreparer,
     services::{HostServices, PeerIo},
     status_post::{PostConfig, StatusPostService},
-    worker::{Audio, AudioOwners, RadioWorker},
+    worker::{Audio, AudioOwners, LocalRingUpdate, RadioWorker},
 };
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
@@ -118,6 +118,8 @@ pub struct GenerationControl {
     status: LinkAudioStatus,
     redirects: Vec<(String, PeerCommand)>,
     awaiting: Vec<(String, crate::link::ring::InboundObserver)>,
+    local_update: Option<LocalRingUpdate>,
+    awaiting_local: bool,
 }
 impl GenerationControl {
     fn acknowledge(&mut self, remote: &str, observer: &crate::link::ring::InboundObserver) {
@@ -207,6 +209,8 @@ fn prepared(
             status,
             redirects,
             awaiting,
+            local_update: None,
+            awaiting_local: false,
         },
         receive_maximum: MAXIMUM_FRAMES,
         transmit_maximum: MAXIMUM_FRAMES,
@@ -292,6 +296,17 @@ impl Host {
         document: ConfigDocument,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        let local_delays: Vec<_> = self
+            .leases
+            .iter()
+            .filter_map(|(name, lease)| {
+                let lease = lease.lock().unwrap_or_else(|error| error.into_inner());
+                lease
+                    .worker
+                    .as_ref()
+                    .map(|worker| (name.clone(), worker.squelch_delay_ms()))
+            })
+            .collect();
         let peers = &self.peers;
         let leases = &mut self.leases;
         let epoch = self.epoch;
@@ -299,7 +314,22 @@ impl Host {
         let result = self.runtime.reload(
             document,
             &self.media,
-            |name, settings| prepared(name, settings, peers),
+            |name, settings| {
+                let mut candidate = prepared(name, settings, peers)?;
+                if local_delays
+                    .iter()
+                    .rev()
+                    .find(|(local, _)| local == name)
+                    .is_some_and(|(_, delay)| *delay != settings.squelch_delay_ms)
+                {
+                    candidate.control.local_update = Some(
+                        LocalRingUpdate::prepare(settings.squelch_delay_ms)
+                            .map_err(|_| RuntimeError::Preparation)?,
+                    );
+                    candidate.control.awaiting_local = true;
+                }
+                Ok(candidate)
+            },
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
                     quiesced: false,
@@ -564,7 +594,7 @@ impl Host {
                     .send(PeerCommand::Digit(digit))
                     .map_err(|_| RuntimeError::Rejected)
             }
-            LinkEffect::Telemetry(action) => {
+            LinkEffect::Telemetry(action, reply) => {
                 let last = self
                     .runtime
                     .node(local)
@@ -572,7 +602,7 @@ impl Host {
                     .and_then(|generation| self.runtime.adapter_control_mut(local, generation))
                     .and_then(|control| control.status.last_keyed().map(str::to_owned));
                 self.runtime
-                    .queue_status(local, action, last.as_deref(), clock)
+                    .queue_status(local, action, last.as_deref(), clock, reply)
             }
             LinkEffect::SelectedRemote | LinkEffect::ParrotEnabled(_) | LinkEffect::None => Ok(()),
         }
@@ -608,7 +638,12 @@ impl Host {
         let mut ended = Vec::new();
         for peer in &mut self.peers {
             while let Some(event) = peer.control.event() {
-                events.push((peer.local.clone(), peer.remote.clone(), event));
+                events.push((
+                    peer.local.clone(),
+                    peer.remote.clone(),
+                    event,
+                    peer.control.reply_target(),
+                ));
             }
             if peer.control.snapshot().is_ok_and(|snapshot| snapshot.ended) {
                 ended.push((peer.local.clone(), peer.remote.clone()));
@@ -617,7 +652,7 @@ impl Host {
         for (local, remote) in ended {
             self.detach(&local, &remote, clock.now_ms);
         }
-        for (local, remote, event) in events {
+        for (local, remote, event, reply) in events {
             let (receiving, transitioned) = self
                 .leases
                 .iter()
@@ -654,7 +689,9 @@ impl Host {
                     }
                 }
                 Event::Digit(digit) => {
-                    if let Some(operation) = node.links().peer_digit(&remote, digit, clock.now_ms) {
+                    if let Some(operation) =
+                        node.links().peer_digit(&remote, digit, clock.now_ms, reply)
+                    {
                         self.operations.push((local, operation));
                     }
                 }
@@ -700,6 +737,22 @@ impl Host {
                 .adapter_control_mut(&local, generation)
                 .expect("snapshot generation retains its adapter control");
             control.dispatcher.dispatch(2);
+            if control.awaiting_local {
+                // Runtime retains the device for every active or retiring generation.
+                let (_, lease) = self
+                    .leases
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == &local)
+                    .expect("runtime node retains its device lease");
+                let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(worker) = &mut lease.worker {
+                    if let Some(update) = control.local_update.take() {
+                        control.local_update = worker.update_local_ring(generation, update).err();
+                    }
+                    control.awaiting_local = !worker.local_ring_applied(generation);
+                }
+            }
             let mut pending = Vec::new();
             for (remote, command) in control.redirects.drain(..) {
                 if let Some(peer) = self
@@ -720,7 +773,7 @@ impl Host {
                     .iter()
                     .any(|peer| peer.local == local && &peer.remote == remote)
             });
-            if control.awaiting.is_empty() {
+            if control.awaiting.is_empty() && !control.awaiting_local {
                 if let Some(old) = status.retiring {
                     self.runtime.detached(&local, old);
                 }

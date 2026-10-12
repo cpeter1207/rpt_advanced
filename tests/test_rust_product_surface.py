@@ -25,6 +25,11 @@ STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.1"
 RING_MINIMUM_VERSION = "3.0.0~alpha2"
 SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha1"
+TONE_MINIMUM_VERSION = "0.1.0~alpha1"
+MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
+DTMF_MINIMUM_VERSION = "0.1.0~alpha1-1"
+TEMPLATE_MINIMUM_VERSION = "0.1.0~alpha1-1"
+SCHEDULE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 LIBRARIES = {PRODUCT, *(f"librptadv_{name}_adapter.so.1" for name in ADAPTERS)}
 ELF_DEPENDENCIES = {
     "app_rpt_advanced.so": LIBRARIES,
@@ -32,6 +37,11 @@ ELF_DEPENDENCIES = {
     PRODUCT: {
         "librate_adjusting_pcm_ring3.so.3",
         "librptadv_samplerate_adapter.so.2",
+        "librptadvtone.so.1",
+        "librptadvmorse.so.1",
+        "librptadvdtmf.so.1",
+        "librptadvtemplate.so.1",
+        "librptadvschedule.so.1",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
@@ -107,7 +117,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
             )
         symbols = command("nm", "--defined-only", "--demangle", str(path))
         assert not re.search(
-            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor)$",
+            r"\b(rpcr3_descriptor|rptadv_samplerate_adapter_descriptor|rptadv_tone_descriptor|rptadv_morse_descriptor|rptadv_dtmf_descriptor|rptadv_template_descriptor|rptadv_schedule_descriptor)$",
             symbols,
             re.MULTILINE,
         ), f"static external adapter in {name}"
@@ -268,6 +278,11 @@ def package(control: Path) -> None:
         "dh-sequence-asterisk",
         "librate-adjusting-pcm-ring3-dev",
         "librptadv-samplerate-adapter-dev",
+        "librptadvtone-dev",
+        "librptadvmorse-dev",
+        "librptadvdtmf-dev",
+        "librptadvtemplate-dev",
+        "librptadvschedule-dev",
         "libusbradioplus-product-dev",
         "${shlibs:Depends}",
         "${misc:Depends}",
@@ -279,8 +294,18 @@ def package(control: Path) -> None:
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",
+        f"librptadvtone-dev (>= {TONE_MINIMUM_VERSION})",
+        f"librptadvtone1 (>= {TONE_MINIMUM_VERSION})",
+        f"librptadvmorse-dev (>= {MORSE_MINIMUM_VERSION})",
+        f"librptadvmorse1 (>= {MORSE_MINIMUM_VERSION})",
+        f"librptadvdtmf-dev (>= {DTMF_MINIMUM_VERSION})",
+        f"librptadvdtmf1 (>= {DTMF_MINIMUM_VERSION})",
+        f"librptadvtemplate-dev (>= {TEMPLATE_MINIMUM_VERSION})",
+        f"librptadvtemplate1 (>= {TEMPLATE_MINIMUM_VERSION})",
+        f"librptadvschedule-dev (>= {SCHEDULE_MINIMUM_VERSION})",
+        f"librptadvschedule1 (>= {SCHEDULE_MINIMUM_VERSION})",
     ):
-        assert token in contents, f"missing compatible audio provider: {token}"
+        assert token in contents, f"missing compatible shared provider: {token}"
     stanzas = {
         stanza.splitlines()[0].removeprefix("Package: ").split()[0]: stanza
         for stanza in contents.split("\n\n")
@@ -288,11 +313,27 @@ def package(control: Path) -> None:
     }
     standalone = stanzas["rpt-advanced"].split("Description:", 1)[0]
     adapter = stanzas["app-rpt-advanced"].split("Description:", 1)[0]
+    product = stanzas["librptadv-product1"].split("Description:", 1)[0]
     assert "${asterisk:Depends}" not in standalone, (
         "standalone package depends on Asterisk"
     )
     assert "${asterisk:Depends}" in adapter, "Asterisk adapter lost its dependency"
     assert "libusbradioplus-product1" in standalone, "missing dynamic radio product"
+    assert f"librptadvtone1 (>= {TONE_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released tone runtime"
+    )
+    assert f"librptadvmorse1 (>= {MORSE_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released Morse runtime"
+    )
+    assert f"librptadvdtmf1 (>= {DTMF_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released DTMF runtime"
+    )
+    assert f"librptadvtemplate1 (>= {TEMPLATE_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released template runtime"
+    )
+    assert f"librptadvschedule1 (>= {SCHEDULE_MINIMUM_VERSION})" in product, (
+        "product must depend directly on the released schedule runtime"
+    )
     assert "asl3-asterisk" not in contents, "ASL3-specific package dependency"
 
 
@@ -450,6 +491,12 @@ def coverage(report: Path) -> None:
     branches = {}
     assert data["data"], "missing coverage instrumentation"
     for unit in data["data"]:
+        code_regions = {
+            (function["filenames"][region[5]], *region[:4])
+            for function in unit.get("functions", [])
+            for region in function["regions"]
+            if region[7] == 0 and 0 < region[4] < 2**63 - 1
+        }
         for source in unit["files"]:
             if is_test_source(source["filename"]):
                 continue
@@ -472,7 +519,12 @@ def coverage(report: Path) -> None:
                     if any(start <= line <= end for start, end in test_ranges):
                         continue
                     key = (source["filename"], line)
-                    lines[key] = lines.get(key, False) or segment[2] > 0
+                    lines[key] = (
+                        lines.get(key, False)
+                        or segment[2] > 0
+                        or (source["filename"], *segment[:2], *following[:2])
+                        in code_regions
+                    )
             for branch in source.get("branches", []):
                 if any(start <= branch[0] <= end for start, end in test_ranges):
                     continue
@@ -621,6 +673,8 @@ def verify_artifact_policy() -> None:
                 write(root, name)
             for duplicate in (
                 "0000 T rpcr3_descriptor\n",
+                "0000 T rptadv_dtmf_descriptor\n",
+                "0000 T rptadv_schedule_descriptor\n",
                 "rpt_advanced_core::controller",
             ):
                 symbols.side_effect = lambda *arguments, value=duplicate: (
@@ -821,6 +875,69 @@ def verify_artifact_policy() -> None:
             ),
         ):
             write(root, report.name, json.dumps({"data": [{"files": sources}]}))
+            try:
+                coverage(report)
+            except AssertionError:
+                assert not accepted
+            else:
+                assert accepted
+
+        # Hosted LLVM export can assign zero to a merged file segment while
+        # retaining a positive code region for that exact half-open interval.
+        observed = root / "observed.rs"
+        other = root / "other.rs"
+        write(
+            root,
+            observed.name,
+            "pub fn observed() {\n" + "    let _x = 1;\n" * 200 + "}\n",
+        )
+        write(root, other.name, "pub fn other() {}\n")
+        segments = [
+            [198, 1, 1, True, True, False],
+            [199, 50, 0, True, True, False],
+            [201, 26, 0, False, False, False],
+        ]
+        code = [199, 50, 201, 26, 12, 0, 0, 0]
+        for region, filenames, arms, accepted in (
+            (code, [str(observed)], [1, 1], True),
+            ([198, 1, 201, 26, 12, 0, 0, 0], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 25, 12, 0, 0, 0], [str(observed)], [1, 1], False),
+            (code, [str(other)], [1, 1], False),
+            (
+                [199, 50, 201, 26, 12, 1, 0, 0],
+                [str(observed), str(other)],
+                [1, 1],
+                False,
+            ),
+            ([199, 50, 201, 26, 12, 0, 0, 1], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 12, 0, 0, 2], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 12, 0, 0, 3], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 2**63 - 1, 0, 0, 0], [str(observed)], [1, 1], False),
+            ([199, 50, 201, 26, 0, 0, 0, 0], [str(observed)], [1, 1], False),
+            (code, [str(observed)], [1, 0], False),
+        ):
+            write(
+                root,
+                report.name,
+                json.dumps(
+                    {
+                        "data": [
+                            {
+                                "files": [
+                                    {
+                                        "filename": str(observed),
+                                        "segments": segments,
+                                        "branches": [[198, 1, 198, 10, *arms]],
+                                    }
+                                ],
+                                "functions": [
+                                    {"filenames": filenames, "regions": [region]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+            )
             try:
                 coverage(report)
             except AssertionError:

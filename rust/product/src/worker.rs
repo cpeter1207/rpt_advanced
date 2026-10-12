@@ -90,6 +90,18 @@ impl MeterWindow {
         }
     }
 
+    fn configure(&mut self, interval_ms: u64) {
+        let interval_samples = interval_ms.saturating_mul(48).max(1);
+        if self.interval_samples != interval_samples {
+            self.interval_samples = interval_samples;
+            self.next_snapshot_sample = self.elapsed_samples.saturating_add(interval_samples);
+            self.samples = 0;
+            self.sum_squares = 0.0;
+            self.peak = 0.0;
+            self.clipped_samples = 0;
+        }
+    }
+
     fn observe(&mut self, audio: &[f32]) -> Option<MeterSnapshot> {
         if audio.is_empty() {
             return None;
@@ -219,6 +231,115 @@ struct LocalHandoff {
     reset_failures: AtomicU64,
     render_failures: AtomicU64,
 }
+
+struct ReceiveRing {
+    producer: InboundProducer,
+    delay_ms: u64,
+    handoff: Arc<LocalHandoff>,
+}
+struct TransmitRing {
+    consumer: InboundConsumer,
+    observer: InboundObserver,
+    delay_ms: u64,
+    handoff: Arc<LocalHandoff>,
+}
+
+/// Control-prepared replacement; callbacks only move its already allocated endpoints.
+pub(crate) struct LocalRingUpdate {
+    receive: ReceiveRing,
+    transmit: TransmitRing,
+}
+impl LocalRingUpdate {
+    /// Allocate one empty ring and independent qualification state on control.
+    pub(crate) fn prepare(delay_ms: u64) -> Result<Self, RingError> {
+        Self::with_handoff(delay_ms, Arc::default())
+    }
+    fn with_handoff(delay_ms: u64, handoff: Arc<LocalHandoff>) -> Result<Self, RingError> {
+        let (producer, consumer) = InboundRing::open(
+            48_000,
+            InboundPolicy::Local {
+                squelch_delay_ms: delay_ms,
+            },
+        )?;
+        let observer = producer.observer();
+        Ok(Self {
+            receive: ReceiveRing {
+                producer,
+                delay_ms,
+                handoff: handoff.clone(),
+            },
+            transmit: TransmitRing {
+                consumer,
+                observer,
+                delay_ms,
+                handoff,
+            },
+        })
+    }
+}
+
+struct EndpointControl<T> {
+    ready: Producer<(u64, T)>,
+    retired: Consumer<T>,
+    adopted: Arc<AtomicU64>,
+}
+struct EndpointOwner<T> {
+    current: T,
+    ready: Consumer<(u64, T)>,
+    retired: Producer<T>,
+    pending: Option<(u64, T)>,
+    adopted: Arc<AtomicU64>,
+}
+impl<T> EndpointOwner<T> {
+    fn new(current: T) -> (Self, EndpointControl<T>) {
+        let (send, ready) = RingBuffer::new(1);
+        let (retired, reclaim) = RingBuffer::new(1);
+        let adopted = Arc::new(AtomicU64::new(0));
+        (
+            Self {
+                current,
+                ready,
+                retired,
+                pending: None,
+                adopted: adopted.clone(),
+            },
+            EndpointControl {
+                ready: send,
+                retired: reclaim,
+                adopted,
+            },
+        )
+    }
+
+    // One candidate is retained until both acknowledgments return. No endpoint is
+    // destroyed here, including when its bounded return queue is temporarily full.
+    fn adopt(&mut self, generation: u64) {
+        if self.pending.is_none() {
+            self.pending = self.ready.pop().ok();
+        }
+        let Some((id, next)) = self.pending.take() else {
+            return;
+        };
+        if id != generation {
+            self.pending = Some((id, next));
+            return;
+        }
+        let old = std::mem::replace(&mut self.current, next);
+        if let Err(rtrb::PushError::Full(old)) = self.retired.push(old) {
+            self.pending = Some((id, std::mem::replace(&mut self.current, old)));
+            return;
+        }
+        self.adopted.store(id, Ordering::Release);
+    }
+}
+impl<T> EndpointControl<T> {
+    fn reclaim(&mut self) {
+        while let Ok(retired) = self.retired.pop() {
+            drop(retired);
+        }
+    }
+}
+
 impl RadioStatus {
     /// Current receive state and original transition time.
     pub fn snapshot(&self) -> (bool, u64) {
@@ -229,10 +350,14 @@ impl RadioStatus {
         self.transmit_keyed.load(Ordering::Acquire)
     }
     fn update(&self, receiving: bool, now_ms: u64) {
-        if self.carrier.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
-            let previous = self.handoff.token.load(Ordering::Relaxed);
+        self.update_carrier(receiving, now_ms);
+        self.update_qualification(receiving, &self.handoff);
+    }
+    fn update_qualification(&self, receiving: bool, handoff: &LocalHandoff) {
+        let previous = handoff.token.load(Ordering::Relaxed);
+        if previous & 1 != u64::from(receiving) {
             // Publish only after the serial RX endpoint finished its previous write.
-            self.handoff.token.store(
+            handoff.token.store(
                 if receiving {
                     previous | 1
                 } else {
@@ -240,6 +365,10 @@ impl RadioStatus {
                 },
                 Ordering::Release,
             );
+        }
+    }
+    fn update_carrier(&self, receiving: bool, now_ms: u64) {
+        if self.carrier.load(Ordering::Relaxed) & 1 != u64::from(receiving) {
             self.carrier.store(
                 (now_ms.min(u64::MAX >> 1) << 1) | u64::from(receiving),
                 Ordering::Release,
@@ -254,7 +383,7 @@ impl RadioStatus {
     }
 }
 struct ReceiveState {
-    producer: InboundProducer,
+    ring: EndpointOwner<ReceiveRing>,
     elapsed_samples: u64,
     meter: MeterPublisher,
 }
@@ -269,11 +398,9 @@ struct ReceiveContext {
 struct TransmitContext {
     active: Arc<AtomicBool>,
     owner: UnsafeCell<Option<TransmitOwner>>,
-    consumer: UnsafeCell<InboundConsumer>,
+    ring: UnsafeCell<EndpointOwner<TransmitRing>>,
     maximum: usize,
     status: RadioStatus,
-    squelch_delay_ms: u64,
-    observer: InboundObserver,
     meter: UnsafeCell<MeterPublisher>,
 }
 // SAFETY: callbacks are serialized independently by the host. Control writes owner slots
@@ -349,11 +476,27 @@ unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> 
     let count = samples.len() as u64;
     state.elapsed_samples = state.elapsed_samples.saturating_add(count);
     let now_ms = context.origin_ms.saturating_add(state.elapsed_samples / 48);
-    context.status.update(receiving != 0, now_ms);
+    context.status.update_carrier(receiving != 0, now_ms);
+    context
+        .status
+        .update_qualification(receiving != 0, &state.ring.current.handoff);
     let Some(mut generation) = owner.as_mut().expect("active receive owner").acquire() else {
         samples.fill(0.0);
         return 0;
     };
+    state
+        .meter
+        .window
+        .configure(generation.settings().status_snapshot_interval_ms);
+    state.ring.adopt(generation.id());
+    let ring = &mut state.ring.current;
+    context
+        .status
+        .update_qualification(receiving != 0, &ring.handoff);
+    if ring.delay_ms != generation.settings().squelch_delay_ms {
+        samples.fill(0.0);
+        return 0;
+    }
     #[cfg(test)]
     if take_test_failure(TestFailure::ReceivePanic) {
         panic!("injected receive processing panic");
@@ -362,7 +505,7 @@ unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> 
     let muted = receiving != 0 && generation.state().suppressing();
     context.status.set_dtmf_muted(muted);
     if receiving != 0 {
-        let handoff = &context.status.handoff;
+        let handoff = &ring.handoff;
         let epoch = handoff.token.load(Ordering::Acquire) & !1;
         if epoch != handoff.reset_ack.load(Ordering::Acquire) {
             // Bound the handoff to one reset acknowledgement. Do not let new audio
@@ -370,7 +513,7 @@ unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> 
             handoff
                 .pending_reset_dropped
                 .fetch_add(count, Ordering::Relaxed);
-        } else if state.producer.write(samples).is_err() {
+        } else if ring.producer.write(samples).is_err() {
             handoff
                 .write_failed_samples
                 .fetch_add(count, Ordering::Relaxed);
@@ -418,6 +561,7 @@ unsafe extern "C" fn transmit_callback(
     let keyed = keyed.expect("validated PTT output");
     let ctcss_enabled = ctcss_enabled.expect("validated CTCSS output");
     *keyed = 0;
+    *ctcss_enabled = 0;
     let result = match catch_unwind(AssertUnwindSafe(|| unsafe {
         transmit(context, samples, keyed, ctcss_enabled)
     })) {
@@ -436,7 +580,8 @@ unsafe extern "C" fn transmit_callback(
 fn publish_transmit_samples(context: Option<&TransmitContext>, samples: &[f32]) {
     if let Some(context) = context {
         // SAFETY: the serialized TX callback is the sole writer of this publisher.
-        unsafe { &mut *context.meter.get() }.publish(samples, Some(&context.observer));
+        let ring = unsafe { &*context.ring.get() };
+        unsafe { &mut *context.meter.get() }.publish(samples, Some(&ring.current.observer));
     }
 }
 fn publish_transmit_keyed(status: Option<&RadioStatus>, keyed: bool) {
@@ -470,9 +615,22 @@ unsafe fn transmit(
         return 0;
     }
     // SAFETY: only this serial transmit endpoint accesses these cells while active.
-    let (owner, consumer) = unsafe { (&mut *context.owner.get(), &mut *context.consumer.get()) };
+    let (owner, endpoint) = unsafe { (&mut *context.owner.get(), &mut *context.ring.get()) };
     samples.fill(0.0);
-    let handoff = &context.status.handoff;
+    let Some(mut generation) = owner.as_mut().expect("active transmit owner").acquire() else {
+        return 0;
+    };
+    // SAFETY: this serial TX callback exclusively owns its meter window.
+    unsafe { &mut *context.meter.get() }
+        .window
+        .configure(generation.settings().status_snapshot_interval_ms);
+    endpoint.adopt(generation.id());
+    let ring = &mut endpoint.current;
+    if ring.delay_ms != generation.settings().squelch_delay_ms {
+        return 0;
+    }
+    let consumer = &mut ring.consumer;
+    let handoff = &ring.handoff;
     let token = handoff.token.load(Ordering::Acquire);
     let epoch = token & !1;
     let mut reset_ok = true;
@@ -497,10 +655,6 @@ unsafe fn transmit(
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
-    let Some(mut generation) = owner.as_mut().expect("active transmit owner").acquire() else {
-        samples.fill(0.0);
-        return 0;
-    };
     let transmit = generation.state();
     #[cfg(test)]
     if take_test_failure(TestFailure::TransmitPanic) {
@@ -536,6 +690,11 @@ pub struct RadioWorker {
     receive: Box<ReceiveContext>,
     transmit: Box<TransmitContext>,
     observer: InboundObserver,
+    handoff: Arc<LocalHandoff>,
+    squelch_delay_ms: u64,
+    receive_updates: EndpointControl<ReceiveRing>,
+    transmit_updates: EndpointControl<TransmitRing>,
+    pending_update: Option<(u64, u64, InboundObserver, Arc<LocalHandoff>)>,
     receive_snapshots: Consumer<MeterSnapshot>,
     transmit_snapshots: Consumer<MeterSnapshot>,
     latest_receive: Option<MeterSnapshot>,
@@ -549,6 +708,66 @@ impl RadioWorker {
         peer.bind_radio(self.radio.as_ref().expect("live radio reservation"))
     }
 
+    /// Effective reserve currently installed, or prepared for this worker's next adoption.
+    pub(crate) fn squelch_delay_ms(&self) -> u64 {
+        self.pending_update
+            .as_ref()
+            .map_or(self.squelch_delay_ms, |update| update.1)
+    }
+
+    /// Publish a prepared pair without changing the stream or fixed callback registrations.
+    pub(crate) fn update_local_ring(
+        &mut self,
+        generation: u64,
+        update: LocalRingUpdate,
+    ) -> Result<(), LocalRingUpdate> {
+        self.receive_updates.reclaim();
+        self.transmit_updates.reclaim();
+        if self.pending_update.is_some()
+            || self.receive_updates.ready.slots() == 0
+            || self.transmit_updates.ready.slots() == 0
+        {
+            return Err(update);
+        }
+        self.pending_update = Some((
+            generation,
+            update.transmit.delay_ms,
+            update.transmit.observer.clone(),
+            update.transmit.handoff.clone(),
+        ));
+        // This is the sole producer and each queue has an available slot.
+        assert!(
+            self.receive_updates
+                .ready
+                .push((generation, update.receive))
+                .is_ok()
+        );
+        assert!(
+            self.transmit_updates
+                .ready
+                .push((generation, update.transmit))
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    /// Reclaim returned endpoints on control and report when both owners acknowledge the pair.
+    pub(crate) fn local_ring_applied(&mut self, generation: u64) -> bool {
+        self.receive_updates.reclaim();
+        self.transmit_updates.reclaim();
+        let applied = self.receive_updates.adopted.load(Ordering::Acquire) == generation
+            && self.transmit_updates.adopted.load(Ordering::Acquire) == generation;
+        if !applied {
+            return false;
+        }
+        if let Some((_, delay_ms, observer, handoff)) = self.pending_update.take() {
+            self.squelch_delay_ms = delay_ms;
+            self.observer = observer;
+            self.handoff = handoff;
+        }
+        true
+    }
+
     /// Attach both inactive endpoints and start the reserved channel transactionally.
     /// Failed activation synchronously detaches endpoints and returns the reservation.
     pub fn prepare(
@@ -559,17 +778,20 @@ impl RadioWorker {
         status_snapshot_interval_ms: u64,
     ) -> Result<Self, (Error, Radio)> {
         let maximum = radio.maximum_frames();
-        let ring = InboundRing::open(48_000, InboundPolicy::Local { squelch_delay_ms });
+        let ring = LocalRingUpdate::with_handoff(squelch_delay_ms, status.handoff.clone());
         #[cfg(test)]
         let ring = if take_test_failure(TestFailure::Prepare) {
             Err(RingError)
         } else {
             ring
         };
-        let Ok((producer, consumer)) = ring else {
+        let Ok(update) = ring else {
             return Err((Error::Allocation, radio));
         };
-        let observer = producer.observer();
+        let observer = update.transmit.observer.clone();
+        let handoff = update.transmit.handoff.clone();
+        let (receive_ring, receive_updates) = EndpointOwner::new(update.receive);
+        let (transmit_ring, transmit_updates) = EndpointOwner::new(update.transmit);
         let origin_ms = epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let (receive_publisher, receive_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
         let (transmit_publisher, transmit_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
@@ -578,7 +800,7 @@ impl RadioWorker {
             active: active.clone(),
             owner: UnsafeCell::new(None),
             state: UnsafeCell::new(ReceiveState {
-                producer,
+                ring: receive_ring,
                 elapsed_samples: 0,
                 meter: MeterPublisher {
                     window: MeterWindow::new(status_snapshot_interval_ms, origin_ms),
@@ -593,11 +815,9 @@ impl RadioWorker {
         let transmit = Box::new(TransmitContext {
             active,
             owner: UnsafeCell::new(None),
-            consumer: UnsafeCell::new(consumer),
+            ring: UnsafeCell::new(transmit_ring),
             maximum,
             status,
-            squelch_delay_ms,
-            observer: observer.clone(),
             meter: UnsafeCell::new(MeterPublisher {
                 window: MeterWindow::new(status_snapshot_interval_ms, origin_ms),
                 snapshots: transmit_publisher,
@@ -623,6 +843,11 @@ impl RadioWorker {
             receive,
             transmit,
             observer,
+            handoff,
+            squelch_delay_ms,
+            receive_updates,
+            transmit_updates,
+            pending_update: None,
             receive_snapshots,
             transmit_snapshots,
             latest_receive: None,
@@ -632,7 +857,7 @@ impl RadioWorker {
         })
     }
     fn fault_counts(&self, ring: &Observation) -> [u64; 6] {
-        let handoff = &self.transmit.status.handoff;
+        let handoff = &self.handoff;
         [
             ring.missing_samples,
             ring.discarded_samples,
@@ -657,7 +882,7 @@ impl RadioWorker {
             ring.capacity_samples / 48,
             ring.reserve_samples / 48,
             ring.target_samples / 48,
-            self.transmit.squelch_delay_ms,
+            self.squelch_delay_ms,
             ring.ratio_correction_ppm,
             missing,
             discarded,

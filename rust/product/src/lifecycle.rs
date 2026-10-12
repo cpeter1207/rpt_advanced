@@ -7,17 +7,20 @@ use crate::{
     services::HostServices,
 };
 use rpt_advanced_core::{
+    audio::{DtmfDetector, MorseRenderer, ToneSequence},
+    config::{ConfigDocument, Schema},
+    control::{ControlExecutor, ControlTask},
+    runtime::{RuntimeClock, RuntimeError},
+    schedule,
+    template::MessageTemplate,
+};
+use rpt_advanced_core::{
     command::LinkAction,
     runtime::{
         RuntimeDispatch,
         dtmf::DigitOperation,
         links::{ConnectAttempt, LinkEffect, RetryWork},
     },
-};
-use rpt_advanced_core::{
-    config::{ConfigDocument, Schema},
-    control::{ControlExecutor, ControlTask},
-    runtime::{RuntimeClock, RuntimeError},
 };
 use std::{
     any::Any,
@@ -122,16 +125,17 @@ impl Engine {
         self: &Arc<Self>,
         local: String,
         operation: DigitOperation,
-        local_rf_source: bool,
+        dtmf_source: bool,
     ) -> Result<(), RuntimeError> {
         let revision = self.revision.load(Ordering::Acquire);
         let peer = operation.command.node.clone();
+        let reply = operation.reply.clone();
         match self.operation(&local, operation) {
             Ok(effect) => self.effect(local, effect, revision),
             Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
-                if local_rf_source =>
+                if dtmf_source =>
             {
-                self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer))
+                self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer, reply))
             }
             Err(error) => Err(error),
         }
@@ -698,6 +702,11 @@ unsafe extern "C" fn rptadv_product_start(
                 .map_err(|_| RuntimeError::Preparation)?,
         );
         drop(crate::link::egress::Egress::new(48000, 960).map_err(|_| RuntimeError::Preparation)?);
+        ToneSequence::provider_ready().map_err(|_| RuntimeError::Preparation)?;
+        MorseRenderer::provider_ready().map_err(|_| RuntimeError::Preparation)?;
+        DtmfDetector::provider_ready().map_err(|_| RuntimeError::Preparation)?;
+        MessageTemplate::provider_ready().map_err(|_| RuntimeError::Preparation)?;
+        schedule::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let origin = Instant::now();
         let clock = capture(origin, services);
