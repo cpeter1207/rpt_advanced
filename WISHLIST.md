@@ -428,8 +428,8 @@ None.
   a dynamically linked shared object named `librptadvradio`.
 - `librptadvradio` must not depend on OSS or PortAudio. The ASL legacy and
   modern channel adapters use the versioned audio-I/O adapter instead.
-- Link `app_rpt_advanced` with `librptadvradio` and the versioned PortAudio
-  adapter rather than `libportaudio2` directly.
+- Have standalone `rpt-advanced` select `librptadvradio` and the versioned
+  PortAudio adapter rather than depend on `libportaudio2` directly.
 - Add one focused source part that connects a CM119 through PortAudio's ALSA
   backend using PortAudio's minimum recommended latency.
 - PortAudio input calls only the `librptadvradio` local receive worker; output
@@ -454,14 +454,15 @@ None.
   preserving ordering, admission/failure behavior, and reload/unload safety.
   Other Asterisk-specific thread handling stays in its integration adapter.
 - `librptadvradio` is a separately versioned repository and Debian package,
-  with a published ABI consumed by USBRadioPlus and `app_rpt_advanced`.
+  with a published ABI consumed by USBRadioPlus and standalone `rpt-advanced`.
 - PortAudio/ALSA remains an audio-adapter dependency, not a `librptadvradio`
   dependency. OSS and `res_usbradio` are removed under ADR 0028.
 - Adapters own direct CM119 mixer, GPIO/PTT/COR, EEPROM, and device-selection
   I/O. `librptadvradio` receives those services through a platform-neutral
   callback contract.
-- `app_rpt_advanced` links `librptadvradio` and the PortAudio adapter. The
-  adapter alone links `libportaudio2` and ALSA.
+- Standalone `rpt-advanced` selects the `librptadvradio` and PortAudio adapter
+  descriptors. The adapter alone links `libportaudio2` and ALSA; the optional
+  `app_rpt_advanced.so` uses `RadioPlusAdvanced` instead.
 - The direct PortAudio/ALSA CM119 adapter coexists as a selectable per-node
   path with the Asterisk adapters. Configuration rejects concurrent ownership
   of one device.
@@ -472,16 +473,21 @@ None.
 - Its CM119 PortAudio source part uses ALSA with the device's
   `defaultLowInputLatency` and `defaultLowOutputLatency` values.
 - The real-time callbacks delegate to the shared library's separate receive
-  and transmit workers under the pending ADR 0027 amendment.
+  and transmit workers under the accepted ADR 0027 amendment.
 - A verified shared-clock adapter may invoke those workers back-to-back in one
   full-duplex callback with a local-ring target reserve equal only to configured
   squelch delay under ADR 0027.
-- Implementation status — 2026-10-04: `librptadvradio` and the versioned
-  PortAudio/ALSA adapter exist as separately packaged shared objects, and
-  USBRadioPlus dynamically links them. `rpt_advanced` still integrates with
-  USBRadioPlus through the `RadioPlusAdvanced` Asterisk channel and does not
-  directly link/use those two components. This entry remains partial until
-  that adapter boundary is implemented and verified.
+- Implementation status — 2026-10-12: `librptadvradio` and the versioned
+  PortAudio/ALSA adapter are separately packaged shared objects used by
+  USBRadioPlus. The standalone `rpt-advanced` service directly selects
+  `librptadvradio.so.4`, `librptadv_portaudio_alsa_adapter.so.2`, and
+  `libusbradioplus_product.so.1` descriptors, with corresponding runtime
+  package dependencies and no Asterisk or ASL3 dependency. The optional
+  `app_rpt_advanced.so` adapter still uses `RadioPlusAdvanced` for its Asterisk
+  composition. ADR 0005's standalone execution and ADR 0028's
+  `res_usbradio` dependency removal are implemented. USBRadioPlus's separate
+  direct-hardware local/telemetry-ring topology and a verified shared-clock
+  adapter remain outside this status.
 
 ### Independently versioned radio components
 
@@ -519,12 +525,15 @@ None.
   adapter-supplied pin I/O, rather than direct Linux device access.
 - Extraction order is squelch, CTCSS, DCS, then GPIO/parallel-port control.
   Audio-device control remains deferred until its boundary is defined.
-- Implementation status — 2026-10-04: independently released PCM-ring,
+- Implementation status — 2026-10-12: the independently released PCM-ring,
   samplerate, FFmpeg, RNNoise, GPIO/parallel, PortAudio/ALSA, and portable radio
-  core components are present. Squelch, CTCSS encode/decode, and DCS
-  encode/decode remain implemented inside `librptadvradio`. The generic
-  audio-device control component remains deferred under ADR 0011. Keep this
-  entry open for those boundaries only.
+  core components remain present. Squelch, CTCSS encode/decode, DCS
+  encode/decode, and portable GPIO/parallel signaling are released components.
+  `librptadvradio` v0.1.0-alpha.8 dynamically consumes the ABI-2 squelch and
+  CTCSS libraries and ABI-1 DCS library; the GPIO adapter v0.1.0-alpha.3
+  dynamically consumes the ABI-1 signaling library. The GPIO adapter retains
+  device I/O; the signaling component owns portable semantics only. Generic
+  audio-device control remains deferred until its boundary is defined.
 
 ### Independently versioned controller components
 
@@ -560,11 +569,13 @@ None.
   values.
 - Extraction order is tone generation, Morse, DTMF, message templating, then
   scheduling.
-- Implementation status — 2026-10-04: these functions currently remain Rust
-  modules within `rpt_advanced`; none is an independently versioned shared
-  component. The component-extraction work has not started. Keep this entry
-  open for the requested separations, not for the already implemented
-  controller behavior.
+- Implementation status — 2026-10-12: tone, Morse, DTMF detection, message
+  templating, and generic scheduling are released components dynamically
+  consumed by the controller product; Morse dynamically consumes tone. Their
+  former implementations have been removed from the controller. DTMF PCM
+  generation did not exist in the moved source and remains a future capability
+  of the shared DTMF component. Controller action, authorization, link, and
+  telemetry policy remain in the product.
 
 ### Standalone lock-free controller
 

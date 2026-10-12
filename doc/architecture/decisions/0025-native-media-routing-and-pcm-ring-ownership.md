@@ -1,10 +1,13 @@
 # ADR 0025: Native media routing assigns conversion to PCM rings
 
-Status: Accepted
+Status: Implemented — telemetry streaming through its PCM ring (2026-10-12)
 
 Amended 2026-10-01: every telemetry source, including Morse and tone sequences,
 is produced outside the transmit worker and streamed through the telemetry PCM
-ring. The RPT Advanced implementation status is tracked in `WISHLIST.md`.
+ring. Speech, files, Morse, and tone sequences use this implemented producer
+path; transmit consumes PCM without rendering telemetry. This status covers
+telemetry streaming, not completion of every control interface in ADR 0023 or
+the shared-clock adapter work in ADR 0027.
 
 ## Context
 
@@ -146,11 +149,12 @@ partial-I/O staging to that adapter. ADR 0033 defines the
 appliance direct-codec profile, which uses external discrete CTCSS and therefore
 does not inject a native CTCSS tone.
 
-A per-node active-traffic CTCSS policy may independently restrict CTCSS encode
-and decode. When enabled, a live local-receiver or connected-peer transmission
-qualifies the policy; hangtime alone does not. Identifiers and courtesy tones
-never qualify it. Command-response telemetry qualifies it from command receipt
-through response playout, including any deferred interval before that playout.
+A per-node active-traffic CTCSS encode policy is implemented under ADR 0042.
+Live local-receiver or connected-peer transmission qualifies encoding and its
+configured CTCSS hang interval; transmitter hangtime alone does not. Identifiers
+and courtesy tones never qualify it. Command-response telemetry qualifies it
+from command receipt through response playout, including any deferred interval
+before that playout. Activity-scoped CTCSS decode is not planned.
 This is source-aware signaling policy, not an inference from physical PTT
 alone, and it applies equally to native generated CTCSS and profile-selected
 external CTCSS enable.

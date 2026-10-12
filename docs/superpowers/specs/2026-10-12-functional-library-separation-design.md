@@ -55,6 +55,13 @@ Use public Rust `cdylib` artifacts implementing the stable C-compatible contract
 of ADRs 0011 and 0022, not the unstable Rust ABI as a public package interface.
 Clarify this terminology in the affected ADRs without changing their policy.
 
+On 2026-10-12 the user selected ABI 2 replacements for the initially published
+squelch and CTCSS contracts: uint32 booleans and status/output-handle creation.
+Keep the ABI-1 releases intact, publish the next alpha with SONAME/runtime
+package 2, and rebuild their radio consumer and dependency checks together.
+This changes only the ABI representation, not the moved algorithms or radio
+behavior. The other seven initial libraries remain ABI 1.
+
 Each component exports one immutable descriptor containing structure size, ABI
 version, capability identity and only the required function pointers. Use opaque
 handles for owned state and explicit C-compatible buffers, scalars and callback

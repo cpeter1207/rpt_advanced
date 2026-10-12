@@ -1,6 +1,6 @@
 # ADR 0028: Remove res_usbradio through explicit hardware adapters
 
-Status: Accepted
+Status: Implemented — res_usbradio dependency removal (2026-10-12)
 
 ## Context
 
@@ -18,8 +18,8 @@ resource module rather than explicit replaceable boundaries.
 
 ## Decision
 
-The dependency on `res_usbradio.so` will be removed by moving every remaining
-hardware interaction behind three selected adapters:
+The dependency on `res_usbradio.so` is removed. Hardware interactions use
+three selected adapters:
 
 1. The **audio adapter** owns PCM device lifetime, channel normalization,
    capture/playback queue handling, hardware mixer control, and raw-device
@@ -84,13 +84,11 @@ selected composition at a time.
 
 ### Native operating-mode retirement (2026-09-13)
 
-ADR 0039 separately retires USBRadioPlus's native software local-repeat mode
-and native parrot from future ASL3 support; rpt_advanced does not require them.
-This narrows feature preservation for the subsequent removal, not the already
-completed hardware cutover. Preserve ordinary app_rpt, legacy echo, hardware
-local repeat, shared native DSP/statistics, and the distinct `RadioPlusAdvanced`
-transport. Mode removal is implemented in the current candidate and remains
-under verification; it does not alter released alpha18.
+ADR 0039 separately removes USBRadioPlus's native software local-repeat mode
+and native parrot from ASL3 support; rpt_advanced does not require them.
+Both mode removal and the hardware cutover are implemented. Preserve ordinary
+app_rpt, legacy echo, hardware local repeat, shared native DSP/statistics, and
+the distinct `RadioPlusAdvanced` transport.
 
 ### Best-effort audio scheduling (amended 2026-09-13)
 
@@ -192,6 +190,22 @@ the device-ownership rule from ADR 0005.
 
 ## Implementation status
 
+The resource-module dependency removal is implemented. USBRadioPlus and
+rpt_advanced use the selected audio, radio-control, and GPIO adapters without
+`res_usbradio` headers, imports, module requirements, or runtime dependency.
+The ASL3 legacy/modern hardware split has been removed. Rust owns the shared
+implementation; Asterisk support remains an optional boundary adapter.
+
+The controller product now owns local, linked-peer, and telemetry inbound rings
+and generational receive/transmit state. The shared-product standalone service
+uses these components without Asterisk. Separate shared-clock adapter and
+USBRadioPlus direct-hardware topology work is not marked complete here.
+
+### Historical migration checkpoints
+
+The following records the earlier proof of concept and alpha18 cutover, not
+the current controller ring implementation or current product ABI.
+
 The direct-callback proof of concept (2026-09-16) removes the product's
 `rpt-radio` thread and its Asterisk PCM exchange. Host-services ABI 2
 (`rptadv.hst2`) reserves a channel, installs both direct endpoints through
@@ -208,18 +222,16 @@ hangs up before returning, while normal quiesce destroys the channel before
 reclaiming contexts or registrations. RX time advances from accumulated
 48 kHz samples; TX consumes local PCM directly into its caller's buffer.
 
-The current direct callback contract has since advanced to ABI 3 to return
-CTCSS enable independently from PTT; the product and host-services tables are
-now ABI 3 and 4 respectively. See ADR 0042. The implementation-status values
-above record the contract when this proof of concept was first integrated.
+ADR 0042 subsequently advanced the direct callback contract to ABI 3 to return
+CTCSS enable independently from PTT, with product/host-services ABI 3/4 at that
+checkpoint. Later product revisions are recorded in ADRs 0005 and 0036.
 
-This proof of concept does not claim the later complete asynchronous ring
-design: its local queue has bounded newest-sample drops and zero-fill
-shortfall, with a latest-state receiver snapshot. Adaptive clock correction,
-sample-associated qualification, and generation-tagged local PCM remain the
-separate ADR 0025/0026 migration requirements.
+This proof of concept preceded the asynchronous ring design: its local queue
+had bounded newest-sample drops and zero-fill shortfall, with a latest-state
+receiver snapshot. Adaptive clock correction, sample-associated qualification,
+and generation-tagged local PCM followed under ADRs 0025 and 0026.
 
-The current USBRadioPlus migration implements independent PortAudio input and
+The USBRadioPlus Rust implementation provides independent PortAudio input and
 output callback entry points and runs receive DSP from the input callback.
 It does not yet implement the processed local-receive ring, the complete
 local/link/telemetry ring mixer, the verified shared-clock fast path, or the
@@ -238,8 +250,8 @@ source remain separate release operations; already released binaries are
 unchanged.
 
 Released alpha18's hardware cutover removed the duplicate backend and
-resource-module imports before the complete Rust migration. In the current
-migration, Rust owns station composition, callback processing, app_rpt DTMF and
+resource-module imports before the complete Rust migration. Rust now owns
+station composition, callback processing, app_rpt DTMF and
 8 kHz echo state, native 48 kHz delivery to rpt_advanced, Asterisk channel and
 frame delivery, incoming-link control, transactional reload, CLI commands, and
 the complete module lifecycle. The remaining C entry point only declares

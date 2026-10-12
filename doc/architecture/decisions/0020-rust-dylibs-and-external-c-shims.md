@@ -17,7 +17,7 @@ ABI is not a public compatibility contract. They are built, tested, and
 released with a compatible pinned Rust toolchain and their owning product.
 
 Public C-facing boundaries are outside this record's scope. They use separate,
-versioned Rust `dylib` adapters and the stable C-compatible descriptor/
+versioned Rust `cdylib` adapters and the stable C-compatible descriptor/
 function-table contract in ADRs 0021 and 0022. A minimal C loader remains
 permissible when Asterisk macro-generated metadata or its loader ABI requires
 C source, but it is part of the Asterisk adapter rather than a private

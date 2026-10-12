@@ -1,6 +1,6 @@
 # ADR 0011: Stable functional components use narrow versioned shared-library boundaries
 
-Status: Accepted
+Status: Implemented (initial existing-function extraction)
 
 ## Context
 
@@ -41,8 +41,8 @@ announcements, warnings, and macros remains in `app_rpt_advanced`. The message
 template component only parses and expands caller-supplied key/value data; the
 controller defines substitutions and authorization-sensitive values.
 
-The following further boundaries are approved directions, not current runtime
-dependencies:
+The following further boundaries are tracked separately from the initial
+extraction. This extraction does not establish their implementation status:
 
 - `librptadvconfig` owns only INI syntax reading and the owned document model.
   Schema, inheritance, and settings resolution remain controller policy.
@@ -68,6 +68,34 @@ dependencies:
 Controller orchestration, node-specific configuration resolution, identifiers,
 announcements, duplex policy, link topology policy, and Asterisk channel/media
 adapters remain in the application because they intentionally evolve together.
+
+## Initial extraction status
+
+The nine existing-function providers were released after their native PR gates
+and published to the signed package index. Their runtime/development packages,
+released SONAMEs, and direct consumers are:
+
+| Provider release | SONAME | Debian runtime / development packages | Direct consumer |
+| --- | --- | --- | --- |
+| [squelch v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvsquelch/releases/tag/v0.1.0-alpha.2) | `librptadvsquelch.so.2` | `librptadvsquelch2` / `librptadvsquelch-dev` | `librptadvradio.so.4` |
+| [CTCSS v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvctcss/releases/tag/v0.1.0-alpha.2) | `librptadvctcss.so.2` | `librptadvctcss2` / `librptadvctcss-dev` | `librptadvradio.so.4` |
+| [DCS v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvdcs/releases/tag/v0.1.0-alpha.1) | `librptadvdcs.so.1` | `librptadvdcs1` / `librptadvdcs-dev` | `librptadvradio.so.4` |
+| [signaling v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvsignaling/releases/tag/v0.1.0-alpha.1) | `librptadvsignaling.so.1` | `librptadvsignaling1` / `librptadvsignaling-dev` | `librptadv_gpio_adapter.so.1` |
+| [tone v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvtone/releases/tag/v0.1.0-alpha.1) | `librptadvtone.so.1` | `librptadvtone1` / `librptadvtone-dev` | `librptadv_product.so.1`, `librptadvmorse.so.1` |
+| [Morse v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvmorse/releases/tag/v0.1.0-alpha.1) | `librptadvmorse.so.1` | `librptadvmorse1` / `librptadvmorse-dev` | `librptadv_product.so.1` |
+| [DTMF v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvdtmf/releases/tag/v0.1.0-alpha.1) | `librptadvdtmf.so.1` | `librptadvdtmf1` / `librptadvdtmf-dev` | `librptadv_product.so.1` |
+| [template v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvtemplate/releases/tag/v0.1.0-alpha.1) | `librptadvtemplate.so.1` | `librptadvtemplate1` / `librptadvtemplate-dev` | `librptadv_product.so.1` |
+| [schedule v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvschedule/releases/tag/v0.1.0-alpha.1) | `librptadvschedule.so.1` | `librptadvschedule1` / `librptadvschedule-dev` | `librptadv_product.so.1` |
+
+Radio adopted the ABI-2 squelch and CTCSS packages and ABI-1 DCS in
+[v0.1.0-alpha.8](https://github.com/cpeter1207/librptadvradio/releases/tag/v0.1.0-alpha.8);
+the hardware GPIO adapter adopted signaling in
+[v0.1.0-alpha.3](https://github.com/cpeter1207/rptadv-gpio-adapter/releases/tag/v0.1.0-alpha.3).
+The controller product dynamically links the five controller components, and
+Morse dynamically links tone. The initial extraction moves existing DTMF
+detection only. DTMF PCM generation remains a later requirement in the same
+component; generic audio-device control and the further directions above are
+outside this extraction.
 
 ## Consequences
 

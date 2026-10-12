@@ -10,7 +10,7 @@
 
 **Spec:** [Approved extraction design](../specs/2026-10-12-functional-library-separation-design.md).
 
-Status: Prepared for implementation-plan review; implementation has not started.
+Status: Approved by the user on 2026-10-12; parallel implementation in progress.
 
 ## Global Constraints
 
@@ -64,6 +64,15 @@ The export is `rptadv_{component}_descriptor()`. Its header uses the existing
 booleans cross as `uint32_t`; existing operation failures use documented status
 values. Lifecycle operations are setup-only `create(..., handle **out)` and
 `destroy(handle *)`. Keep existing Rust method signatures in consumer wrappers.
+
+User-approved correction on 2026-10-12: replace the initially published squelch
+and CTCSS ABI-1 C-bool/pointer-create contracts with ABI/SONAME 2. Their next
+release is `v0.1.0-alpha.2` / Debian `0.1.0~alpha2-1`, with runtime packages
+`librptadvsquelch2` and `librptadvctcss2`. Use the uint32/status-output-handle
+convention above. Do not overwrite the published ABI-1 artifacts. Rebuild the
+radio owner against both ABI-2 providers and release radio `v0.1.0-alpha.8`,
+retaining its opaque public ABI 4. Update package/image checks together. The
+other seven new providers remain ABI/SONAME 1.
 
 For every component task:
 

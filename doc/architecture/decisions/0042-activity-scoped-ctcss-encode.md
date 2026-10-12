@@ -1,6 +1,6 @@
 # ADR 0042: Activity-scoped CTCSS transmit control
 
-Status: Accepted (2026-10-05)
+Status: Implemented (2026-10-12); accepted 2026-10-05
 
 ## Context
 

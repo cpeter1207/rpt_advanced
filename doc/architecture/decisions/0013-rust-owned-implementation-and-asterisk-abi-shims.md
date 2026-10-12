@@ -1,6 +1,11 @@
 # ADR 0013: Rust owns implementation; C is limited to Asterisk ABI shims
 
-Status: Partially superseded by ADRs 0020, 0021, and 0022
+Status: Implemented — Rust migration (2026-10-12); boundary scope partially
+superseded by ADRs 0020, 0021, and 0022
+
+Substantive owned radio, controller, ring, and adapter implementations are Rust.
+The retained production C is the minimal Asterisk metadata shim. Future
+component extractions inherit this rule; they do not keep the migration open.
 
 ## Context
 
