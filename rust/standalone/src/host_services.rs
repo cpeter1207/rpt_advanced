@@ -335,7 +335,8 @@ unsafe extern "C" fn peer_read(
             return -1;
         };
         let mut samples = [0.0_f32; 4096];
-        let mut text = [0_u8; 1024];
+        // Match the IAX client's datagram capacity so large topology frames stay connected.
+        let mut text = [0_u8; 1500];
         match peer.0.poll(&mut samples, &mut text) {
             Ok(IaxEvent::None) => 0,
             Ok(IaxEvent::Audio(length)) => unsafe {
@@ -464,6 +465,21 @@ mod tests {
         unsafe { context.cast::<Vec<u32>>().as_mut() }
             .unwrap()
             .push(kind);
+    }
+
+    unsafe extern "C" fn record_peer_text(
+        context: *mut c_void,
+        kind: u32,
+        data: *const c_void,
+        length: usize,
+    ) {
+        if kind == 1 {
+            // SAFETY: peer_read provides a readable payload for this synchronous callback.
+            let text = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
+            unsafe { context.cast::<Vec<Vec<u8>>>().as_mut() }
+                .unwrap()
+                .push(text.to_vec());
+        }
     }
 
     unsafe extern "C" fn allow_test_peer(
@@ -1059,10 +1075,35 @@ mod tests {
         assert_eq!(status, 0);
         assert_ne!(peer, 0);
         assert_ne!(accepted.load(Ordering::Acquire), 0);
-        unsafe { super::peer_destroy(ptr::null_mut(), peer as *mut c_void) };
         let accepted_peer = accepted.swap(0, Ordering::AcqRel) as *mut c_void;
         let server_client = crate::iax::IaxClient::load(library).unwrap();
-        let inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
+        let mut inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
+
+        // 51018 sent a valid 1291-byte topology that used to terminate this call.
+        let topology = format!("L {}T1506316\0", "T506316,".repeat(160));
+        let mut observed = Vec::<Vec<u8>>::new();
+        for message in [topology.as_bytes(), b"!NEWKEY1!"] {
+            inbound.send_text(message).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while observed.is_empty() && Instant::now() < deadline {
+                assert_eq!(
+                    unsafe {
+                        super::peer_read(
+                            ptr::null_mut(),
+                            peer as *mut c_void,
+                            Some(record_peer_text),
+                            ptr::from_mut(&mut observed).cast(),
+                        )
+                    },
+                    0,
+                    "valid topology must not end the call",
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(observed, [message]);
+            observed.clear();
+        }
+        unsafe { super::peer_destroy(ptr::null_mut(), peer as *mut c_void) };
         drop(inbound);
 
         let canceled_calls = AtomicUsize::new(0);
