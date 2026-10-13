@@ -313,6 +313,7 @@ unsafe extern "C" fn peer_events(
         event(context, 3, audio.as_ptr().cast(), audio.len());
         event(context, 4, ptr::null(), 0);
         event(context, 5, ptr::null(), 0);
+        event(context, 6, ptr::null(), 80);
         event(context, 4, ptr::from_ref(&digit).cast(), 1);
         event(context, 4, ptr::null(), 1);
         event(context, 5, ptr::from_ref(&digit).cast(), 1);
@@ -322,6 +323,8 @@ unsafe extern "C" fn peer_events(
         event(context, 2, ptr::null(), 1);
         event(context, 2, ptr::from_ref(&digit).cast(), 2);
         event(context, 3, ptr::null(), 1);
+        event(context, 6, ptr::null(), 0);
+        event(context, 6, ptr::from_ref(&digit).cast(), 80);
     }
     0
 }
@@ -352,6 +355,8 @@ unsafe extern "C" fn write_failure(_: *mut c_void, _: *mut c_void, _: *const f32
     -1
 }
 
+unsafe extern "C" fn stop_only(_: *mut c_void, _: *mut c_void) {}
+
 #[test]
 fn host_table_validation_and_value_conversions_fail_closed() {
     let _serial = crate::fixture::LIFECYCLE
@@ -367,7 +372,33 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v5, peer_step_attach) as u32;
+    assert!(unsafe { HostServices::open(&table) }.is_ok());
+    table.struct_size -= 1;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v5, peer_observe) as u32;
+    assert!(unsafe { HostServices::open(&table) }.is_ok());
+    table.struct_size += 1;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v5, peer_destroy)
+        + size_of::<usize>() * 2) as u32;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
     table.struct_size = size_of::<abi::rptadv_host_services_v5>() as u32;
+    table.peer_step_stop = Some(stop_only);
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+    table.peer_step_stop = None;
     table.abi_version = 1;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -507,6 +538,7 @@ fn peer_callbacks_dispatch_valid_events_and_reject_invalid_or_failed_operations(
         PeerInput::Text(text) => events.push(format!("text:{:?}", text)),
         PeerInput::Digit(digit) => events.push(format!("digit:{digit}")),
         PeerInput::Audio(audio) => events.push(format!("audio:{audio:?}")),
+        PeerInput::Gap(samples) => events.push(format!("gap:{samples}")),
         PeerInput::RadioKey => events.push("radio-key".into()),
         PeerInput::RadioUnkey => events.push("radio-unkey".into()),
     })
@@ -518,7 +550,8 @@ fn peer_callbacks_dispatch_valid_events_and_reject_invalid_or_failed_operations(
             "digit:7",
             "audio:[0.25]",
             "radio-key",
-            "radio-unkey"
+            "radio-unkey",
+            "gap:80"
         ]
     );
     drop(peer);

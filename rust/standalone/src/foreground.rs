@@ -76,6 +76,7 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let mut runtime =
             crate::runtime::ProductRuntime::start_with_providers(&text, radios, secrets, providers)
                 .map_err(ForegroundError::Runtime)?;
+        enable_iax_listeners(&mut iax_listeners, &runtime)?;
         let mut registration = crate::registration::RegistrationWorker::start(registrations)
             .map_err(ForegroundError::Registration)?;
         install_signal_handlers()?;
@@ -89,7 +90,9 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
                 }) {
                     Ok(updated) => match resolve_radios(&updated).and_then(|radios| {
                         let nodes = resolve_listener_nodes(&radios);
-                        update_iax_listeners(&mut iax_listeners, nodes, || {
+                        update_iax_listeners(&mut iax_listeners, nodes, |candidates| {
+                            // Prepare readiness tasks before changing the active generation.
+                            enable_iax_listeners(candidates, &runtime)?;
                             runtime
                                 .reload_with_radios(&updated, radios)
                                 .map_err(ForegroundError::Runtime)
@@ -152,7 +155,9 @@ fn bind_iax_listener(
 fn update_iax_listeners(
     listeners: &mut BTreeMap<u16, crate::iax::IaxServer>,
     nodes: BTreeMap<u16, Vec<String>>,
-    reload_product: impl FnOnce() -> Result<(), ForegroundError>,
+    reload_product: impl FnOnce(
+        &mut BTreeMap<u16, crate::iax::IaxServer>,
+    ) -> Result<(), ForegroundError>,
 ) -> Result<(), ForegroundError> {
     let mut added = BTreeMap::new();
     for (port, local_nodes) in &nodes {
@@ -160,7 +165,7 @@ fn update_iax_listeners(
             added.insert(*port, bind_iax_listener(*port, local_nodes)?);
         }
     }
-    reload_product()?;
+    reload_product(&mut added)?;
     for (port, local_nodes) in &nodes {
         if let Some(listener) = listeners.get_mut(port) {
             listener
@@ -175,6 +180,18 @@ fn update_iax_listeners(
 
 fn iax_library_path() -> PathBuf {
     PathBuf::from("librptadviax2.so.1")
+}
+
+/// Start prepared listeners before exposing their generation to control polling.
+fn enable_iax_listeners(
+    listeners: &mut BTreeMap<u16, crate::iax::IaxServer>,
+    runtime: &crate::runtime::ProductRuntime,
+) -> Result<(), ForegroundError> {
+    listeners.values_mut().try_for_each(|listener| {
+        runtime
+            .enable_listener(listener)
+            .map_err(ForegroundError::Iax)
+    })
 }
 
 fn poll_iax_listeners(
@@ -492,7 +509,7 @@ mod tests {
         ]);
         let mut reloaded = false;
 
-        super::update_iax_listeners(&mut listeners, nodes, || {
+        super::update_iax_listeners(&mut listeners, nodes, |_| {
             reloaded = true;
             Ok(())
         })
@@ -511,7 +528,7 @@ mod tests {
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
         let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
 
-        let error = super::update_iax_listeners(&mut listeners, nodes, || {
+        let error = super::update_iax_listeners(&mut listeners, nodes, |_| {
             Err(ForegroundError::Runtime(
                 crate::runtime::RuntimeError::Reload,
             ))
@@ -526,12 +543,25 @@ mod tests {
     }
 
     #[test]
+    fn listener_reload_prepares_async_candidates_before_committing() {
+        let current = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
+        let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
+        let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
+        let result = super::update_iax_listeners(&mut listeners, nodes, |candidates| {
+            assert_eq!(candidates.keys().copied().collect::<Vec<_>>(), [0]);
+            Err(ForegroundError::Iax(crate::iax::IaxError::Operation))
+        });
+        assert!(matches!(result, Err(ForegroundError::Iax(_))));
+        assert_eq!(listeners.keys().copied().collect::<Vec<_>>(), [4569]);
+    }
+
+    #[test]
     fn listener_reload_rejects_invalid_existing_node_assignment() {
         let current = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
         let nodes = std::collections::BTreeMap::from([(4569, Vec::new())]);
 
-        let error = super::update_iax_listeners(&mut listeners, nodes, || Ok(())).unwrap_err();
+        let error = super::update_iax_listeners(&mut listeners, nodes, |_| Ok(())).unwrap_err();
 
         assert!(matches!(
             error,
@@ -627,6 +657,7 @@ mod tests {
         let context = std::ptr::from_mut(&mut context).cast::<c_void>();
         let listener = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(0, listener)]);
+        super::enable_iax_listeners(&mut listeners, &runtime).unwrap();
         super::poll_iax_listeners(&mut listeners, &runtime);
         let local = c"524950";
         let allowed_remote = c"506315";

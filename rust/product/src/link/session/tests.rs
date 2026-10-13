@@ -7,6 +7,7 @@ pub(crate) enum Input {
     Text(&'static [u8]),
     Digit(u8),
     Audio(Vec<f32>),
+    Gap(usize),
     RadioKey,
     RadioUnkey,
 }
@@ -21,11 +22,20 @@ pub(crate) struct State {
     pub(crate) fail_text: bool,
     pub(crate) fail_read: bool,
     pub(crate) fail_ready: bool,
+    pub(crate) ready_without_input: bool,
     pub(crate) fail_write: bool,
     pub(crate) fail_bind: bool,
     pub(crate) bound_radio: Option<String>,
     pub(crate) pause: Option<Arc<std::sync::Barrier>>,
     pub(crate) drops: usize,
+    pub(crate) async_attaches: usize,
+    pub(crate) async_stops: usize,
+    pub(crate) async_detaches: usize,
+    pub(crate) fail_async_attach: bool,
+    pub(crate) observe_calls: usize,
+    pub(crate) fail_observe: bool,
+    pub(crate) bad_observe_size: bool,
+    pub(crate) bad_observe_version: bool,
 }
 type Shared = Arc<Mutex<State>>;
 
@@ -52,7 +62,7 @@ unsafe extern "C" fn ready(_: *mut c_void, peer: *mut c_void) -> i32 {
     let result = if state.fail_ready {
         -1
     } else {
-        i32::from(!state.input.is_empty())
+        i32::from(state.ready_without_input || !state.input.is_empty())
     };
     drop(state);
     if let Some(pause) = pause {
@@ -81,6 +91,7 @@ unsafe extern "C" fn read(
                 Input::Audio(samples) => {
                     event.unwrap()(context, 3, samples.as_ptr().cast(), samples.len())
                 }
+                Input::Gap(samples) => event.unwrap()(context, 6, ptr::null(), samples),
                 Input::RadioKey => event.unwrap()(context, 4, ptr::null(), 0),
                 Input::RadioUnkey => event.unwrap()(context, 5, ptr::null(), 0),
             }
@@ -291,7 +302,85 @@ unsafe extern "C" fn destroy(_: *mut c_void, peer: *mut c_void) {
     let state = unsafe { Box::from_raw(peer.cast::<Shared>()) };
     state.lock().unwrap().drops += 1;
 }
+struct AsyncRegistration {
+    state: Shared,
+    thread: Option<JoinHandle<i32>>,
+}
+unsafe extern "C" fn async_attach(
+    _: *mut c_void,
+    peer: *mut c_void,
+    step: abi::rptadv_peer_step_v1,
+    step_context: *mut c_void,
+    registration: *mut *mut c_void,
+) -> i32 {
+    let state = unsafe { state(peer) }.clone();
+    if state.lock().unwrap().fail_async_attach {
+        return -1;
+    }
+    state.lock().unwrap().async_attaches += 1;
+    let address = step_context as usize;
+    let thread = thread::spawn(move || unsafe { step.unwrap()(address as *mut c_void) });
+    unsafe {
+        *registration = Box::into_raw(Box::new(AsyncRegistration {
+            state,
+            thread: Some(thread),
+        }))
+        .cast();
+    }
+    0
+}
+unsafe extern "C" fn async_stop(_: *mut c_void, registration: *mut c_void) {
+    let registration = unsafe { &*registration.cast::<AsyncRegistration>() };
+    registration.state.lock().unwrap().async_stops += 1;
+}
+unsafe extern "C" fn async_detach(_: *mut c_void, registration: *mut c_void) {
+    let mut registration = unsafe { Box::from_raw(registration.cast::<AsyncRegistration>()) };
+    registration.thread.take().unwrap().join().unwrap();
+    registration.state.lock().unwrap().async_detaches += 1;
+}
+unsafe extern "C" fn observe_peer(
+    _: *mut c_void,
+    peer: *mut c_void,
+    output: *mut abi::rptadv_peer_observation_v1,
+) -> i32 {
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.observe_calls += 1;
+    if state.fail_observe {
+        return -1;
+    }
+    unsafe {
+        *output = abi::rptadv_peer_observation_v1 {
+            struct_size: std::mem::size_of::<abi::rptadv_peer_observation_v1>() as u32,
+            abi_version: abi::RPTADV_PEER_OBSERVATION_ABI_VERSION,
+            jitter_queued_packets: 3,
+            jitter_delay_samples: 480,
+            jitter_buffered_span_samples: 640,
+            jitter_duplicate_drops: 1,
+            jitter_late_drops: 2,
+            jitter_full_drops: 3,
+            jitter_missing_samples: 160,
+            jitter_insertion_samples: 80,
+            jitter_skipped_samples: 40,
+            jitter_limit_resets: 4,
+            jitter_overload_drops: 5,
+            jitter_overload_span_samples: 800,
+            ingress_overflow_drops: 6,
+            ingress_queued_packets: 7,
+            ingress_capacity_packets: 64,
+        };
+        if state.bad_observe_size {
+            (*output).struct_size -= 1;
+        }
+        if state.bad_observe_version {
+            (*output).abi_version += 1;
+        }
+    }
+    0
+}
 pub(crate) fn peer(rate_hz: u32) -> (PeerIo, Shared) {
+    peer_with_async(rate_hz, false)
+}
+pub(crate) fn peer_with_async(rate_hz: u32, async_enabled: bool) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
         ..State::default()
@@ -305,9 +394,23 @@ pub(crate) fn peer(rate_hz: u32) -> (PeerIo, Shared) {
     table.peer_send_digit = Some(digit);
     table.peer_write = Some(write);
     table.peer_destroy = Some(destroy);
+    if async_enabled {
+        table.peer_step_attach = Some(async_attach);
+        table.peer_step_stop = Some(async_stop);
+        table.peer_step_detach = Some(async_detach);
+        table.peer_observe = Some(observe_peer);
+    }
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let handle = Box::into_raw(Box::new(state.clone())).cast();
     (unsafe { services.peer(handle) }.unwrap(), state)
+}
+fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
+    let (io, state) = peer_with_async(48000, true);
+    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600)
+        .unwrap()
+        .into_endpoints();
+    let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
+    (session, control, state, output)
 }
 fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (io, state) = peer(48000);
@@ -340,6 +443,215 @@ fn shared_peer_io_stop_signals_active_session_before_drop() {
     assert!(control.stop.load(Ordering::Acquire));
     assert!(control.snapshot().unwrap().ended);
     assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
+fn idle_peer_io_worker_does_not_start_a_poll_thread() {
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    assert!(worker.thread.is_none());
+    worker.stop();
+}
+
+#[test]
+fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
+    let (session, control, state, _) = make_async_session("1000");
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.attach(session).ok().unwrap();
+    control.stop();
+    worker.reap();
+    assert!(worker.async_peers.is_empty());
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(
+            (state.async_stops, state.async_detaches, state.drops),
+            (1, 1, 1)
+        );
+    }
+    worker.stop();
+    assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
+fn async_peer_drains_ready_gap_audio_and_control_in_one_bounded_turn() {
+    let (mut session, mut control, state, _) = make_async_session("1000");
+    {
+        let mut state = state.lock().unwrap();
+        state.input.push_back(Input::Gap(80));
+        state.input.push_back(Input::Audio(vec![0.25; 160]));
+        state.input.push_back(Input::Text(b"L T3000"));
+    }
+    session.step(0).unwrap();
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(matches!(control.event(), Some(Event::Text(bytes)) if bytes == b"L T3000"));
+}
+
+#[test]
+fn peer_observation_is_copied_for_control_without_a_second_peer_borrow() {
+    let (mut session, control, state, _) = make_async_session("1000");
+    assert!(control.snapshot().unwrap().peer.is_none());
+    session.step(0).unwrap();
+    let observation = control.snapshot().unwrap().peer.unwrap();
+    assert_eq!(observation.jitter_delay_samples, 480);
+    assert_eq!(observation.jitter_missing_samples, 160);
+    assert_eq!(observation.jitter_overload_span_samples, 800);
+    assert_eq!(observation.ingress_queued_packets, 7);
+    assert_eq!(state.lock().unwrap().observe_calls, 1);
+    state.lock().unwrap().fail_observe = true;
+    session.step(20).unwrap();
+    assert_eq!(
+        control
+            .snapshot()
+            .unwrap()
+            .peer
+            .unwrap()
+            .jitter_delay_samples,
+        480
+    );
+    assert_eq!(state.lock().unwrap().observe_calls, 2);
+    state.lock().unwrap().fail_observe = false;
+    state.lock().unwrap().bad_observe_size = true;
+    session.step(40).unwrap();
+    assert_eq!(
+        control
+            .snapshot()
+            .unwrap()
+            .peer
+            .unwrap()
+            .jitter_delay_samples,
+        480
+    );
+    state.lock().unwrap().bad_observe_size = false;
+    state.lock().unwrap().bad_observe_version = true;
+    session.step(60).unwrap();
+    assert_eq!(
+        control
+            .snapshot()
+            .unwrap()
+            .peer
+            .unwrap()
+            .jitter_delay_samples,
+        480
+    );
+    assert_eq!(state.lock().unwrap().observe_calls, 4);
+}
+
+#[test]
+fn async_peer_step_is_serial_and_detaches_before_handle_drop() {
+    let (session, control, state, _output) = make_async_session("1000");
+    let pause = Arc::new(std::sync::Barrier::new(2));
+    state.lock().unwrap().pause = Some(pause.clone());
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.attach(session).ok().unwrap();
+    worker.reap();
+    assert_eq!(worker.async_peers.len(), 1);
+    pause.wait();
+    if worker.thread.is_some() {
+        pause.wait();
+        worker.stop();
+        panic!("async peer used the synchronous polling thread");
+    }
+    assert!(worker.thread.is_none());
+    assert_eq!(state.lock().unwrap().async_attaches, 1);
+    let release_state = state.clone();
+    let release = thread::spawn(move || {
+        for _ in 0..1000 {
+            if release_state.lock().unwrap().async_stops != 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(release_state.lock().unwrap().drops, 0);
+        pause.wait();
+    });
+    worker.stop();
+    release.join().unwrap();
+    assert!(control.snapshot().unwrap().ended);
+    let state = state.lock().unwrap();
+    assert_eq!(
+        (state.async_stops, state.async_detaches, state.drops),
+        (1, 1, 1)
+    );
+}
+
+#[test]
+fn retained_step_rejects_missing_context_and_unregistered_epoch() {
+    assert_eq!(unsafe { retained_step(ptr::null_mut()) }, -1);
+    let (mut session, control, _state, _) = make_async_session("1000");
+    assert_eq!(
+        unsafe { retained_step(ptr::from_mut(&mut session).cast()) },
+        -1
+    );
+    assert!(control.snapshot().unwrap().ended);
+}
+
+#[test]
+fn spurious_ready_without_an_event_yields_the_peer_turn() {
+    let (mut session, _control, state, _) = make_session("1000");
+    state.lock().unwrap().ready_without_input = true;
+    session.step(0).unwrap();
+    assert!(state.lock().unwrap().input.is_empty());
+}
+
+#[test]
+fn failed_async_attach_never_retains_session_context() {
+    let (session, _control, state, _) = make_async_session("1000");
+    state.lock().unwrap().fail_async_attach = true;
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    let session = worker.attach(session).expect_err("host rejected attach");
+    assert_eq!(state.lock().unwrap().async_attaches, 0);
+    drop(session);
+    assert_eq!(state.lock().unwrap().drops, 1);
+    worker.stop();
+}
+
+#[test]
+fn finished_synchronous_owner_rejects_a_new_session_without_consuming_it() {
+    let (session, _control, state, _) = make_session("1000");
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    let finished = thread::spawn(|| {});
+    while !finished.is_finished() {
+        thread::yield_now();
+    }
+    worker.thread = Some(finished);
+    let session = worker.attach(session).expect_err("owner already finished");
+    drop(session);
+    assert_eq!(state.lock().unwrap().drops, 1);
+    worker.stop();
+}
+
+#[test]
+fn async_capacity_rejects_before_host_registration() {
+    let (session, _control, state, _) = make_async_session("1000");
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.test_async_capacity = 0;
+    let session = worker
+        .attach(session)
+        .expect_err("async peer limit reached");
+    assert_eq!(state.lock().unwrap().async_attaches, 0);
+    drop(session);
+    assert_eq!(state.lock().unwrap().drops, 1);
+    worker.stop();
+}
+
+#[test]
+fn missing_sync_queue_and_spawn_failure_return_unconsumed_sessions() {
+    let (session, _control, state, _) = make_session("1000");
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    drop(worker.incoming.take());
+    let session = worker.attach(session).expect_err("sync queue missing");
+    drop(session);
+    assert_eq!(state.lock().unwrap().drops, 1);
+    worker.stop();
+
+    let (session, _control, state, _) = make_session("1000");
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.fail_next_spawn = true;
+    let session = worker.attach(session).expect_err("spawn failed");
+    assert!(worker.stop.load(Ordering::Acquire));
+    assert!(worker.thread.is_none());
+    drop(session);
+    assert_eq!(state.lock().unwrap().drops, 1);
+    worker.stop();
 }
 
 #[test]
@@ -421,6 +733,174 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     assert!(input.signals().ended());
     drop(session);
     assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
+fn oversized_peer_audio_is_rejected_before_touching_the_ring() {
+    let (mut session, control, state, _) = make_session("1000");
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.25; MAX_PEER_INPUT_SAMPLES + 1]));
+    assert!(matches!(session.step(0), Err(Error::InvalidFrame)));
+    assert!(control.snapshot().unwrap().ended);
+    assert!(session.pending_input.is_none());
+}
+
+#[test]
+fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
+    for gap in [false, true] {
+        for overreported in [false, true] {
+            let (mut session, mut control, state, _) = make_session("1000");
+            let (inbound, _consumer) =
+                crate::link::ring::tests::invalid_ingress_endpoints(gap, overreported);
+            control
+                .send(Command::Redirect {
+                    inbound,
+                    outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+                        .unwrap()
+                        .into_endpoints()
+                        .1,
+                })
+                .ok()
+                .unwrap();
+            session.step(0).unwrap();
+            state.lock().unwrap().input.push_back(if gap {
+                Input::Gap(8)
+            } else {
+                Input::Audio(vec![0.25; 8])
+            });
+            assert!(matches!(session.step(1), Err(Error::Write)));
+            assert!(session.inbound.signals().ended());
+        }
+    }
+}
+
+#[test]
+fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
+    let (mut session, mut control, state, _) = make_session("1000");
+    let (inbound, _consumer) = crate::link::ring::tests::pending_overreported_gap_endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+                .unwrap()
+                .into_endpoints()
+                .1,
+        })
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    state.lock().unwrap().input.push_back(Input::Gap(8));
+    session.step(1).unwrap();
+    assert!(matches!(session.pending_input, Some(PendingInput::Gap(8))));
+    assert!(matches!(session.step(2), Err(Error::Write)));
+    assert!(session.inbound.signals().ended());
+}
+
+#[test]
+fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
+    let (mut session, mut control, state, _) = make_session("1000");
+    let (inbound, mut consumer) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+    control
+        .send(Command::Redirect {
+            inbound,
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+                .unwrap()
+                .into_endpoints()
+                .1,
+        })
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    for _ in 0..4 {
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 4096]));
+    }
+    state.lock().unwrap().input.push_back(Input::Gap(4096));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.5; 64]));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"L T3000"));
+    for now in 1..=4 {
+        session.step(now).unwrap();
+    }
+    session.step(5).unwrap();
+    assert_eq!(consumer.observe().unwrap().available_samples, 16576);
+    assert_eq!(state.lock().unwrap().input.len(), 2);
+    session.step(6).unwrap();
+    assert_eq!(state.lock().unwrap().input.len(), 2);
+    let mut output = [0.0; 4096];
+    assert_eq!(consumer.render(&mut output), Ok(3916));
+    session.step(7).unwrap();
+    session.step(8).unwrap();
+    assert_eq!(consumer.render(&mut output), Ok(4096));
+    for now in 9..=12 {
+        session.step(now).unwrap();
+    }
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(matches!(control.event(), Some(Event::Redirected(_))));
+    assert!(matches!(control.event(), Some(Event::Text(bytes)) if bytes == b"L T3000"));
+}
+
+#[test]
+fn partial_pcm_is_staged_before_a_following_counted_gap() {
+    let (mut session, mut control, state, _) = make_session("1000");
+    let (inbound, mut consumer) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+    control
+        .send(Command::Redirect {
+            inbound,
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+                .unwrap()
+                .into_endpoints()
+                .1,
+        })
+        .ok()
+        .unwrap();
+    session.step(0).unwrap();
+    for _ in 0..4 {
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 4096]));
+    }
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.5; 256]));
+    state.lock().unwrap().input.push_back(Input::Gap(64));
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"L T3000"));
+    for now in 1..=5 {
+        session.step(now).unwrap();
+    }
+    assert_eq!(consumer.observe().unwrap().available_samples, 16576);
+    assert_eq!(state.lock().unwrap().input.len(), 2);
+    session.step(6).unwrap();
+    assert_eq!(state.lock().unwrap().input.len(), 2);
+    let mut output = [0.0; 4096];
+    assert_eq!(consumer.render(&mut output), Ok(3916));
+    for now in 7..=10 {
+        session.step(now).unwrap();
+    }
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(matches!(control.event(), Some(Event::Redirected(_))));
+    assert!(matches!(control.event(), Some(Event::Text(bytes)) if bytes == b"L T3000"));
 }
 
 #[test]

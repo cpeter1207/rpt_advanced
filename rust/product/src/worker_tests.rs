@@ -129,7 +129,7 @@ fn worker_with_interval(status: RadioStatus, interval_ms: u64) -> RadioWorker {
         0,
         interval_ms,
     )
-    .unwrap_or_else(|(error, _radio)| panic!("prepare callbacks: {error:?}"))
+    .unwrap_or_else(|failure| panic!("prepare callbacks: {:?}", failure.0))
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
     RadioWorker::fail_next_for_test(TestFailure::Prepare);
-    let Err((_, radio)) = RadioWorker::prepare(
+    let Err(failure) = RadioWorker::prepare(
         services.radio("1000", "usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
@@ -450,6 +450,7 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
     ) else {
         panic!("expected failure")
     };
+    let (_, radio) = *failure;
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
     drop(radio);
     let (mut runtime, owners) = audio_owners();
@@ -919,7 +920,7 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
     let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
     crate::fixture::RADIO_ACTIVATE_RESULT.store(1, Ordering::Release);
-    let Err((Error::Operation, radio)) = RadioWorker::prepare(
+    let Err(failure) = RadioWorker::prepare(
         services.radio("1000", "usb", 8).unwrap(),
         Instant::now(),
         RadioStatus::default(),
@@ -928,6 +929,8 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
     ) else {
         panic!("activation must fail")
     };
+    let (error, radio) = *failure;
+    assert!(matches!(error, Error::Operation));
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
     let mut worker = RadioWorker::prepare(radio, Instant::now(), RadioStatus::default(), 0, 50)
         .unwrap_or_else(|_| panic!("reservation retry"));

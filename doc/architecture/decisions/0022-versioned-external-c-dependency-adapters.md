@@ -29,7 +29,8 @@ native API. Capability-specific functions are added only when an internal Rust
 port requires them.
 
 The complete adapter architecture has one adapter per independently replaceable
-capability: FFmpeg graph, sample-rate conversion, system DNS resolution, Hamlib, speech synthesis,
+capability: FFmpeg graph, sample-rate conversion, system DNS resolution,
+packet jitter buffering, Hamlib, speech synthesis,
 PortAudio/ALSA, control-path execution, and Asterisk entry. This record governs
 the external-service adapters; ADR 0021 governs the Asterisk entry adapter.
 ADR 0038 defines the control-path adapter, initially backed by Asterisk's
@@ -106,3 +107,13 @@ This completes the current composition's external-capability extraction, not
 unimplemented Hamlib, remote-base, or other wishlist capabilities. Filesystem,
 socket, clock, and other ordinary operating-system facilities remain with their
 existing owners; this decision does not introduce a generic OS adapter.
+
+## Planned packet-jitter capability (2026-10-13)
+
+ADR 0037 adds a mandatory standalone jitter adapter, initially backed by
+SpeexDSP's generic adaptive packet buffer. Only this separate Rust `cdylib`
+links SpeexDSP and owns its types, FFI and lifetime. Protocol/controller code
+uses neutral bounded packet operations; codecs and PCM-ring PLC remain separate.
+It ships its own ABI-1 descriptor, SONAME and runtime/development packages,
+following the resolver adapter's workspace pattern. It is not yet implemented
+or part of the running composition. The Asterisk composition is unchanged.

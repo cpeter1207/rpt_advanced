@@ -582,11 +582,12 @@ None.
 **Requirements**
 
 - Run rpt_advanced as a standalone application with no dependency on Asterisk.
-- Keep all I/O and inter-thread communication lock-free.
-- In standalone operation, avoid locks, mutexes, spinlocks, and equivalent
-  contention gates wherever thread-safe alternatives exist. Scale ingress to
-  hundreds or thousands of peers without a thread per peer; use ADR 0037's
-  bounded SPSC packet fan-in to a peer's sole media/PCM-ring producer.
+- Keep audio I/O and PCM inter-thread exchange strictly lock-free.
+- Scale standalone ingress to hundreds or thousands of peers using Tokio
+  readiness, bounded per-peer mailboxes and one serialized task per connection
+  on a shared worker pool under ADR 0037. A peer-local asynchronous mutex is
+  permitted where needed; neither other peers nor audio may wait on it. Tokio
+  internals are not required to be lock-free. No OS thread per peer or spin gate.
 - Implement enough IAX2 to interoperate with current AllStarLink nodes.
 - Keep the standalone application small, fast, and suitable for inexpensive
   hardware.
@@ -607,12 +608,15 @@ None.
   or third-party backend must pass the same execution/lifecycle contract tests;
   no replacement taskprocessor is required now.
 - I/O and inter-thread communication are lock-free at native media boundaries.
-  Standalone packet producers never share a PCM-ring writer: each uses its
-  own bounded SPSC queue to the peer's assigned media owner. That owner alone
-  advances jitter/decoder state and writes PCM. A full queue rejects new
-  packets with observable drops; a stalled producer cannot block ready queues.
-  The current Asterisk module is outside this new standalone-only requirement
-  and retains its existing narrow ingress-mutex exception (ADR 0037).
+  Standalone callbacks never share a PCM writer: bounded non-waiting mailbox
+  admission feeds the peer's exclusive async owner. A full mailbox rejects new
+  packets with observable drops; a stalled peer cannot stop unrelated peers.
+  SpeexDSP adaptive packet buffering is called only through a separate versioned
+  jitter adapter; codec decoding and shared-ring conversion/PLC stay separate.
+  Implementation status — 2026-10-13: the Tokio/jitter cutover is implemented
+  in the working branch; local composed tests and scoped coverage closure pass.
+  Hosted validation, dependency publication and live testing remain outstanding.
+  The Asterisk path retains its existing ingress exception.
 - IAX2 interoperability targets AllStarLink.
 - Implement IAX2 in our own independently versioned `librptadviax2` library.
   Keep packet/session logic separate from datagram I/O, and keep codec adapters

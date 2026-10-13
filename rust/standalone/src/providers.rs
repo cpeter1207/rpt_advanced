@@ -8,7 +8,7 @@ use std::{
     ptr::NonNull,
 };
 
-const PROVIDERS: [ProviderSpec; 11] = [
+const PROVIDERS: [ProviderSpec; 12] = [
     inline(
         "librptadv_product.so.1",
         "rptadv_product_descriptor_v1",
@@ -39,6 +39,12 @@ const PROVIDERS: [ProviderSpec; 11] = [
         "rptadv_resolver_adapter_descriptor_v1",
         1,
         b"rptadv.resolver",
+    ),
+    inline(
+        "librptadv_jitter_adapter.so.1",
+        "rptadv_jitter_adapter_descriptor_v1",
+        1,
+        b"rptadv.jitter",
     ),
     system(inline(
         "librptadviax2.so.1",
@@ -413,6 +419,7 @@ impl ProviderSet {
             ));
         }
         self.resolver_descriptor()?;
+        self.jitter_descriptor()?;
         self.native_product_descriptor()?;
         Ok(())
     }
@@ -432,6 +439,56 @@ impl ProviderSet {
             ));
         }
         Ok(api)
+    }
+
+    /// Borrow the complete packet-jitter capability while its DSO remains retained.
+    pub(crate) fn jitter_descriptor(
+        &self,
+    ) -> Result<&crate::abi::rptadv_jitter_descriptor_v1, ProviderError> {
+        let api: &crate::abi::rptadv_jitter_descriptor_v1 =
+            self.typed_descriptor("librptadv_jitter_adapter.so.1")?;
+        if [
+            api.create.is_some(),
+            api.destroy.is_some(),
+            api.reset.is_some(),
+            api.put.is_some(),
+            api.get.is_some(),
+            api.advance.is_some(),
+            api.observe.is_some(),
+        ]
+        .into_iter()
+        .all(|present| present)
+        {
+            Ok(api)
+        } else {
+            Err(ProviderError::IncompleteDescriptor(
+                "librptadv_jitter_adapter.so.1",
+            ))
+        }
+    }
+
+    /// Create the IAX readiness executor from the already-retained protocol DSO.
+    pub(crate) fn iax_executor(
+        &'static self,
+    ) -> Result<crate::iax::executor::Executor, ProviderError> {
+        const NAME: &str = "librptadviax2.so.1";
+        let index = self
+            .descriptors
+            .iter()
+            .position(|provider| provider.library == NAME)
+            .ok_or(ProviderError::MissingDescriptor(NAME))?;
+        type Descriptor = unsafe extern "C" fn() -> *const c_void;
+        // The host owns this executor within this provider set's validated lifetime.
+        let pointer = unsafe {
+            let symbol = self._libraries[index]
+                .get::<Descriptor>(b"rptadv_iax2_async_descriptor_v1\0")
+                .map_err(|_| ProviderError::MissingDescriptor(NAME))?;
+            symbol()
+        };
+        unsafe { crate::iax::executor::Executor::new(pointer) }.map_err(|error| match error {
+            crate::iax::executor::Error::Descriptor => ProviderError::IncompatibleDescriptor(NAME),
+            _ => ProviderError::Initialize(NAME),
+        })
     }
 
     /// Borrow the radio providers for an activation owner that lives as long as this set.
@@ -673,6 +730,125 @@ pub(crate) mod tests {
         super::ProviderSet {
             _libraries: Vec::new(),
             descriptors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn jitter_is_required_by_the_standalone_manifest() {
+        let spec = super::PROVIDERS
+            .iter()
+            .find(|spec| spec.library == "librptadv_jitter_adapter.so.1")
+            .expect("packet jitter must come from a retained versioned provider");
+        assert_eq!(spec.symbol, "rptadv_jitter_adapter_descriptor_v1");
+        assert_eq!(spec.abi_version, 1);
+        assert_eq!(spec.capability, b"rptadv.jitter");
+    }
+
+    #[test]
+    fn jitter_requires_a_full_table_and_each_operation() {
+        const NAME: &str = "librptadv_jitter_adapter.so.1";
+        let mut providers = super::ProviderSet::load().unwrap();
+        let valid = *providers.jitter_descriptor().unwrap();
+        let changes: &[fn(&mut crate::abi::rptadv_jitter_descriptor_v1)] = &[
+            |api| api.create = None,
+            |api| api.destroy = None,
+            |api| api.reset = None,
+            |api| api.put = None,
+            |api| api.get = None,
+            |api| api.advance = None,
+            |api| api.observe = None,
+            |api| api.struct_size -= 1,
+        ];
+        for change in changes {
+            let mut api = valid;
+            change(&mut api);
+            replace_descriptor(&mut providers, NAME, api);
+            assert_eq!(
+                providers.jitter_descriptor().err(),
+                Some(ProviderError::IncompleteDescriptor(NAME))
+            );
+        }
+    }
+
+    #[test]
+    fn executor_requires_the_retained_protocol_capability() {
+        const NAME: &str = "librptadviax2.so.1";
+        let empty = Box::leak(Box::new(empty_provider_set()));
+        assert_eq!(
+            empty.iax_executor().err(),
+            Some(ProviderError::MissingDescriptor(NAME))
+        );
+        let directory = ProviderFixture::new(4, false, false);
+        let providers = Box::leak(Box::new(
+            super::ProviderSet::load_from_directory(directory.path()).unwrap(),
+        ));
+        assert_eq!(
+            providers.iax_executor().err(),
+            Some(ProviderError::MissingDescriptor(NAME))
+        );
+    }
+
+    #[test]
+    fn executor_preserves_descriptor_and_initialization_errors() {
+        const NAME: &str = "librptadviax2.so.1";
+        for (version, expected) in [
+            (2, ProviderError::IncompatibleDescriptor(NAME)),
+            (1, ProviderError::Initialize(NAME)),
+        ] {
+            let fixture = ProviderFixture::new(4, false, false);
+            let source = fixture.path().join("iax-async.c");
+            std::fs::write(
+                &source,
+                format!(
+                    "{}\n{}",
+                    provider_fixture_source(),
+                    r#"
+                    #include <stdlib.h>
+                    typedef struct {
+                        Inline header;
+                        int (*create)(void **);
+                        void (*destroy)(void *);
+                        int (*attach)(void *, void *, int (*)(void *), void *, void **);
+                        void (*stop)(void *);
+                        void (*detach)(void *);
+                        int (*configure)(void *, const void *);
+                        int (*enable)(void *, void *);
+                        int (*observe)(void *, void *);
+                    } Async;
+                    static int fail_create(void **out) { *out = NULL; return -1; }
+                    static void unused(void *p) { (void)p; abort(); }
+                    static int attach(void *r, void *p, int (*s)(void *), void *c, void **out) {
+                        (void)r; (void)p; (void)s; (void)c; (void)out; abort();
+                    }
+                    static int configure(void *p, const void *j) { (void)p; (void)j; abort(); }
+                    static int unused_pair(void *a, void *b) { (void)a; (void)b; abort(); }
+                    static Async api = {
+                        { sizeof(Async), ASYNC_VERSION, "rptadv.iaxasync" },
+                        fail_create, unused, attach, unused, unused,
+                        configure, unused_pair, unused_pair
+                    };
+                    void *rptadv_iax2_async_descriptor_v1(void) { return &api; }
+                    "#,
+                ),
+            )
+            .unwrap();
+            let library = fixture.path().join(NAME);
+            std::fs::remove_file(&library).unwrap();
+            assert!(
+                std::process::Command::new("cc")
+                    .args(["-shared", "-fPIC"])
+                    .arg(format!("-DASYNC_VERSION={version}"))
+                    .arg(source)
+                    .arg("-o")
+                    .arg(library)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let providers = Box::leak(Box::new(
+                super::ProviderSet::load_from_directory(fixture.path()).unwrap(),
+            ));
+            assert_eq!(providers.iax_executor().err(), Some(expected));
         }
     }
 
@@ -1420,6 +1596,7 @@ pub(crate) mod tests {
             INLINE(file, rptadv_file_adapter_descriptor, 2, "rptadv.file")
             INLINE(speech, rptadv_speech_adapter_descriptor, 2, "rptadv.speech")
             INLINE(resolver, rptadv_resolver_adapter_descriptor_v1, 1, "rptadv.resolver")
+            INLINE(jitter, rptadv_jitter_adapter_descriptor_v1, 1, "rptadv.jitter")
             INLINE(iax2, rptadv_iax2_client_descriptor_v1, 1, "rptadv.iax2.v1")
             NAMED(native, usbradioplus_product_descriptor_v1, 1, "usbradioplus.product1")
             NAMED(radio, rptadv_radio_descriptor, 4, "rptadv.radio-core")

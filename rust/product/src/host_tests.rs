@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     abi,
-    link::session::tests::{Input, peer},
+    link::session::tests::{Input, peer, peer_with_async},
 };
 use rpt_advanced_core::{
     command::{Command, LinkAction},
@@ -344,6 +344,51 @@ fn blocked_peer_io_does_not_block_control_pump() {
     release.join().unwrap();
     assert!(elapsed < Duration::from_millis(50), "pump took {elapsed:?}");
     assert!(host.stop(30));
+}
+
+#[test]
+fn status_reports_cached_peer_jitter_and_ingress_metrics() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let effect = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::Transceive, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    let LinkEffect::Connect(attempt) = effect else {
+        panic!("expected a new dial");
+    };
+    assert!(
+        host.runtime
+            .finish_connect("1000", attempt, true, clock())
+            .unwrap()
+    );
+    let (io, state) = peer_with_async(48000, true);
+    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
+    pump_until(&mut host, |host| {
+        host.peers.iter().any(|peer| {
+            peer.control
+                .snapshot()
+                .is_ok_and(|snapshot| snapshot.peer.is_some())
+        })
+    });
+    let status = host.status_text("1000").unwrap();
+    assert!(
+        status.contains("jitter delay=10ms buffered-span=13ms queued=3"),
+        "{status}"
+    );
+    assert!(status.contains("missing-samples=160 insertion-samples=80"));
+    assert!(status.contains("overload-drops=5 overload-span-samples=800"));
+    assert!(status.contains("ingress-queued=7/64 ingress-overflow-drops=6"));
+    assert_eq!(state.lock().unwrap().observe_calls, 1);
+    assert!(host.stop(20));
 }
 
 #[test]

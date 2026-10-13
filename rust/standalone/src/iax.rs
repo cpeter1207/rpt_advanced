@@ -1,5 +1,7 @@
 //! Dynamic boundary to the standalone ULAW IAX2 client.
 
+pub(crate) mod executor;
+
 use crate::secrets::SecretsFile;
 use std::{
     ffi::c_void,
@@ -167,6 +169,8 @@ pub enum IaxEvent {
     None,
     /// Decoded mono F32 ULAW samples were written to the supplied sample buffer.
     Audio(usize),
+    /// Counted missing input-rate samples; the shared PCM ring performs PLC in order.
+    Gap(usize),
     /// ASL text bytes were written to the supplied text buffer.
     Text(usize),
     /// The remote peer ended the call.
@@ -265,6 +269,11 @@ pub struct IaxServer {
 }
 
 impl IaxServer {
+    /// Route socket readiness through the shared retained Tokio executor.
+    pub(crate) fn enable_async(&mut self, executor: &executor::Executor) -> Result<(), IaxError> {
+        unsafe { executor.enable_server(self.handle.as_ptr()) }.map_err(|_| IaxError::Operation)
+    }
+
     /// Bind one numeric UDP endpoint and route NEW calls to any configured local node.
     pub fn bind(
         path: &Path,
@@ -448,6 +457,11 @@ pub struct IaxPeer {
 }
 
 impl IaxPeer {
+    /// Opaque peer identity for the retained executor from the same protocol DSO.
+    pub(crate) fn raw_handle(&self) -> *mut c_void {
+        self.handle.as_ptr()
+    }
+
     /// Return the negotiated linear rate; the initial client supports only 8 kHz ULAW.
     pub fn sample_rate_hz(&self) -> u32 {
         // SAFETY: the uniquely owned peer is live and the validated ABI owns the call.
@@ -514,6 +528,7 @@ impl IaxPeer {
             }
             5 if length == 0 => Ok(IaxEvent::RadioKey),
             6 if length == 0 => Ok(IaxEvent::RadioUnkey),
+            7 if (1..=4000).contains(&length) => Ok(IaxEvent::Gap(length)),
             _ => Err(IaxError::Operation),
         }
     }
@@ -744,7 +759,7 @@ pub(crate) mod tests {
         fail_operations: bool,
     ) -> IaxPeer {
         EVENT.with(|value| value.set(event));
-        EVENT_LENGTH.with(|value| value.set(if matches!(event, 1 | 2 | 4) { 1 } else { 0 }));
+        EVENT_LENGTH.with(|value| value.set(if matches!(event, 1 | 2 | 4 | 7) { 1 } else { 0 }));
         OPERATION_RESULT.with(|value| value.set(i32::from(fail_operations)));
         let mut api = descriptor();
         if fail_poll {
@@ -1038,6 +1053,10 @@ pub(crate) mod tests {
         EVENT.with(|value| value.set(6));
         assert_eq!(peer.poll(&mut samples, &mut text), Err(IaxError::Operation));
         EVENT.with(|value| value.set(7));
+        assert_eq!(peer.poll(&mut samples, &mut text), Ok(IaxEvent::Gap(2)));
+        EVENT_LENGTH.with(|value| value.set(4001));
+        assert_eq!(peer.poll(&mut samples, &mut text), Err(IaxError::Operation));
+        EVENT_LENGTH.with(|value| value.set(0));
         assert_eq!(peer.poll(&mut samples, &mut text), Err(IaxError::Operation));
         EVENT_LENGTH.with(|value| value.set(0));
     }

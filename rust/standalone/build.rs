@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=../resolver-adapter/include/rptadv_resolver_adapter.h");
+    println!("cargo:rerun-if-changed=../jitter-adapter/include/rptadv_jitter_adapter.h");
     println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
     println!("cargo:rerun-if-changed=../media-support/include/rptadv_media_types.h");
@@ -39,6 +40,7 @@ fn main() {
         .header("wrapper.h")
         .clang_arg("-I../product/include")
         .clang_arg("-I../resolver-adapter/include")
+        .clang_arg("-I../jitter-adapter/include")
         .clang_arg("-I../control-abi/include")
         .clang_arg("-I../media-support/include")
         .clang_arg("-I../file-adapter/include")

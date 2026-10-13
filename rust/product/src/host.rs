@@ -104,8 +104,8 @@ impl DeviceHandoff for Device {
                 }
                 true
             }
-            Err((_error, radio)) => {
-                drop(radio);
+            Err(failure) => {
+                drop(failure);
                 false
             }
         }
@@ -465,6 +465,7 @@ impl Host {
             let peer = self.peers.remove(index);
             let announced = peer.announced;
             peer.control.stop();
+            self.peer_io.reap();
             announced
         } else {
             false
@@ -534,6 +535,7 @@ impl Host {
                 .map_or(48000, |snapshot| snapshot.input_rate)
                 .max(1) as u64;
             let observation = snapshot
+                .as_ref()
                 .map(|snapshot| snapshot.ring)
                 .unwrap_or(unsafe { std::mem::zeroed() });
             let ms = |samples: u64| samples.saturating_mul(1000) / rate;
@@ -551,6 +553,30 @@ impl Host {
                 ms(observation.target_samples),
                 observation.ratio_correction_ppm
             );
+            if let Some(peer_observation) = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.peer.as_ref())
+            {
+                let _ = writeln!(
+                    result,
+                    "    jitter delay={}ms buffered-span={}ms queued={} duplicate-drops={} late-drops={} full-drops={} missing-samples={} insertion-samples={} skipped-samples={} limit-resets={} overload-drops={} overload-span-samples={} ingress-queued={}/{} ingress-overflow-drops={}",
+                    ms(peer_observation.jitter_delay_samples.into()),
+                    ms(peer_observation.jitter_buffered_span_samples),
+                    peer_observation.jitter_queued_packets,
+                    peer_observation.jitter_duplicate_drops,
+                    peer_observation.jitter_late_drops,
+                    peer_observation.jitter_full_drops,
+                    peer_observation.jitter_missing_samples,
+                    peer_observation.jitter_insertion_samples,
+                    peer_observation.jitter_skipped_samples,
+                    peer_observation.jitter_limit_resets,
+                    peer_observation.jitter_overload_drops,
+                    peer_observation.jitter_overload_span_samples,
+                    peer_observation.ingress_queued_packets,
+                    peer_observation.ingress_capacity_packets,
+                    peer_observation.ingress_overflow_drops,
+                );
+            }
         }
         let _ = writeln!(
             result,

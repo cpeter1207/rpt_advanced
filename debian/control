@@ -3,9 +3,9 @@ Section: hamradio
 Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
- libclang-dev, pkg-config, dh-sequence-asterisk <!standalone>,
- librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha2),
- librptadv-samplerate-adapter-dev (>= 0.2.0~alpha1),
+ libclang-dev, libspeexdsp-dev, pkg-config, dh-sequence-asterisk <!standalone>,
+ librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha3),
+ librptadv-samplerate-adapter-dev (>= 0.2.0~alpha2),
  librptadvtone-dev (>= 0.1.0~alpha1),
  librptadvmorse-dev (>= 0.1.0~alpha1-1),
  librptadvdtmf-dev (>= 0.1.0~alpha1-1),
@@ -23,19 +23,20 @@ Rules-Requires-Root: no
 Package: rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha2),
- librptadv-samplerate-adapter2 (>= 0.2.0~alpha1),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha3),
+ librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadv-product1 (= ${binary:Version}),
  libusbradioplus-product1,
  librptadv-file-adapter1 (= ${binary:Version}),
  librptadv-speech-adapter1 (= ${binary:Version}),
  librptadv-control-standalone-adapter1 (= ${binary:Version}),
  librptadv-resolver-adapter1 (= ${binary:Version}),
+ librptadv-jitter-adapter1 (= ${binary:Version}),
  librptadvradio4 (>= 0.1.0~alpha6),
  librptadv-portaudio-alsa-adapter2 (>= 0.2.0~alpha3),
  librptadv-gpio-adapter1 (>= 0.1.0~alpha2),
  librptadv-ffmpeg-adapter1 (>= 0.1.0~alpha2),
- librptadv-iax2-client1 (>= 0.1.0~alpha4)
+ librptadv-iax2-client1 (>= 0.1.0~alpha5)
 Description: standalone Rust-owned radio controller
  Standalone controller service for configured radio nodes. It has no runtime
  dependency on Asterisk or ASL3; the deprecated Asterisk adapter is packaged
@@ -44,8 +45,8 @@ Description: standalone Rust-owned radio controller
 Package: app-rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends},
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha2),
- librptadv-samplerate-adapter2 (>= 0.2.0~alpha1),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha3),
+ librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadv-product1 (= ${binary:Version}),
  librptadv-file-adapter1 (= ${binary:Version}),
  librptadv-speech-adapter1 (= ${binary:Version}),
@@ -58,8 +59,8 @@ Package: librptadv-product1
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha2),
- librptadv-samplerate-adapter2 (>= 0.2.0~alpha1),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha3),
+ librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadvtone1 (>= 0.1.0~alpha1),
  librptadvmorse1 (>= 0.1.0~alpha1-1),
  librptadvdtmf1 (>= 0.1.0~alpha1-1),
@@ -149,3 +150,19 @@ Multi-Arch: same
 Depends: ${misc:Depends}, librptadv-resolver-adapter1 (= ${binary:Version})
 Description: development files for the rpt_advanced resolver adapter
  Public C header and unversioned linker name for the resolver adapter.
+
+Package: librptadv-jitter-adapter1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: adaptive packet jitter adapter for rpt_advanced
+ Versioned Rust C-ABI adapter for SpeexDSP packet ordering and playout timing
+ outside the real-time audio path.
+
+Package: librptadv-jitter-adapter-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-jitter-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced jitter adapter
+ Public C header, pkg-config metadata and unversioned linker name for the
+ adaptive packet jitter adapter.

@@ -776,7 +776,7 @@ impl RadioWorker {
         status: RadioStatus,
         squelch_delay_ms: u64,
         status_snapshot_interval_ms: u64,
-    ) -> Result<Self, (Error, Radio)> {
+    ) -> Result<Self, Box<(Error, Radio)>> {
         let maximum = radio.maximum_frames();
         let ring = LocalRingUpdate::with_handoff(squelch_delay_ms, status.handoff.clone());
         #[cfg(test)]
@@ -786,7 +786,7 @@ impl RadioWorker {
             ring
         };
         let Ok(update) = ring else {
-            return Err((Error::Allocation, radio));
+            return Err(Box::new((Error::Allocation, radio)));
         };
         let observer = update.transmit.observer.clone();
         let handoff = update.transmit.handoff.clone();
@@ -836,7 +836,7 @@ impl RadioWorker {
         }
         .is_err()
         {
-            return Err((Error::Operation, radio));
+            return Err(Box::new((Error::Operation, radio)));
         }
         Ok(Self {
             radio: Some(radio),

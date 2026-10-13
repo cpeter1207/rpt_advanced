@@ -7,7 +7,7 @@ use crate::{
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
-    mem::size_of,
+    mem::{MaybeUninit, offset_of, size_of},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
 };
@@ -20,15 +20,17 @@ pub enum PeerInput<'a> {
     Digit(char),
     /// Decoded normalized F32 PCM.
     Audio(&'a [f32]),
+    /// Counted missing source-rate samples, in the peer's negotiated PCM rate.
+    Gap(usize),
     /// Remote radio asserted receive independently of media-frame arrival.
     RadioKey,
     /// Remote radio released receive.
     RadioUnkey,
 }
 
-/// Validated process-lifetime host capability.
+/// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(&'static abi::rptadv_host_services_v5);
+pub struct HostServices(abi::rptadv_host_services_v5);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
@@ -186,18 +188,96 @@ impl HostServices {
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
     pub unsafe fn open(pointer: *const abi::rptadv_host_services_v5) -> Result<Self, Error> {
-        if pointer.is_null()
-            || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-                < size_of::<abi::rptadv_host_services_v5>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 5
+        if pointer.is_null() {
+            return Err(Error::Admission);
+        }
+        let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
+        let prefix = offset_of!(abi::rptadv_host_services_v5, peer_step_attach);
+        let async_end = offset_of!(abi::rptadv_host_services_v5, peer_observe);
+        let full = size_of::<abi::rptadv_host_services_v5>();
+        if size < prefix || (size > prefix && size < async_end) || (size > async_end && size < full)
         {
             return Err(Error::Admission);
         }
-        let api = unsafe { &*pointer };
-        if api.capability != *b"rptadv.hst5\0" || !complete(api) {
+        // A prefix-only host has no async tail. Never form a full-size reference to it.
+        let mut copied = MaybeUninit::<abi::rptadv_host_services_v5>::zeroed();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                pointer.cast::<u8>(),
+                copied.as_mut_ptr().cast(),
+                size.min(full),
+            );
+        }
+        let api = unsafe { copied.assume_init() };
+        let async_count = [
+            api.peer_step_attach.is_some(),
+            api.peer_step_stop.is_some(),
+            api.peer_step_detach.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        if api.abi_version != 5
+            || api.capability != *b"rptadv.hst5\0"
+            || !complete(&api)
+            || !matches!(async_count, 0 | 3)
+        {
             return Err(Error::Admission);
         }
         Ok(Self(api))
+    }
+    /// Whether all retained peer-owner operations were supplied by this host.
+    pub fn peer_step_available(&self) -> bool {
+        self.0.peer_step_attach.is_some()
+    }
+    /// Register one stable context while peer ownership remains with the product.
+    ///
+    /// # Safety
+    /// `peer` is exclusively owned, and `step_context` remains live until the
+    /// matching detach has quiesced every host callback.
+    pub unsafe fn peer_step_attach(
+        &self,
+        peer: *mut c_void,
+        step: abi::rptadv_peer_step_v1,
+        step_context: *mut c_void,
+    ) -> Result<NonNull<c_void>, Error> {
+        let mut registration = ptr::null_mut();
+        let code = unsafe {
+            self.0.peer_step_attach.unwrap()(
+                self.0.context,
+                peer,
+                step,
+                step_context,
+                &mut registration,
+            )
+        };
+        (code == 0)
+            .then(|| NonNull::new(registration))
+            .flatten()
+            .ok_or(Error::Operation)
+    }
+    /// Signal peer retirement without waiting for an in-progress step.
+    pub fn peer_step_stop(&self, registration: NonNull<c_void>) {
+        unsafe { self.0.peer_step_stop.unwrap()(self.0.context, registration.as_ptr()) };
+    }
+    /// Wait off-callback until no retained step can access product state.
+    pub fn peer_step_detach(&self, registration: NonNull<c_void>) {
+        unsafe { self.0.peer_step_detach.unwrap()(self.0.context, registration.as_ptr()) };
+    }
+    /// Copy optional peer metrics only from that peer's serialized owner turn.
+    fn peer_observe(&self, peer: *mut c_void) -> Option<abi::rptadv_peer_observation_v1> {
+        let observe = self.0.peer_observe?;
+        // SAFETY: this C record contains only integer fields.
+        let mut raw: abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
+        raw.struct_size = size_of::<abi::rptadv_peer_observation_v1>() as u32;
+        raw.abi_version = abi::RPTADV_PEER_OBSERVATION_ABI_VERSION;
+        if unsafe { observe(self.0.context, peer, &mut raw) } != 0
+            || raw.struct_size as usize != size_of::<abi::rptadv_peer_observation_v1>()
+            || raw.abi_version != abi::RPTADV_PEER_OBSERVATION_ABI_VERSION
+        {
+            return None;
+        }
+        Some(raw)
     }
     /// Convert one Unix second using the host process's configured local timezone.
     pub fn local_time(&self, unix_seconds: i64) -> Option<(CivilTime, u8)> {
@@ -396,6 +476,16 @@ pub struct PeerIo {
 // SAFETY: the handle is uniquely moved to one owner thread.
 unsafe impl Send for PeerIo {}
 impl PeerIo {
+    /// Copy async registration inputs before callbacks can begin touching this peer.
+    pub fn async_owner(&self) -> Option<(HostServices, *mut c_void)> {
+        self.services
+            .peer_step_available()
+            .then_some((self.services, self.handle.as_ptr()))
+    }
+    /// Observe on the same exclusive owner that performs peer I/O.
+    pub fn observe(&self) -> Option<abi::rptadv_peer_observation_v1> {
+        self.services.peer_observe(self.handle.as_ptr())
+    }
     /// Bind this exclusive peer to the existing radio before starting any media.
     pub fn bind_radio(&mut self, radio: &Radio) -> Result<(), Error> {
         // SAFETY: control borrows both live handles; the host retains neither handle.
@@ -422,14 +512,15 @@ impl PeerIo {
             value => Ok(value != 0),
         }
     }
-    /// Read one frame and dispatch its borrowed canonical representation.
-    pub fn read<F>(&mut self, mut dispatch: F) -> Result<(), Error>
+    /// Read one frame and report whether the host delivered a valid event.
+    pub fn read<F>(&mut self, mut dispatch: F) -> Result<bool, Error>
     where
         F: FnMut(PeerInput<'_>),
     {
         struct State<'a, F> {
             dispatch: &'a mut F,
             failed: bool,
+            seen: bool,
         }
         unsafe extern "C" fn callback<F: FnMut(PeerInput<'_>)>(
             context: *mut c_void,
@@ -438,35 +529,48 @@ impl PeerIo {
             count: usize,
         ) {
             let state = unsafe { &mut *context.cast::<State<'_, F>>() };
-            let result = catch_unwind(AssertUnwindSafe(|| match kind {
-                abi::RPTADV_PEER_EVENT_TEXT if !data.is_null() => {
-                    (state.dispatch)(PeerInput::Text(unsafe {
-                        std::slice::from_raw_parts(data.cast(), count)
-                    }));
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let input = match kind {
+                    abi::RPTADV_PEER_EVENT_TEXT if !data.is_null() => {
+                        Some(PeerInput::Text(unsafe {
+                            std::slice::from_raw_parts(data.cast(), count)
+                        }))
+                    }
+                    abi::RPTADV_PEER_EVENT_DIGIT if count == 1 && !data.is_null() => {
+                        Some(PeerInput::Digit(unsafe { *data.cast::<u8>() } as char))
+                    }
+                    abi::RPTADV_PEER_EVENT_AUDIO if !data.is_null() => {
+                        Some(PeerInput::Audio(unsafe {
+                            std::slice::from_raw_parts(data.cast(), count)
+                        }))
+                    }
+                    abi::RPTADV_PEER_EVENT_GAP if data.is_null() && count != 0 => {
+                        Some(PeerInput::Gap(count))
+                    }
+                    abi::RPTADV_PEER_EVENT_RADIO_KEY if data.is_null() && count == 0 => {
+                        Some(PeerInput::RadioKey)
+                    }
+                    abi::RPTADV_PEER_EVENT_RADIO_UNKEY if data.is_null() && count == 0 => {
+                        Some(PeerInput::RadioUnkey)
+                    }
+                    _ => None,
+                };
+                if let Some(input) = input {
+                    (state.dispatch)(input);
+                    true
+                } else {
+                    false
                 }
-                abi::RPTADV_PEER_EVENT_DIGIT if count == 1 && !data.is_null() => {
-                    (state.dispatch)(PeerInput::Digit(unsafe { *data.cast::<u8>() } as char));
-                }
-                abi::RPTADV_PEER_EVENT_AUDIO if !data.is_null() => {
-                    (state.dispatch)(PeerInput::Audio(unsafe {
-                        std::slice::from_raw_parts(data.cast(), count)
-                    }));
-                }
-                abi::RPTADV_PEER_EVENT_RADIO_KEY if data.is_null() && count == 0 => {
-                    (state.dispatch)(PeerInput::RadioKey);
-                }
-                abi::RPTADV_PEER_EVENT_RADIO_UNKEY if data.is_null() && count == 0 => {
-                    (state.dispatch)(PeerInput::RadioUnkey);
-                }
-                _ => {}
             }));
-            if result.is_err() {
-                state.failed = true;
+            match result {
+                Ok(seen) => state.seen |= seen,
+                Err(_) => state.failed = true,
             }
         }
         let mut state = State {
             dispatch: &mut dispatch,
             failed: false,
+            seen: false,
         };
         let code = unsafe {
             self.services.0.peer_read.unwrap()(
@@ -477,7 +581,7 @@ impl PeerIo {
             )
         };
         (code == 0 && !state.failed)
-            .then_some(())
+            .then_some(state.seen)
             .ok_or(Error::Hangup)
     }
     /// Send one NUL-free text payload.

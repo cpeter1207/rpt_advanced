@@ -117,6 +117,7 @@ impl InboundRing {
                 || api.ring_create.is_none()
                 || api.ring_destroy.is_none()
                 || api.ring_producer_push.is_none()
+                || api.ring_producer_gap.is_none()
                 || api.ring_consumer_render.is_none()
                 || api.ring_consumer_render_sample.is_none()
                 || api.ring_consumer_reset.is_none()
@@ -198,6 +199,20 @@ impl InboundProducer {
                 self.0.signals.publish_pcm();
             }
             Ok(accepted as usize)
+        } else {
+            Err(RingError)
+        }
+    }
+    /// Publish at most one bounded block of counted missing source samples.
+    pub fn gap(&mut self, samples: u64) -> Result<u64, RingError> {
+        let mut accepted = 0;
+        // SAFETY: this noncloneable endpoint is the only producer; the checked
+        // descriptor retains this tail callback for the ring's whole lifetime.
+        let code = unsafe {
+            (self.0.api.ring_producer_gap.unwrap())(self.0.handle.as_ptr(), samples, &mut accepted)
+        };
+        if code == 0 {
+            Ok(accepted)
         } else {
             Err(RingError)
         }

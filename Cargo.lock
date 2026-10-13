@@ -602,6 +602,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rptadv-jitter-adapter"
+version = "0.1.0-alpha8"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "rptadv-product"
 version = "0.1.0-alpha8"
 dependencies = [
