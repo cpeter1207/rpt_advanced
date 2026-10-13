@@ -53,34 +53,34 @@ int32_t resolve_addresses(void *context, const uint8_t *endpoint, size_t length,
 
 Text results use the existing hostname/`SocketAddr` representation. Zero means completed (possibly no result); positive means unavailable; negative means rejected input/output. No libc or Rust-owned type crosses the contract. Validate required pointers/lengths before use and document context concurrency.
 
-- [ ] Move the existing deterministic SRV parser tests into the new crate. Add table-driven descriptor/borrow/status tests and resolver fixtures; no public DNS calls.
-- [ ] Assert `absent_srv => success + no result`, `malformed_srv => unavailable`, `bad_borrow => rejected`; preserve priority/weights, compressed names, zero-port rejection, malformed and oversized packet handling.
-- [ ] Run `cargo test --locked -p rptadv-resolver-adapter` in the maintained quality container; first demonstrate missing extraction/contract tests failing.
-- [ ] Move SRV FFI, parser/selection, and system address resolution from standalone into the adapter. Keep `file_record` in standalone. Contain panics at descriptor entry points using existing adapter conventions.
-- [ ] Repeat the targeted crate tests, `cargo fmt --all -- --check`, and `cargo clippy -p rptadv-resolver-adapter --all-targets -- -D warnings`; require success. Update Rustdoc and commit the focused extraction when buildable.
+- [x] Move the existing deterministic SRV parser tests into the new crate. Add table-driven descriptor/borrow/status tests and resolver fixtures; no public DNS calls.
+- [x] Assert `absent_srv => success + no result`, `malformed_srv => unavailable`, `bad_borrow => rejected`; preserve priority/weights, compressed names, zero-port rejection, malformed and oversized packet handling.
+- [x] Run `cargo test --locked -p rptadv-resolver-adapter` in the maintained quality container; first demonstrate missing extraction/contract tests failing.
+- [x] Move SRV FFI, parser/selection, and system address resolution from standalone into the adapter. Keep `file_record` in standalone. Contain panics at descriptor entry points using existing adapter conventions.
+- [x] Repeat the targeted crate tests, `cargo fmt --all -- --check`, and `cargo clippy -p rptadv-resolver-adapter --all-targets -- -D warnings`; require success. Update Rustdoc and commit the focused extraction when buildable.
 
 ## Task 2: Wire the mandatory provider without changing lookup policy
 
 **Consumes:** Task 1 descriptor. **Produces:** Standalone host-service DNS callbacks backed exclusively by the retained resolver provider; the existing product callback table and directory policy remain unchanged.
 
-- [ ] Extend provider fixtures for missing library/symbol, null descriptor, wrong ABI/capability/size, and each absent function. Assert startup failure and reload rejection preserving the prior runtime.
-- [ ] Add destination-resolution regressions: numeric endpoint bypass, hostname/default port 4569, first-result selection and resolver failure. Retain product tests for static precedence, DNS/extnodes fallback, and source-identity mismatch.
-- [ ] Run `cargo test --locked -p rpt-advanced-standalone` and `cargo test --locked -p rptadv-product directory`; record the expected new fixture failures.
-- [ ] Add the resolver to the standalone manifest, retain its library/context through product shutdown, and forward existing DNS callbacks. Route hostname resolution in `parse_destination` through it. Revalidate the complete selected manifest on reload; do not reload executable code.
-- [ ] Remove standalone's `resolv` link, resolver header and resolver bindgen allowlists. Add only the neutral adapter header. Remove now-unused implementation/helpers.
-- [ ] Repeat the targeted tests, plus provider lifecycle/drop-order tests. Verify successful reload and provider failure cannot change active configuration. Commit the focused wiring with updated developer docs.
+- [x] Extend provider fixtures for missing library/symbol, null descriptor, wrong ABI/capability/size, and each absent function. Assert startup failure and reload rejection preserving the prior runtime.
+- [x] Add destination-resolution regressions: numeric endpoint bypass, hostname/default port 4569, first-result selection and resolver failure. Retain product tests for static precedence, DNS/extnodes fallback, and source-identity mismatch.
+- [x] Run `cargo test --locked -p rpt-advanced-standalone` and `cargo test --locked -p rptadv-product directory`; record the expected new fixture failures.
+- [x] Add the resolver to the standalone manifest, retain its library/context through product shutdown, and forward existing DNS callbacks. Route hostname resolution in `parse_destination` through it. Revalidate the complete selected manifest on reload; do not reload executable code.
+- [x] Remove standalone's `resolv` link, resolver header and resolver bindgen allowlists. Add only the neutral adapter header. Remove now-unused implementation/helpers.
+- [x] Repeat the targeted tests, plus provider lifecycle/drop-order tests. Verify successful reload and provider failure cannot change active configuration. Commit the focused wiring with updated developer docs.
 
 ## Task 3: Package, validate the boundary, and correct its status
 
 **Artifact:** `librptadv_resolver_adapter.so.1`, runtime package `librptadv-resolver-adapter1`, development header/symlink package. Keep this out of Makefile `ADAPTERS` if that list links providers into the Asterisk loader; use standalone artifact/install lists.
 
-- [ ] Extend `tests/test_rust_product_surface.py`, `tests/test_package_combinations.py`, and `tests/test_standalone_service.py` to expect the resolver provider/header/package and reject direct standalone resolver imports.
-- [ ] Run those tests before adding packaging and confirm their new expectations fail.
-- [ ] Wire workspace, build/install, Debian dependency/runtime/dev manifests, and developer-doc inputs using the existing file/speech adapter pattern. Do not invent an unreleased minimum dependency version.
-- [ ] Run the three Python files, `make standalone-check`, and the affected staged artifact/package checks. Verify with `readelf -d` and `nm -D` that standalone does not directly need/import libresolv APIs and the resolver owns them.
-- [ ] Run scoped Rustdoc with warnings denied, formatting, lint and static analysis. Record completed checks and affected-file coverage in ignored `.work/quality-progress.md`; do not repeatedly rerun a full coverage report.
-- [ ] Update ADR 0022 and ADR 0036's resolver ownership text, architecture manifest, and relevant wishlist status using the actual tested boundary. Mark current selected external capabilities implemented; explicitly leave unimplemented capabilities planned.
-- [ ] Review the diff for policy/audio/config changes, missing ownership checks, and retained dead code. Commit only the scoped implementation and documentation.
+- [x] Extend `tests/test_rust_product_surface.py`, `tests/test_package_combinations.py`, and `tests/test_standalone_service.py` to expect the resolver provider/header/package and reject direct standalone resolver imports.
+- [x] Run those tests before adding packaging and confirm their new expectations fail.
+- [x] Wire workspace, build/install, Debian dependency/runtime/dev manifests, and developer-doc inputs using the existing file/speech adapter pattern. Do not invent an unreleased minimum dependency version.
+- [x] Run the three Python files, `make standalone-check`, and the affected staged artifact/package checks. Verify with `readelf -d` and `nm -D` that standalone does not directly need/import libresolv APIs and the resolver owns them.
+- [x] Run scoped Rustdoc with warnings denied, formatting, lint and static analysis. Record completed checks and affected-file coverage in ignored `.work/quality-progress.md`; do not repeatedly rerun a full coverage report.
+- [x] Update ADR 0022 and ADR 0036's resolver ownership text, architecture manifest, and relevant wishlist status using the actual tested boundary. Mark current selected external capabilities implemented; explicitly leave unimplemented capabilities planned.
+- [x] Review the diff for policy/audio/config changes, missing ownership checks, and retained dead code. Commit only the scoped implementation and documentation.
 
 ## Reproducible execution
 
@@ -97,3 +97,17 @@ It pulls `latest`, records the digest, cleans stale matching test containers and
 ## Completion evidence
 
 The descriptor/provider and directory regressions pass, installed artifacts prove the dependency boundary, and documentation states only verified implementation status. A subsequent authorized PR uses the hosted full platform gate; no live-node test is needed for the extraction itself.
+
+### Execution result (2026-10-13)
+
+- Implementation: `5d6f074`; extraction, host wiring and required install manifests
+  share one buildable commit to avoid an incomplete installed composition.
+- Targeted native Debian 13 amd64 checks passed: 146 standalone tests, six resolver
+  tests, six product directory-policy tests, package/service checks, actual ELF and
+  staged installation, and installed-provider loading. Formatting, lint, static
+  analysis, scoped Rustdoc and resolver-header Doxygen passed.
+- Independent whole-branch review found no issues. The affected resolver report is
+  213/215 production lines and 53/54 branches; its inherited defensive UTF-8 error
+  path remains uncovered. This is not a full quality-gate pass or merge approval.
+- The complete hosted platform gate remains required before merge. No push,
+  deployment, configuration change or external link connection was performed.
