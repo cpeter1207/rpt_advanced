@@ -8,7 +8,7 @@ use std::{
     ptr::NonNull,
 };
 
-const PROVIDERS: [ProviderSpec; 10] = [
+const PROVIDERS: [ProviderSpec; 11] = [
     inline(
         "librptadv_product.so.1",
         "rptadv_product_descriptor_v1",
@@ -33,6 +33,12 @@ const PROVIDERS: [ProviderSpec; 10] = [
         "rptadv_speech_adapter_descriptor",
         2,
         b"rptadv.speech",
+    ),
+    inline(
+        "librptadv_resolver_adapter.so.1",
+        "rptadv_resolver_adapter_descriptor_v1",
+        1,
+        b"rptadv.resolver",
     ),
     system(inline(
         "librptadviax2.so.1",
@@ -208,11 +214,16 @@ pub enum ProviderError {
     IncompatibleDescriptor(&'static str),
     /// The named descriptor does not expose its complete callable table.
     IncompleteDescriptor(&'static str),
+    /// A required provider could not create its runtime context.
+    Initialize(&'static str),
 }
 
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Initialize(name) => {
+                write!(formatter, "cannot initialize required provider {name}")
+            }
             Self::Load(name) => write!(formatter, "cannot load required provider {name}"),
             Self::MissingDescriptor(name) => {
                 write!(formatter, "required provider {name} has no descriptor")
@@ -344,6 +355,17 @@ impl ProviderSet {
 
     /// Ensure the product and its direct lifecycle providers expose complete function tables.
     pub fn validate_runtime(&self) -> Result<(), ProviderError> {
+        // Validate the retained composition again on reload, without loading replacement code.
+        for spec in PROVIDERS {
+            let loaded = self
+                .descriptors
+                .iter()
+                .find(|loaded| loaded.library == spec.library)
+                .ok_or(ProviderError::MissingDescriptor(spec.library))?;
+            if !valid_descriptor(loaded.descriptor.as_ptr(), spec) {
+                return Err(ProviderError::IncompatibleDescriptor(spec.library));
+            }
+        }
         let product = self.typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>(
             "librptadv_product.so.1",
         )?;
@@ -390,8 +412,26 @@ impl ProviderSet {
                 "librptadv_speech_adapter.so.1",
             ));
         }
+        self.resolver_descriptor()?;
         self.native_product_descriptor()?;
         Ok(())
+    }
+
+    pub(crate) fn resolver_descriptor(
+        &self,
+    ) -> Result<&crate::abi::rptadv_resolver_descriptor_v1, ProviderError> {
+        let api: &crate::abi::rptadv_resolver_descriptor_v1 =
+            self.typed_descriptor("librptadv_resolver_adapter.so.1")?;
+        if api.create.is_none()
+            || api.destroy.is_none()
+            || api.resolve_srv.is_none()
+            || api.resolve_addresses.is_none()
+        {
+            return Err(ProviderError::IncompleteDescriptor(
+                "librptadv_resolver_adapter.so.1",
+            ));
+        }
+        Ok(api)
     }
 
     /// Borrow the radio providers for an activation owner that lives as long as this set.
@@ -453,6 +493,16 @@ impl ProviderSet {
             .find(|provider| provider.library == library)
             .ok_or(ProviderError::MissingDescriptor(library))?;
         if provider.size < std::mem::size_of::<T>() {
+            return Err(ProviderError::IncompleteDescriptor(library));
+        }
+        let spec = PROVIDERS
+            .iter()
+            .find(|spec| spec.library == library)
+            .ok_or(ProviderError::MissingDescriptor(library))?;
+        if !valid_descriptor(provider.descriptor.as_ptr(), *spec) {
+            return Err(ProviderError::IncompatibleDescriptor(library));
+        }
+        if descriptor_size(provider.descriptor.as_ptr(), spec.layout) < std::mem::size_of::<T>() {
             return Err(ProviderError::IncompleteDescriptor(library));
         }
         // SAFETY: load_at checked ABI identity and this method checks the full structure size;
@@ -600,7 +650,7 @@ fn named_descriptor_matches(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         DescriptorLayout, ProviderError, ProviderLibrary, ProviderSpec,
         native_product_functions_complete, valid_descriptor,
@@ -619,9 +669,125 @@ mod tests {
         };
     }
 
+    pub(crate) fn empty_provider_set() -> super::ProviderSet {
+        super::ProviderSet {
+            _libraries: Vec::new(),
+            descriptors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolver_is_required_by_the_standalone_manifest() {
+        let spec = super::PROVIDERS
+            .iter()
+            .find(|spec| spec.library == "librptadv_resolver_adapter.so.1");
+        assert!(
+            spec.is_some(),
+            "system DNS must come from a required versioned provider"
+        );
+    }
+
+    #[test]
+    fn resolver_loader_rejects_missing_and_incompatible_providers() {
+        const NAME: &str = "librptadv_resolver_adapter.so.1";
+        for (source, expected) in [
+            (None, ProviderError::Load(NAME)),
+            (
+                Some("void other(void) {}"),
+                ProviderError::MissingDescriptor(NAME),
+            ),
+            (
+                Some("void *rptadv_resolver_adapter_descriptor_v1(void) { return 0; }"),
+                ProviderError::MissingDescriptor(NAME),
+            ),
+            (
+                Some(
+                    "static struct { unsigned size, version; char cap[16]; } api = {24, 2, \"rptadv.resolver\"}; void *rptadv_resolver_adapter_descriptor_v1(void) { return &api; }",
+                ),
+                ProviderError::IncompatibleDescriptor(NAME),
+            ),
+            (
+                Some(
+                    "static struct { unsigned size, version; char cap[16]; } api = {24, 1, \"wrong\"}; void *rptadv_resolver_adapter_descriptor_v1(void) { return &api; }",
+                ),
+                ProviderError::IncompatibleDescriptor(NAME),
+            ),
+            (
+                Some(
+                    "static struct { unsigned size, version; char cap[16]; } api = {0, 1, \"rptadv.resolver\"}; void *rptadv_resolver_adapter_descriptor_v1(void) { return &api; }",
+                ),
+                ProviderError::IncompatibleDescriptor(NAME),
+            ),
+        ] {
+            let fixture = ProviderFixture::new(4, false, false);
+            let library = fixture.path().join(NAME);
+            std::fs::remove_file(&library).unwrap();
+            if let Some(source) = source {
+                let path = fixture.path().join("resolver.c");
+                std::fs::write(&path, source).unwrap();
+                assert!(
+                    std::process::Command::new("cc")
+                        .args(["-shared", "-fPIC"])
+                        .arg(path)
+                        .arg("-o")
+                        .arg(library)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            assert_eq!(
+                super::ProviderSet::load_from_directory(fixture.path()).err(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_requires_a_full_table_and_each_operation() {
+        let mut providers = super::ProviderSet::load().unwrap();
+        let valid = *providers.resolver_descriptor().unwrap();
+        for operation in 0..5 {
+            let mut api = valid;
+            match operation {
+                0 => api.create = None,
+                1 => api.destroy = None,
+                2 => api.resolve_srv = None,
+                3 => api.resolve_addresses = None,
+                _ => api.struct_size -= 1,
+            }
+            replace_descriptor(&mut providers, "librptadv_resolver_adapter.so.1", api);
+            assert_eq!(
+                providers.validate_runtime(),
+                Err(ProviderError::IncompleteDescriptor(
+                    "librptadv_resolver_adapter.so.1"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_validation_rechecks_descriptor_identity() {
+        let mut providers = super::ProviderSet::load().unwrap();
+        let mut descriptor = *providers
+            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.1")
+            .unwrap();
+        descriptor.abi_version += 1;
+        replace_descriptor(&mut providers, "librptadv_product.so.1", descriptor);
+        assert_eq!(
+            providers.validate_runtime(),
+            Err(ProviderError::IncompatibleDescriptor(
+                "librptadv_product.so.1"
+            ))
+        );
+    }
+
     #[test]
     fn native_runtime_rejects_missing_lifecycle_operations() {
         let mut api: crate::abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.struct_size = std::mem::size_of_val(&api) as u32;
+        api.abi_version = 1;
+        api.capability_name = c"usbradioplus.product1".as_ptr();
         assert!(!native_product_functions_complete(&api));
         api.native_create = Some(fake_native_create);
         api.native_start = Some(fake_native_control);
@@ -1057,9 +1223,9 @@ mod tests {
             .typed_descriptor::<crate::abi::UrpAstDescriptor>("libusbradioplus_product.so.1")
             .unwrap();
 
-        replace_descriptor(&mut providers, "librptadv_product.so.1", unsafe {
-            std::mem::zeroed::<crate::abi::rptadv_product_descriptor_v1>()
-        });
+        let mut incomplete = valid_product;
+        incomplete.start = None;
+        replace_descriptor(&mut providers, "librptadv_product.so.1", incomplete);
         assert_eq!(
             providers.validate_runtime(),
             Err(ProviderError::IncompleteDescriptor(
@@ -1121,9 +1287,9 @@ mod tests {
         }
         replace_descriptor(&mut providers, speech_library, valid_speech);
 
-        replace_descriptor(&mut providers, "libusbradioplus_product.so.1", unsafe {
-            std::mem::zeroed::<crate::abi::UrpAstDescriptor>()
-        });
+        let mut incomplete = valid_native;
+        incomplete.native_start = None;
+        replace_descriptor(&mut providers, "libusbradioplus_product.so.1", incomplete);
         assert_eq!(
             providers.validate_runtime(),
             Err(ProviderError::IncompleteDescriptor(
@@ -1231,6 +1397,7 @@ mod tests {
             void *rptadv_control_standalone_descriptor_v1(void) { return &control; }
             INLINE(file, rptadv_file_adapter_descriptor, 2, "rptadv.file")
             INLINE(speech, rptadv_speech_adapter_descriptor, 2, "rptadv.speech")
+            INLINE(resolver, rptadv_resolver_adapter_descriptor_v1, 1, "rptadv.resolver")
             INLINE(iax2, rptadv_iax2_client_descriptor_v1, 1, "rptadv.iax2.v1")
             NAMED(native, usbradioplus_product_descriptor_v1, 1, "usbradioplus.product1")
             NAMED(radio, rptadv_radio_descriptor, 4, "rptadv.radio-core")

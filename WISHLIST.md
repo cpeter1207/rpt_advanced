@@ -594,6 +594,9 @@ None.
 **Decisions recorded**
 
 - Standalone operation has no Asterisk dependency.
+- System DNS/SRV resolution now uses a required versioned resolver DSO (ADR
+  0022); directory policy remains shared with the Asterisk composition.
+  This boundary is implemented, not a remaining standalone feature.
 - Both module and standalone controller execution use neutral worker and
   lifecycle contracts. The replaceable control-path adapter currently uses
   Asterisk's taskprocessor; standalone selects a non-Asterisk implementation

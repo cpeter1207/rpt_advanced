@@ -1,7 +1,7 @@
 #!/usr/bin/make -f
 
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
-PRIVATE_LIB_DIRS := $(CURDIR)/debian/librptadv-product1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-file-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-speech-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-control-asterisk-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-control-standalone-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
+PRIVATE_LIB_DIRS := $(CURDIR)/debian/librptadv-resolver-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-product1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-file-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-speech-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-control-asterisk-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced:$(CURDIR)/debian/librptadv-control-standalone-adapter1/usr/lib/$(DEB_HOST_MULTIARCH)/rpt_advanced
 DH_OPTIONS :=
 
 ifneq (,$(filter standalone,$(DEB_BUILD_PROFILES)))

@@ -102,6 +102,7 @@ Rust's private ABI.
 | `librptadv_control_asterisk_adapter.so.1` | Replaceable serialized control executor backed by Asterisk's taskprocessor |
 | `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
 | `librptadv_speech_adapter.so.1` | Offline Piper synthesis, direct WAV reading, and speech-only level adjustment |
+| `librptadv_resolver_adapter.so.1` | Standalone system DNS/SRV resolution; no directory policy or Asterisk dependency |
 
 The file and speech providers are independently replaceable and expose only
 their own operation. Speech does not invoke FFmpeg; file decoding does not
@@ -148,6 +149,12 @@ never from a real-time tick. See
 [ADR 0020](decisions/0020-rust-dylibs-and-external-c-shims.md), and
 [ADR 0021](decisions/0021-versioned-rust-c-adapter-boundaries.md), and
 [ADR 0022](decisions/0022-versioned-external-c-dependency-adapters.md).
+
+Standalone's complete provider manifest includes the resolver adapter. Its
+context and shared object outlive product callbacks. Reload revalidates retained
+providers before publishing configuration, without loading replacement code.
+Directory precedence and source authentication remain in the shared product;
+the Asterisk composition keeps its own resolver backend.
 
 Standalone AllStarLink interoperability uses the separately released
 `librptadviax2` protocol engine. It owns IAX2 serialization, parsing, and

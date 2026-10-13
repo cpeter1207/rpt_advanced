@@ -21,6 +21,7 @@ FORBIDDEN_MAKE_TOKENS = (
 )
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
 STANDALONE_CONTROL = "librptadv_control_standalone_adapter.so.1"
+RESOLVER = "librptadv_resolver_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.1"
 RING_MINIMUM_VERSION = "3.0.0~alpha2"
@@ -47,6 +48,7 @@ ELF_DEPENDENCIES = {
     "librptadv_file_adapter.so.1": set(),
     "librptadv_speech_adapter.so.1": set(),
     STANDALONE_CONTROL: set(),
+    RESOLVER: {"libresolv.so.2"},
 }
 EXPORTS = {
     "librptadv_asterisk_adapter.so.1": "rptadv_asterisk_descriptor_v1",
@@ -55,6 +57,7 @@ EXPORTS = {
     "librptadv_file_adapter.so.1": "rptadv_file_adapter_descriptor",
     "librptadv_speech_adapter.so.1": "rptadv_speech_adapter_descriptor",
     STANDALONE_CONTROL: "rptadv_control_standalone_descriptor_v1",
+    RESOLVER: "rptadv_resolver_adapter_descriptor_v1",
 }
 MANUALS = (
     "README.md",
@@ -98,7 +101,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     for name, dependencies in ELF_DEPENDENCIES.items():
         path = directory / name
         assert path.is_file(), f"missing artifact: {path}"
-        if name in LIBRARIES or name == STANDALONE_CONTROL:
+        if name in LIBRARIES or name in (STANDALONE_CONTROL, RESOLVER):
             assert dynamic(path, "SONAME") == {name}, f"incorrect SONAME: {name}"
             exports = {
                 line.split()[-1]
@@ -135,6 +138,14 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     assert not any(
         "asterisk" in name.lower() or "asl3" in name.lower() for name in needed
     ), f"standalone executable has an Asterisk/ASL3 dependency: {needed}"
+    assert "libresolv.so.2" not in needed, "standalone must not link system DNS"
+    dns_symbols = r"\b(?:res_query|ns_initparse|ns_parserr|dn_expand)(?:@\S+)?$"
+    imports = command("nm", "-D", "--undefined-only", str(standalone))
+    assert not re.search(dns_symbols, imports, re.MULTILINE), (
+        "standalone directly imports system DNS"
+    )
+    imports = command("nm", "-D", "--undefined-only", str(directory / RESOLVER))
+    assert re.search(dns_symbols, imports, re.MULTILINE), "resolver must own system DNS"
     symbols = command("nm", "--defined-only", "--demangle", str(standalone))
     assert "rpt_advanced_core::" not in symbols, "duplicated core in standalone"
     assert not re.search(r"\busbradioplus_\w+::", symbols), (
@@ -157,7 +168,17 @@ def staged(
         Path("usr/bin") / STANDALONE_BINARY,
         *(library / name for name in LIBRARIES),
         library / STANDALONE_CONTROL,
+        library / RESOLVER,
     }
+    link = library / "librptadv_resolver_adapter.so"
+    expected.add(link)
+    assert (stage / link).is_symlink()
+    assert (stage / link).readlink() == Path(RESOLVER)
+    header = Path("usr/include/rpt_advanced/resolver/rptadv_resolver_adapter.h")
+    expected.add(header)
+    assert (stage / header).read_bytes() == (
+        root / "rust/resolver-adapter/include/rptadv_resolver_adapter.h"
+    ).read_bytes()
     link = library / "librptadv_product.so"
     expected.add(link)
     assert (stage / link).is_symlink(), f"missing developer link: {link}"
@@ -237,7 +258,7 @@ def staged(
     assert found == expected, (
         f"staged manifest: missing={expected - found}, extra={found - expected}"
     )
-    for name in (*LIBRARIES, STANDALONE_CONTROL):
+    for name in (*LIBRARIES, STANDALONE_CONTROL, RESOLVER):
         assert (stage / library / name).read_bytes() == (
             root / "build" / name
         ).read_bytes()
@@ -624,7 +645,7 @@ def verify_artifact_policy() -> None:
         for name, dependencies in ELF_DEPENDENCIES.items():
             write(root, name)
             tables[name] = {"NEEDED": set(dependencies)}
-            if name in LIBRARIES or name == STANDALONE_CONTROL:
+            if name in LIBRARIES or name in (STANDALONE_CONTROL, RESOLVER):
                 tables[name]["SONAME"] = {name}
         write(root, STANDALONE_BINARY)
         tables[STANDALONE_BINARY] = {"NEEDED": set()}
@@ -644,6 +665,11 @@ def verify_artifact_policy() -> None:
         def inspect(*arguments: str) -> str:
             if arguments[:3] == ("nm", "-D", "--defined-only"):
                 return f"0000 T {EXPORTS[Path(arguments[-1]).name]}\n"
+            if (
+                arguments[:3] == ("nm", "-D", "--undefined-only")
+                and Path(arguments[-1]).name == RESOLVER
+            ):
+                return "                 U res_query@GLIBC_2.34\n"
             return ""
 
         with (
@@ -660,6 +686,21 @@ def verify_artifact_policy() -> None:
             tables["app_rpt_advanced.so"]["NEEDED"].remove("libc.so.6")
             rejected()
             tables["app_rpt_advanced.so"]["NEEDED"].add("libc.so.6")
+            tables[STANDALONE_BINARY]["NEEDED"].add("libresolv.so.2")
+            rejected()
+            tables[STANDALONE_BINARY]["NEEDED"].remove("libresolv.so.2")
+            for name, imports in (
+                (STANDALONE_BINARY, "                 U res_query@GLIBC_2.34\n"),
+                (RESOLVER, ""),
+            ):
+                symbols.side_effect = lambda *arguments, target=name, value=imports: (
+                    value
+                    if arguments[:3] == ("nm", "-D", "--undefined-only")
+                    and Path(arguments[-1]).name == target
+                    else inspect(*arguments)
+                )
+                rejected()
+            symbols.side_effect = inspect
             for name, table in tables.items():
                 for tag in table:
                     previous = table[tag]
@@ -952,7 +993,7 @@ def verify_stage_policy() -> None:
         root = Path(temporary)
         stage = root / "stage"
         library = "usr/lib/test-linux-gnu/rpt_advanced"
-        for name in (*LIBRARIES, STANDALONE_CONTROL):
+        for name in (*LIBRARIES, STANDALONE_CONTROL, RESOLVER):
             write(root, f"build/{name}")
             write(stage, f"{library}/{name}")
         target_directory = "coverage-target"
@@ -960,6 +1001,9 @@ def verify_stage_policy() -> None:
         write(stage, f"usr/bin/{STANDALONE_BINARY}")
         write(root, "build/app_rpt_advanced.so")
         write(stage, "usr/lib/test-linux-gnu/asterisk/modules/app_rpt_advanced.so")
+        write(root, "rust/resolver-adapter/include/rptadv_resolver_adapter.h")
+        write(stage, "usr/include/rpt_advanced/resolver/rptadv_resolver_adapter.h")
+        (stage / library / "librptadv_resolver_adapter.so").symlink_to(RESOLVER)
         write(root, "rust/product/include/rptadv_product.h")
         write(stage, "usr/include/rptadv_product.h")
         write(root, "rust/control-abi/include/rptadv_control_adapter.h")
@@ -1080,6 +1124,7 @@ def main() -> None:
             "rptadv_control_standalone_adapter",
             "rptadv_file_adapter",
             "rptadv_speech_adapter",
+            "rptadv_resolver_adapter",
         ):
             assert (args.rustdoc / crate / "index.html").is_file(), (
                 f"missing Rustdoc: {crate}"
