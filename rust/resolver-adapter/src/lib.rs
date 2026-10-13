@@ -106,13 +106,12 @@ fn srv_record(answer: &[u8], choice: u64) -> io::Result<Option<(String, u16)>> {
         if consumed < 0 || consumed as usize + 6 != data.len() || port == 0 {
             return Err(invalid());
         }
-        let host = unsafe { CStr::from_ptr(host.as_ptr()) }
-            .to_str()
-            .map_err(|_| invalid())?;
-        if !valid_srv_host(host) {
+        // dn_expand emits printable ASCII, escaping non-ASCII DNS label octets.
+        let host = unsafe { CStr::from_ptr(host.as_ptr()) }.to_string_lossy();
+        if !valid_srv_host(&host) {
             return Err(invalid());
         }
-        records.push((priority, weight, host.to_owned(), port));
+        records.push((priority, weight, host.into_owned(), port));
     }
     records.sort_by_key(|record| (record.0, record.1));
     let Some(priority) = records.first().map(|record| record.0) else {

@@ -49,6 +49,23 @@ fn srv_packet_uses_priority_port_and_compressed_target() {
 }
 
 #[test]
+fn srv_packet_preserves_escaped_target_octets() {
+    for (octet, target) in [
+        (0, r"\000.test"),
+        (b' ', r"\032.test"),
+        (b'.', r"\..test"),
+        (b'\\', r"\\.test"),
+        (b'Z', "Z.test"),
+        (127, r"\127.test"),
+        (255, r"\255.test"),
+    ] {
+        let mut packet = srv_packet();
+        packet[30] = octet;
+        assert_eq!(srv_record(&packet, 0).unwrap(), Some((target.into(), 4571)));
+    }
+}
+
+#[test]
 fn resolver_checks_query_lengths_and_parses_a_successful_answer() {
     // An overlong label is rejected while constructing the query, before DNS I/O.
     assert_eq!(resolve_srv(&"x".repeat(64)).unwrap(), None);

@@ -106,8 +106,17 @@ The descriptor/provider and directory regressions pass, installed artifacts prov
   tests, six product directory-policy tests, package/service checks, actual ELF and
   staged installation, and installed-provider loading. Formatting, lint, static
   analysis, scoped Rustdoc and resolver-header Doxygen passed.
-- Independent whole-branch review found no issues. The affected resolver report is
-  213/215 production lines and 53/54 branches; its inherited defensive UTF-8 error
-  path remains uncovered. This is not a full quality-gate pass or merge approval.
-- The complete hosted platform gate remains required before merge. No push,
-  deployment, configuration change or external link connection was performed.
+- Independent extraction review found no issues. The initial raw LLVM resolver
+  totals were 213/215 lines and 53/54 branches, but these count duplicated generic
+  instances separately: the repository's source-level coverage checker passed.
+- Follow-up coverage work characterized escaped DNS labels and removed the
+  unreachable UTF-8 error path. Targeted reports now pass the repository's 100%
+  production line/branch checks for the resolver and the standalone directory,
+  provider, host-service and runtime components. Tests cover callback failures,
+  resolver-backed dialing, provider initialization and descriptor validation.
+- PR preparation documents the required resolver runtime package and adds it to
+  the companion workflow's installed test image. Formatting, lint, static
+  analysis, scoped Rustdoc and resolver-header Doxygen passed again.
+- The complete hosted platform gate remains required before the authorized
+  merge. No deployment, configuration change or external link connection was
+  performed.

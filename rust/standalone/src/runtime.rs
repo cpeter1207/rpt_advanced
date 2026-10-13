@@ -593,6 +593,39 @@ mod tests {
     }
 
     #[test]
+    fn provider_startup_reports_manifest_and_resolver_initialization_failures() {
+        use crate::providers::{ProviderError, ProviderSet, tests};
+        unsafe extern "C" fn reject_create(_: *mut *mut std::ffi::c_void) -> i32 {
+            -1
+        }
+        let mut providers = ProviderSet::load().unwrap();
+        let mut resolver = *providers.resolver_descriptor().unwrap();
+        resolver.create = Some(reject_create);
+        tests::replace_descriptor(&mut providers, "librptadv_resolver_adapter.so.1", resolver);
+        for (providers, expected) in [
+            (
+                tests::empty_provider_set(),
+                ProviderError::MissingDescriptor("librptadv_product.so.1"),
+            ),
+            (
+                providers,
+                ProviderError::Initialize("librptadv_resolver_adapter.so.1"),
+            ),
+        ] {
+            assert_eq!(
+                ProductRuntime::start_with_providers(
+                    "[general]\n",
+                    Vec::new(),
+                    SecretsFile::parse("").unwrap(),
+                    providers,
+                )
+                .err(),
+                Some(RuntimeError::Provider(expected))
+            );
+        }
+    }
+
+    #[test]
     fn resolver_context_is_destroyed_only_after_product_stop() {
         use std::ffi::c_void;
         use std::sync::atomic::AtomicBool;

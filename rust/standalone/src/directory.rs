@@ -233,6 +233,9 @@ mod tests {
     unsafe extern "C" fn empty_create(_: *mut *mut c_void) -> i32 {
         0
     }
+    unsafe extern "C" fn failed_empty_create(_: *mut *mut c_void) -> i32 {
+        -1
+    }
     unsafe extern "C" fn fake_destroy(context: *mut c_void) {
         assert_eq!(unsafe { *Box::from_raw(context.cast::<u8>()) }, 7);
         DESTROYED.fetch_add(1, Ordering::Relaxed);
@@ -249,6 +252,15 @@ mod tests {
             "ordered:4569" => &["[::ffff:192.0.2.1]:4569", "192.0.2.2:4569"],
             "invalid:4569" => &["not an address", "192.0.2.2:4569"],
             "empty:4569" => &[],
+            "invalid-utf8:4569" => {
+                unsafe { sink.unwrap()(context, b"\xff".as_ptr(), 1) };
+                return 0;
+            }
+            "failed-after-result:4569" => {
+                let value = b"192.0.2.2:4569";
+                unsafe { sink.unwrap()(context, value.as_ptr(), value.len()) };
+                return -7;
+            }
             _ => return 1,
         };
         for value in values {
@@ -275,6 +287,8 @@ mod tests {
             ]
         );
         assert_eq!(resolver.addresses("invalid:4569"), Err(-1));
+        assert_eq!(resolver.addresses("invalid-utf8:4569"), Err(-1));
+        assert_eq!(resolver.addresses("failed-after-result:4569"), Err(-7));
         assert_eq!(resolver.addresses("missing:4569"), Err(1));
         assert_eq!(resolver.addresses("empty:4569"), Ok(Vec::new()));
         drop(resolver);
@@ -286,10 +300,96 @@ mod tests {
         rejected.create = Some(empty_create);
         assert!(Resolver::new(Box::leak(Box::new(rejected))).is_err());
         assert_eq!(DESTROYED.load(Ordering::Relaxed), 2);
+        rejected.create = Some(failed_empty_create);
+        assert!(Resolver::new(Box::leak(Box::new(rejected))).is_err());
+        assert_eq!(DESTROYED.load(Ordering::Relaxed), 2);
     }
     unsafe extern "C" fn collect(context: *mut c_void, text: *const c_char, length: usize) {
         unsafe { &mut *context.cast::<Vec<String>>() }
             .push(unsafe { input(text, length) }.unwrap().into());
+    }
+
+    #[test]
+    fn host_directory_callbacks_preserve_provider_results_order_and_status() {
+        unsafe extern "C" fn selected_srv(
+            _: *mut c_void,
+            service: *const u8,
+            length: usize,
+            sink: abi::rptadv_resolver_srv_sink_v1,
+            context: *mut c_void,
+        ) -> i32 {
+            assert_eq!(
+                unsafe { input(service.cast(), length) },
+                Some("_iax._udp.test")
+            );
+            let host = b"selected.example.";
+            unsafe { sink.unwrap()(context, host.as_ptr(), host.len(), 4571) };
+            0
+        }
+        unsafe extern "C" fn collect_srv(
+            context: *mut c_void,
+            host: *const c_char,
+            length: usize,
+            port: u16,
+        ) {
+            unsafe { &mut *context.cast::<Vec<(String, u16)>>() }
+                .push((unsafe { input(host, length) }.unwrap().into(), port));
+        }
+        let providers = crate::providers::ProviderSet::load().unwrap();
+        let mut resolver = *providers.resolver_descriptor().unwrap();
+        resolver.resolve_addresses = Some(fake_addresses);
+        resolver.resolve_srv = Some(selected_srv);
+        let owner = crate::host_services::HostServicesOwner::new(
+            Vec::new(),
+            None,
+            crate::secrets::SecretsFile::parse("").unwrap(),
+        )
+        .unwrap();
+        let host = owner.descriptor();
+        unsafe {
+            (*host
+                .context
+                .cast::<crate::host_services::StandaloneHostContext>())
+            .resolver = Some(Resolver::new(Box::leak(Box::new(resolver))).unwrap());
+        }
+        let mut selected = Vec::<(String, u16)>::new();
+        assert_eq!(
+            unsafe {
+                host.directory_srv.unwrap()(
+                    host.context,
+                    c"_iax._udp.test".as_ptr(),
+                    14,
+                    Some(collect_srv),
+                    ptr::from_mut(&mut selected).cast(),
+                )
+            },
+            0
+        );
+        assert_eq!(selected, [("selected.example.".into(), 4571)]);
+        for (name, status, expected) in [
+            ("ordered", 0, vec!["::ffff:192.0.2.1", "192.0.2.2"]),
+            ("empty", 1, vec![]),
+            ("invalid", -1, vec![]),
+            ("missing", 1, vec![]),
+            ("failed-after-result", -7, vec![]),
+        ] {
+            let mut addresses = Vec::<String>::new();
+            assert_eq!(
+                unsafe {
+                    host.directory_addresses.unwrap()(
+                        host.context,
+                        name.as_ptr().cast(),
+                        name.len(),
+                        4569,
+                        Some(collect),
+                        ptr::from_mut(&mut addresses).cast(),
+                    )
+                },
+                status,
+                "{name}"
+            );
+            assert_eq!(addresses, expected, "{name}");
+        }
     }
     #[test]
     fn file_backend_keeps_raw_records_and_existing_unavailable_file_behavior() {

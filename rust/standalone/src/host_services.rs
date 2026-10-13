@@ -609,11 +609,24 @@ mod tests {
     }
 
     #[test]
+    fn host_owner_rejects_a_manifest_without_its_resolver() {
+        let providers = Box::leak(Box::new(crate::providers::tests::empty_provider_set()));
+        assert_eq!(
+            HostServicesOwner::new(Vec::new(), Some(providers), SecretsFile::parse("").unwrap())
+                .err(),
+            Some(crate::providers::ProviderError::MissingDescriptor(
+                "librptadv_resolver_adapter.so.1"
+            ))
+        );
+    }
+
+    #[test]
     fn callback_input_and_panic_boundary_return_safe_fallbacks() {
         let invalid_utf8 = [0xff_u8];
         assert_eq!(unsafe { input(ptr::null(), 0) }, Some(""));
         assert_eq!(unsafe { input(ptr::null(), 1) }, None);
         assert_eq!(unsafe { input(invalid_utf8.as_ptr().cast(), 1) }, None);
+        assert_eq!(unsafe { input(ptr::null(), usize::MAX) }, None);
         assert_eq!(boundary(-1, || panic!("test callback panic")), -1);
     }
 
@@ -1081,6 +1094,20 @@ mod tests {
 
     #[test]
     fn outbound_host_dial_connects_to_local_iax_server() {
+        unsafe extern "C" fn ordered_addresses(
+            _: *mut c_void,
+            endpoint: *const u8,
+            length: usize,
+            sink: crate::abi::rptadv_resolver_address_sink_v1,
+            context: *mut c_void,
+        ) -> i32 {
+            let endpoint = unsafe { input(endpoint.cast(), length) }.unwrap();
+            let port = endpoint.strip_prefix("selected.invalid:").unwrap();
+            for address in [format!("127.0.0.1:{port}"), format!("[::1]:{port}")] {
+                unsafe { sink.unwrap()(context, address.as_ptr(), address.len()) };
+            }
+            0
+        }
         let library = Path::new("librptadviax2.so.1");
         let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
@@ -1088,10 +1115,15 @@ mod tests {
         let mut server =
             crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
         let accepted = AtomicUsize::new(0);
-        let host =
+        let providers = crate::providers::ProviderSet::load().unwrap();
+        let mut host =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let mut resolver = *providers.resolver_descriptor().unwrap();
+        resolver.resolve_addresses = Some(ordered_addresses);
+        host.context.resolver =
+            Some(crate::directory::Resolver::new(Box::leak(Box::new(resolver))).unwrap());
         let host_context = host.descriptor().context as usize;
-        let destination = format!("radio@{address}/506315");
+        let destination = format!("radio@selected.invalid:{}/506315", address.port());
         let (sender, receiver) = std::sync::mpsc::channel();
         let dial = thread::spawn(move || {
             let destination = std::ffi::CString::new(destination).unwrap();

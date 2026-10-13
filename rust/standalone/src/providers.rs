@@ -783,6 +783,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn resolver_borrow_rejects_a_changed_provider_identity() {
+        let mut providers = super::ProviderSet::load().unwrap();
+        let mut resolver = *providers.resolver_descriptor().unwrap();
+        resolver.abi_version += 1;
+        replace_descriptor(&mut providers, "librptadv_resolver_adapter.so.1", resolver);
+        assert_eq!(
+            providers.resolver_descriptor().err(),
+            Some(ProviderError::IncompatibleDescriptor(
+                "librptadv_resolver_adapter.so.1"
+            ))
+        );
+    }
+
+    #[test]
     fn native_runtime_rejects_missing_lifecycle_operations() {
         let mut api: crate::abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
         api.struct_size = std::mem::size_of_val(&api) as u32;
@@ -829,6 +843,10 @@ pub(crate) mod tests {
     #[test]
     fn provider_error_messages_are_stable() {
         for (error, expected) in [
+            (
+                ProviderError::Initialize("initialize"),
+                "cannot initialize required provider initialize",
+            ),
             (
                 ProviderError::Load("load"),
                 "cannot load required provider load",
@@ -1299,7 +1317,11 @@ pub(crate) mod tests {
         replace_descriptor(&mut providers, "libusbradioplus_product.so.1", valid_native);
     }
 
-    fn replace_descriptor<T>(providers: &mut super::ProviderSet, library: &str, descriptor: T) {
+    pub(crate) fn replace_descriptor<T>(
+        providers: &mut super::ProviderSet,
+        library: &str,
+        descriptor: T,
+    ) {
         let descriptor = Box::leak(Box::new(descriptor));
         let provider = providers
             .descriptors
