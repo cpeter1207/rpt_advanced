@@ -110,6 +110,7 @@ pub struct ReceiveState {
     epoch: u64,
     age_native_samples: u64,
     primed: bool,
+    draining: bool,
 }
 impl ReceiveState {
     /// Establish source units; activity timing always advances at native 48 kHz.
@@ -122,6 +123,7 @@ impl ReceiveState {
             epoch: 0,
             age_native_samples: 0,
             primed: false,
+            draining: false,
         })
     }
     /// Decide whether to consume this native block; an ended transport wins immediately.
@@ -133,20 +135,29 @@ impl ReceiveState {
         ended: bool,
         native_frames: usize,
     ) -> bool {
-        if epoch != self.epoch {
-            self.epoch = epoch;
+        let new_pcm = epoch != self.epoch;
+        self.epoch = epoch;
+        if new_pcm {
             self.age_native_samples = 0;
-        } else {
-            self.age_native_samples = self.age_native_samples.saturating_add(native_frames as u64);
         }
         let capacity = (self.rate * 300 / 1000).max(512);
         let source_frames = (native_frames as u64).saturating_mul(self.rate) / 48000;
         let remaining = capacity.saturating_sub(source_frames);
-        let reserve = (self.rate * 60 / 1000).min(remaining);
         let target = (self.rate * 260 / 1000).min(remaining);
         self.primed |= epoch != 0 && available >= target;
-        let fresh = self.age_native_samples.saturating_mul(self.rate) < reserve * 48000;
-        let protected = if fresh { reserve } else { 0 };
-        self.primed && !ended && (available > protected || fresh)
+        self.draining |= self.primed && (new_pcm || available > 0);
+        !ended && self.draining
+    }
+
+    /// Keep receive active until real converter output drains, then allow 60 ms of PLC.
+    /// Raw input occupancy can reach zero with hundreds of milliseconds still converted.
+    pub fn rendered(&mut self, real_samples: Option<usize>, native_frames: usize) -> bool {
+        self.age_native_samples = if real_samples.is_some_and(|count| count > 0) {
+            0
+        } else {
+            self.age_native_samples.saturating_add(native_frames as u64)
+        };
+        self.draining = real_samples.is_some() && self.age_native_samples < 48000 * 60 / 1000;
+        self.draining
     }
 }

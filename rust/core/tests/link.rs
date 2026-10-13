@@ -23,8 +23,8 @@ fn audio_peer_preparation_checks_identity_rate_and_callback_capacity() {
         fn available(&self) -> u64 {
             0
         }
-        fn render(&mut self, _: &mut [f32]) -> bool {
-            false
+        fn render(&mut self, _: &mut [f32]) -> Option<usize> {
+            None
         }
     }
     for (name, rate, maximum) in [
@@ -236,9 +236,11 @@ fn external_radio_key_keys_a_link_without_replaying_stale_pcm() {
         fn available(&self) -> u64 {
             20000 * u64::from(self.active.load(std::sync::atomic::Ordering::Acquire))
         }
-        fn render(&mut self, output: &mut [f32]) -> bool {
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
             output.fill(0.75);
-            self.active.load(std::sync::atomic::Ordering::Acquire)
+            self.active
+                .load(std::sync::atomic::Ordering::Acquire)
+                .then_some(output.len())
         }
     }
     let signals = std::sync::Arc::new(PeerSignals::new());
@@ -429,9 +431,9 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
         fn available(&self) -> u64 {
             14400
         }
-        fn render(&mut self, output: &mut [f32]) -> bool {
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
             output.fill(self.value);
-            true
+            Some(output.len())
         }
     }
     let (producer, mut consumer) = LinkAudioQueue::new(1920).unwrap().into_endpoints();
@@ -529,9 +531,9 @@ fn generated_status_stays_local_and_never_reaches_a_link() {
         fn available(&self) -> u64 {
             0
         }
-        fn render(&mut self, output: &mut [f32]) -> bool {
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
             output.fill(0.0);
-            true
+            Some(0)
         }
     }
     let (producer, mut consumer) = LinkAudioQueue::new(960).unwrap().into_endpoints();
@@ -781,12 +783,45 @@ fn receive_activity_primes_conceals_brief_gaps_drains_and_honors_eof() {
     assert!(!receive.should_render(0, 0, false, 960));
     assert!(!receive.should_render(1, 1600, false, 960));
     assert!(receive.should_render(2, 2080, false, 960));
+    assert!(receive.rendered(Some(960), 960));
+    // Empty producer storage does not mean converter output is empty.
+    for _ in 0..20 {
+        assert!(receive.should_render(2, 0, false, 960));
+        assert!(receive.rendered(Some(960), 960));
+    }
     assert!(receive.should_render(2, 0, false, 960));
+    assert!(receive.rendered(Some(0), 960));
     assert!(receive.should_render(2, 0, false, 960));
+    assert!(receive.rendered(Some(0), 960));
+    assert!(receive.should_render(2, 0, false, 960));
+    assert!(!receive.rendered(Some(0), 960));
     assert!(!receive.should_render(2, 0, false, 960));
     assert!(receive.should_render(2, 10, false, 960));
+    assert!(receive.rendered(Some(10), 960));
     assert!(!receive.should_render(3, 2080, true, 960));
+    assert!(!receive.rendered(None, 960));
     assert!(ReceiveState::new(0).is_err());
+}
+
+#[test]
+fn peer_concealment_grace_uses_elapsed_native_samples_not_source_rate_or_ticks() {
+    for rate in [8000, 48000] {
+        for frames in [480, 960, 1440] {
+            let mut receive = rpt_advanced_core::link::ReceiveState::new(rate).unwrap();
+            assert!(receive.should_render(1, u64::from(rate), false, frames));
+            assert!(receive.rendered(Some(frames), frames));
+            for elapsed in (frames..=2880).step_by(frames) {
+                assert!(receive.should_render(1, 0, false, frames));
+                assert_eq!(receive.rendered(Some(0), frames), elapsed < 2880);
+            }
+            assert!(!receive.should_render(1, 0, false, frames));
+            assert!(receive.should_render(2, u64::from(rate), false, frames));
+            // A resumed burst can need one block of converter/PLC lookahead.
+            assert!(receive.rendered(Some(0), frames));
+            assert!(receive.should_render(2, 0, false, frames));
+            assert!(receive.rendered(Some(frames), frames));
+        }
+    }
 }
 
 #[test]

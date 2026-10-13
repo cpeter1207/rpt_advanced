@@ -337,16 +337,14 @@ impl crate::link::PeerInput for TestPeerInput {
         self.sample.map_or(0, |_| 20_000)
     }
 
-    fn render(&mut self, output: &mut [f32]) -> bool {
-        let Some(sample) = self.sample.filter(|_| {
+    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        let sample = self.sample.filter(|_| {
             self.enabled
                 .as_ref()
                 .is_none_or(|enabled| enabled.load(std::sync::atomic::Ordering::Acquire))
-        }) else {
-            return false;
-        };
+        })?;
         output.fill(sample);
-        true
+        Some(output.len())
     }
 }
 
@@ -1186,8 +1184,8 @@ fn loopback_pool_never_allocates_or_drops_owned_buffers_on_audio_full() {
         fn available(&self) -> u64 {
             0
         }
-        fn render(&mut self, _: &mut [f32]) -> bool {
-            false
+        fn render(&mut self, _: &mut [f32]) -> Option<usize> {
+            None
         }
     }
     let (outbound, mut consumer) = LinkAudioQueue::new(1920).unwrap().into_endpoints();

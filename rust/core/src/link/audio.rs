@@ -108,10 +108,10 @@ pub trait PeerInput: Send {
     fn source_rate(&self) -> u32;
     /// Shared PCM-before-epoch, activity and terminal snapshots.
     fn signals(&self) -> &PeerSignals;
-    /// Currently available source-rate samples.
+    /// Queued source-rate samples, excluding converter and PLC lookahead.
     fn available(&self) -> u64;
-    /// Render native F32, concealing exactly once inside the released ring.
-    fn render(&mut self, output: &mut [f32]) -> bool;
+    /// Render native F32, returning real samples (not concealment), or None on failure.
+    fn render(&mut self, output: &mut [f32]) -> Option<usize>;
 }
 
 /// Prepared slot whose endpoints move into exactly one generation's transmit owner.
@@ -351,7 +351,10 @@ impl<P: PeerInput> LinkAudio<P> {
             let audio_active = peer
                 .receive
                 .should_render(pcm_epoch, available, ended, count);
-            let audio_active = audio_active && peer.input.render(&mut peer.audio[..count]);
+            let audio_active = audio_active
+                && peer
+                    .receive
+                    .rendered(peer.input.render(&mut peer.audio[..count]), count);
             if !audio_active {
                 peer.audio[..count].fill(0.0);
             }
