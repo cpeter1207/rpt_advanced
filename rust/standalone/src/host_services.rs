@@ -9,7 +9,7 @@ use crate::{
 use std::{
     ffi::{c_char, c_void},
     mem::size_of,
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     ptr,
@@ -18,6 +18,7 @@ use std::{
 /// Context retained while the product uses the standalone host table.
 pub struct StandaloneHostContext {
     radio: RadioHostContext,
+    pub(crate) resolver: Option<directory::Resolver>,
     secrets: SecretsFile,
 }
 
@@ -33,9 +34,13 @@ impl HostServicesOwner {
         radios: Vec<crate::ResolvedRadioNode>,
         providers: Option<&'static crate::providers::ProviderSet>,
         secrets: SecretsFile,
-    ) -> Self {
+    ) -> Result<Self, crate::providers::ProviderError> {
+        let resolver = providers
+            .map(|providers| directory::Resolver::new(providers.resolver_descriptor()?))
+            .transpose()?;
         let mut context = Box::new(StandaloneHostContext {
             radio: RadioHostContext::new(radios, providers),
+            resolver,
             secrets,
         });
         let descriptor = Box::new(abi::rptadv_host_services_v5 {
@@ -64,10 +69,10 @@ impl HostServicesOwner {
             peer_write: Some(peer_write),
             peer_destroy: Some(peer_destroy),
         });
-        Self {
+        Ok(Self {
             context,
             descriptor,
-        }
+        })
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
@@ -111,7 +116,7 @@ pub(crate) fn boundary<T>(fallback: T, operation: impl FnOnce() -> T) -> T {
 }
 
 pub(crate) unsafe fn input<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
-    if pointer.is_null() && length != 0 {
+    if length > isize::MAX as usize || (pointer.is_null() && length != 0) {
         return None;
     }
     let bytes = if length == 0 {
@@ -252,7 +257,15 @@ unsafe extern "C" fn peer_dial(
         if unsafe { current(current_context) } == 0 {
             return -1;
         }
-        let Some((address, remote)) = parse_destination(destination) else {
+        let Some((address, remote)) = parse_destination(destination, |endpoint| {
+            context
+                .resolver
+                .as_ref()?
+                .addresses(endpoint)
+                .ok()?
+                .into_iter()
+                .next()
+        }) else {
             eprintln!("rpt-advanced: IAX2 destination validation or address resolution failed");
             return -1;
         };
@@ -290,7 +303,10 @@ fn dial_peer(
     IaxClient::load(library)?.dial_configured(address, local, remote, secrets, timeout_ms)
 }
 
-fn parse_destination(value: &str) -> Option<(SocketAddr, String)> {
+fn parse_destination(
+    value: &str,
+    resolve: impl FnOnce(&str) -> Option<SocketAddr>,
+) -> Option<(SocketAddr, String)> {
     let (address, remote) = value.strip_prefix("radio@")?.rsplit_once('/')?;
     if remote.is_empty() || remote.len() > 63 || !remote.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -305,9 +321,9 @@ fn parse_destination(value: &str) -> Option<(SocketAddr, String)> {
     {
         SocketAddr::new(ip, 4569)
     } else if address.contains(':') {
-        address.to_socket_addrs().ok()?.next()?
+        resolve(address)?
     } else {
-        (address, 4569).to_socket_addrs().ok()?.next()?
+        resolve(&format!("{address}:4569"))?
     };
     (address.port() != 0).then(|| (address, remote.to_owned()))
 }
@@ -335,7 +351,8 @@ unsafe extern "C" fn peer_read(
             return -1;
         };
         let mut samples = [0.0_f32; 4096];
-        let mut text = [0_u8; 1024];
+        // Match the IAX client's datagram capacity so large topology frames stay connected.
+        let mut text = [0_u8; 1500];
         match peer.0.poll(&mut samples, &mut text) {
             Ok(IaxEvent::None) => 0,
             Ok(IaxEvent::Audio(length)) => unsafe {
@@ -427,7 +444,7 @@ unsafe extern "C" fn peer_destroy(_: *mut c_void, peer: *mut c_void) {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostServicesOwner, boundary, dial_peer, input, parse_destination, peer_dial};
+    use super::{HostServicesOwner, boundary, dial_peer, input, peer_dial};
     use crate::{iax::IaxError, secrets::SecretsFile};
     use std::{
         ffi::c_void,
@@ -464,6 +481,21 @@ mod tests {
         unsafe { context.cast::<Vec<u32>>().as_mut() }
             .unwrap()
             .push(kind);
+    }
+
+    unsafe extern "C" fn record_peer_text(
+        context: *mut c_void,
+        kind: u32,
+        data: *const c_void,
+        length: usize,
+    ) {
+        if kind == 1 {
+            // SAFETY: peer_read provides a readable payload for this synchronous callback.
+            let text = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) };
+            unsafe { context.cast::<Vec<Vec<u8>>>().as_mut() }
+                .unwrap()
+                .push(text.to_vec());
+        }
     }
 
     unsafe extern "C" fn allow_test_peer(
@@ -510,9 +542,47 @@ mod tests {
         0
     }
 
+    fn parse_destination(value: &str) -> Option<(SocketAddr, String)> {
+        super::parse_destination(value, |endpoint| match endpoint {
+            "localhost:4569" => Some("127.0.0.1:4569".parse().unwrap()),
+            "localhost:4571" => Some("[::1]:4571".parse().unwrap()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn destination_resolution_uses_provider_only_for_names() {
+        for target in [
+            "radio@127.0.0.1/1",
+            "radio@[::ffff:127.0.0.1]:4569/1",
+            "radio@[::1]/1",
+        ] {
+            assert!(
+                super::parse_destination(target, |_| panic!("numeric address reached DNS"))
+                    .is_some()
+            );
+        }
+        let expected: SocketAddr = "[::ffff:192.0.2.1]:4569".parse().unwrap();
+        assert_eq!(
+            super::parse_destination("radio@test.invalid/1", |endpoint| {
+                assert_eq!(endpoint, "test.invalid:4569");
+                Some(expected)
+            }),
+            Some((expected, "1".into()))
+        );
+        assert!(
+            super::parse_destination("radio@test.invalid:4571/1", |endpoint| {
+                assert_eq!(endpoint, "test.invalid:4571");
+                None
+            })
+            .is_none()
+        );
+    }
+
     #[test]
     fn host_services_table_is_complete_and_uses_its_owned_context() {
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
@@ -529,7 +599,8 @@ mod tests {
 
     #[test]
     fn descriptor_address_survives_owner_move() {
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let before = ptr::from_ref(owner.descriptor());
         let owner = Box::new(owner);
         let after = ptr::from_ref(owner.descriptor());
@@ -538,11 +609,24 @@ mod tests {
     }
 
     #[test]
+    fn host_owner_rejects_a_manifest_without_its_resolver() {
+        let providers = Box::leak(Box::new(crate::providers::tests::empty_provider_set()));
+        assert_eq!(
+            HostServicesOwner::new(Vec::new(), Some(providers), SecretsFile::parse("").unwrap())
+                .err(),
+            Some(crate::providers::ProviderError::MissingDescriptor(
+                "librptadv_resolver_adapter.so.1"
+            ))
+        );
+    }
+
+    #[test]
     fn callback_input_and_panic_boundary_return_safe_fallbacks() {
         let invalid_utf8 = [0xff_u8];
         assert_eq!(unsafe { input(ptr::null(), 0) }, Some(""));
         assert_eq!(unsafe { input(ptr::null(), 1) }, None);
         assert_eq!(unsafe { input(invalid_utf8.as_ptr().cast(), 1) }, None);
+        assert_eq!(unsafe { input(ptr::null(), usize::MAX) }, None);
         assert_eq!(boundary(-1, || panic!("test callback panic")), -1);
     }
 
@@ -671,7 +755,8 @@ mod tests {
 
     #[test]
     fn outbound_dial_callback_rejects_bad_inputs_and_stale_calls() {
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let descriptor = owner.descriptor();
         let local = c"524950";
         let destination = c"not-a-radio-destination";
@@ -735,7 +820,8 @@ mod tests {
         let library = Path::new("librptadviax2.so.1");
         let mut server =
             crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let context = owner.descriptor().context as usize;
         let destination = format!("radio@{address}/506315");
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -779,7 +865,8 @@ mod tests {
 
     #[test]
     fn host_callbacks_reject_missing_context_handles_and_outputs() {
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let api = owner.descriptor();
         let destination = c"radio@127.0.0.1/506315";
         let local = c"524950";
@@ -902,7 +989,8 @@ mod tests {
 
     #[test]
     fn host_callback_notice_and_radio_staging_preserve_safe_state() {
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         unsafe { super::noop() };
         unsafe { super::command_notice(ptr::null_mut(), c"524950".as_ptr(), 6, 1) };
         unsafe { super::command_notice(ptr::null_mut(), c"524950".as_ptr(), 6, 0) };
@@ -919,7 +1007,8 @@ mod tests {
 
     #[test]
     fn peer_callbacks_forward_events_and_report_send_results() {
-        let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let events = [
             (0, 0, None),
             (1, 0, Some(3)),
@@ -1005,6 +1094,20 @@ mod tests {
 
     #[test]
     fn outbound_host_dial_connects_to_local_iax_server() {
+        unsafe extern "C" fn ordered_addresses(
+            _: *mut c_void,
+            endpoint: *const u8,
+            length: usize,
+            sink: crate::abi::rptadv_resolver_address_sink_v1,
+            context: *mut c_void,
+        ) -> i32 {
+            let endpoint = unsafe { input(endpoint.cast(), length) }.unwrap();
+            let port = endpoint.strip_prefix("selected.invalid:").unwrap();
+            for address in [format!("127.0.0.1:{port}"), format!("[::1]:{port}")] {
+                unsafe { sink.unwrap()(context, address.as_ptr(), address.len()) };
+            }
+            0
+        }
         let library = Path::new("librptadviax2.so.1");
         let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
@@ -1012,9 +1115,15 @@ mod tests {
         let mut server =
             crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
         let accepted = AtomicUsize::new(0);
-        let host = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap());
+        let providers = crate::providers::ProviderSet::load().unwrap();
+        let mut host =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let mut resolver = *providers.resolver_descriptor().unwrap();
+        resolver.resolve_addresses = Some(ordered_addresses);
+        host.context.resolver =
+            Some(crate::directory::Resolver::new(Box::leak(Box::new(resolver))).unwrap());
         let host_context = host.descriptor().context as usize;
-        let destination = format!("radio@{address}/506315");
+        let destination = format!("radio@selected.invalid:{}/506315", address.port());
         let (sender, receiver) = std::sync::mpsc::channel();
         let dial = thread::spawn(move || {
             let destination = std::ffi::CString::new(destination).unwrap();
@@ -1059,10 +1168,35 @@ mod tests {
         assert_eq!(status, 0);
         assert_ne!(peer, 0);
         assert_ne!(accepted.load(Ordering::Acquire), 0);
-        unsafe { super::peer_destroy(ptr::null_mut(), peer as *mut c_void) };
         let accepted_peer = accepted.swap(0, Ordering::AcqRel) as *mut c_void;
         let server_client = crate::iax::IaxClient::load(library).unwrap();
-        let inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
+        let mut inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
+
+        // 51018 sent a valid 1291-byte topology that used to terminate this call.
+        let topology = format!("L {}T1506316\0", "T506316,".repeat(160));
+        let mut observed = Vec::<Vec<u8>>::new();
+        for message in [topology.as_bytes(), b"!NEWKEY1!"] {
+            inbound.send_text(message).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while observed.is_empty() && Instant::now() < deadline {
+                assert_eq!(
+                    unsafe {
+                        super::peer_read(
+                            ptr::null_mut(),
+                            peer as *mut c_void,
+                            Some(record_peer_text),
+                            ptr::from_mut(&mut observed).cast(),
+                        )
+                    },
+                    0,
+                    "valid topology must not end the call",
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(observed, [message]);
+            observed.clear();
+        }
+        unsafe { super::peer_destroy(ptr::null_mut(), peer as *mut c_void) };
         drop(inbound);
 
         let canceled_calls = AtomicUsize::new(0);

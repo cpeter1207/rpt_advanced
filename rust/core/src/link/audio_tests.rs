@@ -19,9 +19,9 @@ impl PeerInput for Input {
         0
     }
 
-    fn render(&mut self, output: &mut [f32]) -> bool {
+    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
         output.fill(0.0);
-        false
+        None
     }
 }
 

@@ -140,7 +140,7 @@ standalone deployment approval.
   passes.
 
 The build produces the standalone service, `librptadv_product.so.1`, the
-versioned control, file, and speech adapter DSOs, and the optional
+versioned control, file, speech, and standalone resolver adapter DSOs, and the optional
 `app_rpt_advanced.so` Asterisk adapter. It uses the separately released
 `libusbradioplus_product.so.1` and does not ship a static controller library
 or legacy controller headers. The

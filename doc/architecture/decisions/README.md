@@ -27,7 +27,7 @@ status. Superseded records remain and point to their replacement.
 | [0019](0019-tolerant-configuration-resolution.md) | Accepted | Unknown configuration resolves through warnings and sensible defaults. |
 | [0020](0020-rust-dylibs-and-external-c-shims.md) | Partially superseded | Rust `dylib`s separate private components. |
 | [0021](0021-versioned-rust-c-adapter-boundaries.md) | Accepted | Versioned adapter shared objects isolate C-to-Rust boundaries. |
-| [0022](0022-versioned-external-c-dependency-adapters.md) | Accepted | Stable C contracts isolate replaceable external implementations. |
+| [0022](0022-versioned-external-c-dependency-adapters.md) | Implemented (current selected capabilities) | Stable C contracts isolate external implementations, including standalone system DNS; future capabilities remain planned. |
 | [0023](0023-unified-control-and-dtmf-policy.md) | Accepted | CLI, REST, and DTMF share a controlled operation model. |
 | [0024](0024-voting-receivers-and-simulcast-timing.md) | Accepted | Voting and simulcast use explicit clock and node boundaries. |
 | [0025](0025-native-media-routing-and-pcm-ring-ownership.md) | Implemented (telemetry streaming) | The telemetry producer streams every media type through its PCM ring; transmit only mixes consumed PCM. |

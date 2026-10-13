@@ -105,7 +105,8 @@ impl ProductRuntime {
         let descriptors = provider_ref
             .product_runtime_descriptors()
             .map_err(RuntimeError::Provider)?;
-        let host = HostServicesOwner::new(radios, Some(provider_ref), secrets);
+        let host = HostServicesOwner::new(radios, Some(provider_ref), secrets)
+            .map_err(RuntimeError::Provider)?;
         // SAFETY: provider_ref points into the boxed owner moved into ProductRuntime below. The
         // product stops before host and provider boxes are dropped, including startup rollback.
         let mut runtime = unsafe {
@@ -124,6 +125,11 @@ impl ProductRuntime {
 
     /// Replace configuration without stopping the process; failed preparation keeps old state.
     pub fn reload(&self, configuration: &str) -> Result<(), RuntimeError> {
+        if let Some(providers) = &self.providers {
+            providers
+                .validate_runtime()
+                .map_err(RuntimeError::Provider)?;
+        }
         (unsafe { (self.reload)(configuration.as_ptr().cast::<c_char>(), configuration.len()) }
             == 0)
             .then_some(())
@@ -472,7 +478,7 @@ mod tests {
     }
 
     fn host() -> HostServicesOwner {
-        HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap())
+        HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap()
     }
 
     fn host_with_configuration(configuration: &str) -> HostServicesOwner {
@@ -481,6 +487,7 @@ mod tests {
             None,
             SecretsFile::parse("").unwrap(),
         )
+        .unwrap()
     }
 
     fn radio_channel_available(process: &ProductRuntime, channel: &str) -> bool {
@@ -558,6 +565,116 @@ mod tests {
         assert!(radio_channel_available(&process, "old"));
         assert!(!radio_channel_available(&process, "new"));
         process.stop().unwrap();
+    }
+
+    #[test]
+    fn incompatible_provider_reload_preserves_active_configuration() {
+        let active = "[1000]\nradio_channel=old\n[radio 1000]\n";
+        let candidate = "[1000]\nradio_channel=new\n[radio 1000]\n";
+        let mut process = unsafe {
+            ProductRuntime::start(
+                descriptor(start_without_counts, stop_without_counts, None),
+                host_with_configuration(active),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                active,
+            )
+        }
+        .unwrap();
+        process.providers = Some(Box::new(crate::providers::tests::empty_provider_set()));
+        assert!(matches!(
+            process.reload_with_radios(candidate, crate::resolve_radio_nodes(candidate).unwrap()),
+            Err(RuntimeError::Provider(_))
+        ));
+        assert!(radio_channel_available(&process, "old"));
+        assert!(!radio_channel_available(&process, "new"));
+        process.stop().unwrap();
+    }
+
+    #[test]
+    fn provider_startup_reports_manifest_and_resolver_initialization_failures() {
+        use crate::providers::{ProviderError, ProviderSet, tests};
+        unsafe extern "C" fn reject_create(_: *mut *mut std::ffi::c_void) -> i32 {
+            -1
+        }
+        let mut providers = ProviderSet::load().unwrap();
+        let mut resolver = *providers.resolver_descriptor().unwrap();
+        resolver.create = Some(reject_create);
+        tests::replace_descriptor(&mut providers, "librptadv_resolver_adapter.so.1", resolver);
+        for (providers, expected) in [
+            (
+                tests::empty_provider_set(),
+                ProviderError::MissingDescriptor("librptadv_product.so.1"),
+            ),
+            (
+                providers,
+                ProviderError::Initialize("librptadv_resolver_adapter.so.1"),
+            ),
+        ] {
+            assert_eq!(
+                ProductRuntime::start_with_providers(
+                    "[general]\n",
+                    Vec::new(),
+                    SecretsFile::parse("").unwrap(),
+                    providers,
+                )
+                .err(),
+                Some(RuntimeError::Provider(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_context_is_destroyed_only_after_product_stop() {
+        use std::ffi::c_void;
+        use std::sync::atomic::AtomicBool;
+        static LIVE: AtomicBool = AtomicBool::new(false);
+        unsafe extern "C" fn create(context: *mut *mut c_void) -> i32 {
+            unsafe { *context = Box::into_raw(Box::new(())).cast() };
+            LIVE.store(true, Ordering::Relaxed);
+            0
+        }
+        unsafe extern "C" fn destroy(context: *mut c_void) {
+            unsafe { drop(Box::from_raw(context.cast::<()>())) };
+            LIVE.store(false, Ordering::Relaxed);
+        }
+        extern "C" fn stop() -> i32 {
+            assert!(
+                LIVE.load(Ordering::Relaxed),
+                "resolver released before product callbacks stop"
+            );
+            0
+        }
+        let providers = crate::providers::ProviderSet::load().unwrap();
+        let mut resolver = *providers.resolver_descriptor().unwrap();
+        resolver.create = Some(create);
+        resolver.destroy = Some(destroy);
+        let host = host();
+        // No callbacks have started; replace only this fixture's resolver context.
+        unsafe {
+            (*host
+                .descriptor()
+                .context
+                .cast::<crate::host_services::StandaloneHostContext>())
+            .resolver =
+                Some(crate::directory::Resolver::new(Box::leak(Box::new(resolver))).unwrap());
+        }
+        let mut process = unsafe {
+            ProductRuntime::start(
+                descriptor(start_without_counts, stop, None),
+                host,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                "[general]\n",
+            )
+        }
+        .unwrap();
+        process.providers = Some(Box::new(providers));
+        process.stop().unwrap();
+        assert!(!LIVE.load(Ordering::Relaxed));
+        assert!(process.providers.is_none());
     }
 
     #[test]

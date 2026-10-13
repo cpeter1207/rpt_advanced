@@ -14,14 +14,14 @@ VERSION ?= 0.1.0-alpha8
 DIST_NAME := rpt_advanced-$(VERSION)
 CFLAGS ?= -O2 -g
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror
-HEADERS := rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
+HEADERS := rust/resolver-adapter/include/rptadv_resolver_adapter.h rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
 CPPFLAGS += $(addprefix -I,$(dir $(HEADERS)))
 LOADER := module/app_rpt_advanced_loader.c
 ADAPTERS := asterisk control_asterisk file speech
-STANDALONE_ADAPTERS := control_standalone
+STANDALONE_ADAPTERS := control_standalone resolver
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
 LIBRARIES += build/librptadv_product.so.1
-STANDALONE_LIBRARIES := build/librptadv_control_standalone_adapter.so.1
+STANDALONE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(STANDALONE_ADAPTERS)))
 INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH" RPT_ADVANCED_LIBDIR="$(CURDIR)/build"
@@ -50,10 +50,10 @@ rust-build: | build
 
 standalone-build: | build
 	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
-		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter
+		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
-	@set -e; for name in file speech control_standalone; do \
+	@set -e; for name in file speech $(STANDALONE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" \
 			"build/librptadv_$${name}_adapter.so.1"; \
 		done
@@ -161,6 +161,8 @@ install: all
 	install -D -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/app_rpt_advanced.so $(DESTDIR)$(asteriskmoddir)/
 	install -m 0755 $(INSTALL_LIBRARIES) $(DESTDIR)$(libdir)/
+	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
+	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
 	ln -sfn librptadv_product.so.1 $(DESTDIR)$(libdir)/librptadv_product.so
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
@@ -183,8 +185,10 @@ standalone-install: standalone-build
 	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/librptadv_product.so.1 build/librptadv_file_adapter.so.1 \
-		build/librptadv_speech_adapter.so.1 build/librptadv_control_standalone_adapter.so.1 \
+		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) \
 		$(DESTDIR)$(libdir)/
+	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
+	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
 	ln -sfn librptadv_product.so.1 $(DESTDIR)$(libdir)/librptadv_product.so
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so

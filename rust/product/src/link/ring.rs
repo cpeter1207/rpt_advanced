@@ -223,8 +223,8 @@ impl PeerInput for InboundConsumer {
         self.observe()
             .map_or(0, |observation| observation.available_samples)
     }
-    fn render(&mut self, output: &mut [f32]) -> bool {
-        InboundConsumer::render(self, output).is_ok()
+    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        InboundConsumer::render(self, output).ok()
     }
 }
 impl InboundConsumer {

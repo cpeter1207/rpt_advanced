@@ -93,6 +93,88 @@ fn peer_playout_has_plc_lookahead_without_counting_it_as_loss() {
     assert_eq!(consumer.observe().unwrap().missing_samples, 0);
 }
 
+#[test]
+fn peer_tail_drains_before_courtesy_instead_of_replaying_on_next_burst() {
+    use rpt_advanced_core::{
+        audio::{LinkAudioQueue, PcmRead, PcmStreamReader},
+        controller::{ControllerSettings, CourtesySettings, NodeController, PreparedMedia},
+        link::{AudioPeer, LinkAudio, Mode},
+    };
+
+    struct Courtesy;
+    impl PcmStreamReader for Courtesy {
+        fn render(&mut self, output: &mut [f32]) -> PcmRead {
+            output.fill(0.75);
+            PcmRead::FinalSamples(output.len())
+        }
+    }
+    let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Peer).unwrap();
+    let (outbound, _) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, consumer, outbound, 960, 0).unwrap();
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
+    let courtesy = CourtesySettings {
+        link: Some(PreparedMedia::new_stream(Box::new(Courtesy)).unwrap()),
+        ..CourtesySettings::default()
+    };
+    let (mut controller, _control) = NodeController::new(
+        ControllerSettings {
+            hang_ms: 0,
+            courtesy_delay_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        courtesy,
+    )
+    .unwrap();
+    let mut output = [0.0; 960];
+    for _ in 0..100 {
+        assert_eq!(producer.write(&[0.25; 160]), Ok(160));
+        output.fill(0.0);
+        links.process(&mut controller, false, &mut output).unwrap();
+        dispatcher.dispatch(1);
+    }
+    let mut tail_samples = 0;
+    let mut courtesy_started = false;
+    for _ in 0..25 {
+        output.fill(0.0);
+        links.process(&mut controller, false, &mut output).unwrap();
+        dispatcher.dispatch(1);
+        for &sample in &output {
+            if sample > 0.6 {
+                assert!(
+                    tail_samples > 8_000,
+                    "courtesy cut off buffered speech: {tail_samples} samples"
+                );
+                courtesy_started = true;
+            } else if sample > 0.2 {
+                assert!(!courtesy_started, "old speech followed the courtesy tone");
+                tail_samples += 1;
+            }
+        }
+    }
+    assert!(
+        courtesy_started,
+        "concealment must not hold receive forever"
+    );
+    assert_eq!(links.active_count(), 0);
+    assert_eq!(producer.write(&[-0.25; 160]), Ok(160));
+    output.fill(0.0);
+    links.process(&mut controller, false, &mut output).unwrap();
+    // Allow the bounded FIR/PLC recovery transition, not a saved speech tail.
+    assert!(output.iter().filter(|&&sample| sample > 0.2).count() < 480);
+    dispatcher.dispatch(1);
+    for _ in 0..4 {
+        assert_eq!(producer.write(&[-0.25; 160]), Ok(160));
+        output.fill(0.0);
+        links.process(&mut controller, false, &mut output).unwrap();
+        dispatcher.dispatch(1);
+        assert!(output.iter().all(|&sample| sample < 0.2));
+    }
+    assert!(output.iter().sum::<f32>() / 960.0 < -0.2);
+    assert_eq!(producer.observer().observe().unwrap().discarded_samples, 0);
+}
+
 unsafe extern "C" fn failed_create(
     _: *const ffi::rpcr3_config,
     _: *mut *mut ffi::rpcr3_ring,
@@ -279,7 +361,7 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
         assert_eq!(samples, [0.0; 8]);
         assert!(consumer.observe().is_err());
         assert_eq!(PeerInput::available(&consumer), 0);
-        assert!(!PeerInput::render(&mut consumer, &mut samples));
+        assert!(PeerInput::render(&mut consumer, &mut samples).is_none());
         assert_eq!(PeerInput::source_rate(&consumer), 8000);
         assert!(std::ptr::eq(
             PeerInput::signals(&consumer),

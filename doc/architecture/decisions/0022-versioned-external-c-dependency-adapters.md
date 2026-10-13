@@ -1,6 +1,6 @@
 # ADR 0022: Versioned adapters isolate external implementations
 
-Status: Accepted
+Status: Implemented for the current selected capabilities; future capabilities remain planned
 
 ## Context
 
@@ -29,7 +29,7 @@ native API. Capability-specific functions are added only when an internal Rust
 port requires them.
 
 The complete adapter architecture has one adapter per independently replaceable
-capability: FFmpeg graph, sample-rate conversion, Hamlib, speech synthesis,
+capability: FFmpeg graph, sample-rate conversion, system DNS resolution, Hamlib, speech synthesis,
 PortAudio/ALSA, control-path execution, and Asterisk entry. This record governs
 the external-service adapters; ADR 0021 governs the Asterisk entry adapter.
 ADR 0038 defines the control-path adapter, initially backed by Asterisk's
@@ -85,3 +85,24 @@ ABI of a `dylib`, makes independently built adapter replacements possible. Its
 exact symbol names and capability-specific table fields are implementation
 details, but every published descriptor follows the lifecycle, versioning, and
 real-time rules in this record.
+
+## Implementation boundary (2026-10-13)
+
+Standalone selects `librptadv_resolver_adapter.so.1`, capability
+`rptadv.resolver`, descriptor ABI 1. The adapter owns libresolv bindings,
+SRV packet decoding/priority/weight selection, and system address resolution.
+Synchronous borrowed hostname/port and SocketAddr text results cross its C
+contract; lookup precedence and source authentication stay in the product.
+The Asterisk composition retains its Asterisk-backed resolver.
+
+The standalone manifest requires the resolver alongside its existing providers.
+Startup and reload validate the retained manifest and complete lifecycle tables;
+reload never loads replacement code. Product shutdown precedes resolver-context
+destruction and library release. A rejected reload preserves the active
+configuration. Resolver runtime and development packages are independently
+installable and do not become Asterisk-module dependencies.
+
+This completes the current composition's external-capability extraction, not
+unimplemented Hamlib, remote-base, or other wishlist capabilities. Filesystem,
+socket, clock, and other ordinary operating-system facilities remain with their
+existing owners; this decision does not introduce a generic OS adapter.

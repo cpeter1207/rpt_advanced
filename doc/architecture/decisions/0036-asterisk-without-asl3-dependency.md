@@ -109,7 +109,9 @@ Host-services ABI 5 (`rptadv.hst5`) replaces the resolved-directory callback
 with raw extnodes, selected SRV target/port, and numeric-address callbacks.
 The product owns static/DNS/external precedence, record validation, and source-IP
 authentication once. Asterisk owns config/DNS allocation and cleanup; standalone
-owns filesystem/system-resolution I/O and its existing SRV packet decoder.
+owns filesystem I/O and forwards DNS to the required versioned resolver adapter.
+`librptadv_resolver_adapter.so.1` owns system resolution and the existing SRV
+packet decoder under ADR 0022; standalone has no direct libresolv imports.
 Borrowed results live only during each synchronous callback; no native object or
 Rust layout crosses the boundary. The host keeps its existing diagnostics.
 

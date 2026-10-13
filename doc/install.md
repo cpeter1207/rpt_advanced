@@ -13,7 +13,9 @@ as described in the [USBRadioPlus installation guide](https://github.com/cpeter1
 so APT can obtain `libusbradioplus-product1`.
 Download the rpt_advanced Debian 13 runtime packages from the same rpt_advanced
 release into an otherwise empty directory, then install the package set with
-APT resolving the separately released shared-library dependencies:
+APT resolving the separately released shared-library dependencies. Include the
+matching `librptadv-resolver-adapter1` runtime package; the standalone composition
+requires it even when configured peers use numeric addresses:
 
 ```sh
 sudo apt-get install ./*.deb
@@ -42,7 +44,10 @@ Changes to the standalone configuration are applied by restarting the service:
 sudo systemctl restart rpt-advanced
 ```
 
-The process handles SIGHUP as a configuration reload request. The service runs
+The process handles SIGHUP as a configuration reload request and revalidates its
+loaded providers. Missing or incompatible required providers prevent startup;
+a failed reload keeps the active configuration. Replacing provider code,
+including the resolver, requires a service restart. The service runs
 as `rpt-advanced`, with access to CM119 USB control and the audio group; do not
 run it as root. Install Piper separately if speech announcements are wanted and
 configure a local model readable by the service account. File playback uses the

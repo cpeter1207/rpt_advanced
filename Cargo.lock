@@ -616,6 +616,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rptadv-resolver-adapter"
+version = "0.1.0-alpha8"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "rptadv-speech-adapter"
 version = "0.1.0-alpha8"
 dependencies = [

@@ -607,7 +607,8 @@ mod tests {
             Vec::new(),
             None,
             crate::secrets::SecretsFile::parse("").unwrap(),
-        );
+        )
+        .unwrap();
         let runtime = unsafe {
             crate::runtime::ProductRuntime::start(
                 descriptor,
