@@ -1,78 +1,73 @@
-# Configuration model
+# Configure rpt_advanced
 
-Configuration reading, storage, whole-file validation, node/media-set discovery, and
-settings resolution are implemented. The owner confirmed the current audio fixes
-on test node 524950; broader peer interoperability and hardware acceptance remain
-to be verified. These are the supported settings.
+rpt_advanced runs a radio node, links it to other nodes, and plays IDs,
+announcements, and courtesy tones over the local transmitter. It can use the
+standalone radio service or the Asterisk adapter. This guide lists the settings
+for both. Use only the sections that apply to your station.
 
 The installed example is `share/doc/rpt-advanced/examples/rpt_advanced.conf`
 under the installation prefix. Its example node is disabled and its ID text is
 empty. Installation does not replace an active configuration or activate a node.
 
-Semicolons introduce comments. Blank lines are ignored. Options require a
-preceding section. Whitespace around names and values is stripped; a final
-newline is optional. Embedded null bytes and malformed section/option lines
-are errors. The reader reports the physical line number and imposes no fixed
-line-length limit. File read errors reject loading rather than accepting a
-partial file.
+Put each `name = value` line under a section heading. Start comments with `;`.
+Blank lines and spaces around names and values are allowed. Check the file with
+`rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf` before
+restarting the standalone service. A bad line or unreadable file stops loading.
+Unknown settings and invalid values give warnings; invalid values use the
+inherited default when a safe configuration is possible.
 
-Flat `[general]` settings provide node defaults. A named node section such as
-`[524950]` overrides them. Identifier resolution starts with `[identifier]`,
-then `[identifier 524950]`; announcement resolution likewise starts with
-`[announcement]`, then `[announcement 524950]`; courtesy resolution starts
-with `[courtesy]`, then `[courtesy 524950]`. The `speech_*` and `morse_*`
-names are valid in either kind of media-default section and in its named set,
-except `speech_level_db` and `morse_level_db`: courtesy uses its single
-`level_db` control for every media type.
-After those media-default sections, `[speech]` then `[speech 524950]` apply
-their matching speech values, and `[morse]` then `[morse 524950]` apply their
-matching Morse values. Finally, `[identifier 524950 welcome]` or
-`[announcement 524950 release]` overrides every matching setting for that one
-set. File order does not change this scope precedence; later occurrences of
-the same option in one section win. Empty media paths or text clear inherited
-values.
+`[general]` sets defaults for all nodes. `[524950]` changes one node.
+`[identifier]`, `[announcement]`, `[courtesy]`, `[speech]`, and `[morse]` set
+media defaults for all nodes. Add the node name, such as `[speech 524950]`, to
+change one node. Add a set name, such as `[identifier 524950 welcome]`, to set
+one ID. A set's values take priority over defaults, regardless of file order.
+An empty media path or text clears an inherited value. Courtesy uses one
+`level_db` for all media; other media sections can use `speech_*` and
+`morse_*` settings.
 
-Named templates and macros use `[template label]` and `[macro label]` globally;
-`[template node label]` and `[macro node label]` override same-label global
-settings for that node. Zero-time events are node-scoped: `[event node label]`.
-Configuration-owned permanent links and replacement windows are also
-node-scoped: `[permanent node label]` and `[schedule node label]`.
+Named templates and macros use `[template label]` and `[macro label]` for all
+nodes. Add a node name before the label to change one node's copy. Events,
+permanent links, and replacement schedules always name a node:
+`[event node label]`, `[permanent node label]`, or `[schedule node label]`.
 Template, macro, event, permanent-link, and schedule labels are case-sensitive
 single tokens and cannot contain whitespace or square brackets.
 
-Node names are case-sensitive, limited to 63 bytes, and cannot contain whitespace or square
-brackets. Media-set names are case-sensitive and cannot contain whitespace or square brackets.
-The same 63-byte limit applies to decimal remote-node identities, so configured names always fit
-the direct-peer and scheduler transports without truncation. Scoped headers use
+Node names are case-sensitive, limited to 63 bytes, and cannot contain spaces or square
+brackets. Media-set names are case-sensitive and cannot contain spaces or square brackets.
+Remote node numbers are decimal and limited to 63 digits. Scoped headers use
 one space between components. `general`,
 `identifier`, `announcement`, `courtesy`, `speech`, `morse`, `time`, `template`,
 `macro`, `event`, `permanent`, and `schedule` are reserved section names. Scoped identifier,
 announcement, courtesy, speech, Morse, time, template, macro, event, permanent, and schedule
 headers must name an existing node where their syntax includes a node name, which may be
 declared later in the file.
-Repeated ordinary section headers merge options without creating duplicate nodes or media
-sets. A repeated named template, macro, event, permanent-link, or schedule header is instead
-rejected as a duplicate definition. Unknown options are ignored with a warning; an invalid
-recognized value warns and uses its inherited default. A configuration is rejected only when
-safe deterministic settings cannot be constructed. There is no fixed limit on the number of nodes, identifiers,
-announcements, courtesy tones, templates, macros, events, permanent links, or schedules.
+Repeated ordinary section headings combine their settings. Repeating a named
+template, macro, event, permanent link, or schedule heading is an error. In the
+same section, the last value for a setting wins. An empty media path or text
+clears an inherited value.
 
 ## Node settings
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `node_enabled` | yes | Start the configured node. |
-| `language` | `en-US` | Select built-in RF wording from a Fluent locale catalog. `[general]` supplies the shared default; a node section may override it. |
+| `language` | `en-US` | Language for built-in RF messages. Set it here for all nodes or in one node section. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
-| `dtmf_muting` | yes | Silence qualified local in-band DTMF tone audio before command completion. Qualification adds no lookback, so the initial tone prefix can pass. DTMF command decoding remains active when disabled. |
-| `squelch_delay_ms` | 0 | Delay local receive playout in its PCM ring by this many milliseconds. Immediate receiver unkey cancels the buffered tail; rapid rekey cannot replay the previous burst. Inherits from `[general]` to each node; zero adds no delay. |
-| `status_snapshot_interval_ms` | 50 | Publish RX/TX audio meters and local receive-ring statistics at this interval. Must be a positive integer; each worker reports on its first callback at or after the sample-count deadline. Set in `[general]` and override in a node section. |
+| `dtmf_muting` | yes | Mute local DTMF command tones on repeated audio. The start of a tone may still be heard. Commands still work when this is `no`. |
+| `parrot_enabled` | no | Record a received burst and play it back after unkey. Live `*804` and `*805` changes last until reload. |
+| `dtmf_admin_unlock_hash` | empty | Argon2id hash of the code used after `*800` to unlock admin DTMF commands. Both admin hashes must be set to enable them. |
+| `dtmf_admin_lock_hash` | empty | Argon2id hash of the code used after `*801` to lock admin DTMF commands. Do not put a plain code here. |
+| `dtmf_admin_timeout_ms` | 300000 | Lock admin DTMF after this many milliseconds without a successful admin command; must be positive. |
+| `squelch_delay_ms` | 0 | Delay local receive audio by this many milliseconds. Unkey drops the buffered tail. Zero adds no delay. |
+| `status_snapshot_interval_ms` | 50 | Update RX/TX meters and receive-buffer statistics this often, in milliseconds; must be positive. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
-| `transmit_timeout_ms` | 180000 | Maximum keyed interval in milliseconds without an individual local-receiver or direct-link unkey. Each such unkey restarts the watchdog even if hang time or another source keeps PTT asserted. Zero disables it. A source that never unkeys expires; on expiry, PTT releases immediately and remains blocked until the active receiver/link source clears and `timeout_lockout_ms` has elapsed. |
+| `ctcss_encode_on_input` | no | Send transmit CTCSS only during local or linked receive activity and command replies, plus `ctcss_hang_ms`. Other IDs and telemetry do not turn it on. |
+| `ctcss_hang_ms` | 0 | Keep transmit CTCSS on this many milliseconds after qualifying activity ends. It cannot exceed `transmit_hang_ms`. |
+| `transmit_timeout_ms` | 180000 | Maximum time PTT may stay keyed without a local receiver or direct link unkey, in milliseconds. Each unkey restarts the timer. On timeout, PTT releases until that source unkeys and the lockout ends. Zero disables the timeout. |
 | `timeout_lockout_ms` | 30000 | Post-watchdog lockout in milliseconds. Zero permits recovery as soon as the timed-out source unkeys. |
 | `kerchunk_max_ms` | 500 | Maximum local-receiver or individual-link transmission duration treated as a kerchunk. A kerchunk does not queue its courtesy tone or every-release announcement. Zero disables kerchunk control. |
-| `telemetry_duck_db` | -20 | Smooth receive-active attenuation for sound-file, speech, Morse, and generated-tone identifiers, announcements, courtesy tones, and RF telemetry, from -60 through 0 dB. Local or linked receive selects the ducked level; release is smooth after it ends. |
-| `courtesy_delay_ms` | 250 | Delay after a receiver or link source unkeys before its assigned courtesy tone starts. Each source retains its own delay when several tones are queued. A rekey by that same source before the delay ends cancels only that pending tone. PTT remains asserted from unkey through the queued tone's completion. |
+| `telemetry_duck_db` | -20 | Lower ID, announcement, courtesy, and RF message audio during local or linked receive; -60 to 0 dB. Zero leaves the level unchanged. |
+| `courtesy_delay_ms` | 250 | Wait this many milliseconds after unkey before a courtesy tone. A source that rekeys during its wait cancels its tone. PTT stays keyed until the tone ends. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
 | `callsign` | empty | Optional local station callsign, up to 63 bytes. `${callsign}` in a scheduled message renders this exact value; an empty value renders nothing. |
 | `link_allow_nodes` | empty | Incoming node allowlist; comma-separated decimal node numbers. Empty places no allowlist restriction on verified nodes or their IAX DTMF control events. |
@@ -80,10 +75,16 @@ announcements, courtesy tones, templates, macros, events, permanent links, or sc
 | `link_static_directory_file` | empty | Optional local-priority Asterisk-format node directory. `[extnodes]` records use `number=radio@host:port/number,numeric-address`; both `number` fields must be the requested node. A present static record is authoritative. |
 | `link_directory_file` | empty | Optional ASL external `[extnodes]` directory used by `link_lookup_method`. Its records use the same syntax and identity check as the static directory. |
 | `link_lookup_method` | `both` | Selects sources after the static directory: `dns`, `file`, or `both`. `both` checks ASL DNS, then the external directory. |
+| `statpost_url` | empty | HTTP or HTTPS URL for node status posts. Empty turns status posting off. Do not put a username or password in the URL. |
+| `statpost_time` | 60 | Seconds between status posts; 30–600. |
+| `iax_registration_url` | `https://register.allstarlink.org/` | HTTPS registration URL for ASL3. Empty turns registration off. Do not put a username or password in the URL. |
+| `iax_registration_interval_s` | 60 | Seconds between IAX registration requests; 30–600. |
+| `iax_local_port` | 4569 | Local IAX UDP port; 1–65535. |
 
-Identifiers, announcements, courtesy tones, and command/status telemetry play on
-the local RF transmitter only. Linked peers receive eligible program audio;
-transmitter hang time does not generate peer PCM.
+Identifiers, announcements, and courtesy tones play on local RF. A command or
+status reply goes to the station that sent the command: local RF for a local
+command, or the linked peer for a peer command. Linked peers also receive
+eligible program audio. Transmit hang time sends no extra peer audio.
 
 Link access and directory settings are validated and inherit from `[general]` to each node. They
 apply to incoming calls and to selecting a direct peer for remote-command mode; explicit denial
@@ -95,42 +96,64 @@ node identities, not prefixes. Identity verification is separate: listing a
 node never authenticates it. A local static record is checked first. If it is
 absent, `link_lookup_method` selects DNS, the external file, or DNS followed by
 the external file. A present malformed record or a resolved source-address
-mismatch rejects the request without trying a later source. Incoming links enter through the
-`RptAdvanced(node)` dialplan application; the IAX registration and dialplan
-remain Asterisk configuration.
+mismatch rejects the request without trying a later source. With the Asterisk
+adapter, incoming links use the `RptAdvanced(node)` dialplan application.
+Configure its IAX registration and dialplan in Asterisk.
 
-The local RadioPlusAdvanced connection always uses 48 kHz signed-linear PCM.
-Retired `sample_rate_hz` and `codec` entries are ignored with a warning on load
-or reload, so their normal inherited defaults remain effective. For an outbound
-IAX call, rpt_advanced discovers every concrete registered format at or below
-48 kHz that Asterisk can translate bidirectionally to matching-rate
-signed-linear PCM. It attempts those candidates one at a time from the highest
-rate downward within one 20-second dialing budget. This is necessary because
-Asterisk's public IAX request API reduces a multi-audio capability to one format
-before IAX sees it. Each connected peer uses its negotiated PCM rate, and the
-link adapter resamples between it and the local 48 kHz radio rate. A peer can
-therefore negotiate a rate at or below 48 kHz without requiring
-`codec_resample` for the peer-to-radio conversion.
+The local radio uses 48 kHz audio. With the Asterisk adapter, an outbound IAX
+link tries supported codecs from the highest rate down, within a 20-second
+dialing limit; a peer can use a rate at or below 48 kHz. The standalone service
+uses 8 kHz ULAW for IAX links.
+
+## Standalone IAX passwords
+
+For IAX registration, put passwords in
+`/etc/rpt_advanced/iax-secrets.conf`, separate from the main configuration.
+In `[general]`, `iax_secret` sets a shared password; a section such as
+`[524950]` sets that node's password. Use the password assigned to the node.
+For example, replace the placeholder before saving:
+
+```ini
+[524950]
+iax_secret = <your node password>
+```
+
+Create or edit this file with `sudoedit`, then give ownership to the
+`rpt-advanced` service user and set mode `0600`:
+
+```sh
+sudoedit /etc/rpt_advanced/iax-secrets.conf
+sudo chown rpt-advanced:rpt-advanced /etc/rpt_advanced/iax-secrets.conf
+sudo chmod 0600 /etc/rpt_advanced/iax-secrets.conf
+stat -c '%U %a %n' /etc/rpt_advanced/iax-secrets.conf
+sudo -u rpt-advanced rpt-advanced --check-secrets-file /etc/rpt_advanced/iax-secrets.conf
+```
+
+It must be a regular file; links to another file are rejected. The service
+reads it at start and again for registration after a configuration reload. The
+default file may be absent when no IAX password is needed.
 
 ## Standalone radio settings
 
 The standalone service owns local audio-device selection and CM119 signaling.
 Flat `[radio]` values are shared defaults; `[radio <node>]` overrides them for
 one node. These settings are independent of `radio_channel`, which is used only
-by the optional Asterisk adapter. The native audio rate is 48 kHz. Processing
+by the optional Asterisk adapter. The audio rate is 48 kHz. Processing
 graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `device_selection` | `exact` | Select `exact` for an identified device, or `automatic_lowest_alsa_card` to choose the lowest ALSA card. Automatic selection is intended for a host with one radio. |
-| `device_identifier` | empty | PortAudio device name or stable USB/ALSA identifier. Used with `usb_serial` when selecting an exact device. |
-| `usb_serial` | empty | Optional exact CM119 USB serial-number match. |
+| `device_identifier` | empty | PortAudio device name or stable USB/ALSA identifier, up to 255 bytes. Used with `usb_serial` when selecting an exact device. |
+| `usb_serial` | empty | Optional exact CM119 USB serial number, up to 255 bytes. |
 | `input_device_channels` | `1` | Physical capture channel count; accepted values are 1 or 2. |
 | `output_device_channels` | `1` | Physical playback channel count; accepted values are 1 or 2. |
 | `input_extra_buffer_ms` | `0` | Additional capture buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
 | `output_extra_buffer_ms` | `0` | Additional playback buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
-| `receive_graph` | `anull` | FFmpeg chain applied to mono 48 kHz receiver audio. |
-| `transmit_graph` | `anull` | FFmpeg chain applied to mono 48 kHz transmitter audio. |
+| `receive_input_gain_db` | `0` | Receiver input gain, from -30 to +30 dB. |
+| `receive_output_gain_db` | `0` | Receiver output gain, from -30 to +30 dB. |
+| `receive_graph` | `anull` | FFmpeg chain applied to mono 48 kHz receiver audio; 1–4096 bytes. |
+| `transmit_graph` | `anull` | FFmpeg chain applied to mono 48 kHz transmitter audio; 1–4096 bytes. |
 | `cm119_profile` | `dudeusb` | CM119 wiring profile: `dudeusb`, `sphusb`, `nhrc`, or `custom`. |
 | `cm119_ptt_inverted` | `no` | Invert the CM119 PTT output polarity. |
 | `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
@@ -161,6 +184,8 @@ Transmit signaling options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `transmit_output_a_assignment` | `voice` | Audio sent to radio output A: `disabled`, `voice`, `tone`, `composite`, or `auxiliary_voice`. |
+| `transmit_output_b_assignment` | `tone` | Audio sent to radio output B; same choices as output A. |
 | `transmit_signaling` | `carrier` | Transmit carrier only (`carrier`), CTCSS (`ctcss`), or DCS (`dcs`). |
 | `transmit_ctcss_tones_hz` | `100.0` | Comma-separated CTCSS tones permitted for transmission. |
 | `transmit_ctcss_default_hz` | `100.0` | CTCSS tone used when no selected mapping overrides it. |
@@ -215,37 +240,14 @@ morse_text = N
 tone_sequence = 800Hz / 80ms
 ```
 
-There may be one named `input = receiver` tone and one generic
-`input = link` tone per local node. The generic link tone has no
-`remote_node` and is the fallback for every linked transmission that has no
-playable matching override. A named `input = link` tone may set `remote_node` to
-the exact decimal identity of a direct linked peer. It overrides the generic
-link tone for that peer whether the link is permanent or temporary. While a
-direct peer remains receive-active, rpt_advanced sends the canonical
-legacy-compatible `K? * requester 0 0` keyed-source query at the receive edge
-and then once per second. rpt_advanced peers strictly parse canonical `K?` and
-`K` text in their reader/control plane. They queue their own key-state reply to
-the ingress peer, forward a query only to other direct peers, and relay a valid
-reply toward its named requester without returning it to the ingress peer. A
-direct peer's own reply is not downstream evidence; the direct peer remains the
-fallback. The first valid keyed downstream `K` reply delivered for each
-successfully sent query can select that downstream node's `remote_node`
-override. During a double, reader arrival order selects the first responder.
-Across periodic queries, the latest accepted first response is retained until
-the direct peer unkeys. A missing, malformed, unsupported, nonforwarding, or
-failed later query does not erase an already accepted result from that receive
-epoch. This provides a useful best-effort choice without waiting for or
-delaying the courtesy tone. `K` replies have no query serial, so a delayed valid
-reply may be attributed to a newer query and remains advisory evidence only.
-The receive falling edge cancels any unsent locally originated query and
-rejects a late reply before courtesy selection. If no downstream result is
-accepted during the receive epoch, selection falls back to the direct peer and
-then the generic link tone. `L ` topology advertisements never select a
-courtesy override. An override without playable media falls back to the generic
-link tone. Keyed-source replies do not prove the origin of individual PCM
-frames.
-`remote_node` is invalid for receiver input. If no assignment matches a
-receiver or link source, the result is silence.
+Use one `input = receiver` tone and one generic `input = link` tone per node.
+The generic link tone has no `remote_node`. For a peer's own tone, add another
+link tone with that peer's decimal number in `remote_node`. A linked network may
+also report which downstream node is keyed. The first valid report for each
+query selects that node's tone; a later valid result can replace it until the
+direct peer unkeys. If no downstream tone matches, the direct peer tone plays;
+if that is unavailable, the generic link tone plays. A missing playable tone is
+silent. `remote_node` cannot be used with `input = receiver`.
 
 When a source rekeys before its courtesy delay expires, only that source's
 pending courtesy tone is cancelled: a local-receiver rekey does not cancel a
@@ -256,7 +258,7 @@ telemetry ducking behavior.
 | Option | Applies to | Default | Meaning |
 | --- | --- | --- | --- |
 | `input` | Named tone | required | Source assignment: `receiver` or `link`. |
-| `remote_node` | Named link tone | empty | Exact direct-peer identity, or the latest accepted first valid keyed downstream identity from the periodic canonical `K?`/`K` exchange, for an override. The direct peer's own reply is ignored; reader arrival order selects the first responder during a double. This advisory result does not prove the origin of individual PCM frames. Omit it for the generic link fallback. |
+| `remote_node` | Named link tone | empty | Decimal node number for a peer-specific courtesy tone. This can match a direct peer or a reported keyed downstream node. Omit it for the generic link tone. |
 | `sound_file` | Defaults and named tone | empty | Courtesy sound-file path. An absent or unusable file falls through to speech. |
 | `speech_text` | Defaults and named tone | empty | Courtesy speech text. Empty or unavailable speech falls through to the tone sequence. |
 | `tone_sequence` | Defaults and named tone | empty | Generated-tone sequence used after file and speech fail or are absent. An absent sequence falls through to Morse. |
@@ -265,13 +267,9 @@ telemetry ducking behavior.
 | `speech_model`, `speech_speed_percent` | Defaults and named tone | inherited | Piper model and speed used by courtesy speech. |
 | `morse_frequency_hz`, `morse_speed_wpm` | Defaults and named tone | inherited | Frequency and speed used by the terminal Morse fallback. |
 
-Courtesy media is tried in this order: sound file, speech, generated
-`tone_sequence`, then Morse. Each unavailable or unusable source falls through
-to the next one. A configured tone sequence is syntax-checked while its enabled
-node reloads even if a file or speech source is usable. Tone sequences are
-configured only in this file: they require no controller-specific DTMF
-programming. The module pre-renders them during reload, so parsing and allocation
-never occur in the real-time audio path.
+Courtesy media plays in this order: sound file, speech, `tone_sequence`, then
+Morse. If one source is missing or cannot play, the next is tried. The tone
+sequence is checked when an enabled node reloads.
 
 `tone_sequence` is a comma-separated list of segments:
 
@@ -292,22 +290,14 @@ clearer in configuration files. For example:
 tone_sequence = 500Hz / 80ms, silence / 40ms, 1000Hz+1500Hz / 120ms / -20dB
 ```
 
-Every non-silent frequency must be below the selected playback rate's Nyquist
-limit. A sequence may contain up to 256 segments and 5,760,000 rendered PCM
-samples in total (120 seconds at 48 kHz). Two-frequency segments divide their
-configured level between the two components to avoid intentional clipping.
-Oscillator phase is continuous between adjacent non-silent segments.
+Each non-silent frequency must be below half the playback rate. A sequence may
+have up to 256 segments and 120 seconds of audio at 48 kHz.
 
-This covers the familiar controller patterns without their controller-specific
-programming syntax: write a single beep as one segment, a two-tone as one
-dual-frequency segment, a delay as `silence`, and longer source-identifying
-patterns as additional comma-separated segments. A leading `silence` segment
-adds a per-tone delay after the shared `courtesy_delay_ms`; later silent segments
-are inter-segment delays. There is no fixed four-segment controller limit.
+Use one segment for a beep, two frequencies for a dual tone, and `silence` for a
+pause. A leading silence adds delay after `courtesy_delay_ms`.
 
-Queued source events play in unkey order, with each retaining its own delay. Up
-to 16 near-simultaneous source unkeys are retained; an event beyond that fixed
-real-time queue is ignored rather than allocating in the radio worker.
+Courtesy tones play in unkey order. Up to 16 near-simultaneous unkeys can wait;
+any more are skipped.
 
 ## Link command mappings
 
@@ -330,15 +320,19 @@ three-second interdigit timeout. Prefixes contain up to 63 DTMF digits from
 | `link_command_transceive` | `3` | Connect in transceive mode. |
 | `link_command_remote` | `4` | Enter direct-peer remote-command mode. `#` exits this mode locally. |
 | `link_command_status` | `70` | Report direct-link status. |
-| `link_command_disconnect_all` | `806` | Disconnect all current links, retain them for reconnect-all, and hold configuration-owned routes until reconnect-all. Manual direct links remain permitted while the hold is active. |
+| `link_command_disconnect_all` | `806` | Disconnect and pause permanent links, including configured links. Temporary links stay connected. New manual links remain allowed. |
 | `link_command_last_keyed` | `72` | Report the most recently active direct linked node. |
 | `link_command_local_monitor` | `75` | Connect in local-monitor mode: receive locally without forwarding the peer to other links. |
-| `link_command_disconnect_permanent` | `811` | Disconnect a manually created permanent link and cancel its recovery. A configuration-owned route is restored by its configured policy; use `*806` to hold all configuration-owned routes and `*816` to resume them. |
+| `link_command_disconnect_permanent` | `811` | Disconnect a manually created permanent link and stop its retries. Configured links follow their schedule; use `*806` to pause them. |
 | `link_command_permanent_monitor` | `812` | Make a permanent monitor link. |
 | `link_command_permanent_transceive` | `813` | Make a permanent transceive link. |
-| `link_command_full_status` | `73` | Queue direct-link RF status and, when that reply is queued, log the best-effort topology cache. |
-| `link_command_reconnect_all` | `816` | Re-evaluate the current local-time configured-link policy, then restore links saved by disconnect-all. An active replacement window remains selected; its suppressed permanent peer is withdrawn before retries resume. |
+| `link_command_full_status` | `73` | Reply with link status and log the known network routes. The route list may be incomplete. |
+| `link_command_reconnect_all` | `816` | Resume paused permanent links under the current schedule. Temporary links are unchanged. |
 | `link_command_permanent_local_monitor` | `818` | Make a permanent local-monitor link. |
+| `link_command_admin_unlock` | `800` | Enter the configured admin unlock code, then `#`. Requires both admin code hashes. |
+| `link_command_admin_lock` | `801` | Enter the configured admin lock code, then `#`. Locks admin commands at once. |
+| `link_command_parrot_enable` | `804` | Turn parrot playback on until reload. Requires admin unlock. |
+| `link_command_parrot_disable` | `805` | Turn parrot playback off until reload. Requires admin unlock. |
 
 Destination-taking operations accept node number `0` as the last node used by a
 previous linking operation. Remote-command mode may select only an attached peer
@@ -352,12 +346,9 @@ current per-node allow/deny policy. An explicitly outbound audio link may
 remain connected after a policy change, but its rejected peer DTMF is ignored.
 DTMF starts and malformed end events are ignored.
 
-Local in-band DTMF is decoded in the radio worker. With `dtmf_muting = yes`, a
-frame containing a completed digit is silenced before it reaches the local
-controller or link router. Each node inherits this setting from `[general]` and
-can override it in its own section. This does not apply to IAX DTMF control
-events, which contain no program-audio frame. Local receiver unkey terminates
-an active DTMF command exactly as `#` does.
+With `dtmf_muting = yes`, local DTMF command audio is muted on repeat and link
+audio. IAX DTMF control events have no audio to mute. Local receiver unkey ends
+a command like `#`.
 
 `*722` announces the local system time. It uses speech with the selected node's
 `[speech]` defaults and falls back to Morse with its `[morse]` defaults if speech
@@ -391,14 +382,9 @@ text = ${greeting}. The ${callsign} net starts at ${time}.
 text = ${greeting}. The KG0BP net starts at ${time}.
 ```
 
-Template text is strict. It accepts only `${day_of_week}`, `${date}`, `${time}`,
-`${greeting}`, `${link_status}`, `${node}`, and `${callsign}`. `${callsign}`
-uses the resolved node `callsign` setting and may render empty. Unknown,
-malformed, or unterminated substitutions reject the complete configuration
-reload; text is not interpreted as a shell command. A rendered scheduled message
-is limited to 127 bytes. Validation proves the worst case using the longest
-weekday, date, clock, greeting, direct-peer status, node, and callsign values;
-it rejects text that could exceed the limit rather than truncating it at runtime.
+Use only the substitutions below. Unknown or broken substitutions stop a reload.
+The longest possible rendered message must fit 127 bytes; a longer one is
+rejected rather than cut short.
 
 | Substitution | Rendered value |
 | --- | --- |
@@ -424,7 +410,7 @@ nonpermanent transceive direct link. `disconnect` detaches the active direct
 peer named by `target_node`. `disconnect_all` detaches every current temporary
 and permanent direct peer and pauses their retained retry records;
 `reconnect_all` resumes every retained retry.
-Macros never run shell commands or launch processes.
+Macros run only these link actions; they do not run shell commands.
 
 ```ini
 [macro connect_news]
@@ -467,32 +453,15 @@ macro = clear_links
 | `weekly weekday HH:MM` | Run on the named full weekday (`Sunday` through `Saturday`) at that local time. Weekday spelling is case-insensitive. |
 | `once YYYY-MM-DD HH:MM` | Run once on one valid local Gregorian calendar date and time. |
 
-Seconds, time zones, ranges, aliases, and cron expressions are intentionally
-invalid. The host local timezone supplies all schedule civil time. A repeated
-local minute during daylight-saving fallback runs once, not twice; a skipped
-spring-forward minute does not run. Events due in the same minute run in
-complete configuration-section order across all nodes. A forward wall-clock
-step skips missed events. After a backward step, events remain suppressed until
-the clock reaches new civil time; no event is caught up or replayed. A `once`
-event is once per running scheduler instance, not once across an Asterisk
-restart.
+Use the host's local time. Seconds, time zones, ranges, aliases, and cron
+expressions are invalid. A repeated minute at a daylight-saving change runs
+once; a skipped minute does not run. Missed events are not replayed. A `once`
+event can run again if the controller restarts during its scheduled minute.
 
-The scheduler submits one FIFO control task each second; the runtime
-calendar-minute de-duplicates event occurrences while allowing a configured
-link quiet-time deadline to expire promptly. Their messages enter the serialized
-telemetry path. When an event has both a message/template and a macro, the
-message is queued before the macro executes. The macro does not wait for
-on-air playback: it runs after the telemetry queue accepts the message. If that
-queue is full, both the message and macro remain pending until a later
-control-plane tick can queue the message. A macro-only event has no
-telemetry-queue dependency and runs when it is selected. A successful
-configuration reload reevaluates the current local time. It can cancel queued
-or in-progress scheduled telemetry; that telemetry is not replayed. An event
-keeps its completed state across reload when its node, section label, and `at`
-trigger are unchanged, even if its text or macro changes. Renaming the event
-makes it a new eligible event. Macro dispatch, local-time matching, template
-rendering, and speech preparation are control-plane work, never audio-callback
-work.
+When an event has both a message and a macro, it queues the message first, then
+runs the macro without waiting for playback. Reload may cancel a queued or
+playing scheduled message. An event with the same node, label, and `at` time
+keeps its completed state across reload; renaming it makes a new event.
 
 ## Configuration-owned permanent links and replacement windows
 
@@ -532,6 +501,7 @@ later reload.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `remote_node` | required | Decimal identity of the replacement direct peer. It must differ from the local node, the replaced permanent peer, and every other configured permanent or schedule route for that node. |
+| `group_name` | empty | Optional display name for this replacement route, up to 63 bytes. |
 | `replace_permanent` | required | Label of the same-node configured permanent link to suspend while this window is requested. |
 | `days` | empty | Comma-separated full weekday names or inclusive ranges, such as `Monday-Friday` or `Tuesday,Thursday`. Matching is case-insensitive. Empty selects every calendar day unless `dates` is set. |
 | `dates` | empty | Up to 64 comma-separated local Gregorian dates in exact `YYYY-MM-DD` form. It cannot be combined with `days`. |
@@ -542,37 +512,23 @@ later reload.
 | `warning_before_end_ms` | absent | Optional comma-separated positive millisecond lead times before the expected disconnect. For inactivity-based disconnects, each warning is based on the current expected inactivity deadline. |
 | `warning_message_id` | absent | Fluent catalog message ID for warnings. Required with any valid warning lead; currently `scheduled-link-change`. Warnings remain disabled when omitted. |
 
-Warnings use the localized message selected by `warning_message_id`, with
-`${time_remaining}` formatted from the remaining time. Due warnings are skipped
-while the local receiver or any linked peer is active. A qualifying activity
-reset starts a new inactivity period, making that period's warnings eligible
-again. A warning at or after its related start/disconnect deadline is skipped.
-Warnings enter the same serialized telemetry queue as other status messages;
-they do not interrupt active audio.
+Warnings use the selected `warning_message_id` and include time remaining.
+Active local or linked receive skips a due warning. Warnings do not interrupt
+active audio.
 
 When a window becomes active, rpt_advanced detaches its named permanent peer
 before attaching the replacement. When the window ends, it detaches the
 replacement before restoring the named permanent peer. With nonzero
 `end_inactivity_ms`, the schedule no longer requires the replacement at
 `end_time`, but it remains connected until the quiet interval expires.
-Local-receiver and linked-peer activity can defer only that handoff; IDs,
-telemetry, and other transmit-only activity do not. If no qualifying receive
-activity was observed, the replacement restores at the window end. On a cold
-start during the configured quiet interval immediately after a selected window,
-the replacement is retained for only the interval still remaining; the first
-qualifying receive activity supersedes that estimate. A quiet interval crossing
-midnight after a cold start is currently not reconstructed; it is a documented
-limitation pending the preceding-window calculation selected by ADR 0017.
+Local or linked receive activity can defer that handoff; IDs and other transmit
+audio cannot. On startup during a quiet interval after a window, only the
+remaining quiet time is kept. A quiet interval that crosses midnight is not
+restored after startup.
 
-Current membership is re-evaluated from host local time at startup and on
-successful reload; it follows daylight-saving and manual/NTP clock changes
-without catch-up operations. An unchanged issued route is not redialed solely
-because of reload. `*806` holds automatic configuration attachment and retry
-across reload, although a replacement configuration still withdraws an issued
-route that its policy now suppresses. `*816` re-evaluates current policy before
-any retained retry resumes. ADR 0017 records the required continuous
-route-ownership and final retry-policy gate for future scheduler and hub
-hardening.
+Startup and reload check the host's local time to choose active windows. Reload
+does not redial an unchanged link. `*806` pauses configured link attachment and
+retry across reload; `*816` resumes links under the current schedule.
 
 Multiple replacement windows are accepted, including windows that overlap.
 They form a union: every matching or deferred replacement is requested and its
@@ -607,9 +563,11 @@ remote_node = 506315
 ## Localized built-in messages
 
 `[general] language` selects the shared message locale and a node's `language`
-overrides it. The package ships English at
-`/usr/share/asterisk/rpt_advanced/messages/en-US.ftl`; administrator catalogs
-may be installed under `/etc/asterisk/rpt_advanced/messages/<locale>.ftl`.
+overrides it. Standalone ships English at
+`/usr/share/rpt-advanced/messages/en-US.ftl`. Put local message files in
+`/etc/rpt_advanced/messages/<locale>.ftl`. For Asterisk, the paths are
+`/usr/share/asterisk/rpt_advanced/messages/en-US.ftl` and
+`/etc/asterisk/rpt_advanced/messages/<locale>.ftl`.
 An absent translation falls back to English independently for text, speech,
 and Morse. An invalid localized entry also falls back for that entry. Invalid
 required English content rejects a candidate reload, preserving the active
@@ -618,22 +576,19 @@ bundle, not embedded in source or copied into each node section.
 
 ## Link lifetime, recovery, and duplex
 
-Direct links created at runtime by DTMF, a CLI operation, or a macro exist only
-in the running Asterisk process. A configuration-owned `[permanent node label]`
-entry instead recreates its desired link from the configuration at module
-startup and after a successful reload; its live transport is still runtime
-state. A permanent link whose initial dial or attachment fails, or whose
-established transport fails unexpectedly, retries immediately, then after one
-second with exponential backoff to a five-minute maximum.
+Direct links created by DTMF, a CLI command, or a macro last only while the
+service or Asterisk module runs. A `[permanent node label]` entry restores its
+link at startup and after reload. If a permanent link fails, it retries at
+once, then after one second, with longer waits up to five minutes.
 `link_command_disconnect_permanent` cancels the retained retry of a manually
 created permanent link. Configuration-owned routes remain controlled by their
 current policy and are restored on the next scheduler reconciliation; use
 `link_command_disconnect_all` and `link_command_reconnect_all` to hold and
 resume those routes together.
-`link_command_disconnect_all` disconnects and retains both temporary and
-permanent links for `link_command_reconnect_all`; only permanent links retry
-automatically. Reconnect-all makes retained links eligible to dial again without
-changing their original routing mode.
+DTMF `*806` disconnects and pauses permanent links only. DTMF `*816` resumes
+their retries under the current schedule. Temporary links stay connected.
+By contrast, a scheduled macro with `action = disconnect_all` disconnects all
+links and saves them for `action = reconnect_all`.
 
 With `full_duplex = yes`, local receive and transmit may operate at the same
 time. With `full_duplex = no`, local receive is not repeated and transmission
@@ -643,20 +598,16 @@ that become due during local reception wait until reception ends.
 
 ## Link status
 
-The status, last-keyed, and full-status command mappings in the table above
-queue concise spoken RF replies. They use the selected node's resolved
-`[speech]` settings and fall back to the selected node's `[morse]` settings
-only when speech cannot be prepared or reception interrupts it. They do not
-key or begin playback until 250 ms after the local receiver unkeys, preempt a
-scheduled identifier without satisfying it, and wait for reception to end when
-half duplex prevents transmission. Speech preparation and topology work remain
-outside the radio callback.
+Status, last-keyed, and full-status replies use the node's speech settings and
+Morse fallback. A local command replies on local RF. A command from a linked
+peer replies only to that peer. Local replies wait 250 ms after receiver unkey
+and wait longer if half duplex prevents transmission.
 
 Link lifecycle telemetry names only the remote endpoint when this node is a
 link endpoint, such as `123 CONNECTED`. For an event between two other nodes,
 it says `node 1 CONNECTED TO node 2` or `node 1 DISCONNECTED FROM node 2`.
 
-When its RF status reply is queued, full status writes a best-effort
+When its status reply is queued, full status writes a best-effort
 app_rpt-style route list to the Asterisk operator log. The administrative
 commands `rpt_advanced link status <node>`
 and `rpt link status <node>` print every directly attached or retained peer with
@@ -673,18 +624,9 @@ mapping and authorization rules and treats a missing trailing `#` as receiver
 unkey, so `rpt_advanced command 524950 *722` requests the configured time
 announcement.
 
-Each direct IAX peer receives a recipient-excluded `L ` topology advertisement
-after topology changes and on a periodic refresh with a 30-second cadence. If a
-route list cannot fit the bounded advertisement, its terminal `R000000` entry
-means that the list was truncated. These advertisements and cached inbound `L `
-messages are control-plane data and never run in the hardware-paced audio path.
-An inbound topology that already reaches the local node is a loop: the direct
-peer is disconnected without retry. A route that names another direct peer also
-proves a loop, so it is disconnected even when that other peer does not advertise
-topology. Direct self-links, duplicate direct links (including permanent links
-and retained retries), and a requested target already named by an attached
-peer's topology are rejected. A local rejection queues the spoken status `LINK
-REJECTED TOPOLOGY LOOP`, with its normal Morse fallback.
+The node rejects self-links, duplicate direct links, and routes that would make
+a known loop. An incoming peer that advertises such a loop is disconnected.
+For a local rejected request, RF status says `LINK REJECTED TOPOLOGY LOOP`.
 
 ## Identifier settings
 
@@ -735,7 +677,7 @@ a named-set value overrides every default.
 | --- | --- | --- |
 | `voice` | `en_US-lessac-medium.onnx` | Local Piper model path. A missing model falls back to Morse. |
 | `speed_percent` | 100 | Speaking rate relative to the model default, from 1 through 1000 percent. |
-| `level_db` | 0 | Synthesized-speech gain from -60 through 0 dBFS. It does not change sound-file or Morse level. |
+| `level_db` | 0 | Speech gain from -60 through 0 dB. It does not change sound-file or Morse level. |
 
 Named identifier and announcement sets override these with `speech_model`,
 `speech_speed_percent`, and `speech_level_db`.
@@ -750,37 +692,22 @@ named-set value overrides every default.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `frequency_hz` | 800 | Positive tone frequency, also required to be below the playback rate's Nyquist limit. |
+| `frequency_hz` | 800 | Morse tone frequency in Hz, greater than zero and below half the playback rate (24,000 Hz for 48 kHz audio). |
 | `speed_wpm` | 20 | PARIS words per minute, from 1 through 100. |
-| `level_db` | -6 | Morse-tone level from -60 through 0 dBFS. -6 dB is approximately the historical half-scale tone. |
+| `level_db` | -6 | Morse-tone level from -60 through 0 dBFS. |
 
 Named identifier and announcement sets override these with `morse_frequency_hz`,
 `morse_speed_wpm`, and `morse_level_db`.
 
-Switches accept `yes` or `no`, ignoring case. Unsigned numeric values use
-decimal digits without signs or suffixes. Audio levels accept signed decimal
-integers in their documented range. Sample rate and Morse frequency fit unsigned
-32-bit values; interval and hang time fit unsigned 64-bit values. Invalid typed
-values do not partially update a resolved settings object. Runtime capability
-checks are separate from numeric parsing.
+Switches accept `yes` or `no`, ignoring case. Unsigned numbers use decimal
+digits without signs or units. Audio levels use signed whole numbers in the
+listed range.
 
-No media is configured by default. Zero identifier or announcement sets is
-valid. For testing on 524950, set `voice` in `[speech 524950]` to
-`/usr/lib/piper-tts/voices/en_US-amy-low.onnx` to use the installed voice
-without downloading another model.
+No ID or announcement media is configured by default. Set `voice` to a local
+Piper model path when using speech.
 
-The Morse renderer accepts ASCII letters (case-insensitive), digits, and
-`/ . , ? - = + @ ( ) ' ! " : ; _ $ &`. Spaces, tabs, and line breaks separate
-words. Unsupported characters are rejected. Timing uses standard 1-unit dots,
-3-unit dashes, 1-unit element gaps, 3-unit character gaps, and 7-unit word gaps.
-Generated PCM uses the configured Morse level; transmitter processing follows it.
+Morse accepts letters, digits, and `/ . , ? - = + @ ( ) ' ! " : ; _ $ &`.
+Spaces, tabs, and line breaks separate words. Other characters are rejected.
 
-File and synthesized audio preparation uses the `ffmpeg` executable to produce
-mono PCM at the selected playback rate. Preparation runs outside the audio loop;
-prepared samples are consumed at the radio hardware's cadence. A failed decode
-or conversion is a playback-source failure and must follow the ID fallback order.
-Preparation occurs when nodes start or reload. Each external process is limited
-to thirty seconds before that source fails. Reload can therefore pause radio
-operation while files or speech are prepared. Temporary files are removed after
-preparation; playback uses immutable in-memory PCM. Sets with neither prepared
-audio nor configured Morse text are omitted from scheduling.
+If a sound file or speech cannot play, the next configured source is used. A
+set with no playable audio and no Morse text is not scheduled.

@@ -1,148 +1,232 @@
-# Installation
+# Install and run rpt_advanced
 
-Debian 13 amd64 and arm64 packages are the supported release targets. Install
-the standalone controller or the optional Asterisk adapter; neither package
-requires the other. The standalone runtime has no Asterisk or ASL3 dependency.
-It does require the separately released `libusbradioplus-product1` shared radio
-runtime, which also has no Asterisk dependency.
+Use Debian 13 on a 64-bit Raspberry Pi (`arm64`) or Intel/AMD PC (`amd64`).
+Keep a copy of your working configuration before an upgrade. Test on a dummy
+load before placing the repeater in service.
 
-## Standalone controller
+## Choose a controller
 
-Configure the signed USBRadioPlus package repository for the target architecture
-as described in the [USBRadioPlus installation guide](https://github.com/cpeter1207/USBRadioPlus/blob/main/INSTALL.md),
-so APT can obtain `libusbradioplus-product1`.
-Download the rpt_advanced Debian 13 runtime packages from the same rpt_advanced
-release into an otherwise empty directory, then install the package set with
-APT resolving the separately released shared-library dependencies. Include the
-matching `librptadv-resolver-adapter1` and `librptadv-jitter-adapter1` runtime
-packages. Both are required by standalone, even with no configured links:
+- Install `rpt-advanced` to run the standalone Linux service. It does not need
+  Asterisk or ASL3.
+- Install `app-rpt-advanced` and `usbradioplus` to run the controller in
+  ASL3 Asterisk.
+
+Both choices may be installed on one node. Only one may use a given radio at
+a time. Stop the other service before starting it.
+
+## Install packages
+
+Set up the signed [project package repository](https://cpeter1207.github.io/USBRadioPlus/).
+Skip this setup if it is already listed in your APT sources.
+
+```sh
+sudo apt-get install ca-certificates curl gnupg
+curl -fsSLO https://cpeter1207.github.io/USBRadioPlus/usbradioplus-archive-keyring.gpg
+gpg --show-keys --with-fingerprint usbradioplus-archive-keyring.gpg
+```
+
+Check that the displayed key fingerprint is
+`A0D5 A79E 0F5C 45E9 E636 7995 0951 502B AC79 5E55`.
+Do not use a key whose fingerprint differs.
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo install -m 0644 usbradioplus-archive-keyring.gpg /etc/apt/keyrings/usbradioplus.gpg
+printf '%s\n' 'deb [signed-by=/etc/apt/keyrings/usbradioplus.gpg] https://cpeter1207.github.io/USBRadioPlus trixie main' | sudo tee /etc/apt/sources.list.d/usbradioplus.list
+```
+
+Install standalone:
+
+```sh
+sudo apt-get update
+sudo apt-get install rpt-advanced
+```
+
+For Asterisk operation instead:
+
+```sh
+sudo apt-get update
+sudo apt-get install app-rpt-advanced usbradioplus
+```
+
+APT installs the required shared libraries. Do not copy library files from a
+different release over the installed files.
+
+You may also download Debian packages for your architecture from a
+[release](https://github.com/cpeter1207/rpt_advanced/releases).
+Put the runtime packages from that release in an empty directory, then run:
 
 ```sh
 sudo apt-get install ./*.deb
 ```
 
-The `rpt-advanced` package installs `/usr/bin/rpt-advanced`, a systemd service,
-the example configuration at `/etc/rpt_advanced/rpt_advanced.conf`, and the
-CM119 udev rule. It creates a non-root `rpt-advanced` service account. Edit the
-configuration before enabling a node: the shipped example has no radio node
-enabled. Configure a stable `device_identifier` or `usb_serial` in `[radio]` or
-`[radio <node>]`, and set `node_enabled = yes` in the selected node section.
-Consult [configuration](configuration.md) for device, signaling, and audio-graph
-settings.
+For standalone, include `rpt-advanced`, `librptadv-product1`, the file and speech
+adapter packages, and the standalone control, resolver, and jitter adapter
+packages. Packages ending in `-dev` are not needed to run the node.
+Keep the signed repository enabled for other dependencies.
 
-Enable and inspect the service:
+## Set up standalone
+
+1. Stop Asterisk if it uses the same radio:
+
+   ```sh
+   sudo systemctl stop asterisk
+   ```
+
+2. Edit `/etc/rpt_advanced/rpt_advanced.conf`. Use the
+   [configuration reference](configuration.md) to set your node number,
+   callsign, radio device, COS source, CTCSS, levels, and IDs. Set
+   `node_enabled = yes` for the node you want to run. The sample has no enabled
+   node. Use `device_identifier` or `usb_serial` to select the radio interface.
+
+3. Set the AllStarLink node password and registration options before enabling
+   links. Follow the secrets-file instructions in the
+   [configuration reference](configuration.md). Do not put passwords in a
+   public example.
+
+4. Check the configuration and installed libraries:
+
+   ```sh
+   sudo -u rpt-advanced rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf
+   sudo -u rpt-advanced rpt-advanced --check-providers
+   ```
+
+5. Start the service and check its log:
+
+   ```sh
+   sudo systemctl enable --now rpt-advanced
+   systemctl status rpt-advanced
+   sudo journalctl -u rpt-advanced -n 50 --no-pager
+   ```
+
+The service runs as the `rpt-advanced` user. Do not run it as root.
+Speech needs Piper and a local voice model. Put the model where that user can
+read it, outside a home directory, and set its path in the configuration.
+
+## Check the radio
+
+1. Leave links disconnected during the local test.
+2. Transmit a short voice call into the receiver with the required CTCSS or DCS.
+3. Check that receive audio is clear and PTT releases after the hang time.
+4. Send `*722` and unkey. Listen for the time announcement.
+5. Check any configured courtesy tone and station ID.
+6. Connect a permitted test node. Check audio in both directions, then disconnect.
+
+If a test fails, check the log and radio settings before changing audio gains.
+See [radio operation](implementation-status.md) and
+[link operation](allstarlink-status.md).
+
+## Apply settings and upgrades
+
+Check the configuration, then reload it without stopping the service:
 
 ```sh
-sudo systemctl enable --now rpt-advanced
-sudo systemctl status rpt-advanced
-sudo journalctl -u rpt-advanced
+sudo -u rpt-advanced rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf
+sudo systemctl kill --kill-whom=main --signal=HUP rpt-advanced
+sudo journalctl -u rpt-advanced -n 50 --no-pager
 ```
 
-Changes to the standalone configuration are applied by restarting the service:
+A failed reload leaves the running settings in place. Check warnings as well
+as errors. Changing the radio device may briefly interrupt audio.
+
+To upgrade standalone:
 
 ```sh
+sudo apt-get update
+sudo apt-get install --only-upgrade rpt-advanced
 sudo systemctl restart rpt-advanced
 ```
 
-The process handles SIGHUP as a configuration reload request and revalidates its
-loaded providers. Missing or incompatible required providers prevent startup;
-a failed reload keeps the active configuration. Replacing provider code,
-including the resolver and jitter adapter, requires a service restart. The service runs
-as `rpt-advanced`, with access to CM119 USB control and the audio group; do not
-run it as root. Install Piper separately if speech announcements are wanted and
-configure a local model readable by the service account. File playback uses the
-FFmpeg adapter.
+Restart after a package upgrade, then repeat the radio checks. A restart drops
+live links; configured permanent links will retry.
 
-To stop or roll back the standalone service:
+## Set up the Asterisk controller
+
+Stop standalone first. Keep `/etc/rpt_advanced/rpt_advanced.conf` for later use.
+Configure `/etc/asterisk/usbradioplus.conf` for the radio and
+`/etc/asterisk/rpt_advanced.conf` for the controller. Set `radio_channel` and
+`node_enabled = yes` for each enabled node.
+
+In `/etc/asterisk/modules.conf`, load the radio driver before the controller:
+
+```ini
+load = chan_usbradioplus.so
+load = app_rpt_advanced.so
+noload = app_rpt.so
+```
+
+Remove any conflicting `load` or `noload` line for those modules. Configure
+the ASL3 IAX channel and dialplan for incoming links. Packages do not edit
+`modules.conf`, `rpt.conf`, or an existing controller configuration for you.
+
+Start Asterisk and check the module:
+
+```sh
+sudo systemctl start asterisk
+sudo asterisk -rx 'module show like app_rpt_advanced'
+sudo asterisk -rx 'rpt_advanced link status 524950'
+```
+
+Replace `524950` with your node number. After editing controller settings, run:
+
+```sh
+sudo asterisk -rx 'module reload app_rpt_advanced.so'
+```
+
+Check the log and repeat the radio tests. In Asterisk, use
+`core show translation` to check loaded audio codecs if a link cannot connect.
+
+## Switch controllers
+
+Keep all working configuration files. Stop one service before starting the
+other; never let both control the same interface.
+
+Switch to standalone:
+
+```sh
+sudo systemctl disable --now asterisk
+sudo systemctl enable --now rpt-advanced
+```
+
+Switch to the configured Asterisk controller:
+
+```sh
+sudo systemctl disable --now rpt-advanced
+sudo systemctl enable --now asterisk
+```
+
+To use ASL3 `app_rpt` instead of `app_rpt_advanced`, stop Asterisk, select
+`app_rpt.so` in `modules.conf`, and disable `app_rpt_advanced.so` there.
+Keep the working `rpt.conf` and USBRadioPlus channel settings. Start Asterisk
+and test the radio before connecting links.
+
+## Remove or restore a package
+
+Stop the service before removing it:
 
 ```sh
 sudo systemctl disable --now rpt-advanced
 sudo apt-get remove rpt-advanced
 ```
 
-APT removal leaves `/etc/rpt_advanced` intact. Back up the configuration before
-purging it or before changing hardware ownership.
+`remove` keeps configuration files. `purge` removes them. To restore a saved
+release, install its matching runtime packages with APT, restore its working
+configuration, restart the selected service, and repeat the radio checks.
 
-## Optional Asterisk adapter
+## Build packages from source
 
-`app-rpt-advanced` is a deprecated compatibility adapter for ASL3 Asterisk. It
-is packaged separately and may be installed without the standalone controller.
-It requires ASL3 Asterisk and a matching USBRadioPlus `RadioPlusAdvanced`
-channel adapter. Install its Debian 13 packages from the same rpt_advanced
-release, with APT resolving their shared-library dependencies.
+Use released packages for normal node operation. To build, install the tools
+and development packages listed in `debian/control`. This includes
+Rust/Cargo 1.85 or later, a C compiler, `pkg-config`, `libclang-dev`,
+`libspeexdsp-dev`, and the radio and audio library development packages.
+The Asterisk package also needs matching ASL3 Asterisk development headers.
 
-For the Asterisk path, the local RadioPlusAdvanced exchange is fixed at 48 kHz
-signed-linear PCM. IAX peer codecs are negotiated separately and converted at
-the peer boundary. Load the codec modules needed by the peers; installed but
-unloaded codec modules are unavailable to negotiation. Use `core show
-translation` to inspect available paths.
-
-Copy the shipped example to `/etc/asterisk/rpt_advanced.conf` if it is not
-already present. Configure the node's `radio_channel`, identification, and
-`node_enabled = yes`. Do not assign the same physical radio to the standalone
-service and an Asterisk channel adapter at the same time.
-
-Load USBRadioPlus before the adapter:
+Extract the source archive, enter its directory, and build standalone packages:
 
 ```sh
-sudo asterisk -rx 'module load chan_usbradioplus.so'
-sudo asterisk -rx 'module load app_rpt_advanced.so'
-sudo asterisk -rx 'module show like app_rpt_advanced'
+dpkg-buildpackage -Pstandalone -us -uc -b
 ```
 
-Persistent loading is configured manually in Asterisk's `modules.conf`. The
-adapter does not modify `modules.conf`, `rpt.conf`, or the active
-`rpt_advanced.conf` during installation. Configure the normal ASL3 dialplan and
-IAX settings separately for incoming AllStarLink connections.
-
-Reload the Asterisk module after editing its configuration:
-
-```sh
-sudo asterisk -rx 'module reload app_rpt_advanced.so'
-```
-
-Invalid configuration keeps the active generation unchanged. A module reload
-may replace radio workers, so use an approved maintenance window and verify
-receive, PTT, audio, telemetry, link, and unkey behavior afterward. To roll back,
-disable `app_rpt_advanced.so` in `modules.conf`, restore the previous module and
-configuration, and restart Asterisk as needed.
-
-## Build from source
-
-Use the package release for routine installation. A source build requires Rust
-1.85/Cargo, a C compiler, `libclang-dev`, `libspeexdsp-dev`, `pkg-config`, FFmpeg, and the matching
-`libusbradioplus-product-dev` package, including
-`/usr/include/usbradioplus_product.h` and the `usbradioplus_product` pkg-config
-file. It also requires the development packages for the versioned radio, GPIO,
-audio, IAX2, samplerate, PCM-ring, `librptadvtone-dev`,
-`librptadvmorse-dev`, `librptadvdtmf-dev`, `librptadvtemplate-dev`, and
-`librptadvschedule-dev`
-(ABI 1) libraries. The corresponding `librptadvtone1`, `librptadvmorse1`,
-`librptadvdtmf1`, `librptadvtemplate1`, and `librptadvschedule1`
-runtimes are direct product dependencies. Ordered loss handling requires
-PCM ring 3.0.0-alpha.3 or later and samplerate adapter 0.2.0-alpha.2 or later;
-standalone additionally requires IAX2 client 0.1.0-alpha5 or later. Their SONAMEs
-remain 3, 2, and 1 respectively. Older libraries with the same SONAME lack the
-required descriptor functions and are not valid substitutes. The standalone
-jitter adapter is built here and links the distribution's SpeexDSP library;
-the Asterisk adapter continues using Asterisk's packet-jitter handling.
-An Asterisk build additionally
-requires the public ASL3 Asterisk development headers; a full Asterisk source
-tree is not used.
-
-Build the standalone binary package without the Asterisk adapter:
-
-```sh
-dpkg-buildpackage -Pstandalone -b
-```
-
-Build the compatibility module package set with the default profile:
-
-```sh
-dpkg-buildpackage -b
-```
-
-The repository's `make distcheck` verifies the source archive and staged
-installation. See [QUALITY.md](../QUALITY.md) and the [testing guide](testing.md)
-for the supported build and verification process. No node should be activated
-until package integrity and hardware behavior have been checked.
+To include the Asterisk adapter, run `dpkg-buildpackage -us -uc -b` instead.
+Install the resulting runtime packages with APT. See the
+[testing guide](testing.md) for build checks.
