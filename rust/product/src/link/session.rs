@@ -75,7 +75,7 @@ pub struct MediaSnapshot {
     pub input_rate: u32,
     /// Native receiver qualification currently active.
     pub receiving: bool,
-    /// Terminal EOF for this exact endpoint generation.
+    /// Terminal connection state, independent of audio-generation replacement.
     pub ended: bool,
     /// First valid downstream responder from the current/last completed receive burst.
     pub selected_source: Option<String>,
@@ -197,7 +197,9 @@ impl PeerControl {
         Ok(MediaSnapshot {
             input_rate: self.observer.rate(),
             receiving: edge & 1 != 0,
-            ended: signal.ended(),
+            // A retired ring reaches EOF before control receives Redirected.
+            // Only the session stop flag means the peer itself has ended.
+            ended: self.stop.load(Ordering::Acquire),
             selected_source,
             ring: self.observer.observe()?,
             peer: self.peer_observation.load(),

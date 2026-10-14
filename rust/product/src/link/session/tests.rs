@@ -778,6 +778,9 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
         .unwrap();
     session.step(3022).unwrap();
     assert!(old.signals().ended());
+    // Control may inspect status before consuming the redirect acknowledgment.
+    // Retiring the old audio generation must not end the live connection.
+    assert!(!control.snapshot().unwrap().ended);
     assert!(
         matches!(control.event(), Some(Event::Redirected(ack)) if ack.same_generation(&observer))
     );
