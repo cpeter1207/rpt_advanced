@@ -21,10 +21,5 @@
     "repository": "rate_adjusting_pcm_ring",
     "sha": "99c2d4f1e6b5927e562b7fcd09a6a2676f653e14",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
-  },
-  {
-    "repository": "librptadviax2",
-    "sha": "20aa29a89fb0a9925caa168c12ca295030a9d191",
-    "packages": ["librptadv-iax2-client1", "librptadv-iax2-client-dev"]
   }
 ]

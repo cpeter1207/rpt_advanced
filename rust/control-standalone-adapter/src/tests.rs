@@ -79,16 +79,25 @@ fn executor_drop_on_worker_tolerates_a_detached_join_handle() {
     assert!(!handle.is_null());
     unsafe { drop(Box::from_raw(handle)) };
     let task_executor = Arc::clone(&executor);
+    let (started_send, started_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
     let (finished_send, finished_receive) = mpsc::channel();
     assert!(
         executor
             .submit(task(move || {
+                started_send.send(()).unwrap();
+                release_receive.recv().unwrap();
                 drop(task_executor);
                 finished_send.send(()).unwrap();
             }))
             .is_ok()
     );
+    started_receive
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker started before the external owner drops");
+    // The detached join handle is valid here only if the worker drops the final owner.
     drop(executor);
+    release_send.send(()).unwrap();
     finished_receive
         .recv_timeout(Duration::from_secs(2))
         .expect("last executor owner drops from its worker");
