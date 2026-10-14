@@ -156,12 +156,25 @@ fn failed_local_ring_reload_preserves_the_active_configuration() {
 }
 
 #[test]
-fn peer_capacity_rejects_the_first_peer_over_the_bound() {
-    assert!(ensure_peer_capacity(MAX_PEER_SESSIONS - 1).is_ok());
-    assert_eq!(
-        ensure_peer_capacity(MAX_PEER_SESSIONS),
-        Err(RuntimeError::Rejected)
-    );
+fn egress_admission_host_reservation_failure_preserves_running_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let generation = host.runtime.status(10)[0].1.active;
+    let mut probe = Vec::<PeerOwner>::new();
+    probe.try_reserve(1).unwrap();
+    let bytes = probe.capacity() * std::mem::size_of::<PeerOwner>();
+    let (io, state) = peer(48000);
+    let result = crate::fixture::fail_allocation(bytes, || {
+        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+    });
+    assert_eq!(result, Err(RuntimeError::Preparation));
+    assert_eq!(host.runtime.status(10)[0].1.active, generation);
+    assert!(host.peers.is_empty());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert!(host.stop(20));
 }
 
 #[test]

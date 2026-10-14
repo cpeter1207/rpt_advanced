@@ -266,8 +266,8 @@ enum PendingInput {
     Gap(u64),
 }
 
-/// Fixed maximum for retained peers and the synchronous attach queue.
-pub const MAX_PEER_SESSIONS: usize = 1024;
+/// Pending operations are bounded independently of established peer count.
+const PENDING_ATTACH_CAPACITY: usize = 1024;
 
 /// Bounded peer ownership: one round-robin thread for synchronous hosts, with
 /// individually retained callbacks for hosts that provide async peer steps.
@@ -278,8 +278,6 @@ pub struct PeerIoWorker {
     thread: Option<JoinHandle<()>>,
     async_peers: Vec<AsyncPeer>,
     epoch: Instant,
-    #[cfg(test)]
-    test_async_capacity: usize,
     #[cfg(test)]
     fail_next_spawn: bool,
 }
@@ -331,17 +329,15 @@ unsafe extern "C" fn retained_step(context: *mut c_void) -> i32 {
 impl PeerIoWorker {
     /// Prepare the owner; a poll thread starts only for a synchronous host.
     pub fn start(epoch: Instant) -> std::io::Result<Self> {
-        let (pending, incoming) = RingBuffer::<Box<PeerSession>>::new(MAX_PEER_SESSIONS);
+        let (pending, incoming) = RingBuffer::<Box<PeerSession>>::new(PENDING_ATTACH_CAPACITY);
         let stop = Arc::new(AtomicBool::new(false));
         Ok(Self {
             pending,
             incoming: Some(incoming),
             stop,
             thread: None,
-            async_peers: Vec::with_capacity(MAX_PEER_SESSIONS),
+            async_peers: Vec::new(),
             epoch,
-            #[cfg(test)]
-            test_async_capacity: MAX_PEER_SESSIONS,
             #[cfg(test)]
             fail_next_spawn: false,
         })
@@ -360,10 +356,15 @@ impl PeerIoWorker {
         thread::Builder::new()
             .name("rpt-peer-io".into())
             .spawn(move || {
-                let mut sessions: Vec<Box<PeerSession>> = Vec::with_capacity(MAX_PEER_SESSIONS);
+                let mut sessions: Vec<Box<PeerSession>> = Vec::new();
                 loop {
                     while let Ok(session) = incoming.pop() {
-                        sessions.push(session);
+                        if sessions.try_reserve(1).is_ok() {
+                            sessions.push(session);
+                        } else {
+                            // Only this new admission ends; existing owners keep running.
+                            session.stop();
+                        }
                     }
                     if worker_stop.load(Ordering::Acquire) {
                         for session in &sessions {
@@ -397,10 +398,7 @@ impl PeerIoWorker {
             return Err(session);
         }
         if let Some((services, peer)) = session.io.async_owner() {
-            let capacity = MAX_PEER_SESSIONS;
-            #[cfg(test)]
-            let capacity = capacity.min(self.test_async_capacity);
-            if self.async_peers.len() == capacity {
+            if self.async_peers.try_reserve(1).is_err() {
                 return Err(session);
             }
             let stop = Arc::clone(&session.stop);

@@ -32,6 +32,7 @@ pub(crate) struct State {
     pub(crate) async_stops: usize,
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
+    no_async_thread: bool,
     pub(crate) observe_calls: usize,
     pub(crate) fail_observe: bool,
     pub(crate) bad_observe_size: bool,
@@ -412,13 +413,10 @@ unsafe extern "C" fn async_attach(
     }
     state.lock().unwrap().async_attaches += 1;
     let address = step_context as usize;
-    let thread = thread::spawn(move || unsafe { step.unwrap()(address as *mut c_void) });
+    let thread = (!state.lock().unwrap().no_async_thread)
+        .then(|| thread::spawn(move || unsafe { step.unwrap()(address as *mut c_void) }));
     unsafe {
-        *registration = Box::into_raw(Box::new(AsyncRegistration {
-            state,
-            thread: Some(thread),
-        }))
-        .cast();
+        *registration = Box::into_raw(Box::new(AsyncRegistration { state, thread })).cast();
     }
     0
 }
@@ -428,7 +426,9 @@ unsafe extern "C" fn async_stop(_: *mut c_void, registration: *mut c_void) {
 }
 unsafe extern "C" fn async_detach(_: *mut c_void, registration: *mut c_void) {
     let mut registration = unsafe { Box::from_raw(registration.cast::<AsyncRegistration>()) };
-    registration.thread.take().unwrap().join().unwrap();
+    if let Some(thread) = registration.thread.take() {
+        thread.join().unwrap();
+    }
     registration.state.lock().unwrap().async_detaches += 1;
 }
 unsafe extern "C" fn observe_peer(
@@ -1029,17 +1029,73 @@ fn finished_synchronous_owner_rejects_a_new_session_without_consuming_it() {
 }
 
 #[test]
-fn async_capacity_rejects_before_host_registration() {
-    let (session, _control, state, _) = make_async_session("1000");
+fn egress_admission_above_1024() {
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
-    worker.test_async_capacity = 0;
-    let session = worker
-        .attach(session)
-        .expect_err("async peer limit reached");
-    assert_eq!(state.lock().unwrap().async_attaches, 0);
-    drop(session);
-    assert_eq!(state.lock().unwrap().drops, 1);
+    let mut owners = Vec::new();
+    for number in 0..2000 {
+        let (mut session, control, state, output) = make_async_session("1000");
+        session.remote = (10000 + number).to_string();
+        state.lock().unwrap().no_async_thread = true;
+        assert!(worker.attach(session).is_ok(), "admission {number}");
+        owners.push((control, state, output));
+    }
+    assert!(worker.thread.is_none());
+    assert_eq!(worker.async_peers.len(), 2000);
+    for (number, peer) in worker.async_peers.iter().enumerate() {
+        // This fixture retains but never executes callbacks.
+        assert_eq!(
+            unsafe { &peer.session.as_ref().remote },
+            &(10000 + number).to_string()
+        );
+    }
+    owners[1000].0.stop();
+    worker.reap();
+    assert_eq!(worker.async_peers.len(), 1999);
+    assert_eq!(owners[1000].1.lock().unwrap().async_detaches, 1);
+    let (session, control, state, _output) = make_async_session("1000");
+    state.lock().unwrap().no_async_thread = true;
+    assert!(worker.attach(session).is_ok());
+    assert_eq!(worker.async_peers.len(), 2000);
+    drop(control);
     worker.stop();
+    assert!(
+        owners
+            .iter()
+            .all(|(_, state, _)| state.lock().unwrap().drops == 1)
+    );
+}
+
+#[test]
+fn egress_admission_failure_keeps_existing_peers() {
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    let (existing, existing_control, existing_state, _existing_output) = make_async_session("1000");
+    existing_state.lock().unwrap().no_async_thread = true;
+    assert!(worker.attach(existing).is_ok());
+    worker.async_peers.shrink_to_fit();
+    let mut probe = Vec::<usize>::with_capacity(1);
+    probe.push(0);
+    probe.try_reserve(1).unwrap();
+    let bytes = probe.capacity() * std::mem::size_of::<AsyncPeer>();
+    for reserve_failure in [true, false] {
+        let (session, _control, state, _output) = make_async_session("1000");
+        {
+            let mut state = state.lock().unwrap();
+            state.no_async_thread = true;
+            state.fail_async_attach = !reserve_failure;
+        }
+        let rejected = if reserve_failure {
+            crate::fixture::fail_allocation(bytes, || worker.attach(session))
+        } else {
+            worker.attach(session)
+        };
+        drop(rejected.expect_err("new admission must fail"));
+        assert_eq!(worker.async_peers.len(), 1);
+        assert_eq!(state.lock().unwrap().async_attaches, 0);
+        assert_eq!(state.lock().unwrap().drops, 1);
+        assert!(!existing_control.snapshot().unwrap().ended);
+    }
+    worker.stop();
+    assert_eq!(existing_state.lock().unwrap().async_detaches, 1);
 }
 
 #[test]

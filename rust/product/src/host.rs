@@ -3,10 +3,7 @@ use crate::{
     link::{
         dispatcher::{MediaWorker, PreparedDispatch},
         ring::{InboundPolicy, InboundRing},
-        session::{
-            Command as PeerCommand, Event, MAX_PEER_SESSIONS, PeerControl, PeerIoWorker,
-            PeerSession,
-        },
+        session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
     },
     media::NativeMediaPreparer,
     services::{HostServices, PeerIo},
@@ -135,14 +132,6 @@ struct PeerOwner {
     group: Option<GroupMemberSelection>,
     announced: bool,
     control: PeerControl,
-}
-
-fn ensure_peer_capacity(count: usize) -> Result<(), RuntimeError> {
-    if count >= MAX_PEER_SESSIONS {
-        Err(RuntimeError::Rejected)
-    } else {
-        Ok(())
-    }
 }
 
 /// Product runtime; every method is invoked by the selected serialized control executor.
@@ -451,7 +440,17 @@ impl Host {
         mut io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        ensure_peer_capacity(self.peers.len())?;
+        self.peers
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let local_name = local.to_owned();
+        let remote_name = remote.to_owned();
+        let group = self
+            .runtime
+            .node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .links()
+            .group_member(remote);
         let source_clock = {
             let (_, lease) = self
                 .leases
@@ -478,15 +477,9 @@ impl Host {
             session.stop();
             return Err(RuntimeError::Rejected);
         }
-        let group = self
-            .runtime
-            .node(local)
-            .ok_or(RuntimeError::MissingNode)?
-            .links()
-            .group_member(remote);
         self.peers.push(PeerOwner {
-            local: local.into(),
-            remote: remote.into(),
+            local: local_name,
+            remote: remote_name,
             mode,
             group,
             announced: false,
