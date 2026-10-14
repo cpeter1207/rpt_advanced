@@ -1,7 +1,7 @@
 # Resource-scaled peer transmit path
 
 Date: 2026-10-14
-Status: Proposed; conversational approach approved, written review pending.
+Status: Approved by the product owner on 2026-10-14; implementation pending.
 
 ## Outcome and scope
 
@@ -81,7 +81,7 @@ idle transmit polling must not stop jitter playout or reliable-frame retries.
 
 ## Congestion and stale media
 
-Proposed outbound age budget: **200 ms**, reusing the current native egress
+Approved outbound age budget: **200 ms**, reusing the current native egress
 queue's duration. This bounds uncommitted voice, not reliable full-frame lifetime,
 target latency, or inbound jitter. Send ready audio immediately when due.
 
