@@ -370,6 +370,11 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v5 {
     peer_step_stop: None,
     peer_step_detach: None,
     peer_observe: None,
+    peer_prepare_audio: None,
+    peer_send_prepared: None,
+    peer_elapsed_ms: None,
+    peer_step_wake: None,
+    peer_set_deadline: None,
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.

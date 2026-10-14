@@ -89,6 +89,11 @@ impl HostServicesOwner {
             peer_step_stop: asynchronous.then_some(peer_step_stop),
             peer_step_detach: asynchronous.then_some(peer_step_detach),
             peer_observe: asynchronous.then_some(peer_observe),
+            peer_prepare_audio: None,
+            peer_send_prepared: None,
+            peer_elapsed_ms: None,
+            peer_step_wake: None,
+            peer_set_deadline: None,
         });
         Ok(Self {
             context,

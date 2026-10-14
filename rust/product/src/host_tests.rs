@@ -701,12 +701,14 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
     )
     .unwrap();
     assert!(host.runtime.node_names().is_empty());
+    pump_until(&mut host, |host| host.runtime.status(40).is_empty());
+    assert!(host.media_workers.is_empty());
     assert!(host.stop(40));
     assert!(host.leases.is_empty());
 }
 
 #[test]
-fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments() {
+fn egress_retirement_waits_for_dispatch_and_redirect() {
     struct Resume(Arc<std::sync::Barrier>);
     impl Drop for Resume {
         fn drop(&mut self) {
@@ -759,6 +761,19 @@ fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments
             .len(),
         1
     );
+    let retiring = host.runtime.status(10)[0].1.retiring.unwrap();
+    pump_until(&mut host, |host| {
+        host.runtime
+            .adapter_control_mut("1000", retiring)
+            .unwrap()
+            .dispatcher
+            .is_quiescent()
+    });
+    assert_eq!(
+        host.runtime.status(10)[0].1.retiring,
+        Some(retiring),
+        "dispatcher quiescence cannot bypass the blocked peer's redirect acknowledgment"
+    );
     drop(resume);
     pump_until(&mut host, |host| {
         host.runtime
@@ -769,7 +784,13 @@ fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments
 
     // Direct publication needs quiescent audio; retain the peer owner for its pending ack.
     assert!(host.leases[0].1.lock().unwrap().quiesce());
-    let candidate = prepared("1000", host.runtime.settings("1000").unwrap(), &host.peers).unwrap();
+    let candidate = prepared(
+        "1000",
+        host.runtime.settings("1000").unwrap(),
+        &host.peers,
+        media_worker(&mut host.media_workers, "1000").unwrap(),
+    )
+    .unwrap();
     host.runtime.replace_adapter("1000", candidate, 11).unwrap();
     host.reject_peer("1000", "2000", 12);
     pump_until(&mut host, |_| state.lock().unwrap().drops == 1);
@@ -845,7 +866,13 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
     std::thread::sleep(Duration::from_millis(5));
     host.pump(clock()).unwrap();
     host.peers[0].control.stop();
-    let candidate = prepared("1000", host.runtime.settings("1000").unwrap(), &host.peers).unwrap();
+    let candidate = prepared(
+        "1000",
+        host.runtime.settings("1000").unwrap(),
+        &host.peers,
+        media_worker(&mut host.media_workers, "1000").unwrap(),
+    )
+    .unwrap();
     assert!(candidate.control.redirects.is_empty());
     host.pump(clock()).unwrap();
     assert!(host.peers.is_empty());

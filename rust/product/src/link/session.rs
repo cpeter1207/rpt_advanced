@@ -1,5 +1,6 @@
 //! Serialized IAX peer work, queued control delivery, and native egress composition.
 use super::{
+    dispatcher::PeerWake,
     egress::Egress,
     ring::{InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation, RingError},
 };
@@ -155,6 +156,7 @@ pub struct PeerControl {
     commands: Producer<Command>,
     events: Consumer<Event>,
     stop: Arc<AtomicBool>,
+    wake: PeerWake,
     observer: InboundObserver,
     peer_observation: Arc<PeerObservationCache>,
     #[cfg(test)]
@@ -169,7 +171,13 @@ impl PeerControl {
     pub fn send(&mut self, command: Command) -> Result<(), Command> {
         self.commands
             .push(command)
-            .map_err(|rtrb::PushError::Full(command)| command)
+            .map_err(|rtrb::PushError::Full(command)| command)?;
+        self.wake.notify();
+        Ok(())
+    }
+    /// Signal-only handle for the off-audio media distributor.
+    pub(crate) fn wake(&self) -> PeerWake {
+        self.wake.clone()
     }
     /// Read one copied event for current-policy processing outside the IAX owner.
     pub fn event(&mut self) -> Option<Event> {
@@ -209,6 +217,7 @@ impl PeerControl {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
         self.observer.signals().end();
+        self.wake.notify();
     }
 
     #[cfg(test)]
@@ -236,6 +245,7 @@ pub struct PeerSession {
     commands: Consumer<Command>,
     events: Producer<Event>,
     stop: Arc<AtomicBool>,
+    wake: PeerWake,
     outbound: LinkAudioConsumer,
     egress: Egress,
     native: [f32; 960],
@@ -282,17 +292,23 @@ struct AsyncPeer {
     stop: Arc<AtomicBool>,
     observer: InboundObserver,
     session: NonNull<PeerSession>,
+    wake: PeerWake,
 }
 // SAFETY: the stable heap allocation moves only as a raw owner token. The host
 // serializes callbacks; detach quiesces them before the Box is reconstructed.
 unsafe impl Send for AsyncPeer {}
 impl AsyncPeer {
     fn signal_stop(&self) {
+        self.wake.close();
         self.stop.store(true, Ordering::Release);
         self.observer.signals().end();
         self.services.peer_step_stop(self.registration);
     }
     fn detach(self) {
+        self.wake.close();
+        while !self.wake.is_quiescent() {
+            thread::yield_now();
+        }
         self.services.peer_step_detach(self.registration);
         // SAFETY: detach guarantees no callback still borrows this peer.
         drop(unsafe { Box::from_raw(self.session.as_ptr()) });
@@ -392,6 +408,7 @@ impl PeerIoWorker {
             }
             let stop = Arc::clone(&session.stop);
             let observer = session.inbound.observer();
+            let wake = session.wake.clone();
             session.async_epoch = Some(self.epoch);
             // The host may invoke the callback before attach returns. Keep the
             // peer allocation raw and stable until detach has quiesced it.
@@ -402,12 +419,14 @@ impl PeerIoWorker {
                 Ok(registration) => registration,
                 Err(_) => return Err(unsafe { Box::from_raw(context) }),
             };
+            services.attach_wake(&wake, registration);
             self.async_peers.push(AsyncPeer {
                 services,
                 registration,
                 stop,
                 observer,
                 session: NonNull::new(context).unwrap(),
+                wake,
             });
             return Ok(());
         }
@@ -439,6 +458,11 @@ impl PeerIoWorker {
         let mut index = 0;
         while index < self.async_peers.len() {
             if self.async_peers[index].stop.load(Ordering::Acquire) {
+                self.async_peers[index].wake.close();
+                if !self.async_peers[index].wake.is_quiescent() {
+                    index += 1;
+                    continue;
+                }
                 let peer = self.async_peers.swap_remove(index);
                 peer.signal_stop();
                 peer.detach();
@@ -488,6 +512,7 @@ impl PeerSession {
         let (commands, incoming) = RingBuffer::new(64);
         let (events, outgoing) = RingBuffer::new(64);
         let stop = Arc::new(AtomicBool::new(false));
+        let wake = PeerWake::default();
         let peer_observation = Arc::new(PeerObservationCache::new());
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
@@ -495,6 +520,7 @@ impl PeerSession {
             commands,
             events: outgoing,
             stop: stop.clone(),
+            wake: wake.clone(),
             observer: inbound.observer(),
             peer_observation: Arc::clone(&peer_observation),
             #[cfg(test)]
@@ -514,6 +540,7 @@ impl PeerSession {
                 commands: incoming,
                 events,
                 stop,
+                wake,
                 outbound,
                 egress,
                 native: [0.0; 960],

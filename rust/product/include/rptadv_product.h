@@ -261,6 +261,24 @@ struct rptadv_host_services_v5 {
      * It never calls this from control or audio. Zero fills the complete record;
      * nonzero leaves the previous copied observation unchanged. */
     int (*peer_observe)(void *context, void *peer, struct rptadv_peer_observation_v1 *out);
+
+    /** Optional prepared-egress group: all five entries absent or present, with
+     * the async owner group. Encode codec-rate PCM into caller-owned bytes;
+     * zero succeeds, negative rejects. Capacity must cover sample_count. */
+    int (*peer_prepare_audio)(void *context, void *peer, const float *samples,
+                              size_t sample_count, uint8_t *encoded, size_t capacity);
+    /** Submit encoded media at its original call-relative source timestamp.
+     * Zero accepts ownership; one is uncommitted socket backpressure; negative
+     * is terminal. The caller retains a would-block item without re-encoding. */
+    int (*peer_send_prepared)(void *context, void *peer, const uint8_t *encoded,
+                              size_t count, uint32_t timestamp_ms);
+    /** Current call-relative monotonic milliseconds, saturating at UINT32_MAX. */
+    uint32_t (*peer_elapsed_ms)(void *context, void *peer);
+    /** Thread-safe signal-only wake. The caller must quiesce its notifications
+     * before detaching registration; this never borrows mutable peer state. */
+    void (*peer_step_wake)(void *context, void *registration);
+    /** Owner-only deadline: relative nanoseconds, UINT64_MAX clears it. */
+    int (*peer_set_deadline)(void *context, void *peer, uint64_t wake_after_ns);
 };
 
 /** Portable runtime entry points.
