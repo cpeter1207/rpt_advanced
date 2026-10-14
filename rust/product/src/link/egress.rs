@@ -120,6 +120,14 @@ impl Egress {
         self.used -= consumed as usize;
         Ok(&self.output[..generated as usize])
     }
+    /// Discard hidden FIR history after a discontinuity; never splice old PCM into a new span.
+    pub(crate) fn reset(&mut self) -> Result<(), EgressError> {
+        self.used = 0;
+        // SAFETY: this owner exclusively holds the validated converter.
+        (unsafe { self.api.reset.unwrap()(self.converter.as_ptr()) } == 0)
+            .then_some(())
+            .ok_or(EgressError)
+    }
 }
 impl Drop for Egress {
     fn drop(&mut self) {

@@ -102,6 +102,14 @@ impl Peer {
             false
         }
     }
+    /// Earliest control timer; an idle peer without a digit has no timer.
+    pub fn deadline_ms(&self) -> Option<u64> {
+        self.active
+            .then_some(self.next_query)
+            .into_iter()
+            .chain(self.digit_deadline)
+            .min()
+    }
 }
 
 /// Consumer-owned receive qualification; the shared ring alone supplies concealment.

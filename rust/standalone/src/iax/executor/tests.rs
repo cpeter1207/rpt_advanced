@@ -66,7 +66,12 @@ fn descriptor() -> Descriptor {
         peer_configure_jitter: Some(configure),
         server_enable: Some(enable),
         peer_observe: Some(observe),
+        peer_wake: Some(stop),
+        peer_set_deadline: Some(deadline),
     }
+}
+unsafe extern "C" fn deadline(_: *mut c_void, _: u64) -> i32 {
+    0
 }
 
 #[test]
@@ -90,9 +95,11 @@ fn retained_runtime_forwards_callback_and_quiesces_before_destroy() {
     );
     unsafe {
         executor.stop(token);
+        executor.wake(token);
+        assert_eq!(executor.set_deadline(123_usize as *mut c_void, u64::MAX), 0);
         executor.detach(token)
     };
-    assert_eq!(state.load(Ordering::Relaxed), 112);
+    assert_eq!(state.load(Ordering::Relaxed), 122);
     executor.api.peer_attach = Some(attach_failure);
     assert_eq!(
         unsafe { executor.attach(ptr::null_mut(), step, context) },
@@ -133,6 +140,8 @@ fn truncated_wrong_and_incomplete_descriptors_are_rejected_before_create() {
         |api| api.peer_configure_jitter = None,
         |api| api.server_enable = None,
         |api| api.peer_observe = None,
+        |api| api.peer_wake = None,
+        |api| api.peer_set_deadline = None,
     ];
     for change in changes {
         let mut api = descriptor();

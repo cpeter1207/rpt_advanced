@@ -10,6 +10,7 @@ fn egress_span_partition_and_overflow() {
             generation: 7,
             burst: 3,
             source_start: 100,
+            ..AudioSpan::default()
         };
         let second = AudioSpan {
             source_start: 100 + count as u64,
@@ -43,6 +44,7 @@ fn egress_span_partition_and_overflow() {
             generation: 8,
             burst: 4,
             source_start: second.source_start + 2,
+            ..AudioSpan::default()
         };
         assert_eq!(producer.write(third, &[0.7]), 0);
         assert_eq!(consumer.read_span(&mut output).unwrap().span, third);
@@ -53,6 +55,7 @@ fn egress_span_partition_and_overflow() {
         generation: 1,
         burst: 1,
         source_start: 0,
+        ..AudioSpan::default()
     };
     assert_eq!(producer.write(span, &[1.0]), 0);
     assert_eq!(
@@ -86,6 +89,33 @@ fn queue_keeps_oldest_samples_and_silences_shortfall() {
     assert_eq!(output, [20.0, 30.0, 40.0, 0.0, 0.0]);
     assert_eq!(consumer.shortfall_samples(), 2);
     assert_eq!(producer.dropped_samples(), 1);
+}
+
+#[test]
+fn egress_span_peek_and_fractional_birth_survive_partitions() {
+    use super::AudioSpan;
+    let (mut producer, mut consumer) = LinkAudioQueue::new(1000, 2).unwrap().into_endpoints();
+    let span = AudioSpan {
+        source_start: 17,
+        born_ns: Some(1_000_000_000),
+        ..AudioSpan::default()
+    };
+    producer.write(span, &[0.5; 997]);
+    let mut total = 0;
+    while let Some(next) = consumer.peek_span() {
+        assert_eq!(consumer.peek_span(), Some(next));
+        let read = consumer.read_span(&mut [0.0; 37]).unwrap();
+        assert_eq!(read.span.source_start, 17 + total);
+        assert_eq!(
+            read.span.born_ns,
+            Some(
+                1_000_000_000 + ((17 + total) * 1_000_000_000 / 48_000)
+                    - 17 * 1_000_000_000 / 48_000
+            )
+        );
+        total += read.frames as u64;
+    }
+    assert_eq!(total, 997);
 }
 
 #[test]

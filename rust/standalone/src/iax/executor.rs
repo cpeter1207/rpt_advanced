@@ -30,6 +30,8 @@ struct Descriptor {
     peer_configure_jitter: Option<unsafe extern "C" fn(*mut c_void, *const c_void) -> i32>,
     server_enable: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32>,
     peer_observe: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32>,
+    peer_wake: Option<unsafe extern "C" fn(*mut c_void)>,
+    peer_set_deadline: Option<unsafe extern "C" fn(*mut c_void, u64) -> i32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,6 +51,42 @@ pub(crate) struct Executor {
 unsafe impl Send for Executor {}
 unsafe impl Sync for Executor {}
 
+unsafe fn checked_descriptor(pointer: *const c_void) -> Result<Descriptor, Error> {
+    if pointer.is_null() {
+        return Err(Error::Descriptor);
+    }
+    let prefix = unsafe { ptr::read_unaligned(pointer.cast::<[u32; 2]>()) };
+    if prefix[0] < size_of::<Descriptor>() as u32 || prefix[1] != 1 {
+        return Err(Error::Descriptor);
+    }
+    let api = unsafe { ptr::read_unaligned(pointer.cast::<Descriptor>()) };
+    if api.capability != *b"rptadv.iaxasync\0"
+        || ![
+            api.runtime_create.is_some(),
+            api.runtime_destroy.is_some(),
+            api.peer_attach.is_some(),
+            api.peer_stop.is_some(),
+            api.peer_detach.is_some(),
+            api.peer_configure_jitter.is_some(),
+            api.server_enable.is_some(),
+            api.peer_observe.is_some(),
+            api.peer_wake.is_some(),
+            api.peer_set_deadline.is_some(),
+        ]
+        .into_iter()
+        .all(|present| present)
+    {
+        return Err(Error::Descriptor);
+    }
+    Ok(api)
+}
+/// Validate reload capability without creating a second executor.
+///
+/// # Safety
+/// The fixed descriptor prefix and stated full storage must be readable.
+pub(crate) unsafe fn valid_descriptor(pointer: *const c_void) -> bool {
+    unsafe { checked_descriptor(pointer) }.is_ok()
+}
 impl Executor {
     /// Validate the whole table before creating the runtime.
     ///
@@ -56,30 +94,7 @@ impl Executor {
     /// The descriptor must be readable for its stated size and its DSO retained
     /// until this owner and all its registrations are destroyed.
     pub(crate) unsafe fn new(pointer: *const c_void) -> Result<Self, Error> {
-        if pointer.is_null() {
-            return Err(Error::Descriptor);
-        }
-        let prefix = unsafe { ptr::read_unaligned(pointer.cast::<[u32; 2]>()) };
-        if prefix[0] < size_of::<Descriptor>() as u32 || prefix[1] != 1 {
-            return Err(Error::Descriptor);
-        }
-        let api = unsafe { ptr::read_unaligned(pointer.cast::<Descriptor>()) };
-        if api.capability != *b"rptadv.iaxasync\0"
-            || ![
-                api.runtime_create.is_some(),
-                api.runtime_destroy.is_some(),
-                api.peer_attach.is_some(),
-                api.peer_stop.is_some(),
-                api.peer_detach.is_some(),
-                api.peer_configure_jitter.is_some(),
-                api.server_enable.is_some(),
-                api.peer_observe.is_some(),
-            ]
-            .into_iter()
-            .all(|present| present)
-        {
-            return Err(Error::Descriptor);
-        }
+        let api = unsafe { checked_descriptor(pointer) }?;
         let mut runtime = ptr::null_mut();
         if unsafe { api.runtime_create.unwrap()(&mut runtime) } != 0 {
             return Err(Error::Initialize);
@@ -88,6 +103,20 @@ impl Executor {
             api,
             runtime: NonNull::new(runtime).ok_or(Error::Initialize)?,
         })
+    }
+    /// Signal only; never borrows the peer or executes a step on the caller.
+    ///
+    /// # Safety
+    /// Token remains attached until this signal returns.
+    pub(crate) unsafe fn wake(&self, token: *mut c_void) {
+        unsafe { self.api.peer_wake.unwrap()(token) };
+    }
+    /// Set the current owner's next relative wake; MAX clears the deadline.
+    ///
+    /// # Safety
+    /// Caller is the sole serialized owner of this live peer.
+    pub(crate) unsafe fn set_deadline(&self, peer: *mut c_void, after: u64) -> i32 {
+        unsafe { self.api.peer_set_deadline.unwrap()(peer, after) }
     }
 
     /// Transfer exclusive peer operations to a stable callback context until detach.

@@ -3,6 +3,54 @@ use crate::audio::{LinkAudioConsumer, LinkAudioQueue};
 use crate::controller::{ControllerSettings, CourtesySettings};
 
 #[test]
+fn egress_dispatch_notifies_receive_only_activity_without_echoing_pcm() {
+    let (mut peer, signals, mut output) = peer_with_kerchunk("200", 960, 0);
+    peer.mode = Mode::MONITOR;
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    signals.set_radio_keyed(true);
+    let mut notified = Vec::new();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 960],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    dispatcher.dispatch_batch(1, |index| notified.push(index));
+    assert_eq!(
+        notified,
+        [0],
+        "inbound activity must wake its idle serialized owner"
+    );
+    assert!(
+        output.read_span(&mut [0.0; 960]).is_none(),
+        "an activity wake must not echo input"
+    );
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 960],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    dispatcher.dispatch_batch(1, |index| notified.push(index));
+    assert_eq!(
+        notified,
+        [0],
+        "unchanged activity must not poll an idle owner"
+    );
+}
+
+#[test]
 fn egress_batched_mix_minus_preserves_routes() {
     use crate::audio::AudioSpan;
     let (mut full, _, _full_output) = peer_with_kerchunk("200", 4, 0);
@@ -22,6 +70,7 @@ fn egress_batched_mix_minus_preserves_routes() {
     let source = SourcePosition {
         generation: 8,
         sample: 500,
+        ..SourcePosition::default()
     };
     links
         .process(&mut controller, true, &mut [0.25; 2], source)
@@ -124,6 +173,7 @@ fn egress_batched_mix_minus_preserves_routes() {
             SourcePosition {
                 generation: 9,
                 sample: 509,
+                ..source
             },
         )
         .unwrap();

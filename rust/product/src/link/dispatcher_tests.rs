@@ -81,6 +81,7 @@ fn egress_dispatch_survives_control_pause() {
                 SourcePosition {
                     generation: 1,
                     sample: block * 960,
+                    ..SourcePosition::default()
                 },
             )
             .unwrap();
@@ -172,6 +173,7 @@ fn egress_retirement_waits_for_partial_dispatch() {
             SourcePosition {
                 generation: 1,
                 sample: 0,
+                ..SourcePosition::default()
             },
         )
         .unwrap();
@@ -203,6 +205,7 @@ fn egress_retirement_waits_for_partial_dispatch() {
         SourcePosition {
             generation: 2,
             sample: 960,
+            ..SourcePosition::default()
         },
     )
     .unwrap();

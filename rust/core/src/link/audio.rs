@@ -193,6 +193,10 @@ pub struct SourcePosition {
     pub generation: u64,
     /// First native sample in this callback; advances through publication drops.
     pub sample: u64,
+    /// Physical stream identity, retained across configuration-only reloads.
+    pub stream: u64,
+    /// Source time mapped off audio and captured once for this native block.
+    pub born_ns: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -201,6 +205,7 @@ struct Destination {
     eligible: bool,
     target: usize,
     span: AudioSpan,
+    activity_edge: u64,
 }
 
 #[derive(Debug)]
@@ -221,6 +226,7 @@ pub struct LinkDispatcher {
     scratch: Vec<f32>,
     current: Option<ProgramBlock>,
     next_destination: usize,
+    activity_edges: Vec<u64>,
 }
 
 /// Work completed by one bounded fan-out pass.
@@ -242,7 +248,7 @@ impl LinkDispatcher {
     }
 
     /// Visit at most `maximum_destinations`; retain partially dispatched blocks.
-    /// Notify only destinations that accepted samples, after descriptor publication.
+    /// Notify accepted PCM and activity edges, after their atomic publication.
     pub fn dispatch_batch(
         &mut self,
         maximum_destinations: usize,
@@ -259,6 +265,8 @@ impl LinkDispatcher {
             };
             let index = self.next_destination;
             let destination = block.routing[index];
+            let mut notify = self.activity_edges[index] != destination.activity_edge;
+            self.activity_edges[index] = destination.activity_edge;
             if destination.eligible {
                 let offset = (index + 1) * self.scratch.len();
                 for (frame, sample) in self.scratch[..block.frames].iter_mut().enumerate() {
@@ -274,8 +282,11 @@ impl LinkDispatcher {
                 if self.outbound[index].write(destination.span, &self.scratch[..block.frames])
                     < block.frames
                 {
-                    on_written(index);
+                    notify = true;
                 }
+            }
+            if notify {
+                on_written(index);
             }
             self.next_destination += 1;
             progress.destinations += 1;
@@ -351,6 +362,7 @@ impl<P: PeerInput> LinkAudio<P> {
             scratch: vec![0.0; maximum],
             current: None,
             next_destination: 0,
+            activity_edges: vec![0; peers.len()],
         };
         Ok((
             Self {
@@ -508,6 +520,7 @@ impl<P: PeerInput> LinkAudio<P> {
         // Track activity even when both blocks are in flight. Dropped callbacks
         // remain source-time gaps and cannot hide a new destination burst.
         for (route, peer) in self.routing.iter_mut().zip(&self.peers) {
+            route.activity_edge = peer.input.signals().activity_edge();
             let selected = peer.group_index.is_none_or(|group| {
                 peer.group
                     .as_ref()
@@ -536,6 +549,8 @@ impl<P: PeerInput> LinkAudio<P> {
             route.eligible = eligible;
             route.span.generation = source.generation;
             route.span.source_start = source.sample;
+            route.span.stream = source.stream;
+            route.span.born_ns = source.born_ns;
         }
         let Ok(mut block) = self.recycled.pop() else {
             self.status.dropped.fetch_add(1, Ordering::Relaxed);

@@ -21,6 +21,10 @@ pub struct AudioSpan {
     pub burst: u64,
     /// First sample on the stream timeline, including any previously dropped samples.
     pub source_start: u64,
+    /// Physical stream identity; changes on reopen, not ordinary configuration reload.
+    pub stream: u64,
+    /// Immutable monotonic source time; absent until the native clock is observed.
+    pub born_ns: Option<u64>,
 }
 
 /// One read never crosses a source span, even when later audio is already queued.
@@ -129,14 +133,19 @@ impl LinkAudioProducer {
 }
 
 impl LinkAudioConsumer {
+    /// Inspect the next published source span without consuming its samples.
+    pub fn peek_span(&mut self) -> Option<ReadSpan> {
+        if self.pending.is_none() {
+            self.pending = self.spans.pop().ok();
+        }
+        self.pending
+    }
     /// Copy only the current span, leaving the unused output untouched.
     pub fn read_span(&mut self, output: &mut [f32]) -> Option<ReadSpan> {
         if output.is_empty() {
             return None;
         }
-        if self.pending.is_none() {
-            self.pending = Some(self.spans.pop().ok()?);
-        }
+        self.peek_span()?;
         let pending = self.pending.as_mut().expect("current span");
         let count = pending.frames.min(output.len());
         // The acquired descriptor publishes all of its PCM before it becomes visible.
@@ -147,7 +156,14 @@ impl LinkAudioConsumer {
             span: pending.span,
             frames: count,
         };
-        pending.span.source_start = pending.span.source_start.wrapping_add(count as u64);
+        let next = pending.span.source_start.wrapping_add(count as u64);
+        let elapsed = (u128::from(next) * 1_000_000_000 / 48_000)
+            .saturating_sub(u128::from(pending.span.source_start) * 1_000_000_000 / 48_000);
+        pending.span.born_ns = pending
+            .span
+            .born_ns
+            .and_then(|time| time.checked_add(elapsed as u64));
+        pending.span.source_start = next;
         pending.frames -= count;
         if pending.frames == 0 {
             self.pending = None;

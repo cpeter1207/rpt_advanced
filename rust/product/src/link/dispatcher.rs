@@ -83,6 +83,7 @@ const QUIET: u8 = 3;
 struct DispatchState {
     phase: AtomicU8,
     generation: AtomicU64,
+    clock: OnceLock<Arc<super::source_clock::SourceClock>>,
 }
 struct Dispatch {
     state: Arc<DispatchState>,
@@ -101,6 +102,9 @@ pub(crate) struct PreparedDispatch {
     state: Arc<DispatchState>,
 }
 impl PreparedDispatch {
+    pub(crate) fn bind_clock(&self, clock: Arc<super::source_clock::SourceClock>) {
+        let _ = self.state.clock.set(clock);
+    }
     /// Infallible publication after the core has accepted the prepared generation.
     pub(crate) fn activate(&self, generation: u64) {
         self.state.generation.store(generation, Ordering::Relaxed);
@@ -156,6 +160,9 @@ impl MediaWorker {
                         let Some(context) = slot else { continue };
                         match context.state.phase.load(Ordering::Acquire) {
                             ACTIVE => {
+                                if let Some(clock) = context.state.clock.get() {
+                                    clock.observe();
+                                }
                                 let progress = context
                                     .dispatcher
                                     .dispatch_batch(64, |index| context.wakes[index].notify());
@@ -193,6 +200,7 @@ impl MediaWorker {
         let state = Arc::new(DispatchState {
             phase: AtomicU8::new(PREPARED),
             generation: AtomicU64::new(0),
+            clock: OnceLock::new(),
         });
         self.pending
             .push(Dispatch {

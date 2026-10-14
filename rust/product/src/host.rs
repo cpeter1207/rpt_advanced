@@ -272,7 +272,7 @@ impl Host {
                     owners: None,
                     worker: None,
                     epoch,
-                    status: Default::default(),
+                    status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
                 Ok(Box::new(Device { lease, services }))
@@ -299,9 +299,25 @@ impl Host {
     fn activate_dispatchers(&mut self, now_ms: u64) {
         for (local, status) in self.runtime.status(now_ms) {
             if let Some(generation) = status.active {
+                let clock = self
+                    .leases
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == &local)
+                    .map(|(_, lease)| {
+                        lease
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .status
+                            .source_clock
+                            .clone()
+                    });
                 // This borrow marks the external owner exposed: core reclamation
                 // must wait for its explicit quiescence acknowledgment.
                 if let Some(control) = self.runtime.adapter_control_mut(&local, generation) {
+                    if let Some(clock) = clock {
+                        control.dispatcher.bind_clock(clock);
+                    }
                     control.dispatcher.activate(generation);
                 }
             }
@@ -382,7 +398,7 @@ impl Host {
                     owners: None,
                     worker: None,
                     epoch,
-                    status: Default::default(),
+                    status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
                 Ok(Box::new(Device { lease, services }))
@@ -436,7 +452,7 @@ impl Host {
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
         ensure_peer_capacity(self.peers.len())?;
-        {
+        let source_clock = {
             let (_, lease) = self
                 .leases
                 .iter()
@@ -450,12 +466,14 @@ impl Host {
                 .ok_or(RuntimeError::Device)?
                 .bind_peer(&mut io)
                 .map_err(|_| RuntimeError::Preparation)?;
-        }
+            Arc::clone(&lease.status.source_clock)
+        };
         let (_, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
-        let (session, control) = PeerSession::prepare(io, outbound, local, remote)
+        let (mut session, control) = PeerSession::prepare(io, outbound, local, remote)
             .map_err(|_| RuntimeError::Preparation)?;
+        session.bind_clock(source_clock);
         if let Err(session) = self.peer_io.attach(session) {
             session.stop();
             return Err(RuntimeError::Rejected);

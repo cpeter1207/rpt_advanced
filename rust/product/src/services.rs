@@ -643,6 +643,59 @@ impl PeerIo {
         };
         (code == 0).then_some(()).ok_or(Error::Write)
     }
+    /// Whether this host supports source-timed prepared media and readiness deadlines.
+    pub(crate) fn prepared_media(&self) -> bool {
+        self.services.0.peer_prepare_audio.is_some()
+    }
+    /// Encode one codec-rate block into caller-owned storage, without sending it.
+    pub(crate) fn prepare_audio(
+        &mut self,
+        samples: &[f32],
+        output: &mut [u8],
+    ) -> Result<(), Error> {
+        let code = unsafe {
+            self.services.0.peer_prepare_audio.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                samples.as_ptr(),
+                samples.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        (code == 0).then_some(()).ok_or(Error::Translation)
+    }
+    /// Submit retained bytes; false is socket congestion, not a failed connection.
+    pub(crate) fn send_prepared(&mut self, bytes: &[u8], timestamp: u32) -> Result<bool, Error> {
+        match unsafe {
+            self.services.0.peer_send_prepared.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                timestamp,
+            )
+        } {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(Error::Write),
+        }
+    }
+    /// Provider call-clock milliseconds, sampled only by the serialized peer owner.
+    pub(crate) fn elapsed_ms(&self) -> u32 {
+        unsafe {
+            self.services.0.peer_elapsed_ms.unwrap()(self.services.0.context, self.handle.as_ptr())
+        }
+    }
+    /// Publish the next relative wake; MAX clears the timer. PCM-only hosts ignore it.
+    pub(crate) fn set_deadline(&mut self, after_ns: u64) -> Result<(), Error> {
+        let Some(set) = self.services.0.peer_set_deadline else {
+            return Ok(());
+        };
+        (unsafe { set(self.services.0.context, self.handle.as_ptr(), after_ns) } == 0)
+            .then_some(())
+            .ok_or(Error::Write)
+    }
 }
 impl Drop for PeerIo {
     fn drop(&mut self) {

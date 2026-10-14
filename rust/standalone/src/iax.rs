@@ -65,6 +65,9 @@ struct ClientDescriptor {
     hangup: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
     destroy: Option<unsafe extern "C" fn(*mut c_void)>,
     send_digit: Option<unsafe extern "C" fn(*mut c_void, u8) -> i32>,
+    prepare_ulaw: Option<unsafe extern "C" fn(*const f32, usize, *mut u8, usize) -> i32>,
+    send_prepared_ulaw: Option<unsafe extern "C" fn(*mut c_void, *const u8, usize, u32) -> i32>,
+    elapsed_ms: Option<unsafe extern "C" fn(*const c_void) -> u32>,
 }
 
 #[repr(C)]
@@ -457,6 +460,38 @@ pub struct IaxPeer {
 }
 
 impl IaxPeer {
+    /// Encode once into retained caller storage; encoding does not advance the call.
+    pub(crate) fn prepare_audio(&self, pcm: &[f32], output: &mut [u8]) -> Result<(), IaxError> {
+        (unsafe {
+            self.api.prepare_ulaw.unwrap()(
+                pcm.as_ptr(),
+                pcm.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        } == 0)
+            .then_some(())
+            .ok_or(IaxError::Operation)
+    }
+    /// Preserve congestion as a retryable result; accepted reliable frames belong to IAX.
+    pub(crate) fn send_prepared(&mut self, bytes: &[u8], timestamp: u32) -> Result<bool, IaxError> {
+        match unsafe {
+            self.api.send_prepared_ulaw.unwrap()(
+                self.handle.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                timestamp,
+            )
+        } {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(IaxError::Operation),
+        }
+    }
+    /// Monotonic call age used to anchor the radio source timeline off the callback.
+    pub(crate) fn elapsed_ms(&self) -> u32 {
+        unsafe { self.api.elapsed_ms.unwrap()(self.handle.as_ptr()) }
+    }
     /// Opaque peer identity for the retained executor from the same protocol DSO.
     pub(crate) fn raw_handle(&self) -> *mut c_void {
         self.handle.as_ptr()
@@ -563,6 +598,17 @@ fn valid_descriptor(pointer: *const ClientDescriptor) -> bool {
         && api.hangup.is_some()
         && api.destroy.is_some()
         && api.send_digit.is_some()
+        && api.prepare_ulaw.is_some()
+        && api.send_prepared_ulaw.is_some()
+        && api.elapsed_ms.is_some()
+}
+
+/// Check the complete current capability without opening a call.
+///
+/// # Safety
+/// Pointer must refer to a readable provider descriptor prefix, with its stated storage live.
+pub(crate) unsafe fn valid_client_descriptor(pointer: *const c_void) -> bool {
+    valid_descriptor(pointer.cast())
 }
 
 fn checked_descriptor(pointer: *const ClientDescriptor) -> Result<ClientDescriptor, IaxError> {
@@ -601,6 +647,9 @@ pub(crate) mod tests {
                 hangup: None,
                 destroy: Some(destroy),
                 send_digit: None,
+                prepare_ulaw: None,
+                send_prepared_ulaw: None,
+                elapsed_ms: None,
             },
             handle: NonNull::dangling(),
         }
@@ -750,7 +799,20 @@ pub(crate) mod tests {
             hangup: Some(hangup),
             destroy: Some(destroy),
             send_digit: Some(send_digit),
+            prepare_ulaw: Some(prepare_audio),
+            send_prepared_ulaw: Some(send_prepared),
+            elapsed_ms: Some(elapsed),
         }
+    }
+
+    unsafe extern "C" fn prepare_audio(_: *const f32, _: usize, _: *mut u8, _: usize) -> i32 {
+        OPERATION_RESULT.get()
+    }
+    unsafe extern "C" fn send_prepared(_: *mut c_void, _: *const u8, _: usize, _: u32) -> i32 {
+        OPERATION_RESULT.get()
+    }
+    unsafe extern "C" fn elapsed(_: *const c_void) -> u32 {
+        1234
     }
 
     pub(crate) fn peer_for_host_callback(
@@ -829,6 +891,12 @@ pub(crate) mod tests {
 
     #[test]
     fn descriptor_requires_exact_version_capability_and_all_functions() {
+        let header = DescriptorHeader {
+            struct_size: size_of::<DescriptorHeader>() as u32,
+            abi_version: ABI_VERSION,
+            capability: CAPABILITY,
+        };
+        assert!(!valid_descriptor(std::ptr::from_ref(&header).cast()));
         let mut api = descriptor();
         assert!(valid_descriptor(&api));
         api.abi_version += 1;
@@ -863,6 +931,15 @@ pub(crate) mod tests {
         api = descriptor();
         api.send_digit = None;
         assert!(!valid_descriptor(&api));
+        for missing in 0..3 {
+            api = descriptor();
+            match missing {
+                0 => api.prepare_ulaw = None,
+                1 => api.send_prepared_ulaw = None,
+                _ => api.elapsed_ms = None,
+            }
+            assert!(!valid_descriptor(&api));
+        }
         assert!(matches!(
             checked_descriptor(std::ptr::null()),
             Err(IaxError::IncompatibleAdapter)
@@ -1005,6 +1082,21 @@ pub(crate) mod tests {
         };
         assert_eq!(peer.sample_rate_hz(), 8000);
         assert!(peer.send_audio(&[0.0; 160]).is_ok());
+        assert_eq!(peer.elapsed_ms(), 1234);
+        assert!(peer.prepare_audio(&[0.5; 160], &mut [0; 160]).is_ok());
+        assert_eq!(peer.send_prepared(&[0xff; 160], 42), Ok(true));
+        OPERATION_RESULT.set(1);
+        assert_eq!(peer.send_prepared(&[0xff; 160], 42), Ok(false));
+        assert_eq!(
+            peer.prepare_audio(&[0.5], &mut [0]),
+            Err(IaxError::Operation)
+        );
+        OPERATION_RESULT.set(-1);
+        assert_eq!(
+            peer.send_prepared(&[0xff; 160], 42),
+            Err(IaxError::Operation)
+        );
+        OPERATION_RESULT.set(0);
         assert!(peer.send_text(b"status").is_ok());
         assert!(peer.send_digit(b'7').is_ok());
         assert_eq!(SENT_DIGIT.with(Cell::get), u32::from(b'7'));

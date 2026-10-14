@@ -1,8 +1,9 @@
 //! Serialized IAX peer work, queued control delivery, and native egress composition.
 use super::{
     dispatcher::PeerWake,
-    egress::Egress,
+    outbound::Outbound,
     ring::{InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation, RingError},
+    source_clock::SourceClock,
 };
 use crate::{
     Error,
@@ -246,11 +247,7 @@ pub struct PeerSession {
     events: Producer<Event>,
     stop: Arc<AtomicBool>,
     wake: PeerWake,
-    outbound: LinkAudioConsumer,
-    egress: Egress,
-    native: [f32; 960],
-    next_audio: u64,
-    sent_audio: bool,
+    outbound: Outbound,
     edge: u64,
     query_epoch: Option<u64>,
     replied_newkey: bool,
@@ -505,7 +502,7 @@ impl PeerSession {
         if rpt_advanced_core::config::NodeId::new(local).is_err() || local.contains('\0') {
             return Err(Error::Reservation);
         }
-        let egress = Egress::new(io.rate(), 960).map_err(|_| Error::Allocation)?;
+        let outbound = Outbound::new(io.rate(), outbound)?;
         let (inbound, _input) =
             InboundRing::open(io.rate(), InboundPolicy::Peer).map_err(|_| Error::Allocation)?;
         io.send_text(c"!NEWKEY1!")?;
@@ -542,10 +539,6 @@ impl PeerSession {
                 stop,
                 wake,
                 outbound,
-                egress,
-                native: [0.0; 960],
-                next_audio: 0,
-                sent_audio: false,
                 edge: 0,
                 query_epoch: None,
                 replied_newkey: false,
@@ -556,6 +549,10 @@ impl PeerSession {
             },
             control,
         ))
+    }
+    /// Bind the physical stream before publishing this session to its peer owner.
+    pub(crate) fn bind_clock(&mut self, clock: Arc<SourceClock>) {
+        self.outbound.bind_clock(clock);
     }
     fn event(&mut self, event: Event) -> Result<(), Error> {
         self.events.push(event).map_err(|_| Error::Write)
@@ -712,7 +709,7 @@ impl PeerSession {
                 Command::Redirect { inbound, outbound } => {
                     self.inbound = inbound;
                     self.pending_input = None;
-                    self.outbound = outbound;
+                    self.outbound.redirect(outbound)?;
                     self.peer.activity(false, now_ms);
                     self.edge = 0;
                     self.query_epoch = None;
@@ -808,32 +805,31 @@ impl PeerSession {
         if self.peer.expire_digit(now_ms) {
             self.event(Event::Digit('#'))?;
         }
-        if now_ms >= self.next_audio {
-            let shortfall = self.outbound.read(&mut self.native);
-            let real = self.native.len() - shortfall;
-            // Keep a continuous burst on its sample cadence: scheduler lateness
-            // must not lower the drain rate. Idle/start rebases the deadline;
-            // catch-up remains bounded to one block per owner step.
-            self.next_audio = if real == 0 || !self.sent_audio {
-                now_ms
-            } else {
-                self.next_audio
-            }
-            .saturating_add(20);
-            if real != 0 {
-                let audio = self
-                    .egress
-                    .process(&self.native[..real])
-                    .map_err(|_| Error::Translation)?;
-                if !audio.is_empty() {
-                    self.io.write(audio)?;
-                    self.sent_audio = true;
-                }
-            } else if self.sent_audio {
-                self.io.write(&[])?;
-                self.sent_audio = false;
+        let deadline = self.outbound.step(&mut self.io, now_ms)?;
+        let now = now_ms.saturating_mul(1_000_000);
+        let mut after = deadline.map_or(u64::MAX, |deadline| deadline.saturating_sub(now));
+        // Space can become available without an activity edge; retry only that
+        // backpressure. The media dispatcher wakes ordinary activity changes.
+        if self.pending_input.is_some() {
+            after = after.min(10_000_000);
+        }
+        if self.commands.slots() != 0 {
+            after = 0;
+        }
+        if let Some(deadline) = self.peer.deadline_ms() {
+            after = after.min(deadline.saturating_sub(now_ms).saturating_mul(1_000_000));
+        }
+        if let RadioControlState::Negotiating(Some(deadline)) = self.radio_control {
+            after = after.min(deadline.saturating_sub(now_ms).saturating_mul(1_000_000));
+        }
+        // Conversion/control work may have consumed part of the wait already.
+        if let Some(epoch) = self.async_epoch {
+            let elapsed = epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            if after != u64::MAX {
+                after = after.saturating_sub(elapsed.saturating_sub(now));
             }
         }
+        self.io.set_deadline(after)?;
         Ok(())
     }
     /// Request this owner to stop before the next serialized step.
