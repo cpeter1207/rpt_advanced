@@ -75,6 +75,11 @@ accepts `rpt_advanced command <local-node> <DTMF>` to send a command through
 the normal command rules. These CLI commands are not standalone service
 commands.
 
+The `fanout` line shows completed audio batches, the longest batch time in
+nanoseconds, and dropped audio blocks. Check host load if `dropped-blocks`
+keeps rising: some outgoing audio is being lost. The `media` counters are not
+used on the Asterisk path.
+
 Standalone service checks use `systemctl status rpt-advanced` and
 `journalctl -u rpt-advanced`; see the [installation guide](install.md#set-up-standalone).
 The standalone program has no link-status or DTMF command-line option.
