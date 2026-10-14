@@ -146,6 +146,61 @@ fn audio_burst_ends_with_exactly_one_idle_marker() {
 }
 
 #[test]
+fn outbound_audio_keeps_up_when_driver_wakes_one_millisecond_late() {
+    for driver_interval_ms in [10, 11] {
+        let (mut session, _control, _state, mut output) = make_session("1000");
+        for now_ms in 0..=4_000 {
+            if now_ms % 20 == 0 {
+                output.write(&[0.25; 960]);
+            }
+            if now_ms % driver_interval_ms == 0 {
+                session.step(now_ms).unwrap();
+            }
+        }
+        assert_eq!(
+            output.dropped_samples(),
+            0,
+            "continuous 48 kHz audio overflowed with {driver_interval_ms} ms driver steps"
+        );
+    }
+}
+
+#[test]
+fn outbound_audio_rebases_after_late_start_and_idle() {
+    let (mut session, _control, state, mut output) = make_session("1000");
+    assert_eq!(output.write(&[0.25; 1920]), 0);
+    session.step(5_000).unwrap();
+    session.step(5_001).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960]);
+
+    session.step(5_020).unwrap();
+    session.step(10_000).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960, 960, 0]);
+
+    assert_eq!(output.write(&[0.25; 1920]), 0);
+    session.step(10_001).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960, 960, 0]);
+    session.step(10_020).unwrap();
+    session.step(10_021).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960, 960, 0, 960]);
+    session.step(10_040).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960, 960, 0, 960, 960]);
+}
+
+#[test]
+fn outbound_audio_catches_up_one_block_per_step_after_owner_stall() {
+    let (mut session, _control, state, mut output) = make_session("1000");
+    assert_eq!(output.write(&[0.25; 2880]), 0);
+    session.step(0).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960]);
+
+    session.step(100).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960, 960]);
+    session.step(101).unwrap();
+    assert_eq!(state.lock().unwrap().writes, [960, 960, 960]);
+}
+
+#[test]
 fn legacy_newkey_is_echoed_once_without_gating_audio() {
     let (mut session, _control, state, mut output) = make_session("1000");
     state

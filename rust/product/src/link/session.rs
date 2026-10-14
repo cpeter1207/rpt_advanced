@@ -780,9 +780,17 @@ impl PeerSession {
             self.event(Event::Digit('#'))?;
         }
         if now_ms >= self.next_audio {
-            self.next_audio = now_ms.saturating_add(20);
             let shortfall = self.outbound.read(&mut self.native);
             let real = self.native.len() - shortfall;
+            // Keep a continuous burst on its sample cadence: scheduler lateness
+            // must not lower the drain rate. Idle/start rebases the deadline;
+            // catch-up remains bounded to one block per owner step.
+            self.next_audio = if real == 0 || !self.sent_audio {
+                now_ms
+            } else {
+                self.next_audio
+            }
+            .saturating_add(20);
             if real != 0 {
                 let audio = self
                     .egress
