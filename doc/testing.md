@@ -24,12 +24,21 @@ The focused component checks are `cargo test -p rpt-advanced-core --test link`,
 `cargo test -p rptadv-asterisk-adapter`,
 `cargo test -p rptadv-file-adapter -p rptadv-speech-adapter`, and
 `cargo test -p rptadv-control-asterisk-adapter`. The Asterisk adapter loads the
-released `librate_adjusting_pcm_ring2.so.2` and
-`librptadv_samplerate_adapter.so.1`; install their matching development packages
+released `librate_adjusting_pcm_ring3.so.3` and
+`librptadv_samplerate_adapter.so.2`; install their matching development packages
 before building. File tests use FFmpeg; speech tests compile a local Piper fixture
 and verify synthesis without an FFmpeg dependency. They need no voice model or
 network access. Each media descriptor is also exercised independently through
 its public C header and dynamically loaded versioned shared object.
+
+`cargo test -p rptadv-jitter-adapter` exercises the SpeexDSP boundary, including
+reordering, duplicates, late packets, delay limits, reset, and packet bounds.
+Product and standalone tests exercise async peer ownership, ordered PCM/loss
+publication, concurrent progress, and stop/reload detachment. The C
+`tests/test_jitter_ring.c` integration trace verifies that a missing packet stays
+between the same earlier and later audio through resampling and ring PLC.
+Install the dependency versions listed in [installation](install.md); an older
+same-SONAME provider is insufficient for these descriptor extensions.
 
 ## Prebuilt test images
 

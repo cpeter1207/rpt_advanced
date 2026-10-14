@@ -19,6 +19,14 @@ tests are present. This branch has not yet passed its full hosted pull-request
 gate or current hardware/peer acceptance; do not treat a package build alone as
 standalone deployment approval.
 
+Standalone peer ingress now uses a bounded shared Tokio executor and one
+serialized owner per connection. The separately packaged SpeexDSP jitter
+adapter performs adaptive packet playout with a 40/60/500 ms minimum/initial/
+maximum policy; the released PCM ring remains the sole converter and PLC owner.
+Ordered missing spans survive converter lookahead. Local composed tests and
+changed-source coverage pass; refreshed images, hosted gates, and live testing
+are tracked separately under ADR 0037.
+
 - Identifier scheduling policy: intervals, priorities, activity-based
   and unconditional periods, first-key-only sets, bounded polite deferral while
   receiver/link activity or queued telemetry is present, and completion hierarchy.
@@ -140,7 +148,7 @@ standalone deployment approval.
   passes.
 
 The build produces the standalone service, `librptadv_product.so.1`, the
-versioned control, file, speech, and standalone resolver adapter DSOs, and the optional
+versioned control, file, speech, standalone resolver and jitter adapter DSOs, and the optional
 `app_rpt_advanced.so` Asterisk adapter. It uses the separately released
 `libusbradioplus_product.so.1` and does not ship a static controller library
 or legacy controller headers. The

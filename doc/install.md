@@ -14,8 +14,8 @@ so APT can obtain `libusbradioplus-product1`.
 Download the rpt_advanced Debian 13 runtime packages from the same rpt_advanced
 release into an otherwise empty directory, then install the package set with
 APT resolving the separately released shared-library dependencies. Include the
-matching `librptadv-resolver-adapter1` runtime package; the standalone composition
-requires it even when configured peers use numeric addresses:
+matching `librptadv-resolver-adapter1` and `librptadv-jitter-adapter1` runtime
+packages. Both are required by standalone, even with no configured links:
 
 ```sh
 sudo apt-get install ./*.deb
@@ -47,7 +47,7 @@ sudo systemctl restart rpt-advanced
 The process handles SIGHUP as a configuration reload request and revalidates its
 loaded providers. Missing or incompatible required providers prevent startup;
 a failed reload keeps the active configuration. Replacing provider code,
-including the resolver, requires a service restart. The service runs
+including the resolver and jitter adapter, requires a service restart. The service runs
 as `rpt-advanced`, with access to CM119 USB control and the audio group; do not
 run it as root. Install Piper separately if speech announcements are wanted and
 configure a local model readable by the service account. File playback uses the
@@ -110,7 +110,7 @@ configuration, and restart Asterisk as needed.
 ## Build from source
 
 Use the package release for routine installation. A source build requires Rust
-1.85/Cargo, a C compiler, `libclang-dev`, `pkg-config`, FFmpeg, and the matching
+1.85/Cargo, a C compiler, `libclang-dev`, `libspeexdsp-dev`, `pkg-config`, FFmpeg, and the matching
 `libusbradioplus-product-dev` package, including
 `/usr/include/usbradioplus_product.h` and the `usbradioplus_product` pkg-config
 file. It also requires the development packages for the versioned radio, GPIO,
@@ -119,7 +119,14 @@ audio, IAX2, samplerate, PCM-ring, `librptadvtone-dev`,
 `librptadvschedule-dev`
 (ABI 1) libraries. The corresponding `librptadvtone1`, `librptadvmorse1`,
 `librptadvdtmf1`, `librptadvtemplate1`, and `librptadvschedule1`
-runtimes are direct product dependencies. An Asterisk build additionally
+runtimes are direct product dependencies. Ordered loss handling requires
+PCM ring 3.0.0-alpha.3 or later and samplerate adapter 0.2.0-alpha.2 or later;
+standalone additionally requires IAX2 client 0.1.0-alpha5 or later. Their SONAMEs
+remain 3, 2, and 1 respectively. Older libraries with the same SONAME lack the
+required descriptor functions and are not valid substitutes. The standalone
+jitter adapter is built here and links the distribution's SpeexDSP library;
+the Asterisk adapter continues using Asterisk's packet-jitter handling.
+An Asterisk build additionally
 requires the public ASL3 Asterisk development headers; a full Asterisk source
 tree is not used.
 

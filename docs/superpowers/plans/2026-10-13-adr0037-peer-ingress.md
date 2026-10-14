@@ -381,7 +381,7 @@ and `Cargo.toml`/`Cargo.lock`. Keep the protocol engine free of socket operation
   SpeexDSP-backed adapter and codec/ring chain. Check recovered reorderings,
   bounded latency, lost-span placement, adaptation during continuous speech and
   unkey tail drainage; no live-network dependency in automated tests.
-- [ ] Close affected production coverage gaps using scoped reports and the
+- [x] Close affected production coverage gaps using scoped reports and the
   ignored `.work/quality-progress.md` checklist. Run relevant Rustdoc and fast
   checks before push; update user documentation before a PR.
 - [ ] Run the hosted full gate on both native platforms, independently review the
