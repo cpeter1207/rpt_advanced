@@ -1,0 +1,10 @@
+prefix=@prefix@
+libdir=@libdir@
+includedir=${prefix}/include/rpt_advanced/jitter
+abi_version=1
+
+Name: rptadv_jitter_adapter
+Description: Versioned adaptive packet jitter capability for rpt_advanced
+Version: @version@
+Libs: -L${libdir} -lrptadv_jitter_adapter
+Cflags: -I${includedir}

@@ -34,6 +34,36 @@ struct rptadv_speech_descriptor;
 #define RPTADV_PEER_EVENT_RADIO_KEY 4U
 /** Peer event clearing remote receiver activity; no payload. */
 #define RPTADV_PEER_EVENT_RADIO_UNKEY 5U
+/** Peer event for counted missing input-rate PCM samples; data is null and
+ * count is positive. Only a standalone peer host emits this event. */
+#define RPTADV_PEER_EVENT_GAP 6U
+/** Compatible copied peer-observation record revision. */
+#define RPTADV_PEER_OBSERVATION_ABI_VERSION 1U
+
+/** Non-transactional peer ingress/jitter counters. Durations are negotiated
+ * source-rate samples, never native 48 kHz ring samples. Buffered span is the
+ * sum of queued packet spans and can include packet overlap. Drop fields count
+ * packets; ingress overflow counts datagrams. Counters are connection-lifetime
+ * totals unless named queued/delay/buffered/capacity. No payload or secret data. */
+struct rptadv_peer_observation_v1 {
+    uint32_t struct_size;                  /**< Set by caller; host must fill complete revision. */
+    uint32_t abi_version;                  /**< RPTADV_PEER_OBSERVATION_ABI_VERSION. */
+    uint32_t jitter_queued_packets;        /**< Packets retained for playout. */
+    uint32_t jitter_delay_samples;         /**< Current packet-buffer delay. */
+    uint64_t jitter_buffered_span_samples; /**< Sum of retained packet durations. */
+    uint64_t jitter_duplicate_drops;       /**< Rejected duplicate packets. */
+    uint64_t jitter_late_drops;            /**< Packets too late for playout. */
+    uint64_t jitter_full_drops;            /**< Packets rejected at the slot bound. */
+    uint64_t jitter_missing_samples;       /**< Released missing media duration. */
+    uint64_t jitter_insertion_samples;     /**< Released delay-insertion duration. */
+    uint64_t jitter_skipped_samples;       /**< Media skipped during delay reduction. */
+    uint64_t jitter_limit_resets;          /**< Adaptive resets at the delay limit. */
+    uint64_t jitter_overload_drops;        /**< Packets lost in overload resets. */
+    uint64_t jitter_overload_span_samples; /**< Packet duration lost in overload resets. */
+    uint64_t ingress_overflow_drops;       /**< Datagrams rejected by the ingress queue. */
+    uint32_t ingress_queued_packets;       /**< Datagrams awaiting this peer's owner. */
+    uint32_t ingress_capacity_packets;     /**< Bounded ingress queue capacity. */
+};
 
 /** Copied local civil time. Valid is zero when conversion failed. */
 struct rptadv_local_time_v1 {
@@ -88,8 +118,16 @@ struct urp_ast_link_attach {
 };
 /** Current-generation predicate used during one bounded outbound dial. */
 typedef uint32_t (*rptadv_current_v1)(void *context);
-/** One borrowed peer input event identified by the RPTADV_PEER_EVENT_* constants. */
+/** One borrowed peer input event identified by the RPTADV_PEER_EVENT_* constants.
+ * For GAP, data is null and count is the number of missing source-rate samples.
+ * The product may defer reading another event until all of this event is
+ * admitted to the ordered inbound ring. */
 typedef void (*rptadv_peer_event_v1)(void *context, uint32_t kind, const void *data, size_t count);
+/** One serialized peer-owner turn. Return zero to wait for readiness/deadline
+ * or a negative value to retire the peer.
+ * The product may call the peer's synchronous I/O operations during this callback;
+ * the host must not hold a peer borrow or lock while invoking it. */
+typedef int32_t (*rptadv_peer_step_v1)(void *step_context);
 /** Borrowed status text sink. */
 typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t length);
 struct UrpNativeStationConfig;
@@ -127,7 +165,9 @@ typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, si
  * on success and nonzero on failure. Provider callbacks never unwind.
  *
  * Borrowed strings/slices and product callbacks are valid only for the synchronous
- * call, except radio endpoints retained from activate through destroy. PCM is aligned normalized
+ * call, except radio endpoints retained from activate through destroy and the
+ * optional peer-step callback retained from successful peer_step_attach through
+ * peer_step_detach. PCM is aligned normalized
  * F32 with exactly the stated count. Radio transmit returns key and CTCSS-enable
  * decisions through separate output pointers. Peer text/audio data and DTMF byte
  * are borrowed for the callback; radio key/unkey events have null data and zero
@@ -202,6 +242,25 @@ struct rptadv_host_services_v5 {
     int (*peer_write)(void *context, void *peer, const float *samples, size_t sample_count);
     /** Destroy one uniquely owned peer. */
     void (*peer_destroy)(void *context, void *peer);
+
+    /** Optional async peer-owner group: all three entries are null or all present.
+     * Attach retains step_context but does not transfer the uniquely owned peer.
+     * On failure it neither invokes nor retains the callback/context and sets
+     * registration to null. On success the host serializes every step for this
+     * peer, never holding a peer borrow or lock across the call. It services
+     * queued ingress and protocol/media deadlines at most 10 ms apart. */
+    int (*peer_step_attach)(void *context, void *peer, rptadv_peer_step_v1 step, void *step_context,
+                            void **registration);
+    /** Nonblocking and safe from within step; prevent further callbacks. */
+    void (*peer_step_stop)(void *context, void *registration);
+    /** Off-callback-only quiescence barrier. After return no callback can run;
+     * the product may then release step_context and destroy the peer. */
+    void (*peer_step_detach)(void *context, void *registration);
+    /** Optional serialized peer-owner observation. The product calls this only
+     * from peer_step, after ordinary peer I/O and before returning to the host.
+     * It never calls this from control or audio. Zero fills the complete record;
+     * nonzero leaves the previous copied observation unchanged. */
+    int (*peer_observe)(void *context, void *peer, struct rptadv_peer_observation_v1 *out);
 };
 
 /** Portable runtime entry points.

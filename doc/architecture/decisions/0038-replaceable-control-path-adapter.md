@@ -82,11 +82,12 @@ replaceable. Both may depend on public Asterisk APIs; neither requires ASL3.
 The exact descriptor fields and package names are implementation details and
 are not introduced by this architecture-only change.
 
-A standalone composition selects a non-Asterisk control-path backend. It must
-meet the standalone lock-free/thread-safe-alternative requirement in ADR 0037
-as well as this functional contract. Internal Asterisk taskprocessor locking
-does not impose that implementation on standalone operation. The standalone
-packet fan-in remains a separate media boundary, not this control executor.
+A standalone composition selects a non-Asterisk control-path backend meeting
+this functional contract and the native audio isolation rules. ADR 0037's
+Tokio/per-connection serialization applies to packet media only, not replacement
+of this control executor. Internal Asterisk taskprocessor locking does not
+impose that implementation on standalone operation. Packet handling, jitter
+playout and PCM publication never wait for the control executor.
 
 ## Consequences and verification
 

@@ -50,7 +50,7 @@ def test_standalone_package_does_not_depend_on_asterisk() -> None:
     depends = stanza.split("Depends:", 1)[1].split("Description:", 1)[0]
     assert "asterisk" not in depends.lower()
     assert "app-rpt-advanced" not in depends.lower()
-    assert "librptadv-iax2-client1 (>= 0.1.0~alpha4)" in depends
+    assert "librptadv-iax2-client1 (>= 0.1.0~alpha5)" in depends
 
 
 def test_standalone_requires_radio_core_with_live_update_api() -> None:
@@ -108,6 +108,7 @@ def test_standalone_check_builds_the_product_before_loading_it() -> None:
     test = plan.find("test --locked -p rpt-advanced-standalone")
     assert 0 <= build < stage < test, "standalone tests need the current shared product"
     assert "-p rptadv-resolver-adapter" in plan[:test]
+    assert "-p rptadv-jitter-adapter" in plan[:test]
     assert "resolver" in plan[stage:test], (
         "resolver must be staged before provider loading"
     )
@@ -126,6 +127,7 @@ def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
         "librptadv-file-adapter1",
         "librptadv-speech-adapter1",
         "librptadv-resolver-adapter1",
+        "librptadv-jitter-adapter1",
         "librptadv-control-asterisk-adapter1",
         "librptadv-control-standalone-adapter1",
     ):

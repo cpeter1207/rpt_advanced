@@ -7,6 +7,7 @@ thread_local! {
     static PUSH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PUSH_SCRIPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PUSH_CANCEL: std::cell::Cell<Option<(*const std::sync::atomic::AtomicU64, u64, usize)>> = const { std::cell::Cell::new(None) };
+    static GAP_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[test]
@@ -26,6 +27,21 @@ fn peer_preparation_reserves_one_maximum_callback_and_producer_write() {
         assert_eq!(consumer.observe().unwrap().available_samples, 4096);
         assert_eq!(output, [0.0; 4097]);
     }
+}
+
+#[test]
+fn peer_gap_accepts_only_the_available_source_prefix() {
+    let (mut producer, mut consumer) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+    for _ in 0..4 {
+        assert_eq!(producer.write(&[0.25; 4096]), Ok(4096));
+    }
+    assert_eq!(producer.gap(4096), Ok(192));
+    assert_eq!(consumer.observe().unwrap().available_samples, 16576);
+    assert_eq!(producer.gap(4097), Err(RingError));
+    let mut output = [0.0; 4096];
+    assert_eq!(consumer.render(&mut output), Ok(3916));
+    assert_eq!(producer.gap(3904), Ok(3904));
+    assert_eq!(producer.write(&[0.5; 64]), Ok(64));
 }
 
 #[test]
@@ -195,6 +211,35 @@ unsafe extern "C" fn failed_push(
 ) -> i32 {
     -1
 }
+unsafe extern "C" fn failed_gap(_: *mut ffi::rpcr3_ring, _: u64, _: *mut u64) -> i32 {
+    -1
+}
+unsafe extern "C" fn overreported_push(
+    _: *mut ffi::rpcr3_ring,
+    _: *const f32,
+    count: u64,
+    accepted: *mut u64,
+) -> i32 {
+    unsafe { *accepted = count + 1 };
+    0
+}
+unsafe extern "C" fn overreported_gap(
+    _: *mut ffi::rpcr3_ring,
+    count: u64,
+    accepted: *mut u64,
+) -> i32 {
+    unsafe { *accepted = count + 1 };
+    0
+}
+unsafe extern "C" fn pending_overreported_gap(
+    _: *mut ffi::rpcr3_ring,
+    count: u64,
+    accepted: *mut u64,
+) -> i32 {
+    let call = GAP_CALLS.with(|calls| calls.replace(calls.get() + 1));
+    unsafe { *accepted = if call == 0 { 0 } else { count + 1 } };
+    0
+}
 unsafe extern "C" fn failed_render(
     _: *mut ffi::rpcr3_ring,
     _: *mut f32,
@@ -325,7 +370,7 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
             assert!(InboundRing::open(48000, InboundPolicy::Local { squelch_delay_ms }).is_err());
         }
         let original = *ffi::rpcr3_descriptor();
-        for case in 0..14 {
+        for case in 0..15 {
             let mut api = original;
             match case {
                 0 => api.struct_size = 8,
@@ -341,7 +386,8 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
                 10 => api.ring_create = Some(empty_create),
                 11 => api.ring_consumer_reset = None,
                 12 => api.ring_consumer_render_sample = None,
-                _ => api.ring_output_delay = None,
+                13 => api.ring_output_delay = None,
+                _ => api.ring_producer_gap = None,
             }
             assert!(
                 InboundRing::from_descriptor(8000, InboundPolicy::Peer, Box::leak(Box::new(api)))
@@ -381,6 +427,40 @@ pub(crate) fn failed_endpoints() -> (InboundProducer, InboundConsumer) {
         api.ring_producer_push = Some(failed_push);
         api.ring_consumer_render = Some(failed_render);
         api.ring_observe = Some(failed_observe);
+        InboundRing::from_descriptor(48000, InboundPolicy::Peer, Box::leak(Box::new(api))).unwrap()
+    }
+}
+
+pub(crate) fn invalid_ingress_endpoints(
+    gap: bool,
+    overreported: bool,
+) -> (InboundProducer, InboundConsumer) {
+    // SAFETY: the copied table retains its real create/destroy pair and lives for the test.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        if gap {
+            api.ring_producer_gap = Some(if overreported {
+                overreported_gap
+            } else {
+                failed_gap
+            });
+        } else {
+            api.ring_producer_push = Some(if overreported {
+                overreported_push
+            } else {
+                failed_push
+            });
+        }
+        InboundRing::from_descriptor(48000, InboundPolicy::Peer, Box::leak(Box::new(api))).unwrap()
+    }
+}
+
+pub(crate) fn pending_overreported_gap_endpoints() -> (InboundProducer, InboundConsumer) {
+    // SAFETY: the copied table retains its real allocation lifecycle for this test.
+    unsafe {
+        GAP_CALLS.with(|calls| calls.set(0));
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_producer_gap = Some(pending_overreported_gap);
         InboundRing::from_descriptor(48000, InboundPolicy::Peer, Box::leak(Box::new(api))).unwrap()
     }
 }

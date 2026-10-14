@@ -206,9 +206,11 @@ file/speech/Morse/tone worker ──streaming PCM──> telemetry playout ring 
 Link media ingress serializes concurrent asynchronous callbacks for one peer
 before it touches that peer's jitter buffer, decoder, or receive-program ring.
 The Asterisk-hosted adapter may retain a narrow ingress mutex, never acquired
-by the radio-port audio engine. The planned standalone implementation instead
-uses bounded producer-to-owner SPSC packet queues and one assigned media owner
-per peer, with a fixed worker pool rather than a thread per peer. See
+by the radio-port audio engine. The planned standalone implementation uses
+Tokio readiness, bounded per-connection mailboxes and one asynchronous owner
+per peer on a shared worker pool. A peer-local async mutex is permitted only
+where necessary, never on audio. The separate versioned jitter adapter alone
+calls SpeexDSP; packet playout, decoding and PCM conversion remain distinct. See
 [ADR 0037](decisions/0037-standalone-lock-free-peer-ingress.md). The
 local receive, linked-peer inbound, and telemetry playout rings alone own
 source-to-transmit conversion and drift recovery. The transmit worker runs
@@ -395,10 +397,11 @@ defines the full reload, hardware-handoff, and failure policy.
   the audio adapter reports the inherited policy, priority, and limitation for
   each callback worker. See
   [ADR 0028](decisions/0028-remove-res-usbradio-through-hardware-adapters.md).
-- Standalone code uses thread-safe ownership, messages, and atomics instead
-  of locks wherever possible. Concurrent packet producers hand off through
-  bounded lock-free queues; only the assigned peer owner writes its inbound
-  PCM ring. ADR 0037 does not change the current Asterisk module.
+- Standalone code uses thread-safe ownership, messages and atomics. Under ADR
+  0037, concurrent packet callbacks use bounded admission to a connection's
+  serial async owner; no peer can hold another peer's serialization. Tokio
+  internals are not claimed to be lock-free. Audio and PCM consumers never
+  enter Tokio or wait on ingress. The Asterisk module remains unchanged.
 - Each radio audio worker holds one immutable runtime generation for a complete
   call. Reload publishes a fully prepared replacement atomically and does
   not free a retired generation until its safe-quiescence grace period ends.
@@ -484,7 +487,7 @@ defines the full reload, hardware-handoff, and failure policy.
   policy is defined by [ADR 0017](decisions/0017-scheduler-route-lifecycle-and-civil-time.md).
 - Control-path execution is a replaceable adapter capability, not scheduling
   policy or a media queue. Its Asterisk taskprocessor backend preserves current
-  FIFO execution and failure/reload behavior. Standalone media fan-in under
+  FIFO execution and failure/reload behavior. Standalone async media under
   ADR 0037 remains separate from that control executor.
 - A configured replacement window withdraws its named permanent group before
   attaching the scheduled group, and withdraws the scheduled group before

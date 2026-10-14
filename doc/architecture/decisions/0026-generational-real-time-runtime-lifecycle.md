@@ -142,11 +142,14 @@ If an adapter can invoke an unregistered arbitrary thread, it must first hand
 off a fixed packet descriptor to a registered link-media-ingress executor;
 that arbitrary thread must not retain a generation reference.
 
-The planned standalone transport uses ADR 0037's bounded SPSC fan-in instead
-of that ingress mutex. Each registered producer has its own queue to the
-assigned media owner; that owner alone writes a peer's receive-program ring.
-Queue topology follows bounded worker counts rather than creating a thread
-per peer. The same generation tagging and quiescence rules apply.
+The planned standalone transport uses ADR 0037's bounded Tokio mailboxes and
+one async owner per connection on a shared worker pool. A permitted peer-local
+async mutex cannot delay another peer or audio. The owner alone advances the
+jitter adapter, decoder and receive-program writer. Registration retains its
+callback context explicitly; detachment stops delivery and awaits quiescence
+off audio before contexts or DSOs are released. An async task may move threads
+and must not hold a thread-specific hazard slot across an await. Existing
+generation tagging still rejects work for retired connections and rings.
 
 ### Atomic generation publication and reclamation
 

@@ -343,6 +343,10 @@ static mut HOST: crate::abi::rptadv_host_services_v5 = crate::abi::rptadv_host_s
     peer_send_digit: Some(send_digit),
     peer_write: Some(write),
     peer_destroy: Some(peer_destroy),
+    peer_step_attach: None,
+    peer_step_stop: None,
+    peer_step_detach: None,
+    peer_observe: None,
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v5 {

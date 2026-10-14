@@ -61,6 +61,7 @@ def test_standalone_package_declares_its_native_runtime_providers() -> None:
         "librptadv-ffmpeg-adapter1",
         "librptadv-iax2-client1",
         "librptadv-resolver-adapter1",
+        "librptadv-jitter-adapter1",
     ):
         assert package in runtime
 
@@ -75,6 +76,28 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
     for package in ("app-rpt-advanced", "librptadv-product1"):
         assert "usbradioplus" not in depends(stanzas[package])
         assert "librptadv-resolver-adapter1" not in depends(stanzas[package])
+        assert "librptadv-jitter-adapter1" not in depends(stanzas[package])
+
+
+def test_jitter_runtime_and_development_manifests() -> None:
+    stanzas = package_stanzas()
+    runtime = stanzas["librptadv-jitter-adapter1"]
+    assert "${shlibs:depends}" in depends(runtime)
+    assert "librptadv-jitter-adapter1 (= ${binary:version})" in depends(
+        stanzas["librptadv-jitter-adapter-dev"]
+    )
+    assert (
+        ROOT / "debian/librptadv-jitter-adapter1.install"
+    ).read_text().splitlines() == [
+        "usr/lib/*/rpt_advanced/librptadv_jitter_adapter.so.1*"
+    ]
+    assert set(
+        (ROOT / "debian/librptadv-jitter-adapter-dev.install").read_text().splitlines()
+    ) == {
+        "usr/include/rpt_advanced/jitter/rptadv_jitter_adapter.h",
+        "usr/lib/*/rpt_advanced/librptadv_jitter_adapter.so",
+        "usr/lib/*/pkgconfig/rptadv_jitter_adapter.pc",
+    }
 
 
 def test_resolver_runtime_and_development_manifests() -> None:
@@ -123,6 +146,7 @@ if __name__ == "__main__":
         test_standalone_package_declares_its_service_account_provisioner,
         test_standalone_build_profile_excludes_asterisk_adapter_packages,
         test_resolver_runtime_and_development_manifests,
+        test_jitter_runtime_and_development_manifests,
     )
     for test in tests:
         test()

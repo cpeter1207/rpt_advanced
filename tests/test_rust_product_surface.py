@@ -22,10 +22,11 @@ FORBIDDEN_MAKE_TOKENS = (
 ADAPTERS = ("asterisk", "control_asterisk", "file", "speech")
 STANDALONE_CONTROL = "librptadv_control_standalone_adapter.so.1"
 RESOLVER = "librptadv_resolver_adapter.so.1"
+JITTER = "librptadv_jitter_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.1"
-RING_MINIMUM_VERSION = "3.0.0~alpha2"
-SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha1"
+RING_MINIMUM_VERSION = "3.0.0~alpha3"
+SAMPLERATE_MINIMUM_VERSION = "0.2.0~alpha2"
 TONE_MINIMUM_VERSION = "0.1.0~alpha1"
 MORSE_MINIMUM_VERSION = "0.1.0~alpha1-1"
 DTMF_MINIMUM_VERSION = "0.1.0~alpha1-1"
@@ -49,6 +50,7 @@ ELF_DEPENDENCIES = {
     "librptadv_speech_adapter.so.1": set(),
     STANDALONE_CONTROL: set(),
     RESOLVER: {"libresolv.so.2"},
+    JITTER: {"libspeexdsp.so.1"},
 }
 EXPORTS = {
     "librptadv_asterisk_adapter.so.1": "rptadv_asterisk_descriptor_v1",
@@ -58,6 +60,7 @@ EXPORTS = {
     "librptadv_speech_adapter.so.1": "rptadv_speech_adapter_descriptor",
     STANDALONE_CONTROL: "rptadv_control_standalone_descriptor_v1",
     RESOLVER: "rptadv_resolver_adapter_descriptor_v1",
+    JITTER: "rptadv_jitter_adapter_descriptor_v1",
 }
 MANUALS = (
     "README.md",
@@ -101,7 +104,7 @@ def artifacts(directory: Path, runpath: str = "$ORIGIN/../../rpt_advanced") -> N
     for name, dependencies in ELF_DEPENDENCIES.items():
         path = directory / name
         assert path.is_file(), f"missing artifact: {path}"
-        if name in LIBRARIES or name in (STANDALONE_CONTROL, RESOLVER):
+        if name in LIBRARIES or name in (STANDALONE_CONTROL, RESOLVER, JITTER):
             assert dynamic(path, "SONAME") == {name}, f"incorrect SONAME: {name}"
             exports = {
                 line.split()[-1]
@@ -169,6 +172,7 @@ def staged(
         *(library / name for name in LIBRARIES),
         library / STANDALONE_CONTROL,
         library / RESOLVER,
+        library / JITTER,
     }
     link = library / "librptadv_resolver_adapter.so"
     expected.add(link)
@@ -179,6 +183,21 @@ def staged(
     assert (stage / header).read_bytes() == (
         root / "rust/resolver-adapter/include/rptadv_resolver_adapter.h"
     ).read_bytes()
+    link = library / "librptadv_jitter_adapter.so"
+    expected.add(link)
+    assert (stage / link).is_symlink()
+    assert (stage / link).readlink() == Path(JITTER)
+    header = Path("usr/include/rpt_advanced/jitter/rptadv_jitter_adapter.h")
+    expected.add(header)
+    assert (stage / header).read_bytes() == (
+        root / "rust/jitter-adapter/include/rptadv_jitter_adapter.h"
+    ).read_bytes()
+    pkgconfig = Path(f"usr/lib/{multiarch}/pkgconfig/rptadv_jitter_adapter.pc")
+    expected.add(pkgconfig)
+    metadata = (stage / pkgconfig).read_text(encoding="utf-8")
+    assert "@" not in metadata
+    assert f"libdir=/{library.as_posix()}" in metadata
+    assert "abi_version=1" in metadata
     link = library / "librptadv_product.so"
     expected.add(link)
     assert (stage / link).is_symlink(), f"missing developer link: {link}"
@@ -258,7 +277,7 @@ def staged(
     assert found == expected, (
         f"staged manifest: missing={expected - found}, extra={found - expected}"
     )
-    for name in (*LIBRARIES, STANDALONE_CONTROL, RESOLVER):
+    for name in (*LIBRARIES, STANDALONE_CONTROL, RESOLVER, JITTER):
         assert (stage / library / name).read_bytes() == (
             root / "build" / name
         ).read_bytes()
@@ -645,7 +664,7 @@ def verify_artifact_policy() -> None:
         for name, dependencies in ELF_DEPENDENCIES.items():
             write(root, name)
             tables[name] = {"NEEDED": set(dependencies)}
-            if name in LIBRARIES or name in (STANDALONE_CONTROL, RESOLVER):
+            if name in LIBRARIES or name in (STANDALONE_CONTROL, RESOLVER, JITTER):
                 tables[name]["SONAME"] = {name}
         write(root, STANDALONE_BINARY)
         tables[STANDALONE_BINARY] = {"NEEDED": set()}
@@ -993,7 +1012,7 @@ def verify_stage_policy() -> None:
         root = Path(temporary)
         stage = root / "stage"
         library = "usr/lib/test-linux-gnu/rpt_advanced"
-        for name in (*LIBRARIES, STANDALONE_CONTROL, RESOLVER):
+        for name in (*LIBRARIES, STANDALONE_CONTROL, RESOLVER, JITTER):
             write(root, f"build/{name}")
             write(stage, f"{library}/{name}")
         target_directory = "coverage-target"
@@ -1004,6 +1023,14 @@ def verify_stage_policy() -> None:
         write(root, "rust/resolver-adapter/include/rptadv_resolver_adapter.h")
         write(stage, "usr/include/rpt_advanced/resolver/rptadv_resolver_adapter.h")
         (stage / library / "librptadv_resolver_adapter.so").symlink_to(RESOLVER)
+        write(root, "rust/jitter-adapter/include/rptadv_jitter_adapter.h")
+        write(stage, "usr/include/rpt_advanced/jitter/rptadv_jitter_adapter.h")
+        (stage / library / "librptadv_jitter_adapter.so").symlink_to(JITTER)
+        write(
+            stage,
+            "usr/lib/test-linux-gnu/pkgconfig/rptadv_jitter_adapter.pc",
+            f"libdir=/{library}\nabi_version=1\n",
+        )
         write(root, "rust/product/include/rptadv_product.h")
         write(stage, "usr/include/rptadv_product.h")
         write(root, "rust/control-abi/include/rptadv_control_adapter.h")
@@ -1125,6 +1152,7 @@ def main() -> None:
             "rptadv_file_adapter",
             "rptadv_speech_adapter",
             "rptadv_resolver_adapter",
+            "rptadv_jitter_adapter",
         ):
             assert (args.rustdoc / crate / "index.html").is_file(), (
                 f"missing Rustdoc: {crate}"

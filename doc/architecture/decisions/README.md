@@ -42,7 +42,7 @@ status. Superseded records remain and point to their replacement.
 | [0034](0034-appliance-hardware-output-interlock.md) | Accepted | Appliance actuator power is physically fault-gated and requires explicit re-arm. |
 | [0035](0035-fixed-48khz-native-audio.md) | Accepted | Native radio/controller audio remains 48 kHz; inbound rings own conversion/drift into transmit, with outbound codec conversion separate. |
 | [0036](0036-asterisk-without-asl3-dependency.md) | Accepted | rpt_advanced uses adapter-neutral execution; Asterisk thread handling stays in adapters, and ASL3-specific code stays in its compatibility adapter. |
-| [0037](0037-standalone-lock-free-peer-ingress.md) | Accepted | Standalone ingress uses bounded SPSC fan-in and one media owner per peer, without mutex serialization or per-peer threads. |
+| [0037](0037-standalone-lock-free-peer-ingress.md) | Implemented; hosted/live validation pending | Tokio per-connection owners use a versioned SpeexDSP jitter adapter; PCM consumers remain lock-free. |
 | [0038](0038-replaceable-control-path-adapter.md) | Accepted | Control execution uses a replaceable adapter, initially backed by the Asterisk taskprocessor. |
 | [0039](0039-retire-usbradioplus-native-mode.md) | Implemented | Remove USBRadioPlus native software-repeat and native parrot modes; preserve shared native DSP and controller transport. |
 | [0040](0040-initial-alpha-compatibility-policy.md) | Accepted | Initial-alpha project interfaces do not require backward compatibility; remove compatibility-only code while rejecting mismatched artifacts safely. |

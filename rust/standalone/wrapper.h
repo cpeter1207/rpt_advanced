@@ -6,6 +6,7 @@
 #include "../product/include/rptadv_product.h"
 #include "../speech-adapter/include/rptadv_speech_adapter.h"
 #include "rptadv_resolver_adapter.h"
+#include "rptadv_jitter_adapter.h"
 #include <rptadv_ffmpeg_adapter/rptadv_ffmpeg_adapter.h>
 #include <rptadv_gpio_adapter/rptadv_gpio_adapter.h>
 #include <rptadv_portaudio_alsa_adapter/rptadv_portaudio_alsa_adapter.h>

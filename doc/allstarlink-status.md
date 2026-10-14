@@ -6,6 +6,32 @@ not complete peer interoperability or hardware acceptance. This document
 describes the implemented behavior and remaining validation; it is not
 authorization to activate a live link.
 
+## Standalone packet reception
+
+Standalone receives IAX2 packets through a shared Tokio worker pool. Each peer
+has its own bounded packet mailbox and serialized media handler; waiting on one
+peer does not stop another peer or the radio audio callbacks.
+
+The separately packaged SpeexDSP jitter adapter reorders packets that arrive
+before their playout deadline and adjusts delay to observed lateness. Its
+starting policy is 40 ms minimum, 60 ms initial, and 500 ms maximum. These values
+are not configuration options in this revision. They are separate from the
+decoded PCM ring's reserve, target, and capacity. Missing packet spans retain
+their place in the stream and are concealed by the shared PCM ring, not by a
+second concealment engine in the packet handler.
+
+Peer status snapshots include jitter delay, buffered span, queued packets,
+duplicate/late/full drops, missing/insertion/skipped samples, limit resets,
+and ingress queue occupancy/overflow. Sample counts use that peer's decoded
+rate; status delay and occupancy are displayed in milliseconds. Use changes
+between snapshots to distinguish packet lateness from PCM starvation or ingress
+overload. These observations do not by themselves establish network packet loss.
+The Asterisk adapter retains Asterisk's existing packet-jitter path.
+
+Synthetic concurrency, packet reordering, loss placement, retirement, and
+loopback tests cover this implementation. Hosted platform verification and
+separately approved on-node listening tests are still required for this change.
+
 ## Implemented locally
 
 The controller accepts the configured linking-only DTMF operations: monitor,
@@ -57,7 +83,7 @@ Direct links are transceive, monitor, or local-monitor links. Routing provides
 mix-minus and prevents local-monitor links from being forwarded to other peers.
 The media boundary is rate-aware: Asterisk negotiates an available channel
 format, Asterisk translates the wire codec to peer PCM, and the controller uses
-libsamplerate when peer PCM differs from the radio rate. Ordinary 8 kHz ASL
+the shared PCM ring for peer-to-native conversion and clock correction. Ordinary 8 kHz ASL
 operation remains the primary compatibility case; broader codec/rate
 interoperability is still to be demonstrated against real peers.
 The fixed 48 kHz local radio rate bounds the dynamically discovered IAX candidates.

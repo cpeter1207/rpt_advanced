@@ -128,10 +128,13 @@ playout is available, decodes it and writes the decoded samples to that peer's
 receive-program rate-adjusting PCM ring. The mutex exists only to maintain the
 ring's conceptual single producer. Neither radio audio worker takes it.
 
-For standalone operation, ADR 0037 replaces this mutex with bounded SPSC
-packet queues from each ingress producer to the peer's assigned media worker.
-That worker alone owns the peer jitter buffer, decoder, and PCM-ring writer.
-No producer writes the PCM ring directly and no thread per peer is required.
+For standalone operation, ADR 0037 uses readiness-driven Tokio tasks and
+bounded per-connection mailboxes. One asynchronous owner mutates each peer's
+jitter-adapter context, decoder and PCM writer. A peer-local async mutex is
+permitted where necessary; it is never acquired by audio or held for another
+peer. SpeexDSP is private to the versioned jitter adapter. Explicit missing
+spans preserve sample order through the shared ring's existing PLC; no second
+concealment or conversion path is introduced. No OS thread per peer is required.
 
 The DAC/adapter-output-clocked transmit worker calls a bounded radio-program
 mixer that consumes the requested native frame count from the local receive
@@ -202,7 +205,7 @@ Queue ownership is fixed:
 Jitter buffering, decoding, rate recovery, mixing, codec encoding, RF
 signaling, station-control events, and hardware signaling have distinct
 owners. The Asterisk compatibility ingress mutex cannot delay either radio
-audio worker; standalone ingress instead uses ADR 0037's lock-free handoff.
+audio worker; standalone ingress uses ADR 0037's independently serialized tasks.
 All PCM rings remain
 observable for occupancy, shortfall, and rate-adjustment diagnosis. This record
 supplements the lock-free audio rule in ADR 0002 and the shared-ring rule in ADR

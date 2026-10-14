@@ -1,14 +1,19 @@
-# ADR 0037: Standalone peer ingress uses lock-free single-owner serialization
+# ADR 0037: Standalone peer ingress uses Tokio and per-connection ownership
 
-Status: Accepted
+Status: Implemented; hosted and live validation pending
+
+Amended 2026-10-13: readiness-driven Tokio tasks replace the prescribed SPSC
+producer-to-worker topology. SpeexDSP supplies adaptive packet jitter buffering
+only through a separately versioned adapter. Implementation and local composed
+validation are complete; this is not a deployed or release-verified change.
 
 ## Context
 
 The planned standalone controller must remain responsive with hundreds or
-thousands of connected peers. Concurrent packet producers must not contend on
-a mutex around a peer's jitter buffer, decoder, or inbound PCM ring. The shared
-PCM ring is single-producer/single-consumer; calling its producer concurrently
-does not become safe merely because its cursors are atomic.
+thousands of connected peers. Work waiting on one connection must not serialize
+unrelated connections or block audio callbacks. The shared PCM ring is
+single-producer/single-consumer; calling its producer concurrently does not
+become safe merely because its cursors are atomic.
 
 This decision applies to the planned standalone application. It does not
 require changing locks, threads, or behavior in the current Asterisk-hosted
@@ -22,81 +27,126 @@ over locks, mutexes, spinlocks, or equivalent contention gates wherever a
 thread-safe alternative exists. Do not replace a mutex with a spinlock or
 retry loop that waits for another producer to release the same resource.
 
-Use **single-owner serialization with bounded SPSC fan-in** for standalone
-peer ingress:
+Use **Tokio readiness and one serialized asynchronous owner per connection**:
 
-1. A bounded set of ingress producers hands packets to a bounded set of media
-   workers. Assign each connected peer one stable media owner, independent of
-   the peer count; do not create a thread or task executor per peer. Bound
-   producer, worker, peer, and queue-slot resources at setup; reject admission
-   rather than exceed available capacity.
-2. Each producer-to-owner pair has its own preallocated SPSC packet queue.
-   Its producer handle belongs to exactly one execution context. Concurrent
-   producers never share a producer handle, a reservation cursor, or the PCM
-   ring's writer. These queues carry packet records, not a second PCM buffer.
-   Multiple producer queues may carry packets for the same peer. Standalone
-   transport execution contexts are registered before publishing; an arbitrary
-   callback thread must not borrow another producer's SPSC handle.
-3. The owner fairly drains ready input queues with bounded work per turn. An
-   empty queue or a producer paused before publication must not stop other
-   ready queues. It alone inserts a peer's packets into that peer's jitter
-   buffer, advances its decoder, and writes its inbound PCM ring.
-   Service peer playout deadlines even when no packets arrive; never drain a
-   busy input indefinitely before checking other inputs or due playout.
-4. Preserve each producer's packet order. Packets from different producers
-   retain their protocol sequence/timestamps and arrival metadata; the peer's
-   existing jitter/ordering logic resolves network reordering. Do not invent a
-   global packet sequence or wait for every producer before making progress.
-   Order-sensitive peer control packets use the same owner and protocol-order
-   rules as media, not a second concurrent path into peer state.
-5. Queue publication and consumption never block or allocate. Packet payload
-   ownership remains valid until consumed, using bounded preallocated storage.
-   Each record owns its bounded payload and peer/session generation; it never
-   retains a pointer into a callback's reusable receive buffer.
-   When a queue is full, reject the new packet and count the drop; never wait,
-   grow without bound, overwrite a consumer-owned slot, or mutate the PCM ring
-   from the producer. Queue occupancy and drops remain observable.
-6. Lifecycle and routing changes use the generation/quiescence rules in
-   ADR 0026. A retired peer's queued packet cannot reach a replacement peer
-   that reuses its slot. A live peer never acquires a second media owner.
+1. A bounded shared Tokio worker pool handles socket readiness and asynchronous
+   packet processing. There is no runtime or OS thread per peer, unbounded
+   task-per-packet spawning, global media worker, or busy-spin polling loop.
+2. Resolve a packet by endpoint, IAX call identifiers and session generation.
+   Admit owned, bounded records to that connection's bounded mailbox without
+   waiting for its handler or for mailbox space. A full mailbox rejects/counts
+   the new packet; another peer must continue receiving and making progress.
+   Records preserve arrival time and protocol order metadata, never a pointer
+   into a reused socket buffer.
+3. One asynchronous task exclusively owns that connection's session, jitter
+   context, decoder and PCM producer. Concurrent callbacks may submit records
+   but may not write PCM. Bound work per turn and service playout, retry,
+   negotiation, DTMF and egress deadlines even while no packet arrives.
+4. A narrow per-connection asynchronous mutex is permitted when necessary for
+   direct concurrent handler entry. It suspends only the contending task; it
+   cannot block an executor thread or guard other connections. Prefer the
+   mailbox owner rather than adding both mechanisms. Mutex acquisition order
+   is not proof of packet arrival order. No global lock is held through media
+   processing, authorization, DNS or an await.
+5. Network I/O, protocol parsing, adaptive packet playout, codec decoding and
+   controller policy remain distinct boundaries. Reliable control ordering
+   must not discard recoverable out-of-order voice before jitter admission.
+   Protocol and timer events use the same connection owner, not a second writer.
+6. Audio callbacks independently consume PCM without entering Tokio, acquiring
+   ingress locks, decoding packets or waiting on producers. Their work remains
+   bounded, allocation-free and strictly lock-free. Tokio and non-real-time
+   ingress serialization are not claimed to be formally lock-free internally.
+7. Retained callbacks require explicit registration, detachment and quiescence;
+   do not retain a synchronous borrowed callback for future async delivery.
+   Gate admission and timers, invalidate stale generations, await peer task
+   quiescence off audio, then release contexts and libraries under ADR 0026.
+   A migrating task must not retain a thread-specific hazard across an await.
 
-Use the existing project handoff where it meets this contract; for the Rust
-packet queues, select the established `rtrb` SPSC implementation under its MIT
-license rather than writing a new queue algorithm. It is an internal Rust
-implementation dependency under ADR 0018, not a replacement for the released
-rate-adjusting PCM shared object. No new PCM ABI or multi-writer API is needed.
-The upstream project documents wait-free operations and bounded storage;
-integration must preserve those properties by keeping blocking work and
-allocating payload destructors out of queue operations.
+Reuse established Tokio readiness, bounded mailbox and timer facilities; do not
+write a new executor or queue algorithm. Tokio is an internal Rust dependency
+under ADR 0018. Existing real-time SPSC queues retain their single-owner rules.
+The independent control-path adapter in ADR 0038 does not schedule media work.
 
-Queue topology scales with the fixed producer/worker counts, not one queue or
-thread per possible producer per peer. Peer jitter/codec/ring state still
-scales with actual connected peers. Use readiness-driven nonblocking network
-I/O and bounded service turns; no lock-free requirement mandates idle spinning.
-The native audio tick remains independent of packet arrival and queue drains.
+### Adaptive jitter adapter
+
+Use SpeexDSP's generic adaptive jitter buffer through a neutral packet-jitter
+capability under ADR 0022. Only the separate Rust `cdylib` adapter dynamically
+links SpeexDSP, owns its FFI/context and translates errors. Its versioned C
+descriptor exposes bounded timestamped packet admission, due retrieval,
+playout advancement, reset, diagnostics and lifecycle; it exposes no native
+SpeexDSP types, raw control opcodes or API escape hatch. One context belongs
+to each peer owner; contexts do not share a global processing lock.
+
+The adapter uses packet timestamp/span and arrival timing to balance buffering
+delay against lateness and recover reordered packets before playout deadlines.
+It returns explicit packet, missing-span or insertion decisions, not decoded
+or synthesized PCM. Initial/minimum/maximum delay, bounded overflow and delay
+adjustment policy must be recorded and tested before media cutover. SpeexDSP's
+fixed packet capacity is not the latency bound, and its native full-buffer
+eviction is distinct from the mailbox's reject-new policy.
+
+The approved initial policy is 40 ms minimum, 60 ms initial delay and 500 ms
+maximum, with SpeexDSP's automatic lateness trade-off. These are packet-jitter
+limits, not the shared PCM ring's reserve, target or capacity.
+
+The existing shared PCM ring remains the sole source-rate converter, drift
+corrector and selected PLC owner. Missing/insertion spans must preserve their
+position among earlier and later PCM; omitting a write or appending zeros is
+not a loss-span contract. Do not duplicate PLC or silently compress the media
+timeline. The owner approved an ABI-3 descriptor-tail `ring_producer_gap`
+operation to append counted missing source samples in order, without breaking
+existing callers. New consumers require its presence; prove placement through
+converter lookahead and pending buffers. The approved samplerate ABI-2 tail
+reports source-position delay, including FIR lookahead and compensation, so
+the ring can place each gap at the correct output position without flushing
+the converter or moving PLC into it. Both existing descriptor prefixes and
+SONAMEs remain unchanged.
+
+Prefer reducing jitter delay between transmissions and validate any adjustment
+during speech; the generic buffer does not itself perform smooth audio
+time-stretching.
+
+Standalone peer diagnostics use the optional host-services `peer_observe` tail.
+The product calls it only from that peer's serialized owner step, copies the
+versioned source-rate jitter and ingress counters to atomics, and reads those
+copies for control-plane status. No status request borrows the live IAX peer,
+and no audio callback observes the jitter adapter or an ingress queue. Older
+host tables and Asterisk continue without this optional observation group.
+
+The complete standalone manifest requires the jitter adapter. Startup fails
+for a missing/incompatible provider; configuration reload revalidates retained
+providers and preserves the old generation on failure. Adapter code replacement
+requires a controlled process restart after tasks and contexts have stopped.
+The Asterisk composition keeps its current jitter implementation/dependencies.
 
 ## Consequences and verification
 
-The standalone ingress-mutex exception in ADRs 0002, 0025, and 0026 is removed.
-That compatibility exception remains available only in the Asterisk-hosted
-adapter; this decision does not authorize rewriting the deployed module.
+This supersedes the earlier mandatory standalone SPSC fan-in and blanket
+non-audio mutex prohibition in ADRs 0002, 0025 and 0026. Their lock-free audio
+and single-writer PCM requirements remain unchanged. The Asterisk-hosted
+ingress exception remains; this decision does not rewrite the deployed module.
 
-Test concurrent producers, a producer paused before publication, full queues,
-wraparound, per-producer order, protocol reordering, fair service, and peer
-retirement with queued packets. Verify one writer per peer PCM ring, no lost
-ownership or torn payloads, no unbounded growth, and continued progress for
-unrelated ready sources. Exercise hundreds and thousands of simulated peers
-and report CPU, memory, queue drops, and service latency. These are scaling
+Test overlapping callbacks, a stalled peer, full mailboxes, timestamp wrap,
+reordering, missing-span placement, adaptive delay, timer-only progress and
+peer retirement with queued work. Verify one writer per peer PCM ring,
+nonblocking audio consumers, bounded storage and independent peer progress.
+Exercise hundreds and thousands of simulated peers and report CPU, memory,
+queue drops and service latency. These are scaling
 validation requirements, not a claim that every hardware target can carry
 thousands of simultaneous audio streams.
 
-This records the implementation method; the standalone ingress is not yet
-implemented. No current Asterisk behavior, package dependency, or shared PCM
-ABI changes as a result of documenting this decision.
+The standalone Tokio/jitter cutover and its ordered-gap prerequisites pass local
+composed tests. New and changed production scopes have 100% line and branch
+coverage; synchronous Asterisk boundary tests also pass. Hosted native-platform
+validation, dependency publication and live-node testing remain outstanding;
+no release-readiness claim is made.
 
 ## Reference
 
-[rtrb API documentation](https://docs.rs/rtrb/latest/rtrb/) and
-[its upstream MIT license](https://github.com/mgeier/rtrb)
-describe the selected bounded wait-free SPSC primitive. The producer-to-owner
-fan-in and ownership policy above are this project's design.
+[Tokio UDP](https://docs.rs/tokio/latest/tokio/net/struct.UdpSocket.html),
+[bounded mailbox](https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html), and
+[async mutex](https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html)
+document the selected non-real-time primitives.
+[SpeexDSP's generic jitter API](https://github.com/xiph/speexdsp/blob/SpeexDSP-1.2.1/include/speex/speex_jitter.h)
+is private to the jitter adapter. The per-peer ownership and timeline handoff
+above are this project's integration contract.

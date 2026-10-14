@@ -42,6 +42,17 @@ pub struct ProductRuntime {
 }
 
 impl ProductRuntime {
+    /// Activate readiness routing while keeping listener admission on control.
+    pub(crate) fn enable_listener(
+        &self,
+        listener: &mut crate::iax::IaxServer,
+    ) -> Result<(), crate::iax::IaxError> {
+        self.host
+            .as_ref()
+            .ok_or(crate::iax::IaxError::Operation)?
+            .enable_listener(listener)
+    }
+
     /// Start the portable product and retain its host callbacks and providers.
     ///
     /// # Safety

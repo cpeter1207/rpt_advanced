@@ -20,6 +20,13 @@ pub struct StandaloneHostContext {
     radio: RadioHostContext,
     pub(crate) resolver: Option<directory::Resolver>,
     secrets: SecretsFile,
+    ingress: Option<PeerIngress>,
+}
+
+/// An executor cannot publish peers until its jitter provider is available.
+struct PeerIngress {
+    executor: crate::iax::executor::Executor,
+    jitter: &'static abi::rptadv_jitter_descriptor_v1,
 }
 
 /// Owns a complete host-services table and the context it points to.
@@ -38,10 +45,20 @@ impl HostServicesOwner {
         let resolver = providers
             .map(|providers| directory::Resolver::new(providers.resolver_descriptor()?))
             .transpose()?;
+        let ingress = providers
+            .map(|providers| {
+                Ok::<_, crate::providers::ProviderError>(PeerIngress {
+                    executor: providers.iax_executor()?,
+                    jitter: providers.jitter_descriptor()?,
+                })
+            })
+            .transpose()?;
+        let asynchronous = ingress.is_some();
         let mut context = Box::new(StandaloneHostContext {
             radio: RadioHostContext::new(radios, providers),
             resolver,
             secrets,
+            ingress,
         });
         let descriptor = Box::new(abi::rptadv_host_services_v5 {
             struct_size: size_of::<abi::rptadv_host_services_v5>() as u32,
@@ -68,6 +85,10 @@ impl HostServicesOwner {
             peer_send_digit: Some(peer_send_digit),
             peer_write: Some(peer_write),
             peer_destroy: Some(peer_destroy),
+            peer_step_attach: asynchronous.then_some(peer_step_attach),
+            peer_step_stop: asynchronous.then_some(peer_step_stop),
+            peer_step_detach: asynchronous.then_some(peer_step_detach),
+            peer_observe: asynchronous.then_some(peer_observe),
         });
         Ok(Self {
             context,
@@ -93,6 +114,17 @@ impl HostServicesOwner {
         }
     }
 
+    /// Start listener routing on the same executor as established peer handlers.
+    pub(crate) fn enable_listener(
+        &self,
+        listener: &mut crate::iax::IaxServer,
+    ) -> Result<(), IaxError> {
+        if let Some(ingress) = &self.context.ingress {
+            listener.enable_async(&ingress.executor)?;
+        }
+        Ok(())
+    }
+
     /// Stage radio settings while keeping the active set available for rollback.
     pub fn stage_radios(&self, radios: Vec<crate::ResolvedRadioNode>) -> bool {
         self.context.radio.stage_radios(radios)
@@ -110,6 +142,87 @@ impl HostServicesOwner {
 }
 
 struct PeerHandle(IaxPeer);
+
+unsafe extern "C" fn peer_step_attach(
+    context: *mut c_void,
+    peer: *mut c_void,
+    step: abi::rptadv_peer_step_v1,
+    step_context: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let Some(output) = (unsafe { output.as_mut() }) else {
+            return -1;
+        };
+        *output = ptr::null_mut();
+        let (Some(context), Some(step)) = (
+            unsafe { context.cast::<StandaloneHostContext>().as_ref() },
+            step,
+        ) else {
+            return -1;
+        };
+        let Some(ingress) = &context.ingress else {
+            return -1;
+        };
+        // End the wrapper borrow before attach: its callback may immediately read it.
+        let raw_peer = {
+            let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
+                return -1;
+            };
+            peer.0.raw_handle()
+        };
+        if unsafe {
+            ingress
+                .executor
+                .configure_jitter(raw_peer, ptr::from_ref(ingress.jitter).cast())
+        }
+        .is_err()
+        {
+            return -1;
+        }
+        match unsafe { ingress.executor.attach(raw_peer, step, step_context) } {
+            Ok(token) => {
+                *output = token;
+                0
+            }
+            Err(_) => -1,
+        }
+    })
+}
+
+unsafe extern "C" fn peer_step_stop(context: *mut c_void, token: *mut c_void) {
+    if let Some(executor) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
+        .and_then(|context| context.ingress.as_ref().map(|ingress| &ingress.executor))
+    {
+        unsafe { executor.stop(token) };
+    }
+}
+
+unsafe extern "C" fn peer_observe(
+    context: *mut c_void,
+    peer: *mut c_void,
+    output: *mut abi::rptadv_peer_observation_v1,
+) -> i32 {
+    boundary(-1, || {
+        let executor = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
+            .and_then(|context| context.ingress.as_ref().map(|ingress| &ingress.executor));
+        let peer = unsafe { peer.cast::<PeerHandle>().as_ref() };
+        match (executor, peer) {
+            (Some(executor), Some(peer)) => unsafe {
+                executor.observe(peer.0.raw_handle(), output.cast())
+            },
+            _ => -1,
+        }
+    })
+}
+
+unsafe extern "C" fn peer_step_detach(context: *mut c_void, token: *mut c_void) {
+    if let Some(executor) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
+        .and_then(|context| context.ingress.as_ref().map(|ingress| &ingress.executor))
+    {
+        unsafe { executor.detach(token) };
+    }
+}
 
 pub(crate) fn boundary<T>(fallback: T, operation: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(operation)).unwrap_or(fallback)
@@ -359,6 +472,10 @@ unsafe extern "C" fn peer_read(
                 event(event_context, 3, samples.as_ptr().cast(), length);
                 0
             },
+            Ok(IaxEvent::Gap(length)) => unsafe {
+                event(event_context, 6, ptr::null(), length);
+                0
+            },
             Ok(IaxEvent::Text(length)) => unsafe {
                 event(event_context, 1, text.as_ptr().cast(), length);
                 0
@@ -606,6 +723,58 @@ mod tests {
         let after = ptr::from_ref(owner.descriptor());
 
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn async_callbacks_reject_absent_context_and_disabled_backend() {
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let api = owner.descriptor();
+        assert!(api.peer_step_attach.is_none());
+        assert!(api.peer_step_stop.is_none());
+        assert!(api.peer_step_detach.is_none());
+        assert!(api.peer_observe.is_none());
+        unsafe extern "C" fn step(_: *mut c_void) -> i32 {
+            0
+        }
+        let mut token = std::ptr::dangling_mut();
+        for context in [ptr::null_mut(), api.context] {
+            for callback in [None, Some(step as unsafe extern "C" fn(*mut c_void) -> i32)] {
+                assert_eq!(
+                    unsafe {
+                        super::peer_step_attach(
+                            context,
+                            ptr::null_mut(),
+                            callback,
+                            ptr::null_mut(),
+                            &mut token,
+                        )
+                    },
+                    -1
+                );
+                assert!(token.is_null());
+            }
+            unsafe {
+                super::peer_step_stop(context, ptr::null_mut());
+                super::peer_step_detach(context, ptr::null_mut());
+            }
+            assert_eq!(
+                unsafe { super::peer_observe(context, ptr::null_mut(), ptr::null_mut()) },
+                -1
+            );
+        }
+        assert_eq!(
+            unsafe {
+                super::peer_step_attach(
+                    api.context,
+                    ptr::null_mut(),
+                    Some(step),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            -1
+        );
     }
 
     #[test]
@@ -1016,6 +1185,7 @@ mod tests {
             (4, 0, Some(2)),
             (5, 0, Some(4)),
             (6, 0, Some(5)),
+            (7, 0, Some(6)),
             (3, -1, None),
         ];
         for (event, result, forwarded) in events {
@@ -1094,6 +1264,15 @@ mod tests {
 
     #[test]
     fn outbound_host_dial_connects_to_local_iax_server() {
+        host_dial_connects(false);
+    }
+
+    #[test]
+    fn asynchronous_host_delivers_jittered_audio_and_quiesces_after_detach() {
+        host_dial_connects(true);
+    }
+
+    fn host_dial_connects(asynchronous: bool) {
         unsafe extern "C" fn ordered_addresses(
             _: *mut c_void,
             endpoint: *const u8,
@@ -1115,9 +1294,14 @@ mod tests {
         let mut server =
             crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
         let accepted = AtomicUsize::new(0);
-        let providers = crate::providers::ProviderSet::load().unwrap();
-        let mut host =
-            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let providers = Box::leak(Box::new(crate::providers::ProviderSet::load().unwrap()));
+        let mut host = HostServicesOwner::new(
+            Vec::new(),
+            asynchronous.then_some(&*providers),
+            SecretsFile::parse("").unwrap(),
+        )
+        .unwrap();
+        host.enable_listener(&mut server).unwrap();
         let mut resolver = *providers.resolver_descriptor().unwrap();
         resolver.resolve_addresses = Some(ordered_addresses);
         host.context.resolver =
@@ -1196,6 +1380,9 @@ mod tests {
             assert_eq!(observed, [message]);
             observed.clear();
         }
+        if asynchronous {
+            verify_async_audio(&host, peer as *mut c_void, &mut inbound);
+        }
         unsafe { super::peer_destroy(ptr::null_mut(), peer as *mut c_void) };
         drop(inbound);
 
@@ -1247,6 +1434,140 @@ mod tests {
         let accepted_peer = accepted.swap(0, Ordering::AcqRel) as *mut c_void;
         let server_client = crate::iax::IaxClient::load(library).unwrap();
         let inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
-        drop(inbound);
+        if asynchronous {
+            verify_attach_rejection(&mut host, inbound);
+        } else {
+            drop(inbound);
+        }
+    }
+
+    fn verify_attach_rejection(host: &mut HostServicesOwner, inbound: crate::iax::IaxPeer) {
+        unsafe extern "C" fn unused_step(_: *mut c_void) -> i32 {
+            panic!("rejected attachment must not publish a callback");
+        }
+        let context = host.descriptor().context;
+        let handle = host.peer_handle(inbound);
+        let mut token = 1_usize as *mut c_void;
+        assert_eq!(
+            unsafe {
+                super::peer_step_attach(
+                    context,
+                    ptr::null_mut(),
+                    Some(unused_step),
+                    ptr::null_mut(),
+                    &mut token,
+                )
+            },
+            -1
+        );
+        assert!(token.is_null());
+
+        let jitter = host.context.ingress.as_ref().unwrap().jitter;
+        let mut invalid = *jitter;
+        invalid.create = None;
+        host.context.ingress.as_mut().unwrap().jitter = Box::leak(Box::new(invalid));
+        assert_eq!(
+            unsafe {
+                super::peer_step_attach(
+                    context,
+                    handle,
+                    Some(unused_step),
+                    ptr::null_mut(),
+                    &mut token,
+                )
+            },
+            -1
+        );
+        assert!(token.is_null());
+
+        let ingress = host.context.ingress.as_mut().unwrap();
+        ingress.jitter = jitter;
+        ingress.executor.reject_attachment_for_test();
+        assert_eq!(
+            unsafe {
+                super::peer_step_attach(
+                    context,
+                    handle,
+                    Some(unused_step),
+                    ptr::null_mut(),
+                    &mut token,
+                )
+            },
+            -1
+        );
+        assert!(token.is_null());
+        host.destroy_peer(handle);
+    }
+
+    struct AsyncRead {
+        host: *mut c_void,
+        peer: *mut c_void,
+        samples: AtomicUsize,
+        observations: AtomicUsize,
+    }
+
+    unsafe extern "C" fn receive_samples(
+        context: *mut c_void,
+        kind: u32,
+        _: *const c_void,
+        count: usize,
+    ) {
+        let state = unsafe { &*context.cast::<AsyncRead>() };
+        if kind == 3 {
+            state.samples.fetch_add(count, Ordering::Release);
+        }
+    }
+
+    unsafe extern "C" fn read_step(context: *mut c_void) -> i32 {
+        let state = unsafe { &*context.cast::<AsyncRead>() };
+        let status =
+            unsafe { super::peer_read(state.host, state.peer, Some(receive_samples), context) };
+        let mut observation: crate::abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
+        observation.struct_size = size_of::<crate::abi::rptadv_peer_observation_v1>() as u32;
+        observation.abi_version = 1;
+        if unsafe { super::peer_observe(state.host, state.peer, &mut observation) } != 0 {
+            return -1;
+        }
+        state.observations.fetch_add(1, Ordering::Release);
+        status
+    }
+
+    fn verify_async_audio(
+        host: &HostServicesOwner,
+        peer: *mut c_void,
+        inbound: &mut crate::iax::IaxPeer,
+    ) {
+        let state = Box::into_raw(Box::new(AsyncRead {
+            host: host.descriptor().context,
+            peer,
+            samples: AtomicUsize::new(0),
+            observations: AtomicUsize::new(0),
+        }));
+        let mut token = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                super::peer_step_attach(
+                    host.descriptor().context,
+                    peer,
+                    Some(read_step),
+                    state.cast(),
+                    &mut token,
+                )
+            },
+            0
+        );
+        inbound.send_audio(&[0.25; 480]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { (*state).samples.load(Ordering::Acquire) } < 480 && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        unsafe {
+            super::peer_step_stop(host.descriptor().context, token);
+            super::peer_step_detach(host.descriptor().context, token);
+        }
+        let state = unsafe { Box::from_raw(state) };
+        assert_eq!(state.samples.load(Ordering::Acquire), 480);
+        assert!(state.observations.load(Ordering::Acquire) > 0);
     }
 }

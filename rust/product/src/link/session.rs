@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     Error,
-    services::{PeerInput, PeerIo},
+    services::{HostServices, PeerInput, PeerIo},
 };
 use rpt_advanced_core::{
     audio::LinkAudioConsumer,
@@ -13,10 +13,12 @@ use rpt_advanced_core::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
-    ffi::CString,
+    ffi::{CString, c_void},
+    panic::{AssertUnwindSafe, catch_unwind},
+    ptr::NonNull,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -79,6 +81,74 @@ pub struct MediaSnapshot {
     pub selected_source: Option<String>,
     /// Released ring counters, including occupancy/reserve/target, drift and missing PCM.
     pub ring: Observation,
+    /// Copied host jitter/ingress counters when this peer exposes them.
+    pub peer: Option<PeerObservation>,
+}
+/// Source-rate peer metrics copied from the optional host observation tail.
+pub type PeerObservation = crate::abi::rptadv_peer_observation_v1;
+
+struct PeerObservationCache {
+    valid: AtomicBool,
+    fields: [AtomicU64; 15],
+}
+impl PeerObservationCache {
+    fn new() -> Self {
+        Self {
+            valid: AtomicBool::new(false),
+            fields: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+    fn store(&self, peer: PeerObservation) {
+        let fields = [
+            peer.jitter_queued_packets as u64,
+            peer.jitter_delay_samples as u64,
+            peer.jitter_buffered_span_samples,
+            peer.jitter_duplicate_drops,
+            peer.jitter_late_drops,
+            peer.jitter_full_drops,
+            peer.jitter_missing_samples,
+            peer.jitter_insertion_samples,
+            peer.jitter_skipped_samples,
+            peer.jitter_limit_resets,
+            peer.jitter_overload_drops,
+            peer.jitter_overload_span_samples,
+            peer.ingress_overflow_drops,
+            peer.ingress_queued_packets as u64,
+            peer.ingress_capacity_packets as u64,
+        ];
+        for (slot, value) in self.fields.iter().zip(fields) {
+            slot.store(value, Ordering::Relaxed);
+        }
+        self.valid.store(true, Ordering::Release);
+    }
+    fn load(&self) -> Option<PeerObservation> {
+        if !self.valid.load(Ordering::Acquire) {
+            return None;
+        }
+        let values = self
+            .fields
+            .each_ref()
+            .map(|field| field.load(Ordering::Relaxed));
+        Some(PeerObservation {
+            struct_size: std::mem::size_of::<PeerObservation>() as u32,
+            abi_version: crate::abi::RPTADV_PEER_OBSERVATION_ABI_VERSION,
+            jitter_queued_packets: values[0] as u32,
+            jitter_delay_samples: values[1] as u32,
+            jitter_buffered_span_samples: values[2],
+            jitter_duplicate_drops: values[3],
+            jitter_late_drops: values[4],
+            jitter_full_drops: values[5],
+            jitter_missing_samples: values[6],
+            jitter_insertion_samples: values[7],
+            jitter_skipped_samples: values[8],
+            jitter_limit_resets: values[9],
+            jitter_overload_drops: values[10],
+            jitter_overload_span_samples: values[11],
+            ingress_overflow_drops: values[12],
+            ingress_queued_packets: values[13] as u32,
+            ingress_capacity_packets: values[14] as u32,
+        })
+    }
 }
 /// Single control producer/event consumer; never borrowed by audio callbacks.
 pub struct PeerControl {
@@ -86,6 +156,7 @@ pub struct PeerControl {
     events: Consumer<Event>,
     stop: Arc<AtomicBool>,
     observer: InboundObserver,
+    peer_observation: Arc<PeerObservationCache>,
     #[cfg(test)]
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
 }
@@ -129,6 +200,7 @@ impl PeerControl {
             ended: signal.ended(),
             selected_source,
             ring: self.observer.observe()?,
+            peer: self.peer_observation.load(),
         })
     }
     /// Stop is out-of-band so a full work queue cannot prevent teardown.
@@ -148,10 +220,13 @@ impl Drop for PeerControl {
     }
 }
 
-/// One prepared peer session, stepped only by the shared peer-I/O owner.
+/// One prepared peer session, stepped by exactly one synchronous or retained owner.
 pub struct PeerSession {
     io: PeerIo,
     inbound: InboundProducer,
+    peer_observation: Arc<PeerObservationCache>,
+    pending_input: Option<PendingInput>,
+    pending_pcm: [f32; MAX_PEER_INPUT_SAMPLES],
     peer: Peer,
     local: String,
     remote: String,
@@ -168,26 +243,106 @@ pub struct PeerSession {
     query_epoch: Option<u64>,
     replied_newkey: bool,
     radio_control: RadioControlState,
+    async_epoch: Option<Instant>,
     #[cfg(test)]
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
 }
 
-/// Fixed maximum for the single shared peer-I/O owner and its attach queue.
+const MAX_PEER_INPUT_SAMPLES: usize = 4096;
+const MAX_ASYNC_READS_PER_STEP: usize = 64;
+
+/// The sole partly admitted event; later host events must wait behind it.
+enum PendingInput {
+    Audio { next: usize, len: usize },
+    Gap(u64),
+}
+
+/// Fixed maximum for retained peers and the synchronous attach queue.
 pub const MAX_PEER_SESSIONS: usize = 1024;
 
-/// One bounded, round-robin I/O owner for all connected peers.
+/// Bounded peer ownership: one round-robin thread for synchronous hosts, with
+/// individually retained callbacks for hosts that provide async peer steps.
 pub struct PeerIoWorker {
     pending: Producer<Box<PeerSession>>,
+    incoming: Option<Consumer<Box<PeerSession>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    async_peers: Vec<AsyncPeer>,
+    epoch: Instant,
+    #[cfg(test)]
+    test_async_capacity: usize,
+    #[cfg(test)]
+    fail_next_spawn: bool,
+}
+struct AsyncPeer {
+    services: HostServices,
+    registration: NonNull<c_void>,
+    stop: Arc<AtomicBool>,
+    observer: InboundObserver,
+    session: NonNull<PeerSession>,
+}
+// SAFETY: the stable heap allocation moves only as a raw owner token. The host
+// serializes callbacks; detach quiesces them before the Box is reconstructed.
+unsafe impl Send for AsyncPeer {}
+impl AsyncPeer {
+    fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.observer.signals().end();
+        self.services.peer_step_stop(self.registration);
+    }
+    fn detach(self) {
+        self.services.peer_step_detach(self.registration);
+        // SAFETY: detach guarantees no callback still borrows this peer.
+        drop(unsafe { Box::from_raw(self.session.as_ptr()) });
+    }
+}
+unsafe extern "C" fn retained_step(context: *mut c_void) -> i32 {
+    let Some(session) = (unsafe { context.cast::<PeerSession>().as_mut() }) else {
+        return -1;
+    };
+    let Some(epoch) = session.async_epoch else {
+        session.stop();
+        return -1;
+    };
+    let now_ms = epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    match catch_unwind(AssertUnwindSafe(|| session.step(now_ms))) {
+        Ok(Ok(())) => 0,
+        _ => {
+            session.stop();
+            -1
+        }
+    }
 }
 impl PeerIoWorker {
-    /// Start the single owner before admitting any sessions.
+    /// Prepare the owner; a poll thread starts only for a synchronous host.
     pub fn start(epoch: Instant) -> std::io::Result<Self> {
-        let (pending, mut incoming) = RingBuffer::<Box<PeerSession>>::new(MAX_PEER_SESSIONS);
+        let (pending, incoming) = RingBuffer::<Box<PeerSession>>::new(MAX_PEER_SESSIONS);
         let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stop);
-        let thread = thread::Builder::new()
+        Ok(Self {
+            pending,
+            incoming: Some(incoming),
+            stop,
+            thread: None,
+            async_peers: Vec::with_capacity(MAX_PEER_SESSIONS),
+            epoch,
+            #[cfg(test)]
+            test_async_capacity: MAX_PEER_SESSIONS,
+            #[cfg(test)]
+            fail_next_spawn: false,
+        })
+    }
+
+    fn spawn_thread(
+        &mut self,
+        mut incoming: Consumer<Box<PeerSession>>,
+    ) -> std::io::Result<JoinHandle<()>> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_spawn) {
+            return Err(std::io::Error::other("injected peer owner spawn failure"));
+        }
+        let worker_stop = Arc::clone(&self.stop);
+        let epoch = self.epoch;
+        thread::Builder::new()
             .name("rpt-peer-io".into())
             .spawn(move || {
                 let mut sessions: Vec<Box<PeerSession>> = Vec::with_capacity(MAX_PEER_SESSIONS);
@@ -216,17 +371,57 @@ impl PeerIoWorker {
                         Duration::from_millis(1)
                     });
                 }
-            })?;
-        Ok(Self {
-            pending,
-            stop,
-            thread: Some(thread),
-        })
+            })
     }
 
     /// Transfer a prepared peer without blocking or growing the bounded queue.
     pub fn attach(&mut self, session: PeerSession) -> Result<(), Box<PeerSession>> {
-        let session = Box::new(session);
+        self.reap();
+        let mut session = Box::new(session);
+        if self.stop.load(Ordering::Acquire) {
+            return Err(session);
+        }
+        if let Some((services, peer)) = session.io.async_owner() {
+            let capacity = MAX_PEER_SESSIONS;
+            #[cfg(test)]
+            let capacity = capacity.min(self.test_async_capacity);
+            if self.async_peers.len() == capacity {
+                return Err(session);
+            }
+            let stop = Arc::clone(&session.stop);
+            let observer = session.inbound.observer();
+            session.async_epoch = Some(self.epoch);
+            // The host may invoke the callback before attach returns. Keep the
+            // peer allocation raw and stable until detach has quiesced it.
+            let context = Box::into_raw(session);
+            let registration = match unsafe {
+                services.peer_step_attach(peer, Some(retained_step), context.cast())
+            } {
+                Ok(registration) => registration,
+                Err(_) => return Err(unsafe { Box::from_raw(context) }),
+            };
+            self.async_peers.push(AsyncPeer {
+                services,
+                registration,
+                stop,
+                observer,
+                session: NonNull::new(context).unwrap(),
+            });
+            return Ok(());
+        }
+        if self.thread.is_none() {
+            let Some(incoming) = self.incoming.take() else {
+                return Err(session);
+            };
+            let thread = self.spawn_thread(incoming);
+            self.thread = match thread {
+                Ok(thread) => Some(thread),
+                Err(_) => {
+                    self.stop.store(true, Ordering::Release);
+                    return Err(session);
+                }
+            };
+        }
         let Some(thread) = self.thread.as_ref().filter(|thread| !thread.is_finished()) else {
             return Err(session);
         };
@@ -237,9 +432,29 @@ impl PeerIoWorker {
         Ok(())
     }
 
-    /// Stop the shared owner and release all peer handles on that owner thread.
+    /// Reclaim disconnected async generations off the executor callback.
+    pub fn reap(&mut self) {
+        let mut index = 0;
+        while index < self.async_peers.len() {
+            if self.async_peers[index].stop.load(Ordering::Acquire) {
+                let peer = self.async_peers.swap_remove(index);
+                peer.signal_stop();
+                peer.detach();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Signal all owners, then wait off-callback before releasing peer handles.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        for peer in &self.async_peers {
+            peer.signal_stop();
+        }
+        for peer in self.async_peers.drain(..) {
+            peer.detach();
+        }
         if let Some(thread) = self.thread.take() {
             thread.thread().unpark();
             let _ = thread.join();
@@ -271,6 +486,7 @@ impl PeerSession {
         let (commands, incoming) = RingBuffer::new(64);
         let (events, outgoing) = RingBuffer::new(64);
         let stop = Arc::new(AtomicBool::new(false));
+        let peer_observation = Arc::new(PeerObservationCache::new());
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
         let control = PeerControl {
@@ -278,6 +494,7 @@ impl PeerSession {
             events: outgoing,
             stop: stop.clone(),
             observer: inbound.observer(),
+            peer_observation: Arc::clone(&peer_observation),
             #[cfg(test)]
             owner_thread: Arc::clone(&owner_thread),
         };
@@ -285,6 +502,9 @@ impl PeerSession {
             Self {
                 io,
                 inbound,
+                peer_observation,
+                pending_input: None,
+                pending_pcm: [0.0; MAX_PEER_INPUT_SAMPLES],
                 peer,
                 local: local.into(),
                 remote: remote.into(),
@@ -301,6 +521,7 @@ impl PeerSession {
                 query_epoch: None,
                 replied_newkey: false,
                 radio_control: RadioControlState::Negotiating(None),
+                async_epoch: None,
                 #[cfg(test)]
                 owner_thread,
             },
@@ -379,6 +600,32 @@ impl PeerSession {
         }
         Ok(())
     }
+    fn flush_pending_input(&mut self) -> Result<(), Error> {
+        let finished = match self.pending_input.as_mut() {
+            Some(PendingInput::Audio { next, len }) => {
+                let accepted = self
+                    .inbound
+                    .write(&self.pending_pcm[*next..*len])
+                    .map_err(|_| Error::Write)?;
+                *next += accepted;
+                *next == *len
+            }
+            Some(PendingInput::Gap(remaining)) => {
+                let chunk = (*remaining).min(MAX_PEER_INPUT_SAMPLES as u64);
+                let accepted = self.inbound.gap(chunk).map_err(|_| Error::Write)?;
+                if accepted > chunk {
+                    return Err(Error::Write);
+                }
+                *remaining -= accepted;
+                *remaining == 0
+            }
+            None => return Ok(()),
+        };
+        if finished {
+            self.pending_input = None;
+        }
+        Ok(())
+    }
     /// Execute one bounded peer iteration; any fatal error publishes EOF immediately.
     pub fn step(&mut self, now_ms: u64) -> Result<(), Error> {
         #[cfg(test)]
@@ -389,6 +636,11 @@ impl PeerSession {
             }
         }
         let result = self.step_inner(now_ms);
+        if result.is_ok() {
+            if let Some(observation) = self.io.observe() {
+                self.peer_observation.store(observation);
+            }
+        }
         if result.is_err() {
             self.inbound.signals().end();
             self.stop.store(true, Ordering::Release);
@@ -430,6 +682,7 @@ impl PeerSession {
                 }
                 Command::Redirect { inbound, outbound } => {
                     self.inbound = inbound;
+                    self.pending_input = None;
                     self.outbound = outbound;
                     self.peer.activity(false, now_ms);
                     self.edge = 0;
@@ -447,23 +700,65 @@ impl PeerSession {
         if let Some(epoch) = self.peer.activity(edge & 1 != 0, now_ms) {
             self.query(edge, epoch)?;
         }
-        if self.io.ready()? {
+        let read_budget = if self.io.async_owner().is_some() {
+            MAX_ASYNC_READS_PER_STEP
+        } else {
+            1
+        };
+        for _ in 0..read_budget {
+            self.flush_pending_input()?;
+            if self.pending_input.is_some() || !self.io.ready()? {
+                break;
+            }
             let mut event = None;
             let mut radio_keyed = None;
+            let mut admission_error = None;
             let radio_control_allowed = matches!(
                 self.radio_control,
                 RadioControlState::Allowed | RadioControlState::LegacyAllowed
             );
             let inbound = &mut self.inbound;
-            self.io.read(|input| match input {
+            let pending_input = &mut self.pending_input;
+            let pending_pcm = &mut self.pending_pcm;
+            let seen = self.io.read(|input| match input {
                 PeerInput::Text(bytes) => event = Some(Event::Text(bytes.into())),
                 PeerInput::Digit(digit) => event = Some(Event::Digit(digit)),
                 PeerInput::Audio(samples) => {
-                    let _ = inbound.write(samples);
+                    if samples.len() > MAX_PEER_INPUT_SAMPLES {
+                        admission_error = Some(Error::InvalidFrame);
+                    } else {
+                        match inbound.write(samples) {
+                            Ok(accepted) if accepted <= samples.len() => {
+                                if accepted < samples.len() {
+                                    pending_pcm[..samples.len()].copy_from_slice(samples);
+                                    *pending_input = Some(PendingInput::Audio {
+                                        next: accepted,
+                                        len: samples.len(),
+                                    });
+                                }
+                            }
+                            _ => admission_error = Some(Error::Write),
+                        }
+                    }
+                }
+                PeerInput::Gap(samples) => {
+                    let chunk = samples.min(MAX_PEER_INPUT_SAMPLES) as u64;
+                    match inbound.gap(chunk) {
+                        Ok(accepted) if accepted <= chunk => {
+                            let remaining = samples as u64 - accepted;
+                            if remaining != 0 {
+                                *pending_input = Some(PendingInput::Gap(remaining));
+                            }
+                        }
+                        _ => admission_error = Some(Error::Write),
+                    }
                 }
                 PeerInput::RadioKey => radio_keyed = Some(true),
                 PeerInput::RadioUnkey => radio_keyed = Some(false),
             })?;
+            if let Some(error) = admission_error {
+                return Err(error);
+            }
             if let Some(keyed) = radio_keyed {
                 if !keyed || radio_control_allowed {
                     self.inbound.signals().set_radio_keyed(keyed);
@@ -476,6 +771,9 @@ impl PeerSession {
                     self.event(Event::Digit(digit))?;
                 }
                 _ => (),
+            }
+            if !seen {
+                break;
             }
         }
         if self.peer.expire_digit(now_ms) {

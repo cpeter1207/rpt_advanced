@@ -51,11 +51,12 @@ radio audio workers, PCM-ring consumer, mixer, station-telemetry producer,
 or hardware path. It does not protect shared radio audio state and does not
 turn the ring exchange into a blocking audio-path operation.
 
-The planned standalone controller does not use that exception. ADR 0037
-assigns one media owner per peer and bounded producer-to-owner SPSC packet
-queues, allowing concurrent ingress without locking or multiple PCM writers.
-Use lock-free thread-safe alternatives wherever available in standalone
-operation; do not disguise a lock as an atomic spin gate.
+Standalone uses ADR 0037's Tokio readiness and one asynchronous media owner per
+connection, preferably fed through a bounded mailbox. Its permitted peer-local
+async mutex suspends only contending ingress tasks; audio never acquires it.
+Different peers progress independently. Tokio internals are not claimed to be
+lock-free; PCM exchange and audio callbacks remain strictly lock-free. Do not
+disguise a blocking lock as an atomic spin gate.
 
 The workers' bounded frame contracts, adapter-owned PCM assembly, and
 elapsed-sample timing rules are defined by ADR 0027. Input availability drives
@@ -72,5 +73,5 @@ coalesce notifications under load, but its atomic snapshots remain
 authoritative for the station-control event dispatcher. Network ingress
 serialization needs tests for concurrent receive callbacks and proof that
 neither radio audio worker ever waits on the compatibility ingress mutex.
-Standalone tests additionally prove bounded lock-free fan-in and progress
-with a stalled producer under ADR 0037.
+Standalone tests additionally prove bounded admission, progress despite a
+stalled peer, and independent lock-free PCM consumption under ADR 0037.

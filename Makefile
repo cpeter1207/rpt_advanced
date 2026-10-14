@@ -14,11 +14,11 @@ VERSION ?= 0.1.0-alpha8
 DIST_NAME := rpt_advanced-$(VERSION)
 CFLAGS ?= -O2 -g
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror
-HEADERS := rust/resolver-adapter/include/rptadv_resolver_adapter.h rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
+HEADERS := rust/jitter-adapter/include/rptadv_jitter_adapter.h rust/resolver-adapter/include/rptadv_resolver_adapter.h rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
 CPPFLAGS += $(addprefix -I,$(dir $(HEADERS)))
 LOADER := module/app_rpt_advanced_loader.c
 ADAPTERS := asterisk control_asterisk file speech
-STANDALONE_ADAPTERS := control_standalone resolver
+STANDALONE_ADAPTERS := control_standalone resolver jitter
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
 LIBRARIES += build/librptadv_product.so.1
 STANDALONE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(STANDALONE_ADAPTERS)))
@@ -26,11 +26,12 @@ INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH" RPT_ADVANCED_LIBDIR="$(CURDIR)/build"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
-DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c examples doc debian messages README.md QUALITY.md WISHLIST.md
+DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c examples doc debian messages README.md QUALITY.md WISHLIST.md
 
 .PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface product-abi-check rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
 .PHONY: build/app_rpt_advanced.so
+.PHONY: install-jitter-development jitter-ring-check
 all: build/app_rpt_advanced.so
 
 build:
@@ -50,7 +51,7 @@ rust-build: | build
 
 standalone-build: | build
 	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
-		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter
+		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
 	@set -e; for name in file speech $(STANDALONE_ADAPTERS); do \
@@ -60,10 +61,11 @@ standalone-build: | build
 
 standalone-check: standalone-build
 	$(TEST_ENV) $(CARGO) test --locked -p rpt-advanced-standalone
+	$(MAKE) -o rust-build jitter-ring-check
 	python3 tests/test_standalone_service.py
 	python3 tests/test_package_combinations.py
 
-$(LIBRARIES): rust-build
+$(LIBRARIES) $(STANDALONE_LIBRARIES): rust-build
 	@test -f $@
 
 build/app_rpt_advanced.so: $(LOADER) $(HEADERS) $(LIBRARIES)
@@ -84,7 +86,7 @@ dependency-boundary:
 
 lint:
 	$(CARGO) fmt --all -- --check
-	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c
+	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -106,7 +108,7 @@ docs: | build
 
 quality: lint static-analysis docs
 
-check: rust-build loader-check
+check: rust-build loader-check jitter-ring-check
 	$(TEST_ENV) $(CARGO) test --locked --workspace
 
 rust-check: rust-quality check
@@ -145,6 +147,13 @@ build/test_product_abi: tests/test_product_abi.c rust/product/include/rptadv_pro
 product-abi-check: build/test_product_abi build/librptadv_product.so.1
 	./build/test_product_abi "$(CURDIR)/build/librptadv_product.so.1"
 
+build/test_jitter_ring: tests/test_jitter_ring.c $(HEADERS) build/librptadv_jitter_adapter.so.1 | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -UNDEBUG $< \
+		-Lbuild -l:librptadv_jitter_adapter.so.1 -lrate_adjusting_pcm_ring3 $(LDFLAGS) -o $@
+
+jitter-ring-check: build/test_jitter_ring
+	$(TEST_ENV) ./build/test_jitter_ring
+
 loader-check: build/test_loader
 	./build/test_loader
 
@@ -156,7 +165,14 @@ loader-coverage: loader-check
 
 coverage: rust-coverage loader-coverage
 
-install: all
+install-jitter-development:
+	install -d $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/lib/$(multiarch)/pkgconfig
+	ln -sfn librptadv_jitter_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_jitter_adapter.so
+	install -D -m 0644 rust/jitter-adapter/include/rptadv_jitter_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/jitter/rptadv_jitter_adapter.h
+	sed -e 's|@prefix@|$(prefix)|g' -e 's|@libdir@|$(libdir)|g' -e 's|@version@|$(VERSION)|g' \
+		debian/rptadv_jitter_adapter.pc.in > $(DESTDIR)$(prefix)/lib/$(multiarch)/pkgconfig/rptadv_jitter_adapter.pc
+
+install: all install-jitter-development
 	install -d $(DESTDIR)$(asteriskmoddir) $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -D -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/app_rpt_advanced.so $(DESTDIR)$(asteriskmoddir)/
@@ -181,7 +197,7 @@ install: all
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/asterisk/rpt_advanced/messages/en-US.ftl
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
-standalone-install: standalone-build
+standalone-install: standalone-build install-jitter-development
 	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/librptadv_product.so.1 build/librptadv_file_adapter.so.1 \
