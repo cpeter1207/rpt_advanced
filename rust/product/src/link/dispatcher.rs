@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const CLOSED: usize = 1 << (usize::BITS - 1);
@@ -82,8 +82,9 @@ const STOPPING: u8 = 2;
 const QUIET: u8 = 3;
 struct DispatchState {
     phase: AtomicU8,
-    generation: AtomicU64,
     clock: OnceLock<Arc<super::source_clock::SourceClock>>,
+    batches: AtomicU64,
+    maximum_ns: AtomicU64,
 }
 struct Dispatch {
     state: Arc<DispatchState>,
@@ -102,12 +103,18 @@ pub(crate) struct PreparedDispatch {
     state: Arc<DispatchState>,
 }
 impl PreparedDispatch {
+    /// Completed nonempty batches and their maximum elapsed duration, off audio.
+    pub(crate) fn timing(&self) -> (u64, u64) {
+        (
+            self.state.batches.load(Ordering::Relaxed),
+            self.state.maximum_ns.load(Ordering::Relaxed),
+        )
+    }
     pub(crate) fn bind_clock(&self, clock: Arc<super::source_clock::SourceClock>) {
         let _ = self.state.clock.set(clock);
     }
     /// Infallible publication after the core has accepted the prepared generation.
-    pub(crate) fn activate(&self, generation: u64) {
-        self.state.generation.store(generation, Ordering::Relaxed);
+    pub(crate) fn activate(&self) {
         let _ = self.state.phase.compare_exchange(
             PREPARED,
             ACTIVE,
@@ -160,6 +167,7 @@ impl MediaWorker {
                         let Some(context) = slot else { continue };
                         match context.state.phase.load(Ordering::Acquire) {
                             ACTIVE => {
+                                let started = Instant::now();
                                 if let Some(clock) = context.state.clock.get() {
                                     clock.observe();
                                 }
@@ -167,6 +175,13 @@ impl MediaWorker {
                                     .dispatcher
                                     .dispatch_batch(64, |index| context.wakes[index].notify());
                                 busy |= progress.pending;
+                                if progress.destinations != 0 {
+                                    context.state.batches.fetch_add(1, Ordering::Relaxed);
+                                    context.state.maximum_ns.fetch_max(
+                                        started.elapsed().as_nanos() as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                }
                             }
                             STOPPING => {
                                 *slot = None;
@@ -199,8 +214,9 @@ impl MediaWorker {
         }
         let state = Arc::new(DispatchState {
             phase: AtomicU8::new(PREPARED),
-            generation: AtomicU64::new(0),
             clock: OnceLock::new(),
+            batches: AtomicU64::new(0),
+            maximum_ns: AtomicU64::new(0),
         });
         self.pending
             .push(Dispatch {

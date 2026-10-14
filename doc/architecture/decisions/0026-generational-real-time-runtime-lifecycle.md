@@ -272,6 +272,20 @@ logs.
 
 ### Lifecycle observability
 
+The node-lifetime media worker owns at most the active and retiring generation's
+dispatch endpoints. Preparation does not start distribution; publication activates
+it. Retirement stops distribution, waits for its quiescence, and waits for each
+peer's endpoint-redirection acknowledgment before reclaiming the old generation.
+Peer wake tokens are closed before detach and cannot be reclaimed until all
+already-admitted notifications have returned. No callback can use a detached token.
+The physical-stream clock survives same-device reloads; reopening the device
+changes its identity and invalidates uncommitted old-stream media.
+
+Peer collections reserve capacity before callback registration or publication.
+There is no configured or compiled peer-count ceiling. Allocation or wire
+call-number exhaustion rejects the new admission without terminating existing
+peers. Pending operations, media queues, and reliable windows remain bounded.
+
 Status must expose active and retiring generation IDs, lifecycle state,
 retirement age, per-worker adopted generation, protected-owner count,
 outstanding tagged work, queue occupancy, media drops, and quiescence-timeout

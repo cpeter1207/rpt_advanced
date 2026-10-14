@@ -1,7 +1,7 @@
 //! Serialized IAX peer work, queued control delivery, and native egress composition.
 use super::{
     dispatcher::PeerWake,
-    outbound::Outbound,
+    outbound::{EgressObservation, EgressStatistics, Outbound},
     ring::{InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation, RingError},
     source_clock::SourceClock,
 };
@@ -73,6 +73,8 @@ const RADIO_CONTROL_NEGOTIATION_TIMEOUT_MS: u64 = 2_000;
 
 /// Current direct-peer media snapshot; combine with core LinkStatus for routing/retry intent.
 pub struct MediaSnapshot {
+    /// Bounded egress observations copied without borrowing the peer owner.
+    pub egress: EgressObservation,
     /// Negotiated decoded input rate; divide input-unit ring fields by this for seconds.
     pub input_rate: u32,
     /// Native receiver qualification currently active.
@@ -91,7 +93,7 @@ pub type PeerObservation = crate::abi::rptadv_peer_observation_v1;
 
 struct PeerObservationCache {
     valid: AtomicBool,
-    fields: [AtomicU64; 15],
+    fields: [AtomicU64; 20],
 }
 impl PeerObservationCache {
     fn new() -> Self {
@@ -117,6 +119,11 @@ impl PeerObservationCache {
             peer.ingress_overflow_drops,
             peer.ingress_queued_packets as u64,
             peer.ingress_capacity_packets as u64,
+            peer.egress_datagrams,
+            peer.egress_would_block,
+            peer.egress_reliable_retries,
+            peer.egress_reliable_pending as u64,
+            peer.egress_reply_pending as u64,
         ];
         for (slot, value) in self.fields.iter().zip(fields) {
             slot.store(value, Ordering::Relaxed);
@@ -149,11 +156,17 @@ impl PeerObservationCache {
             ingress_overflow_drops: values[12],
             ingress_queued_packets: values[13] as u32,
             ingress_capacity_packets: values[14] as u32,
+            egress_datagrams: values[15],
+            egress_would_block: values[16],
+            egress_reliable_retries: values[17],
+            egress_reliable_pending: values[18] as u32,
+            egress_reply_pending: values[19] as u32,
         })
     }
 }
 /// Single control producer/event consumer; never borrowed by audio callbacks.
 pub struct PeerControl {
+    egress: Arc<EgressStatistics>,
     commands: Producer<Command>,
     events: Consumer<Event>,
     stop: Arc<AtomicBool>,
@@ -180,6 +193,10 @@ impl PeerControl {
     pub(crate) fn wake(&self) -> PeerWake {
         self.wake.clone()
     }
+    /// Read terminal state without copying diagnostics; this is not quiescence.
+    pub(crate) fn ended(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
     /// Read one copied event for current-policy processing outside the IAX owner.
     pub fn event(&mut self) -> Option<Event> {
         let event = self.events.pop().ok()?;
@@ -204,11 +221,12 @@ impl PeerControl {
             )
             .map(str::to_owned);
         Ok(MediaSnapshot {
+            egress: self.egress.snapshot(),
             input_rate: self.observer.rate(),
             receiving: edge & 1 != 0,
             // A retired ring reaches EOF before control receives Redirected.
             // Only the session stop flag means the peer itself has ended.
-            ended: self.stop.load(Ordering::Acquire),
+            ended: self.ended(),
             selected_source,
             ring: self.observer.observe()?,
             peer: self.peer_observation.load(),
@@ -512,6 +530,7 @@ impl PeerSession {
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
         let control = PeerControl {
+            egress: outbound.statistics.clone(),
             commands,
             events: outgoing,
             stop: stop.clone(),

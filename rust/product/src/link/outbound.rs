@@ -2,11 +2,60 @@
 use super::{egress::Egress, source_clock::SourceClock};
 use crate::{Error, services::PeerIo};
 use rpt_advanced_core::audio::{AudioSpan, LinkAudioConsumer};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 const BLOCK: usize = 960;
 const AGE_NS: u64 = 200_000_000;
 const BLOCK_NS: u64 = 20_000_000;
+
+/// Connection-lifetime egress counters; observations may straddle an owner turn.
+pub struct EgressObservation {
+    /// Prepared packets accepted by the provider, not necessarily sent yet.
+    pub accepted: u64,
+    /// Uncommitted send attempts rejected by backpressure.
+    pub blocked: u64,
+    /// Expired media duration expressed at the 48 kHz native rate.
+    pub expired_native_samples: u64,
+    /// Newest samples rejected by the bounded native queue.
+    pub rejected_native_samples: u64,
+    /// Maximum observed oldest queued or pending media age.
+    pub maximum_queue_age_ns: u64,
+    /// Accepted packet age histogram: integer milliseconds, final bucket >=200 ms.
+    pub send_age_ms: [u64; 201],
+}
+pub(super) struct EgressStatistics {
+    accepted: AtomicU64,
+    blocked: AtomicU64,
+    expired: AtomicU64,
+    rejected: AtomicU64,
+    queue_age: AtomicU64,
+    ages: [AtomicU64; 201],
+}
+impl EgressStatistics {
+    fn new() -> Self {
+        Self {
+            accepted: 0.into(),
+            blocked: 0.into(),
+            expired: 0.into(),
+            rejected: 0.into(),
+            queue_age: 0.into(),
+            ages: std::array::from_fn(|_| 0.into()),
+        }
+    }
+    pub(super) fn snapshot(&self) -> EgressObservation {
+        EgressObservation {
+            accepted: self.accepted.load(Ordering::Relaxed),
+            blocked: self.blocked.load(Ordering::Relaxed),
+            expired_native_samples: self.expired.load(Ordering::Relaxed),
+            rejected_native_samples: self.rejected.load(Ordering::Relaxed),
+            maximum_queue_age_ns: self.queue_age.load(Ordering::Relaxed),
+            send_age_ms: self.ages.each_ref().map(|age| age.load(Ordering::Relaxed)),
+        }
+    }
+}
 
 struct Pending {
     count: usize,
@@ -34,7 +83,9 @@ struct Anchor {
 
 /// One prepared packet at most; provider-committed reliable packets belong to IAX.
 pub(super) struct Outbound {
+    pub(super) statistics: Arc<EgressStatistics>,
     queue: LinkAudioConsumer,
+    retired_rejections: u64,
     converter: Egress,
     rate: u32,
     native: [f32; BLOCK],
@@ -53,7 +104,9 @@ fn source_ns(sample: u64) -> u128 {
 impl Outbound {
     pub(super) fn new(rate: u32, queue: LinkAudioConsumer) -> Result<Self, Error> {
         Ok(Self {
+            statistics: Arc::new(EgressStatistics::new()),
             queue,
+            retired_rejections: 0,
             converter: Egress::new(rate, BLOCK).map_err(|_| Error::Allocation)?,
             rate,
             native: [0.0; BLOCK],
@@ -71,6 +124,9 @@ impl Outbound {
         self.clock = Some(clock);
     }
     pub(super) fn redirect(&mut self, queue: LinkAudioConsumer) -> Result<(), Error> {
+        self.retired_rejections = self
+            .retired_rejections
+            .saturating_add(self.queue.dropped_samples());
         self.queue = queue;
         self.discard()
     }
@@ -91,8 +147,27 @@ impl Outbound {
             return Ok(Some(self.next_audio_ms.saturating_mul(1_000_000)));
         }
         let now = now_ms.saturating_mul(1_000_000);
+        self.statistics.rejected.store(
+            self.retired_rejections
+                .saturating_add(self.queue.dropped_samples()),
+            Ordering::Relaxed,
+        );
+        let oldest = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.expires.saturating_sub(AGE_NS))
+            .or_else(|| self.queue.peek_span().and_then(|span| span.span.born_ns));
+        if let Some(born) = oldest {
+            self.statistics
+                .queue_age
+                .fetch_max(now.saturating_sub(born), Ordering::Relaxed);
+        }
         if let Some(pending) = &self.pending {
             if now >= pending.expires || !self.current(pending.stream) {
+                self.statistics.expired.fetch_add(
+                    pending.count as u64 * 48_000 / u64::from(self.rate),
+                    Ordering::Relaxed,
+                );
                 self.discard()?;
             } else {
                 self.send(io, now)?;
@@ -110,6 +185,9 @@ impl Outbound {
                 .is_none_or(|born| now >= born.saturating_add(AGE_NS))
                 || !self.current(read.span.stream)
             {
+                self.statistics
+                    .expired
+                    .fetch_add(read.frames as u64, Ordering::Relaxed);
                 self.discard()?;
             } else {
                 self.encode(io, read.span, read.frames, now)?;
@@ -210,9 +288,15 @@ impl Outbound {
     fn send(&mut self, io: &mut PeerIo, now: u64) -> Result<(), Error> {
         if let Some(pending) = &self.pending {
             if io.send_prepared(&self.encoded[..pending.count], pending.timestamp)? {
+                let age = now.saturating_sub(pending.expires.saturating_sub(AGE_NS));
+                self.statistics.ages[(age / 1_000_000).min(200) as usize]
+                    .fetch_add(1, Ordering::Relaxed);
+                self.statistics.accepted.fetch_add(1, Ordering::Relaxed);
                 self.pending = None;
                 self.sent = true;
                 self.unkey_ns = Some(now.saturating_add(BLOCK_NS));
+            } else {
+                self.statistics.blocked.fetch_add(1, Ordering::Relaxed);
             }
         }
         Ok(())

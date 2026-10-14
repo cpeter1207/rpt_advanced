@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn egress_wire_topology_is_bounded_without_truncating_local_status() {
+    let mut hub = LinkManager::new("1000").unwrap();
+    for node in 2000..3000 {
+        hub.attach(&node.to_string(), Mode::TRANSCEIVE, false)
+            .unwrap();
+    }
+    assert_eq!(hub.full_topology().split(',').count(), 1000);
+    let messages = crate::link::TopologyManager::default().publish(&hub, 0);
+    assert_eq!(messages.len(), 1000);
+    for (_, message) in messages {
+        assert!(
+            message.len() <= 1488,
+            "{} bytes exceed IAX text payload",
+            message.len()
+        );
+        assert!(message.ends_with("R000000"));
+    }
+}
+
+#[test]
 fn incoming_priority_member_uses_the_current_access_policy() {
     let mut hub = LinkManager::new("1000").unwrap();
     let denied = AccessPolicy::new("", "2000").unwrap();

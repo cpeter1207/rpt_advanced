@@ -133,6 +133,10 @@ impl LinkAudioProducer {
 }
 
 impl LinkAudioConsumer {
+    /// Newest native samples rejected by the single producer at queue capacity.
+    pub fn dropped_samples(&self) -> u64 {
+        self.statistics.dropped.load(Ordering::Relaxed)
+    }
     /// Inspect the next published source span without consuming its samples.
     pub fn peek_span(&mut self) -> Option<ReadSpan> {
         if self.pending.is_none() {

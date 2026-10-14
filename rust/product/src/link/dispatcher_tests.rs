@@ -70,7 +70,7 @@ fn egress_dispatch_survives_control_pause() {
     let registration = worker
         .prepare(dispatcher, vec![PeerWake::default(); 130])
         .unwrap();
-    registration.activate(1);
+    registration.activate();
     let mut controller = controller();
     for block in 0..8 {
         audio
@@ -98,6 +98,7 @@ fn egress_dispatch_survives_control_pause() {
         }
     }
     assert_eq!(audio.status().dropped_blocks(), 0);
+    assert!(registration.timing().0 >= 24);
     registration.request_stop();
     wait_for(|| registration.is_quiescent());
 }
@@ -164,7 +165,7 @@ fn egress_retirement_waits_for_partial_dispatch() {
     let mut wakes = vec![PeerWake::default(); 130];
     wakes[0] = wake.clone();
     let registration = worker.prepare(dispatcher, wakes).unwrap();
-    registration.activate(1);
+    registration.activate();
     audio
         .process(
             &mut controller(),
@@ -197,7 +198,7 @@ fn egress_retirement_waits_for_partial_dispatch() {
     let replacement = worker
         .prepare(dispatcher, vec![PeerWake::default()])
         .unwrap();
-    replacement.activate(2);
+    replacement.activate();
     next.process(
         &mut controller(),
         true,

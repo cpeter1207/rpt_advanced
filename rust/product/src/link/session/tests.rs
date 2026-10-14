@@ -460,6 +460,11 @@ unsafe extern "C" fn observe_peer(
             ingress_overflow_drops: 6,
             ingress_queued_packets: 7,
             ingress_capacity_packets: 64,
+            egress_datagrams: 10,
+            egress_would_block: 2,
+            egress_reliable_retries: 1,
+            egress_reliable_pending: 3,
+            egress_reply_pending: 0,
         };
         if state.bad_observe_size {
             (*output).struct_size -= 1;
@@ -638,7 +643,7 @@ fn egress_expiry_preserves_media_timeline() {
 
 #[test]
 fn egress_prepared_retry_encodes_once() {
-    let (mut session, _control, state, mut output) = timed_session();
+    let (mut session, control, state, mut output) = timed_session();
     state.lock().unwrap().prepared_result = 1;
     output.write(timed_span(48_000, 1_000), &[0.25; 960]);
     session.step(1_000).unwrap();
@@ -660,6 +665,64 @@ fn egress_prepared_retry_encodes_once() {
         attempts,
         "expiry is never renewed by retry"
     );
+    let metrics = control.snapshot().unwrap().egress;
+    assert_eq!(metrics.accepted, 1);
+    assert_eq!(metrics.blocked, 3);
+    assert_eq!(metrics.expired_native_samples, 960);
+    assert_eq!(metrics.send_age_ms[199], 1);
+    // Continuous source samples retain the earlier converter timeline, even
+    // when this fixture publishes the next block with a newer wall-clock birth.
+    assert_eq!(metrics.maximum_queue_age_ns, 380_000_000);
+}
+
+#[test]
+fn egress_rejection_count_survives_generation_redirect() {
+    let (mut session, control, _state, mut output) = timed_session();
+    assert_eq!(output.write(timed_span(48_000, 1_000), &[0.25; 9601]), 1);
+    session.step(1_000).unwrap();
+    assert_eq!(
+        control.snapshot().unwrap().egress.rejected_native_samples,
+        1
+    );
+    let (_producer, replacement) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    session.outbound.redirect(replacement).unwrap();
+    session.step(1_001).unwrap();
+    assert_eq!(
+        control.snapshot().unwrap().egress.rejected_native_samples,
+        1
+    );
+}
+
+#[test]
+fn blocked_egress_preserves_ingress_commands_and_stop() {
+    let (mut session, mut control, state, mut output) = timed_session();
+    {
+        let mut state = state.lock().unwrap();
+        state.prepared_result = 1;
+        state.input.push_back(Input::Gap(80));
+        state.input.push_back(Input::Audio(vec![0.25; 160]));
+        state.input.push_back(Input::Text(b"L T3000"));
+    }
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    control.send(Command::Digit('1')).ok().unwrap();
+    session.step(1_000).unwrap();
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(matches!(control.event(), Some(Event::Text(bytes)) if bytes == b"L T3000"));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text.ends_with(b" 1"))
+    );
+    assert_eq!(control.snapshot().unwrap().egress.blocked, 1);
+    let attempts = state.lock().unwrap().prepared.len();
+    session.stop();
+    assert!(session.step(1_001).is_err());
+    assert_eq!(state.lock().unwrap().prepared.len(), attempts);
 }
 
 #[test]
@@ -904,6 +967,10 @@ fn peer_observation_is_copied_for_control_without_a_second_peer_borrow() {
     assert_eq!(observation.jitter_missing_samples, 160);
     assert_eq!(observation.jitter_overload_span_samples, 800);
     assert_eq!(observation.ingress_queued_packets, 7);
+    assert_eq!(observation.egress_datagrams, 10);
+    assert_eq!(observation.egress_would_block, 2);
+    assert_eq!(observation.egress_reliable_retries, 1);
+    assert_eq!(observation.egress_reliable_pending, 3);
     assert_eq!(state.lock().unwrap().observe_calls, 1);
     state.lock().unwrap().fail_observe = true;
     session.step(20).unwrap();
@@ -1194,12 +1261,15 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     // Control may inspect status before consuming the redirect acknowledgment.
     // Retiring the old audio generation must not end the live connection.
     assert!(!control.snapshot().unwrap().ended);
+    assert!(!control.ended());
     assert!(
         matches!(control.event(), Some(Event::Redirected(ack)) if ack.same_generation(&observer))
     );
     assert!(!control.snapshot().unwrap().ended);
+    assert!(!control.ended());
     assert!(!input.signals().ended());
     control.stop();
+    assert!(control.ended());
     assert_eq!(session.step(3023), Err(Error::Hangup));
     assert!(input.signals().ended());
     drop(session);

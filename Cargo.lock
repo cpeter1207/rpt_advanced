@@ -613,11 +613,14 @@ name = "rptadv-product"
 version = "0.1.0-alpha9"
 dependencies = [
  "bindgen",
+ "libc",
  "rpt-advanced-core",
+ "rpt-advanced-standalone",
  "rptadv-control-standalone-adapter",
  "rptadv-file-adapter",
  "rptadv-speech-adapter",
  "rtrb",
+ "serde_json",
  "ureq",
  "url",
 ]

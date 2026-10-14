@@ -559,4 +559,20 @@ hosted platform gate or live callback/reload acceptance on an approved test node
 
 ## Decisions
 
+Peer transmit fan-out has a node-lifetime media thread independent of station
+control. The output callback publishes into a fixed two-block pool; bounded
+64-destination batches feed each peer's sole native-PCM consumer. That peer's
+existing Tokio owner performs conversion, codec preparation, protocol sequencing
+and nonblocking socket submission. Source-span identity and immutable age survive
+queueing and retries. Full peers cannot stall healthy peers. Admission is bounded
+by resources and protocol call numbers rather than an arbitrary peer count.
+See ADRs 0025, 0026 and 0037 for ownership, expiry, readiness and retirement rules.
+
+The opt-in `tests/peer_egress_load.py` experiment runs real product dispatch,
+conversion, encoding and dynamic IAX against loopback-only peers. It bulk-admits
+sessions before measuring; it does not benchmark connection storms or physical
+radio I/O. Reports separate provider acceptance, UDP datagrams (including empty
+idle markers), received samples, intentional congestion and host overload.
+Timing measurements are host-specific observations, not CI timing thresholds.
+
 See [the ADR index](decisions/README.md).

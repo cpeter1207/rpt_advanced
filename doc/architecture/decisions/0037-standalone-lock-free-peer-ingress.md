@@ -119,6 +119,37 @@ providers and preserves the old generation on failure. Adapter code replacement
 requires a controlled process restart after tasks and contexts have stopped.
 The Asterisk composition keeps its current jitter implementation/dependencies.
 
+## Egress ownership and readiness
+
+The same serialized peer owner handles receive and transmit protocol state.
+It prepares codec bytes once and submits a timestamped packet without waiting
+for another peer. A blocked uncommitted send remains with that owner. A committed
+full frame remains in the provider's bounded reliable window with its sequence,
+timestamp and original failure deadline. Writable readiness is requested only
+after an actual socket WouldBlock; writable idle sockets do not drive polling.
+
+The node media distributor signals a coalesced peer wake after publishing PCM or
+an activity edge. The peer owner publishes its next genuine work deadline for
+media expiry, pending ingress, signaling, or protocol work. An idle peer parks
+without periodic media polling. A bounded retry is retained only for pending
+ingress that the product cannot yet consume. No task is created per packet and
+no OS thread is created per connection.
+
+Client descriptor ABI 1 appends prepared-ULAW submission and call elapsed time;
+async descriptor ABI 1 appends wake/deadline operations. Standalone validates all
+required tails at startup and reload. SONAME remains 1. Candidate package
+`0.1.0~alpha6+egress1` identifies these capabilities until release preparation;
+the consumer pins the exact candidate commit. The 144-byte observation record
+adds socket sends, backpressure, reliable retries and pending counts, preserving
+its 112-byte prefix for existing readers. The Asterisk host keeps its synchronous
+PCM contract and does not implement the standalone prepared-media tails.
+
+Diagnostics distinguish provider-accepted media from actual datagram sends and
+remote delivery. Bounded counters record expired/rejected native samples, media
+age, distributor duration and program-block drops. Large wire topology reports
+use ASL's `R000000` truncation marker within the 1488-byte IAX text payload;
+local status retains its separate larger bound.
+
 ## Consequences and verification
 
 This supersedes the earlier mandatory standalone SPSC fan-in and blanket

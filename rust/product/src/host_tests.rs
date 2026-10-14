@@ -1,4 +1,6 @@
 use super::*;
+#[path = "egress_load.rs"]
+mod egress_load;
 use crate::{
     abi,
     link::session::tests::{Input, peer, peer_with_async},
@@ -405,6 +407,10 @@ fn status_reports_cached_peer_jitter_and_ingress_metrics() {
     assert!(status.contains("missing-samples=160 insertion-samples=80"));
     assert!(status.contains("overload-drops=5 overload-span-samples=800"));
     assert!(status.contains("ingress-queued=7/64 ingress-overflow-drops=6"));
+    assert!(status.contains(
+        "egress datagrams=10 socket-blocked=2 reliable-retries=1 reliable-pending=3 reply-pending=0"
+    ));
+    assert!(status.contains("media accepted=0 blocked=0 expired-native-samples=0"));
     assert_eq!(state.lock().unwrap().observe_calls, 1);
     assert!(host.stop(20));
 }

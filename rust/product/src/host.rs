@@ -307,7 +307,7 @@ impl Host {
                     if let Some(clock) = clock {
                         control.dispatcher.bind_clock(clock);
                     }
-                    control.dispatcher.activate(generation);
+                    control.dispatcher.activate();
                 }
             }
         }
@@ -584,6 +584,22 @@ impl Host {
             let _ = writeln!(result, "{}", worker.local_status_text());
         }
         drop(lease);
+        let generation = self
+            .runtime
+            .status(0)
+            .into_iter()
+            .find(|(name, _)| name == local)
+            .and_then(|(_, status)| status.active);
+        if let Some(control) =
+            generation.and_then(|generation| self.runtime.adapter_control_mut(local, generation))
+        {
+            let (batches, maximum_ns) = control.dispatcher.timing();
+            let _ = writeln!(
+                result,
+                "  fanout batches={batches} maximum-batch-ns={maximum_ns} dropped-blocks={}",
+                control.status.dropped_blocks()
+            );
+        }
         for peer in peers {
             let mode = if peer.mode.transmits() {
                 "transceive"
@@ -650,6 +666,27 @@ impl Host {
                     peer_observation.ingress_queued_packets,
                     peer_observation.ingress_capacity_packets,
                     peer_observation.ingress_overflow_drops,
+                );
+                let _ = writeln!(
+                    result,
+                    "    egress datagrams={} socket-blocked={} reliable-retries={} reliable-pending={} reply-pending={}",
+                    peer_observation.egress_datagrams,
+                    peer_observation.egress_would_block,
+                    peer_observation.egress_reliable_retries,
+                    peer_observation.egress_reliable_pending,
+                    peer_observation.egress_reply_pending
+                );
+            }
+            if let Some(snapshot) = snapshot {
+                let egress = snapshot.egress;
+                let _ = writeln!(
+                    result,
+                    "    media accepted={} blocked={} expired-native-samples={} rejected-native-samples={} maximum-queue-age={}ms",
+                    egress.accepted,
+                    egress.blocked,
+                    egress.expired_native_samples,
+                    egress.rejected_native_samples,
+                    egress.maximum_queue_age_ns / 1_000_000
                 );
             }
         }
@@ -746,7 +783,7 @@ impl Host {
                     peer.control.reply_target(),
                 ));
             }
-            if peer.control.snapshot().is_ok_and(|snapshot| snapshot.ended) {
+            if peer.control.ended() {
                 ended.push((peer.local.clone(), peer.remote.clone()));
             }
         }
@@ -838,7 +875,7 @@ impl Host {
                 .adapter_control_mut(&local, generation)
                 .expect("snapshot generation retains its adapter control");
             if status.active == Some(generation) {
-                control.dispatcher.activate(generation);
+                control.dispatcher.activate();
             }
             if control.awaiting_local {
                 // Runtime retains the device for every active or retiring generation.

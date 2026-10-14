@@ -50,7 +50,7 @@ def test_standalone_package_does_not_depend_on_asterisk() -> None:
     depends = stanza.split("Depends:", 1)[1].split("Description:", 1)[0]
     assert "asterisk" not in depends.lower()
     assert "app-rpt-advanced" not in depends.lower()
-    assert "librptadv-iax2-client1 (>= 0.1.0~alpha5)" in depends
+    assert "librptadv-iax2-client1 (>= 0.1.0~alpha6+egress1)" in depends
 
 
 def test_standalone_requires_radio_core_with_live_update_api() -> None:
@@ -59,10 +59,12 @@ def test_standalone_requires_radio_core_with_live_update_api() -> None:
     assert "librptadvradio4 (>= 0.1.0~alpha6)" in package_stanza("rpt-advanced")
 
 
-def test_released_iax2_library_is_not_rebuilt_as_a_candidate_dependency() -> None:
+def test_iax2_candidate_requires_the_prepared_media_and_readiness_revision() -> None:
     manifest = (ROOT / ".github/dependencies.json").read_text(encoding="utf-8")
     dependencies = json.loads(manifest)
-    assert all(item["repository"] != "librptadviax2" for item in dependencies)
+    iax = next(item for item in dependencies if item["repository"] == "librptadviax2")
+    assert iax["sha"] == "d9984664557572f1de9bd9d13c536902631ddc30"
+    assert iax["packages"] == ["librptadv-iax2-client1", "librptadv-iax2-client-dev"]
 
 
 def test_standalone_package_grants_service_user_cm119_usb_access() -> None:
@@ -143,7 +145,7 @@ if __name__ == "__main__":
         test_debian_install_manifests_are_not_executable_scripts,
         test_standalone_package_does_not_depend_on_asterisk,
         test_standalone_requires_radio_core_with_live_update_api,
-        test_released_iax2_library_is_not_rebuilt_as_a_candidate_dependency,
+        test_iax2_candidate_requires_the_prepared_media_and_readiness_revision,
         test_standalone_package_grants_service_user_cm119_usb_access,
         test_asterisk_adapter_is_separately_installable,
         test_standalone_build_profile_omits_asterisk_build_and_adapter,
