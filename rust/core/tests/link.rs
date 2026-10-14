@@ -33,7 +33,7 @@ fn audio_peer_preparation_checks_identity_rate_and_callback_capacity() {
         ("2000", 0, 1),
         ("2000", 48001, 1),
     ] {
-        let (outbound, _) = LinkAudioQueue::new(1).unwrap().into_endpoints();
+        let (outbound, _) = LinkAudioQueue::new(1, 64).unwrap().into_endpoints();
         assert!(
             AudioPeer::new(
                 name,
@@ -50,7 +50,7 @@ fn audio_peer_preparation_checks_identity_rate_and_callback_capacity() {
         );
     }
     assert!(LinkAudio::<Empty>::new(vec![], 0).is_err());
-    let (outbound, _) = LinkAudioQueue::new(1).unwrap().into_endpoints();
+    let (outbound, _) = LinkAudioQueue::new(1, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
         "2000",
         Mode::TRANSCEIVE,
@@ -72,8 +72,26 @@ fn audio_peer_preparation_checks_identity_rate_and_callback_capacity() {
         rpt_advanced_core::controller::CourtesySettings::default(),
     )
     .unwrap();
-    assert!(!empty.process(&mut controller, false, &mut []).unwrap());
-    assert!(!empty.process(&mut controller, false, &mut [0.0]).unwrap());
+    assert!(
+        !empty
+            .process(
+                &mut controller,
+                false,
+                &mut [],
+                rpt_advanced_core::link::SourcePosition::default()
+            )
+            .unwrap()
+    );
+    assert!(
+        !empty
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0],
+                rpt_advanced_core::link::SourcePosition::default()
+            )
+            .unwrap()
+    );
     assert_eq!(dispatcher.dispatch(1), 0);
 }
 
@@ -246,7 +264,7 @@ fn external_radio_key_keys_a_link_without_replaying_stale_pcm() {
     let signals = std::sync::Arc::new(PeerSignals::new());
     let media_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     signals.publish_pcm();
-    let (producer, _) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let (producer, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
         "200",
         Mode::TRANSCEIVE,
@@ -268,18 +286,39 @@ fn external_radio_key_keys_a_link_without_replaying_stale_pcm() {
     )
     .unwrap();
     let mut audio = [0.0];
-    links.process(&mut controller, false, &mut audio).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut audio,
+            rpt_advanced_core::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(audio, [0.75]);
 
     media_active.store(false, std::sync::atomic::Ordering::Release);
     signals.set_radio_keyed(true);
     audio[0] = 0.5;
-    links.process(&mut controller, false, &mut audio).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut audio,
+            rpt_advanced_core::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(links.active_count(), 1);
     assert_eq!(audio, [0.0]);
 
     signals.set_radio_keyed(false);
-    links.process(&mut controller, false, &mut audio).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut audio,
+            rpt_advanced_core::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(links.active_count(), 0);
 }
 
@@ -436,7 +475,7 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
             Some(output.len())
         }
     }
-    let (producer, mut consumer) = LinkAudioQueue::new(1920).unwrap().into_endpoints();
+    let (producer, mut consumer) = LinkAudioQueue::new(1920, 64).unwrap().into_endpoints();
     let first = Input {
         signals: std::sync::Arc::new(PeerSignals::new()),
         value: 0.25,
@@ -444,7 +483,8 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
     first.signals.publish_pcm();
     let first_signal = first.signals.clone();
     let peer = AudioPeer::new("200", Mode::TRANSCEIVE, first, producer, 960, 100).unwrap();
-    let (local_producer, mut local_consumer) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let (local_producer, mut local_consumer) =
+        LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let local = Input {
         signals: std::sync::Arc::new(PeerSignals::new()),
         value: 0.75,
@@ -467,7 +507,16 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
     )
     .unwrap();
     let mut output = [0.5; 960];
-    assert!(links.process(&mut controller, true, &mut output).unwrap());
+    assert!(
+        links
+            .process(
+                &mut controller,
+                true,
+                &mut output,
+                rpt_advanced_core::link::SourcePosition::default()
+            )
+            .unwrap()
+    );
     let mut outgoing = [0.0; 960];
     assert_eq!(consumer.read(&mut outgoing), 960);
     assert_eq!(dispatcher.dispatch(1), 1);
@@ -478,7 +527,12 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
     assert_eq!(local_consumer.read(&mut outgoing), 960);
     for _ in 0..6 {
         links
-            .process(&mut controller, false, &mut [0.0; 960])
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 960],
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
             .unwrap();
         dispatcher.dispatch(1);
         consumer.read(&mut outgoing);
@@ -486,7 +540,12 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
     first_signal.end();
     local_signal.end();
     links
-        .process(&mut controller, false, &mut [0.0; 960])
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 960],
+            rpt_advanced_core::link::SourcePosition::default(),
+        )
         .unwrap();
     assert_eq!(links.active_count(), 0);
     assert_eq!(status.last_keyed(), Some("400"));
@@ -495,7 +554,12 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
     assert!(outgoing.iter().all(|value| *value == 0.0));
     assert!(
         links
-            .process(&mut controller, false, &mut [0.0; 961])
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0; 961],
+                rpt_advanced_core::link::SourcePosition::default()
+            )
             .is_err()
     );
 }
@@ -536,7 +600,7 @@ fn generated_status_stays_local_and_never_reaches_a_link() {
             Some(0)
         }
     }
-    let (producer, mut consumer) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let (producer, mut consumer) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
         "200",
         Mode::TRANSCEIVE,
@@ -561,7 +625,14 @@ fn generated_status_stays_local_and_never_reaches_a_link() {
     let mut found_local = false;
     for _ in 0..14 {
         let mut rf = [0.0; 960];
-        links.process(&mut controller, false, &mut rf).unwrap();
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut rf,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
+            .unwrap();
         assert_eq!(dispatcher.dispatch(1), 1);
         let mut output = [0.0; 960];
         let shortfall = consumer.read(&mut output);

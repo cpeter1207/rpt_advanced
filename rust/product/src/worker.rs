@@ -655,6 +655,11 @@ unsafe fn transmit(
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
+    let source = rpt_advanced_core::link::SourcePosition {
+        generation: generation.id(),
+        // The meter clock advances after every TX callback, including drops and reloads.
+        sample: unsafe { &*context.meter.get() }.window.elapsed_samples,
+    };
     let transmit = generation.state();
     #[cfg(test)]
     if take_test_failure(TestFailure::TransmitPanic) {
@@ -662,7 +667,7 @@ unsafe fn transmit(
     }
     match transmit
         .adapter
-        .process(&mut transmit.controller, receiving, samples)
+        .process(&mut transmit.controller, receiving, samples, source)
     {
         Ok(value) => {
             *keyed = u32::from(value);

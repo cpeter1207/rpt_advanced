@@ -7,8 +7,8 @@ mod signals;
 mod topology;
 
 pub use audio::{
-    AudioPeer, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus, LinkDispatcher,
-    PeerInput,
+    AudioPeer, DispatchProgress, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus,
+    LinkDispatcher, PeerInput, SourcePosition,
 };
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use peer::{Peer, ReceiveState};

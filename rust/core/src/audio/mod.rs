@@ -7,7 +7,9 @@ mod playback;
 mod tone;
 
 pub use dtmf::{DtmfDetector, DtmfError};
-pub use link_queue::{LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue, LinkQueueError};
+pub use link_queue::{
+    AudioSpan, LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue, LinkQueueError, ReadSpan,
+};
 pub use morse::{MorseError, MorseRenderer};
 pub use playback::Playback;
 pub use tone::{ToneError, ToneSequence};

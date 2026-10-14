@@ -1,14 +1,86 @@
 use super::LinkAudioQueue;
 
 #[test]
+fn egress_span_partition_and_overflow() {
+    use super::AudioSpan;
+    for count in [1, 240, 480, 960, 4096] {
+        let (mut producer, mut consumer) =
+            LinkAudioQueue::new(count + 1, 2).unwrap().into_endpoints();
+        let first = AudioSpan {
+            generation: 7,
+            burst: 3,
+            source_start: 100,
+        };
+        let second = AudioSpan {
+            source_start: 100 + count as u64,
+            ..first
+        };
+        assert_eq!(producer.write(first, &vec![0.25; count]), 0);
+        assert_eq!(producer.write(second, &[0.5, 0.6]), 1);
+        let mut output = vec![9.0; count.max(2)];
+        let mut position = 100;
+        let mut remaining = count;
+        while remaining != 0 {
+            let wanted = remaining.min(37);
+            let read = consumer.read_span(&mut output[..wanted]).unwrap();
+            assert_eq!(
+                read.span,
+                AudioSpan {
+                    source_start: position,
+                    ..first
+                }
+            );
+            assert_eq!(read.frames, wanted);
+            assert_eq!(&output[..wanted], vec![0.25; wanted]);
+            remaining -= wanted;
+            position += wanted as u64;
+        }
+        let read = consumer.read_span(&mut output).unwrap();
+        assert_eq!((read.span, read.frames, output[0]), (second, 1, 0.5));
+        assert!(consumer.read_span(&mut output).is_none());
+        // Rejected samples leave a source-time gap; later samples never slide backward.
+        let third = AudioSpan {
+            generation: 8,
+            burst: 4,
+            source_start: second.source_start + 2,
+        };
+        assert_eq!(producer.write(third, &[0.7]), 0);
+        assert_eq!(consumer.read_span(&mut output).unwrap().span, third);
+        assert_eq!(producer.dropped_samples(), 1);
+    }
+    let (mut producer, mut consumer) = LinkAudioQueue::new(8, 1).unwrap().into_endpoints();
+    let span = AudioSpan {
+        generation: 1,
+        burst: 1,
+        source_start: 0,
+    };
+    assert_eq!(producer.write(span, &[1.0]), 0);
+    assert_eq!(
+        producer.write(span, &[2.0, 3.0]),
+        2,
+        "descriptor exhaustion rejects whole newest span"
+    );
+    assert!(consumer.read_span(&mut []).is_none());
+    assert_eq!(consumer.read_span(&mut [0.0; 8]).unwrap().frames, 1);
+    assert!(consumer.read_span(&mut [0.0]).is_none());
+    assert_eq!(producer.dropped_samples(), 2);
+}
+
+#[test]
 fn queue_keeps_oldest_samples_and_silences_shortfall() {
-    assert!(LinkAudioQueue::new(0).is_err());
-    let (mut producer, mut consumer) = LinkAudioQueue::new(3).unwrap().into_endpoints();
-    assert_eq!(producer.write(&[10.0, 20.0]), 0);
+    assert!(LinkAudioQueue::new(0, 64).is_err());
+    let (mut producer, mut consumer) = LinkAudioQueue::new(3, 64).unwrap().into_endpoints();
+    assert_eq!(
+        producer.write(super::AudioSpan::default(), &[10.0, 20.0]),
+        0
+    );
     let mut first = [99.0];
     assert_eq!(consumer.read(&mut first), 0);
     assert_eq!(first, [10.0]);
-    assert_eq!(producer.write(&[30.0, 40.0, 50.0]), 1);
+    assert_eq!(
+        producer.write(super::AudioSpan::default(), &[30.0, 40.0, 50.0]),
+        1
+    );
     let mut output = [99.0; 5];
     assert_eq!(consumer.read(&mut output), 2);
     assert_eq!(output, [20.0, 30.0, 40.0, 0.0, 0.0]);
@@ -18,10 +90,13 @@ fn queue_keeps_oldest_samples_and_silences_shortfall() {
 
 #[test]
 fn queue_endpoints_transfer_samples_between_threads() {
-    let (producer, consumer) = LinkAudioQueue::new(16).unwrap().into_endpoints();
+    let (producer, consumer) = LinkAudioQueue::new(16, 64).unwrap().into_endpoints();
     let writer = std::thread::spawn(move || {
         let mut producer = producer;
-        assert_eq!(producer.write(&[1.0, 2.0, 3.0, 4.0]), 0);
+        assert_eq!(
+            producer.write(super::AudioSpan::default(), &[1.0, 2.0, 3.0, 4.0]),
+            0
+        );
     });
     let reader = std::thread::spawn(move || {
         let mut consumer = consumer;

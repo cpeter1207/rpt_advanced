@@ -1,7 +1,7 @@
 //! Generation-owned peer audio composition; no channel operations or locks.
 use super::{AdmissionError, Mode, PeerSignals, ReceiveState};
 use crate::{
-    audio::LinkAudioProducer,
+    audio::{AudioSpan, LinkAudioProducer},
     controller::{NodeController, ParrotOutput, PeerReplySample},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -179,11 +179,28 @@ pub struct LinkAudio<P: PeerInput> {
     parrot_output: Vec<f32>,
     reply_output: Vec<PeerReplySample>,
     status: LinkAudioStatus,
-    destinations: Vec<usize>,
+    routing: Vec<Destination>,
     groups: Vec<GroupSelection>,
     selected_groups: Vec<usize>,
     publish: Producer<ProgramBlock>,
     recycled: Consumer<ProgramBlock>,
+}
+
+/// Position supplied by the existing native stream clock, not generation preparation time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SourcePosition {
+    /// Active immutable configuration generation.
+    pub generation: u64,
+    /// First native sample in this callback; advances through publication drops.
+    pub sample: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Destination {
+    enabled: bool,
+    eligible: bool,
+    target: usize,
+    span: AudioSpan,
 }
 
 #[derive(Debug)]
@@ -191,9 +208,8 @@ struct ProgramBlock {
     // One peer-routable composite plane followed by each destination's contribution.
     audio: Vec<f32>,
     frames: usize,
-    enabled: Vec<bool>,
+    routing: Vec<Destination>,
     replies: Vec<PeerReplySample>,
-    targets: Vec<usize>,
 }
 
 /// Sole peer-audio loopback consumer and producer of all per-peer transmit queues.
@@ -203,44 +219,77 @@ pub struct LinkDispatcher {
     recycle: Producer<ProgramBlock>,
     outbound: Vec<LinkAudioProducer>,
     scratch: Vec<f32>,
+    current: Option<ProgramBlock>,
+    next_destination: usize,
+}
+
+/// Work completed by one bounded fan-out pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DispatchProgress {
+    /// Destinations examined, including disabled or full peers.
+    pub destinations: usize,
+    /// Complete program blocks returned to the radio-side pool.
+    pub completed_blocks: usize,
+    /// A partial block or queued block still needs distribution.
+    pub pending: bool,
 }
 impl LinkDispatcher {
     /// Dispatch at most `maximum_blocks`, then return every block to its radio-side pool.
     /// Only this owner writes peer queues; no block allocation or wait occurs here.
     pub fn dispatch(&mut self, maximum_blocks: usize) -> usize {
-        let mut count = 0;
-        for _ in 0..maximum_blocks {
-            let Ok(block) = self.incoming.pop() else {
+        self.dispatch_batch(maximum_blocks.saturating_mul(self.outbound.len()), |_| {})
+            .completed_blocks
+    }
+
+    /// Visit at most `maximum_destinations`; retain partially dispatched blocks.
+    /// Notify only destinations that accepted samples, after descriptor publication.
+    pub fn dispatch_batch(
+        &mut self,
+        maximum_destinations: usize,
+        mut on_written: impl FnMut(usize),
+    ) -> DispatchProgress {
+        let mut progress = DispatchProgress::default();
+        while progress.destinations < maximum_destinations {
+            if self.current.is_none() {
+                self.current = self.incoming.pop().ok();
+                self.next_destination = 0;
+            }
+            let Some(block) = &self.current else {
                 break;
             };
-            for (index, outbound) in self.outbound.iter_mut().enumerate() {
-                if block.targets[index] == 0
-                    || (!block.enabled[index]
-                        && !block.replies[..block.frames]
-                            .iter()
-                            .any(|reply| reply.target == block.targets[index]))
-                {
-                    continue;
-                }
+            let index = self.next_destination;
+            let destination = block.routing[index];
+            if destination.eligible {
                 let offset = (index + 1) * self.scratch.len();
                 for (frame, sample) in self.scratch[..block.frames].iter_mut().enumerate() {
-                    *sample = if block.enabled[index] {
+                    *sample = if destination.enabled {
                         block.audio[frame] - block.audio[offset + frame]
                     } else {
                         0.0
                     };
-                    if block.replies[frame].target == block.targets[index] {
+                    if block.replies[frame].target == destination.target {
                         *sample += block.replies[frame].sample;
                     }
                 }
-                outbound.write(&self.scratch[..block.frames]);
+                if self.outbound[index].write(destination.span, &self.scratch[..block.frames])
+                    < block.frames
+                {
+                    on_written(index);
+                }
             }
+            self.next_destination += 1;
+            progress.destinations += 1;
             // The two queues hold exactly two blocks in total. Owning this block
             // proves the recycle queue has a free slot, even if radio has stopped.
-            let _ = self.recycle.push(block);
-            count += 1;
+            if self.next_destination == self.outbound.len() {
+                let _ = self
+                    .recycle
+                    .push(self.current.take().expect("finished block"));
+                progress.completed_blocks += 1;
+            }
         }
-        count
+        progress.pending = self.current.is_some() || self.incoming.slots() != 0;
+        progress
     }
 }
 impl<P: PeerInput> LinkAudio<P> {
@@ -273,16 +322,14 @@ impl<P: PeerInput> LinkAudio<P> {
             peer.group_index = Some(index);
         }
         let selected_groups = vec![0; groups.len()];
-        let mut destinations = Vec::new();
         let mut outbound = Vec::new();
-        for (index, peer) in peers.iter_mut().enumerate() {
+        for peer in &mut peers {
             // Control-only construction consumes each freshly prepared peer exactly once.
             let producer = peer.outbound.take().expect("prepared outbound owner");
-            destinations.push(index);
             outbound.push(producer);
         }
         let samples = maximum
-            .checked_mul(destinations.len() + 1)
+            .checked_mul(peers.len() + 1)
             .ok_or(AdmissionError::Invalid)?;
         let (publish, incoming) = RingBuffer::new(2);
         let (mut recycle, recycled) = RingBuffer::new(2);
@@ -292,9 +339,8 @@ impl<P: PeerInput> LinkAudio<P> {
                 .push(ProgramBlock {
                     audio: vec![0.0; samples],
                     frames: 0,
-                    enabled: vec![false; destinations.len()],
+                    routing: vec![Destination::default(); peers.len()],
                     replies: vec![PeerReplySample::default(); maximum],
-                    targets: vec![0; destinations.len()],
                 })
                 .expect("new loopback pool");
         }
@@ -303,9 +349,12 @@ impl<P: PeerInput> LinkAudio<P> {
             recycle,
             outbound,
             scratch: vec![0.0; maximum],
+            current: None,
+            next_destination: 0,
         };
         Ok((
             Self {
+                routing: vec![Destination::default(); peers.len()],
                 peers,
                 local: vec![0.0; maximum],
                 mix: vec![0.0; maximum],
@@ -313,7 +362,6 @@ impl<P: PeerInput> LinkAudio<P> {
                 parrot_output: vec![0.0; maximum],
                 reply_output: vec![PeerReplySample::default(); maximum],
                 status,
-                destinations,
                 groups,
                 selected_groups,
                 publish,
@@ -336,6 +384,7 @@ impl<P: PeerInput> LinkAudio<P> {
         controller: &mut NodeController,
         receiving: bool,
         audio: &mut [f32],
+        source: SourcePosition,
     ) -> Result<bool, AdmissionError> {
         let count = audio.len();
         if count > self.local.len() {
@@ -440,14 +489,60 @@ impl<P: PeerInput> LinkAudio<P> {
                 replies: Some(&mut self.reply_output[..count]),
             },
         );
-        if count == 0 || self.destinations.is_empty() {
+        if count == 0 || self.peers.is_empty() {
             return Ok(keyed);
+        }
+        let forwarding_sources = self
+            .peers
+            .iter()
+            .filter(|peer| {
+                peer.active
+                    && peer.mode.forwards()
+                    && peer.group_index.is_none_or(|group| {
+                        peer.group
+                            .as_ref()
+                            .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+                    })
+            })
+            .count();
+        // Track activity even when both blocks are in flight. Dropped callbacks
+        // remain source-time gaps and cannot hide a new destination burst.
+        for (route, peer) in self.routing.iter_mut().zip(&self.peers) {
+            let selected = peer.group_index.is_none_or(|group| {
+                peer.group
+                    .as_ref()
+                    .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
+            });
+            let own_source = usize::from(peer.active && peer.mode.forwards() && selected);
+            let ended = peer.input.signals().ended();
+            route.target = if ended {
+                0
+            } else {
+                peer.input.signals().reply_identity()
+            };
+            route.enabled = !ended
+                && (parrot_active
+                    || ((peer.mode.transmits() || peer.group.is_some())
+                        && selected
+                        && (receiving || forwarding_sources > own_source)));
+            let eligible = route.target != 0
+                && (route.enabled
+                    || self.reply_output[..count]
+                        .iter()
+                        .any(|reply| reply.target == route.target));
+            if eligible && !route.eligible {
+                route.span.burst = route.span.burst.wrapping_add(1);
+            }
+            route.eligible = eligible;
+            route.span.generation = source.generation;
+            route.span.source_start = source.sample;
         }
         let Ok(mut block) = self.recycled.pop() else {
             self.status.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(keyed);
         };
         block.frames = count;
+        block.routing.copy_from_slice(&self.routing);
         block.replies[..count].copy_from_slice(&self.reply_output[..count]);
         block.audio[..count].fill(0.0);
         if receiving {
@@ -475,41 +570,12 @@ impl<P: PeerInput> LinkAudio<P> {
         {
             *output += parrot;
         }
-        let forwarding_sources = self
-            .peers
-            .iter()
-            .filter(|peer| {
-                peer.active
-                    && peer.mode.forwards()
-                    && peer.group_index.is_none_or(|group| {
-                        peer.group
-                            .as_ref()
-                            .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
-                    })
-            })
-            .count();
-        for (destination, &peer_index) in self.destinations.iter().enumerate() {
-            let peer = &self.peers[peer_index];
+        for (destination, peer) in self.peers.iter().enumerate() {
             let selected = peer.group_index.is_none_or(|group| {
                 peer.group
                     .as_ref()
                     .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
             });
-            let own_source = usize::from(peer.active && peer.mode.forwards() && selected);
-            let ended = peer.input.signals().ended();
-            block.targets[destination] = if ended {
-                0
-            } else {
-                peer.input.signals().reply_identity()
-            };
-            block.enabled[destination] = !ended
-                && if parrot_active {
-                    true
-                } else {
-                    (peer.mode.transmits() || peer.group.is_some())
-                        && selected
-                        && (receiving || forwarding_sources > own_source)
-                };
             let offset = (destination + 1) * self.local.len();
             let own = &mut block.audio[offset..offset + count];
             // Ordinary mix-minus removes this peer's own forwarding contribution.

@@ -135,7 +135,10 @@ unsafe extern "C" fn write(
 #[test]
 fn audio_burst_ends_with_exactly_one_idle_marker() {
     let (mut session, _control, state, mut output) = make_session("1000");
-    assert_eq!(output.write(&[0.25; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]),
+        0
+    );
 
     session.step(20).unwrap();
     session.step(40).unwrap();
@@ -151,7 +154,7 @@ fn outbound_audio_keeps_up_when_driver_wakes_one_millisecond_late() {
         let (mut session, _control, _state, mut output) = make_session("1000");
         for now_ms in 0..=4_000 {
             if now_ms % 20 == 0 {
-                output.write(&[0.25; 960]);
+                output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]);
             }
             if now_ms % driver_interval_ms == 0 {
                 session.step(now_ms).unwrap();
@@ -168,7 +171,13 @@ fn outbound_audio_keeps_up_when_driver_wakes_one_millisecond_late() {
 #[test]
 fn outbound_audio_rebases_after_late_start_and_idle() {
     let (mut session, _control, state, mut output) = make_session("1000");
-    assert_eq!(output.write(&[0.25; 1920]), 0);
+    assert_eq!(
+        output.write(
+            rpt_advanced_core::audio::AudioSpan::default(),
+            &[0.25; 1920]
+        ),
+        0
+    );
     session.step(5_000).unwrap();
     session.step(5_001).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960]);
@@ -177,7 +186,13 @@ fn outbound_audio_rebases_after_late_start_and_idle() {
     session.step(10_000).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960, 960, 0]);
 
-    assert_eq!(output.write(&[0.25; 1920]), 0);
+    assert_eq!(
+        output.write(
+            rpt_advanced_core::audio::AudioSpan::default(),
+            &[0.25; 1920]
+        ),
+        0
+    );
     session.step(10_001).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960, 960, 0]);
     session.step(10_020).unwrap();
@@ -190,7 +205,13 @@ fn outbound_audio_rebases_after_late_start_and_idle() {
 #[test]
 fn outbound_audio_catches_up_one_block_per_step_after_owner_stall() {
     let (mut session, _control, state, mut output) = make_session("1000");
-    assert_eq!(output.write(&[0.25; 2880]), 0);
+    assert_eq!(
+        output.write(
+            rpt_advanced_core::audio::AudioSpan::default(),
+            &[0.25; 2880]
+        ),
+        0
+    );
     session.step(0).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960]);
 
@@ -208,14 +229,20 @@ fn legacy_newkey_is_echoed_once_without_gating_audio() {
         .unwrap()
         .input
         .push_back(Input::Text(b"!NEWKEY!"));
-    assert_eq!(output.write(&[0.5; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5; 960]),
+        0
+    );
     session.step(0).unwrap();
     state
         .lock()
         .unwrap()
         .input
         .push_back(Input::Text(b"!NEWKEY!"));
-    assert_eq!(output.write(&[0.25; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]),
+        0
+    );
     session.step(20).unwrap();
 
     let state = state.lock().unwrap();
@@ -306,7 +333,10 @@ fn newkey1_does_not_suppress_outbound_audio() {
         .unwrap()
         .input
         .push_back(Input::Text(b"!NEWKEY1!"));
-    assert_eq!(output.write(&[0.5; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5; 960]),
+        0
+    );
     session.step(20).unwrap();
     assert_eq!(state.lock().unwrap().audio, vec![0.5; 960]);
 }
@@ -461,7 +491,7 @@ pub(crate) fn peer_with_async(rate_hz: u32, async_enabled: bool) -> (PeerIo, Sha
 }
 fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (io, state) = peer_with_async(48000, true);
-    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600)
+    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
     let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
@@ -469,7 +499,7 @@ fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAud
 }
 fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (io, state) = peer(48000);
-    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600)
+    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
     let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
@@ -742,7 +772,10 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
         })
         .ok()
         .unwrap();
-    assert_eq!(output.write(&[0.25; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]),
+        0
+    );
     state
         .lock()
         .unwrap()
@@ -769,7 +802,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     let old = control.observer.clone();
     let (inbound, input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     let observer = inbound.observer();
-    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
     control
@@ -816,7 +849,7 @@ fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
             control
                 .send(Command::Redirect {
                     inbound,
-                    outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+                    outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                         .unwrap()
                         .into_endpoints()
                         .1,
@@ -842,7 +875,7 @@ fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
     control
         .send(Command::Redirect {
             inbound,
-            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
                 .1,
@@ -864,7 +897,7 @@ fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
     control
         .send(Command::Redirect {
             inbound,
-            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
                 .1,
@@ -918,7 +951,7 @@ fn partial_pcm_is_staged_before_a_following_counted_gap() {
     control
         .send(Command::Redirect {
             inbound,
-            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
                 .1,
@@ -1017,7 +1050,10 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
             }
             "write" => {
                 state.lock().unwrap().fail_write = true;
-                assert_eq!(output.write(&[0.1; 960]), 0);
+                assert_eq!(
+                    output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.1; 960]),
+                    0
+                );
             }
             "text" => {
                 state.lock().unwrap().fail_text = true;
@@ -1078,7 +1114,7 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
     ] {
         let (io, state) = peer(rate);
         state.lock().unwrap().fail_text = fail;
-        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
             .unwrap()
             .into_endpoints();
         assert!(PeerSession::prepare(io, outbound, local, remote).is_err());
@@ -1100,21 +1136,30 @@ fn unkey_between_query_capture_and_send_cancels_the_advisory_request() {
 #[test]
 fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let (io, state) = peer(8000);
-    let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
+    let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
     let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
-    assert_eq!(output.write(&[0.5]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5]),
+        0
+    );
     session.step(0).unwrap();
     // A warmed converter may emit immediately or retain sub-frame input. Neither
     // case may create an empty network write; filter latency is not an ABI contract.
     let writes = state.lock().unwrap().writes.clone();
     assert!(writes.iter().all(|count| *count > 0));
-    assert_eq!(output.write(&[0.5]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5]),
+        0
+    );
     session.step(20).unwrap();
     let writes = state.lock().unwrap().writes.clone();
     assert!(writes.iter().all(|count| *count > 0));
-    assert_eq!(output.write(&[0.5; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5; 960]),
+        0
+    );
     session.step(40).unwrap();
     let writes = state.lock().unwrap().writes.clone();
     assert!(!writes.is_empty());

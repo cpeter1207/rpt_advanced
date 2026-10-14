@@ -358,7 +358,7 @@ fn grouped_test_audio_peer(
     crate::link::AudioPeer<TestPeerInput>,
     crate::audio::LinkAudioConsumer,
 ) {
-    let (outbound, consumer) = crate::audio::LinkAudioQueue::new(maximum * 2)
+    let (outbound, consumer) = crate::audio::LinkAudioQueue::new(maximum * 2, 64)
         .unwrap()
         .into_endpoints();
     let peer = crate::link::AudioPeer::new(
@@ -411,10 +411,24 @@ fn standby_group_audio_never_reaches_rf_or_any_peer() {
     .unwrap();
 
     let mut rf = [0.0];
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     standby_enabled.store(true, std::sync::atomic::Ordering::Release);
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     let mut sent = [0.0];
     assert_eq!(rf, [0.0]);
@@ -459,10 +473,24 @@ fn selected_group_audio_reaches_rf_but_not_a_standby_peer() {
     .unwrap();
 
     let mut rf = [0.0];
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     selected_enabled.store(true, std::sync::atomic::Ordering::Release);
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
 
     assert_eq!(rf, [0.25]);
@@ -481,7 +509,7 @@ fn parrot_capture_includes_local_and_receive_active_nonforwarded_peer_audio() {
     let peer_enabled = Arc::new(AtomicBool::new(true));
     let mut input = TestPeerInput::new(Some(0.2));
     input.enabled = Some(Arc::clone(&peer_enabled));
-    let (local_out, _) = crate::audio::LinkAudioQueue::new(4)
+    let (local_out, _) = crate::audio::LinkAudioQueue::new(4, 64)
         .unwrap()
         .into_endpoints();
     let local_monitor = AudioPeer::new("100", Mode::LOCAL_MONITOR, input, local_out, 2, 0).unwrap();
@@ -498,10 +526,24 @@ fn parrot_capture_includes_local_and_receive_active_nonforwarded_peer_audio() {
     )
     .unwrap();
 
-    links.process(&mut node, true, &mut [0.1, 0.1]).unwrap();
+    links
+        .process(
+            &mut node,
+            true,
+            &mut [0.1, 0.1],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(links.active_count(), 1);
     peer_enabled.store(false, std::sync::atomic::Ordering::Release);
-    links.process(&mut node, false, &mut [0.0, 0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0, 0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(links.active_count(), 0);
 
     let clip = control.take_parrot_capture().unwrap();
@@ -531,10 +573,10 @@ impl crate::audio::PcmStreamReader for ParrotSamples {
 fn parrot_bypasses_monitor_and_fallback_peer_routing_only_for_its_audio() {
     use crate::link::{AudioPeer, LinkAudio, Mode};
 
-    let (to_transceiver, mut from_transceiver) = crate::audio::LinkAudioQueue::new(8)
+    let (to_transceiver, mut from_transceiver) = crate::audio::LinkAudioQueue::new(8, 64)
         .unwrap()
         .into_endpoints();
-    let (to_monitor, mut from_monitor) = crate::audio::LinkAudioQueue::new(8)
+    let (to_monitor, mut from_monitor) = crate::audio::LinkAudioQueue::new(8, 64)
         .unwrap()
         .into_endpoints();
     let peers = vec![
@@ -572,7 +614,14 @@ fn parrot_bypasses_monitor_and_fallback_peer_routing_only_for_its_audio() {
     assert!(control.queue_prepared_parrot(media));
 
     let mut local = [0.0; 2];
-    links.process(&mut node, false, &mut local).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut local,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(local, [0.4, 0.5]);
     assert!(node.parrot_playback_active());
     assert_eq!(dispatcher.dispatch(1), 1);
@@ -598,7 +647,7 @@ impl crate::audio::PcmStreamReader for OneSampleParrot {
 fn parrot_final_callback_block_reaches_every_peer() {
     use crate::link::{AudioPeer, LinkAudio, Mode};
 
-    let (outbound, mut peer_output) = crate::audio::LinkAudioQueue::new(4)
+    let (outbound, mut peer_output) = crate::audio::LinkAudioQueue::new(4, 64)
         .unwrap()
         .into_endpoints();
     let peer = AudioPeer::new(
@@ -628,7 +677,14 @@ fn parrot_final_callback_block_reaches_every_peer() {
         ))
     );
 
-    links.process(&mut node, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert!(!node.parrot_playback_active());
     assert_eq!(dispatcher.dispatch(1), 1);
     let mut sent = [0.0];
@@ -780,7 +836,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
 fn peer_transmit_is_subtracted_from_its_own_outbound_audio() {
     use crate::link::LinkAudio;
 
-    let (outbound, mut peer_out) = crate::audio::LinkAudioQueue::new(4)
+    let (outbound, mut peer_out) = crate::audio::LinkAudioQueue::new(4, 64)
         .unwrap()
         .into_endpoints();
     let peer = crate::link::AudioPeer::new(
@@ -804,13 +860,27 @@ fn peer_transmit_is_subtracted_from_its_own_outbound_audio() {
     )
     .unwrap();
 
-    links.process(&mut node, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     let mut outbound = [1.0; 1];
     assert_eq!(peer_out.read(&mut outbound), 1);
     assert_eq!(outbound, [0.0]);
     let mut rf = [0.5];
-    links.process(&mut node, true, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            true,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
 
     assert!((rf[0] - 0.75).abs() < 0.001);
@@ -832,7 +902,7 @@ fn monitor_destinations_are_prepared_only_when_they_belong_to_a_group() {
     let grouped_enabled = Arc::new(AtomicBool::new(false));
     let mut grouped_input = TestPeerInput::new(Some(0.25));
     grouped_input.enabled = Some(Arc::clone(&grouped_enabled));
-    let (grouped_outbound, _) = crate::audio::LinkAudioQueue::new(2)
+    let (grouped_outbound, _) = crate::audio::LinkAudioQueue::new(2, 64)
         .unwrap()
         .into_endpoints();
     let grouped_monitor = crate::link::AudioPeer::new(
@@ -848,7 +918,7 @@ fn monitor_destinations_are_prepared_only_when_they_belong_to_a_group() {
     let plain_enabled = Arc::new(AtomicBool::new(false));
     let mut plain_input = TestPeerInput::new(Some(0.5));
     plain_input.enabled = Some(plain_enabled);
-    let (plain_outbound, _) = crate::audio::LinkAudioQueue::new(2)
+    let (plain_outbound, _) = crate::audio::LinkAudioQueue::new(2, 64)
         .unwrap()
         .into_endpoints();
     let plain_monitor = crate::link::AudioPeer::new(
@@ -870,11 +940,25 @@ fn monitor_destinations_are_prepared_only_when_they_belong_to_a_group() {
     )
     .unwrap();
 
-    links.process(&mut node, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(dispatcher.dispatch(1), 1);
     assert_eq!(selection.active(), NonZeroUsize::new(1));
     grouped_enabled.store(true, std::sync::atomic::Ordering::Release);
-    links.process(&mut node, true, &mut [0.1]).unwrap();
+    links
+        .process(
+            &mut node,
+            true,
+            &mut [0.1],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
 
     assert_eq!(links.active_count(), 1);
     assert_eq!(dispatcher.dispatch(1), 1);
@@ -920,22 +1004,64 @@ fn group_winner_change_waits_for_all_inputs_to_be_idle() {
     .unwrap();
 
     let mut rf = [0.0];
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(selection.active(), NonZeroUsize::new(1));
-    links.process(&mut node, true, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            true,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     selection.publish_desired(NonZeroUsize::new(2));
-    links.process(&mut node, true, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            true,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(selection.active(), NonZeroUsize::new(1));
 
     selected_enabled.store(true, std::sync::atomic::Ordering::Release);
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(selection.active(), NonZeroUsize::new(1));
     selected_enabled.store(false, std::sync::atomic::Ordering::Release);
     standby_enabled.store(true, std::sync::atomic::Ordering::Release);
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(selection.active(), NonZeroUsize::new(1));
     standby_enabled.store(false, std::sync::atomic::Ordering::Release);
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(selection.active(), NonZeroUsize::new(2));
 }
 
@@ -971,10 +1097,24 @@ fn group_winner_can_change_while_transmitter_is_keyed_without_input_activity() {
     node.keyed = true;
     let mut rf = [0.0];
 
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(selection.active(), NonZeroUsize::new(1));
     selection.publish_desired(NonZeroUsize::new(2));
-    links.process(&mut node, false, &mut rf).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut rf,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(selection.active(), NonZeroUsize::new(2));
 }
 
@@ -987,7 +1127,7 @@ fn test_audio_peer(
     crate::link::AudioPeer<TestPeerInput>,
     crate::audio::LinkAudioConsumer,
 ) {
-    let (outbound, consumer) = crate::audio::LinkAudioQueue::new(maximum * 2)
+    let (outbound, consumer) = crate::audio::LinkAudioQueue::new(maximum * 2, 64)
         .unwrap()
         .into_endpoints();
     (
@@ -1108,24 +1248,52 @@ fn courtesy_hang_and_status_are_local_only_but_receive_reaches_peers() {
     )
     .unwrap();
 
-    links.process(&mut node, true, &mut [0.25]).unwrap();
+    links
+        .process(
+            &mut node,
+            true,
+            &mut [0.25],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     let mut sent = [0.0];
     assert_eq!(outbound.read(&mut sent), 0);
     assert_eq!(sent, [0.25]);
 
-    links.process(&mut node, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     assert_eq!(outbound.read(&mut sent), 1);
     assert_eq!(sent, [0.0]);
 
-    links.process(&mut node, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     assert_eq!(outbound.read(&mut sent), 1);
 
     control.queue_status("E", Some(vec![0.6])).unwrap();
     let mut elapsed = [0.0; MAXIMUM];
-    links.process(&mut node, false, &mut elapsed).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut elapsed,
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     let mut status = [0.0; MAXIMUM];
     assert_eq!(outbound.read(&mut status), MAXIMUM);
@@ -1145,7 +1313,14 @@ fn mix_minus_queues_other_forwarding_peers_but_not_the_destination_itself() {
         CourtesySettings::default(),
     )
     .unwrap();
-    links.process(&mut node, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     let mut sent = [0.0];
     assert_eq!(outbound.read(&mut sent), 1);
@@ -1161,7 +1336,14 @@ fn mix_minus_queues_other_forwarding_peers_but_not_the_destination_itself() {
         CourtesySettings::default(),
     )
     .unwrap();
-    links.process(&mut node, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut node,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     assert_eq!(outbound.read(&mut sent), 0);
     assert_eq!(sent, [0.7]);
@@ -1188,7 +1370,7 @@ fn loopback_pool_never_allocates_or_drops_owned_buffers_on_audio_full() {
             None
         }
     }
-    let (outbound, mut consumer) = LinkAudioQueue::new(1920).unwrap().into_endpoints();
+    let (outbound, mut consumer) = LinkAudioQueue::new(1920, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new(
         "200",
         Mode::TRANSCEIVE,
@@ -1209,13 +1391,27 @@ fn loopback_pool_never_allocates_or_drops_owned_buffers_on_audio_full() {
     let status = audio.status();
     AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
     for _ in 0..3 {
-        audio.process(&mut node, true, &mut [0.25; 960]).unwrap();
+        audio
+            .process(
+                &mut node,
+                true,
+                &mut [0.25; 960],
+                crate::link::SourcePosition::default(),
+            )
+            .unwrap();
     }
     let dropped = status.dropped_blocks();
     let dispatched = dispatcher.dispatch(2);
     let mut output = [0.0; 1920];
     let missing = consumer.read(&mut output);
-    audio.process(&mut node, true, &mut [0.5; 960]).unwrap();
+    audio
+        .process(
+            &mut node,
+            true,
+            &mut [0.5; 960],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(2);
     let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
     assert_eq!(allocations, Some(0));

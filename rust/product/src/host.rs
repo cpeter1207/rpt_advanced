@@ -177,7 +177,7 @@ fn prepared(
         }
         let (inbound, input) = InboundRing::open(snapshot.input_rate, InboundPolicy::Peer)
             .map_err(|_| RuntimeError::Preparation)?;
-        let (output, outbound) = LinkAudioQueue::new(48000 / 5)
+        let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
         let prepared_peer = AudioPeer::new(
@@ -404,7 +404,7 @@ impl Host {
                 .bind_peer(&mut io)
                 .map_err(|_| RuntimeError::Preparation)?;
         }
-        let (_, outbound) = LinkAudioQueue::new(48000 / 5)
+        let (_, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
         let (session, control) = PeerSession::prepare(io, outbound, local, remote)

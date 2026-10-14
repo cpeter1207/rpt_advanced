@@ -258,7 +258,12 @@ fn render_queued_telemetry(host: &mut Host, owners: &mut AudioOwners) -> bool {
         let transmit = generation.state();
         let keyed = transmit
             .adapter
-            .process(&mut transmit.controller, false, &mut audio)
+            .process(
+                &mut transmit.controller,
+                false,
+                &mut audio,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
             .unwrap();
         drop(generation);
         heard |= audio.iter().any(|sample| *sample != 0.0);
@@ -1146,7 +1151,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     assert!(!host.status_text("1000").unwrap().contains("local-rx:"));
     // A late peer acknowledgment cannot reactivate a failed radio generation.
     let (inbound, _input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
-    let (_, outbound) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let (_, outbound) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     host.peers[0]
         .control
         .send(PeerCommand::Redirect { inbound, outbound })
