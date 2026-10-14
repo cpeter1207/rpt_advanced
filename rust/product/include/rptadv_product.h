@@ -274,7 +274,8 @@ struct rptadv_host_services_v5 {
                               uint8_t *encoded, size_t capacity);
     /** Submit encoded media at its original call-relative source timestamp.
      * Zero accepts ownership; one is uncommitted socket backpressure; negative
-     * is terminal. The caller retains a would-block item without re-encoding. */
+     * is terminal. The caller retains a would-block item without re-encoding.
+     * A zero count submits the source-timed end-of-burst marker. */
     int (*peer_send_prepared)(void *context, void *peer, const uint8_t *encoded, size_t count,
                               uint32_t timestamp_ms);
     /** Current call-relative monotonic milliseconds, saturating at UINT32_MAX. */

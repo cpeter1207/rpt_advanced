@@ -658,10 +658,17 @@ fn egress_prepared_retry_encodes_once() {
     state.lock().unwrap().prepared_result = 1;
     output.write(timed_span(48_960, 1_200), &[0.5; 960]);
     session.step(1_200).unwrap();
-    let attempts = state.lock().unwrap().prepared.len();
+    let attempts = state.lock().unwrap().prepared.clone();
     session.step(1_400).unwrap();
     assert_eq!(
-        state.lock().unwrap().prepared.len(),
+        state
+            .lock()
+            .unwrap()
+            .prepared
+            .iter()
+            .filter(|(bytes, _)| !bytes.is_empty())
+            .cloned()
+            .collect::<Vec<_>>(),
         attempts,
         "expiry is never renewed by retry"
     );
@@ -693,6 +700,53 @@ fn egress_rejection_count_survives_generation_redirect() {
         control.snapshot().unwrap().egress.rejected_native_samples,
         1
     );
+}
+
+#[test]
+fn egress_idle_marker_retries_without_ending_or_blocking_another_peer() {
+    let (mut session, control, state, mut output) = timed_session();
+    state.lock().unwrap().fail_write = true; // Prepared hosts must not use legacy PCM writes.
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(1_000).unwrap(); // Full voice committed, but the provider may still hold it.
+    state.lock().unwrap().prepared_result = 1;
+    session.step(1_020).unwrap();
+    assert_eq!(
+        state.lock().unwrap().prepared.last(),
+        Some(&(vec![], 2_020))
+    );
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&200_000_000));
+    assert!(!control.ended());
+
+    let (mut healthy, _healthy_control, healthy_state, mut healthy_output) = timed_session();
+    healthy_output.write(timed_span(48_000, 1_020), &[0.5; 960]);
+    healthy.step(1_020).unwrap();
+    assert_eq!(healthy_state.lock().unwrap().prepared.len(), 1);
+
+    session.step(1_040).unwrap();
+    state.lock().unwrap().prepared_result = 0;
+    session.step(1_060).unwrap();
+    let attempts = state.lock().unwrap().prepared.len();
+    session.step(1_080).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared.len(), attempts);
+    assert_eq!(&state.prepared[1..], &vec![(vec![], 2_020); 3]);
+    assert!(state.writes.is_empty());
+    assert_eq!(state.encoded_calls, 1);
+}
+
+#[test]
+fn egress_idle_marker_retry_expires_without_ending_the_peer() {
+    let (mut session, control, state, mut output) = timed_session();
+    state.lock().unwrap().fail_write = true;
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(1_000).unwrap();
+    state.lock().unwrap().prepared_result = 1;
+    session.step(1_020).unwrap();
+    let attempts = state.lock().unwrap().prepared.len();
+    session.step(1_220).unwrap();
+    session.step(1_240).unwrap();
+    assert_eq!(state.lock().unwrap().prepared.len(), attempts);
+    assert!(!control.ended());
 }
 
 #[test]
@@ -855,7 +909,10 @@ fn egress_future_reopen_and_redirect_discard_uncommitted_media() {
     assert_eq!(sent.len(), 3);
     assert_eq!(sent[2], (vec![75; 960], 2_020));
     session.step(1_060).unwrap();
-    assert_eq!(state.lock().unwrap().writes.last(), Some(&0));
+    assert_eq!(
+        state.lock().unwrap().prepared.last(),
+        Some(&(vec![], 2_040))
+    );
 }
 
 #[test]
@@ -868,13 +925,13 @@ fn egress_future_span_does_not_hold_an_ended_burst_keyed() {
     output.write(next, &[0.5; 960]);
     session.step(1_020).unwrap();
     assert_eq!(
-        state.lock().unwrap().writes,
-        [0],
+        state.lock().unwrap().prepared.last(),
+        Some(&(vec![], 2_020)),
         "future media cannot extend the current key"
     );
-    assert_eq!(state.lock().unwrap().prepared.len(), 1);
-    session.step(1_100).unwrap();
     assert_eq!(state.lock().unwrap().prepared.len(), 2);
+    session.step(1_100).unwrap();
+    assert_eq!(state.lock().unwrap().prepared.len(), 3);
 }
 fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (io, state) = peer_with_async(48000, true);

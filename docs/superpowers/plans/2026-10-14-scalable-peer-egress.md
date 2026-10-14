@@ -1,6 +1,6 @@
 # Resource-scaled peer egress implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Isolate outgoing peer congestion and station-control stalls without a fixed total-peer ceiling; measure sustained operation at and above 1,000 peers.
 
@@ -9,6 +9,21 @@
 **Tech Stack:** Rust, existing rtrb 0.3.2 and Tokio 1.48.0, dynamically loaded IAX/samplerate libraries, Debian 13 native quality containers.
 
 **Spec:** [Approved design](../specs/2026-10-14-scalable-peer-egress-design.md).
+
+## Completion status
+
+Tasks 1–7 are implemented and locally committed. The final whole-change review
+found one congestion defect in the idle-marker path; its transport and product
+regressions failed before repair and pass afterward. The affected suites pass:
+911 controller/core/adapter tests and 293 IAX tests. Strict checks and developer
+documentation are warning-free. The hosted PR gate and approved live-node
+acceptance remain outstanding; no push, release, or deployment was performed.
+
+Sustained loopback runs retained all 1,000, 2,000, and 3,000 peers for 120 seconds.
+On the 12-logical-CPU test host, 1,000 peers had 0–1 program drops and 0–6 late
+callbacks across two runs; 2,000 had mild scheduling overload; 3,000 saturated
+the host. These measurements are not deployment capacity guarantees or limits.
+The fixture bulk-admits peers, so it does not establish join-storm performance.
 
 ## Global constraints
 
@@ -76,22 +91,22 @@ documentation. Record commands, revisions, outcomes, and deferred checks once.
 `IaxPeer::send_prepared_ulaw(&mut self, payload: &[u8], timestamp_ms: u32) -> Result<MediaSend, DialError>`.
 Reuse `G711Ulaw`, the existing full/mini builders, reliable queue, and retry schedule.
 
-- [ ] Add `egress_congestion_preserves_sequence_and_epoch`: inject WouldBlock
+- [x] Add `egress_congestion_preserves_sequence_and_epoch`: inject WouldBlock
   before the first full voice send; assert Accepted, exactly one retained sequence,
   no eligible mini before its full frame sends, and identical bytes on retry.
   Repeat across the 16-bit mini timestamp rollover and 8-bit sequence rollover.
-- [ ] Add `egress_ack_cannot_retire_unsent_frame` and
+- [x] Add `egress_ack_cannot_retire_unsent_frame` and
   `egress_mini_would_block_is_uncommitted`: assert an early ACK retains an unsent
   frame; a blocked mini leaves sequence/voice epoch unchanged; a permanent error
   remains terminal only for that peer.
-- [ ] Run `cargo test --locked --lib egress_`; confirm failures identify the
+- [x] Run `cargo test --locked --lib egress_`; confirm failures identify the
   missing retention behavior, not setup/dependency errors.
-- [ ] Reserve reliable capacity before sequence mutation; retain committed bytes
+- [x] Reserve reliable capacity before sequence mutation; retain committed bytes
   before attempting UDP. Record whether each frame was actually sent, start retries
   then, and retain a first-send failure deadline using the existing terminal retry
   horizon. Drain bounded protocol replies without dropping committed frames or
   returning before ingress/ACK processing. Do not reset retry age on WouldBlock.
-- [ ] Rerun those tests plus `cargo test --locked --lib interop_`; document the
+- [x] Rerun those tests plus `cargo test --locked --lib interop_`; document the
   ownership/result rules and commit `fix: isolate IAX send congestion`.
 
 ### Task 2: Expose prepared media and readiness-driven peer scheduling
@@ -119,21 +134,21 @@ does not construct voice. `elapsed_ms` exposes the existing call clock for sourc
 mapping. `UINT64_MAX` clears the product deadline; zero makes it due. Retain ABI 1
 and SONAME 1 for additive tables; new consumers require the complete needed tail.
 
-- [ ] Add `egress_descriptor_tail_and_prepared_codec`: check exact existing field
+- [x] Add `egress_descriptor_tail_and_prepared_codec`: check exact existing field
   offsets, prefix-size reads, null/short buffers, unchanged failed outputs, and
   prepared bytes equal the current codec's output. No codec implementation in R.
-- [ ] Add `egress_wake_deadline_and_blocked_peer_isolation`: wake coalescing,
+- [x] Add `egress_wake_deadline_and_blocked_peer_isolation`: wake coalescing,
   wake-before-wait, a product expiry without ingress/writability, jitter playout
   without packets, and another peer progressing while one remains blocked.
   Use injected time/readiness; assert no busy loop on a persistently blocked peer.
-- [ ] Run `cargo test --locked --lib egress_` and
+- [x] Run `cargo test --locked --lib egress_` and
   `cargo test --locked --test abi_v1`; confirm red.
-- [ ] Share the existing socket through `Arc<tokio::net::UdpSocket>` after async
+- [x] Share the existing socket through `Arc<tokio::net::UdpSocket>` after async
   attachment. Use `writable()` with `try_send_to()`, not shared `poll_send_ready()`.
   Select stop, ingress, coalesced product wake, blocked-send readiness, and the
   earliest product/jitter/protocol deadline. Bound work and yield between batches;
   retain the existing synchronous path for non-async callers.
-- [ ] Rerun named tests, `cargo test --locked --test ulaw_media`, and async-driver
+- [x] Rerun named tests, `cargo test --locked --test ulaw_media`, and async-driver
   tests. Add ABI comments and commit `feat: drive peer egress by readiness`.
 
 ### Task 3: Carry source time through bounded PCM fan-out
@@ -167,18 +182,18 @@ cross-span concatenation, per-sample metadata, or queue allocation during writes
 not a counter restarted for each configuration generation. Track each destination's
 burst number when its ordinary audio or targeted reply becomes eligible after idle.
 
-- [ ] Add `egress_span_partition_and_overflow`: callback partitions 1, 240, 480,
+- [x] Add `egress_span_partition_and_overflow`: callback partitions 1, 240, 480,
   960, and 4096 samples; partial PCM admission and descriptor exhaustion; assert
   accepted samples match descriptors and rejected suffixes remain source-time gaps.
-- [ ] Add `egress_batched_mix_minus_preserves_routes`: retain existing routing
+- [x] Add `egress_batched_mix_minus_preserves_routes`: retain existing routing
   assertions, dispatch one destination at a time, assert exactly two recycled
   program blocks, no early recycle, and full peers do not stop healthy destinations.
-- [ ] Run the core `audio::link_queue::tests` and `link::audio::tests`; confirm red.
-- [ ] Store current block/destination cursor in `LinkDispatcher`; count skipped
+- [x] Run the core `audio::link_queue::tests` and `link::audio::tests`; confirm red.
+- [x] Store current block/destination cursor in `LinkDispatcher`; count skipped
   destinations toward each batch budget. Invoke `on_written(index)` only after
   accepted media. Stamp blocks from the worker's existing sample timeline and
   generation identity; advance source position even when publication is dropped.
-- [ ] Rerun affected core tests; update Rustdoc and commit
+- [x] Rerun affected core tests; update Rustdoc and commit
   `refactor: preserve source spans through peer fanout`.
 
 ### Task 4: Run generation-owned dispatchers independently of control
@@ -195,24 +210,24 @@ existing `link/mod.rs`, `host.rs`, `host_tests.rs`, `worker.rs`, `worker_tests.r
 `is_quiescent(&self) -> bool` reports wake-call completion. Keep these private to
 the product, with no generic executor abstraction.
 
-- [ ] Add `egress_dispatch_survives_control_pause` and
+- [x] Add `egress_dispatch_survives_control_pause` and
   `egress_retirement_waits_for_dispatch_and_redirect`: stop control pumping while
   callback publication continues; then reload with a partially dispatched block
   and delayed redirect ACK. Assert healthy delivery and no premature reclamation.
-- [ ] Add `egress_wake_close_race`: race notification with peer retirement;
+- [x] Add `egress_wake_close_race`: race notification with peer retirement;
   assert no token use after detach and stale wake handles become no-ops.
-- [ ] Run `cargo test --locked -p rptadv-product --lib egress_`; confirm red.
-- [ ] Give each node one long-lived worker. Prepare inactive registrations before
+- [x] Run `cargo test --locked -p rptadv-product --lib egress_`; confirm red.
+- [x] Give each node one long-lived worker. Prepare inactive registrations before
   publication; activate without allocation. Alternate active/retiring contexts in
   batches of at most 64 destinations; use a 1 ms parked idle wait, not busy-spin.
   Remove dispatcher execution from `Host::pump`; control keeps lifecycle handles.
-- [ ] Use a private atomic closed-bit/in-flight-count gate for `PeerWake`, not a
+- [x] Use a private atomic closed-bit/in-flight-count gate for `PeerWake`, not a
   mutex or raw token copied into endpoints. A notifier increments the count,
   calls the signal-only provider only if the closed bit was clear, then decrements.
   Reaping sets closed and waits through later control passes for count zero before
   detaching. Late increments observe closed and never dereference the token.
   Use sequentially consistent ordering and document that lifetime proof.
-- [ ] Reclamation requires callback, dispatcher, and redirect quiescence.
+- [x] Reclamation requires callback, dispatcher, and redirect quiescence.
   Stop/join/free off audio and off peer callbacks. Test failed preparation and
   delayed stream activation using the actual sample-clock origin, not preparation
   wall time. Rerun dispatcher/host/worker/session tests and commit
@@ -234,27 +249,27 @@ Use the corresponding C types/results from Task 2. Current standalone supplies
 the whole group; current Asterisk supplies null for it and keeps `peer_write`.
 Reject a partial group or truncated field. Do not substitute an old-provider fallback.
 
-- [ ] Add `egress_expiry_preserves_media_timeline`: 199 ms media sends; 200 ms
+- [x] Add `egress_expiry_preserves_media_timeline`: 199 ms media sends; 200 ms
   media expires before conversion/packet construction. A later accepted span
   retains the missing source interval. Repeat for metadata overflow, partial
   conversion output, FIR delay, burst transitions, and a generation replacement.
-- [ ] Add `egress_prepared_retry_encodes_once` and
+- [x] Add `egress_prepared_retry_encodes_once` and
   `egress_late_wake_keeps_absolute_cadence`: repeated WouldBlock retains one encoded
   item with its original expiry; recovery neither re-encodes nor compresses time;
   send work stays bounded to one ordinary media block per owner turn.
-- [ ] Add `egress_host_contract_and_asterisk_pcm`: short/partial tails fail safely;
+- [x] Add `egress_host_contract_and_asterisk_pcm`: short/partial tails fail safely;
   current Asterisk PCM writes and unkey remain unchanged; standalone forwards
   the wake/deadline and accepted/would-block distinction correctly.
-- [ ] Run product `egress_` and standalone IAX/host-service targeted tests; confirm red.
-- [ ] Keep one preallocated encoded buffer per session. Map source position to
+- [x] Run product `egress_` and standalone IAX/host-service targeted tests; confirm red.
+- [x] Keep one preallocated encoded buffer per session. Map source position to
   the provider's call clock off audio; preserve fractional sample arithmetic and
   explicit gaps. Reset the existing converter on discarded discontinuous input
   so hidden old FIR samples cannot leak into a fresh span. Preserve continuous
   stream conversion and normal final-tail behavior.
-- [ ] Derive remaining wait from absolute media/expiry deadlines; pass it through
+- [x] Derive remaining wait from absolute media/expiry deadlines; pass it through
   the new tail. Wake after PCM/commands arrive. Continue ingress/control during
   WouldBlock; preserve key/final-audio/unkey order and no stale generation sends.
-- [ ] Run product link/services/host tests, standalone IAX/host-services tests,
+- [x] Run product link/services/host tests, standalone IAX/host-services tests,
   and `make product-abi-check`; update in-source docs and commit
   `feat: expire stale peer media without blocking healthy peers`.
 
@@ -269,18 +284,18 @@ Change `next_available_call` to return `Option<u16>`; handle exhaustion as a loc
 admission failure. Rename the product pending-operation bound to
 `PENDING_ATTACH_CAPACITY = 1024`; it is not an established-peer limit.
 
-- [ ] Add `egress_admission_above_1024` in both repositories: admit 2,000
+- [x] Add `egress_admission_above_1024` in both repositories: admit 2,000
   lightweight peers/routes, verify all identities, release/reuse one, and keep
   existing per-peer queue bounds. No real network or timing threshold is needed.
-- [ ] Add `egress_admission_failure_keeps_existing_peers`: injected reservation,
+- [x] Add `egress_admission_failure_keeps_existing_peers`: injected reservation,
   registration, and exhausted inbound call-number failures retain existing peers
   and publish no stranded callback. Test call reuse only after ownership release.
-- [ ] Run each repository's `egress_admission` tests; confirm red.
-- [ ] Fallibly reserve growable bookkeeping before retained callbacks/route
+- [x] Run each repository's `egress_admission` tests; confirm red.
+- [x] Fallibly reserve growable bookkeeping before retained callbacks/route
   publication, retain bounded attach/command/event queues, and remove the
   call-exhaustion panic. Do not promise recovery from OS OOM or allocations inside
   third-party channels. Dedicated outbound sockets retain their own namespaces.
-- [ ] Rerun host/session and ingress/server tests; commit each repository's scoped
+- [x] Rerun host/session and ingress/server tests; commit each repository's scoped
   change as `refactor: admit peers by resources instead of fixed count`.
 
 ### Task 7: Measure the complete path and finish architecture/package integration
@@ -297,32 +312,32 @@ encoding, dynamic IAX provider, and local UDP receivers. Inputs:
 The Python runner accepts `--peers`, `--seconds`, `--output`; it starts no public
 connections, labels/cleans test processes, and emits machine-readable results.
 
-- [ ] Add deterministic cross-layer tests for stalled control, a congested peer,
+- [x] Add deterministic cross-layer tests for stalled control, a congested peer,
   simultaneous ingress, queued reload/stop, and bounded memory. Inject blocked
   sends explicitly: a remote UDP receiver that stops reading does not reliably
   make the local sender return WouldBlock.
-- [ ] Verify loss/latency counters with known events before using them in the
+- [x] Verify loss/latency counters with known events before using them in the
   load report. Capture send-lateness p50/p95/p99/max, expired/rejected samples,
   queue age, congestion/retries, reliable backlog, dispatcher duration/block drops,
   callback duration/misses, CPU/RSS, and task/thread counts. Keep hot diagnostics
   bounded; compute percentiles/report files outside radio callbacks.
-- [ ] Run those tests red, implement the test harness/necessary observations,
+- [x] Run those tests red, implement the test harness/necessary observations,
   then confirm green. Run all affected test modules once, not a full local gate.
-- [ ] Run 120-second measured intervals after warm-up at 1,000 and 2,000 peers
+- [x] Run 120-second measured intervals after warm-up at 1,000 and 2,000 peers
   where resources permit, with variable callbacks, mixed traffic, topology work,
   a control pause and selected congestion. Increase the requested count until
   saturation/resource failure is observed; report the host, workload, ceiling,
   and limiting resource. Do not hide capacity failure as a passing performance
   result or make noisy wall-clock percentiles mandatory CI thresholds.
-- [ ] Address measured avoidable transmit bottlenecks within this design; stop
+- [x] Address measured avoidable transmit bottlenecks within this design; stop
   for a design decision if a larger architectural change is necessary. Verify
   timing fixes and overload behavior again using only affected tests.
-- [ ] Record the implemented ownership/invariants in ADR0025/0026/0037 and the
+- [x] Record the implemented ownership/invariants in ADR0025/0026/0037 and the
   architecture map without absorbing the unrelated existing edits. Update package
   minimums and descriptor-size tests together. Candidate dependency revision must
   identify the actual I commit, not an invented release tag. SONAME stays unchanged
   for append-only descriptors; current consumers explicitly require the tails.
-- [ ] Run `make -j2 lint static-analysis` in each fresh native container and
+- [x] Run `make -j2 lint static-analysis` in each fresh native container and
   warning-free Rustdoc for touched crates; log exact evidence. Commit scoped
   developer docs/tests/artifacts. Report measured results and remaining limits.
   Push/PR/release/deployment are separate authorization, not automatic final steps.

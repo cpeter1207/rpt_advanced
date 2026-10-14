@@ -96,6 +96,7 @@ pub(super) struct Outbound {
     clock: Option<Arc<SourceClock>>,
     next_audio_ms: u64,
     unkey_ns: Option<u64>,
+    idle_timestamp: u32,
     sent: bool,
 }
 fn source_ns(sample: u64) -> u128 {
@@ -117,6 +118,7 @@ impl Outbound {
             clock: None,
             next_audio_ms: 0,
             unkey_ns: None,
+            idle_timestamp: 0,
             sent: false,
         })
     }
@@ -204,8 +206,13 @@ impl Outbound {
         if next.is_some_and(|deadline| deadline <= now) {
             return Ok(next);
         }
-        if self.sent && self.unkey_ns.is_some_and(|deadline| now >= deadline) {
-            io.write(&[])?;
+        if let Some(deadline) = self.unkey_ns.filter(|deadline| now >= *deadline) {
+            // An idle marker is uncommitted media too: keep its source timestamp
+            // while waiting for writable, but never retain it indefinitely.
+            let expires = deadline.saturating_add(AGE_NS);
+            if now < expires && !io.send_prepared(&[], self.idle_timestamp)? {
+                return Ok(next.into_iter().chain(Some(expires)).min());
+            }
             self.sent = false;
             self.unkey_ns = None;
         }
@@ -292,6 +299,9 @@ impl Outbound {
                 self.statistics.ages[(age / 1_000_000).min(200) as usize]
                     .fetch_add(1, Ordering::Relaxed);
                 self.statistics.accepted.fetch_add(1, Ordering::Relaxed);
+                self.idle_timestamp = pending
+                    .timestamp
+                    .wrapping_add((pending.count as u64 * 1_000 / u64::from(self.rate)) as u32);
                 self.pending = None;
                 self.sent = true;
                 self.unkey_ns = Some(now.saturating_add(BLOCK_NS));

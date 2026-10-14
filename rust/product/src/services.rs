@@ -666,6 +666,7 @@ impl PeerIo {
         (code == 0).then_some(()).ok_or(Error::Translation)
     }
     /// Submit retained bytes; false is socket congestion, not a failed connection.
+    /// Empty bytes submit the timestamped end-of-burst marker with the same contract.
     pub(crate) fn send_prepared(&mut self, bytes: &[u8], timestamp: u32) -> Result<bool, Error> {
         match unsafe {
             self.services.0.peer_send_prepared.unwrap()(

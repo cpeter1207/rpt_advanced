@@ -1,7 +1,9 @@
 # Resource-scaled peer transmit path
 
 Date: 2026-10-14
-Status: Approved by the product owner on 2026-10-14; implementation pending.
+Status: Implemented and locally validated on 2026-10-14. Hosted PR validation and
+approved live-node acceptance remain pending. See the implementation plan for
+measured limits and review results.
 
 ## Outcome and scope
 
