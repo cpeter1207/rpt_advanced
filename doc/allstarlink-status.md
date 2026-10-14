@@ -1,191 +1,83 @@
-# AllStarLink implementation status
+# AllStarLink links
 
-The AllStarLink implementation is present in the source tree. The owner confirmed
-the current audio fixes on test node 524950 on 2026-09-19. That observation does
-not complete peer interoperability or hardware acceptance. This document
-describes the implemented behavior and remaining validation; it is not
-authorization to activate a live link.
+`rpt_advanced` can connect a radio node to other AllStarLink nodes over IAX2.
+The standalone service handles IAX2 itself. The optional Asterisk adapter uses
+ASL3 Asterisk for IAX2 calls. Choose one path for a radio; see the
+[installation guide](install.md) and [configuration reference](configuration.md).
 
-## Standalone packet reception
+## What a link does
 
-Standalone receives IAX2 packets through a shared Tokio worker pool. Each peer
-has its own bounded packet mailbox and serialized media handler; waiting on one
-peer does not stop another peer or the radio audio callbacks.
+- A **transceive** link sends and receives program audio.
+- A **monitor** link receives audio from the peer but does not send program audio
+  to it.
+- A **local-monitor** link receives the peer at this radio but does not pass
+  that peer's audio to other linked nodes.
 
-The separately packaged SpeexDSP jitter adapter reorders packets that arrive
-before their playout deadline and adjusts delay to observed lateness. Its
-starting policy is 40 ms minimum, 60 ms initial, and 500 ms maximum. These values
-are not configuration options in this revision. They are separate from the
-decoded PCM ring's reserve, target, and capacity. Missing packet spans retain
-their place in the stream and are concealed by the shared PCM ring, not by a
-second concealment engine in the packet handler.
+The controller prevents a node from linking directly to itself or making a
+duplicate direct link. It also rejects a link when known routes show a loop.
+Route information from peers can be missing or out of date, so a displayed
+network route is only a guide.
 
-Peer status snapshots include jitter delay, buffered span, queued packets,
-duplicate/late/full drops, missing/insertion/skipped samples, limit resets,
-and ingress queue occupancy/overflow. Sample counts use that peer's decoded
-rate; status delay and occupancy are displayed in milliseconds. Use changes
-between snapshots to distinguish packet lateness from PCM starvation or ingress
-overload. These observations do not by themselves establish network packet loss.
-The Asterisk adapter retains Asterisk's existing packet-jitter path.
+Incoming peers must have a verified node identity. Set `link_allow_nodes` and
+`link_deny_nodes` to limit who may connect; a deny entry takes priority. Set
+`link_lookup_method` and any directory files to control node lookup. See
+[node settings](configuration.md#node-settings) for the exact rules.
 
-Synthetic concurrency, packet reordering, loss placement, retirement, and
-loopback tests cover this implementation. Hosted platform verification and
-separately approved on-node listening tests are still required for this change.
+## Control links by radio
 
-## Implemented locally
+Send DTMF while using the local receiver. These are the default commands; a
+node's `link_command_*` settings can change or disable them.
 
-The controller accepts the configured linking-only DTMF operations: monitor,
-transceive, local-monitor, permanent variants, disconnect, `*10` temporary-link
-disconnect, disconnect-all, reconnect-all, status, last-keyed, full status, direct-peer remote-command
-mode, and the fixed `*722` local-time announcement. Forced-ID, DTMF macros,
-autopatch, and other unrelated commands are not implemented. Scheduled controller
-macros are configured control-plane operations, not DTMF commands. The normal default mappings are documented in
-[configuration](configuration.md); mappings are configurable, use a leading
-`*`, and destination-taking commands end with `#`, local receiver unkey, or a
-three-second interdigit timeout. Destination `0` selects the last link destination.
+| DTMF | Action |
+| --- | --- |
+| `*3<node>#` | Make a transceive link. |
+| `*2<node>#` | Make a monitor link. |
+| `*75<node>#` | Make a local-monitor link. |
+| `*1<node>#` | Disconnect a temporary link. |
+| `*813<node>#` | Make a permanent transceive link. |
+| `*812<node>#` | Make a permanent monitor link. |
+| `*818<node>#` | Make a permanent local-monitor link. |
+| `*811<node>#` | Disconnect a manually made permanent link. |
+| `*10` | Disconnect all connected temporary links. |
+| `*806` | Disconnect and pause permanent links, including configured routes. Temporary links stay connected. |
+| `*816` | Resume paused permanent links and configured routes. |
+| `*70` | Hear direct-link status. |
+| `*72` | Hear the last keyed direct link. |
+| `*73` | Hear full direct-link status. |
+| `*722` | Hear the local time. |
 
-For administrative testing, `rpt_advanced command <node> <DTMF>` injects a
-complete DTMF sequence through that same collector. For example,
-`rpt_advanced command 524950 *722` queues the configured time response. The
-command terminates an input not ending in `#` exactly as a local receiver
-unkey would; it does not bypass command mappings or authorization.
+For commands with a node number, `#`, local receiver unkey, or a three-second
+pause ends the entry. Node `0` means the last link destination. `*4<node>#`
+selects an attached, authorized direct peer for remote-command mode. The `#`
+ends the selection command. Keep the receiver keyed while sending digits to
+that peer. Once the mode is active, the next `#` or local receiver unkey exits
+it. See
+[link command mappings](configuration.md#link-command-mappings) before using
+custom DTMF codes. Forced ID, DTMF macros, and autopatch are not provided.
 
-`*4<node>` selects only a directly attached peer whose identity resolves and
-passes the same allow/deny policy required for an incoming peer. That policy is
-rechecked for every forwarded digit. Subsequent DTMF is delivered only to that
-peer, and `#` always exits remote-command mode locally. No remote-command digit
-is interpreted as a local command while that mode is active.
+Permanent links retry after a failed call or dropped connection. A temporary
+link does not retry on its own. A link made with DTMF is lost when the process
+stops. To bring back a permanent link at startup, define it in the
+[configuration](configuration.md#configuration-owned-permanent-links-and-replacement-windows).
 
-An attached direct peer's IAX `DTMF_END` events use the same serial control
-queue as locally decoded DTMF only while its identity passes the current
-deny-first policy, so a classic authorized peer can send linking commands to
-this node through remote-command mode. An explicitly outbound audio link may
-remain connected after a policy change, but its rejected IAX DTMF is ignored.
-Starts and malformed end events are ignored. The reader is joined before its
-hub and runtime callback are released; a reload discards any queued event from
-the retired runtime.
-Local in-band DTMF is decoded in the radio worker; when a digit completes, its
-current PCM frame is silenced before controller or link routing when
-`dtmf_muting` is enabled. Local receiver unkey queues the same command
-terminator as `#`, so an unfinished command cannot survive a transmission.
+## Check a link
 
-Incoming calls enter through `RptAdvanced(node)`. The implementation checks an
-optional local static directory first, then uses the configured DNS/file
-selection; `both` uses ASL DNS before the optional ASL external directory. Every
-accepted source verifies the numeric IAX address. Valid nodes are accepted by
-default. Inherited `link_allow_nodes` and `link_deny_nodes` lists can restrict
-that policy; denial wins over allowlist membership and there are no access
-exemptions. A list never makes an unresolved or mismatched identity valid. A
-present malformed record or address mismatch fails closed rather than falling
-through to a later source.
+Status and time replies from local DTMF play on the local RF transmitter after
+the receiver unkeys. A command sent by a linked peer replies only to that peer
+after it unkeys; it does not key the local transmitter. Replies use speech when
+available and Morse as a fallback.
 
-Direct links are transceive, monitor, or local-monitor links. Routing provides
-mix-minus and prevents local-monitor links from being forwarded to other peers.
-The media boundary is rate-aware: Asterisk negotiates an available channel
-format, Asterisk translates the wire codec to peer PCM, and the controller uses
-the shared PCM ring for peer-to-native conversion and clock correction. Ordinary 8 kHz ASL
-operation remains the primary compatibility case; broader codec/rate
-interoperability is still to be demonstrated against real peers.
-The fixed 48 kHz local radio rate bounds the dynamically discovered IAX candidates.
-Asterisk's public IAX request path reduces a multi-format audio capability to
-one format before IAX negotiation, so rpt_advanced attempts one exact candidate
-at a time from the local native rate downward within one 20-second dial budget.
-That permits a compatible wideband peer to use direct PCM while a ULAW/SLIN8
-peer remains usable without Asterisk's `codec_resample`. After IAX chooses the
-wire format, the adapter resamples its matching-rate PCM as needed.
+On the Asterisk path, run `rpt_advanced link status <local-node>` in the
+Asterisk CLI. `rpt link status <local-node>` is also accepted. The output shows
+direct peers, link modes, permanent links, and retained links marked `retrying`
+or `paused`. Its route list may be incomplete or stale. The Asterisk CLI also
+accepts `rpt_advanced command <local-node> <DTMF>` to send a command through
+the normal command rules. These CLI commands are not standalone service
+commands.
 
-Permanent links retain their routing mode after an initial dial or attachment
-failure as well as after an unexpected transport failure. They retry
-immediately, then after one second with exponential backoff to a five-minute
-maximum. An explicit permanent disconnect cancels a queued retry.
-Disconnect-all retains both temporary and permanent links for reconnect-all;
-only permanent links retry automatically. Retained state for runtime-created
-links is in memory only. A configuration-owned `[permanent node label]` entry
-instead rebuilds its desired permanent peer at module startup and after a
-successful configuration reload; its live transport remains runtime state.
+Standalone service checks use `systemctl status rpt-advanced` and
+`journalctl -u rpt-advanced`; see the [installation guide](install.md#set-up-standalone).
+The standalone program has no link-status or DTMF command-line option.
 
-The half-duplex policy prevents local receive audio from being repeated and
-holds transmit off while the local receiver is active. Linked audio remains
-eligible for transmit according to the configured link mode. Identifier and RF
-status playback defer until reception ends when half duplex prohibits a
-transmission.
-
-The status, last-keyed, and full-status operations queue short spoken RF replies
-outside the audio callback. Speech preparation falls back to Morse when Piper
-is unavailable or when reception interrupts it; playback starts no sooner than
-250 ms after local receiver unkey. They preempt a scheduled identifier without
-satisfying it. `rpt_advanced link status <node>` and the compatible
-`rpt link status <node>` show direct peers, routing mode, permanence, and the
-current topology cache in the Asterisk CLI. Retained links appear as `retrying`
-or `paused`, so an operator can distinguish an active transport from a pending
-automatic or reconnect-all recovery. Full status logs that cache when its RF
-status reply was successfully queued.
-
-Topology is deliberately best-effort rather than an authoritative network map.
-The implementation validates inbound app_rpt-style `L ` text advertisements and
-caches the last valid one for each direct peer. Each direct peer is sent a
-recipient-excluded outbound `L ` advertisement after topology changes and on a
-30-second refresh cadence. A terminal `R000000` route means the bounded
-advertisement was truncated. A peer that has not advertised yet, does not
-support `L `, or has changed topology since its last update can therefore make
-the reported topology incomplete or stale.
-An advertised route containing the local node is treated as a topology loop;
-the direct peer is disconnected without retry. A route naming another direct
-peer is also detached, covering a legacy peer that does not advertise its own
-topology. Direct self-links, duplicate direct links (including permanent links
-and retained retries), and a requested target already named by an attached peer
-are rejected. An interactive local rejection queues the spoken status `LINK
-REJECTED TOPOLOGY LOOP`, with normal Morse fallback. Configuration-owned
-scheduled retries stay silent when topology admission rejects them, preventing
-repeated RF telemetry.
-
-For courtesy selection only, an active direct peer receives one advisory
-canonical legacy-compatible `K? * requester 0 0` key-status query at its
-receive edge and then once per second. rpt_advanced peers strictly parse this
-`K?`/`K` exchange in their reader/control plane: they queue their own key-state
-reply to the ingress peer, forward a query only to other direct peers, and
-relay a valid reply toward its named requester without returning it to ingress.
-A reply identifying the direct peer is ignored for candidate selection; the
-direct peer remains the normal fallback. The first valid keyed downstream `K`
-reply delivered for each successfully sent query wins, including a double where
-reader arrival order chooses the responder. Across periodic queries, the latest
-accepted candidate is used for courtesy lookup; a missing, malformed,
-unsupported, nonforwarding, or failed later query does not erase an earlier
-candidate from the same receive epoch. No reply delays the courtesy tone. `K`
-has no query serial, so a delayed valid reply may be attributed to a newer query
-and remains best-effort advisory evidence. The receive falling edge cancels an
-unsent locally originated query and rejects a late reply before courtesy
-selection. A peer with no accepted downstream reply uses the direct-peer
-courtesy, then the generic link tone. This does not tag individual media frames,
-alter `*70` or `*72`, or make the topology cache authoritative.
-
-Routing and audio exchange remain lock-free in hardware-paced callbacks. Link
-admission, dialing, retry, status, topology construction, and IAX text delivery
-run on control or peer-reader threads.
-
-## Verification still required
-
-The current source changes require a fresh full quality run before they may be
-merged or released. Focused unit and isolated-Asterisk integration tests cover
-the local behavior, but this document intentionally makes no current aggregate
-coverage or platform-matrix claim.
-
-Before a live deployment, complete the required Debian 13 amd64/arm64 quality
-matrix and staged-install checks, then perform explicitly approved testing with
-the existing 524950 link settings. That testing must cover the linking commands,
-allow/deny behavior, connection failure and recovery, disconnect-all/reconnect-all,
-reload, half-duplex behavior, status, and both classic 8 kHz `app_rpt` peers and
-any higher-rate capable peer. No AllStarLink integration deployment has occurred.
-
-## Reference checks
-
-The ASL3 [IAX text page](https://allstarlink.github.io/developers/iaxtext/)
-warns that it is incomplete and potentially incorrect. The local implementation
-uses the documented behavior together with observed app_rpt wire conventions,
-including `!NEWKEY!`, `!NEWKEY1!`, `L ` topology advertisements, and `K?`/`K`
-keyed-source queries. No app_rpt implementation is copied.
-
-Read-only checks on 524950 found an active RadioPlusAdvanced channel, an
-incoming dialplan still using `Rpt()` and `RPT_NODE()`, DNS-only lookup, and an
-IAX radio profile allowing ulaw, adpcm, and gsm. Those settings are reference
-material for future approved testing; they have not been changed for this work.
+This is alpha software. Confirm RF audio, PTT, DTMF, link recovery, and peer
+compatibility on the intended equipment before putting a node into service.

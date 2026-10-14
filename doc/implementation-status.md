@@ -1,242 +1,71 @@
-# Implementation status
+# Capabilities and limits
 
-## Implemented behavior
+`rpt_advanced` controls a repeater and its AllStarLink-compatible links. It is
+alpha software for Debian 13 amd64 and arm64. Choose either the standalone
+`rpt-advanced` service or the optional `app-rpt-advanced` Asterisk adapter.
+The packages install separately. See
+[installation](install.md) before choosing a path.
 
-The Rust migration replaces the C controller; only the metadata loader remains
-production C. The product library embeds the controller core once, with separate
-versioned Asterisk entry, control-execution, file, and speech providers. The
-[architecture artifact map](architecture/README.md#current-product-artifacts)
-records their ownership. Component and isolated-host tests exercise the behavior
-below; they do not replace the fresh full gate or live verification listed later.
+## Radio operation
 
-The current branch also adds the separately packaged `rpt-advanced` standalone
-service, direct PortAudio/ALSA and CM119 provider loading, standalone radio
-settings, and IAX2 shared-library client. The standalone service loads the
-versioned `libusbradioplus_product.so.1` for adapter-neutral radio processing;
-the USBRadioPlus Asterisk channel is not a standalone dependency. Synthetic
-lifecycle and package-boundary
-tests are present. This branch has not yet passed its full hosted pull-request
-gate or current hardware/peer acceptance; do not treat a package build alone as
-standalone deployment approval.
+The controller uses 48 kHz audio at the local radio. It handles receiver audio,
+PTT, transmit hang time, time-out and lockout, local repeat, and half or full
+duplex. It can play identifiers, announcements, courtesy tones, and scheduled
+messages. Media may come from a sound file, Piper speech, a generated tone, or
+Morse, according to the configured set. Piper and its voice model must be
+installed separately for speech; sound files use FFmpeg. Configure the node,
+radio, signaling, and media in the [configuration reference](configuration.md).
 
-Standalone peer ingress now uses a bounded shared Tokio executor and one
-serialized owner per connection. The separately packaged SpeexDSP jitter
-adapter performs adaptive packet playout with a 40/60/500 ms minimum/initial/
-maximum policy; the released PCM ring remains the sole converter and PLC owner.
-Ordered missing spans survive converter lookahead. Local composed tests and
-changed-source coverage pass; refreshed images, hosted gates, and live testing
-are tracked separately under ADR 0037.
+The standalone service uses local audio devices and CM119 signaling through the
+separately packaged USBRadioPlus radio runtime. Configure `[radio]` or
+`[radio <node>]` and enable the node before starting it. The Asterisk adapter
+uses a `RadioPlusAdvanced` channel supplied by USBRadioPlus; it also needs the
+ASL3 dialplan and IAX setup for incoming calls. Do not assign the same radio
+to both paths at once. The [installation guide](install.md) gives the commands
+for each path.
 
-- Identifier scheduling policy: intervals, priorities, activity-based
-  and unconditional periods, first-key-only sets, bounded polite deferral while
-  receiver/link activity or queued telemetry is present, and completion hierarchy.
-- Named announcements with inherited file/speech/Morse media: zero-interval
-  every-release playback, positive rate-limited playback, configuration-order
-  serialization after ordinary hang and due IDs, idle PTT initiation, and smooth
-  receive-active ducking.
-- Named courtesy-tone inputs with shared and per-node media defaults: receiver,
-  generic-link, exact-direct-peer, and advisory first-keyed-downstream-per-query routing
-  through canonical legacy-compatible `K?`/`K` reply and relay handling at the
-  receive edge and once per active second; file/speech/generated-tone/Morse fallback;
-  source-specific pending cancellation; and receive-active ducking.
-  Generated sequences are pre-rendered on reload and support bounded mono-tone,
-  dual-tone, silence, duration, and per-segment-level patterns.
-- File/speech/Morse preference policy, including Morse-only reception behavior.
-- Streaming normalized-F32 Morse renderer with configurable rate, speed, and tone
-  frequency; fractional-sample timing and block-independent output tests.
-- Sample-driven prepared-PCM playback with immediate, irreversible Morse fallback
-  on reception. Completion remains terminal, and control events need not consume
-  audio samples. This playback state is connected to radio transport.
-- Asterisk frame-exchange boundary that sends one transmit block per received
-  voice block, including silence. Carrier events change state without advancing
-  audio. API-fixture tests cover ownership, malformed frames, and output failures;
-  module startup now connects this exchange to per-node workers.
-- Asterisk IAX wire-codec conversion and the rate-aware peer boundary, with
-  buffered-conversion ownership tests. The local RadioPlusAdvanced exchange is
-  direct 48 kHz signed-linear PCM.
-- Exclusive RadioPlusAdvanced reservation with fixed 48 kHz signed-linear
-  read/write formats. Failure tests cover unavailable devices, unsupported
-  media, and channel-format setup; cleanup releases every resource.
-  Module startup invokes this helper, calls the channel, and starts its worker.
-- Asterisk codec-registry selection with bidirectional translation checks for
-  IAX peer candidates bounded by the 48 kHz local radio rate, tested with
-  deterministic API fixtures. The reservation path always requests 48 kHz
-  signed-linear PCM.
-- Independent Piper speech adapter with direct argument execution, file-backed text input,
-  nonblocking completion polling, cancellation, and Asterisk child-reaper
-  coordination supplied through host callbacks. It reads Piper's WAV directly,
-  applies speech-only gain, and never invokes FFmpeg. Prepared output is
-  validated and bound to scheduled playback.
-  Tests cover injected failures and real subprocess execution with a fixture
-  executable; they do not claim verification of a real Piper voice model.
-- Independent FFmpeg file adapter preparing mono PCM at the decoded source rate.
-  It shares private process/WAV source with the speech provider, not a combined
-  runtime capability. The product uses the released ring3 for finite source-rate
-  conversion to 48 kHz; short-impulse and nonintegral-rate tests check duration
-  and sample level. Neither provider embeds controller code or a resampler.
-- Runtime file-to-speech-to-Morse preparation, checked PCM loading, bounded child
-  execution, and temporary-file cleanup. Unavailable sets without Morse do not
-  occupy a scheduling slot. Tests cover each I/O failure, allocation failure,
-  timeout cancellation, actual FFmpeg file decode, and direct fixture-Piper WAV
-  preparation with no FFmpeg speech dependency.
-- Real-Asterisk two-node audio integration using a test-only 48 kHz radio driver.
-  Tests exercise direct local 48 kHz signed-linear transport, retained
-  `sample_rate_hz`/`codec` warnings, and ULAW/SLIN16 IAX peer conversion;
-  they verify half/full-duplex local repeat, Morse output, balanced PTT, and
-  reload-driven channel cleanup. The fixture is not installed by the package.
-- Historical, pre-split real Piper 1.8.0 synthesis using 524950's existing Amy-low
-  model was tested locally on Debian 13 amd64. This does not verify the current
-  split provider with that model. See
-  [testing](testing.md) for the optional real-model invocation and its scope.
-- Half/full-duplex transmit ownership and configurable hang-time policy.
-- Integrated node controller joining ID and announcement scheduling, prepared
-  PCM/Morse playback, local repeat, and PTT/hang policy. Sequence tests cover
-  half-duplex deferral, receive interruption, priority satisfaction, polite
-  deferral, first-key identification after inactivity, and announcement ordering,
-  release, idle-keying, and ducking. Module startup binds it to its channel worker.
-- Joinable channel worker driven by channel readiness, with monotonic ID timing,
-  bounded shutdown checks, and unkey/hangup before releasing controller state.
-  Tests cover injected failures and real threads driven by pipe-based hardware
-  events, including stop and replacement with a different controller. Module
-  configuration loading now starts these workers for every enabled node.
-- Shared, node, and ID/announcement/courtesy-set configuration-value inheritance,
-  including explicit empty overrides and scope independence from file order.
-- Configuration-line syntax parsing, including whitespace, semicolon comments,
-  section names, and empty option values, composed with file loading and schema
-  validation.
-- Bounded unsigned-decimal and explicit yes/no value validation. Invalid values
-  leave their destination unchanged; numeric overflow is rejected.
-- Typed node, ID, announcement, and courtesy settings with shared/node/set
-  inheritance, documented in [configuration](configuration.md). Unknown or bad
-  values warn and use inherited sensible defaults; only an inability to build a
-  safe deterministic configuration rejects reload.
-- Streaming file-syntax reader with physical-line diagnostics, unbounded line
-  lengths, embedded-null rejection, and builder-error propagation.
-- Owned configuration storage, including empty sections, with complete cleanup
-  on syntax/allocation failures and file-to-settings integration tests.
-- Whole-file option and scope validation, exact node-reference checking, and
-  duplicate-free enumeration of named nodes and their identifier, announcement,
-  and courtesy sets.
-- Local AllStarLink link control: verified inbound admission, duplicate and
-  topology-loop rejection, direct IAX peer routing, linking-only DTMF,
-  permanent-link recovery, direct-peer remote command mode, `*722` local-time
-  speech with Morse fallback, lock-free prepared-speech RF status playback, and
-  best-effort `L ` topology plus canonical advisory keyed-source `K?`/`K`
-  reply and relay handling. See
-  [AllStarLink status](allstarlink-status.md) for validation limits.
-- Local-time scheduled events with strict daily, weekly, and one-time triggers;
-  inherited named message templates; serialized speech/Morse telemetry; and
-  configuration-order controller macros limited to direct link operations.
-- Configuration-owned permanent transceive direct links and same-day local-time
-  replacement windows, including permanent-first withdrawal, optional
-  post-window receive quiet time, and reload-safe desired-link continuity.
-- Generational `NodeHost` ownership with fixed receive/transmit registrations,
-  coherent paired radio calls, hazard-protected retirement, and explicit
-  callback-detachment acknowledgment. Generation-owned peer rings prevent old
-  ingress from crossing into the replacement mix.
-- One bounded program-audio loopback SPSC from radio TX to a non-audio link
-  dispatcher. The dispatcher owns per-peer fanout; each peer's TX owner alone
-  converts, encodes, and sends. Preallocated block recycling preserves mix-minus
-  without allocation or locking on radio TX.
-- Descriptor-backed control execution with accepted/rejected ownership, FIFO
-  serialization, stop/drain, and worker-join close. Product scheduling and command
-  policy remain outside the Asterisk taskprocessor provider.
-- The quality policy requires strict formatting, compiler diagnostics, Rustdoc,
-  and Debian 13 amd64 production line/branch coverage, plus Cppcheck, Clang-Tidy, and
-  Doxygen for the metadata shim and public C adapter headers. Generated API
-  documentation is published to GitHub Pages after the main-branch quality gate
-  passes.
+## Links and control
 
-The build produces the standalone service, `librptadv_product.so.1`, the
-versioned control, file, speech, standalone resolver and jitter adapter DSOs, and the optional
-`app_rpt_advanced.so` Asterisk adapter. It uses the separately released
-`libusbradioplus_product.so.1` and does not ship a static controller library
-or legacy controller headers. The
-module starts named radio workers with inherited, prepared file/speech/Morse IDs,
-announcements, and courtesy tones. Invalid configuration leaves the running
-generation untouched; a valid reload publishes a prepared replacement and uses
-a controlled handoff for changed radio leases. Failed
-radio startup releases partial resources and attempts to reopen the previous
-configuration, reporting any restoration failure. Lifecycle tests use the real shared library and
-Asterisk's public ABI, including configuration-path allocation and input errors.
-An integration test loads, reloads, and unloads the installed module in an isolated
-Asterisk process with temporary configuration and a synthetic radio. Other tests
-include combined identifier/announcement/courtesy/duplex state sequences. The
-native matrix also links the actual USBRadioPlus adapter to the synthetic
-hardware backend.
+Direct IAX2 links support transceive, monitor, and local-monitor modes. Local
+DTMF controls connecting, disconnecting, status, and remote-command mode.
+Verified node identity and the configured allow and deny lists control incoming
+links. Permanent links can reconnect; configured permanent links can return
+after startup. The controller can also run local-time events and configured
+link macros. See [AllStarLink links](allstarlink-status.md) for operating
+commands and [configuration](configuration.md) for settings.
 
-## Current USBRadioPlus integration boundary
+Local DTMF status replies use local RF. A linked peer's status request replies
+only to that peer after it unkeys. On the Asterisk path, the Asterisk CLI can
+show direct-link status and send an administrative DTMF command. The standalone
+service does not offer those CLI commands; use its service status and journal
+for process checks.
 
-The rpt_advanced generational host and link/program-audio routing above are
-implemented. They are distinct from USBRadioPlus's direct-hardware migration.
-The current USBRadioPlus Rust migration implements independently paced
-PortAudio input and output callback entry points. Receive DSP runs from input
-callbacks, while transmit rendering runs from output callbacks. The complete
-local-receive, linked-peer, and telemetry inbound-ring topology, verified
-shared-clock fast path, and corresponding hardware-side generation integration
-remain pending; the callback split alone does not implement those later
-architecture tranches.
+## Check receive audio with parrot
 
-## Remaining verification
+Set `parrot_enabled = yes` for the node, reload, then make a short transmission.
+After all receive activity ends, the controller speaks the peak and RMS levels
+in whole dBFS, then plays back the recording. It keeps the first 30 seconds at
+48 kHz. If speech is unavailable, it plays only the recording.
 
-- Physical identifier playback/interruption and the remaining hardware acceptance
-  cases in [testing](testing.md).
-- A fresh complete quality gate and Debian 13 amd64/arm64 matrix for the
-  current Rust product.
-- The remaining explicitly approved interoperability cases with classic
-  `app_rpt` and higher-rate capable peers.
-- Execution verification of the version-tag release workflow. Source archive
-  rebuilding is covered by the platform gate. Earlier source releases exist;
-  alpha7 introduces the current Rust Debian package set.
+New receive activity cancels a waiting or playing response. Set
+`parrot_enabled = no` and reload to turn it off. The `*804` and `*805` commands
+can also enable and disable it when admin DTMF is unlocked; see
+[command settings](configuration.md#link-command-mappings).
 
-The project provides clean ASL3 and installed-module test images for Debian 13
-amd64/arm64; see [testing](testing.md). The quality images remain
-separate development environments with compilers and analysis tools. Their
-existence is not a quality result for the current working tree.
+Parrot playback also goes to linked peers. Do not link two parrot-enabled nodes:
+they may replay each other's recordings.
 
-## Local audio confirmation, 2026-09-19
+## Before operating
 
-The owner confirmed that the current audio fixes are healthy on test node
-524950. The Rust controller cancels the buffered local receive tail on unkey,
-prevents rapid rekey from replaying the preceding burst, and exposes ring fault
-counters. These observations are scoped manual evidence; the release still
-requires its complete pull-request gate and remaining hardware/interoperability
-acceptance.
+The supplied example has no enabled radio node. Set up the radio, check the
+configuration, and verify receive audio, transmit audio, PTT release, IDs, and
+links on the intended hardware. Peer codec and higher-rate behavior still need
+checking with the peers you plan to use. A package build or a successful
+configuration check does not establish RF or peer performance.
 
-## Refactored standalone manual check, 2026-10-09
-
-The owner reported healthy repeat audio, courtesy output, and time announcements
-after the standalone shared-product refactor. This is scoped listening evidence
-from an earlier approved check. It does not verify the current package split,
-fresh hosted quality gate, or every hardware and peer case. No node
-configuration was changed for this documentation update.
-
-## Historical local-radio test, 2026-09-07
-
-The following radio-only observation predates the AllStarLink implementation.
-It neither installed nor enabled the current link controller.
-
-With the owner's approval, 524950 runs the controller on Debian 13 arm64 with
-ASL3 Asterisk 22.9.0 / ASL 3.9.3 and the actual CM119 interface. Asterisk reports
-`RadioPlusAdvanced`, `slin48` in both directions, and no transcoding. The owner
-confirmed clean repeat audio and approximately one second of configured hang time.
-At 39,967 native frames, counters showed zero FIFO underruns/overruns, SRC errors,
-or USB short/error writes. ADC rail counts were nonzero; this does not establish
-receive-level calibration or absence of analog clipping.
-
-Configuration reload and controller unload/replacement/load succeeded with the
-same Asterisk PID. The temporary 15-second speech-ID test has been restored to
-the normal ten-minute activity-based interval. The owner confirmed that an
-incoming signal interrupted speech and switched playback to Morse.
-
-Normal unloading of the pre-existing app_rpt crashed Asterisk before the new
-modules were installed. Controlled recovery required a service restart. Startup
-also exposed driver ordering: USBRadioPlus provides an optional ordering
-dependency so the controller can start after its radio driver. After a controlled
-service restart, the controller opened the native 48 kHz radio channel without
-transcoding. The original modules and configuration are retained for rollback.
-
-No app_rpt implementation has been copied. USBRadioPlus changes are limited to
-its separate RadioPlusAdvanced adapter and shared-engine integration. The
-current working tree still requires its fresh quality and interoperability
-verification before release or deployment.
+For standalone, run `rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf` and follow the
+[service instructions](install.md#set-up-standalone). For Asterisk, follow
+the [adapter instructions](install.md#set-up-the-asterisk-controller) and reload the
+module after a configuration change. Invalid reloads leave the active
+configuration in place. See [configuration](configuration.md) for all values
+and [testing](testing.md) for acceptance checks.
