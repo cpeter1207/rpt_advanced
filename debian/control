@@ -36,7 +36,7 @@ Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
  librptadv-portaudio-alsa-adapter2 (>= 0.2.0~alpha3),
  librptadv-gpio-adapter1 (>= 0.1.0~alpha2),
  librptadv-ffmpeg-adapter1 (>= 0.1.0~alpha2),
- librptadv-iax2-client1 (>= 0.1.0~alpha6+egress1)
+ librptadv-iax2-client1 (>= 0.1.0~alpha7)
 Description: standalone Rust-owned radio controller
  Standalone controller service for configured radio nodes. It has no runtime
  dependency on Asterisk or ASL3; the deprecated Asterisk adapter is packaged
