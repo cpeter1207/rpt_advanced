@@ -21,7 +21,8 @@ canonical normalized `f32` audio at its source rate to the peer's inbound PCM
 ring. Under the 2026-09-13 amendment in ADR 0025, that ring alone converts and
 corrects drift into the native transmit mix; outbound codec conversion remains
 at egress. EchoLink's transport representation converts only at its external
-boundary. This aligns the pending two-worker design, not a deployed change.
+boundary. The two-worker media path is implemented; the EchoLink adapter
+described here remains planned.
 
 Each configured rpt_advanced node owns one EchoLink identity. Its default UDP
 audio/control pair is 5198/5199, but the pair and optional bind address are

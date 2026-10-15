@@ -198,8 +198,13 @@ implementation; Asterisk support remains an optional boundary adapter.
 
 The controller product now owns local, linked-peer, and telemetry inbound rings
 and generational receive/transmit state. The shared-product standalone service
-uses these components without Asterisk. Separate shared-clock adapter and
-USBRadioPlus direct-hardware topology work is not marked complete here.
+uses these components without Asterisk. USBRadioPlus provides the native radio
+endpoints, rather than duplicating the controller's rings and mixer. Its
+prepared updates remain alive until both callbacks acknowledge adoption;
+stream teardown quiesces callbacks before releasing contexts. The optional
+verified shared-clock adapter path remains pending under ADR 0027. Hamlib
+remote-base support remains planned under ADR 0004; it is not required for
+the completed CM119 resource-module cutover.
 
 ### Historical migration checkpoints
 
@@ -231,13 +236,12 @@ had bounded newest-sample drops and zero-fill shortfall, with a latest-state
 receiver snapshot. Adaptive clock correction, sample-associated qualification,
 and generation-tagged local PCM followed under ADRs 0025 and 0026.
 
-The USBRadioPlus Rust implementation provides independent PortAudio input and
-output callback entry points and runs receive DSP from the input callback.
-It does not yet implement the processed local-receive ring, the complete
-local/link/telemetry ring mixer, the verified shared-clock fast path, or the
-generational station-host lifecycle. Those remain a later implementation
-tranche. Released alpha18 still hands raw capture through its clock-recovery
-ring to a playback-driven combined native tick.
+At the alpha18 checkpoint, raw capture passed through a clock-recovery ring
+to a playback-driven combined tick. The current Rust implementation instead
+runs receive DSP from the input callback and supplies processed native PCM to
+the controller. The controller owns its inbound rings, mix, and station
+generations; the radio transmit callback renders into the adapter output.
+The old checkpoint does not describe the current media path.
 
 The current PortAudio/ALSA adapter source implements best-effort scheduling at
 stream startup. It tries FIFO priorities from 99 downward, continues with the
@@ -245,9 +249,8 @@ inherited scheduler when elevation or metadata is unavailable, and records the
 policy, priority, and limitation separately for capture and playback. The new
 statistics append the original ABI-2 prefix, so the adapter retains SONAME 2
 and accepts ABI-2 callers using the earlier prefix size. Restoration failure
-after an actual scheduling change remains fatal. Publishing and deploying that
-source remain separate release operations; already released binaries are
-unchanged.
+after an actual scheduling change remains fatal. These scheduling capabilities
+are separate from the optional shared-clock work.
 
 Released alpha18's hardware cutover removed the duplicate backend and
 resource-module imports before the complete Rust migration. Rust now owns

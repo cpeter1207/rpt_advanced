@@ -4,8 +4,8 @@ Status: Accepted
 
 ## Context
 
-rpt_advanced must support an Asterisk module today and a standalone controller
-later without coupling reusable radio and controller behavior to a particular
+rpt_advanced supports an Asterisk module and a standalone controller without
+coupling reusable radio and controller behavior to a particular
 audio, telephony, or user-interface framework. Independently versioned
 components need a consistent placement and dependency direction to avoid
 recreating policy or hardware coupling in each library.
@@ -54,9 +54,9 @@ The layers are:
    policy. The IAX2 protocol engine owns packet/session semantics, not sockets;
    its standalone network adapter owns datagram I/O, while codec adapters use
    released codec libraries where available.
-6. **Node controller:** the shared controller core, presently reached through
-   `app_rpt_advanced`. It owns node configuration semantics, identifiers,
-   announcements, topology, links, timeouts, schedules, macros, and telemetry
+6. **Node controller:** the shared controller core, reached through the
+   standalone service or `app_rpt_advanced`. It owns node configuration semantics,
+   identifiers, announcements, topology, links, timeouts, schedules, macros, and telemetry
    policy. Each node owns exactly one receiver and one transmitter; systems
    with more local radios use additional configured nodes connected through
    loopback or the local network. The radio-port transmit worker writes one native
@@ -66,7 +66,7 @@ The layers are:
    control-path execution, PortAudio/ALSA CM119, EchoLink, and Hamlib. They
    translate external APIs and device I/O into core contracts and own
    API-specific dependencies.
-   Each Rust--C adapter is a separate versioned Rust `dylib` shared object with
+   Each Rust--C adapter is a separate versioned Rust `cdylib` shared object with
    the smallest required stable C-compatible descriptor/function-table ABI and
    no inner-layer policy, as defined by ADR 0021 for C-to-Rust entry and ADR
    0022 for Rust-to-C dependency calls. The latter includes FFmpeg graph,
@@ -81,9 +81,9 @@ The layers are:
    Asterisk APIs, while ASL3-specific dependencies are minimized and confined
    to the ASL3 adapter. No inner layer or rpt_advanced module requires it.
    Asterisk-specific thread handling stays in its adapters. ADR 0038's
-   control-path adapter currently uses Asterisk's taskprocessor behind a
-   neutral execution contract; scheduling and lifecycle policy remain in the
-   controller, and standalone selects a non-Asterisk backend.
+   control-path adapter uses Asterisk's taskprocessor in the Asterisk composition
+   and an owned worker in standalone, behind the same neutral execution contract.
+   Scheduling and lifecycle policy remain in the controller.
 8. **User interfaces:** Asterisk CLI, REST, WebSocket, and DTMF command
    mapping. They validate requests, submit controller operations, and expose
    state; they never mutate real-time state directly.
@@ -98,7 +98,7 @@ Identifiers, announcements, duplex policy, runtime lifecycle, link-topology
 policy, and Asterisk media glue are intentionally not separate shared
 libraries. They evolve together as node behavior.
 
-The pending 2026-09-13 amendment splits the radio core into input-driven local
+The implemented asynchronous path splits the radio core into input-driven local
 receive and DAC/adapter-output-clocked transmit workers, both canonical-`f32`
 and independently frame-bounded. Receive DSP publishes to its inbound ring;
 that ring, per-link inbound rings, and the telemetry playout ring own all
@@ -106,7 +106,7 @@ conversion/drift recovery into the native transmit mix. Transmit fills the
 adapter's output buffer directly after profile-selected signaling. Adapters
 own device I/O and Asterisk representation/egress conversion. ADR 0027 defines
 the two-worker contract, backend-specific partial output, and publication
-cadence; no new runtime behavior is claimed by this amendment.
+cadence. Its optional verified shared-clock paired callback remains pending.
 
 ## Consequences
 

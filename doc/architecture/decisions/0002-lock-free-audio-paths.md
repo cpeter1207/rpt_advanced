@@ -16,9 +16,9 @@ All radio-port audio exchange uses lock-free ownership and atomic state. Work
 that can block or allocate unpredictably is prepared outside the radio-port
 audio path and published as immutable prepared state.
 
-The **radio-port audio engine** is split into two owners under the accepted,
-not-yet-implemented 2026-09-13 amendment in ADR 0027. The input-driven **local
-receive worker** owns squelch, CTCSS/DCS decode, deemphasis, and receive DSP.
+The **radio-port audio engine** is split into two owners under ADR 0027.
+The input-driven **local receive worker** owns squelch, CTCSS/DCS decode,
+deemphasis, and receive DSP.
 The DAC/adapter-output-clocked **transmit worker** owns native mixing, transmit
 DSP, oscillator phase, and actual PTT state, and fills the adapter's output
 buffer directly. Neither is a general event dispatcher or waits for the other.
