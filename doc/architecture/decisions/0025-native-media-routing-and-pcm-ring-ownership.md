@@ -96,6 +96,20 @@ that peer's egress, and CLI/REST replies stay on the requesting interface.
 Response routing is carried explicitly with the prepared telemetry; it is not
 inferred from whichever peer happens to be active when playout begins.
 
+Proposed implementation — 2026-10-15, awaiting written-design review:
+ADR 0023's ASL-style
+DTMF regeneration is prompt local radio-control signaling, not deferred
+telemetry. Its bounded digit queue is produced by station control and consumed
+by the existing off-audio node media distributor. That owner incrementally
+renders through the shared DTMF/tone components into a dedicated local-only
+PCM ring, without delaying peer distribution or waiting for ring space.
+The transmit worker only consumes the PCM and selects it for the local RF
+voice-band output during its tone/gap span. This source does not enter peer
+program audio or parrot capture, and does not wait for receive to end or for
+the serialized speech/file producer. No generator runs in an audio callback.
+Generation retirement and bounded ownership follow ADR 0026. Ordinary
+telemetry serialization and raw receive muting are unchanged.
+
 The optional rpt_advanced parrot is a separate, explicitly tagged exception to
 ordinary telemetry routing. When enabled for a node, the radio worker captures
 one mixed burst from processed local receive and every active linked-peer

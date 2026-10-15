@@ -385,7 +385,10 @@ None.
 - The pad-test capture owns the digits after its command so they are not
   interpreted as other DTMF commands. It must preserve the normal receiver
   DTMF-muting behavior.
-- Permit configurable DTMF regeneration to connected peers.
+- Permit configurable ASL-style DTMF regeneration only to the local
+  transmitter. Do not regenerate PCM tones to connected peers.
+- Complete ASL-style `*4` addressed command forwarding, including transit
+  through linked nodes when the destination is not directly connected.
 - Support autopatch, reverse patch, and paging through an external IAX or SIP
   connection, with a more user-friendly interface than ASL3.
 - Preserve the long-term option to replace Asterisk with a lock-free native
@@ -407,13 +410,22 @@ None.
 - Pad-test telemetry follows ADR 0023's source-scoped response policy.
 - Readback announces symbols individually: “star”, “pound”, and letters
   `A`--`D`; an empty capture says “no digits”.
-- DTMF regeneration is configurable for connected peers.
+- Regeneration is disabled by default, with global defaults and per-node
+  overrides for fixed tone duration, interdigit gap, and combined peak level.
+  Defaults are 200 ms, 50 ms, and -12 dBFS; an idle queue waits 500 ms before
+  its first tone. It regenerates eligible received link digits, not collected
+  command digits or a second replay of local RF digits.
+- `*4` prefix/destination collection is local. Subsequent digits use addressed
+  ASL `D` text, sent directly or relayed without changing the envelope. Actual
+  `#` exits locally; RF unkey does not clear the selected destination. Existing
+  raw-audio muting and source-specific reply routing remain in force.
+- The 2026-10-15 decisions supersede peer PCM regeneration and broadcasting
+  the partially entered `*4` destination. Implementation remains pending.
 - Initial telephony integration uses external IAX or SIP rather than requiring
   a native IAX2 implementation.
 
 **Material decisions needed before implementation**
 
-- DTMF regeneration routing, muting, authorization, and timing policy.
 - Telephony provider scope, outbound/inbound/reverse-patch access rules,
   dialing restrictions, emergency-call policy, recording policy, and caller-ID
   behavior.
