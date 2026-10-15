@@ -1,4 +1,4 @@
-//! Loopback-only IAX fixture: one socket/thread, bounded reliable state per call.
+//! Loopback-only IAX test fixture: one socket/thread, bounded reliable state per call.
 use std::{
     collections::{HashMap, VecDeque},
     io,

@@ -72,6 +72,7 @@ fn egress_span_partition_and_overflow() {
 #[test]
 fn queue_keeps_oldest_samples_and_silences_shortfall() {
     assert!(LinkAudioQueue::new(0, 64).is_err());
+    assert!(LinkAudioQueue::new(3, 0).is_err());
     let (mut producer, mut consumer) = LinkAudioQueue::new(3, 64).unwrap().into_endpoints();
     assert_eq!(
         producer.write(super::AudioSpan::default(), &[10.0, 20.0]),

@@ -829,11 +829,18 @@ mod tests {
         );
         unsafe {
             super::peer_step_wake(ptr::null_mut(), ptr::null_mut());
+            super::peer_step_wake(api.context, ptr::null_mut());
         }
         assert_eq!(
             unsafe { super::peer_set_deadline(ptr::null_mut(), ptr::null_mut(), u64::MAX) },
             -1
         );
+        let peer = owner.peer_handle(crate::iax::tests::peer_for_host_callback(0, false, false));
+        assert_eq!(
+            unsafe { super::peer_set_deadline(api.context, peer, 0) },
+            -1
+        );
+        owner.destroy_peer(peer);
         unsafe extern "C" fn step(_: *mut c_void) -> i32 {
             0
         }
@@ -1275,6 +1282,49 @@ mod tests {
     }
 
     #[test]
+    fn prepared_media_rejects_invalid_buffers_without_touching_output() {
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let peer = owner.peer_handle(crate::iax::tests::peer_for_host_callback(0, false, false));
+        let pcm = [0.0_f32];
+        let mut output = [0xa5];
+        let output_ptr = output.as_mut_ptr();
+        let oversized = isize::MAX as usize / size_of::<f32>() + 1;
+        for (handle, samples, count, encoded, capacity) in [
+            (ptr::null_mut(), pcm.as_ptr(), 1, output_ptr, 1),
+            (peer, pcm.as_ptr(), oversized, output_ptr, oversized),
+            (peer, ptr::null(), 1, output_ptr, 1),
+            (peer, pcm.as_ptr(), 1, ptr::null_mut(), 1),
+        ] {
+            assert_eq!(
+                unsafe {
+                    super::peer_prepare_audio(
+                        ptr::null_mut(),
+                        handle,
+                        samples,
+                        count,
+                        encoded,
+                        capacity,
+                    )
+                },
+                -1
+            );
+            assert_eq!(output, [0xa5]);
+        }
+        for (handle, bytes, count, expected) in [
+            (ptr::null_mut(), output.as_ptr(), 1, -1),
+            (peer, output.as_ptr(), isize::MAX as usize + 1, -1),
+            (peer, ptr::null(), 0, 0),
+        ] {
+            assert_eq!(
+                unsafe { super::peer_send_prepared(ptr::null_mut(), handle, bytes, count, 1234) },
+                expected
+            );
+        }
+        owner.destroy_peer(peer);
+    }
+
+    #[test]
     fn peer_callbacks_forward_events_and_report_send_results() {
         let owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
@@ -1530,6 +1580,22 @@ mod tests {
         let server_client = crate::iax::IaxClient::load(library).unwrap();
         let mut inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
 
+        // The provider's packet bound is stricter than the host's safe-slice bound.
+        let oversized = [0xff; 1500];
+        assert_eq!(
+            unsafe {
+                super::peer_send_prepared(
+                    ptr::null_mut(),
+                    peer as *mut c_void,
+                    oversized.as_ptr(),
+                    oversized.len(),
+                    0,
+                )
+            },
+            -1,
+            "a provider rejection must not become success or retryable congestion"
+        );
+
         // 51018 sent a valid 1291-byte topology that used to terminate this call.
         let topology = format!("L {}T1506316\0", "T506316,".repeat(160));
         let mut observed = Vec::<Vec<u8>>::new();
@@ -1702,6 +1768,14 @@ mod tests {
         if unsafe { super::peer_observe(state.host, state.peer, &mut observation) } != 0 {
             return -1;
         }
+        let after = if state.observations.load(Ordering::Acquire) == 0 {
+            0
+        } else {
+            u64::MAX
+        };
+        if unsafe { super::peer_set_deadline(state.host, state.peer, after) } != 0 {
+            return -1;
+        }
         state.observations.fetch_add(1, Ordering::Release);
         status
     }
@@ -1730,6 +1804,21 @@ mod tests {
             },
             0
         );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { (*state).observations.load(Ordering::Acquire) } < 2
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        let scheduled = unsafe { (*state).observations.load(Ordering::Acquire) };
+        unsafe { super::peer_step_wake(host.descriptor().context, token) };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { (*state).observations.load(Ordering::Acquire) } == scheduled
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        let awakened = unsafe { (*state).observations.load(Ordering::Acquire) } > scheduled;
         inbound.send_audio(&[0.25; 480]).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while unsafe { (*state).samples.load(Ordering::Acquire) } < 480 && Instant::now() < deadline
@@ -1741,6 +1830,11 @@ mod tests {
             super::peer_step_detach(host.descriptor().context, token);
         }
         let state = unsafe { Box::from_raw(state) };
+        assert!(
+            scheduled >= 2,
+            "the owner deadline must schedule an idle peer"
+        );
+        assert!(awakened, "an explicit wake must schedule the parked peer");
         assert_eq!(state.samples.load(Ordering::Acquire), 480);
         assert!(state.observations.load(Ordering::Acquire) > 0);
     }

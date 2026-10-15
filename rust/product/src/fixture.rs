@@ -415,6 +415,13 @@ pub fn control_descriptor() -> *const crate::abi::rptadv_control_descriptor_v1 {
     &raw const CONTROL
 }
 
+/// Arm one selected allocation on the current test-owned thread. Consumption
+/// clears the fault; terminating that thread also discards its thread-local state.
+pub(crate) fn fail_next_allocation(bytes: usize) {
+    assert_ne!(bytes, 0);
+    assert_eq!(FAIL_BYTES.replace(bytes), 0);
+}
+
 pub fn fail_allocation<T>(bytes: usize, operation: impl FnOnce() -> T) -> T {
     struct Clear;
     impl Drop for Clear {
@@ -422,8 +429,7 @@ pub fn fail_allocation<T>(bytes: usize, operation: impl FnOnce() -> T) -> T {
             FAIL_BYTES.set(0);
         }
     }
-    assert_ne!(bytes, 0);
-    assert_eq!(FAIL_BYTES.replace(bytes), 0);
+    fail_next_allocation(bytes);
     let _clear = Clear;
     let result = operation();
     assert_eq!(FAIL_BYTES.get(), 0, "selected allocation was not reached");

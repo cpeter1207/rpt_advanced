@@ -1,5 +1,5 @@
 use super::*;
-#[path = "egress_load.rs"]
+#[path = "egress_load_tests.rs"]
 mod egress_load;
 use crate::{
     abi,
@@ -1067,6 +1067,43 @@ fn pending_audio_generation_bounds_adapter_refresh_retries() {
 }
 
 #[test]
+fn saturated_media_publication_keeps_the_running_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let active = host.runtime.status(10)[0].1.active;
+    let mut held = Vec::new();
+    // The worker retains two contexts plus two queued publications. The active
+    // generation owns one slot; holding three candidates fills every other slot.
+    for _ in 0..3 {
+        loop {
+            match prepared(
+                "1000",
+                host.runtime.settings("1000").unwrap(),
+                &host.peers,
+                media_worker(&mut host.media_workers, "1000").unwrap(),
+            ) {
+                Ok(candidate) => {
+                    held.push(candidate);
+                    break;
+                }
+                // Let a queued candidate move into an unused context slot.
+                Err(RuntimeError::Busy) => std::thread::yield_now(),
+                Err(error) => panic!("unexpected preparation failure: {error:?}"),
+            }
+        }
+    }
+    assert!(matches!(
+        host.refresh("1000", clock()),
+        Err(RuntimeError::Busy)
+    ));
+    assert_eq!(host.runtime.status(10)[0].1.active, active);
+    drop(held);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn queued_peer_events_after_runtime_stop_cannot_reenter_removed_node_policy() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -1207,6 +1244,11 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     pump_until(&mut host, |host| {
         !host.peers[0].control.snapshot().unwrap().ended
     });
+    pump_until(&mut host, |host| {
+        host.runtime.status(10)[0].1.retiring.is_none()
+    });
+    // Failed restore retains the configured node after reclaiming its audio generation.
+    assert!(host.runtime.status(10)[0].1.active.is_none());
     host.pump(clock()).unwrap();
     assert!(host.stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);

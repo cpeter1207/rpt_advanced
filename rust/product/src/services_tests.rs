@@ -358,6 +358,42 @@ unsafe extern "C" fn write_failure(_: *mut c_void, _: *mut c_void, _: *const f32
 unsafe extern "C" fn stop_only(_: *mut c_void, _: *mut c_void) {}
 
 #[test]
+fn peer_wake_retains_registration_until_closed() {
+    use crate::link::dispatcher::PeerWake;
+    use std::sync::atomic::AtomicUsize;
+
+    unsafe extern "C" fn wake(_: *mut c_void, registration: *mut c_void) {
+        let calls = unsafe { &*registration.cast::<AtomicUsize>() };
+        calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let calls = AtomicUsize::new(0);
+    let (peer, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let mut services = peer.services;
+    services.0.peer_step_wake = Some(wake);
+    let notification = PeerWake::default();
+    services.attach_wake(&notification, NonNull::from(&calls).cast());
+    notification.notify();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    notification.close();
+    notification.notify();
+    assert!(notification.is_quiescent());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn prepared_peer_send_reports_transport_failure() {
+    let (mut peer, state) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    state.lock().unwrap().prepared_result = -1;
+    assert_eq!(peer.send_prepared(&[0xff], 20), Err(Error::Write));
+    assert_eq!(peer.send_prepared(&[], 21), Err(Error::Write));
+    assert_eq!(
+        state.lock().unwrap().prepared,
+        [(vec![0xff], 20), (vec![], 21)]
+    );
+}
+
+#[test]
 fn host_table_validation_and_value_conversions_fail_closed() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

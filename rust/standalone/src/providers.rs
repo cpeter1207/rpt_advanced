@@ -867,6 +867,26 @@ pub(crate) mod tests {
                 super::ProviderSet::load_from_directory(fixture.path()).unwrap(),
             ));
             assert_eq!(providers.iax_executor().err(), Some(expected));
+
+            let mut runtime = super::ProviderSet::load().unwrap();
+            let index = runtime
+                .descriptors
+                .iter()
+                .position(|provider| provider.library == NAME)
+                .unwrap();
+            // Keep the real client descriptor alive while substituting the async capability.
+            let _client_library = std::mem::replace(
+                &mut runtime._libraries[index],
+                unsafe { libloading::Library::new(fixture.path().join(NAME)) }.unwrap(),
+            );
+            assert_eq!(
+                runtime.validate_runtime(),
+                if version == 2 {
+                    Err(ProviderError::IncompleteDescriptor(NAME))
+                } else {
+                    Ok(())
+                }
+            );
         }
     }
 
@@ -1509,6 +1529,18 @@ pub(crate) mod tests {
             ))
         );
         replace_descriptor(&mut providers, "libusbradioplus_product.so.1", valid_native);
+
+        let iax_library = "librptadviax2.so.1";
+        let truncated = super::InlineDescriptorHeader {
+            struct_size: std::mem::size_of::<super::InlineDescriptorHeader>() as u32,
+            abi_version: 1,
+            capability: *b"rptadv.iax2.v1\0\0",
+        };
+        replace_descriptor(&mut providers, iax_library, truncated);
+        assert_eq!(
+            providers.validate_runtime(),
+            Err(ProviderError::IncompleteDescriptor(iax_library))
+        );
     }
 
     pub(crate) fn replace_descriptor<T>(

@@ -11,7 +11,7 @@ use std::{
     },
     thread::{self, JoinHandle},
 };
-#[path = "egress_simulator.rs"]
+#[path = "egress_simulator_tests.rs"]
 mod simulator;
 
 struct CallbackCounters {

@@ -300,15 +300,16 @@ impl Host {
                             .status
                             .source_clock
                             .clone()
-                    });
+                    })
+                    .expect("active generation retains its device lease");
                 // This borrow marks the external owner exposed: core reclamation
                 // must wait for its explicit quiescence acknowledgment.
-                if let Some(control) = self.runtime.adapter_control_mut(&local, generation) {
-                    if let Some(clock) = clock {
-                        control.dispatcher.bind_clock(clock);
-                    }
-                    control.dispatcher.activate();
-                }
+                let control = self
+                    .runtime
+                    .adapter_control_mut(&local, generation)
+                    .expect("active generation retains its adapter control");
+                control.dispatcher.bind_clock(clock);
+                control.dispatcher.activate();
             }
         }
     }
@@ -915,11 +916,13 @@ impl Host {
             });
             let redirects_done = control.awaiting.is_empty() && !control.awaiting_local;
             if let Some(old) = status.retiring {
-                if let Some(retired) = self.runtime.adapter_control_mut(&local, old) {
-                    retired.dispatcher.request_stop();
-                    if redirects_done && retired.dispatcher.is_quiescent() {
-                        self.runtime.detached(&local, old);
-                    }
+                let retired = self
+                    .runtime
+                    .adapter_control_mut(&local, old)
+                    .expect("retiring generation retains its adapter control");
+                retired.dispatcher.request_stop();
+                if redirects_done && retired.dispatcher.is_quiescent() {
+                    self.runtime.detached(&local, old);
                 }
             }
         }

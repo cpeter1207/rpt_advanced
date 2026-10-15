@@ -103,6 +103,17 @@ fn egress_dispatch_survives_control_pause() {
     wait_for(|| registration.is_quiescent());
 }
 
+#[test]
+fn egress_stopped_media_worker_rejects_new_dispatch() {
+    let mut worker = MediaWorker::start().unwrap();
+    worker.stop();
+    let (_, dispatcher, _) = fixture(1);
+    assert!(matches!(
+        worker.prepare(dispatcher, vec![PeerWake::default()]),
+        Err(Error::Reservation)
+    ));
+}
+
 struct BlockedWake {
     enter: Barrier,
     leave: Barrier,
@@ -213,4 +224,51 @@ fn egress_retirement_waits_for_partial_dispatch() {
     let mut received = [0.0; 960];
     wait_for(|| outputs[0].read_span(&mut received).is_some());
     assert_eq!(received, [0.5; 960]);
+}
+
+#[test]
+fn egress_shutdown_releases_dispatches_still_in_the_publication_queue() {
+    let mut worker = MediaWorker::start().unwrap();
+    let (mut audio, dispatcher, _) = fixture(1);
+    let target = Arc::new(BlockedWake {
+        enter: Barrier::new(2),
+        leave: Barrier::new(2),
+        calls: AtomicUsize::new(0),
+    });
+    let wake = PeerWake::default();
+    unsafe {
+        wake.attach(
+            blocked_wake,
+            Arc::as_ptr(&target).cast_mut().cast(),
+            std::ptr::null_mut(),
+        )
+    };
+    let active = worker.prepare(dispatcher, vec![wake]).unwrap();
+    active.activate();
+    audio
+        .process(
+            &mut controller(),
+            true,
+            &mut [0.25; 960],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    target.enter.wait();
+    let mut pending = Vec::new();
+    for _ in 0..2 {
+        let (_, dispatcher, _) = fixture(1);
+        pending.push(
+            worker
+                .prepare(dispatcher, vec![PeerWake::default()])
+                .unwrap(),
+        );
+    }
+    // Slot zero is held in its callback. At most one publication can enter
+    // slot one before the stop check; the other must be drained on shutdown.
+    worker.stop.store(true, Ordering::Release);
+    target.leave.wait();
+    worker.stop();
+    assert!(active.is_quiescent());
+    assert!(pending.iter().all(PreparedDispatch::is_quiescent));
+    assert_eq!(target.calls.load(Ordering::SeqCst), 1);
 }

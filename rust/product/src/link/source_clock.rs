@@ -102,6 +102,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn egress_clock_ignores_unstarted_and_unrepresentable_observations() {
+        let clock = SourceClock::default();
+        clock.observe_at(1_000_000_000);
+        assert_eq!(clock.advance(960).born_ns, None);
+        clock.restart();
+        assert_eq!(clock.advance(960).born_ns, None);
+        clock.observe_at(u64::MAX);
+        assert_eq!(clock.advance(960).born_ns, None);
+        clock.observe_at(2_000_000_000);
+        assert_eq!(clock.advance(960).born_ns, Some(2_020_000_000));
+    }
+
+    #[test]
     fn egress_clock_waits_for_native_progress_and_never_rejuvenates_a_span() {
         let clock = SourceClock::new(std::time::Instant::now());
         clock.restart();
