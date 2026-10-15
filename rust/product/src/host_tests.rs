@@ -1,4 +1,6 @@
 use super::*;
+#[path = "egress_load_tests.rs"]
+mod egress_load;
 use crate::{
     abi,
     link::session::tests::{Input, peer, peer_with_async},
@@ -156,12 +158,25 @@ fn failed_local_ring_reload_preserves_the_active_configuration() {
 }
 
 #[test]
-fn peer_capacity_rejects_the_first_peer_over_the_bound() {
-    assert!(ensure_peer_capacity(MAX_PEER_SESSIONS - 1).is_ok());
-    assert_eq!(
-        ensure_peer_capacity(MAX_PEER_SESSIONS),
-        Err(RuntimeError::Rejected)
-    );
+fn egress_admission_host_reservation_failure_preserves_running_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let generation = host.runtime.status(10)[0].1.active;
+    let mut probe = Vec::<PeerOwner>::new();
+    probe.try_reserve(1).unwrap();
+    let bytes = probe.capacity() * std::mem::size_of::<PeerOwner>();
+    let (io, state) = peer(48000);
+    let result = crate::fixture::fail_allocation(bytes, || {
+        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+    });
+    assert_eq!(result, Err(RuntimeError::Preparation));
+    assert_eq!(host.runtime.status(10)[0].1.active, generation);
+    assert!(host.peers.is_empty());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert!(host.stop(20));
 }
 
 #[test]
@@ -258,7 +273,12 @@ fn render_queued_telemetry(host: &mut Host, owners: &mut AudioOwners) -> bool {
         let transmit = generation.state();
         let keyed = transmit
             .adapter
-            .process(&mut transmit.controller, false, &mut audio)
+            .process(
+                &mut transmit.controller,
+                false,
+                &mut audio,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
             .unwrap();
         drop(generation);
         heard |= audio.iter().any(|sample| *sample != 0.0);
@@ -387,6 +407,10 @@ fn status_reports_cached_peer_jitter_and_ingress_metrics() {
     assert!(status.contains("missing-samples=160 insertion-samples=80"));
     assert!(status.contains("overload-drops=5 overload-span-samples=800"));
     assert!(status.contains("ingress-queued=7/64 ingress-overflow-drops=6"));
+    assert!(status.contains(
+        "egress datagrams=10 socket-blocked=2 reliable-retries=1 reliable-pending=3 reply-pending=0"
+    ));
+    assert!(status.contains("media accepted=0 blocked=0 expired-native-samples=0"));
     assert_eq!(state.lock().unwrap().observe_calls, 1);
     assert!(host.stop(20));
 }
@@ -696,12 +720,14 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
     )
     .unwrap();
     assert!(host.runtime.node_names().is_empty());
+    pump_until(&mut host, |host| host.runtime.status(40).is_empty());
+    assert!(host.media_workers.is_empty());
     assert!(host.stop(40));
     assert!(host.leases.is_empty());
 }
 
 #[test]
-fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments() {
+fn egress_retirement_waits_for_dispatch_and_redirect() {
     struct Resume(Arc<std::sync::Barrier>);
     impl Drop for Resume {
         fn drop(&mut self) {
@@ -754,6 +780,19 @@ fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments
             .len(),
         1
     );
+    let retiring = host.runtime.status(10)[0].1.retiring.unwrap();
+    pump_until(&mut host, |host| {
+        host.runtime
+            .adapter_control_mut("1000", retiring)
+            .unwrap()
+            .dispatcher
+            .is_quiescent()
+    });
+    assert_eq!(
+        host.runtime.status(10)[0].1.retiring,
+        Some(retiring),
+        "dispatcher quiescence cannot bypass the blocked peer's redirect acknowledgment"
+    );
     drop(resume);
     pump_until(&mut host, |host| {
         host.runtime
@@ -764,7 +803,13 @@ fn queued_redirect_retries_when_full_and_withdrawn_peers_release_acknowledgments
 
     // Direct publication needs quiescent audio; retain the peer owner for its pending ack.
     assert!(host.leases[0].1.lock().unwrap().quiesce());
-    let candidate = prepared("1000", host.runtime.settings("1000").unwrap(), &host.peers).unwrap();
+    let candidate = prepared(
+        "1000",
+        host.runtime.settings("1000").unwrap(),
+        &host.peers,
+        media_worker(&mut host.media_workers, "1000").unwrap(),
+    )
+    .unwrap();
     host.runtime.replace_adapter("1000", candidate, 11).unwrap();
     host.reject_peer("1000", "2000", 12);
     pump_until(&mut host, |_| state.lock().unwrap().drops == 1);
@@ -840,7 +885,13 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
     std::thread::sleep(Duration::from_millis(5));
     host.pump(clock()).unwrap();
     host.peers[0].control.stop();
-    let candidate = prepared("1000", host.runtime.settings("1000").unwrap(), &host.peers).unwrap();
+    let candidate = prepared(
+        "1000",
+        host.runtime.settings("1000").unwrap(),
+        &host.peers,
+        media_worker(&mut host.media_workers, "1000").unwrap(),
+    )
+    .unwrap();
     assert!(candidate.control.redirects.is_empty());
     host.pump(clock()).unwrap();
     assert!(host.peers.is_empty());
@@ -1016,6 +1067,43 @@ fn pending_audio_generation_bounds_adapter_refresh_retries() {
 }
 
 #[test]
+fn saturated_media_publication_keeps_the_running_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let active = host.runtime.status(10)[0].1.active;
+    let mut held = Vec::new();
+    // The worker retains two contexts plus two queued publications. The active
+    // generation owns one slot; holding three candidates fills every other slot.
+    for _ in 0..3 {
+        loop {
+            match prepared(
+                "1000",
+                host.runtime.settings("1000").unwrap(),
+                &host.peers,
+                media_worker(&mut host.media_workers, "1000").unwrap(),
+            ) {
+                Ok(candidate) => {
+                    held.push(candidate);
+                    break;
+                }
+                // Let a queued candidate move into an unused context slot.
+                Err(RuntimeError::Busy) => std::thread::yield_now(),
+                Err(error) => panic!("unexpected preparation failure: {error:?}"),
+            }
+        }
+    }
+    assert!(matches!(
+        host.refresh("1000", clock()),
+        Err(RuntimeError::Busy)
+    ));
+    assert_eq!(host.runtime.status(10)[0].1.active, active);
+    drop(held);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn queued_peer_events_after_runtime_stop_cannot_reenter_removed_node_policy() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -1146,7 +1234,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     assert!(!host.status_text("1000").unwrap().contains("local-rx:"));
     // A late peer acknowledgment cannot reactivate a failed radio generation.
     let (inbound, _input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
-    let (_, outbound) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let (_, outbound) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     host.peers[0]
         .control
         .send(PeerCommand::Redirect { inbound, outbound })
@@ -1156,6 +1244,11 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     pump_until(&mut host, |host| {
         !host.peers[0].control.snapshot().unwrap().ended
     });
+    pump_until(&mut host, |host| {
+        host.runtime.status(10)[0].1.retiring.is_none()
+    });
+    // Failed restore retains the configured node after reclaiming its audio generation.
+    assert!(host.runtime.status(10)[0].1.active.is_none());
     host.pump(clock()).unwrap();
     assert!(host.stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);

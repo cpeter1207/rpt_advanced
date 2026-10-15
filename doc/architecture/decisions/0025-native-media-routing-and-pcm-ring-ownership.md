@@ -68,6 +68,24 @@ the **program-audio loopback ring** before local CTCSS or DCS generation. The
 into a transmit-program queue for every connected peer. A **linked-peer
 transmit worker** serially owns that peer's codec encoding and packet send.
 Encoding and network transmission never occur in either radio audio worker.
+One off-audio media thread per node owns distribution independently of station
+control. It visits at most 64 destinations per batch and retains a partially
+distributed block. Exactly two preallocated program blocks circulate between
+the radio worker and distributor. Each peer queue retains bounded native PCM
+and source-span descriptors; a full queue rejects newest samples only for that
+peer. The radio worker does not wait, allocate, read a system clock, or wake
+Tokio while publishing a block.
+
+Source spans carry generation, burst, physical-stream identity, native sample
+position, and immutable mapped source time. The off-audio distributor observes
+the stream clock. Unmapped startup media is discarded rather than assigned a
+fresh age after a stall. Conversion uses actual generated sample counts;
+timestamp gaps remain gaps. Uncommitted media expires after 200 ms, including
+time retained inside the converter or a blocked prepared packet. Each peer
+owner retains at most one prepared packet and does not re-encode retries.
+Reliable frames already accepted by the IAX provider instead obey its bounded
+window and original failure deadline.
+
 The split preserves existing duplex, source qualification, mix-minus, and
 per-link routing; it must not reflect a peer's own audio back to that peer or
 send locally generated CTCSS/DCS onto network links.

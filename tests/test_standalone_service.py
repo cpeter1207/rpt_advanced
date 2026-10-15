@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Check standalone service isolation and package boundaries."""
 
-import json
 import subprocess
 from pathlib import Path
 
@@ -50,19 +49,13 @@ def test_standalone_package_does_not_depend_on_asterisk() -> None:
     depends = stanza.split("Depends:", 1)[1].split("Description:", 1)[0]
     assert "asterisk" not in depends.lower()
     assert "app-rpt-advanced" not in depends.lower()
-    assert "librptadv-iax2-client1 (>= 0.1.0~alpha5)" in depends
+    assert "librptadv-iax2-client1 (>= 0.1.0~alpha7)" in depends
 
 
 def test_standalone_requires_radio_core_with_live_update_api() -> None:
     control = (ROOT / "debian/control").read_text(encoding="utf-8")
     assert "librptadvradio-dev (>= 0.1.0~alpha6)" in control
     assert "librptadvradio4 (>= 0.1.0~alpha6)" in package_stanza("rpt-advanced")
-
-
-def test_released_iax2_library_is_not_rebuilt_as_a_candidate_dependency() -> None:
-    manifest = (ROOT / ".github/dependencies.json").read_text(encoding="utf-8")
-    dependencies = json.loads(manifest)
-    assert all(item["repository"] != "librptadviax2" for item in dependencies)
 
 
 def test_standalone_package_grants_service_user_cm119_usb_access() -> None:
@@ -143,7 +136,6 @@ if __name__ == "__main__":
         test_debian_install_manifests_are_not_executable_scripts,
         test_standalone_package_does_not_depend_on_asterisk,
         test_standalone_requires_radio_core_with_live_update_api,
-        test_released_iax2_library_is_not_rebuilt_as_a_candidate_dependency,
         test_standalone_package_grants_service_user_cm119_usb_access,
         test_asterisk_adapter_is_separately_installable,
         test_standalone_build_profile_omits_asterisk_build_and_adapter,

@@ -214,6 +214,7 @@ type TransmitOwner = OwnedTransmitOwner<DtmfWorker, RuntimeTransmit<Audio>>;
 /// Control-readable carrier edge with coherent monotonic transition time.
 #[derive(Clone, Default)]
 pub struct RadioStatus {
+    pub(crate) source_clock: Arc<crate::link::source_clock::SourceClock>,
     carrier: Arc<AtomicU64>,
     dtmf: Arc<AtomicBool>,
     transmit_keyed: Arc<AtomicBool>,
@@ -341,6 +342,12 @@ impl<T> EndpointControl<T> {
 }
 
 impl RadioStatus {
+    pub(crate) fn with_epoch(epoch: Instant) -> Self {
+        Self {
+            source_clock: Arc::new(crate::link::source_clock::SourceClock::new(epoch)),
+            ..Self::default()
+        }
+    }
     /// Current receive state and original transition time.
     pub fn snapshot(&self) -> (bool, u64) {
         let value = self.carrier.load(Ordering::Acquire);
@@ -608,6 +615,7 @@ unsafe fn transmit(
         *ctcss_enabled = 0;
         return -1;
     }
+    let stamp = context.status.source_clock.advance(samples.len());
     if !context.active.load(Ordering::Acquire) {
         samples.fill(0.0);
         *keyed = 0;
@@ -655,6 +663,12 @@ unsafe fn transmit(
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
+    let source = rpt_advanced_core::link::SourcePosition {
+        generation: generation.id(),
+        sample: stamp.sample,
+        stream: stamp.stream,
+        born_ns: stamp.born_ns,
+    };
     let transmit = generation.state();
     #[cfg(test)]
     if take_test_failure(TestFailure::TransmitPanic) {
@@ -662,7 +676,7 @@ unsafe fn transmit(
     }
     match transmit
         .adapter
-        .process(&mut transmit.controller, receiving, samples)
+        .process(&mut transmit.controller, receiving, samples, source)
     {
         Ok(value) => {
             *keyed = u32::from(value);
@@ -796,6 +810,7 @@ impl RadioWorker {
         let (receive_publisher, receive_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
         let (transmit_publisher, transmit_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
         let active = Arc::new(AtomicBool::new(false));
+        status.source_clock.restart();
         let receive = Box::new(ReceiveContext {
             active: active.clone(),
             owner: UnsafeCell::new(None),

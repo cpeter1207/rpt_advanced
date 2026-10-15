@@ -1,11 +1,9 @@
 //! Concrete public-Asterisk devices and generation-owned link endpoints.
 use crate::{
     link::{
+        dispatcher::{MediaWorker, PreparedDispatch},
         ring::{InboundPolicy, InboundRing},
-        session::{
-            Command as PeerCommand, Event, MAX_PEER_SESSIONS, PeerControl, PeerIoWorker,
-            PeerSession,
-        },
+        session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
     },
     media::NativeMediaPreparer,
     services::{HostServices, PeerIo},
@@ -15,7 +13,7 @@ use crate::{
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
     config::{ConfigDocument, LinkLookupMethod, ResolvedNodeSettings},
-    link::{AudioPeer, GroupMemberSelection, LinkAudio, LinkAudioStatus, LinkDispatcher, Mode},
+    link::{AudioPeer, GroupMemberSelection, LinkAudio, LinkAudioStatus, Mode},
     runtime::{
         DeviceHandoff, GenerationSettings, PreparedAdapter, Runtime, RuntimeClock, RuntimeError,
         dtmf::DigitOperation, links::LinkEffect,
@@ -112,9 +110,9 @@ impl DeviceHandoff for Device {
     }
 }
 
-/// Control-only dispatcher and endpoint-redirection acknowledgments for one audio generation.
+/// Dispatcher lifetime and endpoint-redirection acknowledgments for one audio generation.
 pub struct GenerationControl {
-    dispatcher: LinkDispatcher,
+    dispatcher: PreparedDispatch,
     status: LinkAudioStatus,
     redirects: Vec<(String, PeerCommand)>,
     awaiting: Vec<(String, crate::link::ring::InboundObserver)>,
@@ -136,14 +134,6 @@ struct PeerOwner {
     control: PeerControl,
 }
 
-fn ensure_peer_capacity(count: usize) -> Result<(), RuntimeError> {
-    if count >= MAX_PEER_SESSIONS {
-        Err(RuntimeError::Rejected)
-    } else {
-        Ok(())
-    }
-}
-
 /// Product runtime; every method is invoked by the selected serialized control executor.
 pub struct Host {
     /// Core configuration, controller, schedule, and link-policy aggregate.
@@ -152,6 +142,7 @@ pub struct Host {
     pub media: NativeMediaPreparer,
     services: HostServices,
     leases: Vec<(String, Arc<Mutex<Lease>>)>,
+    media_workers: Vec<(String, MediaWorker)>,
     peer_io: PeerIoWorker,
     peers: Vec<PeerOwner>,
     operations: Vec<(String, DigitOperation)>,
@@ -163,10 +154,12 @@ fn prepared(
     local: &str,
     settings: &ResolvedNodeSettings,
     peers: &[PeerOwner],
+    worker: &mut MediaWorker,
 ) -> Result<PreparedAdapter<Audio, GenerationControl>, RuntimeError> {
     let mut audio = Vec::new();
     let mut redirects = Vec::new();
     let mut awaiting = Vec::new();
+    let mut wakes = Vec::new();
     for peer in peers.iter().filter(|peer| peer.local == local) {
         let snapshot = peer
             .control
@@ -177,7 +170,7 @@ fn prepared(
         }
         let (inbound, input) = InboundRing::open(snapshot.input_rate, InboundPolicy::Peer)
             .map_err(|_| RuntimeError::Preparation)?;
-        let (output, outbound) = LinkAudioQueue::new(48000 / 5)
+        let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
         let prepared_peer = AudioPeer::new(
@@ -194,6 +187,7 @@ fn prepared(
             None => prepared_peer,
         });
         awaiting.push((peer.remote.clone(), inbound.observer()));
+        wakes.push(peer.control.wake());
         redirects.push((
             peer.remote.clone(),
             PeerCommand::Redirect { inbound, outbound },
@@ -202,6 +196,9 @@ fn prepared(
     let (audio, dispatcher) =
         LinkAudio::new(audio, MAXIMUM_FRAMES).map_err(|_| RuntimeError::Preparation)?;
     let status = audio.status();
+    let dispatcher = worker
+        .prepare(dispatcher, wakes)
+        .map_err(|_| RuntimeError::Busy)?;
     Ok(PreparedAdapter {
         state: audio,
         control: GenerationControl {
@@ -217,9 +214,31 @@ fn prepared(
     })
 }
 
+fn media_worker<'a>(
+    workers: &'a mut Vec<(String, MediaWorker)>,
+    local: &str,
+) -> Result<&'a mut MediaWorker, RuntimeError> {
+    let index = match workers.iter().position(|(name, _)| name == local) {
+        Some(index) => index,
+        None => {
+            workers
+                .try_reserve(1)
+                .map_err(|_| RuntimeError::Preparation)?;
+            workers.push((
+                local.to_owned(),
+                MediaWorker::start().map_err(|_| RuntimeError::Preparation)?,
+            ));
+            workers.len() - 1
+        }
+    };
+    Ok(&mut workers[index].1)
+}
+
 impl Host {
     fn prune_leases(&mut self) {
         prune_leases(&mut self.leases);
+        self.media_workers
+            .retain(|(local, _)| self.runtime.node(local).is_some());
     }
     /// Prepare and activate inactive callback contexts before publishing fixed registrations.
     pub fn start(
@@ -231,17 +250,18 @@ impl Host {
     ) -> Result<Self, RuntimeError> {
         let peer_io = PeerIoWorker::start(epoch).map_err(|_| RuntimeError::Device)?;
         let mut leases = Vec::new();
+        let mut media_workers = Vec::new();
         let runtime = Runtime::start(
             document,
             &media,
-            |name, settings| prepared(name, settings, &[]),
+            |name, settings| prepared(name, settings, &[], media_worker(&mut media_workers, name)?),
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
                     quiesced: false,
                     owners: None,
                     worker: None,
                     epoch,
-                    status: Default::default(),
+                    status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
                 Ok(Box::new(Device { lease, services }))
@@ -253,6 +273,7 @@ impl Host {
             media,
             services,
             leases,
+            media_workers,
             peer_io,
             peers: Vec::new(),
             operations: Vec::new(),
@@ -260,8 +281,37 @@ impl Host {
             epoch,
         };
         host.configure_status_posts(clock.now_ms);
+        host.activate_dispatchers(clock.now_ms);
         host.attach_workers();
         Ok(host)
+    }
+    fn activate_dispatchers(&mut self, now_ms: u64) {
+        for (local, status) in self.runtime.status(now_ms) {
+            if let Some(generation) = status.active {
+                let clock = self
+                    .leases
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == &local)
+                    .map(|(_, lease)| {
+                        lease
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .status
+                            .source_clock
+                            .clone()
+                    })
+                    .expect("active generation retains its device lease");
+                // This borrow marks the external owner exposed: core reclamation
+                // must wait for its explicit quiescence acknowledgment.
+                let control = self
+                    .runtime
+                    .adapter_control_mut(&local, generation)
+                    .expect("active generation retains its adapter control");
+                control.dispatcher.bind_clock(clock);
+                control.dispatcher.activate();
+            }
+        }
     }
     fn attach_workers(&mut self) {
         // New leases precede retained same-name leases in reverse order. Registering
@@ -308,6 +358,7 @@ impl Host {
             })
             .collect();
         let peers = &self.peers;
+        let media_workers = &mut self.media_workers;
         let leases = &mut self.leases;
         let epoch = self.epoch;
         let services = self.services;
@@ -315,7 +366,8 @@ impl Host {
             document,
             &self.media,
             |name, settings| {
-                let mut candidate = prepared(name, settings, peers)?;
+                let mut candidate =
+                    prepared(name, settings, peers, media_worker(media_workers, name)?)?;
                 if local_delays
                     .iter()
                     .rev()
@@ -336,7 +388,7 @@ impl Host {
                     owners: None,
                     worker: None,
                     epoch,
-                    status: Default::default(),
+                    status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
                 Ok(Box::new(Device { lease, services }))
@@ -345,6 +397,7 @@ impl Host {
         );
         self.prune_leases();
         result?;
+        self.activate_dispatchers(clock.now_ms);
         self.configure_status_posts(clock.now_ms);
         self.attach_workers();
         let effects = self.runtime.take_effects();
@@ -388,8 +441,18 @@ impl Host {
         mut io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
-        ensure_peer_capacity(self.peers.len())?;
-        {
+        self.peers
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let local_name = local.to_owned();
+        let remote_name = remote.to_owned();
+        let group = self
+            .runtime
+            .node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .links()
+            .group_member(remote);
+        let source_clock = {
             let (_, lease) = self
                 .leases
                 .iter()
@@ -403,25 +466,21 @@ impl Host {
                 .ok_or(RuntimeError::Device)?
                 .bind_peer(&mut io)
                 .map_err(|_| RuntimeError::Preparation)?;
-        }
-        let (_, outbound) = LinkAudioQueue::new(48000 / 5)
+            Arc::clone(&lease.status.source_clock)
+        };
+        let (_, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
-        let (session, control) = PeerSession::prepare(io, outbound, local, remote)
+        let (mut session, control) = PeerSession::prepare(io, outbound, local, remote)
             .map_err(|_| RuntimeError::Preparation)?;
+        session.bind_clock(source_clock);
         if let Err(session) = self.peer_io.attach(session) {
             session.stop();
             return Err(RuntimeError::Rejected);
         }
-        let group = self
-            .runtime
-            .node(local)
-            .ok_or(RuntimeError::MissingNode)?
-            .links()
-            .group_member(remote);
         self.peers.push(PeerOwner {
-            local: local.into(),
-            remote: remote.into(),
+            local: local_name,
+            remote: remote_name,
             mode,
             group,
             announced: false,
@@ -443,13 +502,30 @@ impl Host {
     }
     fn refresh(&mut self, local: &str, clock: RuntimeClock) -> Result<(), RuntimeError> {
         for _ in 0..100 {
+            // A preceding publication may still await dispatcher/redirect quiescence.
+            // This control owner must collect it before another replacement can succeed.
+            self.pump(clock)?;
             let settings = self
                 .runtime
                 .settings(local)
                 .ok_or(RuntimeError::MissingNode)?;
-            let candidate = prepared(local, settings, &self.peers)?;
+            let candidate = prepared(
+                local,
+                settings,
+                &self.peers,
+                media_worker(&mut self.media_workers, local)?,
+            );
+            let candidate = match candidate {
+                Ok(candidate) => candidate,
+                Err(RuntimeError::Busy) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if replacement_completed(self.runtime.replace_adapter(local, candidate, clock.now_ms))?
             {
+                self.activate_dispatchers(clock.now_ms);
                 return self.pump(clock);
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -509,6 +585,22 @@ impl Host {
             let _ = writeln!(result, "{}", worker.local_status_text());
         }
         drop(lease);
+        let generation = self
+            .runtime
+            .status(0)
+            .into_iter()
+            .find(|(name, _)| name == local)
+            .and_then(|(_, status)| status.active);
+        if let Some(control) =
+            generation.and_then(|generation| self.runtime.adapter_control_mut(local, generation))
+        {
+            let (batches, maximum_ns) = control.dispatcher.timing();
+            let _ = writeln!(
+                result,
+                "  fanout batches={batches} maximum-batch-ns={maximum_ns} dropped-blocks={}",
+                control.status.dropped_blocks()
+            );
+        }
         for peer in peers {
             let mode = if peer.mode.transmits() {
                 "transceive"
@@ -575,6 +667,27 @@ impl Host {
                     peer_observation.ingress_queued_packets,
                     peer_observation.ingress_capacity_packets,
                     peer_observation.ingress_overflow_drops,
+                );
+                let _ = writeln!(
+                    result,
+                    "    egress datagrams={} socket-blocked={} reliable-retries={} reliable-pending={} reply-pending={}",
+                    peer_observation.egress_datagrams,
+                    peer_observation.egress_would_block,
+                    peer_observation.egress_reliable_retries,
+                    peer_observation.egress_reliable_pending,
+                    peer_observation.egress_reply_pending
+                );
+            }
+            if let Some(snapshot) = snapshot {
+                let egress = snapshot.egress;
+                let _ = writeln!(
+                    result,
+                    "    media accepted={} blocked={} expired-native-samples={} rejected-native-samples={} maximum-queue-age={}ms",
+                    egress.accepted,
+                    egress.blocked,
+                    egress.expired_native_samples,
+                    egress.rejected_native_samples,
+                    egress.maximum_queue_age_ns / 1_000_000
                 );
             }
         }
@@ -652,7 +765,7 @@ impl Host {
             })
             .map_err(|_| RuntimeError::Rejected)
     }
-    /// Drain bounded dispatcher/control snapshots and complete old-generation redirect handshakes.
+    /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
         for (local, lease) in &self.leases {
             if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {
@@ -671,7 +784,7 @@ impl Host {
                     peer.control.reply_target(),
                 ));
             }
-            if peer.control.snapshot().is_ok_and(|snapshot| snapshot.ended) {
+            if peer.control.ended() {
                 ended.push((peer.local.clone(), peer.remote.clone()));
             }
         }
@@ -762,7 +875,9 @@ impl Host {
                 .runtime
                 .adapter_control_mut(&local, generation)
                 .expect("snapshot generation retains its adapter control");
-            control.dispatcher.dispatch(2);
+            if status.active == Some(generation) {
+                control.dispatcher.activate();
+            }
             if control.awaiting_local {
                 // Runtime retains the device for every active or retiring generation.
                 let (_, lease) = self
@@ -799,8 +914,14 @@ impl Host {
                     .iter()
                     .any(|peer| peer.local == local && &peer.remote == remote)
             });
-            if control.awaiting.is_empty() && !control.awaiting_local {
-                if let Some(old) = status.retiring {
+            let redirects_done = control.awaiting.is_empty() && !control.awaiting_local;
+            if let Some(old) = status.retiring {
+                let retired = self
+                    .runtime
+                    .adapter_control_mut(&local, old)
+                    .expect("retiring generation retains its adapter control");
+                retired.dispatcher.request_stop();
+                if redirects_done && retired.dispatcher.is_quiescent() {
                     self.runtime.detached(&local, old);
                 }
             }
@@ -825,7 +946,7 @@ impl Host {
             .collect();
         self.status_post.configure(config);
     }
-    /// Stop peer owners, drain dispatcher blocks, then acknowledge exact generations.
+    /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
         self.status_post.request_stop();
         let statuses = self.runtime.status(now_ms);
@@ -833,6 +954,9 @@ impl Host {
             peer.control.stop();
         }
         self.runtime.stop(now_ms);
+        for (_, worker) in &mut self.media_workers {
+            worker.stop();
+        }
         for peer in self.peers.drain(..) {
             self.runtime
                 .peer_detached(&peer.local, &peer.remote, now_ms);
@@ -841,7 +965,7 @@ impl Host {
         for (local, status) in statuses {
             for generation in [status.active, status.retiring].into_iter().flatten() {
                 if let Some(control) = self.runtime.adapter_control_mut(&local, generation) {
-                    control.dispatcher.dispatch(2);
+                    debug_assert!(control.dispatcher.is_quiescent());
                     control.redirects.clear();
                     control.awaiting.clear();
                 }

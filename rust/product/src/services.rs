@@ -194,9 +194,9 @@ impl HostServices {
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
         let prefix = offset_of!(abi::rptadv_host_services_v5, peer_step_attach);
         let async_end = offset_of!(abi::rptadv_host_services_v5, peer_observe);
+        let observe_end = offset_of!(abi::rptadv_host_services_v5, peer_prepare_audio);
         let full = size_of::<abi::rptadv_host_services_v5>();
-        if size < prefix || (size > prefix && size < async_end) || (size > async_end && size < full)
-        {
+        if size < full && ![prefix, async_end, observe_end].contains(&size) {
             return Err(Error::Admission);
         }
         // A prefix-only host has no async tail. Never form a full-size reference to it.
@@ -217,10 +217,22 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
+        let egress_count = [
+            api.peer_prepare_audio.is_some(),
+            api.peer_send_prepared.is_some(),
+            api.peer_elapsed_ms.is_some(),
+            api.peer_step_wake.is_some(),
+            api.peer_set_deadline.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
         if api.abi_version != 5
             || api.capability != *b"rptadv.hst5\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
+            || !matches!(egress_count, 0 | 5)
+            || (egress_count == 5 && async_count != 3)
         {
             return Err(Error::Admission);
         }
@@ -263,6 +275,17 @@ impl HostServices {
     /// Wait off-callback until no retained step can access product state.
     pub fn peer_step_detach(&self, registration: NonNull<c_void>) {
         unsafe { self.0.peer_step_detach.unwrap()(self.0.context, registration.as_ptr()) };
+    }
+    /// Publish a signal-only capability after registration succeeds. Its gate
+    /// must close and quiesce before the registration can be detached.
+    pub(crate) fn attach_wake(
+        &self,
+        wake: &crate::link::dispatcher::PeerWake,
+        registration: NonNull<c_void>,
+    ) {
+        if let Some(call) = self.0.peer_step_wake {
+            unsafe { wake.attach(call, self.0.context, registration.as_ptr()) };
+        }
     }
     /// Copy optional peer metrics only from that peer's serialized owner turn.
     fn peer_observe(&self, peer: *mut c_void) -> Option<abi::rptadv_peer_observation_v1> {
@@ -619,6 +642,60 @@ impl PeerIo {
             )
         };
         (code == 0).then_some(()).ok_or(Error::Write)
+    }
+    /// Whether this host supports source-timed prepared media and readiness deadlines.
+    pub(crate) fn prepared_media(&self) -> bool {
+        self.services.0.peer_prepare_audio.is_some()
+    }
+    /// Encode one codec-rate block into caller-owned storage, without sending it.
+    pub(crate) fn prepare_audio(
+        &mut self,
+        samples: &[f32],
+        output: &mut [u8],
+    ) -> Result<(), Error> {
+        let code = unsafe {
+            self.services.0.peer_prepare_audio.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                samples.as_ptr(),
+                samples.len(),
+                output.as_mut_ptr(),
+                output.len(),
+            )
+        };
+        (code == 0).then_some(()).ok_or(Error::Translation)
+    }
+    /// Submit retained bytes; false is socket congestion, not a failed connection.
+    /// Empty bytes submit the timestamped end-of-burst marker with the same contract.
+    pub(crate) fn send_prepared(&mut self, bytes: &[u8], timestamp: u32) -> Result<bool, Error> {
+        match unsafe {
+            self.services.0.peer_send_prepared.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                timestamp,
+            )
+        } {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(Error::Write),
+        }
+    }
+    /// Provider call-clock milliseconds, sampled only by the serialized peer owner.
+    pub(crate) fn elapsed_ms(&self) -> u32 {
+        unsafe {
+            self.services.0.peer_elapsed_ms.unwrap()(self.services.0.context, self.handle.as_ptr())
+        }
+    }
+    /// Publish the next relative wake; MAX clears the timer. PCM-only hosts ignore it.
+    pub(crate) fn set_deadline(&mut self, after_ns: u64) -> Result<(), Error> {
+        let Some(set) = self.services.0.peer_set_deadline else {
+            return Ok(());
+        };
+        (unsafe { set(self.services.0.context, self.handle.as_ptr(), after_ns) } == 0)
+            .then_some(())
+            .ok_or(Error::Write)
     }
 }
 impl Drop for PeerIo {

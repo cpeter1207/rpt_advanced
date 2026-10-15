@@ -421,6 +421,14 @@ impl ProviderSet {
         self.resolver_descriptor()?;
         self.jitter_descriptor()?;
         self.native_product_descriptor()?;
+        let iax = self
+            .descriptor("librptadviax2.so.1")
+            .ok_or(ProviderError::MissingDescriptor("librptadviax2.so.1"))?;
+        if !unsafe { crate::iax::valid_client_descriptor(iax.pointer.as_ptr()) }
+            || !unsafe { crate::iax::executor::valid_descriptor(self.iax_async_descriptor()?) }
+        {
+            return Err(ProviderError::IncompleteDescriptor("librptadviax2.so.1"));
+        }
         Ok(())
     }
 
@@ -471,6 +479,16 @@ impl ProviderSet {
     pub(crate) fn iax_executor(
         &'static self,
     ) -> Result<crate::iax::executor::Executor, ProviderError> {
+        unsafe { crate::iax::executor::Executor::new(self.iax_async_descriptor()?) }.map_err(
+            |error| match error {
+                crate::iax::executor::Error::Descriptor => {
+                    ProviderError::IncompatibleDescriptor("librptadviax2.so.1")
+                }
+                _ => ProviderError::Initialize("librptadviax2.so.1"),
+            },
+        )
+    }
+    fn iax_async_descriptor(&self) -> Result<*const c_void, ProviderError> {
         const NAME: &str = "librptadviax2.so.1";
         let index = self
             .descriptors
@@ -485,10 +503,7 @@ impl ProviderSet {
                 .map_err(|_| ProviderError::MissingDescriptor(NAME))?;
             symbol()
         };
-        unsafe { crate::iax::executor::Executor::new(pointer) }.map_err(|error| match error {
-            crate::iax::executor::Error::Descriptor => ProviderError::IncompatibleDescriptor(NAME),
-            _ => ProviderError::Initialize(NAME),
-        })
+        Ok(pointer)
     }
 
     /// Borrow the radio providers for an activation owner that lives as long as this set.
@@ -814,6 +829,8 @@ pub(crate) mod tests {
                         int (*configure)(void *, const void *);
                         int (*enable)(void *, void *);
                         int (*observe)(void *, void *);
+                        void (*wake)(void *);
+                        int (*deadline)(void *, unsigned long long);
                     } Async;
                     static int fail_create(void **out) { *out = NULL; return -1; }
                     static void unused(void *p) { (void)p; abort(); }
@@ -822,10 +839,11 @@ pub(crate) mod tests {
                     }
                     static int configure(void *p, const void *j) { (void)p; (void)j; abort(); }
                     static int unused_pair(void *a, void *b) { (void)a; (void)b; abort(); }
+                    static int deadline(void *p, unsigned long long n) { (void)p; (void)n; abort(); }
                     static Async api = {
                         { sizeof(Async), ASYNC_VERSION, "rptadv.iaxasync" },
                         fail_create, unused, attach, unused, unused,
-                        configure, unused_pair, unused_pair
+                        configure, unused_pair, unused_pair, unused, deadline
                     };
                     void *rptadv_iax2_async_descriptor_v1(void) { return &api; }
                     "#,
@@ -849,6 +867,26 @@ pub(crate) mod tests {
                 super::ProviderSet::load_from_directory(fixture.path()).unwrap(),
             ));
             assert_eq!(providers.iax_executor().err(), Some(expected));
+
+            let mut runtime = super::ProviderSet::load().unwrap();
+            let index = runtime
+                .descriptors
+                .iter()
+                .position(|provider| provider.library == NAME)
+                .unwrap();
+            // Keep the real client descriptor alive while substituting the async capability.
+            let _client_library = std::mem::replace(
+                &mut runtime._libraries[index],
+                unsafe { libloading::Library::new(fixture.path().join(NAME)) }.unwrap(),
+            );
+            assert_eq!(
+                runtime.validate_runtime(),
+                if version == 2 {
+                    Err(ProviderError::IncompleteDescriptor(NAME))
+                } else {
+                    Ok(())
+                }
+            );
         }
     }
 
@@ -1491,6 +1529,18 @@ pub(crate) mod tests {
             ))
         );
         replace_descriptor(&mut providers, "libusbradioplus_product.so.1", valid_native);
+
+        let iax_library = "librptadviax2.so.1";
+        let truncated = super::InlineDescriptorHeader {
+            struct_size: std::mem::size_of::<super::InlineDescriptorHeader>() as u32,
+            abi_version: 1,
+            capability: *b"rptadv.iax2.v1\0\0",
+        };
+        replace_descriptor(&mut providers, iax_library, truncated);
+        assert_eq!(
+            providers.validate_runtime(),
+            Err(ProviderError::IncompleteDescriptor(iax_library))
+        );
     }
 
     pub(crate) fn replace_descriptor<T>(

@@ -1,5 +1,10 @@
 [
   {
+    "repository": "librptadviax2",
+    "sha": "3d8f8425969c1092ecada88dcdd23ac7f1d4de35",
+    "packages": ["librptadv-iax2-client1", "librptadv-iax2-client-dev"]
+  },
+  {
     "repository": "rptadv-portaudio-alsa-adapter",
     "sha": "411dc1e9e4285c7140e975bbadf7d7ce3efea220",
     "packages": [

@@ -16,6 +16,9 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = "2.5"
 
 [dev-dependencies]
+libc = "0.2"
+rpt-advanced-standalone = { path = "../standalone" }
+serde_json = "1"
 rptadv-file-adapter = { path = "../file-adapter" }
 rptadv-speech-adapter = { path = "../speech-adapter" }
 rptadv-control-standalone-adapter = { path = "../control-standalone-adapter" }

@@ -1,4 +1,4 @@
-//! Plain bounded outbound peer PCM handoff.
+//! Bounded outbound PCM with source-time spans; never rebase dropped media.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -12,6 +12,30 @@ pub enum LinkQueueError {
     ZeroCapacity,
 }
 
+/// Immutable origin of a contiguous native-rate PCM span.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AudioSpan {
+    /// Configuration generation that admitted these samples.
+    pub generation: u64,
+    /// Destination's receive-qualified burst identity.
+    pub burst: u64,
+    /// First sample on the stream timeline, including any previously dropped samples.
+    pub source_start: u64,
+    /// Physical stream identity; changes on reopen, not ordinary configuration reload.
+    pub stream: u64,
+    /// Immutable monotonic source time; absent until the native clock is observed.
+    pub born_ns: Option<u64>,
+}
+
+/// One read never crosses a source span, even when later audio is already queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadSpan {
+    /// Origin adjusted for any prefix consumed on a previous read.
+    pub span: AudioSpan,
+    /// Real samples copied to the output prefix.
+    pub frames: usize,
+}
+
 #[derive(Default)]
 struct Statistics {
     dropped: AtomicU64,
@@ -22,31 +46,36 @@ struct Statistics {
 pub struct LinkAudioQueue {
     producer: Producer<f32>,
     consumer: Consumer<f32>,
+    spans: (Producer<ReadSpan>, Consumer<ReadSpan>),
     statistics: Arc<Statistics>,
 }
 
 /// Single producer endpoint for a [`LinkAudioQueue`].
 pub struct LinkAudioProducer {
     producer: Producer<f32>,
+    spans: Producer<ReadSpan>,
     statistics: Arc<Statistics>,
 }
 
 /// Single consumer endpoint for a [`LinkAudioQueue`].
 pub struct LinkAudioConsumer {
     consumer: Consumer<f32>,
+    spans: Consumer<ReadSpan>,
+    pending: Option<ReadSpan>,
     statistics: Arc<Statistics>,
 }
 
 impl LinkAudioQueue {
     /// Allocate a fixed-capacity SPSC queue outside the real-time path.
-    pub fn new(capacity: usize) -> Result<Self, LinkQueueError> {
-        if capacity == 0 {
+    pub fn new(capacity: usize, span_capacity: usize) -> Result<Self, LinkQueueError> {
+        if capacity == 0 || span_capacity == 0 {
             return Err(LinkQueueError::ZeroCapacity);
         }
         let (producer, consumer) = RingBuffer::new(capacity);
         Ok(Self {
             producer,
             consumer,
+            spans: RingBuffer::new(span_capacity),
             statistics: Arc::new(Statistics::default()),
         })
     }
@@ -57,10 +86,13 @@ impl LinkAudioQueue {
         (
             LinkAudioProducer {
                 producer: self.producer,
+                spans: self.spans.0,
                 statistics: Arc::clone(&self.statistics),
             },
             LinkAudioConsumer {
                 consumer: self.consumer,
+                spans: self.spans.1,
+                pending: None,
                 statistics: self.statistics,
             },
         )
@@ -69,13 +101,21 @@ impl LinkAudioQueue {
 
 impl LinkAudioProducer {
     /// Write leading samples that fit and return the rejected newest-sample count.
-    pub fn write(&mut self, audio: &[f32]) -> usize {
-        let mut written = 0;
-        for sample in audio {
-            if self.producer.push(*sample).is_err() {
-                break;
-            }
-            written += 1;
+    pub fn write(&mut self, span: AudioSpan, audio: &[f32]) -> usize {
+        // Sole producer: a free descriptor cannot be taken by another writer.
+        // Publish samples first; the consumer reads only after acquiring this span.
+        let written = if self.spans.slots() == 0 {
+            0
+        } else {
+            self.producer.push_partial_slice(audio).0.len()
+        };
+        if written != 0 {
+            self.spans
+                .push(ReadSpan {
+                    span,
+                    frames: written,
+                })
+                .expect("reserved span");
         }
         let dropped = audio.len() - written;
         self.statistics.dropped.fetch_add(
@@ -93,15 +133,57 @@ impl LinkAudioProducer {
 }
 
 impl LinkAudioConsumer {
-    /// Read queued samples in order, fill any shortfall with silence, and return the shortfall.
+    /// Newest native samples rejected by the single producer at queue capacity.
+    pub fn dropped_samples(&self) -> u64 {
+        self.statistics.dropped.load(Ordering::Relaxed)
+    }
+    /// Inspect the next published source span without consuming its samples.
+    pub fn peek_span(&mut self) -> Option<ReadSpan> {
+        if self.pending.is_none() {
+            self.pending = self.spans.pop().ok();
+        }
+        self.pending
+    }
+    /// Copy only the current span, leaving the unused output untouched.
+    pub fn read_span(&mut self, output: &mut [f32]) -> Option<ReadSpan> {
+        if output.is_empty() {
+            return None;
+        }
+        self.peek_span()?;
+        let pending = self.pending.as_mut().expect("current span");
+        let count = pending.frames.min(output.len());
+        // The acquired descriptor publishes all of its PCM before it becomes visible.
+        self.consumer
+            .pop_entire_slice(&mut output[..count])
+            .expect("published span PCM");
+        let read = ReadSpan {
+            span: pending.span,
+            frames: count,
+        };
+        let next = pending.span.source_start.wrapping_add(count as u64);
+        let elapsed = (u128::from(next) * 1_000_000_000 / 48_000)
+            .saturating_sub(u128::from(pending.span.source_start) * 1_000_000_000 / 48_000);
+        pending.span.born_ns = pending
+            .span
+            .born_ns
+            .and_then(|time| time.checked_add(elapsed as u64));
+        pending.span.source_start = next;
+        pending.frames -= count;
+        if pending.frames == 0 {
+            self.pending = None;
+        }
+        Some(read)
+    }
+
+    /// Unclocked PCM for synchronous hosts; asynchronous egress uses `read_span`.
+    /// Fill any shortfall with silence and return its length.
     pub fn read(&mut self, output: &mut [f32]) -> usize {
         let mut read = 0;
         while read < output.len() {
-            let Ok(sample) = self.consumer.pop() else {
+            let Some(span) = self.read_span(&mut output[read..]) else {
                 break;
             };
-            output[read] = sample;
-            read += 1;
+            read += span.frames;
         }
         output[read..].fill(0.0);
         let shortfall = output.len() - read;

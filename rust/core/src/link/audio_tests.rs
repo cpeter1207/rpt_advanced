@@ -2,6 +2,193 @@ use super::*;
 use crate::audio::{LinkAudioConsumer, LinkAudioQueue};
 use crate::controller::{ControllerSettings, CourtesySettings};
 
+#[test]
+fn egress_dispatch_notifies_receive_only_activity_without_echoing_pcm() {
+    let (mut peer, signals, mut output) = peer_with_kerchunk("200", 960, 0);
+    peer.mode = Mode::MONITOR;
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    signals.set_radio_keyed(true);
+    let mut notified = Vec::new();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 960],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    dispatcher.dispatch_batch(1, |index| notified.push(index));
+    assert_eq!(
+        notified,
+        [0],
+        "inbound activity must wake its idle serialized owner"
+    );
+    assert!(
+        output.read_span(&mut [0.0; 960]).is_none(),
+        "an activity wake must not echo input"
+    );
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 960],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    dispatcher.dispatch_batch(1, |index| notified.push(index));
+    assert_eq!(
+        notified,
+        [0],
+        "unchanged activity must not poll an idle owner"
+    );
+}
+
+#[test]
+fn egress_batched_mix_minus_preserves_routes() {
+    use crate::audio::AudioSpan;
+    let (mut full, _, _full_output) = peer_with_kerchunk("200", 4, 0);
+    let (healthy, _, mut output) = peer_with_kerchunk("300", 4, 0);
+    full.outbound
+        .as_mut()
+        .unwrap()
+        .write(AudioSpan::default(), &[0.9; 4]);
+    let (mut links, mut dispatcher) = LinkAudio::new(vec![full, healthy], 4).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let source = SourcePosition {
+        generation: 8,
+        sample: 500,
+        ..SourcePosition::default()
+    };
+    links
+        .process(&mut controller, true, &mut [0.25; 2], source)
+        .unwrap();
+    assert_eq!(dispatcher.dispatch_batch(0, |_| {}).destinations, 0);
+    let mut notified = Vec::new();
+    let first = dispatcher.dispatch_batch(1, |index| notified.push(index));
+    assert_eq!(
+        (first.destinations, first.completed_blocks, first.pending),
+        (1, 0, true)
+    );
+    assert!(
+        notified.is_empty(),
+        "a full peer does not claim accepted audio"
+    );
+    links
+        .process(
+            &mut controller,
+            true,
+            &mut [0.5; 2],
+            SourcePosition {
+                sample: 502,
+                ..source
+            },
+        )
+        .unwrap();
+    links
+        .process(
+            &mut controller,
+            true,
+            &mut [0.75; 2],
+            SourcePosition {
+                sample: 504,
+                ..source
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        links.status().dropped_blocks(),
+        1,
+        "partial dispatch cannot recycle its block early"
+    );
+    let second = dispatcher.dispatch_batch(1, |index| notified.push(index));
+    assert_eq!((second.destinations, second.completed_blocks), (1, 1));
+    assert_eq!(notified, [1]);
+    let mut received = [0.0; 4];
+    let span = output.read_span(&mut received).unwrap();
+    assert_eq!(
+        (span.frames, span.span.generation, span.span.source_start),
+        (2, 8, 500)
+    );
+    assert_eq!(&received[..2], &[0.25; 2]);
+    assert_eq!(dispatcher.dispatch_batch(2, |_| {}).completed_blocks, 1);
+    assert_eq!(
+        output.read_span(&mut received).unwrap().span.source_start,
+        502
+    );
+    assert_eq!(&received[..2], &[0.5; 2]);
+    assert!(!dispatcher.dispatch_batch(1, |_| {}).pending);
+    links
+        .process(
+            &mut controller,
+            true,
+            &mut [0.6; 2],
+            SourcePosition {
+                sample: 506,
+                ..source
+            },
+        )
+        .unwrap();
+    dispatcher.dispatch_batch(2, |_| {});
+    let after_drop = output.read_span(&mut received).unwrap();
+    assert_eq!(
+        (after_drop.span.source_start, after_drop.span.burst),
+        (506, 1)
+    );
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0],
+            SourcePosition {
+                sample: 508,
+                ..source
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        dispatcher.dispatch_batch(1, |_| {}).destinations,
+        1,
+        "disabled peers consume the batch budget too"
+    );
+    dispatcher.dispatch_batch(1, |_| {});
+    assert!(output.read_span(&mut received).is_none());
+    links
+        .process(
+            &mut controller,
+            true,
+            &mut [0.7],
+            SourcePosition {
+                generation: 9,
+                sample: 509,
+                ..source
+            },
+        )
+        .unwrap();
+    dispatcher.dispatch_batch(2, |_| {});
+    let next_burst = output.read_span(&mut received).unwrap();
+    assert_eq!(
+        (
+            next_burst.span.generation,
+            next_burst.span.source_start,
+            next_burst.span.burst
+        ),
+        (9, 509, 2)
+    );
+}
+
 struct Input {
     signals: Arc<PeerSignals>,
 }
@@ -35,7 +222,7 @@ fn peer_with_kerchunk(
     maximum: usize,
     kerchunk_ms: u32,
 ) -> (AudioPeer<Input>, Arc<PeerSignals>, LinkAudioConsumer) {
-    let (outbound, inbound) = LinkAudioQueue::new(maximum.max(1))
+    let (outbound, inbound) = LinkAudioQueue::new(maximum.max(1), 64)
         .unwrap()
         .into_endpoints();
     let signals = Arc::new(PeerSignals::new());
@@ -82,13 +269,29 @@ fn peer_replies_wait_for_origin_and_route_each_sample_without_local_ptt() {
         assert!(control.queue_prepared_status(media));
     }
     first_signal.set_radio_keyed(true);
-    links.process(&mut controller, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     dispatcher.dispatch(1);
     assert_eq!(first_output.read(&mut [0.0]), 1);
     assert_eq!(second_output.read(&mut [0.0]), 1);
     first_signal.set_radio_keyed(false);
     let mut radio = [0.0; 8];
-    assert!(!links.process(&mut controller, false, &mut radio).unwrap());
+    assert!(
+        !links
+            .process(
+                &mut controller,
+                false,
+                &mut radio,
+                crate::link::SourcePosition::default()
+            )
+            .unwrap()
+    );
     dispatcher.dispatch(1);
     assert_eq!(radio, [0.0; 8]);
     let mut first_pcm = [0.0; 8];
@@ -118,7 +321,16 @@ fn ended_peer_reply_never_reaches_same_number_replacement() {
     )
     .unwrap();
     assert!(control.queue_prepared_status(media));
-    assert!(!links.process(&mut controller, false, &mut [0.0]).unwrap());
+    assert!(
+        !links
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0],
+                crate::link::SourcePosition::default()
+            )
+            .unwrap()
+    );
     dispatcher.dispatch(1);
     assert_eq!(output.read(&mut [0.0]), 1);
     assert_eq!(control.reclaim().count(), 1);
@@ -153,7 +365,16 @@ fn addressed_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback() {
             .reply_to(Some(signal.reply_target()));
         assert!(control.queue_prepared_status(media));
         let mut radio = [0.7; 4];
-        assert!(!links.process(&mut controller, true, &mut radio).unwrap());
+        assert!(
+            !links
+                .process(
+                    &mut controller,
+                    true,
+                    &mut radio,
+                    crate::link::SourcePosition::default()
+                )
+                .unwrap()
+        );
         dispatcher.dispatch(1);
         let mut sent = [0.0; 4];
         assert_eq!(output.read(&mut sent), 0);
@@ -166,7 +387,7 @@ fn addressed_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback() {
 #[test]
 fn preparation_and_empty_graph_reject_invalid_shapes_without_dispatch() {
     for (name, maximum) in [("bad", 1), ("200", 0)] {
-        let (outbound, _) = LinkAudioQueue::new(1).unwrap().into_endpoints();
+        let (outbound, _) = LinkAudioQueue::new(1, 64).unwrap().into_endpoints();
         assert!(
             AudioPeer::new(
                 name,
@@ -196,15 +417,38 @@ fn preparation_and_empty_graph_reject_invalid_shapes_without_dispatch() {
     .unwrap();
     let status = empty.status();
     assert_eq!(status.last_keyed(), None);
-    assert!(!empty.process(&mut controller, false, &mut []).unwrap());
-    assert!(!empty.process(&mut controller, false, &mut [0.0]).unwrap());
+    assert!(
+        !empty
+            .process(
+                &mut controller,
+                false,
+                &mut [],
+                crate::link::SourcePosition::default()
+            )
+            .unwrap()
+    );
+    assert!(
+        !empty
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0],
+                crate::link::SourcePosition::default()
+            )
+            .unwrap()
+    );
     assert_eq!(dispatcher.dispatch(1), 0);
 
     let (prepared, _) = peer("200", 1);
     let (mut links, _) = LinkAudio::new(vec![prepared], 1).unwrap();
     assert!(
         links
-            .process(&mut controller, false, &mut [0.0, 0.0])
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0, 0.0],
+                crate::link::SourcePosition::default()
+            )
             .is_err()
     );
 }
@@ -229,10 +473,31 @@ fn grouped_member_selection_and_last_keyed_status_follow_callback_edges() {
     )
     .unwrap();
     assert_eq!(status.last_keyed(), None);
-    links.process(&mut controller, false, &mut [0.0]).unwrap();
-    links.process(&mut controller, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     signals.set_radio_keyed(true);
-    links.process(&mut controller, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(status.last_keyed(), Some("200"));
 }
 
@@ -265,11 +530,23 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
 
         signals.set_radio_keyed(true);
         links
-            .process(&mut controller, false, &mut vec![0.0; frames])
+            .process(
+                &mut controller,
+                false,
+                &mut vec![0.0; frames],
+                crate::link::SourcePosition::default(),
+            )
             .unwrap();
         signals.set_radio_keyed(false);
         let mut output = [0.0];
-        links.process(&mut controller, false, &mut output).unwrap();
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut output,
+                crate::link::SourcePosition::default(),
+            )
+            .unwrap();
         assert_eq!(outbound.read(&mut [0.0]), 1);
         assert_eq!(output[0] == 0.5, expect_courtesy);
     }
@@ -288,7 +565,14 @@ fn ended_peer_is_not_enabled_as_a_dispatch_destination() {
     .unwrap();
     signals.set_radio_keyed(true);
     signals.end();
-    links.process(&mut controller, false, &mut [0.0]).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0],
+            crate::link::SourcePosition::default(),
+        )
+        .unwrap();
     assert_eq!(dispatcher.dispatch(1), 1);
     let mut output = [1.0];
     assert_eq!(outbound.read(&mut output), 1);

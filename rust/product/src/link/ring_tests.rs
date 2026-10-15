@@ -125,7 +125,7 @@ fn peer_tail_drains_before_courtesy_instead_of_replaying_on_next_burst() {
         }
     }
     let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Peer).unwrap();
-    let (outbound, _) = LinkAudioQueue::new(960).unwrap().into_endpoints();
+    let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     let peer = AudioPeer::new("200", Mode::TRANSCEIVE, consumer, outbound, 960, 0).unwrap();
     let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
     let courtesy = CourtesySettings {
@@ -147,14 +147,28 @@ fn peer_tail_drains_before_courtesy_instead_of_replaying_on_next_burst() {
     for _ in 0..100 {
         assert_eq!(producer.write(&[0.25; 160]), Ok(160));
         output.fill(0.0);
-        links.process(&mut controller, false, &mut output).unwrap();
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut output,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
+            .unwrap();
         dispatcher.dispatch(1);
     }
     let mut tail_samples = 0;
     let mut courtesy_started = false;
     for _ in 0..25 {
         output.fill(0.0);
-        links.process(&mut controller, false, &mut output).unwrap();
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut output,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
+            .unwrap();
         dispatcher.dispatch(1);
         for &sample in &output {
             if sample > 0.6 {
@@ -176,14 +190,28 @@ fn peer_tail_drains_before_courtesy_instead_of_replaying_on_next_burst() {
     assert_eq!(links.active_count(), 0);
     assert_eq!(producer.write(&[-0.25; 160]), Ok(160));
     output.fill(0.0);
-    links.process(&mut controller, false, &mut output).unwrap();
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut output,
+            rpt_advanced_core::link::SourcePosition::default(),
+        )
+        .unwrap();
     // Allow the bounded FIR/PLC recovery transition, not a saved speech tail.
     assert!(output.iter().filter(|&&sample| sample > 0.2).count() < 480);
     dispatcher.dispatch(1);
     for _ in 0..4 {
         assert_eq!(producer.write(&[-0.25; 160]), Ok(160));
         output.fill(0.0);
-        links.process(&mut controller, false, &mut output).unwrap();
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut output,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
+            .unwrap();
         dispatcher.dispatch(1);
         assert!(output.iter().all(|&sample| sample < 0.2));
     }

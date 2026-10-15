@@ -89,6 +89,11 @@ impl HostServicesOwner {
             peer_step_stop: asynchronous.then_some(peer_step_stop),
             peer_step_detach: asynchronous.then_some(peer_step_detach),
             peer_observe: asynchronous.then_some(peer_observe),
+            peer_prepare_audio: asynchronous.then_some(peer_prepare_audio),
+            peer_send_prepared: asynchronous.then_some(peer_send_prepared),
+            peer_elapsed_ms: asynchronous.then_some(peer_elapsed_ms),
+            peer_step_wake: asynchronous.then_some(peer_step_wake),
+            peer_set_deadline: asynchronous.then_some(peer_set_deadline),
         });
         Ok(Self {
             context,
@@ -559,6 +564,87 @@ unsafe extern "C" fn peer_destroy(_: *mut c_void, peer: *mut c_void) {
     }
 }
 
+// Prepared media stays in the product owner across socket congestion; only IAX
+// owns reliable sequence numbers and committed retransmission bytes.
+unsafe extern "C" fn peer_prepare_audio(
+    _: *mut c_void,
+    peer: *mut c_void,
+    pcm: *const f32,
+    count: usize,
+    output: *mut u8,
+    capacity: usize,
+) -> i32 {
+    boundary(-1, || {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
+            return -1;
+        };
+        if count > capacity
+            || count > isize::MAX as usize / size_of::<f32>()
+            || (count != 0 && (pcm.is_null() || output.is_null()))
+        {
+            return -1;
+        }
+        if count == 0 {
+            return 0;
+        }
+        let pcm = unsafe { std::slice::from_raw_parts(pcm, count) };
+        let output = unsafe { std::slice::from_raw_parts_mut(output, count) };
+        if peer.0.prepare_audio(pcm, output).is_ok() {
+            0
+        } else {
+            -1
+        }
+    })
+}
+unsafe extern "C" fn peer_send_prepared(
+    _: *mut c_void,
+    peer: *mut c_void,
+    bytes: *const u8,
+    count: usize,
+    timestamp: u32,
+) -> i32 {
+    boundary(-1, || {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut() }) else {
+            return -1;
+        };
+        if count > isize::MAX as usize || (bytes.is_null() && count != 0) {
+            return -1;
+        }
+        let bytes = if count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(bytes, count) }
+        };
+        match peer.0.send_prepared(bytes, timestamp) {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(_) => -1,
+        }
+    })
+}
+unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
+    unsafe { peer.cast::<PeerHandle>().as_ref() }.map_or(0, |peer| peer.0.elapsed_ms())
+}
+unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_void) {
+    let Some(context) = (unsafe { context.cast::<StandaloneHostContext>().as_ref() }) else {
+        return;
+    };
+    if let Some(ingress) = &context.ingress {
+        unsafe { ingress.executor.wake(registration) };
+    }
+}
+unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, after: u64) -> i32 {
+    let (Some(context), Some(peer)) = (
+        unsafe { context.cast::<StandaloneHostContext>().as_ref() },
+        unsafe { peer.cast::<PeerHandle>().as_ref() },
+    ) else {
+        return -1;
+    };
+    context.ingress.as_ref().map_or(-1, |ingress| unsafe {
+        ingress.executor.set_deadline(peer.0.raw_handle(), after)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HostServicesOwner, boundary, dial_peer, input, peer_dial};
@@ -734,6 +820,27 @@ mod tests {
         assert!(api.peer_step_stop.is_none());
         assert!(api.peer_step_detach.is_none());
         assert!(api.peer_observe.is_none());
+        assert!(
+            api.peer_prepare_audio.is_none()
+                && api.peer_send_prepared.is_none()
+                && api.peer_elapsed_ms.is_none()
+                && api.peer_step_wake.is_none()
+                && api.peer_set_deadline.is_none()
+        );
+        unsafe {
+            super::peer_step_wake(ptr::null_mut(), ptr::null_mut());
+            super::peer_step_wake(api.context, ptr::null_mut());
+        }
+        assert_eq!(
+            unsafe { super::peer_set_deadline(ptr::null_mut(), ptr::null_mut(), u64::MAX) },
+            -1
+        );
+        let peer = owner.peer_handle(crate::iax::tests::peer_for_host_callback(0, false, false));
+        assert_eq!(
+            unsafe { super::peer_set_deadline(api.context, peer, 0) },
+            -1
+        );
+        owner.destroy_peer(peer);
         unsafe extern "C" fn step(_: *mut c_void) -> i32 {
             0
         }
@@ -1175,6 +1282,49 @@ mod tests {
     }
 
     #[test]
+    fn prepared_media_rejects_invalid_buffers_without_touching_output() {
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let peer = owner.peer_handle(crate::iax::tests::peer_for_host_callback(0, false, false));
+        let pcm = [0.0_f32];
+        let mut output = [0xa5];
+        let output_ptr = output.as_mut_ptr();
+        let oversized = isize::MAX as usize / size_of::<f32>() + 1;
+        for (handle, samples, count, encoded, capacity) in [
+            (ptr::null_mut(), pcm.as_ptr(), 1, output_ptr, 1),
+            (peer, pcm.as_ptr(), oversized, output_ptr, oversized),
+            (peer, ptr::null(), 1, output_ptr, 1),
+            (peer, pcm.as_ptr(), 1, ptr::null_mut(), 1),
+        ] {
+            assert_eq!(
+                unsafe {
+                    super::peer_prepare_audio(
+                        ptr::null_mut(),
+                        handle,
+                        samples,
+                        count,
+                        encoded,
+                        capacity,
+                    )
+                },
+                -1
+            );
+            assert_eq!(output, [0xa5]);
+        }
+        for (handle, bytes, count, expected) in [
+            (ptr::null_mut(), output.as_ptr(), 1, -1),
+            (peer, output.as_ptr(), isize::MAX as usize + 1, -1),
+            (peer, ptr::null(), 0, 0),
+        ] {
+            assert_eq!(
+                unsafe { super::peer_send_prepared(ptr::null_mut(), handle, bytes, count, 1234) },
+                expected
+            );
+        }
+        owner.destroy_peer(peer);
+    }
+
+    #[test]
     fn peer_callbacks_forward_events_and_report_send_results() {
         let owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
@@ -1211,6 +1361,60 @@ mod tests {
         let handle = owner.peer_handle(peer);
         assert_eq!(unsafe { super::peer_rate(ptr::null_mut(), handle) }, 8000);
         assert_eq!(unsafe { super::peer_ready(ptr::null_mut(), handle) }, 1);
+        let mut encoded = [0; 160];
+        assert_eq!(
+            unsafe {
+                super::peer_prepare_audio(
+                    ptr::null_mut(),
+                    handle,
+                    [0.0; 160].as_ptr(),
+                    160,
+                    encoded.as_mut_ptr(),
+                    160,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                super::peer_prepare_audio(
+                    ptr::null_mut(),
+                    handle,
+                    ptr::null(),
+                    0,
+                    ptr::null_mut(),
+                    0,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                super::peer_prepare_audio(
+                    ptr::null_mut(),
+                    handle,
+                    ptr::null(),
+                    1,
+                    ptr::null_mut(),
+                    0,
+                )
+            },
+            -1
+        );
+        assert_eq!(
+            unsafe {
+                super::peer_send_prepared(ptr::null_mut(), handle, encoded.as_ptr(), 160, 1234)
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { super::peer_send_prepared(ptr::null_mut(), handle, ptr::null(), 1, 1234) },
+            -1
+        );
+        assert_eq!(
+            unsafe { super::peer_elapsed_ms(ptr::null_mut(), handle) },
+            1234
+        );
         assert_eq!(
             unsafe { super::peer_send_text(ptr::null_mut(), handle, c"status".as_ptr(), 6) },
             0
@@ -1235,6 +1439,26 @@ mod tests {
 
         let peer = crate::iax::tests::peer_for_host_callback(0, true, true);
         let handle = owner.peer_handle(peer);
+        assert_eq!(
+            unsafe {
+                super::peer_send_prepared(ptr::null_mut(), handle, encoded.as_ptr(), 160, 1234)
+            },
+            1,
+            "congestion must remain retryable across both ABIs"
+        );
+        assert_eq!(
+            unsafe {
+                super::peer_prepare_audio(
+                    ptr::null_mut(),
+                    handle,
+                    [0.0; 160].as_ptr(),
+                    160,
+                    encoded.as_mut_ptr(),
+                    160,
+                )
+            },
+            -1
+        );
         assert_eq!(
             unsafe {
                 super::peer_read(
@@ -1355,6 +1579,22 @@ mod tests {
         let accepted_peer = accepted.swap(0, Ordering::AcqRel) as *mut c_void;
         let server_client = crate::iax::IaxClient::load(library).unwrap();
         let mut inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
+
+        // The provider's packet bound is stricter than the host's safe-slice bound.
+        let oversized = [0xff; 1500];
+        assert_eq!(
+            unsafe {
+                super::peer_send_prepared(
+                    ptr::null_mut(),
+                    peer as *mut c_void,
+                    oversized.as_ptr(),
+                    oversized.len(),
+                    0,
+                )
+            },
+            -1,
+            "a provider rejection must not become success or retryable congestion"
+        );
 
         // 51018 sent a valid 1291-byte topology that used to terminate this call.
         let topology = format!("L {}T1506316\0", "T506316,".repeat(160));
@@ -1528,6 +1768,14 @@ mod tests {
         if unsafe { super::peer_observe(state.host, state.peer, &mut observation) } != 0 {
             return -1;
         }
+        let after = if state.observations.load(Ordering::Acquire) == 0 {
+            0
+        } else {
+            u64::MAX
+        };
+        if unsafe { super::peer_set_deadline(state.host, state.peer, after) } != 0 {
+            return -1;
+        }
         state.observations.fetch_add(1, Ordering::Release);
         status
     }
@@ -1556,6 +1804,21 @@ mod tests {
             },
             0
         );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { (*state).observations.load(Ordering::Acquire) } < 2
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        let scheduled = unsafe { (*state).observations.load(Ordering::Acquire) };
+        unsafe { super::peer_step_wake(host.descriptor().context, token) };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { (*state).observations.load(Ordering::Acquire) } == scheduled
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        let awakened = unsafe { (*state).observations.load(Ordering::Acquire) } > scheduled;
         inbound.send_audio(&[0.25; 480]).unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
         while unsafe { (*state).samples.load(Ordering::Acquire) } < 480 && Instant::now() < deadline
@@ -1567,6 +1830,11 @@ mod tests {
             super::peer_step_detach(host.descriptor().context, token);
         }
         let state = unsafe { Box::from_raw(state) };
+        assert!(
+            scheduled >= 2,
+            "the owner deadline must schedule an idle peer"
+        );
+        assert!(awakened, "an explicit wake must schedule the parked peer");
         assert_eq!(state.samples.load(Ordering::Acquire), 480);
         assert!(state.observations.load(Ordering::Acquire) > 0);
     }

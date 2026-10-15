@@ -27,15 +27,22 @@ pub(crate) struct State {
     pub(crate) fail_bind: bool,
     pub(crate) bound_radio: Option<String>,
     pub(crate) pause: Option<Arc<std::sync::Barrier>>,
+    fail_owner_allocation: Option<usize>,
     pub(crate) drops: usize,
     pub(crate) async_attaches: usize,
     pub(crate) async_stops: usize,
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
+    no_async_thread: bool,
     pub(crate) observe_calls: usize,
     pub(crate) fail_observe: bool,
     pub(crate) bad_observe_size: bool,
     pub(crate) bad_observe_version: bool,
+    encoded_calls: usize,
+    pub(crate) prepared: Vec<(Vec<u8>, u32)>,
+    pub(crate) prepared_result: i32,
+    call_elapsed: u32,
+    deadlines: Vec<u64>,
 }
 type Shared = Arc<Mutex<State>>;
 
@@ -59,6 +66,7 @@ unsafe extern "C" fn rate(_: *mut c_void, peer: *const c_void) -> u32 {
 unsafe extern "C" fn ready(_: *mut c_void, peer: *mut c_void) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
     let pause = state.pause.take();
+    let fail_allocation = state.fail_owner_allocation.take();
     let result = if state.fail_ready {
         -1
     } else {
@@ -68,6 +76,9 @@ unsafe extern "C" fn ready(_: *mut c_void, peer: *mut c_void) -> i32 {
     if let Some(pause) = pause {
         pause.wait();
         pause.wait();
+    }
+    if let Some(bytes) = fail_allocation {
+        crate::fixture::fail_next_allocation(bytes);
     }
     result
 }
@@ -135,7 +146,10 @@ unsafe extern "C" fn write(
 #[test]
 fn audio_burst_ends_with_exactly_one_idle_marker() {
     let (mut session, _control, state, mut output) = make_session("1000");
-    assert_eq!(output.write(&[0.25; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]),
+        0
+    );
 
     session.step(20).unwrap();
     session.step(40).unwrap();
@@ -151,7 +165,7 @@ fn outbound_audio_keeps_up_when_driver_wakes_one_millisecond_late() {
         let (mut session, _control, _state, mut output) = make_session("1000");
         for now_ms in 0..=4_000 {
             if now_ms % 20 == 0 {
-                output.write(&[0.25; 960]);
+                output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]);
             }
             if now_ms % driver_interval_ms == 0 {
                 session.step(now_ms).unwrap();
@@ -168,7 +182,13 @@ fn outbound_audio_keeps_up_when_driver_wakes_one_millisecond_late() {
 #[test]
 fn outbound_audio_rebases_after_late_start_and_idle() {
     let (mut session, _control, state, mut output) = make_session("1000");
-    assert_eq!(output.write(&[0.25; 1920]), 0);
+    assert_eq!(
+        output.write(
+            rpt_advanced_core::audio::AudioSpan::default(),
+            &[0.25; 1920]
+        ),
+        0
+    );
     session.step(5_000).unwrap();
     session.step(5_001).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960]);
@@ -177,7 +197,13 @@ fn outbound_audio_rebases_after_late_start_and_idle() {
     session.step(10_000).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960, 960, 0]);
 
-    assert_eq!(output.write(&[0.25; 1920]), 0);
+    assert_eq!(
+        output.write(
+            rpt_advanced_core::audio::AudioSpan::default(),
+            &[0.25; 1920]
+        ),
+        0
+    );
     session.step(10_001).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960, 960, 0]);
     session.step(10_020).unwrap();
@@ -190,7 +216,13 @@ fn outbound_audio_rebases_after_late_start_and_idle() {
 #[test]
 fn outbound_audio_catches_up_one_block_per_step_after_owner_stall() {
     let (mut session, _control, state, mut output) = make_session("1000");
-    assert_eq!(output.write(&[0.25; 2880]), 0);
+    assert_eq!(
+        output.write(
+            rpt_advanced_core::audio::AudioSpan::default(),
+            &[0.25; 2880]
+        ),
+        0
+    );
     session.step(0).unwrap();
     assert_eq!(state.lock().unwrap().writes, [960]);
 
@@ -208,14 +240,20 @@ fn legacy_newkey_is_echoed_once_without_gating_audio() {
         .unwrap()
         .input
         .push_back(Input::Text(b"!NEWKEY!"));
-    assert_eq!(output.write(&[0.5; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5; 960]),
+        0
+    );
     session.step(0).unwrap();
     state
         .lock()
         .unwrap()
         .input
         .push_back(Input::Text(b"!NEWKEY!"));
-    assert_eq!(output.write(&[0.25; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]),
+        0
+    );
     session.step(20).unwrap();
 
     let state = state.lock().unwrap();
@@ -306,7 +344,10 @@ fn newkey1_does_not_suppress_outbound_audio() {
         .unwrap()
         .input
         .push_back(Input::Text(b"!NEWKEY1!"));
-    assert_eq!(output.write(&[0.5; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5; 960]),
+        0
+    );
     session.step(20).unwrap();
     assert_eq!(state.lock().unwrap().audio, vec![0.5; 960]);
 }
@@ -355,7 +396,10 @@ fn addressed_asl_remote_dtmf_text_becomes_a_peer_digit_event() {
 
 unsafe extern "C" fn destroy(_: *mut c_void, peer: *mut c_void) {
     let state = unsafe { Box::from_raw(peer.cast::<Shared>()) };
-    state.lock().unwrap().drops += 1;
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .drops += 1;
 }
 struct AsyncRegistration {
     state: Shared,
@@ -374,13 +418,10 @@ unsafe extern "C" fn async_attach(
     }
     state.lock().unwrap().async_attaches += 1;
     let address = step_context as usize;
-    let thread = thread::spawn(move || unsafe { step.unwrap()(address as *mut c_void) });
+    let thread = (!state.lock().unwrap().no_async_thread)
+        .then(|| thread::spawn(move || unsafe { step.unwrap()(address as *mut c_void) }));
     unsafe {
-        *registration = Box::into_raw(Box::new(AsyncRegistration {
-            state,
-            thread: Some(thread),
-        }))
-        .cast();
+        *registration = Box::into_raw(Box::new(AsyncRegistration { state, thread })).cast();
     }
     0
 }
@@ -390,7 +431,9 @@ unsafe extern "C" fn async_stop(_: *mut c_void, registration: *mut c_void) {
 }
 unsafe extern "C" fn async_detach(_: *mut c_void, registration: *mut c_void) {
     let mut registration = unsafe { Box::from_raw(registration.cast::<AsyncRegistration>()) };
-    registration.thread.take().unwrap().join().unwrap();
+    if let Some(thread) = registration.thread.take() {
+        thread.join().unwrap();
+    }
     registration.state.lock().unwrap().async_detaches += 1;
 }
 unsafe extern "C" fn observe_peer(
@@ -422,6 +465,11 @@ unsafe extern "C" fn observe_peer(
             ingress_overflow_drops: 6,
             ingress_queued_packets: 7,
             ingress_capacity_packets: 64,
+            egress_datagrams: 10,
+            egress_would_block: 2,
+            egress_reliable_retries: 1,
+            egress_reliable_pending: 3,
+            egress_reply_pending: 0,
         };
         if state.bad_observe_size {
             (*output).struct_size -= 1;
@@ -436,6 +484,13 @@ pub(crate) fn peer(rate_hz: u32) -> (PeerIo, Shared) {
     peer_with_async(rate_hz, false)
 }
 pub(crate) fn peer_with_async(rate_hz: u32, async_enabled: bool) -> (PeerIo, Shared) {
+    peer_with_egress(rate_hz, async_enabled, false)
+}
+pub(crate) fn peer_with_egress(
+    rate_hz: u32,
+    async_enabled: bool,
+    egress: bool,
+) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
         ..State::default()
@@ -455,13 +510,569 @@ pub(crate) fn peer_with_async(rate_hz: u32, async_enabled: bool) -> (PeerIo, Sha
         table.peer_step_detach = Some(async_detach);
         table.peer_observe = Some(observe_peer);
     }
+    if egress {
+        table.peer_prepare_audio = Some(prepare_audio);
+        table.peer_send_prepared = Some(send_prepared);
+        table.peer_elapsed_ms = Some(elapsed);
+        table.peer_step_wake = Some(wake_only);
+        table.peer_set_deadline = Some(deadline);
+    }
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let handle = Box::into_raw(Box::new(state.clone())).cast();
     (unsafe { services.peer(handle) }.unwrap(), state)
 }
+
+unsafe extern "C" fn prepare_audio(
+    _: *mut c_void,
+    peer: *mut c_void,
+    input: *const f32,
+    count: usize,
+    output: *mut u8,
+    capacity: usize,
+) -> i32 {
+    assert!(capacity >= count);
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.encoded_calls += 1;
+    for (input, output) in unsafe { std::slice::from_raw_parts(input, count) }
+        .iter()
+        .zip(unsafe { std::slice::from_raw_parts_mut(output, count) })
+    {
+        *output = (input * 100.0) as u8;
+    }
+    0
+}
+unsafe extern "C" fn send_prepared(
+    _: *mut c_void,
+    peer: *mut c_void,
+    input: *const u8,
+    count: usize,
+    timestamp: u32,
+) -> i32 {
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.prepared.push((
+        unsafe { std::slice::from_raw_parts(input, count) }.to_vec(),
+        timestamp,
+    ));
+    state.prepared_result
+}
+unsafe extern "C" fn elapsed(_: *mut c_void, peer: *mut c_void) -> u32 {
+    unsafe { state(peer) }.lock().unwrap().call_elapsed
+}
+unsafe extern "C" fn wake_only(_: *mut c_void, _: *mut c_void) {}
+unsafe extern "C" fn deadline(_: *mut c_void, peer: *mut c_void, after: u64) -> i32 {
+    unsafe { state(peer) }.lock().unwrap().deadlines.push(after);
+    0
+}
+fn timed_session() -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
+    let (io, state) = peer_with_egress(48000, true, true);
+    state.lock().unwrap().call_elapsed = 2_000;
+    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    (session, control, state, output)
+}
+
+#[test]
+fn egress_host_contract_and_asterisk_pcm() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_step_attach = Some(async_attach);
+    table.peer_step_stop = Some(async_stop);
+    table.peer_step_detach = Some(async_detach);
+    for mask in 0..32 {
+        table.peer_prepare_audio = (mask & 1 != 0).then_some(prepare_audio);
+        table.peer_send_prepared = (mask & 2 != 0).then_some(send_prepared);
+        table.peer_elapsed_ms = (mask & 4 != 0).then_some(elapsed);
+        table.peer_step_wake = (mask & 8 != 0).then_some(wake_only);
+        table.peer_set_deadline = (mask & 16 != 0).then_some(deadline);
+        assert_eq!(
+            unsafe { HostServices::open(&table) }.is_ok(),
+            mask == 0 || mask == 31
+        );
+    }
+    table.peer_step_attach = None;
+    table.peer_step_stop = None;
+    table.peer_step_detach = None;
+    assert!(unsafe { HostServices::open(&table) }.is_err());
+    table = unsafe { crate::fixture::host_descriptor().read() };
+    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v5, peer_prepare_audio);
+    for length in boundary..std::mem::size_of_val(&table) {
+        table.struct_size = length as u32;
+        let mut prefix = vec![0_u64; length.div_ceil(8)];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                ptr::from_ref(&table).cast::<u8>(),
+                prefix.as_mut_ptr().cast(),
+                length,
+            )
+        };
+        assert_eq!(
+            unsafe { HostServices::open(prefix.as_ptr().cast()) }.is_ok(),
+            length == boundary
+        );
+    }
+    let (mut session, _control, state, mut output) = make_session("1000");
+    output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]);
+    session.step(0).unwrap();
+    session.step(20).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.writes, [960, 0]);
+    assert_eq!(state.audio, vec![0.25; 960]);
+    assert_eq!(state.encoded_calls, 0);
+}
+fn timed_span(sample: u64, born_ms: u64) -> rpt_advanced_core::audio::AudioSpan {
+    rpt_advanced_core::audio::AudioSpan {
+        generation: 1,
+        burst: 1,
+        source_start: sample,
+        stream: 1,
+        born_ns: Some(born_ms * 1_000_000),
+    }
+}
+
+#[test]
+fn egress_expiry_preserves_media_timeline() {
+    let (mut session, _control, state, mut output) = timed_session();
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(1_199).unwrap();
+    assert_eq!(state.lock().unwrap().prepared, [(vec![25; 960], 1_801)]);
+    output.write(timed_span(48_960, 1_000), &[0.5; 960]);
+    session.step(1_200).unwrap();
+    assert_eq!(
+        state.lock().unwrap().encoded_calls,
+        1,
+        "expired PCM must not enter conversion/encoding"
+    );
+    output.write(timed_span(49_920, 1_040), &[0.75; 960]);
+    session.step(1_239).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared.last(), Some(&(vec![75; 960], 1_841)));
+    assert_eq!(state.encoded_calls, 2);
+}
+
+#[test]
+fn egress_prepared_retry_encodes_once() {
+    let (mut session, control, state, mut output) = timed_session();
+    state.lock().unwrap().prepared_result = 1;
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(1_000).unwrap();
+    session.step(1_050).unwrap();
+    state.lock().unwrap().prepared_result = 0;
+    session.step(1_199).unwrap();
+    assert_eq!(state.lock().unwrap().encoded_calls, 1);
+    assert_eq!(
+        state.lock().unwrap().prepared,
+        vec![(vec![25; 960], 2_000); 3]
+    );
+    state.lock().unwrap().prepared_result = 1;
+    output.write(timed_span(48_960, 1_200), &[0.5; 960]);
+    session.step(1_200).unwrap();
+    let attempts = state.lock().unwrap().prepared.clone();
+    session.step(1_400).unwrap();
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .prepared
+            .iter()
+            .filter(|(bytes, _)| !bytes.is_empty())
+            .cloned()
+            .collect::<Vec<_>>(),
+        attempts,
+        "expiry is never renewed by retry"
+    );
+    let metrics = control.snapshot().unwrap().egress;
+    assert_eq!(metrics.accepted, 1);
+    assert_eq!(metrics.blocked, 3);
+    assert_eq!(metrics.expired_native_samples, 960);
+    assert_eq!(metrics.send_age_ms[199], 1);
+    // Continuous source samples retain the earlier converter timeline, even
+    // when this fixture publishes the next block with a newer wall-clock birth.
+    assert_eq!(metrics.maximum_queue_age_ns, 380_000_000);
+}
+
+#[test]
+fn egress_rejection_count_survives_generation_redirect() {
+    let (mut session, control, _state, mut output) = timed_session();
+    assert_eq!(output.write(timed_span(48_000, 1_000), &[0.25; 9601]), 1);
+    session.step(1_000).unwrap();
+    assert_eq!(
+        control.snapshot().unwrap().egress.rejected_native_samples,
+        1
+    );
+    let (_producer, replacement) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    session.outbound.redirect(replacement).unwrap();
+    session.step(1_001).unwrap();
+    assert_eq!(
+        control.snapshot().unwrap().egress.rejected_native_samples,
+        1
+    );
+}
+
+#[test]
+fn egress_idle_marker_retries_without_ending_or_blocking_another_peer() {
+    let (mut session, control, state, mut output) = timed_session();
+    state.lock().unwrap().fail_write = true; // Prepared hosts must not use legacy PCM writes.
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(1_000).unwrap(); // Full voice committed, but the provider may still hold it.
+    state.lock().unwrap().prepared_result = 1;
+    session.step(1_020).unwrap();
+    assert_eq!(
+        state.lock().unwrap().prepared.last(),
+        Some(&(vec![], 2_020))
+    );
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&200_000_000));
+    assert!(!control.ended());
+
+    let (mut healthy, _healthy_control, healthy_state, mut healthy_output) = timed_session();
+    healthy_output.write(timed_span(48_000, 1_020), &[0.5; 960]);
+    healthy.step(1_020).unwrap();
+    assert_eq!(healthy_state.lock().unwrap().prepared.len(), 1);
+
+    session.step(1_040).unwrap();
+    state.lock().unwrap().prepared_result = 0;
+    session.step(1_060).unwrap();
+    let attempts = state.lock().unwrap().prepared.len();
+    session.step(1_080).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared.len(), attempts);
+    assert_eq!(&state.prepared[1..], &vec![(vec![], 2_020); 3]);
+    assert!(state.writes.is_empty());
+    assert_eq!(state.encoded_calls, 1);
+}
+
+#[test]
+fn egress_idle_marker_retry_expires_without_ending_the_peer() {
+    let (mut session, control, state, mut output) = timed_session();
+    state.lock().unwrap().fail_write = true;
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(1_000).unwrap();
+    state.lock().unwrap().prepared_result = 1;
+    session.step(1_020).unwrap();
+    let attempts = state.lock().unwrap().prepared.len();
+    session.step(1_220).unwrap();
+    session.step(1_240).unwrap();
+    assert_eq!(state.lock().unwrap().prepared.len(), attempts);
+    assert!(!control.ended());
+}
+
+#[test]
+fn blocked_egress_preserves_ingress_commands_and_stop() {
+    let (mut session, mut control, state, mut output) = timed_session();
+    {
+        let mut state = state.lock().unwrap();
+        state.prepared_result = 1;
+        state.input.push_back(Input::Gap(80));
+        state.input.push_back(Input::Audio(vec![0.25; 160]));
+        state.input.push_back(Input::Text(b"L T3000"));
+    }
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    control.send(Command::Digit('1')).ok().unwrap();
+    session.step(1_000).unwrap();
+    assert!(state.lock().unwrap().input.is_empty());
+    assert!(matches!(control.event(), Some(Event::Text(bytes)) if bytes == b"L T3000"));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text.ends_with(b" 1"))
+    );
+    assert_eq!(control.snapshot().unwrap().egress.blocked, 1);
+    let attempts = state.lock().unwrap().prepared.len();
+    session.stop();
+    assert!(session.step(1_001).is_err());
+    assert_eq!(state.lock().unwrap().prepared.len(), attempts);
+}
+
+#[test]
+fn egress_late_wake_keeps_absolute_cadence() {
+    let (mut session, _control, state, mut output) = timed_session();
+    for block in 0..3 {
+        output.write(
+            timed_span(48_000 + block * 960, 1_000 + block * 20),
+            &[0.25; 960],
+        );
+    }
+    for step in 1..=3 {
+        session.step(1_061).unwrap();
+        assert_eq!(
+            state.lock().unwrap().prepared.len(),
+            step,
+            "one media item per owner turn"
+        );
+    }
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .prepared
+            .iter()
+            .map(|(_, t)| *t)
+            .collect::<Vec<_>>(),
+        [1939, 1959, 1979]
+    );
+}
+
+#[test]
+fn egress_fir_output_keeps_sample_time_across_small_partitions_and_a_gap() {
+    let (io, state) = peer_with_egress(8000, true, true);
+    state.lock().unwrap().call_elapsed = 2000;
+    let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let mut position = 48_000;
+    for count in [1, 2, 17, 600, 1, 1, 1, 337] {
+        let mut span = timed_span(position, 1_000);
+        span.born_ns = Some(1_000_000_000 + (position - 48_000) * 1_000_000_000 / 48_000);
+        output.write(span, &vec![0.25; count]);
+        session.step(1_020).unwrap();
+        position += count as u64;
+    }
+    output.write(timed_span(48_960, 1_020), &[0.25; 960]);
+    session.step(1_040).unwrap();
+    let mut generated = 0;
+    for (bytes, timestamp) in &state.lock().unwrap().prepared {
+        assert_eq!(*timestamp, 1980 + generated * 1000 / 8000);
+        generated += bytes.len() as u32;
+    }
+    output.write(timed_span(49_920, 1_040), &[0.75; 960]);
+    session.step(1_240).unwrap();
+    let before = state.lock().unwrap().encoded_calls;
+    let mut fresh = timed_span(60_000, 1_250);
+    fresh.burst += 1;
+    output.write(fresh, &[0.0; 960]);
+    session.step(1_260).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.encoded_calls, before + 1);
+    let last = state.prepared.last().unwrap();
+    assert_eq!(last.1, 2230, "discarded samples remain a source-time gap");
+    assert!(
+        last.0.iter().all(|sample| *sample == 0),
+        "no old FIR history crosses the gap"
+    );
+}
+
+#[test]
+fn egress_fractional_fir_phase_keeps_retained_audio_age_across_clock_remap() {
+    let (io, state) = peer_with_egress(16000, true, true);
+    let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    // The real adapter preserves fractional phase through reset. These complete
+    // bursts leave the third burst's output behind its input at sample 622.
+    for burst in 0..3 {
+        let base_ms = 1000 + burst * 1000;
+        let mut consumed = 0;
+        for (index, count) in [1, 2, 17, 600, 1, 1, 1, 337]
+            .into_iter()
+            .chain(std::iter::repeat_n(1, 960))
+            .chain(std::iter::repeat_n(960, 10))
+            .enumerate()
+        {
+            let remap_ns = if burst == 2 && index >= 6 {
+                100_000_000
+            } else {
+                0
+            };
+            let born_ns = base_ms * 1_000_000 + consumed * 1_000_000_000 / 48_000 + remap_ns;
+            let mut span = timed_span(base_ms * 48 + consumed, base_ms);
+            span.burst = burst + 1;
+            span.born_ns = Some(born_ns);
+            output.write(span, &vec![0.25; count]);
+            session.step(born_ns.div_ceil(1_000_000)).unwrap();
+            consumed += count as u64;
+        }
+    }
+    assert!(state.lock().unwrap().encoded_calls > 0);
+    assert_eq!(
+        control.snapshot().unwrap().egress.send_age_ms[100],
+        1,
+        "the first output after the remap still contains 100 ms-old FIR audio"
+    );
+}
+
+#[test]
+fn egress_clock_remap_does_not_renew_hidden_fir_history() {
+    let (io, state) = peer_with_egress(8000, true, true);
+    let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    output.write(timed_span(48_000, 1_000), &[0.9; 600]);
+    session.step(1_000).unwrap();
+    output.write(timed_span(48_600, 1_300), &[0.0; 960]);
+    session.step(1_300).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared.len(), 2);
+    assert!(
+        state.prepared[1].0.iter().all(|sample| *sample == 0),
+        "old filter history must expire with its own source span"
+    );
+}
+
+#[test]
+fn egress_discontinuities_reset_filter_history_without_splicing_old_audio() {
+    for boundary in ["stream", "generation", "burst", "position"] {
+        let (io, state) = peer_with_egress(8000, true, true);
+        state.lock().unwrap().call_elapsed = 2000;
+        let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+        output.write(timed_span(48_000, 1_000), &[0.9; 960]);
+        session.step(1_000).unwrap();
+        let mut next = timed_span(48_960, 1_020);
+        match boundary {
+            "stream" => next.stream += 1,
+            "generation" => next.generation += 1,
+            "burst" => next.burst += 1,
+            _ => next.source_start += 960,
+        }
+        output.write(next, &[0.0; 960]);
+        session.step(1_020).unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.prepared.len(), 2, "{boundary}");
+        assert!(
+            state.prepared[1].0.iter().all(|sample| *sample == 0),
+            "{boundary}"
+        );
+        assert_eq!(
+            state.prepared[1].1,
+            match boundary {
+                "stream" => 2000,
+                "position" => 2040,
+                _ => 2020,
+            }
+        );
+    }
+}
+
+#[test]
+fn egress_unmapped_backlog_expires_one_span_per_turn_without_encoding() {
+    let (mut session, control, state, mut output) = timed_session();
+    let mut span = timed_span(48_000, 1_000);
+    span.born_ns = None;
+    output.write(span, &[0.25; 960]);
+    span.source_start += 960;
+    output.write(span, &[0.5; 960]);
+    session.step(1_000).unwrap();
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&0));
+    assert_eq!(
+        control.snapshot().unwrap().egress.expired_native_samples,
+        960
+    );
+    session.step(1_000).unwrap();
+    assert_eq!(
+        control.snapshot().unwrap().egress.expired_native_samples,
+        1920
+    );
+    assert!(state.lock().unwrap().prepared.is_empty());
+}
+
+#[test]
+fn egress_reopen_rejects_queued_old_stream_before_encoding() {
+    let (mut session, control, state, mut output) = timed_session();
+    let clock = Arc::new(SourceClock::default());
+    clock.restart();
+    session.bind_clock(Arc::clone(&clock));
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    clock.restart();
+    session.step(1_000).unwrap();
+    assert!(state.lock().unwrap().prepared.is_empty());
+    assert_eq!(
+        control.snapshot().unwrap().egress.expired_native_samples,
+        960
+    );
+}
+
+#[test]
+fn egress_idle_async_session_parks_after_negotiation() {
+    let (mut session, _control, state, _) = timed_session();
+    session.async_epoch = Some(Instant::now());
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY!"));
+    session.step(0).unwrap();
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&u64::MAX));
+}
+
+#[test]
+fn egress_future_reopen_and_redirect_discard_uncommitted_media() {
+    let (mut session, mut control, state, mut output) = timed_session();
+    let clock = Arc::new(SourceClock::default());
+    clock.restart();
+    session.bind_clock(clock.clone());
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(900).unwrap();
+    assert_eq!(state.lock().unwrap().encoded_calls, 0);
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&100_000_000));
+    state.lock().unwrap().prepared_result = 1;
+    session.step(1_000).unwrap();
+    clock.restart();
+    session.step(1_010).unwrap();
+    assert_eq!(
+        state.lock().unwrap().prepared.len(),
+        1,
+        "old stream cannot retry after reopen"
+    );
+    let mut span = timed_span(48_960, 1_020);
+    span.stream = clock.stream();
+    output.write(span, &[0.5; 960]);
+    session.step(1_020).unwrap();
+    let (mut replacement, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (inbound, _) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
+    assert!(
+        control
+            .send(Command::Redirect { inbound, outbound })
+            .is_ok()
+    );
+    span.generation += 1;
+    span.source_start += 960;
+    span.born_ns = Some(1_040_000_000);
+    replacement.write(span, &[0.75; 960]);
+    state.lock().unwrap().prepared_result = 0;
+    session.step(1_040).unwrap();
+    let sent = state.lock().unwrap().prepared.clone();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[2], (vec![75; 960], 2_020));
+    session.step(1_060).unwrap();
+    assert_eq!(
+        state.lock().unwrap().prepared.last(),
+        Some(&(vec![], 2_040))
+    );
+}
+
+#[test]
+fn egress_future_span_does_not_hold_an_ended_burst_keyed() {
+    let (mut session, _control, state, mut output) = timed_session();
+    output.write(timed_span(48_000, 1_000), &[0.25; 960]);
+    session.step(1_000).unwrap();
+    let mut next = timed_span(52_800, 1_100);
+    next.burst = 2;
+    output.write(next, &[0.5; 960]);
+    session.step(1_020).unwrap();
+    assert_eq!(
+        state.lock().unwrap().prepared.last(),
+        Some(&(vec![], 2_020)),
+        "future media cannot extend the current key"
+    );
+    assert_eq!(state.lock().unwrap().prepared.len(), 2);
+    session.step(1_100).unwrap();
+    assert_eq!(state.lock().unwrap().prepared.len(), 3);
+}
 fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (io, state) = peer_with_async(48000, true);
-    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600)
+    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
     let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
@@ -469,7 +1080,7 @@ fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAud
 }
 fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (io, state) = peer(48000);
-    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600)
+    let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
     let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
@@ -527,6 +1138,65 @@ fn disconnected_async_peer_is_reaped_before_the_worker_stops() {
 }
 
 #[test]
+fn egress_retirement_waits_for_an_admitted_wake_before_detaching() {
+    struct WakeBarrier {
+        entered: std::sync::Barrier,
+        release: std::sync::Barrier,
+    }
+    unsafe extern "C" fn wake(context: *mut c_void, _: *mut c_void) {
+        let barrier = unsafe { &*context.cast::<WakeBarrier>() };
+        barrier.entered.wait();
+        barrier.release.wait();
+    }
+    let barrier = Arc::new(WakeBarrier {
+        entered: std::sync::Barrier::new(2),
+        release: std::sync::Barrier::new(2),
+    });
+    let (session, control, state, _) = make_async_session("1000");
+    state.lock().unwrap().no_async_thread = true;
+    let token = session.wake.clone();
+    unsafe {
+        token.attach(
+            wake,
+            Arc::as_ptr(&barrier).cast_mut().cast(),
+            ptr::null_mut(),
+        )
+    };
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    assert!(worker.attach(session).is_ok());
+    let notifier = token.clone();
+    let notifying = thread::spawn(move || notifier.notify());
+    barrier.entered.wait();
+    token.close();
+    control.stop();
+    worker.reap();
+    assert_eq!(worker.async_peers.len(), 1);
+    assert_eq!(state.lock().unwrap().async_detaches, 0);
+    let (done, completed) = std::sync::mpsc::channel();
+    let stopping = thread::spawn(move || {
+        worker.stop();
+        done.send(()).unwrap();
+    });
+    let limit = Instant::now() + Duration::from_secs(3);
+    while state.lock().unwrap().async_stops == 0 {
+        assert!(Instant::now() < limit);
+        thread::yield_now();
+    }
+    let waiting = completed.recv_timeout(Duration::from_millis(20));
+    let dropped_early = state.lock().unwrap().drops;
+    barrier.release.wait();
+    notifying.join().unwrap();
+    stopping.join().unwrap();
+    assert!(matches!(
+        waiting,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(dropped_early, 0);
+    assert_eq!(state.lock().unwrap().async_detaches, 1);
+    assert_eq!(state.lock().unwrap().drops, 1);
+}
+
+#[test]
 fn async_peer_drains_ready_gap_audio_and_control_in_one_bounded_turn() {
     let (mut session, mut control, state, _) = make_async_session("1000");
     {
@@ -550,6 +1220,10 @@ fn peer_observation_is_copied_for_control_without_a_second_peer_borrow() {
     assert_eq!(observation.jitter_missing_samples, 160);
     assert_eq!(observation.jitter_overload_span_samples, 800);
     assert_eq!(observation.ingress_queued_packets, 7);
+    assert_eq!(observation.egress_datagrams, 10);
+    assert_eq!(observation.egress_would_block, 2);
+    assert_eq!(observation.egress_reliable_retries, 1);
+    assert_eq!(observation.egress_reliable_pending, 3);
     assert_eq!(state.lock().unwrap().observe_calls, 1);
     state.lock().unwrap().fail_observe = true;
     session.step(20).unwrap();
@@ -640,6 +1314,19 @@ fn retained_step_rejects_missing_context_and_unregistered_epoch() {
 }
 
 #[test]
+fn egress_retained_step_reports_io_failure_and_ends_the_session() {
+    let (mut session, control, state, _) = make_async_session("1000");
+    session.async_epoch = Some(Instant::now());
+    state.lock().unwrap().fail_read = true;
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    assert_eq!(
+        unsafe { retained_step(ptr::from_mut(&mut session).cast()) },
+        -1
+    );
+    assert!(control.snapshot().unwrap().ended);
+}
+
+#[test]
 fn spurious_ready_without_an_event_yields_the_peer_turn() {
     let (mut session, _control, state, _) = make_session("1000");
     state.lock().unwrap().ready_without_input = true;
@@ -675,17 +1362,121 @@ fn finished_synchronous_owner_rejects_a_new_session_without_consuming_it() {
 }
 
 #[test]
-fn async_capacity_rejects_before_host_registration() {
-    let (session, _control, state, _) = make_async_session("1000");
+fn egress_admission_above_1024() {
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
-    worker.test_async_capacity = 0;
-    let session = worker
-        .attach(session)
-        .expect_err("async peer limit reached");
-    assert_eq!(state.lock().unwrap().async_attaches, 0);
-    drop(session);
-    assert_eq!(state.lock().unwrap().drops, 1);
+    let mut owners = Vec::new();
+    for number in 0..2000 {
+        let (mut session, control, state, output) = make_async_session("1000");
+        session.remote = (10000 + number).to_string();
+        state.lock().unwrap().no_async_thread = true;
+        assert!(worker.attach(session).is_ok(), "admission {number}");
+        owners.push((control, state, output));
+    }
+    assert!(worker.thread.is_none());
+    assert_eq!(worker.async_peers.len(), 2000);
+    for (number, peer) in worker.async_peers.iter().enumerate() {
+        // This fixture retains but never executes callbacks.
+        assert_eq!(
+            unsafe { &peer.session.as_ref().remote },
+            &(10000 + number).to_string()
+        );
+    }
+    owners[1000].0.stop();
+    worker.reap();
+    assert_eq!(worker.async_peers.len(), 1999);
+    assert_eq!(owners[1000].1.lock().unwrap().async_detaches, 1);
+    let (session, control, state, _output) = make_async_session("1000");
+    state.lock().unwrap().no_async_thread = true;
+    assert!(worker.attach(session).is_ok());
+    assert_eq!(worker.async_peers.len(), 2000);
+    drop(control);
     worker.stop();
+    assert!(
+        owners
+            .iter()
+            .all(|(_, state, _)| state.lock().unwrap().drops == 1)
+    );
+}
+
+#[test]
+fn egress_admission_failure_keeps_existing_peers() {
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    let (existing, existing_control, existing_state, _existing_output) = make_async_session("1000");
+    existing_state.lock().unwrap().no_async_thread = true;
+    assert!(worker.attach(existing).is_ok());
+    worker.async_peers.shrink_to_fit();
+    let mut probe = Vec::<usize>::with_capacity(1);
+    probe.push(0);
+    probe.try_reserve(1).unwrap();
+    let bytes = probe.capacity() * std::mem::size_of::<AsyncPeer>();
+    for reserve_failure in [true, false] {
+        let (session, _control, state, _output) = make_async_session("1000");
+        {
+            let mut state = state.lock().unwrap();
+            state.no_async_thread = true;
+            state.fail_async_attach = !reserve_failure;
+        }
+        let rejected = if reserve_failure {
+            crate::fixture::fail_allocation(bytes, || worker.attach(session))
+        } else {
+            worker.attach(session)
+        };
+        drop(rejected.expect_err("new admission must fail"));
+        assert_eq!(worker.async_peers.len(), 1);
+        assert_eq!(state.lock().unwrap().async_attaches, 0);
+        assert_eq!(state.lock().unwrap().drops, 1);
+        assert!(!existing_control.snapshot().unwrap().ended);
+    }
+    worker.stop();
+    assert_eq!(existing_state.lock().unwrap().async_detaches, 1);
+}
+
+#[test]
+fn egress_sync_allocation_failure_ends_only_the_new_admission() {
+    // Measure the standard Vec growth allocation without depending on its
+    // implementation's minimum capacity. Box pointers have usize's layout.
+    let mut probe = Vec::<usize>::new();
+    probe.try_reserve(1).unwrap();
+    let capacity = probe.capacity();
+    probe.resize(capacity, 0);
+    probe.try_reserve(1).unwrap();
+    let failure_bytes = probe.capacity() * std::mem::size_of::<Box<PeerSession>>();
+    let (first, first_control, first_state, _first_output) = make_session("1000");
+    let pause = Arc::new(std::sync::Barrier::new(2));
+    {
+        let mut state = first_state.lock().unwrap();
+        state.pause = Some(Arc::clone(&pause));
+        state.fail_owner_allocation = Some(failure_bytes);
+    }
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    assert!(worker.attach(first).is_ok());
+    pause.wait();
+    let mut admitted = Vec::new();
+    for _ in 1..=capacity {
+        let (session, control, state, output) = make_session("1000");
+        assert!(worker.attach(session).is_ok());
+        admitted.push((control, state, output));
+    }
+    pause.wait();
+    let limit = Instant::now() + Duration::from_secs(3);
+    while admitted.last().unwrap().1.lock().unwrap().drops == 0 {
+        assert!(Instant::now() < limit, "failed admission was not released");
+        thread::yield_now();
+    }
+    assert!(!first_control.ended());
+    assert!(
+        admitted[..capacity - 1]
+            .iter()
+            .all(|(control, _, _)| !control.ended())
+    );
+    assert!(admitted.last().unwrap().0.ended());
+    worker.stop();
+    assert_eq!(first_state.lock().unwrap().drops, 1);
+    assert!(
+        admitted
+            .iter()
+            .all(|(_, state, _)| state.lock().unwrap().drops == 1)
+    );
 }
 
 #[test]
@@ -742,7 +1533,10 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
         })
         .ok()
         .unwrap();
-    assert_eq!(output.write(&[0.25; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]),
+        0
+    );
     state
         .lock()
         .unwrap()
@@ -769,7 +1563,7 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     let old = control.observer.clone();
     let (inbound, input) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     let observer = inbound.observer();
-    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
     control
@@ -781,12 +1575,15 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     // Control may inspect status before consuming the redirect acknowledgment.
     // Retiring the old audio generation must not end the live connection.
     assert!(!control.snapshot().unwrap().ended);
+    assert!(!control.ended());
     assert!(
         matches!(control.event(), Some(Event::Redirected(ack)) if ack.same_generation(&observer))
     );
     assert!(!control.snapshot().unwrap().ended);
+    assert!(!control.ended());
     assert!(!input.signals().ended());
     control.stop();
+    assert!(control.ended());
     assert_eq!(session.step(3023), Err(Error::Hangup));
     assert!(input.signals().ended());
     drop(session);
@@ -816,7 +1613,7 @@ fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
             control
                 .send(Command::Redirect {
                     inbound,
-                    outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+                    outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                         .unwrap()
                         .into_endpoints()
                         .1,
@@ -842,7 +1639,7 @@ fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
     control
         .send(Command::Redirect {
             inbound,
-            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
                 .1,
@@ -864,7 +1661,7 @@ fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
     control
         .send(Command::Redirect {
             inbound,
-            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
                 .1,
@@ -918,7 +1715,7 @@ fn partial_pcm_is_staged_before_a_following_counted_gap() {
     control
         .send(Command::Redirect {
             inbound,
-            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960)
+            outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
                 .1,
@@ -1017,7 +1814,10 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
             }
             "write" => {
                 state.lock().unwrap().fail_write = true;
-                assert_eq!(output.write(&[0.1; 960]), 0);
+                assert_eq!(
+                    output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.1; 960]),
+                    0
+                );
             }
             "text" => {
                 state.lock().unwrap().fail_text = true;
@@ -1078,7 +1878,7 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
     ] {
         let (io, state) = peer(rate);
         state.lock().unwrap().fail_text = fail;
-        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
             .unwrap()
             .into_endpoints();
         assert!(PeerSession::prepare(io, outbound, local, remote).is_err());
@@ -1100,21 +1900,30 @@ fn unkey_between_query_capture_and_send_cancels_the_advisory_request() {
 #[test]
 fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let (io, state) = peer(8000);
-    let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960)
+    let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
     let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
-    assert_eq!(output.write(&[0.5]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5]),
+        0
+    );
     session.step(0).unwrap();
     // A warmed converter may emit immediately or retain sub-frame input. Neither
     // case may create an empty network write; filter latency is not an ABI contract.
     let writes = state.lock().unwrap().writes.clone();
     assert!(writes.iter().all(|count| *count > 0));
-    assert_eq!(output.write(&[0.5]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5]),
+        0
+    );
     session.step(20).unwrap();
     let writes = state.lock().unwrap().writes.clone();
     assert!(writes.iter().all(|count| *count > 0));
-    assert_eq!(output.write(&[0.5; 960]), 0);
+    assert_eq!(
+        output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5; 960]),
+        0
+    );
     session.step(40).unwrap();
     let writes = state.lock().unwrap().writes.clone();
     assert!(!writes.is_empty());

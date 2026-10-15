@@ -53,6 +53,8 @@ impl LinkManager {
     }
 
     fn topology_for(&self, recipient: Option<&str>) -> String {
+        // A full IAX datagram allows 1488 text bytes; local status is not a packet.
+        let limit = if recipient.is_some() { 1488 } else { 10000 };
         let mut tokens = Vec::new();
         let mut seen = HashSet::new();
         let mut length = 2;
@@ -87,7 +89,7 @@ impl LinkManager {
                 if Some(node) == recipient || node == self.local || !seen.insert(node) {
                     continue;
                 }
-                if length + node.len() + 2 + 8 > 10000 {
+                if length + node.len() + 2 + 8 > limit {
                     tokens.push("R000000".into());
                     break 'peers;
                 }
