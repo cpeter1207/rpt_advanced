@@ -92,10 +92,13 @@ Radio adopted the ABI-2 squelch and CTCSS packages and ABI-1 DCS in
 the hardware GPIO adapter adopted signaling in
 [v0.1.0-alpha.3](https://github.com/cpeter1207/rptadv-gpio-adapter/releases/tag/v0.1.0-alpha.3).
 The controller product dynamically links the five controller components, and
-Morse dynamically links tone. The initial extraction moves existing DTMF
-detection only. DTMF PCM generation remains a later requirement in the same
-component; generic audio-device control and the further directions above are
-outside this extraction.
+Morse dynamically links tone. DTMF PCM generation is implemented in the same
+DTMF component through a dynamic tone dependency. The generator appends to the
+ABI-1 descriptor, retaining the detector prefix and SONAME. Generator consumers
+require the alpha2 package and validate the descriptor tail before use. The
+alpha2 release and full hosted gate are pending; the table above records the
+published provider versions. Generic audio-device control and the further
+directions above remain outside this extraction.
 
 ## Consequences
 

@@ -145,8 +145,9 @@ or service monitor to observe transmitted audio and transmitter release.
 11. Pending explicit approval and completion of the full platform quality gate,
    use an isolated test peer before a public node. Verify transceive, monitor,
    local-monitor, permanent-link recovery, disconnect-all/reconnect-all, remote
-   `*4<node>` command mode with local `#` exit, allow/deny rejection, and the
-   `*70`, `*72`, and `*73` status replies. Confirm that an Asterisk restart
+   `*4<node>` command mode with direct and relayed destinations, local `#` exit,
+   allow/deny rejection, and the `*70`, `*72`, and `*73` status replies. Confirm
+   that an Asterisk restart
    removes runtime-created links and reissues configuration-owned permanent
    links according to the current replacement window. Treat the CLI/log
    topology as best-effort: it can be incomplete or stale, and `R000000` means
@@ -159,7 +160,24 @@ or service monitor to observe transmitted audio and transmitter release.
    five-minute qualifying-activity hold,
    and `*806` followed by reload and `*816` during the window; confirm no
    transient primary attachment occurs after policy reconciliation. Do not perform this test against 524950 or
-   another live node without separate approval.
+   another live node without separate approval. For `*4`, check that selection
+   sends no prefix or destination digits, that unkey and a pause longer than
+   three seconds keep the destination selected, and that the exit `#` is not
+   forwarded. Confirm relays do not run or regenerate transit digits and that
+   sources cannot share admin unlocks.
+12. Key the local receiver, send `*82`, then send `0123456789*#ABCD`. Pause for
+   more than three seconds, then unkey. Hear one local reply reading every
+   symbol, including "star" and "pound". Check an empty test, 127 symbols, and
+   128 symbols; the last test must warn of overflow and read only the first
+   127. Confirm captured keys do not run commands, a peer cannot start the
+   test, and a reload cancels an unfinished test. Check speech and Morse fallback.
+13. Enable DTMF regeneration on an isolated test node. Send eligible addressed
+   link digits while the peer stays keyed. Check the 500 ms idle delay, configured
+   tone length, gap, and level. Confirm command digits are not regenerated and
+   tones reach only the local transmitter, not peer audio or parrot. Check that
+   voice does not mix with the tones or resume late, and that half-duplex and
+   transmitter-timeout limits still apply. Turn regeneration off and confirm
+   the same digits produce no tones.
 
 Record module revisions, OS/architecture, USB interface, radio wiring, selected
 codec/rate, configuration, measurements, and any failed step. These procedures

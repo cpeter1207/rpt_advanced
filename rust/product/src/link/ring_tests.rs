@@ -502,6 +502,15 @@ pub(crate) fn failed_output_delay_endpoints() -> (InboundProducer, InboundConsum
     }
 }
 
+pub(crate) fn failed_media_push_endpoints() -> (InboundProducer, InboundConsumer) {
+    // SAFETY: the copied descriptor retains its released create/destroy pair for this test.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_producer_push = Some(failed_push);
+        InboundRing::from_descriptor(48000, InboundPolicy::Media, Box::leak(Box::new(api))).unwrap()
+    }
+}
+
 fn scripted_push_endpoints(mode: usize) -> (InboundProducer, InboundConsumer) {
     // SAFETY: copy the process-lifetime provider table and delegate successful writes to it.
     unsafe {
@@ -577,4 +586,11 @@ fn sample_render_reports_shared_ring_failure() {
                 .unwrap();
         assert!(consumer.render_sample().is_err());
     }
+}
+
+#[test]
+fn peer_input_single_sample_maps_real_pcm_and_provider_error() {
+    let mut consumer = sample_then_fail_consumer();
+    assert_eq!(PeerInput::render_sample(&mut consumer), Some(0.25));
+    assert_eq!(PeerInput::render_sample(&mut consumer), None);
 }

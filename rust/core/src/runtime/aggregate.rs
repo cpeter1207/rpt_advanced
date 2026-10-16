@@ -3,7 +3,7 @@
 use super::{
     DeviceHandoff, GenerationSettings, GenerationWork, LifecycleState, LifecycleStatus, NodeHost,
     OwnedReceiveOwner, OwnedTransmitOwner, RuntimeGeneration,
-    dtmf::{DigitEvent, DigitOperation, DtmfDispatcher, DtmfWorker},
+    dtmf::{DigitEvent, DigitOperation, DigitOutcome, DtmfDispatcher, DtmfWorker},
     link_schedule::{LinkScheduler, ReplacementSpec, RouteSpec},
     links::{LinkEffect, NodeLinkControl},
     prepare::{self, NativeMediaPreparer, RuntimeError},
@@ -199,8 +199,9 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
         self.control.digits.discard();
         self.links.digit(super::dtmf::DigitEvent::Lost);
     }
-    /// Drain the bounded radio digit snapshot on control and return typed policy operations.
-    pub fn drain_digits(&mut self) -> Vec<DigitOperation> {
+    /// Drain a bounded raw-event snapshot. The host applies each policy result
+    /// before interpreting the next event, so remote selection cannot lag digits.
+    pub fn drain_digits(&mut self) -> Vec<DigitEvent> {
         let generation = self.control.digits.generation();
         let mut output = Vec::new();
         let count = self.control.digits.queued();
@@ -208,9 +209,7 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
             let Some(event) = self.control.digits.next(generation) else {
                 break;
             };
-            if let Some(operation) = self.links.digit(event) {
-                output.push(operation);
-            }
+            output.push(event);
         }
         output
     }
@@ -1017,6 +1016,31 @@ impl<A: Send, C: Send> Runtime<A, C> {
             reply,
         )
     }
+    /// Queue one bounded pad report on the local transmitter after receiver unkey.
+    pub fn queue_pad_test(
+        &mut self,
+        local: &str,
+        report: &super::dtmf::PadTestResult,
+    ) -> Result<(), RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let forms = node
+            .control
+            .catalog
+            .format_pad_test(&report.digits, report.overflowed)
+            .map_err(|_| RuntimeError::Preparation)?;
+        queue_status_media(
+            &mut node.control.telemetry,
+            &mut node.control.media_session,
+            &node.status,
+            &forms.morse,
+            &forms.tts,
+            None,
+        )
+    }
     /// Queue a topology-loop explanation to the issuing RF or peer endpoint.
     pub fn queue_loop_rejected(
         &mut self,
@@ -1177,7 +1201,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         failure.map_or(Ok(()), Err)
     }
     /// Process one copied local event on the same serialized owner as reload and incoming admission.
-    pub fn digit(&mut self, local: &str, event: DigitEvent) -> Option<DigitOperation> {
+    pub fn digit(&mut self, local: &str, event: DigitEvent) -> Option<DigitOutcome> {
         self.node(local)?.links.digit(event)
     }
     /// Discard queued digits and partial commands on every active node after admission loss.
@@ -1216,6 +1240,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
         let work = node.work().ok_or(RuntimeError::Rejected)?;
         let reply = operation.reply.clone();
+        let origin = operation.origin.clone();
         let effect = node
             .links
             .command(operation, work, clock.now_ms, directory_verified)
@@ -1225,7 +1250,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 return Err(RuntimeError::Rejected);
             }
             if let Some(reply) = &reply {
-                node.links.confirm_peer_parrot_command(reply, clock.now_ms);
+                node.links
+                    .confirm_peer_parrot_command(origin.as_deref(), reply, clock.now_ms);
             } else {
                 node.links.confirm_parrot_command(clock.now_ms);
             }

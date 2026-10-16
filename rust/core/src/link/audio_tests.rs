@@ -2,6 +2,71 @@ use super::*;
 use crate::audio::{LinkAudioConsumer, LinkAudioQueue};
 use crate::controller::{ControllerSettings, CourtesySettings};
 
+struct FiniteInput {
+    signals: PeerSignals,
+    samples: std::collections::VecDeque<f32>,
+}
+impl PeerInput for FiniteInput {
+    fn source_rate(&self) -> u32 {
+        48000
+    }
+    fn signals(&self) -> &PeerSignals {
+        &self.signals
+    }
+    fn available(&self) -> u64 {
+        self.samples.len() as u64
+    }
+    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        let count = output.len().min(self.samples.len());
+        for sample in &mut output[..count] {
+            *sample = self.samples.pop_front().unwrap();
+        }
+        output[count..].fill(0.0);
+        Some(count)
+    }
+}
+
+#[test]
+fn regeneration_replaces_rf_not_peer_program_or_parrot_capture() {
+    let input = |samples: &[f32]| FiniteInput {
+        signals: PeerSignals::new(),
+        samples: samples.iter().copied().collect(),
+    };
+    let (writer, mut reader) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input(&[]), writer, 4, 0).unwrap();
+    let (audio, mut dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+    let mut audio = audio.with_regeneration(input(&[0.25, 0.0]));
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            parrot_enabled: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut rf = [0.5; 4];
+    audio
+        .process(&mut node, true, &mut rf, SourcePosition::default())
+        .unwrap();
+    assert_eq!(rf, [0.25, 0.0, 0.5, 0.5]);
+    dispatcher.dispatch(1);
+    let mut remote = [0.0; 4];
+    assert_eq!(reader.read(&mut remote), 0);
+    assert_eq!(remote, [0.5; 4]);
+    audio
+        .process(&mut node, false, &mut [0.0], SourcePosition::default())
+        .unwrap();
+    assert_eq!(control.take_parrot_capture().unwrap().samples(), &[0.5; 4]);
+    assert!(
+        audio
+            .process(&mut node, false, &mut [0.0; 5], SourcePosition::default())
+            .is_err()
+    );
+}
+
 #[test]
 fn egress_dispatch_notifies_receive_only_activity_without_echoing_pcm() {
     let (mut peer, signals, mut output) = peer_with_kerchunk("200", 960, 0);

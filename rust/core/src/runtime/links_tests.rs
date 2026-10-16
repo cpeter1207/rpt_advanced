@@ -36,6 +36,207 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn remote_origin_reclamation_preserves_last_node_redial() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    for digits in ["*33000#", "*30#"] {
+        let mut operations = Vec::new();
+        for digit in digits.chars() {
+            if let Some(DigitOutcome::Operation(operation)) =
+                links.peer_digit("2000", digit, 1, reply.clone())
+            {
+                operations.push(operation.command);
+            }
+        }
+        assert_eq!(
+            operations,
+            vec![crate::command::Command {
+                action: LinkAction::Transceive,
+                node: "3000".into()
+            }]
+        );
+    }
+    assert_eq!(
+        links.peer_digit("2000", '5', 2, reply),
+        Some(DigitOutcome::Regenerate('5'))
+    );
+}
+
+#[test]
+fn remote_origin_state_is_bounded_and_idle_collectors_are_reclaimed() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    let signals = crate::link::PeerSignals::new();
+    let reply = signals.reply_target();
+    for origin in 3000..4000 {
+        let text = format!("D 524950 {origin} 1 5");
+        assert!(matches!(
+            links.peer_text("2000", text.as_bytes(), reply.clone(), false, 0, 1),
+            Ok(LinkEffect::Digit(DigitOutcome::Regenerate('5')))
+        ));
+    }
+    assert!(
+        links.peer_commands.is_empty(),
+        "idle regeneration must not retain origin state"
+    );
+    for origin in 3000..3257 {
+        let text = format!("D 524950 {origin} 1 *");
+        links
+            .peer_text("2000", text.as_bytes(), reply.clone(), false, 0, 1)
+            .unwrap();
+    }
+    assert_eq!(
+        links.peer_commands.len(),
+        128,
+        "bound pending origins per connection"
+    );
+    assert!(links.expire_peer_digits(4000).is_empty());
+    assert!(
+        links.peer_commands.is_empty(),
+        "timed-out empty commands must be reclaimed"
+    );
+    assert!(links.peer_digit("2000", '*', 4001, reply).is_none());
+    assert_eq!(links.peer_commands.len(), 1);
+}
+
+#[test]
+fn remote_command_origins_do_not_share_authorization() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut links = links();
+    links.configure_admin(&digest, &digest, 60_000);
+    links.accept("2000", true).unwrap();
+    let signals = crate::link::PeerSignals::new();
+    let reply = signals.reply_target();
+    for digit in "*8001234#".chars() {
+        let text = format!("D 524950 3000 1 {digit}");
+        assert!(matches!(
+            links.peer_text("2000", text.as_bytes(), reply.clone(), false, 0, 1),
+            Ok(LinkEffect::None)
+        ));
+    }
+    for digit in "*804".chars() {
+        let text = format!("D 524950 4000 2 {digit}");
+        assert!(matches!(
+            links.peer_text("2000", text.as_bytes(), reply.clone(), false, 0, 2),
+            Ok(LinkEffect::None)
+        ));
+    }
+    let mut authorized = None;
+    for digit in "*804".chars() {
+        let text = format!("D 524950 3000 3 {digit}");
+        if let LinkEffect::Digit(DigitOutcome::Operation(operation)) = links
+            .peer_text("2000", text.as_bytes(), reply.clone(), false, 0, 3)
+            .unwrap()
+        {
+            authorized = Some(operation);
+        }
+    }
+    let operation = authorized.unwrap();
+    assert_eq!(operation.origin.as_deref(), Some("3000"));
+    assert_eq!(operation.reply, Some(reply.clone()));
+    let mut host = NodeHost::new(generation(1));
+    assert!(matches!(
+        links.command(operation, host.control().work().unwrap(), 4, false),
+        Ok(LinkEffect::ParrotEnabled(true))
+    ));
+    assert!(matches!(
+        links.peer_text("2000", b"D 524950 4000 4 5", reply.clone(), false, 0, 4),
+        Ok(LinkEffect::Digit(DigitOutcome::Regenerate('5')))
+    ));
+    signals.end();
+    assert!(
+        links
+            .peer_text("2000", b"D 524950 3000 4 5", reply, false, 0, 4)
+            .is_err()
+    );
+}
+
+#[test]
+fn remote_candidate_does_not_forward_prefix_and_selects_relay_destination() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    let mut host = NodeHost::new(generation(1));
+    for digit in "*43000".chars() {
+        if let Some(DigitOutcome::RemoteCandidate(candidate)) =
+            links.digit(DigitEvent::Digit { digit, now_ms: 1 })
+        {
+            let valid = candidate.command.node == "3000";
+            let effect = links.command(candidate, host.control().work().unwrap(), 1, valid);
+            if valid {
+                assert!(matches!(effect, Ok(LinkEffect::SelectedRemote)));
+            } else {
+                assert!(effect.is_err());
+            }
+        }
+    }
+    assert!(links.digit(DigitEvent::Unkey { now_ms: 2 }).is_none());
+    let Some(DigitOutcome::Operation(digit)) = links.digit(DigitEvent::Digit {
+        digit: '5',
+        now_ms: 3,
+    }) else {
+        panic!("selected remote")
+    };
+    let LinkEffect::ForwardDigits(deliveries) = links
+        .command(digit, host.control().work().unwrap(), 3, false)
+        .unwrap()
+    else {
+        panic!("forward")
+    };
+    assert_eq!(deliveries, [("2000".into(), "D 3000 524950 1 5".into())]);
+    assert!(
+        links
+            .digit(DigitEvent::Digit {
+                digit: '#',
+                now_ms: 4
+            })
+            .is_none()
+    );
+    assert!(
+        links
+            .digit(DigitEvent::Digit {
+                digit: '5',
+                now_ms: 5
+            })
+            .is_none()
+    );
+}
+
+#[test]
+fn remote_origin_timeout_finishes_only_its_own_command() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    for digit in "*33000".chars() {
+        assert!(matches!(
+            links.peer_text(
+                "2000",
+                format!("D 524950 4000 1 {digit}").as_bytes(),
+                reply.clone(),
+                false,
+                0,
+                10
+            ),
+            Ok(LinkEffect::None)
+        ));
+    }
+    assert!(links.expire_peer_digits(3009).is_empty());
+    let expired = links.expire_peer_digits(3010);
+    assert_eq!(expired.len(), 1);
+    let DigitOutcome::Operation(operation) = &expired[0] else {
+        panic!("expired command")
+    };
+    assert_eq!(operation.command.node, "3000");
+    assert_eq!(operation.origin.as_deref(), Some("4000"));
+    assert_eq!(operation.reply, Some(reply));
+    assert!(links.expire_peer_digits(6010).is_empty());
+}
+
+#[test]
 fn interleaved_peer_and_local_commands_keep_their_collectors() {
     let mut links = links();
     links.accept("2000", true).unwrap();
@@ -55,7 +256,9 @@ fn interleaved_peer_and_local_commands_keep_their_collectors() {
         reply.is_some(),
         "another input must not consume this peer's partial command"
     );
-    let reply = reply.unwrap();
+    let DigitOutcome::Operation(reply) = reply.unwrap() else {
+        panic!("operation")
+    };
     assert_eq!(reply.command.action, LinkAction::Status);
     assert_eq!(reply.reply, Some(first));
 }
@@ -91,13 +294,31 @@ fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
             .peer_digit("2000", digit, 3, first.clone())
             .or(allowed);
     }
-    let allowed = allowed.unwrap();
+    let DigitOutcome::Operation(allowed) = allowed.unwrap() else {
+        panic!("operation")
+    };
     let mut host = NodeHost::new(generation(1));
     assert!(matches!(
         links.command(allowed.clone(), host.control().work().unwrap(), 4, false),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
-    links.confirm_peer_parrot_command(&first, 4);
+    links.confirm_peer_parrot_command(Some("2000"), &first, 4);
+    let mut wrong_origin = allowed.clone();
+    wrong_origin.origin = Some("4000".into());
+    assert!(matches!(
+        links.command(wrong_origin, host.control().work().unwrap(), 5, false),
+        Err(AdmissionError::Denied)
+    ));
+    links.confirm_peer_parrot_command(Some("4000"), &first, 60_000);
+    assert!(matches!(
+        links.command(
+            allowed.clone(),
+            host.control().work().unwrap(),
+            60_004,
+            false
+        ),
+        Err(AdmissionError::Denied)
+    ));
     signal.end();
     assert!(links.peer_digit("2000", '1', 5, first.clone()).is_none());
     assert!(matches!(
@@ -105,7 +326,7 @@ fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
         Err(AdmissionError::Stale)
     ));
     let replacement = crate::link::PeerSignals::new().reply_target();
-    links.confirm_peer_parrot_command(&replacement, 5);
+    links.confirm_peer_parrot_command(Some("2000"), &replacement, 5);
     for digit in "*804".chars() {
         assert!(
             links
@@ -127,6 +348,7 @@ fn peer_remote_selection_and_disconnect_use_the_exact_collector() {
     let mut host = NodeHost::new(generation(1));
     let mut selected = operation(LinkAction::Command, "3000");
     selected.reply = Some(first.clone());
+    selected.origin = Some("2000".into());
     assert!(matches!(
         links.command(selected, host.control().work().unwrap(), 1, true),
         Ok(LinkEffect::SelectedRemote)
@@ -205,7 +427,15 @@ fn parrot_actions_require_a_valid_admin_unlock_and_use_live_typed_effects() {
             .or(enabled);
     }
     assert!(matches!(
-        links.command(enabled.unwrap(), host.control().work().unwrap(), 6, false),
+        links.command(
+            match enabled.unwrap() {
+                DigitOutcome::Operation(operation) => operation,
+                _ => panic!("operation"),
+            },
+            host.control().work().unwrap(),
+            6,
+            false
+        ),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
     links.confirm_parrot_command(6);
@@ -255,7 +485,15 @@ fn authorized_parrot_disable_confirms_the_disabled_state() {
             .or(disable);
     }
     assert!(matches!(
-        links.command(disable.unwrap(), host.control().work().unwrap(), 3, false),
+        links.command(
+            match disable.unwrap() {
+                DigitOutcome::Operation(operation) => operation,
+                _ => panic!("operation"),
+            },
+            host.control().work().unwrap(),
+            3,
+            false
+        ),
         Ok(LinkEffect::ParrotEnabled(false))
     ));
     links.confirm_parrot_command(3);
@@ -427,7 +665,14 @@ fn copied_peer_text_updates_topology_relays_advice_and_detaches_loops() {
     assert_eq!(links.due_topology(0).len(), 2);
     assert!(links.due_topology(1).is_empty());
     let LinkEffect::Text(messages) = links
-        .peer_text("2000", b"K? * 2000 0 0", true, 1000, 4000)
+        .peer_text(
+            "2000",
+            b"K? * 2000 0 0",
+            crate::link::PeerSignals::new().reply_target(),
+            true,
+            1000,
+            4000,
+        )
         .unwrap()
     else {
         panic!("key advice")
@@ -435,17 +680,33 @@ fn copied_peer_text_updates_topology_relays_advice_and_detaches_loops() {
     assert_eq!(messages[0], ("2000".into(), "K 2000 524950 1 3".into()));
     assert_eq!(messages[1], ("3000".into(), "K? * 2000 0 0".into()));
     assert!(matches!(
-        links.peer_text("2000", b"L T4000", false, 0, 5000),
+        links.peer_text(
+            "2000",
+            b"L T4000",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            5000
+        ),
         Ok(LinkEffect::None)
     ));
     assert!(links.manager().reaches("4000", false));
     assert_eq!(links.due_topology(5000).len(), 2);
     assert!(matches!(
-        links.peer_text("2000", b"L T3000", false, 0, 6000),
+        links.peer_text("2000", b"L T3000", crate::link::PeerSignals::new().reply_target(), false, 0, 6000),
         Ok(LinkEffect::Detach(peers)) if peers == ["2000"]
     ));
     assert_eq!(
-        links.peer_text("2000", b"L T5000", false, 0, 7000).err(),
+        links
+            .peer_text(
+                "2000",
+                b"L T5000",
+                crate::link::PeerSignals::new().reply_target(),
+                false,
+                0,
+                7000
+            )
+            .err(),
         Some(AdmissionError::Invalid)
     );
     assert!(
@@ -745,7 +1006,14 @@ fn topology_blocked_automatic_route_retries_only_after_explicit_evidence_change(
     .unwrap();
     links.accept("2000", true).unwrap();
     assert!(matches!(
-        links.peer_text("2000", b"L T3000", false, 0, 0),
+        links.peer_text(
+            "2000",
+            b"L T3000",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            0
+        ),
         Ok(LinkEffect::None)
     ));
     let LinkEffect::Connect(attempt) = links.next_scheduled(control.work().unwrap()).unwrap()
@@ -797,7 +1065,16 @@ fn topology_blocked_automatic_route_retries_only_after_explicit_evidence_change(
     );
 
     links.accept("4000", true).unwrap();
-    links.peer_text("4000", b"L T5000", false, 0, 3).unwrap();
+    links
+        .peer_text(
+            "4000",
+            b"L T5000",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            3,
+        )
+        .unwrap();
     assert!(
         links
             .take_retry(u64::MAX, control.work().unwrap())
@@ -812,7 +1089,16 @@ fn topology_blocked_automatic_route_retries_only_after_explicit_evidence_change(
     );
 
     links.accept("2000", true).unwrap();
-    links.peer_text("2000", b"L T6000", false, 0, 5).unwrap();
+    links
+        .peer_text(
+            "2000",
+            b"L T6000",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            5,
+        )
+        .unwrap();
     let retry = links.take_retry(5, control.work().unwrap()).unwrap();
     assert_eq!(links.finish_retry(retry, false, 5), Ok(false));
     let status = links
@@ -872,7 +1158,14 @@ fn group_member_is_not_topology_blocked_but_other_routes_are() {
     .unwrap();
     links.accept("2000", true).unwrap();
     links
-        .peer_text("2000", b"L T3000,T4000,T5000", false, 0, 1)
+        .peer_text(
+            "2000",
+            b"L T3000,T4000,T5000",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            1,
+        )
         .unwrap();
     let civil = CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 0).unwrap();
     links.tick(civil, 0, 1, |_| None);
@@ -886,7 +1179,14 @@ fn group_member_is_not_topology_blocked_but_other_routes_are() {
         Ok(true)
     );
     assert!(matches!(
-        links.peer_text("3000", b"L T2000", false, 0, 2),
+        links.peer_text(
+            "3000",
+            b"L T2000",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            2
+        ),
         Ok(LinkEffect::None)
     ));
     links.ended("3000");
@@ -1069,6 +1369,11 @@ fn incoming_and_remote_selection_use_current_deny_first_policy() {
         DtmfCommandMap::standard(),
         None,
     );
+    let reply = crate::link::PeerSignals::new().reply_target();
+    assert!(matches!(
+        links.peer_text("2000", b"D 524950 3000 1 5", reply, false, 0, 0),
+        Err(AdmissionError::Denied)
+    ));
     assert_eq!(
         links
             .command(
@@ -1080,6 +1385,46 @@ fn incoming_and_remote_selection_use_current_deny_first_policy() {
             .err(),
         Some(AdmissionError::Denied)
     );
+}
+
+#[test]
+fn remote_command_rejects_self_unreachable_and_invalid_digits_without_advancing_sequence() {
+    let mut host = NodeHost::new(generation(1));
+    let mut links = links();
+    for remote in ["524950", "2000"] {
+        assert!(matches!(
+            links.command(
+                operation(LinkAction::Command, remote),
+                host.control().work().unwrap(),
+                0,
+                true,
+            ),
+            Err(AdmissionError::Denied)
+        ));
+    }
+    links.accept("2000", true).unwrap();
+    links.accept("3000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    assert!(matches!(
+        links.peer_text("2000", b"D 3000 4000 7 5", reply, false, 0, 0),
+        Ok(LinkEffect::ForwardDigits(deliveries))
+            if deliveries == [("3000".into(), "D 3000 4000 7 5".into())]
+    ));
+    for digit in ['x', '\u{0131}'] {
+        let mut invalid = operation(LinkAction::Command, "2000");
+        invalid.digit = Some(digit);
+        assert!(matches!(
+            links.command(invalid, host.control().work().unwrap(), 1, false),
+            Err(AdmissionError::Invalid)
+        ));
+    }
+    let mut valid = operation(LinkAction::Command, "2000");
+    valid.digit = Some('5');
+    assert!(matches!(
+        links.command(valid, host.control().work().unwrap(), 2, false),
+        Ok(LinkEffect::ForwardDigits(deliveries))
+            if deliveries == [("2000".into(), "D 2000 524950 1 5".into())]
+    ));
 }
 
 #[test]
@@ -1245,14 +1590,17 @@ fn remote_selection_forwards_digits_and_temporary_disconnect_preserves_permanent
             true,
         )
         .unwrap();
-    let forwarded = links
+    let DigitOutcome::Operation(forwarded) = links
         .digit(DigitEvent::Digit {
             digit: '5',
             now_ms: 1,
         })
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("operation")
+    };
     assert!(
-        matches!(links.command(forwarded, control.work().unwrap(), 1, false), Ok(LinkEffect::RemoteDigit { remote, digit: '5' }) if remote == "2000")
+        matches!(links.command(forwarded, control.work().unwrap(), 1, false), Ok(LinkEffect::ForwardDigits(deliveries)) if deliveries == [("2000".into(), "D 2000 524950 1 5".into())])
     );
     assert!(
         matches!(links.command(operation(LinkAction::DisconnectNonPermanentAll, ""), control.work().unwrap(), 2, false), Ok(LinkEffect::Detach(names)) if names == ["2000"])
@@ -1276,16 +1624,30 @@ fn copied_peer_negotiation_disconnect_and_closed_admission_have_no_inline_effect
     links.accept("2000", true).unwrap();
     for bytes in [b"!NEWKEY1!".as_slice(), b"!IAXKEY!"] {
         assert!(matches!(
-            links.peer_text("2000", bytes, false, 0, 0),
+            links.peer_text(
+                "2000",
+                bytes,
+                crate::link::PeerSignals::new().reply_target(),
+                false,
+                0,
+                0
+            ),
             Ok(LinkEffect::None)
         ));
     }
     assert!(matches!(
-        links.peer_text("2000", b"bad", false, 0, 0),
+        links.peer_text(
+            "2000",
+            b"bad",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            0
+        ),
         Err(AdmissionError::Invalid)
     ));
     assert!(
-        matches!(links.peer_text("2000", b"!!DISCONNECT!!", false, 0, 0), Ok(LinkEffect::Detach(names)) if names == ["2000"])
+        matches!(links.peer_text("2000", b"!!DISCONNECT!!", crate::link::PeerSignals::new().reply_target(), false, 0, 0), Ok(LinkEffect::Detach(names)) if names == ["2000"])
     );
     links.reclaimed("2000", 0);
     let stale = control.work().unwrap();
@@ -1297,7 +1659,14 @@ fn copied_peer_negotiation_disconnect_and_closed_admission_have_no_inline_effect
     links.close();
     assert_eq!(links.accept("2000", true), Err(AdmissionError::Stale));
     assert!(matches!(
-        links.peer_text("2000", b"L", false, 0, 0),
+        links.peer_text(
+            "2000",
+            b"L",
+            crate::link::PeerSignals::new().reply_target(),
+            false,
+            0,
+            0
+        ),
         Err(AdmissionError::Stale)
     ));
     assert!(links.take_retry(0, control.work().unwrap()).is_none());

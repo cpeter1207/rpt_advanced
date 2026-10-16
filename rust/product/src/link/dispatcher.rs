@@ -1,6 +1,8 @@
 //! Per-node bounded media distribution, independent of station control.
 
+use super::{regeneration::RegenerationProducer, ring::InboundProducer};
 use crate::Error;
+use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
 use rpt_advanced_core::link::LinkDispatcher;
 use rtrb::{Producer, RingBuffer};
 use std::{
@@ -85,11 +87,13 @@ struct DispatchState {
     clock: OnceLock<Arc<super::source_clock::SourceClock>>,
     batches: AtomicU64,
     maximum_ns: AtomicU64,
+    regeneration_dropped: AtomicU64,
 }
 struct Dispatch {
     state: Arc<DispatchState>,
     dispatcher: LinkDispatcher,
     wakes: Vec<PeerWake>,
+    regeneration: Option<RegenerationProducer>,
 }
 impl Drop for Dispatch {
     fn drop(&mut self) {
@@ -101,8 +105,30 @@ impl Drop for Dispatch {
 /// Control-owned lifetime handle; the media thread alone owns queue endpoints.
 pub(crate) struct PreparedDispatch {
     state: Arc<DispatchState>,
+    digits: Option<Producer<char>>,
 }
 impl PreparedDispatch {
+    /// Drop new excess digits; never block the generation's control owner.
+    pub(crate) fn queue_digit(&mut self, digit: char) -> bool {
+        if self.state.phase.load(Ordering::Acquire) != ACTIVE || !"0123456789ABCD*#".contains(digit)
+        {
+            return false;
+        }
+        let Some(digits) = self.digits.as_mut() else {
+            return false;
+        };
+        if digits.push(digit).is_ok() {
+            return true;
+        }
+        self.state
+            .regeneration_dropped
+            .fetch_add(1, Ordering::Relaxed);
+        false
+    }
+    /// Drop-new queue overflow or producer failures in this generation.
+    pub(crate) fn regeneration_dropped(&self) -> u64 {
+        self.state.regeneration_dropped.load(Ordering::Relaxed)
+    }
     /// Completed nonempty batches and their maximum elapsed duration, off audio.
     pub(crate) fn timing(&self) -> (u64, u64) {
         (
@@ -175,6 +201,17 @@ impl MediaWorker {
                                     .dispatcher
                                     .dispatch_batch(64, |index| context.wakes[index].notify());
                                 busy |= progress.pending;
+                                if context
+                                    .regeneration
+                                    .as_mut()
+                                    .is_some_and(|producer| producer.pump(started).is_err())
+                                {
+                                    context
+                                        .state
+                                        .regeneration_dropped
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    context.regeneration = None;
+                                }
                                 if progress.destinations != 0 {
                                     context.state.batches.fetch_add(1, Ordering::Relaxed);
                                     context.state.maximum_ns.fetch_max(
@@ -208,6 +245,7 @@ impl MediaWorker {
         &mut self,
         dispatcher: LinkDispatcher,
         wakes: Vec<PeerWake>,
+        regeneration: Option<(ResolvedDtmfRegenerationSettings, InboundProducer, usize)>,
     ) -> Result<PreparedDispatch, Error> {
         if self.stop.load(Ordering::Acquire) {
             return Err(Error::Reservation);
@@ -217,12 +255,26 @@ impl MediaWorker {
             clock: OnceLock::new(),
             batches: AtomicU64::new(0),
             maximum_ns: AtomicU64::new(0),
+            regeneration_dropped: AtomicU64::new(0),
         });
+        let (digits, regeneration) = match regeneration {
+            Some((settings, writer, maximum)) => {
+                let (digits, incoming) = RingBuffer::new(127);
+                (
+                    Some(digits),
+                    Some(RegenerationProducer::new(
+                        settings, incoming, writer, maximum,
+                    )?),
+                )
+            }
+            None => (None, None),
+        };
         self.pending
             .push(Dispatch {
                 state: state.clone(),
                 dispatcher,
                 wakes,
+                regeneration,
             })
             .map_err(|_| Error::Reservation)?;
         self.thread
@@ -230,7 +282,7 @@ impl MediaWorker {
             .expect("running media owner")
             .thread()
             .unpark();
-        Ok(PreparedDispatch { state })
+        Ok(PreparedDispatch { state, digits })
     }
     /// Join only off audio and peer callbacks; all retained dispatchers become quiescent.
     pub(crate) fn stop(&mut self) {

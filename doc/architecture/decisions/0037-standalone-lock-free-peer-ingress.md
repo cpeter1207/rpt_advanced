@@ -1,21 +1,22 @@
 # ADR 0037: Standalone peer ingress uses Tokio and per-connection ownership
 
-Status: Implemented; hosted and live validation pending
+Status: Implemented, released, and live-validated (2026-10-15)
 
 Amended 2026-10-13: readiness-driven Tokio tasks replace the prescribed SPSC
 producer-to-worker topology. SpeexDSP supplies adaptive packet jitter buffering
-only through a separately versioned adapter. Implementation and local composed
-validation are complete; this is not a deployed or release-verified change.
+only through a separately versioned adapter. The ingress and egress implementation
+has passed the hosted native-platform gate, shipped in Debian packages, and
+been validated on node 524950.
 
 ## Context
 
-The planned standalone controller must remain responsive with hundreds or
+The standalone controller must remain responsive with hundreds or
 thousands of connected peers. Work waiting on one connection must not serialize
 unrelated connections or block audio callbacks. The shared PCM ring is
 single-producer/single-consumer; calling its producer concurrently does not
 become safe merely because its cursors are atomic.
 
-This decision applies to the planned standalone application. It does not
+This decision applies to the standalone application. It does not
 require changing locks, threads, or behavior in the current Asterisk-hosted
 `app_rpt_advanced`. ADR 0036 separately governs independence from Asterisk's
 thread model.
@@ -85,7 +86,7 @@ adjustment policy must be recorded and tested before media cutover. SpeexDSP's
 fixed packet capacity is not the latency bound, and its native full-buffer
 eviction is distinct from the mailbox's reject-new policy.
 
-The approved initial policy is 40 ms minimum, 60 ms initial delay and 500 ms
+The approved packet-buffer policy is 160 ms minimum, 180 ms initial delay and 500 ms
 maximum, with SpeexDSP's automatic lateness trade-off. These are packet-jitter
 limits, not the shared PCM ring's reserve, target or capacity.
 
@@ -137,10 +138,10 @@ no OS thread is created per connection.
 
 Client descriptor ABI 1 appends prepared-ULAW submission and call elapsed time;
 async descriptor ABI 1 appends wake/deadline operations. Standalone validates all
-required tails at startup and reload. SONAME remains 1. Candidate package
-`0.1.0~alpha6+egress1` identifies these capabilities until release preparation;
-the consumer pins the exact candidate commit. The 144-byte observation record
-adds socket sends, backpressure, reliable retries and pending counts, preserving
+required tails at startup and reload. SONAME remains 1. The capabilities are
+released in `librptadviax2` v0.1.0-alpha7 and consumed by rpt_advanced
+v0.1.0-alpha10. The 144-byte observation record adds socket sends, backpressure,
+reliable retries and pending counts, preserving
 its 112-byte prefix for existing readers. The Asterisk host keeps its synchronous
 PCM contract and does not implement the standalone prepared-media tails.
 
@@ -166,11 +167,22 @@ queue drops and service latency. These are scaling
 validation requirements, not a claim that every hardware target can carry
 thousands of simultaneous audio streams.
 
-The standalone Tokio/jitter cutover and its ordered-gap prerequisites pass local
-composed tests. New and changed production scopes have 100% line and branch
-coverage; synchronous Asterisk boundary tests also pass. Hosted native-platform
-validation, dependency publication and live-node testing remain outstanding;
-no release-readiness claim is made.
+## Implementation and validation status — 2026-10-15
+
+The standalone Tokio/jitter cutover, ordered-gap prerequisites, and isolated
+peer egress are implemented. The [rpt_advanced PR gate](https://github.com/cpeter1207/rpt_advanced/actions/runs/38757338657)
+passed native Debian 13 amd64/arm64 tests and package/install checks, with
+100% production line and branch coverage on amd64. The IAX provider's
+[PR gate](https://github.com/cpeter1207/librptadviax2/actions/runs/38749007376)
+also passed.
+
+[librptadviax2 v0.1.0-alpha7](https://github.com/cpeter1207/librptadviax2/releases/tag/v0.1.0-alpha7)
+and [rpt_advanced v0.1.0-alpha10](https://github.com/cpeter1207/rpt_advanced/releases/tag/v0.1.0-alpha10)
+are published in the signed Debian repository and installed through APT on
+node 524950. The operator confirmed local repeat, courtesy tones, spoken time,
+and audio through a linked parrot, exercising peer transmit and receive. This
+verifies the deployed composition, not a guarantee of thousands of simultaneous
+audio streams on that node's hardware.
 
 ## Reference
 

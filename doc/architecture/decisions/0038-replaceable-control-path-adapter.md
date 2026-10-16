@@ -1,6 +1,6 @@
 # ADR 0038: Replaceable control-path execution adapter
 
-Status: Accepted
+Status: Implemented with Asterisk and standalone backends
 
 ## Context
 
@@ -17,9 +17,10 @@ from the current module is not required.
 ## Decision
 
 Add a **control-path adapter** as an independently replaceable execution
-capability. Its current backend is the Asterisk taskprocessor. A later backend
-may use an owned implementation or a suitable third-party taskprocessor, but
-must satisfy the same controller-facing functional contract.
+capability. The Asterisk composition selects its taskprocessor backend;
+standalone selects an owned executor. A future backend may use another
+implementation, but must satisfy the same controller-facing functional
+contract.
 
 The controller owns task meaning, node policy, scheduling decisions, generation
 tags, and logical lifecycle. The adapter owns submission to the selected
@@ -91,10 +92,10 @@ playout and PCM publication never wait for the control executor.
 
 ## Consequences and verification
 
-The current backend remains Asterisk. Migration consists of isolating its
-existing use behind this adapter, not building a second taskprocessor now.
-Controller code can then replace the backend without changing command,
-scheduling, telemetry, or reload semantics.
+The Asterisk backend remains available behind its adapter. Standalone selects
+an owned, non-Asterisk backend through the same contract. Controller code does
+not change command, scheduling, telemetry, or reload semantics with the
+selected backend.
 
 Run the same contract tests against each backend: accepted/rejected ownership,
 FIFO and non-overlap with concurrent submitters, no inline fallback, generation
@@ -111,7 +112,7 @@ with queued work. Their Asterisk request/response handling belongs in the entry
 adapter, not in taskprocessor-specific policy. Tests must exercise them
 concurrently with queued work, reload, and shutdown.
 
-## Implementation status — 2026-09-15
+## Implementation status — 2026-10-15
 
 `librptadv_control_asterisk_adapter.so.1` now implements the versioned execution
 descriptor. The product-owned client implements core's neutral `ControlExecutor`
@@ -125,8 +126,11 @@ accepted work. Its final close releases the sole taskprocessor reference and
 waits for its worker to finish; the loader retains the provider DSO through that
 barrier. Radio rendering and peer PCM exchange do not use this executor.
 The product still owns generation validation, scheduling, retry decisions, and
-the periodic trigger. No non-Asterisk backend was added by this migration.
+the periodic trigger. Standalone now selects
+`librptadv_control_standalone_adapter.so.1`, whose owned worker drains a bounded
+FIFO and implements the same versioned execution descriptor without Asterisk.
 
-The required contract and integration checks above continue to apply. This
-implemented boundary is not a claim that the current working tree has passed
-its full release gate or been deployed.
+The contract and integration checks above remain required for changes to either
+backend. ADR 0037 records the current controller release and standalone
+live-validation evidence; that evidence does not qualify every deployment
+environment or future backend.

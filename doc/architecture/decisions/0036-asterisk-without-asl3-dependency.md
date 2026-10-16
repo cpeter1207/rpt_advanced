@@ -1,6 +1,6 @@
 # ADR 0036: Asterisk integration without an ASL3 dependency
 
-Status: Accepted
+Status: Implemented for the current Asterisk and standalone compositions
 
 ## Context
 
@@ -157,9 +157,13 @@ The periodic trigger and radio/peer workers use Rust-owned threads. File and
 speech providers receive paired child-reaper callbacks through the product's
 host-services boundary rather than importing Asterisk themselves.
 
-This closes the direct-taskprocessor migration gap without removing the
-supported Asterisk backend or adding a standalone backend. It is an implemented
-source boundary, not proof of every deployment environment: the ordinary
-Asterisk/ASL3 independence checks and full platform/integration gate above remain
-required. Current release and live-radio limits are tracked in
+That migration closed the direct-taskprocessor gap while retaining the
+supported Asterisk backend. The standalone composition subsequently added
+`librptadv_control_standalone_adapter.so.1`, an owned, non-Asterisk executor
+selected through the same neutral control descriptor. The standalone service
+and its runtime package select that adapter without an Asterisk or ASL3
+dependency. This implemented source and package boundary is not proof of every
+deployment environment: the ordinary Asterisk/ASL3 independence checks and
+full platform/integration gate above remain required. Current release and
+live-radio limits are tracked in
 [implementation status](../../implementation-status.md).

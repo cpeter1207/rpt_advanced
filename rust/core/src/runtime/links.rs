@@ -2,7 +2,7 @@
 
 use super::{
     GenerationWork,
-    dtmf::{DigitEvent, DigitOperation, DtmfCommands},
+    dtmf::{DigitEvent, DigitOperation, DigitOutcome, DtmfCommands},
     link_schedule::{LinkReservation, LinkScheduler, LinkTransition, ScheduleWarning, WarningGate},
 };
 use crate::{
@@ -71,13 +71,10 @@ pub enum LinkEffect {
     Detach(Vec<String>),
     /// Advisory keyed-source messages, queued on the destination channel owner.
     Text(Vec<(String, String)>),
-    /// Send one copied remote digit outside native audio.
-    RemoteDigit {
-        /// Direct selected peer.
-        remote: String,
-        /// Completed DTMF symbol.
-        digit: char,
-    },
+    /// Addressed command envelopes; delivery failures are not advisory.
+    ForwardDigits(Vec<(String, String)>),
+    /// A locally addressed digit interpreted on station control.
+    Digit(DigitOutcome),
     /// Remote-command mode was selected without transmitting a digit.
     SelectedRemote,
     /// Prepare existing status/topology/time telemetry outside audio.
@@ -95,6 +92,7 @@ pub struct NodeLinkControl {
     policy: AccessPolicy,
     commands: DtmfCommands,
     peer_commands: Vec<(String, PeerReply, DtmfCommands)>,
+    digit_sequence: i32,
     schedule: Option<LinkScheduler>,
     groups: Vec<ConfiguredGroup>,
     topology: TopologyManager,
@@ -170,6 +168,7 @@ impl NodeLinkControl {
             policy,
             commands: DtmfCommands::new(commands),
             peer_commands: Vec::new(),
+            digit_sequence: 0,
             schedule,
             groups,
             topology: TopologyManager::default(),
@@ -202,11 +201,16 @@ impl NodeLinkControl {
         self.commands.confirm_parrot_action(now_ms);
     }
     /// Renew only the collector that authorized a successfully applied peer command.
-    pub(crate) fn confirm_peer_parrot_command(&mut self, reply: &PeerReply, now_ms: u64) {
+    pub(crate) fn confirm_peer_parrot_command(
+        &mut self,
+        origin: Option<&str>,
+        reply: &PeerReply,
+        now_ms: u64,
+    ) {
         if let Some((_, _, commands)) = self
             .peer_commands
             .iter_mut()
-            .find(|(_, source, _)| source == reply)
+            .find(|(name, source, _)| Some(name.as_str()) == origin && source == reply)
         {
             commands.confirm_parrot_action(now_ms);
         }
@@ -284,11 +288,12 @@ impl NodeLinkControl {
         &mut self,
         remote: &str,
         bytes: &[u8],
+        reply: PeerReply,
         local_receiving: bool,
         transitioned_ms: u64,
         now_ms: u64,
     ) -> Result<LinkEffect, AdmissionError> {
-        if !self.admitting {
+        if !self.admitting || reply.ended() {
             return Err(AdmissionError::Stale);
         }
         if !self
@@ -301,6 +306,22 @@ impl NodeLinkControl {
         }
         let message = Protocol::parse(bytes).ok_or(AdmissionError::Invalid)?;
         let detach = match &message {
+            Protocol::RemoteDigit {
+                destination,
+                source,
+                digit,
+                ..
+            } => {
+                if !self.manager.remote_digit(remote, *digit, &self.policy) {
+                    return Err(AdmissionError::Denied);
+                }
+                return Ok(if destination == &self.local {
+                    self.source_digit(source, *digit, now_ms, reply)
+                        .map_or(LinkEffect::None, LinkEffect::Digit)
+                } else {
+                    LinkEffect::ForwardDigits(self.manager.relay_digit(remote, &message))
+                });
+            }
             Protocol::Topology(_) => {
                 let looped = self.manager.update_topology(remote, bytes)?;
                 if looped {
@@ -318,11 +339,7 @@ impl NodeLinkControl {
                     now_ms,
                 )));
             }
-            // Remote DTMF is consumed by the peer-I/O session and delivered as a digit event.
-            Protocol::NewKey
-            | Protocol::NewKey1
-            | Protocol::IaxKey
-            | Protocol::RemoteDigit { .. } => false,
+            Protocol::NewKey | Protocol::NewKey1 | Protocol::IaxKey => false,
         };
         if detach {
             self.ended(remote);
@@ -372,7 +389,7 @@ impl NodeLinkControl {
             .collect()
     }
     /// Interpret radio events on the same serialized owner as reload and incoming admission.
-    pub fn digit(&mut self, event: DigitEvent) -> Option<DigitOperation> {
+    pub fn digit(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
         self.commands.feed(event)
     }
     /// Interpret a peer digit only while its direct connection and current policy allow it.
@@ -382,26 +399,79 @@ impl NodeLinkControl {
         digit: char,
         now_ms: u64,
         reply: PeerReply,
-    ) -> Option<DigitOperation> {
+    ) -> Option<DigitOutcome> {
         if reply.ended() || !self.manager.remote_digit(remote, digit, &self.policy) {
             return None;
         }
-        self.peer_commands
-            .retain(|(name, source, _)| name != remote || source == &reply);
-        let index = self
+        self.source_digit(remote, digit, now_ms, reply)
+    }
+    fn source_digit(
+        &mut self,
+        origin: &str,
+        digit: char,
+        now_ms: u64,
+        reply: PeerReply,
+    ) -> Option<DigitOutcome> {
+        self.retain_peer_commands(now_ms);
+        let index = if let Some(index) = self
             .peer_commands
             .iter()
-            .position(|(_, source, _)| source == &reply)
-            .unwrap_or_else(|| {
-                self.peer_commands
-                    .push((remote.into(), reply.clone(), self.commands.for_source()));
-                self.peer_commands.len() - 1
-            });
-        let mut operation = self.peer_commands[index]
+            .position(|(name, source, _)| name == origin && source == &reply)
+        {
+            index
+        } else {
+            // Idle link digits need no collector. Bound claimed origins per ingress
+            // without evicting another source's command, selection or admin state.
+            if digit != '*' {
+                return Some(DigitOutcome::Regenerate(digit));
+            }
+            if self
+                .peer_commands
+                .iter()
+                .filter(|(_, source, _)| source == &reply)
+                .count()
+                >= 128
+            {
+                return None;
+            }
+            self.peer_commands
+                .push((origin.into(), reply.clone(), self.commands.for_source()));
+            self.peer_commands.len() - 1
+        };
+        self.peer_commands[index]
             .2
-            .feed(DigitEvent::Digit { digit, now_ms })?;
-        operation.reply = Some(reply);
-        Some(operation)
+            .feed(DigitEvent::Digit { digit, now_ms })
+            .map(|outcome| Self::source_outcome(outcome, origin, reply))
+    }
+    /// Attach source identity only to outcomes that carry a command.
+    fn source_outcome(mut outcome: DigitOutcome, origin: &str, reply: PeerReply) -> DigitOutcome {
+        if let DigitOutcome::Operation(operation) | DigitOutcome::RemoteCandidate(operation) =
+            &mut outcome
+        {
+            operation.reply = Some(reply);
+            operation.origin = Some(origin.into());
+        }
+        outcome
+    }
+    /// Reclaim ended connections and expired idle collectors at each control boundary.
+    fn retain_peer_commands(&mut self, now_ms: u64) {
+        self.peer_commands
+            .retain(|(_, source, commands)| !source.ended() && commands.retains_state(now_ms));
+    }
+    /// Expire peer commands independently, preserving their exact reply connection.
+    pub fn expire_peer_digits(&mut self, now_ms: u64) -> Vec<DigitOutcome> {
+        self.peer_commands.retain(|(_, source, _)| !source.ended());
+        let outcomes = self
+            .peer_commands
+            .iter_mut()
+            .filter_map(|(origin, reply, commands)| {
+                commands
+                    .expire(now_ms)
+                    .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
+            })
+            .collect();
+        self.retain_peer_commands(now_ms);
+        outcomes
     }
     /// Apply policy, returning external work without doing a dial, media operation, or write.
     /// `directory_verified` is needed only when selecting a remote-command peer.
@@ -536,19 +606,35 @@ impl NodeLinkControl {
                 }
             }
             LinkAction::Command => {
-                if !self.manager.remote_digit(&remote, '*', &self.policy)
+                if remote == self.local
+                    || !self.policy.allows(&remote, true)
                     || (operation.digit.is_none() && !directory_verified)
                 {
                     return Err(AdmissionError::Denied);
                 }
+                let message = Protocol::RemoteDigit {
+                    destination: remote.clone(),
+                    source: self.local.clone(),
+                    sequence: self.digit_sequence.wrapping_add(1),
+                    digit: operation.digit.unwrap_or('*'),
+                };
+                let deliveries = self.manager.relay_digit("", &message);
+                if deliveries.is_empty() {
+                    return Err(AdmissionError::Denied);
+                }
                 if let Some(digit) = operation.digit {
-                    LinkEffect::RemoteDigit { remote, digit }
+                    if !b"0123456789*#ABCD".contains(&(digit as u8)) || !digit.is_ascii() {
+                        return Err(AdmissionError::Invalid);
+                    }
+                    self.digit_sequence = self.digit_sequence.wrapping_add(1);
+                    LinkEffect::ForwardDigits(deliveries)
                 } else {
                     if let Some(reply) = &operation.reply {
-                        if let Some((_, _, commands)) = self
-                            .peer_commands
-                            .iter_mut()
-                            .find(|(_, source, _)| source == reply)
+                        if let Some((_, _, commands)) =
+                            self.peer_commands.iter_mut().find(|(name, source, _)| {
+                                Some(name.as_str()) == operation.origin.as_deref()
+                                    && source == reply
+                            })
                         {
                             commands.select_remote(&remote);
                         }
@@ -566,7 +652,9 @@ impl NodeLinkControl {
                 let commands = if let Some(reply) = &operation.reply {
                     self.peer_commands
                         .iter_mut()
-                        .find(|(_, source, _)| source == reply)
+                        .find(|(name, source, _)| {
+                            Some(name.as_str()) == operation.origin.as_deref() && source == reply
+                        })
                         .map(|(_, _, commands)| commands)
                 } else {
                     Some(&mut self.commands)
@@ -578,7 +666,7 @@ impl NodeLinkControl {
                 }
                 LinkEffect::ParrotEnabled(action == LinkAction::ParrotEnable)
             }
-            LinkAction::AdminUnlock | LinkAction::AdminLock => {
+            LinkAction::AdminUnlock | LinkAction::AdminLock | LinkAction::PadTest => {
                 return Err(AdmissionError::Denied);
             }
         };

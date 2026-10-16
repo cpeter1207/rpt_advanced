@@ -149,3 +149,23 @@ parrot-levels =
     .text = Peak level { $peak_dbfs } dBFS. RMS level { $rms_dbfs } dBFS.
     .tts = Peak level { $peak_dbfs } dBFS. RMS level { $rms_dbfs } dBFS.
     .morse = PEAK { $peak_dbfs } DBFS RMS { $rms_dbfs } DBFS
+pad-test-empty =
+    .text = no digits
+    .tts = no digits
+    .morse = NO DIGITS
+pad-test-overflow =
+    .text = too many digits
+    .tts = too many digits
+    .morse = TOO MANY DIGITS
+dtmf-symbol =
+    .text = { $symbol }
+    .tts = { $kind ->
+        [star] star
+        [pound] pound
+       *[other] { $symbol }
+        }
+    .morse = { $kind ->
+        [star] STAR
+        [pound] POUND
+       *[other] { $symbol }
+        }

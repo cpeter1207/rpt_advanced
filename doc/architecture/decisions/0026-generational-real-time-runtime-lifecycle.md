@@ -1,10 +1,14 @@
 # ADR 0026: Generational real-time runtime lifecycle
 
-Status: Accepted
+Status: Implemented (current independently paced composition)
 
-Amended 2026-09-13 for independently paced local receive and transmit workers
-under ADR 0027. The current USBRadioPlus migration implements the split callback
-entry points; this record's two-owner generational lifecycle remains pending.
+Implementation status — 2026-10-15: RPT Advanced's `NodeHost` owns runtime
+generations and independent receive/transmit hazard slots. USBRadioPlus's
+station update mailbox retains prepared state until both callbacks acknowledge
+adoption, and stream teardown stops callbacks before releasing their contexts.
+These are complementary lifecycle boundaries, not duplicate station hosts.
+The optional paired shared-clock path remains pending under ADR 0027;
+publishing lifecycle status through future control APIs remains under ADR 0023.
 
 ## Context
 
@@ -65,8 +69,8 @@ concurrently.
 
 These logical owners and their lifetimes belong to rpt_advanced, not to
 Asterisk's thread model. The station-control owner submits through ADR 0038's
-control-path adapter, currently backed by the Asterisk taskprocessor; backend
-thread and queue details stay inside that adapter. Standalone can select an
+control-path adapter, backed by the Asterisk taskprocessor or the standalone
+owned worker; backend details stay inside that adapter. Standalone selects an
 independent backend with the same functional contract. Scheduling and
 reclamation policy remain in the controller. Other Asterisk-owned callbacks
 or API-mandated thread handling remain in their thin integration adapter.
@@ -142,7 +146,7 @@ If an adapter can invoke an unregistered arbitrary thread, it must first hand
 off a fixed packet descriptor to a registered link-media-ingress executor;
 that arbitrary thread must not retain a generation reference.
 
-The planned standalone transport uses ADR 0037's bounded Tokio mailboxes and
+The standalone transport uses ADR 0037's bounded Tokio mailboxes and
 one async owner per connection on a shared worker pool. A permitted peer-local
 async mutex cannot delay another peer or audio. The owner alone advances the
 jitter adapter, decoder and receive-program writer. Registration retains its

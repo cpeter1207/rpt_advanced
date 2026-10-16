@@ -62,10 +62,11 @@ remaining; later qualifying activity replaces that conservative estimate.
 
 Each copied configured-link transition carries its schedule generation, route
 slot, and one-use reservation nonce. The runtime validates that identity before
-preparing, attaching, retaining, or withdrawing a link. `*806` disconnects all
-current links and holds configuration-owned routes; permitted manual links may
-still be connected while that hold is active. `*816` re-evaluates current
-configured-link policy and restores links saved by disconnect-all. A
+preparing, attaching, retaining, or withdrawing a link. `*806` pauses and
+disconnects permanent links while leaving temporary links connected; permitted
+manual links may still be connected while that hold is active. `*816`
+re-evaluates current configured-link policy and resumes permanent retry intent.
+`*813 <node>` resumes one paused permanent peer without clearing other holds. A
 replacement configuration can still withdraw an issued route its current
 policy suppresses. This protects scheduler transitions from stale operations.
 The final hub-retry gate and continuous route-ownership rule are defined by

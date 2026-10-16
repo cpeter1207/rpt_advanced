@@ -44,17 +44,41 @@ forwarded to linked peers.
 
 When DTMF muting is enabled, muting remains active for the entire command,
 until the command ends because the source unkeys, a command terminator digit is
-received, or the command times out. That muting behavior is unchanged by peer
-regeneration. If DTMF regeneration is enabled, forwarding to linked peers
-stops as soon as the command can be determined not to be intended for a given
-peer. The local transmitter is never subject to that forwarding cutoff.
+received, or the command times out. Raw-audio muting is independent of explicit
+tone regeneration and of the selected remote-command destination.
 
-The `*4` remote-command prefix is the one deliberate discovery phase: DTMF
-continues to be forwarded to all connected peers while the destination node
-number is being collected. Once the complete destination node number has been
-entered, forwarding stops completely for every other peer and continues only
-to the selected destination. Subsequent digits remain subject to the command's
-normal termination by unkey, terminator digit, or timeout.
+Amended 2026-10-15: DTMF regeneration and `*4` forwarding follow ASL3. This
+supersedes peer PCM regeneration and forwarding during destination collection.
+Regeneration is disabled by default and sends eligible received link digits
+only to the local transmitter. Command-start and collected command digits are
+not regenerated. No regenerated tone enters peer program audio. Ordinary local
+RF audio continues to obey the existing muting policy; this feature does not
+add a second local-RF digit replay.
+
+The inheritable per-node regeneration settings select fixed tone duration,
+interdigit gap, and combined dual-tone peak level. Approved defaults are
+200 ms, 50 ms, and -12 dBFS, with equal row/column amplitudes. An idle digit
+queue has ASL3's 500 ms initial delay. Generation belongs to the shared DTMF
+component, reusing the shared tone component; synthesis stays outside audio
+callbacks and playback is local-only PCM. Like ASL's local generator, that
+tone/gap span replaces ordinary local voice-band output rather than mixing
+with it. It never replaces peer output or changes input muting. Already
+playing media advances normally rather than accumulating a delayed replay.
+
+The `*4` command collects and validates its destination locally. Neither its
+prefix nor destination digits are broadcast. Subsequent digits use ASL's
+`D <destination> <source> <sequence> <digit>` text envelope. Send directly when
+the destination is adjacent; otherwise relay the addressed envelope through
+eligible links. A transit node does not execute or regenerate those digits
+and does not return the message to its ingress/source. Preserve destination,
+source, and sequence through relays. Only the addressed node processes the
+digit under its normal command and regeneration policy.
+
+An actual `#` exits remote-command mode locally and is not forwarded. Ordinary
+RF unkey and the normal command-collection timeout do not clear the selected
+destination. They still end that source's raw-audio muting interval. Source
+loss and generation retirement discard stale source-owned work. Model actual
+unkey separately from a received `#`, including for pad test.
 
 Administrative DTMF commands require both an unlock and a lock code. Codes
 have global defaults with per-node overrides; omitting either disables DTMF
@@ -83,16 +107,29 @@ source-specific routing above, uses speech with Morse fallback, calls `*` “sta
 empty capture. Captured digits are not interpreted as later commands, and the
 normal decoded-tone muting remains in effect.
 
-Peer DTMF regeneration is a configurable capability. Its routing and cutoff
-rules above are separate from decoded-tone muting, which remains controlled by
-the command-source policy. Remote-base DTMF operations use this same
-command-map and authorization policy as described by ADR 0004.
+Remote command transport does not bypass inbound access policy or DTMF
+administrative authorization. A claimed source in a relayed text envelope is
+not authentication. Preserve independent command/unlock state and the current
+originating-connection reply contract. Remote-base DTMF operations use this
+same command-map and authorization policy as described by ADR 0004.
+Remote destination selection is applied before the next queued digit is parsed.
+Each ingress connection may retain at most 128 simultaneous origin collectors;
+new starts above that bound are ignored without evicting active commands or
+administrative grants. Idle digits need no collector, and expired idle state is
+reclaimed on control. This does not limit the number of connected peers.
+
+Implementation status — 2026-10-16: pad capture, localized readback, local-only
+PCM regeneration, and addressed direct/transit command routing are implemented.
+Regeneration uses the generator-capable DTMF shared-library descriptor; startup
+rejects an older provider. Targeted local tests cover both host ingress paths,
+source isolation, waveform boundaries, and transmitter safety. Hosted release
+validation and live-radio validation remain separate prerequisites to release.
 
 ## Consequences
 
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot
 interrupt their origin while it is keyed. DTMF changes require command-map,
-authorization, muting, peer-forwarding-cutoff, and RF-response tests in
-addition to DSP detection tests.
+authorization, muting, local-only regeneration, addressed relay, and RF-response
+tests in addition to DSP detection tests.
 REST/WebSocket route and schema publication remains governed by ADR 0016.

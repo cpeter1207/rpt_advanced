@@ -117,9 +117,37 @@ impl Engine {
     fn execute_digit(
         self: &Arc<Self>,
         local: String,
-        operation: DigitOperation,
+        outcome: rpt_advanced_core::runtime::dtmf::DigitOutcome,
     ) -> Result<(), RuntimeError> {
-        self.execute_with_source(local, operation, true)
+        if let rpt_advanced_core::runtime::dtmf::DigitOutcome::Operation(operation) = outcome {
+            return self.execute_with_source(local, operation, true);
+        }
+        let revision = self.revision.load(Ordering::Acquire);
+        let effect = self.digit_effect(&local, outcome)?;
+        self.effect(local, effect, revision)
+    }
+    fn digit_effect(
+        self: &Arc<Self>,
+        local: &str,
+        outcome: rpt_advanced_core::runtime::dtmf::DigitOutcome,
+    ) -> Result<LinkEffect, RuntimeError> {
+        use rpt_advanced_core::runtime::dtmf::DigitOutcome;
+        match outcome {
+            DigitOutcome::Operation(operation) => self.operation(local, operation),
+            DigitOutcome::RemoteCandidate(operation) => {
+                self.operation(local, operation).or(Ok(LinkEffect::None))
+            }
+            DigitOutcome::PadTest(report) => {
+                let local = local.to_owned();
+                self.run(move |host| host.runtime.queue_pad_test(&local, &report))?;
+                Ok(LinkEffect::None)
+            }
+            DigitOutcome::Regenerate(digit) => {
+                let local = local.to_owned();
+                self.run(move |host| host.regenerate(&local, digit))?;
+                Ok(LinkEffect::None)
+            }
+        }
     }
     fn execute_with_source(
         self: &Arc<Self>,
@@ -413,7 +441,7 @@ impl Engine {
         })?;
         for (local, operation) in operations {
             if self
-                .operation(&local, operation)
+                .digit_effect(&local, operation)
                 .and_then(|effect| self.background(local, effect, revision, true))
                 .is_err()
             {
@@ -705,6 +733,8 @@ unsafe extern "C" fn rptadv_product_start(
         ToneSequence::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         MorseRenderer::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         DtmfDetector::provider_ready().map_err(|_| RuntimeError::Preparation)?;
+        rpt_advanced_core::audio::DtmfGenerator::provider_ready()
+            .map_err(|_| RuntimeError::Preparation)?;
         MessageTemplate::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         schedule::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;

@@ -35,8 +35,6 @@ pub enum Command {
         /// Failure must not disconnect an advisory K exchange.
         advisory: bool,
     },
-    /// Completed remote-control digit.
-    Digit(char),
     /// Prepared replacement generation endpoints; the old ingress becomes terminal.
     Redirect {
         /// Unique replacement inbound producer.
@@ -259,8 +257,6 @@ pub struct PeerSession {
     pending_pcm: [f32; MAX_PEER_INPUT_SAMPLES],
     peer: Peer,
     local: String,
-    remote: String,
-    dtmf_sequence: i32,
     commands: Consumer<Command>,
     events: Producer<Event>,
     stop: Arc<AtomicBool>,
@@ -549,8 +545,6 @@ impl PeerSession {
                 pending_pcm: [0.0; MAX_PEER_INPUT_SAMPLES],
                 peer,
                 local: local.into(),
-                remote: remote.into(),
-                dtmf_sequence: 0,
                 commands: incoming,
                 events,
                 stop,
@@ -574,7 +568,7 @@ impl PeerSession {
     fn event(&mut self, event: Event) -> Result<(), Error> {
         self.events.push(event).map_err(|_| Error::Write)
     }
-    fn text(&mut self, bytes: Vec<u8>, now_ms: u64) -> Result<(), Error> {
+    fn text(&mut self, bytes: Vec<u8>, _now_ms: u64) -> Result<(), Error> {
         let Some(protocol) = Protocol::parse(&bytes) else {
             return Ok(());
         };
@@ -617,17 +611,7 @@ impl PeerSession {
                 }
                 self.event(Event::Text(bytes))?;
             }
-            Protocol::RemoteDigit {
-                ref destination,
-                ref source,
-                digit,
-                ..
-            } if destination == &self.local && source == &self.remote => {
-                // Protocol::parse admits only conventional DTMF digits.
-                let _ = self.peer.digit(digit, now_ms);
-                self.event(Event::Digit(digit))?;
-            }
-            Protocol::RemoteDigit { .. } => (),
+            // Addressed D messages retain their source and sequence through shared control.
             _ => self.event(Event::Text(bytes))?,
         }
         Ok(())
@@ -713,15 +697,6 @@ impl PeerSession {
                     if !advisory {
                         result?;
                     }
-                }
-                Command::Digit(digit) => {
-                    self.dtmf_sequence = self.dtmf_sequence.wrapping_add(1);
-                    let text = CString::new(format!(
-                        "D {} {} {} {digit}",
-                        self.remote, self.local, self.dtmf_sequence
-                    ))
-                    .map_err(|_| Error::InvalidFrame)?;
-                    self.io.send_text(&text)?;
                 }
                 Command::Redirect { inbound, outbound } => {
                     self.inbound = inbound;

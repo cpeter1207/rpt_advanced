@@ -1,6 +1,6 @@
 # ADR 0021: Versioned adapter shared objects isolate C-to-Rust boundaries
 
-Status: Accepted
+Status: Implemented for the current Asterisk entry boundary
 
 ## Context
 
@@ -57,3 +57,14 @@ per C-facing integration in exchange for strict separation of concerns. ADR
 0021 supersedes ADR 0020's public-boundary shim placement; ADR 0020 continues
 to govern private Rust `dylib` component boundaries. ADR 0022 applies the same
 separation rule in the other direction, from Rust to external C dependencies.
+
+## Implementation status — 2026-10-15
+
+The metadata-only C loader selects `librptadv_asterisk_adapter.so.1`, a Rust
+`cdylib` that owns the public Asterisk entry and host-service calls. It forwards
+through versioned C-compatible descriptors to the product rather than exposing
+the product's private Rust ABI. The independently replaceable Asterisk
+taskprocessor backend is a separate control-path adapter under ADR 0038.
+Standalone does not select the Asterisk entry adapter. Future C-facing
+integrations remain subject to this decision; this status describes the
+current selected boundary, not every possible adapter.

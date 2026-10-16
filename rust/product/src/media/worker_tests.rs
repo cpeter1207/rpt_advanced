@@ -710,6 +710,59 @@ fn invalid_speech_rate_falls_back_to_morse() {
 }
 
 #[test]
+fn pad_test_long_reply_streams_speech_and_morse_fallback() {
+    let catalog = rpt_advanced_core::messages::MessageCatalog::from_sources(
+        "en-US",
+        include_str!("../../../../messages/en-US.ftl"),
+        None,
+    )
+    .unwrap();
+    let forms = catalog.format_pad_test(&"*".repeat(127), true).unwrap();
+    assert!(forms.tts.len() > 127 && forms.morse.len() > 127);
+    for speech_rate in [48000, 192001] {
+        let mut session = StationSession::new(
+            "1000".into(),
+            1,
+            context(None),
+            fixture_context(fixture(speech_rate, 960, 0.25), false, true),
+        )
+        .unwrap();
+        session.start().unwrap();
+        let mut reader = session
+            .register_once(MediaSource {
+                speech: Some(rpt_advanced_core::media::SpeechSource {
+                    text: forms.tts.clone(),
+                    model: "voice.onnx".into(),
+                    speed_percent: 100,
+                    level_db: -6,
+                }),
+                morse: Some(rpt_advanced_core::media::MorseSource {
+                    text: forms.morse.clone(),
+                    speed_wpm: 20,
+                    frequency_hz: 800.0,
+                    level_db: -6,
+                }),
+                ..MediaSource::default()
+            })
+            .unwrap();
+        reader.start();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let mut output = [0.0; 960];
+            let _ = reader.render(&mut output);
+            if output.iter().any(|sample| *sample != 0.0) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no streamed pad reply at speech rate {speech_rate}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+#[test]
 fn active_producer_streams_tone_then_morse_fallback_on_fresh_registration() {
     let mut session = StationSession::new(
         "1000".into(),

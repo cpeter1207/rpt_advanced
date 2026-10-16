@@ -3,6 +3,36 @@ use super::messages::{CatalogError, Message, MessageCatalog};
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
 #[test]
+fn pad_test_forms_are_localized_and_bounded() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let forms = catalog.format_pad_test("*#ABCD0123456789", false).unwrap();
+    assert_eq!(forms.text, "* # A B C D 0 1 2 3 4 5 6 7 8 9");
+    assert_eq!(forms.tts, "star pound A B C D 0 1 2 3 4 5 6 7 8 9");
+    assert_eq!(forms.morse, "STAR POUND A B C D 0 1 2 3 4 5 6 7 8 9");
+    assert_eq!(catalog.format_pad_test("", false).unwrap().tts, "no digits");
+    assert_eq!(
+        catalog.format_pad_test("11", true).unwrap().tts,
+        "too many digits 1 1"
+    );
+    for invalid in ["x".to_owned(), "1".repeat(128)] {
+        assert!(catalog.format_pad_test(&invalid, false).is_err());
+    }
+    let fragment = "x".repeat(127);
+    let overlay = format!(
+        "dtmf-symbol =\n    .text = {fragment}\n    .tts = {fragment}\n    .morse = {fragment}\n"
+    );
+    let translated = MessageCatalog::from_sources("de", ENGLISH, Some(&overlay)).unwrap();
+    let forms = translated.format_pad_test(&"1".repeat(127), true).unwrap();
+    assert!(forms.tts.len() > 127);
+    assert!(forms.tts.len() <= 128 * 128);
+    assert_eq!(forms.tts.matches(&fragment).count(), 127);
+    let missing =
+        MessageCatalog::from_sources("de", ENGLISH, Some("dtmf-symbol =\n    .text = taste\n"))
+            .unwrap();
+    assert_eq!(missing.format_pad_test("*", false).unwrap().tts, "star");
+}
+
+#[test]
 fn message_catalog_formats_all_variants_with_typed_arguments() {
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
     let forms = catalog

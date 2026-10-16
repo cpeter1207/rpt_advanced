@@ -65,6 +65,81 @@ impl NativeMediaPreparer for Media {
     }
 }
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
+
+#[test]
+fn pad_test_queues_one_local_stream_after_unkey() {
+    use crate::runtime::dtmf::{DigitEvent, DigitOutcome, PadTestResult};
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    for digit in "*82*#ABCD".chars() {
+        assert!(
+            runtime
+                .digit("1000", DigitEvent::Digit { digit, now_ms: 1 })
+                .is_none()
+        );
+    }
+    assert!(messages.lock().unwrap().is_empty());
+    let Some(DigitOutcome::PadTest(report)) =
+        runtime.digit("1000", DigitEvent::Unkey { now_ms: 2 })
+    else {
+        panic!("pad result")
+    };
+    runtime.queue_pad_test("1000", &report).unwrap();
+    assert_eq!(*messages.lock().unwrap(), ["star pound A B C D"]);
+    assert!(
+        runtime
+            .digit("1000", DigitEvent::Unkey { now_ms: 3 })
+            .is_none()
+    );
+    for _ in 0..3 {
+        runtime.queue_pad_test("1000", &report).unwrap();
+    }
+    assert_eq!(
+        runtime.queue_pad_test("1000", &report),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.queue_pad_test("missing", &report),
+        Err(RuntimeError::MissingNode)
+    );
+    assert_eq!(
+        runtime.queue_pad_test(
+            "1000",
+            &PadTestResult {
+                digits: "invalid".into(),
+                overflowed: false
+            }
+        ),
+        Err(RuntimeError::Preparation)
+    );
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.0; 960];
+    for _ in 0..15 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(true, false, &[], &mut audio);
+        assert!(audio.iter().all(|sample| *sample == 0.0));
+    }
+    for _ in 0..14 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+    }
+    assert!(audio.iter().any(|sample| *sample != 0.0));
+    drop(generation);
+    assert!(runtime.stop(0));
+}
 impl NativeFilePreparer for CapturingMedia {
     fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
         Err(MediaError::Unavailable)
@@ -235,7 +310,7 @@ fn admission_loss_discards_partial_commands_on_every_active_node() {
                     .is_none()
             );
         }
-        assert_eq!(
+        assert!(matches!(
             runtime
                 .digit(
                     local,
@@ -244,11 +319,9 @@ fn admission_loss_discards_partial_commands_on_every_active_node() {
                         now_ms: 4
                     }
                 )
-                .unwrap()
-                .command
-                .action,
-            LinkAction::Status
-        );
+                .unwrap(),
+            super::dtmf::DigitOutcome::Operation(operation) if operation.command.action == LinkAction::Status
+        ));
     }
     assert!(runtime.stop(5));
     runtime.discard_digits();
@@ -1182,9 +1255,15 @@ fn control_views_and_real_radio_digit_drain_share_one_current_node() {
             rx.acquire().unwrap().state().process(true, &mut pcm, 1000);
         }
     }
-    let commands = runtime.node("1000").unwrap().drain_digits();
+    let events = runtime.node("1000").unwrap().drain_digits();
+    let commands: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| runtime.digit("1000", event))
+        .collect();
     assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].command.action, LinkAction::Status);
+    assert!(
+        matches!(&commands[0], super::dtmf::DigitOutcome::Operation(operation) if operation.command.action == LinkAction::Status)
+    );
     runtime.node("1000").unwrap().discard_digits();
     assert!(runtime.node("1000").unwrap().drain_digits().is_empty());
     assert!(runtime.stop(1001));
@@ -1975,12 +2054,18 @@ fn parrot_command_rejects_a_second_toggle_until_callback_acknowledges_enable() {
         operation
     };
     assert!(feed(&mut runtime, "*8001234#", 1000).is_none());
-    let enabled = feed(&mut runtime, "*804", 1001).unwrap();
+    let super::dtmf::DigitOutcome::Operation(enabled) = feed(&mut runtime, "*804", 1001).unwrap()
+    else {
+        panic!("operation")
+    };
     assert!(matches!(
         runtime.command("1000", enabled, clock(), false),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
-    let disabled = feed(&mut runtime, "*805", 1002).unwrap();
+    let super::dtmf::DigitOutcome::Operation(disabled) = feed(&mut runtime, "*805", 1002).unwrap()
+    else {
+        panic!("operation")
+    };
     assert!(matches!(
         runtime.command("1000", disabled, clock(), false),
         Err(RuntimeError::Rejected)
@@ -2023,7 +2108,10 @@ fn accepted_peer_parrot_command_confirms_only_its_source() {
                 .peer_digit("2000", digit, 1002, reply.clone())
                 .or(operation);
         }
-        operation.unwrap()
+        match operation.unwrap() {
+            super::dtmf::DigitOutcome::Operation(operation) => operation,
+            _ => panic!("operation"),
+        }
     };
     let mut now = clock();
     now.now_ms = 1003;

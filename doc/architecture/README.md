@@ -193,6 +193,7 @@ audio input → local receive worker
                 └─ local receive inbound PCM ring ────────────────┐
 link packet → per-peer jitter / decode → peer inbound PCM ring ───┤
 file/speech/Morse/tone worker ──streaming PCM──> telemetry playout ring ──┤
+link distributor → DTMF generator → local-only signaling PCM ring ──────┤
                                                                 ▼
                       transmit worker ← DAC / adapter output demand
                       ├─ native-rate PCM mix / transmit processing
@@ -459,9 +460,11 @@ defines the full reload, hardware-handoff, and failure policy.
   the local transmitter, a linked-peer command is sent only to that peer, and
   CLI/REST replies remain on the requesting control interface.
 - DTMF muting lasts until unkey, a command terminator, or command timeout.
-  Optional peer regeneration stops as soon as a command is known not to target
-  a peer; `*4` forwards during destination collection, then forwards only to
-  the selected node. Local-transmitter DTMF is unaffected.
+  ADR 0023 regeneration sends eligible link digits only to
+  the local transmitter, never as regenerated peer PCM. `*4` collects its
+  destination locally, then sends addressed ASL `D` text directly or through
+  relays; actual `#` exits selection, not RF unkey. Per-origin collectors retain
+  their authenticated ingress connection and independent administrative state.
 - The local receive inbound ring is also the configured squelch-delay line.
   Its sample-associated COS/CTCSS gate mutes the delayed unqualified tail
   before local or peer routing; phase, no-tone, and 55 Hz CTCSS tails end

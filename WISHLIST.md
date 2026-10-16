@@ -373,19 +373,15 @@ None.
 - Recording format, maximum duration/storage quota, retention/deletion policy,
   upload size/type limits, and REST upload authentication/authorization.
 
-### DTMF regeneration and telephony integration
+### Telephony integration
+
+DTMF pad test, local-transmitter PCM regeneration, and ASL addressed command
+forwarding are implemented under ADRs 0023 and 0025. Targeted local validation
+is recorded in the 2026-10-16 implementation plan; hosted and live validation
+remain release prerequisites.
 
 **Requirements**
 
-- Provide an inheritable, per-node DTMF pad-test command. A local RF user keys
-  the receiver, enters the command followed by DTMF digits, then unkeys.
-- After that source unkeys, serialize a telemetry reply that reads back the
-  captured DTMF digits exactly. Use the node's default speech configuration and
-  fall back to Morse when speech cannot be prepared.
-- The pad-test capture owns the digits after its command so they are not
-  interpreted as other DTMF commands. It must preserve the normal receiver
-  DTMF-muting behavior.
-- Permit configurable DTMF regeneration to connected peers.
 - Support autopatch, reverse patch, and paging through an external IAX or SIP
   connection, with a more user-friendly interface than ASL3.
 - Preserve the long-term option to replace Asterisk with a lock-free native
@@ -395,25 +391,11 @@ None.
 
 **Decisions recorded**
 
-- Pad-test results use default speech with Morse fallback and are deferred
-  until the originating local receiver unkeys.
-- The command is per-node configurable under the established DTMF command-map
-  model. Its inherited default is public `*82`; it does not require a DTMF
-  administrative unlock.
-- A capture accepts all 16 DTMF symbols, including `*`, `#`, and `A`--`D`.
-  Only local receiver unkey ends it. It retains the first 127 symbols,
-  discards later symbols, and reports the over-limit condition before reading
-  back the retained symbols.
-- Pad-test telemetry follows ADR 0023's source-scoped response policy.
-- Readback announces symbols individually: “star”, “pound”, and letters
-  `A`--`D`; an empty capture says “no digits”.
-- DTMF regeneration is configurable for connected peers.
 - Initial telephony integration uses external IAX or SIP rather than requiring
   a native IAX2 implementation.
 
 **Material decisions needed before implementation**
 
-- DTMF regeneration routing, muting, authorization, and timing policy.
 - Telephony provider scope, outbound/inbound/reverse-patch access rules,
   dialing restrictions, emergency-call policy, recording policy, and caller-ID
   behavior.
@@ -573,8 +555,9 @@ None.
   templating, and generic scheduling are released components dynamically
   consumed by the controller product; Morse dynamically consumes tone. Their
   former implementations have been removed from the controller. DTMF PCM
-  generation did not exist in the moved source and remains a future capability
-  of the shared DTMF component. Controller action, authorization, link, and
+  generation is implemented in the shared DTMF component, dynamically consuming
+  the tone component; its generator-capable package release is pending.
+  Controller action, authorization, link, and
   telemetry policy remain in the product.
 
 ### Standalone lock-free controller

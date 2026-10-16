@@ -1,11 +1,18 @@
 # ADR 0027: Separate receive and transmit workers with adapter-owned PCM I/O
 
-Status: Accepted
+Status: Partially implemented (verified shared-clock adapter path pending)
 
 Amended 2026-10-01: every telemetry source, including Morse and tone sequences,
 is rendered outside the transmit worker and delivered as PCM through the
-telemetry ring. This ADR describes required ownership; implementation status is
-tracked in `WISHLIST.md`.
+telemetry ring.
+
+Implementation status — 2026-10-15: independently paced receive/transmit
+callbacks, controller-owned local/peer/telemetry rings, off-worker telemetry
+rendering, and per-node snapshot intervals are implemented. USBRadioPlus supplies
+processed receive PCM and renders transmit PCM through separate adapter callbacks;
+the RPT Advanced product owns the controller rings and mixer. The optional
+verified shared-clock paired callback described below remains pending. This does
+not imply a missing ring or a combined playback-driven tick in the current path.
 
 Native-rate scope is narrowed to 48 kHz by
 [ADR 0035](0035-fixed-48khz-native-audio.md). The variable-frame and elapsed-sample

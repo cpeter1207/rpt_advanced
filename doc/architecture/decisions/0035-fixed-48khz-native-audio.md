@@ -1,6 +1,6 @@
 # ADR 0035: Fixed 48 kHz native audio
 
-Status: Accepted
+Status: Implemented (fixed native rate; shared-clock option remains under ADR 0027)
 
 ## Context
 
@@ -34,10 +34,11 @@ Sample-rate conversion belongs at a real source/sink boundary:
 
 - Under the 2026-09-13 amendment in ADRs 0025/0027, inbound PCM rings alone
   convert local receive, decoded peer, and telemetry sources to the native
-  transmit rate and correct independent-clock drift. The current USBRadioPlus
-  migration implements the separate callback entry points, but this complete
-  ring topology remains pending. Local receive DSP precedes its ring; transmit
-  performs no sample-rate conversion and fills the adapter output buffer directly.
+  transmit rate and correct independent-clock drift. The RPT Advanced product
+  owns these rings; USBRadioPlus supplies separate native receive/transmit
+  endpoints without a duplicate controller program ring. Local receive DSP
+  precedes its ring; transmit performs no sample-rate conversion and fills the
+  adapter output buffer directly.
 - Peer ingress decodes at the negotiated codec rate and leaves inbound rate
   conversion to that peer's ring. Egress converts native PCM to the codec rate
   before encoding; this outbound boundary is not an inbound correction stage.
@@ -86,9 +87,8 @@ partitions rather than preserving the removed converters' filtering.
 Stream setup tests reject unsupported native rates. Native-to-native handoffs
 have no rate-conversion stage except where independent-clock recovery is
 required. Existing codec, Asterisk, and media-boundary conversion tests remain.
-No shared-ring or samplerate-adapter ABI/SONAME change is needed. The
-unreleased radio-core bootstrap is narrowed before its initial release;
-already deployed nodes are not changed by recording this decision.
+The radio composition enforces the native-rate constraint without narrowing
+the reusable shared-ring or samplerate-adapter APIs.
 
 The appliance PRD, system clocking architecture, radio-port endpoint contract,
 and traceability matrix carry this same 48 kHz constraint. A wider codec

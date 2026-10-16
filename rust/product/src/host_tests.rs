@@ -7,7 +7,7 @@ use crate::{
 };
 use rpt_advanced_core::{
     command::{Command, LinkAction},
-    runtime::dtmf::DigitEvent,
+    runtime::dtmf::{DigitEvent, DigitOperation},
 };
 use std::{ffi::c_void, path::Path, ptr, sync::Barrier, time::Duration};
 
@@ -64,6 +64,98 @@ fn host() -> Host {
         clock(),
     )
     .unwrap()
+}
+
+#[test]
+fn remote_selection_precedes_the_next_digit_in_one_host_batch() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for asynchronous in [false, true] {
+        for suffix in ["5", "#5"] {
+            let mut host = host();
+            host.runtime.incoming("1000", "2000", true).unwrap();
+            let (io, state) = peer_with_async(48000, asynchronous);
+            state.lock().unwrap().continuous_async = true;
+            host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+                .unwrap();
+            pump_until(&mut host, |host| {
+                named_peer_ready(host, "2000") && host.runtime.status(10)[0].1.retiring.is_none()
+            });
+            let _other = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+            // The fixture directory resolves every numeric name, including "3".
+            state
+                .lock()
+                .unwrap()
+                .input
+                .extend(format!("*43{suffix}").bytes().map(Input::Digit));
+            let mut outcomes = Vec::new();
+            for _ in 0..100 {
+                host.pump(clock()).unwrap();
+                outcomes.extend(host.take_operations());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if suffix == "5" {
+                assert!(
+                    matches!(outcomes.as_slice(), [(_, DigitOutcome::Operation(operation))]
+                    if operation.command.node == "3" && operation.digit == Some('5')),
+                    "{outcomes:?}"
+                );
+            } else {
+                assert_eq!(
+                    outcomes,
+                    vec![("1000".into(), DigitOutcome::Regenerate('5'))]
+                );
+            }
+            assert!(host.stop(20));
+        }
+    }
+}
+
+#[test]
+fn remote_digits_use_shared_policy_for_polling_and_async_hosts() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for asynchronous in [false, true] {
+        let mut host = host();
+        host.runtime.incoming("1000", "2000", true).unwrap();
+        let (io, state) = peer_with_async(48000, asynchronous);
+        state.lock().unwrap().continuous_async = true;
+        host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+            .unwrap();
+        pump_until(&mut host, |host| {
+            named_peer_ready(host, "2000") && host.runtime.status(10)[0].1.retiring.is_none()
+        });
+        let other = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+        state.lock().unwrap().input.extend([
+            Input::Text(b"D 3000 4000 11 9"),
+            Input::Text(b"D 1000 4000 12 5"),
+        ]);
+        pump_until(&mut host, |host| {
+            !host.operations.is_empty()
+                && other
+                    .lock()
+                    .unwrap()
+                    .texts
+                    .iter()
+                    .any(|text| text == b"D 3000 4000 11 9")
+        });
+        assert_eq!(
+            host.take_operations(),
+            vec![("1000".into(), DigitOutcome::Regenerate('5'))]
+        );
+        assert!(
+            !state
+                .lock()
+                .unwrap()
+                .texts
+                .iter()
+                .any(|text| text.starts_with(b"D "))
+        );
+        assert!(other.lock().unwrap().digits.is_empty());
+        assert!(host.stop(20));
+    }
 }
 
 #[test]
@@ -465,10 +557,7 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
     .unwrap();
     host.immediate(
         "1000",
-        LinkEffect::RemoteDigit {
-            remote: "2000".into(),
-            digit: '5',
-        },
+        LinkEffect::ForwardDigits(vec![("2000".into(), "D 2000 1000 1 5".into())]),
         clock(),
     )
     .unwrap();
@@ -484,6 +573,9 @@ fn peers_survive_reload_route_events_and_detach_before_generation_reclamation() 
     ]);
     pump_until(&mut host, |host| !host.operations.is_empty());
     let (_, operation) = host.take_operations().pop().unwrap();
+    let DigitOutcome::Operation(operation) = operation else {
+        panic!("expected command")
+    };
     assert_eq!(operation.command.action, LinkAction::Status);
     assert_eq!(operation.reply, Some(host.peers[0].control.reply_target()));
     assert!(host.take_operations().is_empty());
@@ -595,10 +687,7 @@ fn status_reports_modes_permanent_retries_and_failed_resource_preparation() {
     assert!(
         host.immediate(
             "1000",
-            LinkEffect::RemoteDigit {
-                remote: "missing".into(),
-                digit: '1'
-            },
+            LinkEffect::ForwardDigits(vec![("missing".into(), "D 3000 1000 1 1".into())]),
             clock()
         )
         .is_err()
@@ -752,7 +841,10 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
     for _ in 0..64 {
         host.peers[0]
             .control
-            .send(PeerCommand::Digit('1'))
+            .send(PeerCommand::Text {
+                text: c"D 2000 1000 1 1".into(),
+                advisory: false,
+            })
             .ok()
             .unwrap();
     }
@@ -761,10 +853,7 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
     assert!(
         host.immediate(
             "1000",
-            LinkEffect::RemoteDigit {
-                remote: "2000".into(),
-                digit: '2'
-            },
+            LinkEffect::ForwardDigits(vec![("2000".into(), "D 2000 1000 1 2".into())]),
             clock()
         )
         .is_err()
@@ -838,7 +927,10 @@ fn withdrawn_peer_clears_a_queued_redirect_and_acknowledgment() {
     for _ in 0..64 {
         host.peers[0]
             .control
-            .send(PeerCommand::Digit('1'))
+            .send(PeerCommand::Text {
+                text: c"D 2000 1000 1 1".into(),
+                advisory: false,
+            })
             .ok()
             .unwrap();
     }
@@ -933,10 +1025,7 @@ fn new_node_reload_and_missing_or_busy_operations_leave_live_owners_intact() {
         .unwrap();
     host.immediate(
         "2000",
-        LinkEffect::RemoteDigit {
-            remote: "3000".into(),
-            digit: '9',
-        },
+        LinkEffect::ForwardDigits(vec![("3000".into(), "D 3000 2000 1 9".into())]),
         clock(),
     )
     .unwrap();

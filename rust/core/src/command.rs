@@ -49,10 +49,12 @@ pub enum LinkAction {
     ParrotEnable,
     /// Disable the native-rate parrot for this node.
     ParrotDisable,
+    /// Capture local keypad digits until receiver unkey, then read them back.
+    PadTest,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 20;
+pub const ACTION_COUNT: usize = 21;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,7 +208,7 @@ impl DtmfCommandMap {
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805",
+            "10", "722", "800", "801", "804", "805", "82",
         ];
         let mappings = prefixes
             .into_iter()
@@ -271,6 +273,21 @@ impl CommandCollector {
     pub fn active(&self) -> bool {
         self.active
     }
+
+    /// In-progress remote-command destination for an exact directory lookup.
+    pub fn remote_candidate(&self) -> Option<String> {
+        if !self.active {
+            return None;
+        }
+        self.mappings.iter().find_map(|mapping| {
+            if mapping.action != LinkAction::Command || mapping.digits.is_empty() {
+                return None;
+            }
+            let destination = self.digits.strip_prefix(&mapping.digits)?;
+            (!destination.is_empty() && destination.bytes().all(|value| value.is_ascii_digit()))
+                .then(|| destination.to_owned())
+        })
+    }
 }
 
 fn all_actions() -> [LinkAction; ACTION_COUNT] {
@@ -295,6 +312,7 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::AdminLock,
         LinkAction::ParrotEnable,
         LinkAction::ParrotDisable,
+        LinkAction::PadTest,
     ]
 }
 
@@ -312,6 +330,7 @@ fn takes_node(action: LinkAction) -> bool {
             | LinkAction::Time
             | LinkAction::ParrotEnable
             | LinkAction::ParrotDisable
+            | LinkAction::PadTest
     )
 }
 
