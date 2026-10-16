@@ -34,6 +34,12 @@ after startup. The controller can also run local-time events and configured
 link macros. See [AllStarLink links](allstarlink-status.md) for operating
 commands and [configuration](configuration.md) for settings.
 
+The local `*82` keypad test reads back captured keys after unkey. Remote-command
+mode (`*4`) sends addressed digits directly or through relays and stays selected
+until `#`. Optional DTMF regeneration plays eligible incoming link digits only
+on the local transmitter; it is off by default. See the
+[DTMF settings and commands](configuration.md#link-command-mappings).
+
 Local DTMF status replies use local RF. A linked peer's status request replies
 only to that peer after it unkeys. On the Asterisk path, the Asterisk CLI can
 show direct-link status and send an administrative DTMF command. The standalone

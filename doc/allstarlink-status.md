@@ -45,15 +45,30 @@ node's `link_command_*` settings can change or disable them.
 | `*72` | Hear the last keyed direct link. |
 | `*73` | Hear full direct-link status. |
 | `*722` | Hear the local time. |
+| `*4<node>` | Select a destination for remote commands. Send `#` to exit. |
+| `*82` | Test the local radio keypad. Keep sending test keys, then unkey for the reply. |
 
-For commands with a node number, `#`, local receiver unkey, or a three-second
-pause ends the entry. Node `0` means the last link destination. `*4<node>#`
-selects an attached, authorized direct peer for remote-command mode. The `#`
-ends the selection command. Keep the receiver keyed while sending digits to
-that peer. Once the mode is active, the next `#` or local receiver unkey exits
-it. See
+For ordinary commands with a node number, `#`, local receiver unkey, or a
+three-second pause ends the entry. Node `0` means the last link destination.
+
+For remote commands, send `*4` followed by a valid destination node number.
+Selection finishes as soon as the node is recognized and passes access checks.
+The prefix and node number stay local. Your next digits travel directly to that
+node or through connected relays. Do not add `#` to select the node: it exits
+the mode and is not forwarded. Unkeying or pausing keeps the destination selected.
+Incoming commands still follow the receiving node's access and admin rules. See
 [link command mappings](configuration.md#link-command-mappings) before using
 custom DTMF codes. Forced ID, DTMF macros, and autopatch are not provided.
+
+The `*82` keypad test needs no admin unlock. It captures all 16 symbols,
+including `*`, `#`, and `A` through `D`, until the local receiver unkeys. Captured
+keys do not run commands. The reply reads the first 127 symbols and warns if
+more were sent. See [keypad testing](configuration.md#check-a-radio-keypad).
+
+Optional [DTMF regeneration](configuration.md#dtmf-regeneration) plays eligible
+link digits addressed to this node on its local transmitter. It is off by
+default. Generated tones stay off peer links and can begin while the sending
+station is still keyed.
 
 Permanent links retry after a failed call or dropped connection. A temporary
 link does not retry on its own. A link made with DTMF is lost when the process

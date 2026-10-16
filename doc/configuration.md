@@ -54,6 +54,10 @@ clears an inherited value.
 | `language` | `en-US` | Language for built-in RF messages. Set it here for all nodes or in one node section. |
 | `full_duplex` | yes | Allow simultaneous reception and transmission. |
 | `dtmf_muting` | yes | Mute local DTMF command tones on repeated audio. The start of a tone may still be heard. Commands still work when this is `no`. |
+| `dtmf_regeneration_enabled` | no | Play eligible DTMF digits received from links on the local transmitter. See [DTMF regeneration](#dtmf-regeneration). |
+| `dtmf_regeneration_duration_ms` | 200 | Length of each regenerated tone, in whole milliseconds; 1–1000. |
+| `dtmf_regeneration_gap_ms` | 50 | Silence after each regenerated tone, in whole milliseconds; 1–1000. |
+| `dtmf_regeneration_level_dbfs` | -12 | Combined peak level of the two DTMF tones before transmitter processing; whole dBFS from -60 to 0. |
 | `parrot_enabled` | no | Record a received burst and play it back after unkey. Live `*804` and `*805` changes last until reload. |
 | `dtmf_admin_unlock_hash` | empty | Argon2id hash of the code used after `*800` to unlock admin DTMF commands. Both admin hashes must be set to enable them. |
 | `dtmf_admin_lock_hash` | empty | Argon2id hash of the code used after `*801` to lock admin DTMF commands. Do not put a plain code here. |
@@ -87,7 +91,7 @@ command, or the linked peer for a peer command. Linked peers also receive
 eligible program audio. Transmit hang time sends no extra peer audio.
 
 Link access and directory settings are validated and inherit from `[general]` to each node. They
-apply to incoming calls and to selecting a direct peer for remote-command mode; explicit denial
+apply to incoming calls and to selecting a destination for remote-command mode; explicit denial
 always wins. There are no access exemptions. These are rpt_advanced configuration lists, not ASL
 AstDB lists, so a successful module reload applies an edit. An explicit empty node value clears
 its inherited list. Spaces around entries are allowed; empty entries and wildcard patterns are
@@ -310,15 +314,16 @@ when its complete prefix is received unless it prefixes a longer node-free
 command; in that case the longer command has priority, while `#`, receiver
 unkey, or the three-second timeout selects the shorter command. A
 destination-taking command ends with `#`, receiver unkey, or after a
-three-second interdigit timeout. Prefixes contain up to 63 DTMF digits from
-`0` through `9` and uppercase `A` through `D`.
+three-second interdigit timeout. Remote-command mode is different: it selects
+the destination as soon as the entered node number is valid. Prefixes contain
+up to 63 DTMF digits from `0` through `9` and uppercase `A` through `D`.
 
 | Option | Default | Operation |
 | --- | --- | --- |
 | `link_command_disconnect` | `1` | Disconnect the selected nonpermanent link. |
 | `link_command_monitor` | `2` | Connect in monitor mode: receive from the peer without sending program audio. |
 | `link_command_transceive` | `3` | Connect in transceive mode. |
-| `link_command_remote` | `4` | Enter direct-peer remote-command mode. `#` exits this mode locally. |
+| `link_command_remote` | `4` | Select a destination for remote commands. `#` exits this mode locally. |
 | `link_command_status` | `70` | Report direct-link status. |
 | `link_command_disconnect_all` | `806` | Disconnect and pause permanent links, including configured links. Temporary links stay connected. New manual links remain allowed. |
 | `link_command_last_keyed` | `72` | Report the most recently active direct linked node. |
@@ -333,22 +338,15 @@ three-second interdigit timeout. Prefixes contain up to 63 DTMF digits from
 | `link_command_admin_lock` | `801` | Enter the configured admin lock code, then `#`. Locks admin commands at once. |
 | `link_command_parrot_enable` | `804` | Turn parrot playback on until reload. Requires admin unlock. |
 | `link_command_parrot_disable` | `805` | Turn parrot playback off until reload. Requires admin unlock. |
+| `link_command_pad_test` | `82` | Start a local RF keypad test. No admin unlock is needed. Unkey to hear the captured digits. |
 
 Destination-taking operations accept node number `0` as the last node used by a
-previous linking operation. Remote-command mode may select only an attached peer
-whose node identity independently resolves and passes the same per-node
-allow/deny policy as an incoming peer. The policy is rechecked before each
-forwarded digit. It forwards subsequent DTMF digits only to that peer;
-it does not invoke the local command decoder while active. `#` and local
-receiver unkey always exit remote-command mode locally. An attached peer's IAX
-DTMF end events enter the same control queue only while its identity passes the
-current per-node allow/deny policy. An explicitly outbound audio link may
-remain connected after a policy change, but its rejected peer DTMF is ignored.
-DTMF starts and malformed end events are ignored.
+previous linking operation.
 
 With `dtmf_muting = yes`, local DTMF command audio is muted on repeat and link
 audio. IAX DTMF control events have no audio to mute. Local receiver unkey ends
-a command like `#`.
+ordinary commands like `#`; pad test and selected remote-command mode use the
+rules below.
 
 `*722` announces the local system time. It uses speech with the selected node's
 `[speech]` defaults and falls back to Morse with its `[morse]` defaults if speech
@@ -357,6 +355,76 @@ Morse sends only the time.
 
 `*10` disconnects every currently connected nonpermanent direct peer. It does
 not disconnect permanent peers or create reconnect-all state.
+
+### Remote commands
+
+Send `*4` followed by the destination node number. The controller selects it
+as soon as the directory recognizes a valid node and a connected link can carry
+the command. The destination must pass this node's allow and deny lists. The
+`*4` prefix and destination digits stay local. Do not add `#` to select the node:
+once selected, `#` exits the mode.
+
+Your next digits go to the selected destination. A direct link is used first;
+otherwise connected links relay the addressed digits. Only the destination
+handles them as commands or eligible tones. Relay nodes do not run the commands
+or play the tones. The destination policy is checked before each digit is sent.
+
+You can unkey and key again or pause between transmissions without leaving the
+selected mode. Send an actual `#` to leave it. That `#` stays local and is not
+sent to the destination.
+
+Incoming digits must pass the current incoming-link access rules. A linked
+peer's claimed source name does not prove its identity. Command collection and
+admin unlocks stay separate for each source and connection; one source cannot
+use another's unlock. An outbound audio link may remain connected after an
+access-list change even when its incoming DTMF is blocked. DTMF start events and
+malformed end events are ignored.
+
+### Check a radio keypad
+
+1. Key your radio into the local receiver and send `*82`.
+2. Keep the radio keyed and press the keys you want to test. All 16 symbols are
+   accepted: `0` through `9`, `*`, `#`, and `A` through `D`.
+3. Release PTT to end the test. Listen for the digits on the local transmitter.
+
+The test needs no admin unlock and cannot be started by a linked peer. Change
+`link_command_pad_test` in `[general]` or a node section to use a different code;
+leave it empty to disable the test.
+
+After `*82`, every key is part of the test. Even `#` is read back as a symbol;
+it does not end the test. A pause or command timeout does not end it either.
+Captured keys cannot run other commands. Only the local receiver's actual
+unkey ends capture.
+
+The reply uses the node's speech settings, with Morse as a fallback. It reads
+each symbol in order, saying "star" for `*` and "pound" for `#`. An empty test
+says "no digits". The test keeps the first 127 symbols. If you send more, the
+reply reports overflow before reading the saved symbols. Reload, loss of the
+receive source, or lost digit events cancels an unfinished test without a reply.
+
+### DTMF regeneration
+
+Set `dtmf_regeneration_enabled = yes` to play eligible link digits addressed to
+this node on its local transmitter. It defaults to `no`. These settings inherit
+from `[general]` and may be changed in each node section. Invalid values give a
+warning and use the inherited valid default.
+
+Only digits outside a collected command are eligible. The command-start `*`
+and the rest of that command are not played as tones. Digits passing through
+to another node and ordinary local RF digits are not regenerated.
+
+An idle tone queue waits 500 ms before its first tone. Each tone then uses
+`dtmf_regeneration_duration_ms`, followed by `dtmf_regeneration_gap_ms` of
+silence. Tone length does not follow how long the sender held the key. Playback
+does not wait for the sending station to unkey, but half-duplex limits,
+transmitter timeout, and other transmitter safety limits still apply.
+
+The tone and its gap replace local voice and announcement audio for that time.
+The interrupted audio continues to advance and is not played back later. The
+generated tones are not sent to linked peers or recorded by parrot.
+`dtmf_regeneration_level_dbfs` sets the combined peak of the two equal-level
+tones. Transmitter processing and hardware gain still affect the final level;
+speech gain and telemetry ducking do not control these tones.
 
 ## Time settings
 

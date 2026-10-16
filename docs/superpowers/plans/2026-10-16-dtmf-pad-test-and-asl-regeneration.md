@@ -226,7 +226,7 @@ Product tests need the existing fixture DSOs: run `make rust-build` once after r
 
 - [x] Obtain an independent whole-diff review against the approved spec: local-only generation, all sixteen symbols, source identity, exact `#`/unkey behavior, media replacement, bounded worker progress, ABI loading, and no unrelated changes. Fix findings with focused failing tests before fixes.
 - [x] Mark ADR/wishlist items implemented only for verified behavior; preserve unrelated incomplete items. Update developer documentation and the task checklist, distinguishing local evidence from the not-yet-run hosted gate.
-- [ ] Before a PR, update configuration reference/examples and operating instructions for `*82`, remapping, four regeneration options, and ASL remote mode. Use plain radio terminology; no history/design narrative. No operator-doc rewrite during earlier code tasks.
+- [x] Before a PR, update configuration reference/examples and operating instructions for `*82`, remapping, four regeneration options, and ASL remote mode. Use plain radio terminology; no history/design narrative. No operator-doc rewrite during earlier code tasks.
 - [x] Report commits, targeted evidence, remaining hosted verification, and dependency release prerequisite. Ask separately for any missing publication/deployment authorization. Do not touch 524950 or external links under this plan's current approval.
 
 ## Self-review record
@@ -257,5 +257,7 @@ Product tests need the existing fixture DSOs: run `make rust-build` once after r
 - Exercise the exact startup descriptor validator with short/missing tails instead of a separate old-DSO host fixture. Dynamic package/artifact checks passed; an installed-alpha1 end-to-end startup test is not claimed.
 - Run the final package checks on a native Linux temporary copy with Git-recorded 0644 install-manifest modes: the Windows bind mount reports those files executable. No test or package source was changed to bypass the check. Cost: direct bind-mount package-mode checks remain unsuitable.
 
-No review findings were deferred. Operator manuals/examples, provider publication,
-and the full hosted gate remain prerequisites for a future authorized PR/release.
+No review findings were deferred. Operator instructions and examples were updated
+before the authorized PRs. The existing workflow can validate the controller
+against pinned candidate dependency packages. Provider publication and the full
+hosted gate remain prerequisites for merging and releasing the consumer.
