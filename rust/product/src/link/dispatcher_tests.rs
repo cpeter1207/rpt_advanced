@@ -321,3 +321,35 @@ fn regeneration_backpressure_does_not_block_fanout_and_retires_with_generation()
     assert!(!replacement.queue_digit('5'));
     assert_eq!(replacement.regeneration_dropped(), 0);
 }
+
+#[test]
+fn failed_regeneration_write_retires_producer_without_stopping_peer_fanout() {
+    use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
+    let mut worker = MediaWorker::start().unwrap();
+    let (mut audio, dispatcher, mut outputs) = fixture(1);
+    let (writer, _reader) = crate::link::ring::tests::failed_media_push_endpoints();
+    let mut registration = worker
+        .prepare(
+            dispatcher,
+            vec![PeerWake::default()],
+            Some((ResolvedDtmfRegenerationSettings::default(), writer, 960)),
+        )
+        .unwrap();
+    registration.activate();
+    assert!(registration.queue_digit('5'));
+    wait_for(|| registration.regeneration_dropped() == 1);
+
+    audio
+        .process(
+            &mut controller(),
+            true,
+            &mut [0.25; 960],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    let mut received = [0.0; 960];
+    wait_for(|| outputs[0].read_span(&mut received).is_some());
+    assert_eq!(received, [0.25; 960]);
+    registration.request_stop();
+    wait_for(|| registration.is_quiescent());
+}

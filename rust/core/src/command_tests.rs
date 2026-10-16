@@ -195,3 +195,18 @@ fn collector_cancels_on_invalid_digit_and_bounds_input() {
     assert_eq!(collector.feed('9', 0), None);
     assert!(!collector.active());
 }
+
+#[test]
+fn disabled_remote_command_does_not_claim_an_unrelated_destination() {
+    let map = DtmfCommandMap::new(vec![
+        CommandMapping::new("", LinkAction::Command),
+        CommandMapping::new("3", LinkAction::Transceive),
+    ])
+    .unwrap();
+    let mut collector = map.collector();
+    for digit in "*32000".chars() {
+        assert!(collector.feed(digit, 1).is_none());
+        assert!(collector.remote_candidate().is_none());
+    }
+    assert_eq!(collector.feed('#', 2).as_deref(), Some("32000"));
+}

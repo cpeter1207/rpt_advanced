@@ -57,6 +57,10 @@ fn remote_origin_reclamation_preserves_last_node_redial() {
             }]
         );
     }
+    assert_eq!(
+        links.peer_digit("2000", '5', 2, reply),
+        Some(DigitOutcome::Regenerate('5'))
+    );
 }
 
 #[test]
@@ -299,6 +303,22 @@ fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
         Ok(LinkEffect::ParrotEnabled(true))
     ));
     links.confirm_peer_parrot_command(Some("2000"), &first, 4);
+    let mut wrong_origin = allowed.clone();
+    wrong_origin.origin = Some("4000".into());
+    assert!(matches!(
+        links.command(wrong_origin, host.control().work().unwrap(), 5, false),
+        Err(AdmissionError::Denied)
+    ));
+    links.confirm_peer_parrot_command(Some("4000"), &first, 60_000);
+    assert!(matches!(
+        links.command(
+            allowed.clone(),
+            host.control().work().unwrap(),
+            60_004,
+            false
+        ),
+        Err(AdmissionError::Denied)
+    ));
     signal.end();
     assert!(links.peer_digit("2000", '1', 5, first.clone()).is_none());
     assert!(matches!(
@@ -1349,6 +1369,11 @@ fn incoming_and_remote_selection_use_current_deny_first_policy() {
         DtmfCommandMap::standard(),
         None,
     );
+    let reply = crate::link::PeerSignals::new().reply_target();
+    assert!(matches!(
+        links.peer_text("2000", b"D 524950 3000 1 5", reply, false, 0, 0),
+        Err(AdmissionError::Denied)
+    ));
     assert_eq!(
         links
             .command(
@@ -1360,6 +1385,46 @@ fn incoming_and_remote_selection_use_current_deny_first_policy() {
             .err(),
         Some(AdmissionError::Denied)
     );
+}
+
+#[test]
+fn remote_command_rejects_self_unreachable_and_invalid_digits_without_advancing_sequence() {
+    let mut host = NodeHost::new(generation(1));
+    let mut links = links();
+    for remote in ["524950", "2000"] {
+        assert!(matches!(
+            links.command(
+                operation(LinkAction::Command, remote),
+                host.control().work().unwrap(),
+                0,
+                true,
+            ),
+            Err(AdmissionError::Denied)
+        ));
+    }
+    links.accept("2000", true).unwrap();
+    links.accept("3000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    assert!(matches!(
+        links.peer_text("2000", b"D 3000 4000 7 5", reply, false, 0, 0),
+        Ok(LinkEffect::ForwardDigits(deliveries))
+            if deliveries == [("3000".into(), "D 3000 4000 7 5".into())]
+    ));
+    for digit in ['x', '\u{0131}'] {
+        let mut invalid = operation(LinkAction::Command, "2000");
+        invalid.digit = Some(digit);
+        assert!(matches!(
+            links.command(invalid, host.control().work().unwrap(), 1, false),
+            Err(AdmissionError::Invalid)
+        ));
+    }
+    let mut valid = operation(LinkAction::Command, "2000");
+    valid.digit = Some('5');
+    assert!(matches!(
+        links.command(valid, host.control().work().unwrap(), 2, false),
+        Ok(LinkEffect::ForwardDigits(deliveries))
+            if deliveries == [("2000".into(), "D 2000 524950 1 5".into())]
+    ));
 }
 
 #[test]

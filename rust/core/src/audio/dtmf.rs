@@ -286,6 +286,27 @@ mod lifecycle_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn generator_rejects_provider_errors_and_oversized_sample_counts() {
+        unsafe extern "C" fn failed(_: *mut c_void, _: *mut f32, _: usize, _: *mut usize) -> i32 {
+            -1
+        }
+        unsafe extern "C" fn oversized(
+            _: *mut c_void,
+            _: *mut f32,
+            capacity: usize,
+            written: *mut usize,
+        ) -> i32 {
+            unsafe { *written = capacity + 1 };
+            0
+        }
+        for render in [failed as GeneratorRender, oversized] {
+            let mut generator = DtmfGenerator::new('1', 200, 50, -12).unwrap();
+            generator.render = render;
+            assert_eq!(generator.render(&mut [0.0; 1]), Err(DtmfError));
+        }
+    }
+
     static DESTROYS: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn create_error(_: u32, out: *mut *mut c_void) -> i32 {

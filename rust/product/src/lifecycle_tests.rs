@@ -357,6 +357,40 @@ fn pad_test_dispatch_queues_local_telemetry() {
 }
 
 #[test]
+fn remote_candidate_dispatch_ignores_denied_command_but_keeps_accepted_effect() {
+    use rpt_advanced_core::runtime::dtmf::DigitOutcome;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    let (engine, call) = selected().unwrap();
+
+    // An unconnected peer's candidate D command must not reject local digit handling.
+    assert!(matches!(
+        engine.digit_effect(
+            "1000",
+            DigitOutcome::RemoteCandidate(operation(LinkAction::Command, "2000"))
+        ),
+        Ok(LinkEffect::None)
+    ));
+    engine
+        .execute("1000".into(), operation(LinkAction::Transceive, "2000"))
+        .unwrap();
+    assert!(matches!(
+        engine.digit_effect(
+            "1000",
+            DigitOutcome::RemoteCandidate(operation(LinkAction::Command, "2000"))
+        ),
+        Ok(LinkEffect::SelectedRemote)
+    ));
+
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
 fn regeneration_dispatch_obeys_node_configuration_and_reload() {
     use rpt_advanced_core::runtime::dtmf::DigitOutcome;
     let _serial = crate::fixture::LIFECYCLE

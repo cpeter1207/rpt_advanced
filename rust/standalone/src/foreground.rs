@@ -788,9 +788,18 @@ mod tests {
         );
 
         let library = Path::new("librptadviax2.so.1");
+        // Keep the port unavailable to the suite's loopback and wildcard allocators.
+        // The IAX listener uses a separate loopback address without releasing this guard.
         let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let address = reservation.local_addr().unwrap();
-        drop(reservation);
+        let address =
+            std::net::SocketAddr::from(([127, 0, 0, 2], reservation.local_addr().unwrap().port()));
+        for host in ["127.0.0.1", "0.0.0.0"] {
+            assert_eq!(
+                UdpSocket::bind((host, address.port())).unwrap_err().kind(),
+                std::io::ErrorKind::AddrInUse,
+                "the fixture port must remain reserved against {host} binds"
+            );
+        }
         let mut server =
             crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
         let mut accepted_peer = 0_usize;

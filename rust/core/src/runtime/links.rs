@@ -412,8 +412,7 @@ impl NodeLinkControl {
         now_ms: u64,
         reply: PeerReply,
     ) -> Option<DigitOutcome> {
-        self.peer_commands
-            .retain(|(_, source, commands)| !source.ended() && commands.retains_state(now_ms));
+        self.retain_peer_commands(now_ms);
         let index = if let Some(index) = self
             .peer_commands
             .iter()
@@ -439,16 +438,25 @@ impl NodeLinkControl {
                 .push((origin.into(), reply.clone(), self.commands.for_source()));
             self.peer_commands.len() - 1
         };
-        let mut operation = self.peer_commands[index]
+        self.peer_commands[index]
             .2
-            .feed(DigitEvent::Digit { digit, now_ms })?;
+            .feed(DigitEvent::Digit { digit, now_ms })
+            .map(|outcome| Self::source_outcome(outcome, origin, reply))
+    }
+    /// Attach source identity only to outcomes that carry a command.
+    fn source_outcome(mut outcome: DigitOutcome, origin: &str, reply: PeerReply) -> DigitOutcome {
         if let DigitOutcome::Operation(operation) | DigitOutcome::RemoteCandidate(operation) =
-            &mut operation
+            &mut outcome
         {
             operation.reply = Some(reply);
             operation.origin = Some(origin.into());
         }
-        Some(operation)
+        outcome
+    }
+    /// Reclaim ended connections and expired idle collectors at each control boundary.
+    fn retain_peer_commands(&mut self, now_ms: u64) {
+        self.peer_commands
+            .retain(|(_, source, commands)| !source.ended() && commands.retains_state(now_ms));
     }
     /// Expire peer commands independently, preserving their exact reply connection.
     pub fn expire_peer_digits(&mut self, now_ms: u64) -> Vec<DigitOutcome> {
@@ -457,18 +465,12 @@ impl NodeLinkControl {
             .peer_commands
             .iter_mut()
             .filter_map(|(origin, reply, commands)| {
-                let mut outcome = commands.expire(now_ms)?;
-                if let DigitOutcome::Operation(operation)
-                | DigitOutcome::RemoteCandidate(operation) = &mut outcome
-                {
-                    operation.reply = Some(reply.clone());
-                    operation.origin = Some(origin.clone());
-                }
-                Some(outcome)
+                commands
+                    .expire(now_ms)
+                    .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
             })
             .collect();
-        self.peer_commands
-            .retain(|(_, source, commands)| !source.ended() && commands.retains_state(now_ms));
+        self.retain_peer_commands(now_ms);
         outcomes
     }
     /// Apply policy, returning external work without doing a dial, media operation, or write.

@@ -17,6 +17,7 @@ fn pad_capture_waits_for_real_unkey() {
     ] {
         let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
         assert!(feed_symbols(&mut commands, "*82").is_empty());
+        assert!(commands.retains_state(9000));
         assert!(feed_symbols(&mut commands, &symbols).is_empty());
         assert!(
             commands
@@ -39,6 +40,8 @@ fn pad_capture_waits_for_real_unkey() {
     commands.feed(DigitEvent::Lost);
     assert!(commands.feed(DigitEvent::Unkey { now_ms: 1 }).is_none());
     let mut peer = commands.for_source();
+    assert!(peer.feed(DigitEvent::Unkey { now_ms: 1 }).is_none());
+    assert!(feed_symbols(&mut peer, "X").is_empty());
     assert!(feed_symbols(&mut peer, "*82").is_empty());
     assert!(peer.feed(DigitEvent::Unkey { now_ms: 1 }).is_none());
     assert_eq!(
@@ -53,6 +56,7 @@ fn pad_capture_waits_for_real_unkey() {
 fn remote_selection_survives_unkey_not_hash() {
     let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
     commands.select_remote("2000");
+    assert!(commands.retains_state(5000));
     assert!(commands.feed(DigitEvent::Unkey { now_ms: 1 }).is_none());
     assert!(
         commands
