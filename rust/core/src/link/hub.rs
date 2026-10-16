@@ -851,6 +851,40 @@ impl LinkManager {
             _ => Vec::new(),
         }
     }
+    /// Route an addressed command intact, preferring its direct destination over a relay flood.
+    /// Empty ingress denotes local origination; a relay never echoes ingress or claimed source.
+    pub fn relay_digit(&self, ingress: &str, message: &Protocol) -> Vec<(String, String)> {
+        if !ingress.is_empty()
+            && !self
+                .peers
+                .iter()
+                .any(|peer| peer.name == ingress && !peer.ended)
+        {
+            return Vec::new();
+        }
+        let Protocol::RemoteDigit {
+            destination,
+            source,
+            sequence,
+            digit,
+        } = message
+        else {
+            return Vec::new();
+        };
+        if destination == &self.local {
+            return Vec::new();
+        }
+        let text = format!("D {destination} {source} {sequence} {digit}");
+        if let Some(peer) = self
+            .eligible(ingress, source)
+            .find(|peer| &peer.name == destination)
+        {
+            return vec![(peer.name.clone(), text)];
+        }
+        self.eligible(ingress, source)
+            .map(|peer| (peer.name.clone(), text.clone()))
+            .collect()
+    }
     fn eligible<'a>(
         &'a self,
         ingress: &'a str,

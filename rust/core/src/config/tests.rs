@@ -1487,7 +1487,7 @@ fn schedule_resolution_uses_empty_defaults_for_invalid_optional_selectors() {
 fn command_map_has_all_defaults_and_rejects_node_taking_prefix_collisions() {
     let document = ConfigDocument::parse("[node]\n").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&document, &NodeId::new("node").unwrap()).unwrap();
-    assert_eq!(resolved.value.link_commands.len(), 20);
+    assert_eq!(resolved.value.link_commands.len(), 21);
     assert_eq!(resolved.value.link_commands["fixed_10"], "10");
     assert_eq!(resolved.value.link_commands["fixed_722"], "722");
     let conflict = ConfigDocument::parse("[node]\nlink_command_disconnect=3\n").unwrap();

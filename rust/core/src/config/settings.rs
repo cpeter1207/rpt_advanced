@@ -22,6 +22,30 @@ pub enum LinkLookupMethod {
     File,
 }
 
+/// Local-transmitter DTMF regeneration after general and node-scoped inheritance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedDtmfRegenerationSettings {
+    /// Regenerate addressed idle link digits on the local transmitter only.
+    pub enabled: bool,
+    /// Tone duration in milliseconds, 1 through 1000.
+    pub duration_ms: u32,
+    /// Following silence in milliseconds, 1 through 1000.
+    pub gap_ms: u32,
+    /// Combined peak of both tone components, -60 through 0 dBFS.
+    pub level_dbfs: i8,
+}
+
+impl Default for ResolvedDtmfRegenerationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            duration_ms: 200,
+            gap_ms: 50,
+            level_dbfs: -12,
+        }
+    }
+}
+
 /// Fully owned node settings after general and node-scoped inheritance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedNodeSettings {
@@ -31,6 +55,8 @@ pub struct ResolvedNodeSettings {
     pub full_duplex: bool,
     /// Whether completed local DTMF frames are muted.
     pub dtmf_muting: bool,
+    /// Local transmitter signaling generated from eligible addressed peer digits.
+    pub dtmf_regeneration: ResolvedDtmfRegenerationSettings,
     /// Whether this node records and replays receive bursts after unkey.
     pub parrot_enabled: bool,
     /// Extra receive-to-transmit delay used for squelch-tail and DTMF lookback.
@@ -1786,6 +1812,37 @@ impl ResolvedNodeSettings {
         boolean!(enabled, "node_enabled");
         boolean!(full_duplex, "full_duplex");
         boolean!(dtmf_muting, "dtmf_muting");
+        if let Some(parsed) = lookup_valid(
+            document,
+            "dtmf_regeneration_enabled",
+            &scopes,
+            parse::boolean,
+        ) {
+            value.dtmf_regeneration.enabled = parsed;
+        }
+        for (key, output) in [
+            (
+                "dtmf_regeneration_duration_ms",
+                &mut value.dtmf_regeneration.duration_ms,
+            ),
+            (
+                "dtmf_regeneration_gap_ms",
+                &mut value.dtmf_regeneration.gap_ms,
+            ),
+        ] {
+            if let Some(parsed) =
+                lookup_valid(document, key, &scopes, |raw| parse::unsigned(raw, 1, 1000))
+            {
+                *output = parsed as u32;
+            }
+        }
+        if let Some(parsed) =
+            lookup_valid(document, "dtmf_regeneration_level_dbfs", &scopes, |raw| {
+                parse::signed(raw, -60, 0)
+            })
+        {
+            value.dtmf_regeneration.level_dbfs = parsed as i8;
+        }
         boolean!(parrot_enabled, "parrot_enabled");
         if let Some(parsed) = lookup_valid(document, "dtmf_admin_timeout_ms", &scopes, |raw| {
             parse::unsigned(raw, 1, u64::MAX)
@@ -1936,6 +1993,7 @@ impl ResolvedNodeSettings {
             enabled: true,
             full_duplex: true,
             dtmf_muting: true,
+            dtmf_regeneration: ResolvedDtmfRegenerationSettings::default(),
             parrot_enabled: false,
             squelch_delay_ms: 0,
             status_snapshot_interval_ms: 50,
@@ -1992,7 +2050,7 @@ fn lookup_valid<T>(
     None
 }
 
-fn command_keys() -> [&'static str; 20] {
+fn command_keys() -> [&'static str; 21] {
     [
         "link_command_disconnect",
         "link_command_monitor",
@@ -2014,6 +2072,7 @@ fn command_keys() -> [&'static str; 20] {
         "link_command_admin_lock",
         "link_command_parrot_enable",
         "link_command_parrot_disable",
+        "link_command_pad_test",
     ]
 }
 
@@ -2039,6 +2098,7 @@ fn default_command(key: &str) -> String {
         "link_command_admin_lock" => "801",
         "link_command_parrot_enable" => "804",
         "link_command_parrot_disable" => "805",
+        "link_command_pad_test" => "82",
         _ => "",
     }
     .to_owned()
@@ -2072,6 +2132,7 @@ fn command_action(key: &str) -> Option<LinkAction> {
         "link_command_admin_lock" => LinkAction::AdminLock,
         "link_command_parrot_enable" => LinkAction::ParrotEnable,
         "link_command_parrot_disable" => LinkAction::ParrotDisable,
+        "link_command_pad_test" => LinkAction::PadTest,
         _ => return None,
     })
 }

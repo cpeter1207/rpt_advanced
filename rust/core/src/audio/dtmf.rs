@@ -1,4 +1,4 @@
-//! Borrowed DTMF events and in-place PCM from the released ABI 1 detector.
+//! Borrowed DTMF events and finite PCM generation from the released ABI 1 provider.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
@@ -176,6 +176,108 @@ impl DtmfDetector {
 impl Drop for DtmfDetector {
     fn drop(&mut self) {
         unsafe { (self.api.destroy)(self.handle.as_ptr()) };
+    }
+}
+
+type GeneratorCreate = unsafe extern "C" fn(u8, u32, u32, i32, *mut *mut c_void) -> i32;
+type GeneratorRender = unsafe extern "C" fn(*mut c_void, *mut f32, usize, *mut usize) -> i32;
+type GeneratorDestroy = unsafe extern "C" fn(*mut c_void);
+
+/// Optional descriptor extension, checked separately from the detector prefix.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GeneratorDescriptor {
+    detector: DtmfDescriptor,
+    create: Option<GeneratorCreate>,
+    render: Option<GeneratorRender>,
+    destroy: Option<GeneratorDestroy>,
+}
+
+unsafe fn generator_api(
+    pointer: *const DtmfDescriptor,
+) -> Result<(GeneratorCreate, GeneratorRender, GeneratorDestroy), DtmfError> {
+    unsafe {
+        validate_descriptor(pointer)?;
+    }
+    if unsafe { (*pointer).struct_size } < std::mem::size_of::<GeneratorDescriptor>() as u32 {
+        return Err(DtmfError);
+    }
+    // SAFETY: size covers the extension; the provider table is immutable.
+    let descriptor = unsafe { *pointer.cast::<GeneratorDescriptor>() };
+    Ok((
+        descriptor.create.ok_or(DtmfError)?,
+        descriptor.render.ok_or(DtmfError)?,
+        descriptor.destroy.ok_or(DtmfError)?,
+    ))
+}
+
+/// Finite 48 kHz mono digit plus silence. Allocate and release on the producer worker.
+pub struct DtmfGenerator {
+    handle: NonNull<c_void>,
+    render: GeneratorRender,
+    destroy: GeneratorDestroy,
+}
+
+// The generator has one owner, moves between workers, and is never shared concurrently.
+unsafe impl Send for DtmfGenerator {}
+
+impl DtmfGenerator {
+    /// Reject a provider missing the finite-generator tail before starting the product.
+    pub fn provider_ready() -> Result<(), DtmfError> {
+        unsafe { generator_api(rptadv_dtmf_descriptor()) }.map(|_| ())
+    }
+    /// Validate settings and allocate provider state without involving audio callbacks.
+    pub fn new(
+        digit: char,
+        duration_ms: u32,
+        gap_ms: u32,
+        level_dbfs: i8,
+    ) -> Result<Self, DtmfError> {
+        let digit = u8::try_from(u32::from(digit)).map_err(|_| DtmfError)?;
+        let (create, render, destroy) = unsafe { generator_api(rptadv_dtmf_descriptor())? };
+        let mut handle = std::ptr::null_mut();
+        if unsafe {
+            create(
+                digit,
+                duration_ms,
+                gap_ms,
+                i32::from(level_dbfs),
+                &mut handle,
+            )
+        } != 0
+        {
+            return Err(DtmfError);
+        }
+        Ok(Self {
+            handle: NonNull::new(handle).ok_or(DtmfError)?,
+            render,
+            destroy,
+        })
+    }
+
+    /// Render a bounded partition; zero returned samples means finished for nonempty output.
+    pub fn render(&mut self, output: &mut [f32]) -> Result<usize, DtmfError> {
+        let mut written = 0;
+        let status = unsafe {
+            (self.render)(
+                self.handle.as_ptr(),
+                output.as_mut_ptr(),
+                output.len(),
+                &mut written,
+            )
+        };
+        if status != 0 || written > output.len() {
+            return Err(DtmfError);
+        }
+        Ok(written)
+    }
+}
+
+impl Drop for DtmfGenerator {
+    fn drop(&mut self) {
+        unsafe {
+            (self.destroy)(self.handle.as_ptr());
+        }
     }
 }
 

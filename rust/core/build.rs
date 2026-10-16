@@ -18,6 +18,7 @@ fn pkg_config(args: &[&str]) -> String {
 }
 
 fn main() {
+    pkg_config(&["--atleast-version=0.1.0~alpha2", "rptadvdtmf"]);
     for provider in [
         "rptadvtone",
         "rptadvmorse",

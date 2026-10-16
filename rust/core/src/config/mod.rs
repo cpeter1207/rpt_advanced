@@ -23,11 +23,11 @@ pub use settings::{
     Cm119GpioMode, Cm119Profile, CtcssTurnoffMode, DcsCode, LinkLookupMethod, NodeId,
     RadioCarrierSource, RadioDeviceSelection, RadioDuplexMode, RadioNoiseFilter,
     RadioOutputAssignment, RadioReceiveAudioSource, RadioSignalingMode, RadioSubaudibleSource,
-    ResolvedAnnouncementSettings, ResolvedCourtesySettings, ResolvedEventSettings,
-    ResolvedIdentifierSettings, ResolvedMacroSettings, ResolvedMorseSettings, ResolvedNodeSettings,
-    ResolvedPermanentLinkSettings, ResolvedRadioSettings, ResolvedRadioSignalingSettings,
-    ResolvedScheduleSettings, ResolvedSpeechSettings, ResolvedTemplateSettings,
-    ResolvedTimeSettings,
+    ResolvedAnnouncementSettings, ResolvedCourtesySettings, ResolvedDtmfRegenerationSettings,
+    ResolvedEventSettings, ResolvedIdentifierSettings, ResolvedMacroSettings,
+    ResolvedMorseSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
+    ResolvedRadioSettings, ResolvedRadioSignalingSettings, ResolvedScheduleSettings,
+    ResolvedSpeechSettings, ResolvedTemplateSettings, ResolvedTimeSettings,
 };
 
 /// A recoverable unknown option or invalid value.

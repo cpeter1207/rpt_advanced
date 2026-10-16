@@ -68,7 +68,7 @@ fn egress_dispatch_survives_control_pause() {
     let mut worker = MediaWorker::start().unwrap();
     let (mut audio, dispatcher, mut outputs) = fixture(130);
     let registration = worker
-        .prepare(dispatcher, vec![PeerWake::default(); 130])
+        .prepare(dispatcher, vec![PeerWake::default(); 130], None)
         .unwrap();
     registration.activate();
     let mut controller = controller();
@@ -109,7 +109,7 @@ fn egress_stopped_media_worker_rejects_new_dispatch() {
     worker.stop();
     let (_, dispatcher, _) = fixture(1);
     assert!(matches!(
-        worker.prepare(dispatcher, vec![PeerWake::default()]),
+        worker.prepare(dispatcher, vec![PeerWake::default()], None),
         Err(Error::Reservation)
     ));
 }
@@ -175,7 +175,7 @@ fn egress_retirement_waits_for_partial_dispatch() {
     };
     let mut wakes = vec![PeerWake::default(); 130];
     wakes[0] = wake.clone();
-    let registration = worker.prepare(dispatcher, wakes).unwrap();
+    let registration = worker.prepare(dispatcher, wakes, None).unwrap();
     registration.activate();
     audio
         .process(
@@ -202,12 +202,12 @@ fn egress_retirement_waits_for_partial_dispatch() {
     let (_, dispatcher, _) = fixture(1);
     drop(
         worker
-            .prepare(dispatcher, vec![PeerWake::default()])
+            .prepare(dispatcher, vec![PeerWake::default()], None)
             .unwrap(),
     );
     let (mut next, dispatcher, mut outputs) = fixture(1);
     let replacement = worker
-        .prepare(dispatcher, vec![PeerWake::default()])
+        .prepare(dispatcher, vec![PeerWake::default()], None)
         .unwrap();
     replacement.activate();
     next.process(
@@ -243,7 +243,7 @@ fn egress_shutdown_releases_dispatches_still_in_the_publication_queue() {
             std::ptr::null_mut(),
         )
     };
-    let active = worker.prepare(dispatcher, vec![wake]).unwrap();
+    let active = worker.prepare(dispatcher, vec![wake], None).unwrap();
     active.activate();
     audio
         .process(
@@ -259,7 +259,7 @@ fn egress_shutdown_releases_dispatches_still_in_the_publication_queue() {
         let (_, dispatcher, _) = fixture(1);
         pending.push(
             worker
-                .prepare(dispatcher, vec![PeerWake::default()])
+                .prepare(dispatcher, vec![PeerWake::default()], None)
                 .unwrap(),
         );
     }
@@ -271,4 +271,53 @@ fn egress_shutdown_releases_dispatches_still_in_the_publication_queue() {
     assert!(active.is_quiescent());
     assert!(pending.iter().all(PreparedDispatch::is_quiescent));
     assert_eq!(target.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn regeneration_backpressure_does_not_block_fanout_and_retires_with_generation() {
+    use crate::link::ring::{InboundPolicy, InboundRing};
+    use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
+    let mut worker = MediaWorker::start().unwrap();
+    let (mut audio, dispatcher, mut outputs) = fixture(1);
+    let (writer, mut reader) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    let mut registration = worker
+        .prepare(
+            dispatcher,
+            vec![PeerWake::default()],
+            Some((ResolvedDtmfRegenerationSettings::default(), writer, 960)),
+        )
+        .unwrap();
+    assert!(!registration.queue_digit('5'));
+    registration.activate();
+    assert!(!registration.queue_digit('x'));
+    for _ in 0..127 {
+        assert!(registration.queue_digit('5'));
+    }
+    assert!(!registration.queue_digit('5'));
+    assert_eq!(registration.regeneration_dropped(), 1);
+    wait_for(|| reader.available() == 8192);
+    audio
+        .process(
+            &mut controller(),
+            true,
+            &mut [0.25; 960],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    let mut received = [0.0; 960];
+    wait_for(|| outputs[0].read_span(&mut received).is_some());
+    assert_eq!(received, [0.25; 960]);
+    registration.request_stop();
+    wait_for(|| registration.is_quiescent());
+    assert!(!registration.queue_digit('5'));
+    while reader.render_sample().unwrap().is_some() {}
+    thread::sleep(Duration::from_millis(5));
+    assert_eq!(reader.available(), 0);
+    let (_, dispatcher, _) = fixture(1);
+    let mut replacement = worker
+        .prepare(dispatcher, vec![PeerWake::default()], None)
+        .unwrap();
+    replacement.activate();
+    assert!(!replacement.queue_digit('5'));
+    assert_eq!(replacement.regeneration_dropped(), 0);
 }

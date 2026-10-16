@@ -1,5 +1,40 @@
 use super::DtmfDetector;
 
+#[test]
+fn generator_validates_extension_and_renders_finite_native_pcm() {
+    assert!(super::DtmfGenerator::provider_ready().is_ok());
+    let old = unsafe { *super::rptadv_dtmf_descriptor() };
+    let mut prefix = old;
+    prefix.struct_size = std::mem::size_of_val(&prefix) as u32;
+    assert!(unsafe { super::generator_api(&prefix) }.is_err());
+    assert!(unsafe { super::generator_api(std::ptr::null()) }.is_err());
+    let descriptor =
+        unsafe { &*super::rptadv_dtmf_descriptor().cast::<super::GeneratorDescriptor>() };
+    for missing in 0..3 {
+        let mut bad = *descriptor;
+        match missing {
+            0 => bad.create = None,
+            1 => bad.render = None,
+            _ => bad.destroy = None,
+        }
+        assert!(unsafe { super::generator_api(&bad.detector) }.is_err());
+    }
+    for digit in "123A456B789C*0#D".chars() {
+        let mut generator = super::DtmfGenerator::new(digit, 200, 50, -12).unwrap();
+        let mut pcm = [2.0; 12001];
+        assert_eq!(generator.render(&mut []).unwrap(), 0);
+        assert_eq!(generator.render(&mut pcm).unwrap(), 12000);
+        assert!(pcm[..9600].iter().any(|value| *value != 0.0));
+        assert!(pcm[9600..12000].iter().all(|value| *value == 0.0));
+        assert_eq!(pcm[12000], 2.0);
+        assert_eq!(generator.render(&mut pcm).unwrap(), 0);
+    }
+    for digit in ['X', '１'] {
+        assert!(super::DtmfGenerator::new(digit, 200, 50, -12).is_err());
+    }
+    assert!(super::DtmfGenerator::new('1', 0, 50, -12).is_err());
+}
+
 const FRAME: usize = 612;
 
 fn tone(row: f32, column: f32, first: usize) -> impl Iterator<Item = f32> {

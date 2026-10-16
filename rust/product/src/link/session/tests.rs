@@ -34,6 +34,7 @@ pub(crate) struct State {
     pub(crate) async_detaches: usize,
     pub(crate) fail_async_attach: bool,
     no_async_thread: bool,
+    pub(crate) continuous_async: bool,
     pub(crate) observe_calls: usize,
     pub(crate) fail_observe: bool,
     pub(crate) bad_observe_size: bool,
@@ -355,8 +356,20 @@ fn newkey1_does_not_suppress_outbound_audio() {
 #[test]
 fn remote_control_digit_uses_the_asl_link_text_envelope() {
     let (mut session, mut control, state, _) = make_session("1000");
-    control.send(Command::Digit('5')).ok().unwrap();
-    control.send(Command::Digit('6')).ok().unwrap();
+    control
+        .send(Command::Text {
+            text: c"D 2000 1000 1 5".into(),
+            advisory: false,
+        })
+        .ok()
+        .unwrap();
+    control
+        .send(Command::Text {
+            text: c"D 2000 1000 2 6".into(),
+            advisory: false,
+        })
+        .ok()
+        .unwrap();
 
     session.step(20).unwrap();
     session.step(21).unwrap();
@@ -382,15 +395,20 @@ fn remote_control_digit_uses_the_asl_link_text_envelope() {
 }
 
 #[test]
-fn addressed_asl_remote_dtmf_text_becomes_a_peer_digit_event() {
+fn remote_dtmf_envelopes_reach_shared_control_intact() {
     let (mut session, mut control, _, _) = make_session("1000");
 
-    session.text(b"D 9999 2000 16 6".to_vec(), 20).unwrap();
-    session.text(b"D 1000 3000 17 6".to_vec(), 20).unwrap();
-    assert!(control.event().is_none());
-    session.text(b"D 1000 2000 17 5".to_vec(), 21).unwrap();
-
-    assert!(matches!(control.event(), Some(Event::Digit('5'))));
+    for text in [
+        b"D 9999 2000 16 6",
+        b"D 1000 3000 17 6",
+        b"D 1000 2000 17 5",
+    ] {
+        session.text(text.to_vec(), 20).unwrap();
+        assert!(matches!(control.event(), Some(Event::Text(bytes)) if bytes == text));
+    }
+    session
+        .text(b"D 1000 2000 17 invalid".to_vec(), 21)
+        .unwrap();
     assert!(control.event().is_none());
 }
 
@@ -418,8 +436,20 @@ unsafe extern "C" fn async_attach(
     }
     state.lock().unwrap().async_attaches += 1;
     let address = step_context as usize;
-    let thread = (!state.lock().unwrap().no_async_thread)
-        .then(|| thread::spawn(move || unsafe { step.unwrap()(address as *mut c_void) }));
+    let worker_state = state.clone();
+    let thread = (!state.lock().unwrap().no_async_thread).then(|| {
+        thread::spawn(move || {
+            loop {
+                let result = unsafe { step.unwrap()(address as *mut c_void) };
+                let state = worker_state.lock().unwrap();
+                if result != 0 || !state.continuous_async || state.async_stops != 0 {
+                    return result;
+                }
+                drop(state);
+                thread::sleep(Duration::from_millis(1));
+            }
+        })
+    });
     unsafe {
         *registration = Box::into_raw(Box::new(AsyncRegistration { state, thread })).cast();
     }
@@ -769,7 +799,13 @@ fn blocked_egress_preserves_ingress_commands_and_stop() {
         state.input.push_back(Input::Text(b"L T3000"));
     }
     output.write(timed_span(48_000, 1_000), &[0.25; 960]);
-    control.send(Command::Digit('1')).ok().unwrap();
+    control
+        .send(Command::Text {
+            text: c"D 2000 1000 1 1".into(),
+            advisory: false,
+        })
+        .ok()
+        .unwrap();
     session.step(1_000).unwrap();
     assert!(state.lock().unwrap().input.is_empty());
     assert!(matches!(control.event(), Some(Event::Text(bytes)) if bytes == b"L T3000"));
@@ -1366,21 +1402,13 @@ fn egress_admission_above_1024() {
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
     let mut owners = Vec::new();
     for number in 0..2000 {
-        let (mut session, control, state, output) = make_async_session("1000");
-        session.remote = (10000 + number).to_string();
+        let (session, control, state, output) = make_async_session("1000");
         state.lock().unwrap().no_async_thread = true;
         assert!(worker.attach(session).is_ok(), "admission {number}");
         owners.push((control, state, output));
     }
     assert!(worker.thread.is_none());
     assert_eq!(worker.async_peers.len(), 2000);
-    for (number, peer) in worker.async_peers.iter().enumerate() {
-        // This fixture retains but never executes callbacks.
-        assert_eq!(
-            unsafe { &peer.session.as_ref().remote },
-            &(10000 + number).to_string()
-        );
-    }
     owners[1000].0.stop();
     worker.reap();
     assert_eq!(worker.async_peers.len(), 1999);
@@ -1525,7 +1553,13 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
     assert!(matches!(control.event(), Some(Event::Text(text)) if text == b"L T3000"));
     assert!(matches!(control.event(), Some(Event::Text(text)) if text == b"K? * 3000 0 0"));
     assert!(control.event().is_none());
-    control.send(Command::Digit('5')).ok().unwrap();
+    control
+        .send(Command::Text {
+            text: c"D 2000 1000 1 5".into(),
+            advisory: false,
+        })
+        .ok()
+        .unwrap();
     control
         .send(Command::Text {
             text: c"L 0".into(),
@@ -1855,11 +1889,20 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
     }
     let (mut session, mut control, _, _) = make_session("1000");
     for _ in 0..64 {
-        control.send(Command::Digit('1')).ok().unwrap();
+        control
+            .send(Command::Text {
+                text: c"D 2000 1000 1 1".into(),
+                advisory: false,
+            })
+            .ok()
+            .unwrap();
     }
     assert!(matches!(
-        control.send(Command::Digit('2')),
-        Err(Command::Digit('2'))
+        control.send(Command::Text {
+            text: c"D 2000 1000 1 2".into(),
+            advisory: false
+        }),
+        Err(Command::Text { .. })
     ));
     session.step(0).unwrap();
     assert!(!control.snapshot().unwrap().ended);

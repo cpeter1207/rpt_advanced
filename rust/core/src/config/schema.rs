@@ -236,6 +236,11 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
             "node_enabled"
                 | "full_duplex"
                 | "dtmf_muting"
+                | "dtmf_regeneration_enabled"
+                | "dtmf_regeneration_duration_ms"
+                | "dtmf_regeneration_gap_ms"
+                | "dtmf_regeneration_level_dbfs"
+                | "link_command_pad_test"
                 | "parrot_enabled"
                 | "dtmf_admin_unlock_hash"
                 | "dtmf_admin_lock_hash"
@@ -440,6 +445,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "node_enabled"
         | "full_duplex"
         | "dtmf_muting"
+        | "dtmf_regeneration_enabled"
         | "parrot_enabled"
         | "ctcss_encode_on_input"
         | "cm119_ptt_inverted"
@@ -472,6 +478,10 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "transmit_ctcss_level_dbfs" | "transmit_dcs_level_dbfs" => {
             parse::signed(value, -60, 0).is_some()
         }
+        "dtmf_regeneration_duration_ms" | "dtmf_regeneration_gap_ms" => {
+            parse::unsigned(value, 1, 1000).is_some()
+        }
+        "dtmf_regeneration_level_dbfs" => parse::signed(value, -60, 0).is_some(),
         "dtmf_admin_timeout_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "status_snapshot_interval_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "polite_maximum_wait_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
@@ -606,6 +616,10 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
             "yes"
         }
         (ScopeKind::General | ScopeKind::Node, "parrot_enabled") => "no",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_regeneration_enabled") => "no",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_regeneration_duration_ms") => "200",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_regeneration_gap_ms") => "50",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_regeneration_level_dbfs") => "-12",
         (ScopeKind::General | ScopeKind::Node, "dtmf_admin_timeout_ms") => "300000",
         (ScopeKind::General | ScopeKind::Node, "transmit_hang_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "ctcss_encode_on_input") => "no",
@@ -686,6 +700,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_admin_lock" => "801",
         "link_command_parrot_enable" => "804",
         "link_command_parrot_disable" => "805",
+        "link_command_pad_test" => "82",
         _ => return None,
     })
 }

@@ -332,6 +332,70 @@ fn local_rf_loop_rejection_is_a_completed_command_with_queued_telemetry() {
 }
 
 #[test]
+fn pad_test_dispatch_queues_local_telemetry() {
+    use rpt_advanced_core::runtime::dtmf::{DigitOutcome, PadTestResult};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    assert!(
+        selected()
+            .unwrap()
+            .0
+            .execute_digit(
+                "1000".into(),
+                DigitOutcome::PadTest(PadTestResult {
+                    digits: "*#A".into(),
+                    overflowed: false
+                })
+            )
+            .is_ok()
+    );
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
+fn regeneration_dispatch_obeys_node_configuration_and_reload() {
+    use rpt_advanced_core::runtime::dtmf::DigitOutcome;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    for enabled in ["no", "yes"] {
+        SKIP_TICKER_THREAD.store(true, Ordering::Release);
+        assert_eq!(
+            unsafe {
+                start(&active_configuration(&format!(
+                    "dtmf_regeneration_enabled={enabled}\n"
+                )))
+            },
+            0
+        );
+        let (engine, call) = selected().unwrap();
+        assert!(
+            engine
+                .execute_digit("1000".into(), DigitOutcome::Regenerate('5'))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .execute_digit("missing".into(), DigitOutcome::Regenerate('5'))
+                .is_err()
+        );
+        assert!(
+            engine
+                .run(|host| host.status_text("1000"))
+                .unwrap()
+                .contains("regeneration-dropped=0")
+        );
+        drop(call);
+        assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    }
+}
+
+#[test]
 fn non_rf_loop_rejection_is_returned_without_local_rf_telemetry() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

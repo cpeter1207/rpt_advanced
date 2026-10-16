@@ -39,6 +39,7 @@ fn mappings() -> Vec<CommandMapping> {
         ("801", LinkAction::AdminLock),
         ("804", LinkAction::ParrotEnable),
         ("805", LinkAction::ParrotDisable),
+        ("82", LinkAction::PadTest),
     ]
     .into_iter()
     .map(|(digits, action)| CommandMapping::new(digits, action))
@@ -107,6 +108,7 @@ fn parses_node_and_node_free_actions_without_mutating_failed_results() {
         ("801654321", LinkAction::AdminLock, "654321"),
         ("804", LinkAction::ParrotEnable, ""),
         ("805", LinkAction::ParrotDisable, ""),
+        ("82", LinkAction::PadTest, ""),
     ];
     for (digits, action, node) in cases {
         let command = map.parse(digits).unwrap();

@@ -33,6 +33,158 @@ fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
 }
 
+fn regenerate(
+    node: &mut NodeController,
+    receiving: bool,
+    samples: &mut [f32],
+    tones: &[Option<f32>],
+) -> bool {
+    let mut parrot = vec![0.0; samples.len()];
+    let mut active = false;
+    node.process_audio_with_parrot(
+        receiving,
+        false,
+        receiving,
+        &[],
+        samples,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+            replies: None,
+            regeneration: Some(tones),
+        },
+    )
+}
+
+#[test]
+fn regeneration_gap_is_not_missing_pcm_and_media_keeps_advancing() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            hang_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio(false, false, &[], &mut [0.0; 12000]);
+    assert!(control.queue_prepared_status(media(0.4, 3)));
+    let mut audio = [0.0; 4];
+    assert!(!regenerate(
+        &mut node,
+        false,
+        &mut audio,
+        &[Some(0.2), Some(0.0), None, None]
+    ));
+    assert_eq!(audio, [0.2, 0.0, 0.4, 0.0]);
+    assert_eq!(control.reclaim().count(), 1);
+    assert!(regenerate(&mut node, false, &mut [0.0], &[Some(0.0)]));
+    assert!(!regenerate(&mut node, false, &mut [0.0], &[None]));
+}
+
+#[test]
+fn regeneration_obeys_transmit_inhibits_and_has_no_ctcss_pseudo_activity() {
+    for full_duplex in [false, true] {
+        let (mut node, _) = NodeController::new(
+            ControllerSettings {
+                full_duplex,
+                hang_ms: 0,
+                ctcss_encode_on_input: true,
+                transmit_timeout_ms: 1,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        let mut audio = [0.5; 64];
+        assert!(!regenerate(&mut node, true, &mut audio, &[Some(0.2); 64]));
+        if full_duplex {
+            assert_eq!(audio[0], 0.2);
+            assert_eq!(audio[63], 0.0);
+        } else {
+            assert_eq!(audio, [0.0; 64]);
+        }
+    }
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            ctcss_encode_on_input: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(regenerate(&mut node, false, &mut [0.0], &[Some(0.2)]));
+    assert!(!node.ctcss_enabled());
+}
+
+#[test]
+fn regeneration_is_partition_invariant() {
+    let render = |partition: usize| {
+        let (mut node, _) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        let tones: Vec<_> = (0..1920)
+            .map(|n| {
+                if n < 960 {
+                    Some(if n < 480 { 0.25 } else { 0.0 })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut audio = vec![0.5; 1920];
+        for (pcm, tone) in audio.chunks_mut(partition).zip(tones.chunks(partition)) {
+            regenerate(&mut node, true, pcm, tone);
+        }
+        audio
+    };
+    assert_eq!(render(1), render(137));
+    assert_eq!(render(960), render(137));
+}
+
+#[test]
+fn regeneration_consumption_does_not_allocate_or_free_on_audio() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut audio = [0.0; 3];
+    let mut parrot = [0.0; 3];
+    let mut active = false;
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+            replies: None,
+            regeneration: Some(&[Some(0.2), Some(0.0), None]),
+        },
+    );
+    let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(allocations, 0);
+    assert_eq!(audio, [0.2, 0.0, 0.0]);
+}
+
 #[test]
 fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
     let signal = crate::link::PeerSignals::new();
@@ -66,6 +218,7 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(&mut replies),
+                regeneration: None,
             },
         );
         let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
@@ -116,6 +269,7 @@ fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
                 samples: &mut parrot,
                 active: &mut active,
                 replies: Some(replies),
+                regeneration: None,
             },
         )
     };
@@ -238,6 +392,7 @@ fn parrot_output_size_mismatch_skips_sample_processing() {
             samples: &mut parrot,
             active: &mut active,
             replies: None,
+            regeneration: None,
         },
     );
 
@@ -723,6 +878,7 @@ fn receive_activity_discards_a_queued_parrot_before_playback() {
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
+            regeneration: None,
         },
     );
 
@@ -758,6 +914,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
+            regeneration: None,
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -773,6 +930,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
             samples: &mut parrot,
             active: &mut parrot_active,
             replies: None,
+            regeneration: None,
         },
     );
 
@@ -808,6 +966,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
             samples: &mut parrot,
             active: &mut active,
             replies: None,
+            regeneration: None,
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -823,6 +982,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
             samples: &mut parrot,
             active: &mut active,
             replies: None,
+            regeneration: None,
         },
     );
     assert_eq!(parrot, [0.0]);

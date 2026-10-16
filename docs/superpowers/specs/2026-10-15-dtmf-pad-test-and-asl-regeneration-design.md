@@ -1,7 +1,7 @@
 # DTMF pad test and ASL-compatible regeneration
 
 Date: 2026-10-15
-Status: Written for review; implementation has not started.
+Status: Implemented locally 2026-10-16. Hosted release and live-radio validation pending.
 
 ## Outcome
 

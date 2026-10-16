@@ -96,8 +96,7 @@ that peer's egress, and CLI/REST replies stay on the requesting interface.
 Response routing is carried explicitly with the prepared telemetry; it is not
 inferred from whichever peer happens to be active when playout begins.
 
-Proposed implementation — 2026-10-15, awaiting written-design review:
-ADR 0023's ASL-style
+Implemented ownership — 2026-10-16: ADR 0023's ASL-style
 DTMF regeneration is prompt local radio-control signaling, not deferred
 telemetry. Its bounded digit queue is produced by station control and consumed
 by the existing off-audio node media distributor. That owner incrementally
@@ -109,6 +108,10 @@ program audio or parrot capture, and does not wait for receive to end or for
 the serialized speech/file producer. No generator runs in an audio callback.
 Generation retirement and bounded ownership follow ADR 0026. Ordinary
 telemetry serialization and raw receive muting are unchanged.
+The finite producer flushes the ring's declared filter delay after the final
+digit. A real zero sample retains tone-gap ownership; an empty ring releases
+that ownership. A full digit queue drops the newest digit and reports the
+drop count through the existing status path.
 
 The optional rpt_advanced parrot is a separate, explicitly tagged exception to
 ordinary telemetry routing. When enabled for a node, the radio worker captures
@@ -225,6 +228,7 @@ Queue ownership is fixed:
 | Local receive inbound PCM ring | Local receive worker | Radio-port transmit worker |
 | Linked-peer inbound / receive-program ring | That peer's receive worker | Radio-port transmit worker |
 | Telemetry playout / telemetry-program ring | Station-telemetry audio worker | Radio-port transmit worker |
+| Local DTMF regeneration PCM ring | Link-audio dispatcher | Radio-port transmit worker, local RF only |
 | Program-audio loopback ring | Radio-port transmit worker | Link-audio dispatcher |
 | Linked-peer transmit-program queue | Link-audio dispatcher | That peer's transmit worker |
 | Receive RF-signaling event queue | Receive edge publisher | Station-control event dispatcher |

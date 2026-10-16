@@ -241,6 +241,9 @@ impl PeerInput for InboundConsumer {
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
         InboundConsumer::render(self, output).ok()
     }
+    fn render_sample(&mut self) -> Option<f32> {
+        InboundConsumer::render_sample(self).ok().flatten()
+    }
 }
 impl InboundConsumer {
     /// Render with the prepared immutable policy; the library classifies real PCM.

@@ -1,5 +1,76 @@
 use super::*;
 
+fn feed_symbols(commands: &mut DtmfCommands, symbols: &str) -> Vec<DigitOutcome> {
+    symbols
+        .chars()
+        .filter_map(|digit| commands.feed(DigitEvent::Digit { digit, now_ms: 1 }))
+        .collect()
+}
+
+#[test]
+fn pad_capture_waits_for_real_unkey() {
+    for symbols in [
+        String::new(),
+        "*#ABCD0123456789".into(),
+        "*".repeat(127),
+        "#".repeat(128),
+    ] {
+        let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+        assert!(feed_symbols(&mut commands, "*82").is_empty());
+        assert!(feed_symbols(&mut commands, &symbols).is_empty());
+        assert!(
+            commands
+                .feed(DigitEvent::Digit {
+                    digit: '\0',
+                    now_ms: 9000
+                })
+                .is_none()
+        );
+        let Some(DigitOutcome::PadTest(result)) =
+            commands.feed(DigitEvent::Unkey { now_ms: 10000 })
+        else {
+            panic!("missing pad report")
+        };
+        assert_eq!(result.digits, &symbols[..symbols.len().min(127)]);
+        assert_eq!(result.overflowed, symbols.len() > 127);
+    }
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    feed_symbols(&mut commands, "*82ABC");
+    commands.feed(DigitEvent::Lost);
+    assert!(commands.feed(DigitEvent::Unkey { now_ms: 1 }).is_none());
+    let mut peer = commands.for_source();
+    assert!(feed_symbols(&mut peer, "*82").is_empty());
+    assert!(peer.feed(DigitEvent::Unkey { now_ms: 1 }).is_none());
+    assert_eq!(
+        feed_symbols(&mut peer, "5"),
+        [DigitOutcome::Regenerate('5')]
+    );
+    assert!(feed_symbols(&mut commands, "5").is_empty());
+    assert!(feed_symbols(&mut peer, "*35").is_empty());
+}
+
+#[test]
+fn remote_selection_survives_unkey_not_hash() {
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    commands.select_remote("2000");
+    assert!(commands.feed(DigitEvent::Unkey { now_ms: 1 }).is_none());
+    assert!(
+        commands
+            .feed(DigitEvent::Digit {
+                digit: '\0',
+                now_ms: 5000
+            })
+            .is_none()
+    );
+    let outcomes = feed_symbols(&mut commands, "5");
+    let [DigitOutcome::Operation(operation)] = outcomes.as_slice() else {
+        panic!("not forwarding")
+    };
+    assert_eq!(operation.digit, Some('5'));
+    assert_eq!(operation.command.node, "2000");
+    assert!(feed_symbols(&mut commands, "#5").is_empty());
+}
+
 #[test]
 fn destination_limit_is_stricter_than_the_collector_and_zero_requires_a_previous_node() {
     for length in [63, 64, 127] {
@@ -11,7 +82,7 @@ fn destination_limit_is_stricter_than_the_collector_and_zero_requires_a_previous
                 .or(result);
         }
         assert_eq!(result.is_some(), length == 63);
-        if let Some(result) = result {
+        if let Some(DigitOutcome::Operation(result)) = result {
             assert_eq!(result.command.node.len(), 63);
         }
     }
@@ -83,12 +154,16 @@ fn final_digit_precedes_unkey_terminator_with_twenty_millisecond_callbacks() {
     }
     let mut digits = Vec::new();
     while let Some(event) = dispatcher.next(7) {
-        let DigitEvent::Digit { digit, .. } = event else {
-            panic!("digit queue overflowed")
-        };
-        digits.push(digit);
+        digits.push(event);
     }
-    assert_eq!(digits, ['*', '2', '#']);
+    assert!(matches!(
+        digits.as_slice(),
+        [
+            DigitEvent::Digit { digit: '*', .. },
+            DigitEvent::Digit { digit: '2', .. },
+            DigitEvent::Unkey { .. }
+        ]
+    ));
 }
 
 #[test]
@@ -159,6 +234,7 @@ fn timeout_unkey_and_overflow_match_worker_contract() {
             now_ms: 8000
         })
     );
+    assert_eq!(dispatcher.next(7), Some(DigitEvent::Unkey { now_ms: 8001 }));
     assert_eq!(dispatcher.next(7), None);
     worker.decoded('5', 8100);
     worker.finish_frame(true, 8100, true);
@@ -170,13 +246,7 @@ fn timeout_unkey_and_overflow_match_worker_contract() {
             now_ms: 8100
         })
     );
-    assert_eq!(
-        dispatcher.next(7),
-        Some(DigitEvent::Digit {
-            digit: '#',
-            now_ms: 8200
-        })
-    );
+    assert_eq!(dispatcher.next(7), Some(DigitEvent::Unkey { now_ms: 8200 }));
     for _ in 0..258 {
         worker.decoded('5', 9000);
     }
@@ -219,14 +289,20 @@ fn lost_work_invalidates_prefix_and_remote_hash_ends_forwarding() {
             .feed(DigitEvent::Digit { digit, now_ms: 3 })
             .or(result);
     }
-    assert_eq!(result.take().unwrap().command.node, "524950");
+    let Some(DigitOutcome::Operation(operation)) = result.take() else {
+        panic!("operation")
+    };
+    assert_eq!(operation.command.node, "524950");
     commands.select_remote("2000");
-    let forwarded = commands
+    let DigitOutcome::Operation(forwarded) = commands
         .feed(DigitEvent::Digit {
             digit: '*',
             now_ms: 4,
         })
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("forwarded operation")
+    };
     assert_eq!(
         (forwarded.command.node.as_str(), forwarded.digit),
         ("2000", Some('*'))
@@ -250,7 +326,10 @@ fn lost_work_invalidates_prefix_and_remote_hash_ends_forwarding() {
     for digit in "*30#".chars() {
         result = commands.feed(DigitEvent::Digit { digit, now_ms: 7 });
     }
-    assert_eq!(result.unwrap().command.node, "524950");
+    let Some(DigitOutcome::Operation(operation)) = result else {
+        panic!("operation")
+    };
+    assert_eq!(operation.command.node, "524950");
 }
 
 #[test]
@@ -329,5 +408,8 @@ fn enter(commands: &mut DtmfCommands, input: &str, now_ms: u64) -> Option<DigitO
             .feed(DigitEvent::Digit { digit, now_ms })
             .or(result);
     }
-    result
+    result.map(|outcome| match outcome {
+        DigitOutcome::Operation(operation) => operation,
+        _ => panic!("operation"),
+    })
 }

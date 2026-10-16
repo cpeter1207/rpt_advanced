@@ -112,6 +112,13 @@ pub trait PeerInput: Send {
     fn available(&self) -> u64;
     /// Render native F32, returning real samples (not concealment), or None on failure.
     fn render(&mut self, output: &mut [f32]) -> Option<usize>;
+    /// One real media sample; unlike PCM zero, absence cannot demand PTT.
+    fn render_sample(&mut self) -> Option<f32> {
+        let mut sample = [0.0];
+        self.render(&mut sample)
+            .filter(|made| *made != 0)
+            .map(|_| sample[0])
+    }
 }
 
 /// Prepared slot whose endpoints move into exactly one generation's transmit owner.
@@ -178,6 +185,8 @@ pub struct LinkAudio<P: PeerInput> {
     parrot_mix: Vec<f32>,
     parrot_output: Vec<f32>,
     reply_output: Vec<PeerReplySample>,
+    regeneration: Option<P>,
+    regeneration_samples: Vec<Option<f32>>,
     status: LinkAudioStatus,
     routing: Vec<Destination>,
     groups: Vec<GroupSelection>,
@@ -373,6 +382,8 @@ impl<P: PeerInput> LinkAudio<P> {
                 parrot_mix: vec![0.0; maximum],
                 parrot_output: vec![0.0; maximum],
                 reply_output: vec![PeerReplySample::default(); maximum],
+                regeneration: None,
+                regeneration_samples: vec![None; maximum],
                 status,
                 groups,
                 selected_groups,
@@ -381,6 +392,11 @@ impl<P: PeerInput> LinkAudio<P> {
             },
             dispatcher,
         ))
+    }
+    /// Attach a prepared finite local-only signaling consumer before publication.
+    pub fn with_regeneration(mut self, input: P) -> Self {
+        self.regeneration = Some(input);
+        self
     }
     /// Clone the read-only status handle before audio ownership is published.
     pub fn status(&self) -> LinkAudioStatus {
@@ -489,6 +505,12 @@ impl<P: PeerInput> LinkAudio<P> {
         }
         controller.observe_parrot(receiving || any_peer_active, &self.parrot_mix[..count]);
         let mut parrot_active = false;
+        for sample in &mut self.regeneration_samples[..count] {
+            *sample = self
+                .regeneration
+                .as_mut()
+                .and_then(PeerInput::render_sample);
+        }
         let keyed = controller.process_audio_with_parrot(
             receiving,
             linked_active,
@@ -499,6 +521,7 @@ impl<P: PeerInput> LinkAudio<P> {
                 samples: &mut self.parrot_output[..count],
                 active: &mut parrot_active,
                 replies: Some(&mut self.reply_output[..count]),
+                regeneration: Some(&self.regeneration_samples[..count]),
             },
         );
         if count == 0 || self.peers.is_empty() {

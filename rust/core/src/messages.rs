@@ -39,11 +39,23 @@ const REQUIRED_IDS: &[&str] = &[
     "scheduled-link-change",
     "duration-seconds",
     "parrot-levels",
+    "pad-test-empty",
+    "pad-test-overflow",
+    "dtmf-symbol",
 ];
 
 /// A typed built-in RF message request; callers cannot select arbitrary Fluent IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
+    /// No keypad symbols were received during a local pad test.
+    PadTestEmpty,
+    /// Report discarded symbols before reading back the retained prefix.
+    PadTestOverflow,
+    /// One keypad symbol, localized independently for each output form.
+    DtmfSymbol {
+        /// Conventional DTMF symbol.
+        symbol: char,
+    },
     /// Report that no peers are connected.
     NoLinks,
     /// Summarize connected peer count, the first peer, and its mode.
@@ -177,6 +189,8 @@ pub struct MessageForms {
 /// Catalog loading, validation, or formatting failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogError {
+    /// A pad report contains symbols outside the DTMF alphabet.
+    InvalidSymbol,
     /// The required English catalog is invalid or incomplete.
     InvalidEnglish,
     /// A formatted RF message exceeds the 127-byte telemetry bound.
@@ -312,11 +326,58 @@ impl MessageCatalog {
             .morse;
         Ok(MessageForms { text, tts, morse })
     }
+
+    /// Compose one local pad reply from at most 128 independently bounded fragments.
+    /// Ordinary catalog messages retain their 127-byte bound.
+    pub fn format_pad_test(
+        &self,
+        digits: &str,
+        overflowed: bool,
+    ) -> Result<MessageForms, CatalogError> {
+        if digits.len() > 127 {
+            return Err(CatalogError::OutputTooLong);
+        }
+        if !digits
+            .bytes()
+            .all(|digit| b"0123456789*#ABCD".contains(&digit))
+        {
+            return Err(CatalogError::InvalidSymbol);
+        }
+        if digits.is_empty() {
+            return self.format(&Message::PadTestEmpty);
+        }
+        let mut forms = MessageForms {
+            text: String::new(),
+            tts: String::new(),
+            morse: String::new(),
+        };
+        let fragments = overflowed
+            .then_some(Message::PadTestOverflow)
+            .into_iter()
+            .chain(digits.chars().map(|symbol| Message::DtmfSymbol { symbol }));
+        for message in fragments {
+            let fragment = self.format(&message)?;
+            for (target, part) in [
+                (&mut forms.text, fragment.text),
+                (&mut forms.tts, fragment.tts),
+                (&mut forms.morse, fragment.morse),
+            ] {
+                if !target.is_empty() {
+                    target.push(' ');
+                }
+                target.push_str(&part);
+            }
+        }
+        Ok(forms)
+    }
 }
 
 impl Message<'_> {
     fn id(&self) -> &'static str {
         match self {
+            Self::PadTestEmpty => "pad-test-empty",
+            Self::PadTestOverflow => "pad-test-overflow",
+            Self::DtmfSymbol { .. } => "dtmf-symbol",
             Self::NoLinks => "no-links",
             Self::LinkStatus { .. } => "link-status",
             Self::LastKeyedNone => "last-keyed-none",
@@ -348,7 +409,22 @@ impl Message<'_> {
     fn args(&self) -> FluentArgs<'_> {
         let mut args = FluentArgs::new();
         match self {
-            Self::NoLinks | Self::LastKeyedNone | Self::Greeting { .. } => {}
+            Self::NoLinks
+            | Self::LastKeyedNone
+            | Self::Greeting { .. }
+            | Self::PadTestEmpty
+            | Self::PadTestOverflow => {}
+            Self::DtmfSymbol { symbol } => {
+                args.set("symbol", symbol.to_string());
+                args.set(
+                    "kind",
+                    match symbol {
+                        '*' => "star",
+                        '#' => "pound",
+                        _ => "other",
+                    },
+                );
+            }
             Self::DayOfWeek { day } => args.set(
                 "day",
                 match day {
@@ -459,6 +535,10 @@ fn validate_translation(bundle: &Bundle) -> Vec<String> {
 fn required_sample_args(id: &str) -> FluentArgs<'static> {
     let mut args = FluentArgs::new();
     match id {
+        "dtmf-symbol" => {
+            args.set("symbol", "*");
+            args.set("kind", "star");
+        }
         "link-status" => {
             args.set("count", 2);
             args.set("peer", "2000");

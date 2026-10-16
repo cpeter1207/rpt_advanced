@@ -1,5 +1,10 @@
 [
   {
+    "repository": "librptadvdtmf",
+    "sha": "7a3ec75544be9891567849b1f2badb43f63905b6",
+    "packages": ["librptadvdtmf1", "librptadvdtmf-dev"]
+  },
+  {
     "repository": "librptadviax2",
     "sha": "3d8f8425969c1092ecada88dcdd23ac7f1d4de35",
     "packages": ["librptadv-iax2-client1", "librptadv-iax2-client-dev"]

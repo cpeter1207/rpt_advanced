@@ -13,11 +13,16 @@ use std::sync::{
 /// One copied radio event; no borrowed callback memory crosses to control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DigitEvent {
-    /// Hardware-timestamped digit, `#` unkey terminator, or NUL timeout tick.
+    /// Hardware-timestamped actual digit or NUL timeout tick.
     Digit {
         /// Decoded symbol or timeout marker.
         digit: char,
         /// Captured monotonic timestamp, never dispatcher execution time.
+        now_ms: u64,
+    },
+    /// Actual receive falling edge, distinct from a literal hash digit.
+    Unkey {
+        /// Captured monotonic timestamp.
         now_ms: u64,
     },
     /// A queue/submission loss invalidates the partial command before further digits.
@@ -52,11 +57,10 @@ impl DtmfPublisher {
         )
     }
     fn queue(&mut self, digit: char, now_ms: u64) {
-        if self
-            .writer
-            .push(DigitEvent::Digit { digit, now_ms })
-            .is_err()
-        {
+        self.publish(DigitEvent::Digit { digit, now_ms });
+    }
+    fn publish(&mut self, event: DigitEvent) {
+        if self.writer.push(event).is_err() {
             self.drops.fetch_add(1, Ordering::Release);
         }
     }
@@ -70,8 +74,8 @@ impl DtmfPublisher {
             self.queue('\0', now_ms);
             self.timeout = false;
         }
-        if self.receiving && !receiving && self.timeout {
-            self.queue('#', now_ms);
+        if self.receiving && !receiving {
+            self.publish(DigitEvent::Unkey { now_ms });
             self.timeout = false;
         }
         self.receiving = receiving;
@@ -172,7 +176,31 @@ pub struct DigitOperation {
     pub digit: Option<char>,
     /// Exact originating peer; absent for the existing local/CLI path.
     pub reply: Option<crate::link::PeerReply>,
+    /// Claimed source label for relayed commands; never an authorization identity.
+    pub origin: Option<String>,
     pub(crate) admin_authorized: bool,
+}
+
+/// Bounded local keypad capture; only actual receiver unkey completes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PadTestResult {
+    /// First 127 ASCII keypad symbols.
+    pub digits: String,
+    /// Additional symbols were discarded.
+    pub overflowed: bool,
+}
+
+/// Control-side interpretation; media and directory work stay outside collection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DigitOutcome {
+    /// Complete operation or one digit for a selected remote.
+    Operation(DigitOperation),
+    /// Incomplete destination to select only if the directory recognizes it exactly.
+    RemoteCandidate(DigitOperation),
+    /// Local keypad report after actual unkey.
+    PadTest(PadTestResult),
+    /// Idle addressed peer digit eligible for configured local-TX regeneration.
+    Regenerate(char),
 }
 
 impl DigitOperation {
@@ -182,6 +210,7 @@ impl DigitOperation {
             command,
             digit,
             reply: None,
+            origin: None,
             admin_authorized: false,
         }
     }
@@ -193,6 +222,9 @@ pub struct DtmfCommands {
     collector: CommandCollector,
     last_node: String,
     remote: String,
+    peer_source: bool,
+    pad: Option<PadTestResult>,
+    digit_deadline: Option<u64>,
     admin_unlock_hash: String,
     admin_lock_hash: String,
     admin_timeout_ms: u64,
@@ -202,6 +234,7 @@ impl DtmfCommands {
     /// Create independent collection and authorization state with the same resolved policy.
     pub(super) fn for_source(&self) -> Self {
         let mut commands = Self::new(self.map.clone());
+        commands.peer_source = true;
         commands.configure_admin(
             &self.admin_unlock_hash,
             &self.admin_lock_hash,
@@ -217,6 +250,9 @@ impl DtmfCommands {
             collector,
             last_node: String::new(),
             remote: String::new(),
+            peer_source: false,
+            pad: None,
+            digit_deadline: None,
             admin_unlock_hash: String::new(),
             admin_lock_hash: String::new(),
             admin_timeout_ms: 300_000,
@@ -238,6 +274,7 @@ impl DtmfCommands {
     /// Select an independently authorized direct peer after the link owner validates it.
     pub fn select_remote(&mut self, remote: &str) {
         self.remote = remote.into();
+        self.collector = self.map.collector();
     }
     /// Clear selection when its peer disconnects or a scheduled route is withdrawn.
     pub fn disconnect(&mut self, remote: &str) {
@@ -246,36 +283,97 @@ impl DtmfCommands {
         }
     }
     /// Interpret copied events on control. Call `Lost` also after control submission rejection.
-    pub fn feed(&mut self, event: DigitEvent) -> Option<DigitOperation> {
-        let DigitEvent::Digit { digit, now_ms } = event else {
+    pub fn feed(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+        self.digit_deadline = match event {
+            DigitEvent::Digit { digit, now_ms } if "0123456789ABCD*".contains(digit) => {
+                Some(now_ms.saturating_add(3000))
+            }
+            _ => None,
+        };
+        if event == DigitEvent::Lost {
             self.collector = self.map.collector();
+            self.pad = None;
             return None;
+        }
+        if let Some(pad) = self.pad.as_mut() {
+            match event {
+                DigitEvent::Unkey { .. } => return self.pad.take().map(DigitOutcome::PadTest),
+                DigitEvent::Digit { digit, .. } if "0123456789ABCD*#".contains(digit) => {
+                    if pad.digits.len() < 127 {
+                        pad.digits.push(digit);
+                    } else {
+                        pad.overflowed = true;
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
+        // Ordinary commands still terminate on unkey; selected remote mode does not.
+        let (digit, now_ms) = match event {
+            DigitEvent::Digit { digit, now_ms } => (digit, now_ms),
+            DigitEvent::Unkey { now_ms } if self.remote.is_empty() => ('#', now_ms),
+            _ => return None,
         };
         if !self.remote.is_empty() {
             if digit == '#' {
                 self.remote.clear();
                 return None;
             }
-            return "0123456789ABCD*".contains(digit).then(|| DigitOperation {
-                command: Command {
-                    action: LinkAction::Command,
-                    node: self.remote.clone(),
-                },
-                digit: Some(digit),
-                reply: None,
-                admin_authorized: false,
+            return "0123456789ABCD*".contains(digit).then(|| {
+                DigitOutcome::Operation(DigitOperation {
+                    command: Command {
+                        action: LinkAction::Command,
+                        node: self.remote.clone(),
+                    },
+                    digit: Some(digit),
+                    reply: None,
+                    origin: None,
+                    admin_authorized: false,
+                })
             });
         }
         if now_ms >= self.admin_until_ms {
             self.admin_until_ms = 0;
         }
-        let text = self.collector.feed(digit, now_ms)?;
+        if self.peer_source
+            && !self.collector.active()
+            && digit != '*'
+            && "0123456789ABCD#".contains(digit)
+            && matches!(event, DigitEvent::Digit { .. })
+        {
+            return Some(DigitOutcome::Regenerate(digit));
+        }
+        let Some(text) = self.collector.feed(digit, now_ms) else {
+            return self
+                .collector
+                .remote_candidate()
+                .filter(|node| node.len() < 64)
+                .map(|node| {
+                    DigitOutcome::RemoteCandidate(DigitOperation::new(
+                        Command {
+                            action: LinkAction::Command,
+                            node,
+                        },
+                        None,
+                    ))
+                });
+        };
         let mut command = self.map.parse(&text)?;
         let mut admin_authorized = false;
         if command.node.len() >= 64 {
             return None;
         }
         match command.action {
+            LinkAction::PadTest => {
+                if !self.peer_source {
+                    self.pad = Some(PadTestResult {
+                        digits: String::with_capacity(127),
+                        overflowed: false,
+                    });
+                }
+                return None;
+            }
             LinkAction::AdminUnlock => {
                 self.admin_until_ms = if self.credentials_configured()
                     && verify_hash(&self.admin_unlock_hash, &command.node)
@@ -311,12 +409,36 @@ impl DtmfCommands {
         if !command.node.is_empty() {
             self.last_node.clone_from(&command.node);
         }
-        Some(DigitOperation {
+        Some(DigitOutcome::Operation(DigitOperation {
             command,
             digit: None,
             reply: None,
+            origin: None,
             admin_authorized,
-        })
+        }))
+    }
+
+    /// Preserve commands, selected/remembered destinations, and live administrative grants.
+    pub(super) fn retains_state(&self, now_ms: u64) -> bool {
+        self.collector.active()
+            || !self.remote.is_empty()
+            || !self.last_node.is_empty()
+            || self.pad.is_some()
+            || now_ms < self.admin_until_ms
+    }
+    /// Expire only this origin's pending command, without ending remote selection.
+    pub(super) fn expire(&mut self, now_ms: u64) -> Option<DigitOutcome> {
+        if self
+            .digit_deadline
+            .is_some_and(|deadline| now_ms >= deadline)
+        {
+            self.feed(DigitEvent::Digit {
+                digit: '\0',
+                now_ms,
+            })
+        } else {
+            None
+        }
     }
 
     /// Consume the one DTMF authorization issued for a parrot action before link control applies it.

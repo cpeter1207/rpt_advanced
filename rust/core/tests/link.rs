@@ -210,6 +210,38 @@ fn key_advice_falls_back_to_eligible_flood_without_echoing_ingress_source_or_loc
 }
 
 #[test]
+fn remote_digits_route_direct_or_relay_without_changing_envelope() {
+    let mut hub = LinkManager::new("1000").unwrap();
+    for remote in ["2000", "3000", "4000", "5000"] {
+        hub.attach(remote, Mode::TRANSCEIVE, false).unwrap();
+    }
+    hub.end("5000");
+    let direct = Protocol::parse(b"D 4000 3000 17 5").unwrap();
+    assert_eq!(
+        hub.relay_digit("2000", &direct),
+        [("4000".into(), "D 4000 3000 17 5".into())]
+    );
+    let flood = Protocol::parse(b"D 6000 3000 17 5").unwrap();
+    assert_eq!(
+        hub.relay_digit("2000", &flood),
+        [("4000".into(), "D 6000 3000 17 5".into())]
+    );
+    for ingress in ["missing", "5000"] {
+        assert!(hub.relay_digit(ingress, &direct).is_empty());
+    }
+    for text in ["D 1000 3000 17 5", "!NEWKEY!"] {
+        assert!(
+            hub.relay_digit("2000", &Protocol::parse(text.as_bytes()).unwrap())
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        hub.relay_digit("", &direct),
+        [("4000".into(), "D 4000 3000 17 5".into())]
+    );
+}
+
+#[test]
 fn media_signals_publish_pcm_and_cancel_stale_key_source() {
     use rpt_advanced_core::link::PeerSignals;
     let signals = PeerSignals::default();

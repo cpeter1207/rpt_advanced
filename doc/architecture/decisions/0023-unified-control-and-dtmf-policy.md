@@ -112,10 +112,18 @@ administrative authorization. A claimed source in a relayed text envelope is
 not authentication. Preserve independent command/unlock state and the current
 originating-connection reply contract. Remote-base DTMF operations use this
 same command-map and authorization policy as described by ADR 0004.
+Remote destination selection is applied before the next queued digit is parsed.
+Each ingress connection may retain at most 128 simultaneous origin collectors;
+new starts above that bound are ignored without evicting active commands or
+administrative grants. Idle digits need no collector, and expired idle state is
+reclaimed on control. This does not limit the number of connected peers.
 
-Implementation status — 2026-10-15: pad test, PCM regeneration, and the complete
-ASL-style remote-command routing above are approved work, not yet implemented.
-The current product supports only direct-peer addressed command digits.
+Implementation status — 2026-10-16: pad capture, localized readback, local-only
+PCM regeneration, and addressed direct/transit command routing are implemented.
+Regeneration uses the generator-capable DTMF shared-library descriptor; startup
+rejects an older provider. Targeted local tests cover both host ingress paths,
+source isolation, waveform boundaries, and transmitter safety. Hosted release
+validation and live-radio validation remain separate prerequisites to release.
 
 ## Consequences
 

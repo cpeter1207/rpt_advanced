@@ -16,7 +16,7 @@ use rpt_advanced_core::{
     link::{AudioPeer, GroupMemberSelection, LinkAudio, LinkAudioStatus, Mode},
     runtime::{
         DeviceHandoff, GenerationSettings, PreparedAdapter, Runtime, RuntimeClock, RuntimeError,
-        dtmf::DigitOperation, links::LinkEffect,
+        dtmf::DigitOutcome, links::LinkEffect,
     },
 };
 use std::{
@@ -145,7 +145,7 @@ pub struct Host {
     media_workers: Vec<(String, MediaWorker)>,
     peer_io: PeerIoWorker,
     peers: Vec<PeerOwner>,
-    operations: Vec<(String, DigitOperation)>,
+    operations: Vec<(String, DigitOutcome)>,
     status_post: StatusPostService,
     epoch: Instant,
 }
@@ -193,11 +193,19 @@ fn prepared(
             PeerCommand::Redirect { inbound, outbound },
         ));
     }
-    let (audio, dispatcher) =
+    let (mut audio, dispatcher) =
         LinkAudio::new(audio, MAXIMUM_FRAMES).map_err(|_| RuntimeError::Preparation)?;
+    let regeneration = if settings.dtmf_regeneration.enabled {
+        let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
+            .map_err(|_| RuntimeError::Preparation)?;
+        audio = audio.with_regeneration(reader);
+        Some((settings.dtmf_regeneration, writer, MAXIMUM_FRAMES))
+    } else {
+        None
+    };
     let status = audio.status();
     let dispatcher = worker
-        .prepare(dispatcher, wakes)
+        .prepare(dispatcher, wakes, regeneration)
         .map_err(|_| RuntimeError::Busy)?;
     Ok(PreparedAdapter {
         state: audio,
@@ -333,8 +341,24 @@ impl Host {
         }
     }
     /// Take copied radio/peer operations after pump; dispatch their effects on this same owner.
-    pub fn take_operations(&mut self) -> Vec<(String, DigitOperation)> {
+    pub fn take_operations(&mut self) -> Vec<(String, DigitOutcome)> {
         std::mem::take(&mut self.operations)
+    }
+    /// Submit eligible addressed digits only to this node's active local signaling lane.
+    pub fn regenerate(&mut self, local: &str, digit: char) -> Result<(), RuntimeError> {
+        let generation = self
+            .runtime
+            .status(0)
+            .into_iter()
+            .find(|(name, _)| name == local)
+            .and_then(|(_, status)| status.active)
+            .ok_or(RuntimeError::Rejected)?;
+        let control = self
+            .runtime
+            .adapter_control_mut(local, generation)
+            .ok_or(RuntimeError::Rejected)?;
+        let _ = control.dispatcher.queue_digit(digit);
+        Ok(())
     }
     /// Admission/queue loss invalidates every partial collector before subsequent queued digits.
     pub fn lost_digits(&mut self) {
@@ -597,8 +621,9 @@ impl Host {
             let (batches, maximum_ns) = control.dispatcher.timing();
             let _ = writeln!(
                 result,
-                "  fanout batches={batches} maximum-batch-ns={maximum_ns} dropped-blocks={}",
-                control.status.dropped_blocks()
+                "  fanout batches={batches} maximum-batch-ns={maximum_ns} dropped-blocks={} regeneration-dropped={}",
+                control.status.dropped_blocks(),
+                control.dispatcher.regeneration_dropped()
             );
         }
         for peer in peers {
@@ -723,15 +748,21 @@ impl Host {
                 }
                 Ok(())
             }
-            LinkEffect::RemoteDigit { remote, digit } => {
-                let peer = self
-                    .peers
-                    .iter_mut()
-                    .find(|peer| peer.local == local && peer.remote == remote)
-                    .ok_or(RuntimeError::Rejected)?;
-                peer.control
-                    .send(PeerCommand::Digit(digit))
-                    .map_err(|_| RuntimeError::Rejected)
+            LinkEffect::ForwardDigits(messages) => {
+                for (remote, text) in messages {
+                    self.text(local, &remote, &text, false)?;
+                }
+                Ok(())
+            }
+            LinkEffect::Digit(outcome) => {
+                if let DigitOutcome::RemoteCandidate(operation) = outcome {
+                    // Selection changes collection of the very next queued digit.
+                    let verified = self.lookup(local, &operation.command.node, None).is_ok();
+                    let _ = self.runtime.command(local, operation, clock, verified);
+                } else {
+                    self.operations.push((local.to_owned(), outcome));
+                }
+                Ok(())
             }
             LinkEffect::Telemetry(action, reply) => {
                 let last = self
@@ -820,6 +851,7 @@ impl Host {
                     if let Ok(effect) = node.links().peer_text(
                         &remote,
                         &text,
+                        reply,
                         receiving,
                         transitioned,
                         clock.now_ms,
@@ -831,12 +863,22 @@ impl Host {
                     if let Some(operation) =
                         node.links().peer_digit(&remote, digit, clock.now_ms, reply)
                     {
-                        self.operations.push((local, operation));
+                        self.immediate(&local, LinkEffect::Digit(operation), clock)?;
                     }
                 }
             }
         }
         for (local, status) in self.runtime.status(clock.now_ms) {
+            let events = self
+                .runtime
+                .node(&local)
+                .map(|node| node.drain_digits())
+                .unwrap_or_default();
+            for event in events {
+                if let Some(outcome) = self.runtime.digit(&local, event) {
+                    self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
+                }
+            }
             if let Some(node) = self.runtime.node(&local) {
                 let keyed = self
                     .leases
@@ -858,7 +900,8 @@ impl Host {
                     node.links().manager().snapshot(),
                 );
                 self.operations.extend(
-                    node.drain_digits()
+                    node.links()
+                        .expire_peer_digits(clock.now_ms)
                         .into_iter()
                         .map(|operation| (local.clone(), operation)),
                 );
