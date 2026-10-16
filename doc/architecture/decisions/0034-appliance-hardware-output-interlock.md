@@ -28,7 +28,7 @@ attenuating/disconnected state, releases PTT and external CTCSS-enable
 contacts, and disables DB-25 output drive. The physical interlock is specified
 and qualified in the appliance hardware repository.
 
-The radio core's transmit worker under the pending ADR 0027 split continues
+The radio core's transmit worker under the ADR 0027 split continues
 to produce abstract prepared PTT and
 signaling actions. The selected appliance hardware adapter reports output-arm
 and safety faults through its status contract, but neither the audio callback

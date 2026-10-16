@@ -41,7 +41,7 @@ available for safety and diagnostics while its controller qualification follows
 the same live-traffic, command-response, hangtime, identifier, and courtesy
 rules as native CTCSS.
 
-Under the pending 2026-09-13 split in ADR 0027, receive DSP/decode executes in
+Under the receive/transmit split in ADR 0027, receive DSP/decode executes in
 the input-driven local receive worker, and generated DCS or external CTCSS
 enable executes through the output-clocked transmit owner. The split does not
 override this profile's external CTCSS selection or add analog CTCSS injection.

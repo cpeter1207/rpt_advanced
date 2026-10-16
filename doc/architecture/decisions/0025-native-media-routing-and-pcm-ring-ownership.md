@@ -1,6 +1,6 @@
 # ADR 0025: Native media routing assigns conversion to PCM rings
 
-Status: Implemented — telemetry streaming through its PCM ring (2026-10-12)
+Status: Implemented (telemetry streaming and local DTMF PCM routing; optional shared-clock work pending)
 
 Amended 2026-10-01: every telemetry source, including Morse and tone sequences,
 is produced outside the transmit worker and streamed through the telemetry PCM
@@ -112,6 +112,12 @@ The finite producer flushes the ring's declared filter delay after the final
 digit. A real zero sample retains tone-gap ownership; an empty ring releases
 that ownership. A full digit queue drops the newest digit and reports the
 drop count through the existing status path.
+
+The local DTMF regeneration path shipped in controller v0.1.0-alpha11 with
+DTMF provider v0.1.0-alpha.2 after the native PR gate and release validation.
+Package installation on node 524950 is complete; manual RF confirmation of
+the new DTMF behavior remains pending. This does not complete ADR 0027's
+optional shared-clock adapter path.
 
 The optional rpt_advanced parrot is a separate, explicitly tagged exception to
 ordinary telemetry routing. When enabled for a node, the radio worker captures

@@ -1,6 +1,6 @@
 # ADR 0041: Fluent catalogs own built-in RF telemetry
 
-Status: Accepted (2026-10-02)
+Status: Implemented; accepted 2026-10-02
 
 ## Context
 
@@ -36,11 +36,13 @@ wording belongs in the English catalog and is covered by its completeness and
 formatting tests. Locale errors are reported as configuration warnings when an
 English fallback is possible.
 
-## Implementation status — 2026-10-04
+## Implementation status — 2026-10-16
 
 The packaged `en-US` catalog, per-node/global locale selection, administrator
 overrides, per-attribute English fallback, built-in RF message migration, and
 serialized warning delivery are implemented. The native parrot's peak/RMS
 report is a typed catalog message with text, speech, and Morse forms; speech
-playback uses the resolved per-node voice, speed, and level. Catalog
-preparation and formatting remain outside audio callbacks.
+playback uses the resolved per-node voice, speed, and level. The released
+DTMF pad test also uses typed catalog messages for its digit report, empty
+capture, and overflow notice. Catalog preparation and formatting remain
+outside audio callbacks.

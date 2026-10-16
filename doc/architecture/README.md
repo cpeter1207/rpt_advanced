@@ -40,7 +40,9 @@ dynamic links are `librptadvradio.so.4` to `librptadvsquelch.so.2`,
 `librptadv_product.so.1` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
 `librptadvdtmf.so.1`, `librptadvtemplate.so.1`, and
 `librptadvschedule.so.1`; and `librptadvmorse.so.1` to
-`librptadvtone.so.1`. Hardware I/O and controller policy remain with their
+`librptadvtone.so.1`. DTMF detection and PCM generation share
+`librptadvdtmf.so.1`, which dynamically consumes `librptadvtone.so.1` for
+generation. Hardware I/O and controller policy remain with their
 existing owners. ADR 0011's further directions are tracked separately from
 this extraction.
 
@@ -207,7 +209,7 @@ link distributor → DTMF generator → local-only signaling PCM ring ───�
 Link media ingress serializes concurrent asynchronous callbacks for one peer
 before it touches that peer's jitter buffer, decoder, or receive-program ring.
 The Asterisk-hosted adapter may retain a narrow ingress mutex, never acquired
-by the radio-port audio engine. The planned standalone implementation uses
+by the radio-port audio engine. The released standalone implementation uses
 Tokio readiness, bounded per-connection mailboxes and one asynchronous owner
 per peer on a shared worker pool. A peer-local async mutex is permitted only
 where necessary, never on audio. The separate versioned jitter adapter alone
@@ -312,9 +314,10 @@ two ingress jobs or two egress jobs executing at once.
 Those logical owners use adapter-neutral execution and lifecycle contracts.
 The **control-path adapter** supplies serialized task execution, explicit
 submission/ownership results, and safe stop/drain. Its current backend is the
-Asterisk taskprocessor; standalone can select an owned or third-party backend
-with the same contract. Scheduling and controller policy stay outside the
-adapter. See [ADR 0038](decisions/0038-replaceable-control-path-adapter.md).
+Asterisk taskprocessor in the Asterisk composition; standalone selects its
+released non-Asterisk backend with the same contract. Scheduling and controller
+policy stay outside the adapter. See
+[ADR 0038](decisions/0038-replaceable-control-path-adapter.md).
 The Rust product submits through the neutral execution contract and its
 validated control-descriptor client. Only the control provider owns Asterisk
 taskprocessor handles. Product radio/peer workers and the periodic control
@@ -384,8 +387,9 @@ defines the full reload, hardware-handoff, and failure policy.
   fallback. The unkey edge cancels unsent locally originated queries and
   rejects late replies. This work never tags PCM frames or runs an IAX write in
   an audio callback.
-  A dedicated external-peer adapter owns EchoLink registration, UDP transport,
-  and callsign access control while using the same controller audio boundary.
+  EchoLink remains planned: a dedicated external-peer adapter will own its
+  registration, UDP transport, and callsign access control while using the
+  same controller audio boundary.
 - `rust/core/src/config/` parses, validates, and inherits configuration.
 
 ## Core invariants
@@ -526,7 +530,7 @@ Neither the portable controller package nor its Asterisk adapter depends on the
 USBRadioPlus integration package. Local candidate packages are verification
 artifacts, not published releases.
 
-As of the 2026-10-09 extraction, hosted verification needs this ordered handoff:
+The 2026-10-09 extraction used this ordered handoff, now completed:
 
 1. Merge the companion workflow changes: USBRadioPlus quality installs all three
    package outputs, and its package workflow publishes the product outputs and
@@ -559,6 +563,12 @@ Asterisk, USBRadioPlus without controller packages, the controller's Asterisk
 adapter alone, and both Asterisk adapters together. Installed descriptors and
 shared-library resolution pass. These hardware-free checks do not replace the
 hosted platform gate or live callback/reload acceptance on an approved test node.
+The released shared product is now an input to the maintained quality images.
+The [alpha11 PR gate](https://github.com/cpeter1207/rpt_advanced/actions/runs/38956936401)
+passed both native platform jobs and full production coverage; its
+[release](https://github.com/cpeter1207/rpt_advanced/releases/tag/v0.1.0-alpha11)
+published both package sets and verified installation images. Shared-product
+dependency publication is no longer an outstanding release prerequisite.
 
 ## Decisions
 
