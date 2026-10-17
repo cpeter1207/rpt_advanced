@@ -18,6 +18,9 @@ Owner revision: identifiers and tails may combine ordinary text or a sound
 file with multiple message macros in one ordered sequence. Message macros may
 include dynamic station/site values and attention tones, not just one spoken
 message selected in place of all other media.
+Incoming local-receiver or linked-peer activity requires Morse-only message
+playback. An interrupted voiced message stops and switches to its complete
+Morse form; this rule applies to message macros and tails as well as IDs.
 
 This design does not authorize implementation, deployment, hardware changes,
 link connections, a release, or the unrelated unfinished wishlist features.
@@ -161,8 +164,9 @@ Acknowledgment silences repeats without declaring recovery. A latched alarm
 requires the condition to clear and an explicit reset. Reset cannot remove a
 physical interlock fault or override an unsafe current condition. Protective
 actions do not wait for telemetry queue admission, speech, or clear RF.
-Unsolicited alarm speech is local-only and follows ordinary non-ID telemetry
-activity rules; command replies retain source-scoped routing.
+Unsolicited alarm messages are local-only and follow ordinary non-ID telemetry
+admission rules. Once admitted, they follow the receive-interruption policy
+below; command replies retain source-scoped routing.
 
 ### Fans and failure behavior
 
@@ -227,8 +231,10 @@ Existing context-specific values such as `time_remaining` remain available only
 where that context supplies them. Bindings cannot evaluate code or select
 arbitrary runtime fields. Resolve one coherent snapshot at preparation for a
 playback attempt, not at configuration load. Multiple references in that
-attempt use the same snapshot. After a deferral/retry, obtain a fresh snapshot
-before beginning another attempt. Apply source freshness checks before use;
+attempt use the same snapshot. A deferral before the first sample or later
+rescheduling of a cancelled message creates a new attempt with a fresh snapshot.
+Switching an active message to Morse, or continuing it after priority/safety
+preemption, retains that attempt's snapshot. Apply source freshness checks before use;
 if a referenced reading is not valid, replace only its measurement segment with
 the localized unavailable form, not the entire ID or alarm sequence.
 
@@ -318,7 +324,8 @@ tone-only macros can supply different attention sequences without adding a
 second tone-reference syntax. A tone-only macro needs no `message_id`, speech,
 or Morse text. Literal text and `{media}` segments can be interleaved as well.
 Whitespace separating structural tokens does not generate spoken content.
-Tones retain their position when an ordinary message falls back to Morse.
+Tones retain their position when speech is unavailable while the station is
+idle. The receive-driven Morse-only rule below suppresses attention tones.
 Reusing the current media fallback field alone would not satisfy this rule.
 Tone level/duration remain explicit and subject to existing validation and
 transmit processing. Message macros may also insert sound files with `{media}`
@@ -408,16 +415,54 @@ callback and streams through the existing telemetry ring.
 For ordinary speech failure, use each segment's Morse fallback in order; a
 file segment uses its configured fallback without losing following macros.
 An unavailable meter does not discard the station-identification segment.
-When receive activity requires an identifier to switch to Morse, cancel the
-remaining primary sequence and start its complete Morse form from the
-beginning, including the station identity. Literal text is Morse-rendered,
-catalog macros use their `.morse` forms, and file segments use `morse_text`.
-Do not play tone sequences or file audio in this forced-Morse ID path; replace
-each file segment with its Morse fallback and require a usable complete Morse
-identification fallback. This preserves the existing rule that only Morse
-identification plays while an input is active. Alarm attention tones remain at
-their configured positions during ordinary speech-to-Morse fallback when the
-station is idle. Tails retain their receive-interruption policy below.
+
+### Receive activity and Morse-only playback
+
+Use the same rule for identifiers, tails, announcements, alarms, command
+replies, and message-macro compositions. Receive activity means qualified
+local-receiver activity OR an incoming transmission from any connected peer,
+not just the message's originating peer. Do not infer it from local PTT,
+hangtime, telemetry playback, or an audio-level threshold.
+
+- Check current receive activity before admitting the first non-Morse sample
+  and throughout playback, including between segments. A message prepared
+  while idle must not start speaking if receive became active during preparation.
+- If an otherwise eligible message starts while receive is active, select its
+  complete Morse form immediately. Existing scheduling and source-unkey rules
+  still determine when a queued message becomes eligible; this is not permission
+  to start every pending message during a transmission.
+- If receive becomes active during speech, a sound file, or an attention-tone
+  segment, stop that primary sequence and begin the complete Morse form from
+  the beginning. Preserve its destination and coherent value snapshot. Never
+  restart at a partial word or lose the station identity from an interrupted ID.
+- Latch Morse for the remainder of that message. An unkey, another peer keying,
+  or a segment boundary must not restore speech or repeatedly restart Morse.
+  Preserve this choice across an ID-priority preemption or safety deferral.
+- Literal text is Morse-rendered, catalog macros use their `.morse` forms, and
+  each file/media segment uses its configured Morse fallback. Omit attention
+  tones and recorded file audio in this receive-driven mode. Embedded tone-only
+  macros contribute no Morse; a wholly tone-only macro has nothing to play in
+  this mode and must not keep PTT asserted or satisfy an ID.
+- Require a usable complete Morse fallback for voiced compositions. A missing
+  fallback follows warning/default resolution and safely disables the affected
+  content if no valid fallback exists. Never continue voice during receive or
+  report a failed/interrupted primary sequence as successfully completed.
+
+The interruption must suppress already-buffered primary PCM, not merely stop
+future synthesis. At the next output boundary that observes receive activity,
+gate the old non-Morse stream and invalidate its unplayed samples, including
+resampler/PLC history, using the existing generation-safe cancellation handoff.
+Do not drain old speech audibly, conceal it into the Morse transition, or admit
+late producer writes from the cancelled stream. The telemetry producer prepares
+and streams Morse off audio; transmit may wait silently for available Morse
+samples but never blocks, allocates, or synthesizes in its callback. Samples
+already submitted to hardware cannot be recalled.
+
+This changes playback selection, not routing or safety. A half-duplex node or
+a reply whose originating source has rekeyed may have to hold its Morse form
+until transmission is allowed. Timeout/interlock rules still win. Existing
+tone-only courtesy cancellation and DTMF regeneration are unchanged. Only
+completion of the selected message form advances its ID/tail completion state.
 
 `interval_ms = 0` makes a tail eligible after every qualifying traffic release.
 A positive interval is minimum elapsed time since successful playback; it
@@ -430,7 +475,8 @@ local/linked traffic ends, not while another input remains active.
 ### Approved timing and precedence
 
 1. Normal polite IDs and tails wait for the existing transmitter hang timer to
-   expire. Ordinary courtesy and command-response rules remain unchanged.
+   expire. Ordinary courtesy behavior and command-response admission/routing
+   remain unchanged; admitted voiced messages use the Morse-only policy above.
 2. With zero tail delay, keep PTT asserted at hang expiry and start the tail.
    A pending polite ID follows it unless its maximum wait has expired.
 3. With positive tail delay, unkey at hang expiry and count the delay from that
@@ -447,19 +493,23 @@ local/linked traffic ends, not while another input remains active.
    the tail becomes ready during the ID, play it immediately after the ID;
    otherwise release PTT and wait for the original tail deadline.
 7. An expiring ID deadline also wins during tail playback: interrupt the tail,
-   send the ID, then restart the eligible tail from its beginning when quiet.
+   send the ID, then restart that already-admitted tail from its beginning when
+   transmission is allowed. Preserve its snapshot and latched Morse choice;
+   ongoing receive activity requires Morse, not a new wait for quiet.
    Never overlap telemetry or resume a spoken message midway through a word.
-8. New receive activity cancels an outstanding release/delay opportunity and
-   interrupts a tail. Reconsider unfinished eligible tails after the next
-   ordinary hang expiry. Only completed playback advances a tail interval.
+8. New receive activity cancels an outstanding release/delay opportunity for a
+   tail that has not started. Reconsider it after the next ordinary hang expiry.
+   An already-playing voiced tail instead stops and switches to its complete
+   Morse form under the policy above; do not defer it merely because receive
+   became active. Only completed playback advances a tail interval.
 9. Process multiple eligible tails in configuration order, rechecking ID
    deadlines and receive state between them. Apply each named tail's delay
    without sleeping a worker; transmitter-generated releases create no new
    tail opportunity. A later tail cannot pass an earlier eligible one.
 
 These rules do not bypass half-duplex constraints, transmitter timeout,
-interlocks, or the existing requirement to use Morse when receive activity
-interrupts a spoken/file identifier. All telemetry is generated off audio and
+interlocks, or the requirement to use Morse when local or linked receive
+activity interrupts a voiced message. All telemetry is generated off audio and
 streamed through the existing telemetry ring. Reuse announcement/identifier
 scheduling and rendering, not a second tail-specific audio engine.
 
@@ -504,12 +554,18 @@ multiple macros, recorded media plus multiple macros, nested acyclic references,
 cycle/missing-reference handling, brace escaping, coherent dynamic values,
 per-segment bounds, natural measurement versus digit-wise node speech,
 attention tones before, between, and after messages, repeated/tone-only macros,
-tone ordering/levels through ordinary speech-to-Morse fallback, and complete
-forced-Morse ID fallback. Verify that segment boundaries do not unkey,
-interleave telemetry, or prematurely
-complete an ID/tail. Exhaustively test zero and positive tail delay, intervals,
-no recursive tails, receive interruption,
-all ID-deadline crossings above, and multiple named tails. Assert PTT sequencing,
+tone ordering/levels through idle speech-to-Morse fallback, and complete
+receive-driven Morse fallback. Test local-only, peer-only, and overlapping
+receive activity before playback, during preparation, within each segment,
+and at segment boundaries. Assert that buffered speech and stale producer
+writes cannot leak after cancellation, Morse stays selected after unkey or
+preemption, and destination/snapshot/identity remain intact. Cover tails that
+are pending versus already playing, missing Morse, tone-only compositions,
+source rekey, and half-duplex/interlock deferral. Verify that segment boundaries
+do not unkey, interleave telemetry, or prematurely complete an ID/tail.
+Exhaustively test zero and positive tail delay, intervals, no recursive tails,
+receive interruption, all ID-deadline crossings above, and multiple named tails.
+Assert PTT sequencing,
 media order, no overlap, and no new audio-callback I/O/allocation/locks.
 
 Follow the existing preflight and hosted Debian 13 native PR gates; production
@@ -518,7 +574,10 @@ physical backend when available and is reported separately from software tests.
 Do not change node 524950 without a separate installation/testing approval.
 
 Before implementation, update ADR 0009's allowed triggers/substitutions and
-ADR 0023's read-only site/message operations, and record the tail/ID timing
-decision. Update the architecture map and site-I/O wishlist to approved/planned,
+ADR 0023's read-only site/message operations. Record the tail/ID timing and
+all-message receive-interruption rules, including ADR 0025's buffered telemetry
+cancellation contract. Track the reported voice-during-receive defect as
+unverified until reproduced; this design change is not a deployed fix.
+Update the architecture map and site-I/O wishlist to approved/planned,
 not implemented. Preserve ADRs 0012, 0019, 0022, 0025-0028, and 0033/0034.
 Update developer docs with code; update operator manuals/examples before a PR.
