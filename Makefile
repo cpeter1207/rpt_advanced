@@ -26,12 +26,12 @@ INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH" RPT_ADVANCED_LIBDIR="$(CURDIR)/build"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
-DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c examples doc debian messages README.md QUALITY.md WISHLIST.md
+DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c examples doc debian messages README.md QUALITY.md WISHLIST.md
 
 .PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface product-abi-check rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
 .PHONY: build/app_rpt_advanced.so
-.PHONY: install-jitter-development jitter-ring-check
+.PHONY: install-jitter-development jitter-ring-check radio-interlock-check
 all: build/app_rpt_advanced.so
 
 build:
@@ -86,7 +86,7 @@ dependency-boundary:
 
 lint:
 	$(CARGO) fmt --all -- --check
-	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c
+	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -94,6 +94,7 @@ static-analysis: dependency-boundary product-surface
 	# AST_MODULE_INFO is external declaration machinery, not a callable API.
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) '-DAST_MODULE_INFO(key,flags,description,...)=;' $(LOADER)
 	clang-tidy $(LOADER) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 tests/test_radio_interlock.c
 	$(TEST_ENV) $(CARGO) clippy --locked --workspace --all-targets -- -D warnings
 
 rust-quality:
@@ -108,7 +109,7 @@ docs: | build
 
 quality: lint static-analysis docs
 
-check: rust-build loader-check jitter-ring-check
+check: rust-build loader-check jitter-ring-check radio-interlock-check
 	$(TEST_ENV) $(CARGO) test --locked --workspace
 
 rust-check: rust-quality check
@@ -153,6 +154,13 @@ build/test_jitter_ring: tests/test_jitter_ring.c $(HEADERS) build/librptadv_jitt
 
 jitter-ring-check: build/test_jitter_ring
 	$(TEST_ENV) ./build/test_jitter_ring
+
+build/test_radio_interlock: tests/test_radio_interlock.c | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -UNDEBUG $< \
+		-lrptadvradio -lrptadv_gpio_adapter $(LDFLAGS) -o $@
+
+radio-interlock-check: build/test_radio_interlock
+	./build/test_radio_interlock
 
 loader-check: build/test_loader
 	./build/test_loader

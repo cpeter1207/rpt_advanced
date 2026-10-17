@@ -1,6 +1,6 @@
 # ADR 0025: Native media routing assigns conversion to PCM rings
 
-Status: Implemented — telemetry streaming through its PCM ring (2026-10-12)
+Status: Implemented (telemetry streaming and local DTMF PCM routing; optional shared-clock work pending)
 
 Amended 2026-10-01: every telemetry source, including Morse and tone sequences,
 is produced outside the transmit worker and streamed through the telemetry PCM
@@ -113,6 +113,12 @@ digit. A real zero sample retains tone-gap ownership; an empty ring releases
 that ownership. A full digit queue drops the newest digit and reports the
 drop count through the existing status path.
 
+The local DTMF regeneration path shipped in controller v0.1.0-alpha11 with
+DTMF provider v0.1.0-alpha.2 after the native PR gate and release validation.
+Package installation on node 524950 is complete; manual RF confirmation of
+the new DTMF behavior remains pending. This does not complete ADR 0027's
+optional shared-clock adapter path.
+
 The optional rpt_advanced parrot is a separate, explicitly tagged exception to
 ordinary telemetry routing. When enabled for a node, the radio worker captures
 one mixed burst from processed local receive and every active linked-peer
@@ -184,8 +190,9 @@ buffer for that adapter). There is no transmit-mix resampler or additional
 output clock-recovery ring. The adapter converts only at its physical hardware
 boundary. ADR 0027 assigns hardware submission and any backend-specific
 partial-I/O staging to that adapter. ADR 0033 defines the
-appliance direct-codec profile, which uses external discrete CTCSS and therefore
-does not inject a native CTCSS tone.
+appliance direct-codec profile and independent CTCSS encode/decode source
+selection. DSP encode mixes the native tone into TX audio; external encode
+publishes encoder-enable intent without injecting a native CTCSS tone.
 
 A per-node active-traffic CTCSS encode policy is implemented under ADR 0042.
 Live local-receiver or connected-peer transmission qualifies encoding and its

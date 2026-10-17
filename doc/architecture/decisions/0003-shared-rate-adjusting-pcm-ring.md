@@ -1,6 +1,6 @@
 # ADR 0003: Shared rate-adjusting PCM ring
 
-Status: Accepted
+Status: Implemented (current asynchronous composition; optional shared-clock path pending)
 
 ## Context
 
@@ -13,17 +13,16 @@ unnecessary divergence.
 Use the separately released `rate_adjusting_pcm_ring` shared library for
 lock-free PCM program buffering, controlled rate recovery, and shortfall
 observability. rpt_advanced and USBRadioPlus link against the same public ABI.
-All newly migrated ring payloads use canonical normalized `f32` PCM under
-[ADR 0029](0029-canonical-f32-internal-pcm.md). The released signed-16 ABI
-remains a transitional compatibility interface until its separately released
-`f32` successor and SONAME migration are complete.
+Current ring payloads use canonical normalized `f32` PCM under
+[ADR 0029](0029-canonical-f32-internal-pcm.md). The released ABI 3 and SONAME 3
+are required; the signed-16 interface is not a current compatibility path.
 
 The ring is the sole owner of inbound sample-rate conversion and clock-drift
 correction whenever asynchronously scheduled or short-lived PCM producers feed
-native-rate transmit consumption. Under the accepted 2026-09-13 split in ADR
-0027, the current USBRadioPlus migration implements the independent callback
-entry points, while the pending ring-ownership tranche has the local receive
-worker write processed audio
+native-rate transmit consumption. Under the implemented independent-worker
+split in ADR 0027, USBRadioPlus provides the separate receive/transmit callback
+entry points and the controller owns the inbound rings. The local receive
+worker writes processed audio
 after squelch, CTCSS/DCS decode, deemphasis, and receive DSP to a **local receive
 inbound PCM ring**. This ring owns capture-to-playback drift correction; no
 additional converter precedes receive DSP. Each connected peer has a
