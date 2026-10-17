@@ -1,6 +1,6 @@
 # ADR 0023: Unified control operations and DTMF policy
 
-Status: Accepted
+Status: Accepted (DTMF feature slice released; broader interface catalog incomplete)
 
 Reaffirmed 2026-09-17: this record's source-scoped telemetry routing is the
 required behavior. ADR 0025's earlier all-local restriction was an intermediate
@@ -119,11 +119,16 @@ administrative grants. Idle digits need no collector, and expired idle state is
 reclaimed on control. This does not limit the number of connected peers.
 
 Implementation status — 2026-10-16: pad capture, localized readback, local-only
-PCM regeneration, and addressed direct/transit command routing are implemented.
-Regeneration uses the generator-capable DTMF shared-library descriptor; startup
-rejects an older provider. Targeted local tests cover both host ingress paths,
-source isolation, waveform boundaries, and transmitter safety. Hosted release
-validation and live-radio validation remain separate prerequisites to release.
+PCM regeneration, and addressed direct/transit command routing shipped in
+controller v0.1.0-alpha11 with DTMF provider v0.1.0-alpha.2. Regeneration uses
+the generator-capable DTMF shared-library descriptor; startup rejects an older
+provider. Tests cover both host ingress paths, source isolation, waveform
+boundaries, and transmitter safety. The full native PR gate passed with 100%
+production coverage, and both components were released. Node 524950 has the
+packages installed with its configuration preserved, but manual validation of
+these new DTMF behaviors has not yet been confirmed. The broader
+CLI/REST/WebSocket control and status catalog remains incomplete. ADR 0016
+governs REST/WebSocket route and schema publication.
 
 ## Consequences
 

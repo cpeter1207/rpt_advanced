@@ -12,7 +12,7 @@ from planned features and optional hardware paths.
 | --- | --- | --- |
 | [0001](0001-reload-without-asterisk-restart.md) | Accepted | Valid configuration reload replaces workers without restarting Asterisk. |
 | [0002](0002-lock-free-audio-paths.md) | Accepted | Audio paths are lock-free. |
-| [0003](0003-shared-rate-adjusting-pcm-ring.md) | Accepted | Clock recovery uses the shared rate-adjusting PCM ring. |
+| [0003](0003-shared-rate-adjusting-pcm-ring.md) | Implemented (current asynchronous composition; optional shared-clock path pending) | Clock recovery uses the shared rate-adjusting PCM ring. |
 | [0004](0004-hamlib-remote-base-boundary.md) | Accepted | Hamlib owns rig control; audio uses an explicit source adapter. |
 | [0005](0005-standalone-core-and-optional-asterisk-adapters.md) | Implemented | A shared lock-free core serves standalone operation and optional Asterisk adapters. |
 | [0006](0006-appliance-control-plane-ingress.md) | Accepted | The appliance hosts its OIDC, proxy, and WAF ingress layer. |
@@ -32,23 +32,23 @@ from planned features and optional hardware paths.
 | [0020](0020-rust-dylibs-and-external-c-shims.md) | Partially superseded | Rust `dylib`s separate private components. |
 | [0021](0021-versioned-rust-c-adapter-boundaries.md) | Implemented (current Asterisk entry boundary) | Versioned adapter shared objects isolate C-to-Rust boundaries. |
 | [0022](0022-versioned-external-c-dependency-adapters.md) | Implemented (current selected capabilities) | Stable C contracts isolate external implementations, including standalone system DNS; future capabilities remain planned. |
-| [0023](0023-unified-control-and-dtmf-policy.md) | Accepted | CLI, REST, and DTMF share a controlled operation model. |
+| [0023](0023-unified-control-and-dtmf-policy.md) | Accepted (DTMF feature slice released; broader interface catalog incomplete) | CLI, REST, and DTMF share a controlled operation model. |
 | [0024](0024-voting-receivers-and-simulcast-timing.md) | Accepted | Voting and simulcast use explicit clock and node boundaries. |
-| [0025](0025-native-media-routing-and-pcm-ring-ownership.md) | Implemented (telemetry streaming) | The telemetry producer streams every media type through its PCM ring; transmit only mixes consumed PCM. |
+| [0025](0025-native-media-routing-and-pcm-ring-ownership.md) | Implemented (telemetry streaming and local DTMF PCM routing; optional shared-clock work pending) | The telemetry producer streams every media type through its PCM ring; transmit only mixes consumed PCM. |
 | [0026](0026-generational-real-time-runtime-lifecycle.md) | Implemented (current independently paced composition) | Station generations provide lock-free real-time ownership and safe reload reclamation. |
 | [0027](0027-variable-frame-native-tick-and-adapter-io.md) | Partially implemented (verified shared-clock adapter pending) | Independent RX/TX callbacks, telemetry streaming, and snapshot intervals are implemented; paired shared-clock callbacks remain planned. |
 | [0028](0028-remove-res-usbradio-through-hardware-adapters.md) | Implemented (dependency removal) | Hardware adapters replace res_usbradio; one ASL3 compatibility implementation replaces its legacy/modern split. |
-| [0029](0029-canonical-f32-internal-pcm.md) | Accepted | Internal PCM is normalized `f32`; Asterisk and hardware convert at their boundaries. |
+| [0029](0029-canonical-f32-internal-pcm.md) | Implemented (current radio and controller PCM interfaces) | Internal PCM is normalized `f32`; Asterisk and hardware convert at their boundaries. |
 | [0030](0030-appliance-update-trust-and-compliance.md) | Accepted | Appliance compliance targets and signed-update roles are explicit. |
 | [0031](0031-five-port-appliance-power-and-thermal-budget.md) | Superseded | Replaced by the four-port appliance decision. |
-| [0032](0032-four-port-appliance-interface-and-power-ceiling.md) | Accepted | Four-port interface, USB-power, and thermal ceilings are explicit. |
-| [0033](0033-appliance-radio-signaling-capability-profile.md) | Accepted | Appliance ports use external discrete CTCSS and profile-selected DSP signaling. |
-| [0034](0034-appliance-hardware-output-interlock.md) | Accepted | Appliance actuator power is physically fault-gated and requires explicit re-arm. |
+| [0032](0032-four-port-appliance-interface-and-power-ceiling.md) | Accepted | Four-port board, USB-power, and thermal ceilings; no fixed software port limit. |
+| [0033](0033-appliance-radio-signaling-capability-profile.md) | Software contract implemented | Independent encode/decode profiles and hardware capabilities; device integration and qualification pending. |
+| [0034](0034-appliance-hardware-output-interlock.md) | Software contract implemented | Epoch-gated readiness, explicit arm and fault recovery; physical interlock qualification pending. |
 | [0035](0035-fixed-48khz-native-audio.md) | Implemented (fixed native rate) | Native radio/controller audio remains 48 kHz; inbound rings own conversion/drift into transmit, with outbound codec conversion separate. |
 | [0036](0036-asterisk-without-asl3-dependency.md) | Implemented (current Asterisk and standalone compositions) | rpt_advanced uses adapter-neutral execution; Asterisk thread handling stays in adapters, and ASL3-specific code stays in its compatibility adapter. |
 | [0037](0037-standalone-lock-free-peer-ingress.md) | Implemented, released, and live-validated | Tokio per-connection owners use a versioned SpeexDSP jitter adapter; PCM consumers remain lock-free. |
 | [0038](0038-replaceable-control-path-adapter.md) | Implemented (Asterisk and standalone backends) | Control execution uses a replaceable adapter backed by the Asterisk taskprocessor or a standalone owned worker. |
 | [0039](0039-retire-usbradioplus-native-mode.md) | Implemented | Remove USBRadioPlus native software-repeat and native parrot modes; preserve shared native DSP and controller transport. |
 | [0040](0040-initial-alpha-compatibility-policy.md) | Accepted | Initial-alpha project interfaces do not require backward compatibility; remove compatibility-only code while rejecting mismatched artifacts safely. |
-| [0041](0041-fluent-localized-controller-telemetry.md) | Accepted | Built-in RF telemetry uses validated Fluent catalogs with independent text, speech, and Morse forms. |
+| [0041](0041-fluent-localized-controller-telemetry.md) | Implemented | Built-in RF telemetry uses validated Fluent catalogs with independent text, speech, and Morse forms. |
 | [0042](0042-activity-scoped-ctcss-encode.md) | Implemented | Activity-scoped CTCSS transmit control is returned independently from PTT by the native radio callback. |

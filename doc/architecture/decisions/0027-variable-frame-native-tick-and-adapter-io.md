@@ -186,11 +186,12 @@ tone has a frequency, the notch retunes to that tail-tone frequency for the
 tail interval. This prevents the received tail tone from entering program
 audio while leaving normal configured-tone notch behavior unchanged.
 
-The per-node active-traffic CTCSS policy in ADR 0025 applies independently to
-encode and decode. The policy window is based on live local/peer traffic and
-the explicitly pending command-response interval, not on PTT or hangtime.
-Thus, IDs and courtesy tones have no CTCSS when enabled, while command-response
-telemetry retains it from command receipt through playout.
+The per-node activity-scoped CTCSS encode policy in ADR 0042 applies to either
+DSP or external encode. Its window follows live local/peer traffic, the configured
+CTCSS hang interval, and the pending command-response interval, not PTT alone.
+IDs and courtesy tones do not qualify encoding, while command-response telemetry
+qualifies it from command receipt through playout. Receive decode selection is
+independent of encode; activity-scoped decode is not planned.
 
 All timing is elapsed-audio-time based. Partitioning one PCM sequence into
 different valid frame counts must preserve its DSP and signaling behavior,
@@ -279,10 +280,11 @@ retunes the notch to its frequency for the tail interval.
 Peer-ring tests additionally prove that its DTMF muting delay equals the
 configured squelch delay, detected DTMF immediately gates its ring output, and
 an intentionally insufficient delay can expose only the leading interval.
-CTCSS-policy tests additionally prove independent encode/decode selection;
-live local and peer traffic qualification; no CTCSS during hangtime, IDs, or
-courtesy tones; and continuous CTCSS from command receipt through delayed
-command-response playout.
+CTCSS-policy tests additionally prove independent DSP/external encode/decode
+selection; encode qualification by live local and peer traffic and its configured
+CTCSS hang; no qualification from transmitter hangtime, IDs, or courtesy tones;
+and continuous encode qualification from command receipt through delayed
+command-response playout. Receive qualification is not activity-gated.
 
 Shared-clock tests additionally prove receive-before-transmit ordering,
 no correction or redundant unity converter, no latency beyond the required

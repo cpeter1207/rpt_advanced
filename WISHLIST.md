@@ -7,8 +7,10 @@ for it, and unresolved decisions needed before implementation. Ask for the
 unresolved material decisions before starting the work. Remove the entry when
 the requirement is implemented.
 
-DTMF parrot enable/disable controls are implemented per ADRs 0023 and 0025 and
-are intentionally absent from the open entries below.
+DTMF parrot controls, pad testing, local-transmitter regeneration, and addressed
+ASL command forwarding are implemented per ADRs 0023 and 0025. The controller
+component extraction, including DTMF generation, is released per ADR 0011.
+These completed requirements are absent from the open entries below.
 
 ## Entries
 
@@ -58,8 +60,8 @@ are intentionally absent from the open entries below.
 - The existing supported native rate remains 48 kHz. The adapter supplies its
   clock/cadence; the transmit worker has no separate pacing source.
 - Outbound codec conversion and detector-private decimation remain separate
-  from the inbound-ring conversion contract. Appliance external CTCSS and
-  physical interlock requirements remain unchanged.
+  from the inbound-ring conversion contract. CTCSS sources and appliance
+  physical interlocks follow ADRs 0033/0034.
 - Workers may execute directly in input/output callbacks; no extra OS threads
   are required by the split. Versioned compatible ABI evolution is required.
 - An adapter that knows ADC/DAC are drift-free and can deliver aligned frames
@@ -270,26 +272,44 @@ None.
 
 ### Site I/O, telemetry, and alarms
 
+**Status: Partially implemented.** The ADR 0033/0034 software contracts now
+provide independent CTCSS source profiles, capability-based multiport GPIO,
+explicit arm/readiness, epoch-gated output intent, and fault recovery. Tests
+compose the real radio and GPIO shared libraries with simulated hardware.
+Device integration and physical interlock qualification remain pending.
+Analog monitoring, sensors, fan control, general alarms/actions, and their
+configuration/API are not implemented by this change.
+
 **Requirements**
 
 - Support configurable GPIO inputs and outputs, voltage, current, temperature,
   and fan monitoring.
 - Support thresholds, hysteresis, alarms, actions, analog meters, outputs, and
   fan control.
-- Use USBRadioPlus CM119 GPIO where available; support parallel-port GPIO for
-  additional site I/O.
+- Use hardware-neutral GPIO with capabilities reported by each backend: USB
+  radio interfaces such as URIXB on a Raspberry Pi, CM119 GPIO, parallel ports,
+  and appliance GPIO. Do not require every device to provide every I/O type.
 
 **Decisions recorded**
 
-- CM119 GPIO and parallel-port GPIO are supported site-I/O sources.
-- The appliance provides the same site-I/O capability through its isolated
-  DB-25 analog/digital front end; CM119 and parallel-port sources remain
-  supported for external adapters.
+- CM119 and parallel-port GPIO already have backends. Additional hardware support
+  must use its actual capabilities; a device example does not claim a verified
+  driver or pin mapping.
+- The appliance adds its isolated DB-25 analog/digital front end and physical
+  interlock. Other GPIO devices need not provide its analog monitoring, arm
+  feedback, watchdog, or physical mutes. Require only the capabilities used by
+  configured signals and that hardware's safety contract.
+- CTCSS encode and decode independently select disabled, DSP, or external per
+  port. External encode may be combined with DSP decode for encoder-only radios.
+  Reuse the existing DSP and controller encode policy; no activity-scoped decode.
+- Software imposes no fixed port-count limit. Allocate state at control setup
+  according to configured endpoints and available resources. The appliance's
+  four-port limit applies only to its physical board.
 
 **Material decisions needed before implementation**
 
-- Hardware abstraction and configuration model for GPIO, analog inputs, fan
-  outputs, and external sensors.
+- Configuration for analog inputs, fan outputs, and external sensors beyond the
+  capability-based radio GPIO contract in ADRs 0033/0034.
 - Alarm/action catalog, default-safe output state, acknowledgment behavior, and
   authorization for manual output control.
 - Sensor conversion/calibration model and retention/reporting policy for meter
@@ -375,32 +395,30 @@ None.
 
 ### Telephony integration
 
-DTMF pad test, local-transmitter PCM regeneration, and ASL addressed command
-forwarding are implemented under ADRs 0023 and 0025. Targeted local validation
-is recorded in the 2026-10-16 implementation plan; hosted and live validation
-remain release prerequisites.
+**Status — 2026-10-16:** Planned. DTMF testing, regeneration, and addressed
+command forwarding are released in `rpt_advanced` v0.1.0-alpha11 with
+`librptadvdtmf` v0.1.0-alpha.2; those are not open telephony requirements.
+The standalone AllStarLink IAX2 implementation is also released. Autopatch,
+reverse patch, paging, and SIP/VoIP-provider integration remain unimplemented.
 
 **Requirements**
 
 - Support autopatch, reverse patch, and paging through an external IAX or SIP
   connection, with a more user-friendly interface than ASL3.
-- Preserve the long-term option to replace Asterisk with a lock-free native
-  IAX2 implementation. If that direction is chosen, support IAX2 or SIP
-  connection to a self-hosted Asterisk instance or third-party VoIP provider,
-  including Google Voice.
+- Support IAX2 or SIP connection to a self-hosted Asterisk instance or
+  third-party VoIP provider, including Google Voice.
 
 **Decisions recorded**
 
-- Initial telephony integration uses external IAX or SIP rather than requiring
-  a native IAX2 implementation.
+- Telephony connects to an external IAX or SIP service. The released native
+  IAX2 implementation serves AllStarLink; telephony session behavior is not
+  implied by that protocol implementation.
 
 **Material decisions needed before implementation**
 
 - Telephony provider scope, outbound/inbound/reverse-patch access rules,
   dialing restrictions, emergency-call policy, recording policy, and caller-ID
   behavior.
-- Whether and when to begin a native lock-free IAX2 replacement; it is an
-  architectural direction, not an active implementation requirement.
 
 ### Shared radio core and direct PortAudio adapter
 
@@ -517,50 +535,13 @@ remain release prerequisites.
   device I/O; the signaling component owns portable semantics only. Generic
   audio-device control remains deferred until its boundary is defined.
 
-### Independently versioned controller components
-
-**Requirements**
-
-- Split discrete `app_rpt_advanced` functional components into independently
-  versioned shared objects, each maintained in its own repository and released
-  under the established shared-library policy.
-- Candidate component boundaries include scheduling, Morse generation, general
-  tone generation, DTMF decoding and generation, and message templating.
-- Keep controller integration and node-specific policy in `app_rpt_advanced`;
-  extracted components provide focused, reusable behavior without duplicating
-  controller state.
-- Preserve behavior while extracting components. The purpose is to isolate
-  stable functions from unrelated feature and defect work.
-- Existing lock-free audio-operation and reload requirements apply to every
-  extracted component used from a real-time audio path.
-
-**Decisions recorded**
-
-- The repository, ABI, SONAME, Debian runtime/development-package, and
-  compatible-minimum dependency rules for extracted radio components apply to
-  every extracted controller component as well.
-- Morse uses the generic tone-generator component for waveform production; the
-  Morse component owns timing and character encoding.
-- DTMF detection and generation share one DTMF component because they use the
-  same digit, timing, and level definitions.
-- The scheduler component provides generic recurrence and due-event
-  calculation only. `app_rpt_advanced` retains link, announcement, warning,
-  and macro policy.
-- Message templating parses and expands a supplied key/value context only.
-  `app_rpt_advanced` defines available substitutions and access-sensitive
-  values.
-- Extraction order is tone generation, Morse, DTMF, message templating, then
-  scheduling.
-- Implementation status — 2026-10-12: tone, Morse, DTMF detection, message
-  templating, and generic scheduling are released components dynamically
-  consumed by the controller product; Morse dynamically consumes tone. Their
-  former implementations have been removed from the controller. DTMF PCM
-  generation is implemented in the shared DTMF component, dynamically consuming
-  the tone component; its generator-capable package release is pending.
-  Controller action, authorization, link, and
-  telemetry policy remain in the product.
-
 ### Standalone lock-free controller
+
+**Status — 2026-10-16:** Partially implemented. Standalone execution,
+AllStarLink registration and calls, the resolver boundary, and Tokio peer
+ingress/egress are released and live-validated under ADRs 0005, 0022 and 0037.
+The appliance hardware, ingress security, REST/WebSocket services, and other
+future capabilities below are not covered by that completion status.
 
 **Requirements**
 
@@ -596,9 +577,10 @@ remain release prerequisites.
   packets with observable drops; a stalled peer cannot stop unrelated peers.
   SpeexDSP adaptive packet buffering is called only through a separate versioned
   jitter adapter; codec decoding and shared-ring conversion/PLC stay separate.
-  Implementation status — 2026-10-13: the Tokio/jitter cutover is implemented
-  in the working branch; local composed tests and scoped coverage closure pass.
-  Hosted validation, dependency publication and live testing remain outstanding.
+  Implementation status — 2026-10-16: the Tokio/jitter cutover and isolated
+  peer egress are merged, released, and installed from signed Debian packages.
+  Native platform gates and production coverage passed; local radio and linked
+  parrot audio were confirmed on 524950 as recorded in ADR 0037.
   The Asterisk path retains its existing ingress exception.
 - IAX2 interoperability targets AllStarLink.
 - Implement IAX2 in our own independently versioned `librptadviax2` library.
@@ -625,6 +607,9 @@ remain release prerequisites.
   DB-25 site I/O, and one through four direct-codec radio ports on a common
   carrier clock. It is not a literal CM119 design. Detailed appliance hardware
   is maintained in the private appliance hardware repository.
+- The four-port ceiling is a board constraint, not a software limit. Other
+  hardware compositions may provide any number of ports that available hardware
+  and host resources can support.
 - A fully populated appliance has a 54 W normal input budget, a 75 W continuous
   input-path rating, four USB-C CAT ports limited to 5 V / 0.9 A each, and a
   33 W sustained enclosure-heat budget at +55 °C ambient. Selected-component
