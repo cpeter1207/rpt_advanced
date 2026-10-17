@@ -24,7 +24,8 @@ Retiring that adapter must not require redesigning the standalone controller.
 
 rpt_advanced owns logical execution, scheduling, and lifecycle independently
 of Asterisk's thread model. ADR 0038 supplies a replaceable control-path
-adapter, currently backed by Asterisk's taskprocessor. Only that adapter owns
+adapter, backed by Asterisk's taskprocessor in that composition and by the
+owned standalone executor otherwise. Only the selected adapter owns
 its taskprocessor handles and backend-specific thread handling; the controller
 depends on the neutral execution contract. Other workers and native media
 remain independent of Asterisk execution services. Do not build another
@@ -75,6 +76,10 @@ dependency must name the first actual ABI 2 provider release, not an invented
 future version. Runtime acknowledgment rejects older mixed installations safely.
 
 ### Explicit peer link processing (2026-09-25)
+
+The ABI 3/4 references in this dated section record their introduction. The
+current host-services descriptor is ABI 5 and the product descriptor is ABI 4,
+as declared in `rust/product/include/rptadv_product.h`.
 
 Before starting either an incoming or outgoing peer's media owner, the product
 binds that peer to its node's existing radio lease through host-services ABI 3.

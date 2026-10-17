@@ -1,6 +1,6 @@
 # ADR 0009: Scheduled actions and macros stay in the control plane
 
-Status: Accepted
+Status: Implemented; scheduler hardening remains tracked by ADR 0017
 
 ## Context
 

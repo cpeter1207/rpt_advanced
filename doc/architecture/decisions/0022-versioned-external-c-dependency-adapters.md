@@ -116,7 +116,7 @@ links SpeexDSP and owns its types, FFI and lifetime. Protocol/controller code
 uses neutral bounded packet operations; codecs and PCM-ring PLC remain separate.
 It ships its own ABI-1 descriptor, SONAME and runtime/development packages,
 following the resolver adapter's workspace pattern. The standalone composition
-requires it at startup and retains it through peer-task shutdown. Local composed
-tests cover the boundary; hosted and live acceptance are tracked by ADR 0037.
-The Asterisk composition is unchanged. This implementation has not been deployed
-to the running node.
+requires it at startup and retains it through peer-task shutdown. The standalone
+jitter capability passed the native-platform gate, shipped in signed Debian
+packages, and was validated on node 524950 as recorded in ADR 0037. The Asterisk
+composition is unchanged.

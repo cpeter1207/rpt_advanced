@@ -1,6 +1,6 @@
 # ADR 0004: Hamlib remote-base boundary
 
-Status: Accepted
+Status: Planned; decision accepted
 
 ## Context
 

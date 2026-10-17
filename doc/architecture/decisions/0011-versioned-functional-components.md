@@ -62,8 +62,9 @@ extraction. This extraction does not establish their implementation status:
   current Asterisk-specific link implementation is not extracted prematurely.
 - The control-path execution adapter owns only taskprocessor submission,
   serialized execution, and stop/drain. ADR 0038 selects Asterisk's
-  taskprocessor as its current backend; scheduling and controller policy are
-  not part of this adapter. Its versioned boundary follows ADR 0022.
+  taskprocessor for the Asterisk composition and an owned executor for standalone;
+  scheduling and controller policy are not part of either adapter. Their
+  versioned boundary follows ADR 0022.
 
 Controller orchestration, node-specific configuration resolution, identifiers,
 announcements, duplex policy, link topology policy, and Asterisk channel/media

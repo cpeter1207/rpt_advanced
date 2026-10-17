@@ -1,11 +1,11 @@
 # ADR 0015: Use idiomatic high-level Rust behind narrow ABI boundaries
 
-Status: Accepted
+Status: Accepted; ongoing architecture policy
 
 ## Context
 
-The project is migrating substantive implementation from C to Rust. Merely
-translating pointer-oriented procedural code would retain C's ownership,
+The project's substantive implementation is Rust-owned. Retaining
+pointer-oriented procedural code would preserve C's ownership,
 validation, and error-handling weaknesses without obtaining Rust's principal
 benefits.
 

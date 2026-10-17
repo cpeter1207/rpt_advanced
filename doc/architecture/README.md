@@ -48,8 +48,7 @@ this extraction.
 
 The USBRadioPlus hardware cutover uses one channel implementation backed by
 the dynamic PortAudio/ALSA and GPIO adapters, with no `res_usbradio` imports or
-module requirement. Released alpha18's combined native tick runs in the
-PortAudio playback callback. The Rust implementation instead provides
+module requirement. The Rust implementation provides
 independently paced PortAudio input and output callback entry points; Asterisk
 frame delivery and device-control I/O remain outside those callbacks. The
 `app_rpt` 8 kHz and `RadioPlusAdvanced` 48 kHz protocols remain separate.
@@ -60,10 +59,10 @@ receive worker and a DAC/adapter-output-clocked transmit worker. The callback
 split is implemented in USBRadioPlus. The rpt_advanced Rust
 product now implements generational `NodeHost` ownership, coherent paired
 receive/transmit calls, local and per-peer inbound rings, telemetry streaming
-through its ring, and the program-audio loopback dispatcher. This does not
-claim completion of USBRadioPlus's separate direct-hardware local/telemetry-ring
-topology or shared-clock adapter cutover;
-none of those changes was part of released alpha18.
+through its ring, and the program-audio loopback dispatcher. The product owns
+those controller rings and mixing; USBRadioPlus does not need a duplicate
+controller-ring topology. The optional verified shared-clock adapter path
+remains pending under ADR 0027.
 Separately, [ADR 0039](decisions/0039-retire-usbradioplus-native-mode.md)
 retires USBRadioPlus's driver-native software-repeat and native parrot modes.
 They are removed from ASL3 support and are not rpt_advanced prerequisites.
@@ -142,12 +141,13 @@ safe resource management rather than a mechanical C-style translation. Unsafe
 code is confined to audited ABI and real-time-buffer boundaries as defined by
 [ADR 0015](decisions/0015-idiomatic-high-level-rust.md).
 
-The versioned REST API publishes its code-derived OpenAPI contract and
-interactive documentation alongside the API as defined by
-[ADR 0016](decisions/0016-code-derived-openapi-contract.md). Asterisk CLI,
-REST, and configurable DTMF submit the shared controller operation catalog;
-WebSocket is intentionally status-streaming only as defined by
-[ADR 0023](decisions/0023-unified-control-and-dtmf-policy.md).
+REST, WebSocket, and code-derived OpenAPI/interactive documentation remain
+planned under [ADR 0016](decisions/0016-code-derived-openapi-contract.md).
+Current Asterisk CLI and configurable DTMF operations exist, but complete
+interface parity is still pending under
+[ADR 0023](decisions/0023-unified-control-and-dtmf-policy.md). The planned REST
+interface will use the same controller operation catalog; WebSocket is
+intentionally status-streaming only.
 
 External and separately released project components are dynamic dependencies.
 Deliberately separated private Rust components use `dylib`. Every C-facing

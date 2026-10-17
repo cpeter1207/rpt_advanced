@@ -1,6 +1,6 @@
 # ADR 0006: Appliance control-plane ingress
 
-Status: Accepted
+Status: Planned; decision accepted
 
 ## Context
 

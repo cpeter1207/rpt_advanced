@@ -1,6 +1,6 @@
 # ADR 0040: Initial alpha does not require backward compatibility
 
-Status: Accepted (2026-09-13)
+Status: Accepted (2026-09-13); ongoing compatibility policy
 
 ## Context
 

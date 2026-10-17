@@ -1,6 +1,6 @@
 # ADR 0034: Appliance hardware output interlock
 
-Status: Software contract implemented; physical interlock qualification pending
+Status: Software contract implemented; device integration and physical qualification pending
 
 ## Context
 

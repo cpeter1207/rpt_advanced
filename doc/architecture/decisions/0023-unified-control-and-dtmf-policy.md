@@ -1,6 +1,6 @@
 # ADR 0023: Unified control operations and DTMF policy
 
-Status: Accepted (DTMF feature slice released; broader interface catalog incomplete)
+Status: Partially implemented (DTMF slice released and operator-confirmed; broader interfaces pending)
 
 Reaffirmed 2026-09-17: this record's source-scoped telemetry routing is the
 required behavior. ADR 0025's earlier all-local restriction was an intermediate
@@ -125,8 +125,10 @@ the generator-capable DTMF shared-library descriptor; startup rejects an older
 provider. Tests cover both host ingress paths, source isolation, waveform
 boundaries, and transmitter safety. The full native PR gate passed with 100%
 production coverage, and both components were released. Node 524950 has the
-packages installed with its configuration preserved, but manual validation of
-these new DTMF behaviors has not yet been confirmed. The broader
+packages installed with its configuration preserved. The operator subsequently
+confirmed that DTMF pad testing and regeneration work correctly. Addressed relay
+behavior has automated coverage; that confirmation is not a manual test of every
+remote-command route. The broader
 CLI/REST/WebSocket control and status catalog remains incomplete. ADR 0016
 governs REST/WebSocket route and schema publication.
 

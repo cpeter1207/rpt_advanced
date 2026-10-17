@@ -1,11 +1,11 @@
 # ADR 0014: Rust implementation uses object-oriented composition
 
-Status: Accepted
+Status: Accepted; ongoing architecture policy
 
 ## Context
 
-The project is migrating substantive implementation to Rust while retaining
-independently versioned components and narrow C ABI boundaries. The design must
+The project's substantive implementation is Rust-owned, with independently
+versioned components and narrow C ABI boundaries. The design must
 remain object-oriented rather than becoming a procedural collection of free
 functions and shared state.
 

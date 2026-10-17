@@ -1,6 +1,6 @@
 # ADR 0017: Scheduler route lifecycle and civil-time semantics
 
-Status: Accepted
+Status: Partially implemented; scheduler health, overnight cold-start grace, and civil-time validation pending
 
 ## Context
 
@@ -74,8 +74,8 @@ only from local-receiver or linked-peer activity.
   identity creates a new eligible event. A successful live reload intentionally
   cancels queued or in-progress telemetry rather than replaying it.
 
-The window grammar will accept `24:00` only as an exclusive `end_time` boundary
-and represent it internally as minute 1440. `24:00` is never a start time.
+The window grammar accepts `24:00` only as an exclusive `end_time` boundary
+and represents it internally as minute 1440. `24:00` is never a start time.
 Cross-midnight windows remain unsupported until a single explicit overnight
 window semantic is approved; two same-route sections are not an emulation.
 At cold start, a post-window inactivity grace calculation must also examine the
@@ -116,3 +116,21 @@ scheduled replacement lifecycle are implemented and covered by runtime and
 integration tests. Same-peer schedule reuse is allowed only across disjoint
 windows; overlapping duplicate scheduled peers are rejected by configuration
 validation, with boundary and integration coverage.
+
+### Remaining work — 2026-10-17
+
+Scheduler health counters and rate-limited warnings for failed control-task
+submission and queue delay are not implemented. The product ticker currently
+discards the result of `engine.pump`; the required status/log reporting remains
+open.
+
+Cold-start inactivity grace handles a preceding window ending at `24:00`, but
+not a preceding ordinary end time across midnight. For example, a window ending
+at `23:59` with five minutes of grace is not retained when starting at `00:01`.
+The schedule provider's `elapsed_after_end` only consults the previous date for
+`24:00` endings. Extend that boundary and its deterministic tests; do not add
+overnight window syntax or durable scheduling.
+
+The explicit DST-transition and clock-step regression scenarios required above
+also remain to be completed. Existing backward-timestamp tests do not establish
+the required daylight-saving transition behavior as verified.

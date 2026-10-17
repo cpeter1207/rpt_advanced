@@ -27,7 +27,7 @@ live inhibit control; the app_rpt compatibility path and existing USBRadioPlus
 `TXCTCSS` text command retain their behavior. CTCSS decode scoping is separate
 from transmit control and is not included in this design.
 
-## Compatibility
+## Compatibility at introduction
 
 The added callback output changes the direct callback ABI from 2 to 3. The RPT
 Advanced product and host-services tables advance from ABI 2/3 to 3/4 because
@@ -35,6 +35,10 @@ they retain or pass that callback. Incompatible alpha combinations are rejected
 as a set; there is no compatibility shim under ADR 0040. The descriptor export
 names and shared-library SONAMEs do not change. USBRadioPlus ABI 3, RPT Advanced
 product ABI 3, and host-services ABI 4 must ship together.
+
+Those are the revisions at this feature's introduction. The current product
+and host-services descriptors are ABI 4 and ABI 5. Later revisions retain the
+independent PTT and CTCSS outputs; current headers define the required set.
 
 ## Consequences
 

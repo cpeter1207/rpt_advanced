@@ -1,6 +1,6 @@
 # ADR 0001: Reload without an Asterisk restart
 
-Status: Accepted
+Status: Implemented
 
 ## Context
 

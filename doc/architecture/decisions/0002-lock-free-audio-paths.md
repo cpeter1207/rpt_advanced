@@ -1,6 +1,6 @@
 # ADR 0002: Lock-free audio paths
 
-Status: Accepted
+Status: Implemented for current audio compositions; ongoing constraint
 
 ## Context
 
