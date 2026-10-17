@@ -14,6 +14,10 @@ The owner approved the feature scope and failure policy, then required
 file-configured sensors/meters and internationalized message macros. DTMF may
 query a sensor or meter and play a message macro; it cannot configure them.
 Message macros may also supply identifier and tail-message content.
+Owner revision: identifiers and tails may combine ordinary text or a sound
+file with multiple message macros in one ordered sequence. Message macros may
+include dynamic station/site values and attention tones, not just one spoken
+message selected in place of all other media.
 
 This design does not authorize implementation, deployment, hardware changes,
 link connections, a release, or the unrelated unfinished wishlist features.
@@ -148,7 +152,8 @@ clear an active threshold alarm; it separately reports sensor health.
 
 Action lists contain validated existing controller macro references and the
 necessary typed site-output/fan/inhibit operations. They are not scripts and
-cannot execute a shell or recursively invoke message/action macros. Execute
+cannot execute a shell or recursively invoke action macros. Message composition
+is read-only and follows the bounded, cycle-free rules below. Execute
 trip/clear actions once per transition in configured order; repeating an alarm
 notification does not repeat its equipment-control actions.
 
@@ -181,14 +186,59 @@ controller/interlock mechanism. A fan, macro, or manual command cannot bypass it
 
 ## Message macros and DTMF
 
-Each message macro has a `message_id` from the Fluent catalog, optional
-`arg_<name>` bindings, and optional `dtmf_id`. Bindings resolve at reload to
-known read-only sources, such as `sensor:battery`, `input:door`, or an existing
-node/time/callsign substitution. They cannot evaluate code or select arbitrary
-runtime fields. Resolve one coherent snapshot for each playback request.
-Provide explicit quality/age alongside measurement arguments; if a referenced
-reading is not valid, play the localized unavailable form instead of its
-numeric-reading form.
+A message macro is a named, read-only content sequence. It has `content`, an
+optional Fluent `message_id`, `arg_<name>` bindings, optional media/tone fields,
+and an optional `dtmf_id`. A simple catalog-based macro defaults to
+`content = {message}`. No action or hardware operation belongs in a message
+macro.
+
+Identifiers, tails, and message macros share one ordered `content` grammar:
+
+| Content | Meaning |
+| --- | --- |
+| Ordinary text | Speak that text, with Morse fallback |
+| `{message_macro_name}` | Insert the configured message macro named `name` at this exact position |
+| `{message}` | Insert this section's Fluent `message_id`, using its bound values and independent text/TTS/Morse forms |
+| `{media}` | Insert this section's existing sound-file, speech-text, and Morse fallback choice as one segment |
+| `{tone_sequence}` | Play this section's configured tone sequence at this exact position |
+
+Placeholders are structural tokens in the configuration's `content` field,
+not Fluent syntax or an expression language. Literal braces use `{{` and `}}`.
+Macro names use the existing section-label rules; the `message_macro_` prefix
+distinguishes references from other tokens. Expand references at their written
+positions, not as an implicit prefix, suffix, or replacement for the whole ID.
+All fields of a selected node/global macro resolve under the invoking node.
+One macro may reuse another, but references must form an acyclic graph with a
+checked finite expansion. No recursion, loops, executable expressions, or
+runtime-selected macro names. Values returned by a sensor or translation are
+data and are never reparsed as content tokens.
+
+Bindings resolve at reload to an allowlisted read-only value source:
+
+| Binding source | Value |
+| --- | --- |
+| `callsign`, `node` | Configured station callsign and node number |
+| `date`, `time`, `day_of_week`, `greeting` | Local civil date/time and localized forms, honoring the node's 12/24-hour choice |
+| `link_status` | The controller's localized current link-status summary |
+| `sensor:name` | Configured sensor/meter reading with unit, precision, quality, and observation time |
+| `input:name` | Configured digital input state, quality, and observation time |
+
+Existing context-specific values such as `time_remaining` remain available only
+where that context supplies them. Bindings cannot evaluate code or select
+arbitrary runtime fields. Resolve one coherent snapshot at preparation for a
+playback attempt, not at configuration load. Multiple references in that
+attempt use the same snapshot. After a deferral/retry, obtain a fresh snapshot
+before beginning another attempt. Apply source freshness checks before use;
+if a referenced reading is not valid, replace only its measurement segment with
+the localized unavailable form, not the entire ID or alarm sequence.
+
+Use the existing audience-specific identity formatting: speech identifies node
+numbers as nodes and reads their digits separately; callsigns receive character
+separation. Numeric measurements and dates/times retain natural-language
+formatting rather than being treated as node numbers. Units, labels, and
+unavailable states are localized. Resolve each binding for its selected text,
+TTS, or Morse form; do not reuse an already Morse-formatted time or status
+string as spoken text.
 
 ```ini
 [general]
@@ -205,6 +255,7 @@ dtmf_id = 1
 ; Enabling requires this installation's backend, device, and channel.
 
 [message battery_report]
+content = {message}
 message_id = site-battery-report
 arg_voltage = sensor:battery
 
@@ -225,8 +276,34 @@ site-battery-report =
 Ship English messages and allow additive administrator language bundles. Reuse
 Fluent and its existing locale/per-attribute fallback, rather than hardcoding
 wording in Rust or requiring a complete copy of the English catalog. Validate
-configured IDs and bindings as well as built-in IDs. Preserve the existing
-bounded per-form message contract; do not silently truncate translations.
+configured IDs and bindings as well as built-in IDs. Translatable wording lives
+in Fluent; literal configuration text is an operator-supplied alternative.
+Preserve the existing bounded per-form message contract per rendered segment;
+do not force an entire composed ID into one 127-byte message or silently
+truncate translations. Validate expansion size and preparation resources on
+control before admitting playback: count expanded segments and bytes with
+checked arithmetic before materializing them. Adjacent text segments may be prepared as
+one utterance within those bounds, without introducing an artificial pause at
+every macro boundary. Files and tones preserve their explicit sequence points.
+
+Attention tones reuse the existing courtesy `tone_sequence` grammar and shared
+tone generator. For example, this alarm plays two attention bursts, then its
+localized speech or Morse message:
+
+```ini
+[message temperature_alarm]
+content = {tone_sequence} {message}
+tone_sequence = 1000Hz / 200ms / -20dB, silence / 100ms, 1000Hz / 200ms / -20dB
+message_id = site-temperature-alarm
+arg_temperature = sensor:pa_temperature
+```
+
+Here the tones are preceding content, not an alternative to speech or Morse.
+Reusing the current media fallback field alone would not satisfy this rule.
+Tone level/duration remain explicit and subject to existing validation and
+transmit processing. Message macros may also insert sound files with `{media}`
+and existing file/speech/Morse fallback fields; no separate file decoder or
+tone renderer is added.
 
 DTMF `*761` queries sensor/input ID `1`; `*771` plays message macro ID `1`.
 Use the existing prefix map, collection, unkey, terminator, and timeout rules.
@@ -249,35 +326,78 @@ into a read-only message macro.
 
 ## Identifiers and tail messages
 
-Identifiers and named tails may reference `message_macro`. A referenced macro
-supplies the existing media text/TTS/Morse forms; it does not replace identity,
-priority, timing, speech/Morse fallback, or destination policy. Keep ordinary
-configured sound-file support. A message reference replaces inline speech/Morse
-content for that entry, avoiding two competing content sources; an explicitly
-configured sound file remains the first choice under existing media precedence.
+Identifiers and named tails use `content` to combine text, files, and any number
+of configured message-macro references, subject to validated resources. Their
+default `content = {media}` preserves the ordinary file/speech/Morse media
+choice. Setting `content` specifies ordering; it does not forbid ordinary media
+fields or replace them with an exclusive `message_macro` setting.
+
+For example, a spoken ID can contain the owner's requested composition:
 
 ```ini
 [identifier 524950 routine]
 interval_ms = 600000
 polite = yes
 polite_maximum_wait_ms = 60000
-message_macro = station_identification
+content = This is the KG0BP repeater. {message_macro_time} {message_macro_temperature} {message_macro_link_status}
+
+[message time]
+message_id = site-time
+arg_time = time
+
+[message temperature]
+message_id = site-temperature
+arg_temperature = sensor:pa_temperature
+
+[message link_status]
+message_id = site-link-status
+arg_links = link_status
+
+; A recorded ID can precede the same multiple message macros instead.
+[identifier 524950 recorded]
+sound_file = /var/lib/rpt-advanced/sounds/kg0bp-id.wav
+speech_text = This is the KG0BP repeater.
+morse_text = DE KG0BP
+content = {media} {message_macro_time} {message_macro_temperature} {message_macro_link_status}
 
 [tail]
 delay_ms = 0
 interval_ms = 0
 
 [tail 524950 battery]
-message_macro = battery_report
+content = {message_macro_battery_report}
 interval_ms = 1800000
 delay_ms = 250
 ```
 
-`station_identification` must resolve to a configured message macro containing
-the station's identification; this fragment illustrates the reference, not a
-complete deployable station configuration. Sensor readings alone are not IDs.
-All delay/interval fields use integer milliseconds. Named tails can also use
-the same direct media fields and inherited levels as identifiers.
+The two ID sections illustrate alternative compositions, not a recommendation
+to enable both. Referenced catalog messages, sensors, and files must be supplied
+for an enabled entry. A translatable opening can replace the literal opening
+with another catalog-backed message macro using `arg_callsign = callsign` and,
+if wanted, `arg_node = node`. A sensor report alone is not identification.
+All delay/interval fields use integer milliseconds. Media levels continue to
+inherit the existing node/global speech, Morse, and tone settings.
+
+The entire expanded sequence is one telemetry item and keeps its caller's
+identity, priority, deadline, route, cancellation, and completion. Do not mark
+an ID satisfied or a tail interval elapsed after only its first macro. Do not
+release PTT, add hangtime, or allow unrelated telemetry between its segments.
+All file decoding, TTS, tone, and Morse production stays outside the transmit
+callback and streams through the existing telemetry ring.
+
+For ordinary speech failure, use each segment's Morse fallback in order; a
+file segment uses its configured fallback without losing following macros.
+An unavailable meter does not discard the station-identification segment.
+When receive activity requires an identifier to switch to Morse, cancel the
+remaining primary sequence and start its complete Morse form from the
+beginning, including the station identity. Literal text is Morse-rendered,
+catalog macros use their `.morse` forms, and file segments use `morse_text`.
+Do not play tone sequences or file audio in this forced-Morse ID path; replace
+each file segment with its Morse fallback and require a usable complete Morse
+identification fallback. This preserves the existing
+rule that only Morse identification plays while an input is active. Alarm
+attention tones remain present before an ordinary speech-to-Morse fallback
+when the station is idle. Tails retain their receive-interruption policy below.
 
 `interval_ms = 0` makes a tail eligible after every qualifying traffic release.
 A positive interval is minimum elapsed time since successful playback; it
@@ -359,8 +479,14 @@ dynamic-library contracts without claiming simulated tests qualify wiring.
 
 Test DTMF selectors and remapping, unchanged remembered link destinations,
 source-scoped replies, additive locale catalogs, missing/stale readings,
-translation bounds, and reuse inside identifiers/tails. Exhaustively test zero
-and positive tail delay, intervals, no recursive tails, receive interruption,
+translation bounds, and reuse inside identifiers/tails. Test literal text plus
+multiple macros, recorded media plus multiple macros, nested acyclic references,
+cycle/missing-reference handling, brace escaping, coherent dynamic values,
+per-segment bounds, natural measurement versus digit-wise node speech,
+attention-tone ordering/levels, and complete forced-Morse ID fallback. Verify
+that segment boundaries do not unkey, interleave telemetry, or prematurely
+complete an ID/tail. Exhaustively test zero and positive tail delay, intervals,
+no recursive tails, receive interruption,
 all ID-deadline crossings above, and multiple named tails. Assert PTT sequencing,
 media order, no overlap, and no new audio-callback I/O/allocation/locks.
 
