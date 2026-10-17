@@ -42,8 +42,8 @@ from planned features and optional hardware paths.
 | [0030](0030-appliance-update-trust-and-compliance.md) | Accepted | Appliance compliance targets and signed-update roles are explicit. |
 | [0031](0031-five-port-appliance-power-and-thermal-budget.md) | Superseded | Replaced by the four-port appliance decision. |
 | [0032](0032-four-port-appliance-interface-and-power-ceiling.md) | Accepted | Four-port board, USB-power, and thermal ceilings; no fixed software port limit. |
-| [0033](0033-appliance-radio-signaling-capability-profile.md) | Accepted | Independent DSP/external CTCSS encode and decode; hardware-neutral GPIO capabilities. |
-| [0034](0034-appliance-hardware-output-interlock.md) | Accepted | Appliance outputs require physical fault gating and explicit re-arm; other GPIO backends report their own safety capabilities. |
+| [0033](0033-appliance-radio-signaling-capability-profile.md) | Software contract implemented | Independent encode/decode profiles and hardware capabilities; device integration and qualification pending. |
+| [0034](0034-appliance-hardware-output-interlock.md) | Software contract implemented | Epoch-gated readiness, explicit arm and fault recovery; physical interlock qualification pending. |
 | [0035](0035-fixed-48khz-native-audio.md) | Implemented (fixed native rate) | Native radio/controller audio remains 48 kHz; inbound rings own conversion/drift into transmit, with outbound codec conversion separate. |
 | [0036](0036-asterisk-without-asl3-dependency.md) | Implemented (current Asterisk and standalone compositions) | rpt_advanced uses adapter-neutral execution; Asterisk thread handling stays in adapters, and ASL3-specific code stays in its compatibility adapter. |
 | [0037](0037-standalone-lock-free-peer-ingress.md) | Implemented, released, and live-validated | Tokio per-connection owners use a versioned SpeexDSP jitter adapter; PCM consumers remain lock-free. |

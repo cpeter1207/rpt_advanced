@@ -272,6 +272,14 @@ None.
 
 ### Site I/O, telemetry, and alarms
 
+**Status: Partially implemented.** The ADR 0033/0034 software contracts now
+provide independent CTCSS source profiles, capability-based multiport GPIO,
+explicit arm/readiness, epoch-gated output intent, and fault recovery. Tests
+compose the real radio and GPIO shared libraries with simulated hardware.
+Device integration and physical interlock qualification remain pending.
+Analog monitoring, sensors, fan control, general alarms/actions, and their
+configuration/API are not implemented by this change.
+
 **Requirements**
 
 - Support configurable GPIO inputs and outputs, voltage, current, temperature,

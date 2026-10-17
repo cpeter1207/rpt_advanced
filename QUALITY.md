@@ -68,6 +68,26 @@ cleans those labels before launch, and installs an exit cleanup trap. Quality
 images intentionally use their published `latest` tags; do not replace that
 policy with ad-hoc local builds during normal validation.
 
+## Radio signaling and hardware admission contract
+
+`make radio-interlock-check` compiles a hardware-free C consumer against the
+installed radio ABI 4 and GPIO ABI 1 shared objects. Required descriptor tails
+must be present; missing functionality is a failure, not a skipped test. The
+test is part of `make check` and the source archive. Its C formatting and static
+analysis run with the platform-independent checks.
+
+Candidate provider revisions and runtime/development packages are pinned in
+`.github/dependencies.json`. Install those packages into the disposable native
+Debian 13 test image before running the target. No provider source is copied
+into the controller, and no static provider is linked. `readelf -d` and `ldd`
+can confirm the versioned libraries used by `build/test_radio_interlock`.
+
+Seven covered ports and a separate ordinary hardware context exercise normalized
+receive snapshots, independent CTCSS assignments, native DCS, exact callback
+spans, live inhibit, fresh arm epochs, fault invalidation and safe shutdown.
+The transport fixture is test-only. This does not qualify physical watchdogs,
+pin mappings, power gates, or post-DAC attenuation.
+
 ## Workflow separation
 
 Workflow implementations reside in

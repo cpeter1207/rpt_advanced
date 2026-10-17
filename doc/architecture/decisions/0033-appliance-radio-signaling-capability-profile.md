@@ -1,6 +1,6 @@
 # ADR 0033: Appliance direct-codec radio-signaling capability profile
 
-Status: Accepted
+Status: Software contract implemented; device integration and physical qualification pending
 
 Amended 2026-10-17: CTCSS encode and decode sources are independent; GPIO
 capabilities belong to the selected hardware, not only the appliance.
@@ -72,3 +72,23 @@ or tail-tone requests cannot be simulated by an on/off GPIO. DSP encode retains
 its existing frequency, level, routing, and turn-off behavior. The appliance
 hardware repository remains the source for electrical implementation and safe
 state requirements; this ADR supplies the software capability contract.
+
+## Implementation evidence
+
+`librptadvradio` ABI 4 appends sized profile, receive, and transmit operations.
+The profile validates encoder and decoder capabilities independently before
+session creation. Same-profile updates use the existing prepared-update path;
+changing a source requires a stopped-session replacement. DSP CTCSS and DCS
+require a usable native signaling route. External encode produces a prepared
+enable action from the existing transmit state machine, with no native CTCSS
+PCM and no second hang timer. Live controller inhibit applies to either source.
+
+`rptadv-gpio-adapter` ABI 1 reports actual CM119 and parallel capabilities and
+adds normalized, setup-sized port contexts. It does not infer an encoder or
+interlock from an unassigned pin. `tests/test_radio_interlock.c` composes both
+installed shared objects across seven simulated ports, including GPIO-derived
+receive qualification, decoder loss, fault invalidation, and transmit actions.
+
+This is a software API implementation, not a device rollout. No current
+consumer selects the direct-codec profile yet. Physical pin mapping, hardware
+qualification, and consumer configuration/cutover remain separate work.

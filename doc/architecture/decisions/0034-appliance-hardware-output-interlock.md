@@ -1,6 +1,6 @@
 # ADR 0034: Appliance hardware output interlock
 
-Status: Accepted
+Status: Software contract implemented; physical interlock qualification pending
 
 ## Context
 
@@ -56,3 +56,28 @@ compositions. One interlock context covers exactly the ports and site outputs
 connected to that physical gate. Its fault disarms them all, not unrelated
 hardware contexts. This decision adds no native-tick allocation, lock, or
 blocking operation.
+
+## Implementation evidence
+
+The GPIO adapter's normalized context owns the disarmed, arming, armed, and
+latched-fault states. Its sole control owner samples transport health, requests
+physical arm, applies prepared intent, and submits safe outputs. Audio owners
+only publish complete epoch-tagged intent or read bounded atomic snapshots.
+Every setup allocation can fail without publishing a handle or aborting the
+process. Port count is resource-bounded, not a fixed bitmap.
+
+Revocation invalidates readiness and observations before transport I/O. Recovery
+repeats initialization but does not arm. Fresh radio warm-up/readiness, matching
+new arm feedback, and a new output epoch are required; stale PTT/encoder intent
+cannot replay. Epoch exhaustion fails closed. Successful writes are not treated
+as physical readback. Failed safe submission is a visible latched fault.
+
+Provider tests cover each health input, stale/future snapshots, failed I/O,
+deadline and epoch exhaustion, allocation failure, retirement, and recovery.
+The cross-library test uses seven covered ports plus an independent ordinary
+context. Its simulated physical gate releases outputs during a software-service
+stall; callback publication remains allocation-free and nonblocking.
+
+These tests validate software contracts only. No simulated transport is exposed
+by an installed service. They do not qualify watchdog timing, wiring, post-DAC
+attenuation, power-loss behavior, or the physical appliance interlock.

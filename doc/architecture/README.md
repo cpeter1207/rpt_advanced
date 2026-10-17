@@ -75,6 +75,14 @@ The fully populated appliance interface, power, and thermal ceilings are
 defined by [ADR 0032](decisions/0032-four-port-appliance-interface-and-power-ceiling.md).
 Its four-port limit belongs to that board, not the software. Software port state
 is sized from configured endpoints and available resources without a fixed cap.
+The additive radio/GPIO contracts implement independent DSP or external CTCSS
+sources and per-context output admission, as described by
+[ADR 0033](decisions/0033-appliance-radio-signaling-capability-profile.md) and
+[ADR 0034](decisions/0034-appliance-hardware-output-interlock.md). Control owns
+transport I/O, explicit arming, health checks and fault recovery; audio callbacks
+publish epoch-tagged intent and read atomic snapshots. Seven-port dynamic-library
+tests validate this software boundary. Device integration and physical interlock
+qualification remain pending; no installed service selects the test transport.
 
 The product implementation is Rust-owned. The only retained production C is the
 minimal Asterisk metadata shim; it has no controller, media, radio, or control
