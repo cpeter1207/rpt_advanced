@@ -60,8 +60,8 @@ These completed requirements are absent from the open entries below.
 - The existing supported native rate remains 48 kHz. The adapter supplies its
   clock/cadence; the transmit worker has no separate pacing source.
 - Outbound codec conversion and detector-private decimation remain separate
-  from the inbound-ring conversion contract. Appliance external CTCSS and
-  physical interlock requirements remain unchanged.
+  from the inbound-ring conversion contract. CTCSS sources and appliance
+  physical interlocks follow ADRs 0033/0034.
 - Workers may execute directly in input/output callbacks; no extra OS threads
   are required by the split. Versioned compatible ABI evolution is required.
 - An adapter that knows ADC/DAC are drift-free and can deliver aligned frames
@@ -278,20 +278,30 @@ None.
   and fan monitoring.
 - Support thresholds, hysteresis, alarms, actions, analog meters, outputs, and
   fan control.
-- Use USBRadioPlus CM119 GPIO where available; support parallel-port GPIO for
-  additional site I/O.
+- Use hardware-neutral GPIO with capabilities reported by each backend: USB
+  radio interfaces such as URIXB on a Raspberry Pi, CM119 GPIO, parallel ports,
+  and appliance GPIO. Do not require every device to provide every I/O type.
 
 **Decisions recorded**
 
-- CM119 GPIO and parallel-port GPIO are supported site-I/O sources.
-- The appliance provides the same site-I/O capability through its isolated
-  DB-25 analog/digital front end; CM119 and parallel-port sources remain
-  supported for external adapters.
+- CM119 and parallel-port GPIO already have backends. Additional hardware support
+  must use its actual capabilities; a device example does not claim a verified
+  driver or pin mapping.
+- The appliance adds its isolated DB-25 analog/digital front end and physical
+  interlock. Other GPIO devices need not provide its analog monitoring, arm
+  feedback, watchdog, or physical mutes. Require only the capabilities used by
+  configured signals and that hardware's safety contract.
+- CTCSS encode and decode independently select disabled, DSP, or external per
+  port. External encode may be combined with DSP decode for encoder-only radios.
+  Reuse the existing DSP and controller encode policy; no activity-scoped decode.
+- Software imposes no fixed port-count limit. Allocate state at control setup
+  according to configured endpoints and available resources. The appliance's
+  four-port limit applies only to its physical board.
 
 **Material decisions needed before implementation**
 
-- Hardware abstraction and configuration model for GPIO, analog inputs, fan
-  outputs, and external sensors.
+- Configuration for analog inputs, fan outputs, and external sensors beyond the
+  capability-based radio GPIO contract in ADRs 0033/0034.
 - Alarm/action catalog, default-safe output state, acknowledgment behavior, and
   authorization for manual output control.
 - Sensor conversion/calibration model and retention/reporting policy for meter
@@ -589,6 +599,9 @@ future capabilities below are not covered by that completion status.
   DB-25 site I/O, and one through four direct-codec radio ports on a common
   carrier clock. It is not a literal CM119 design. Detailed appliance hardware
   is maintained in the private appliance hardware repository.
+- The four-port ceiling is a board constraint, not a software limit. Other
+  hardware compositions may provide any number of ports that available hardware
+  and host resources can support.
 - A fully populated appliance has a 54 W normal input budget, a 75 W continuous
   input-path rating, four USB-C CAT ports limited to 5 V / 0.9 A each, and a
   33 W sustained enclosure-heat budget at +55 °C ambient. Selected-component

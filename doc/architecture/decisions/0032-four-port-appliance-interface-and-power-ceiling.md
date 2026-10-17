@@ -29,8 +29,13 @@ future costed design margin; it does not imply a fifth radio position.
 
 ## Consequences
 
-The KiCad architecture, product requirements, power allocation, radio-GPIO
-reservation, validation fixture, and software appliance requirements all use a
-four-port maximum. A later expansion beyond four ports requires a new explicit
+The KiCad architecture, appliance product requirements, power allocation,
+radio-GPIO reservation, and board validation fixture use a four-port maximum.
+This is a physical carrier limit, not a software port-count limit. Software
+sizes endpoint state from configured hardware and available resources and must
+not impose a fixed four-port array or aggregate mask.
+
+Expanding this carrier beyond four slots requires a new explicit hardware
 architecture decision and a different audio topology or SoM; it is not an
-uncommitted option in this carrier design.
+uncommitted option in this carrier design. Other hardware compositions can
+provide additional ports without changing this board's power or interface budget.

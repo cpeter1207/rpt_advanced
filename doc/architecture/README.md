@@ -73,6 +73,8 @@ Appliance emissions/immunity acceptance targets and its signed-update trust
 roles are defined by [ADR 0030](decisions/0030-appliance-update-trust-and-compliance.md).
 The fully populated appliance interface, power, and thermal ceilings are
 defined by [ADR 0032](decisions/0032-four-port-appliance-interface-and-power-ceiling.md).
+Its four-port limit belongs to that board, not the software. Software port state
+is sized from configured endpoints and available resources without a fixed cap.
 
 The product implementation is Rust-owned. The only retained production C is the
 minimal Asterisk metadata shim; it has no controller, media, radio, or control
@@ -297,11 +299,19 @@ through a generation-tagged lock-free handoff, not shared mutable DSP. The
 publishers apply only prepared immediate actions and publish snapshots; they
 do not evaluate macros, schedule work, route links, or format telemetry.
 
+CTCSS encode and decode independently select disabled, DSP, or external under
+[ADR 0033](decisions/0033-appliance-radio-signaling-capability-profile.md).
+GPIO comes from the selected USB, parallel-port, or appliance backend, which
+reports only the inputs, outputs, and safety facilities it provides. External
+encode produces an enable action instead of native CTCSS audio; DSP encode
+uses the existing generator and TX audio routing.
+
 For an appliance direct-codec port, the selected hardware adapter applies a
 prepared PTT or CTCSS action through the physical output interlock and reports
 its armed/fault state. The interlock, not the tick, decides whether actuator
 power reaches the radio or DB-25 output. [ADR 0034](decisions/0034-appliance-hardware-output-interlock.md)
-defines that boundary.
+defines that boundary. That interlock covers its own endpoints; unrelated GPIO
+devices need not implement the appliance's arm protocol or physical mutes.
 
 The **station-control event dispatcher** consumes those notifications and owns
 their high-level consequences: telemetry policy, courtesy and identifier

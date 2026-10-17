@@ -11,6 +11,13 @@ serial-audio disable do not prove an inactive analogue transmit path.
 
 ## Decision
 
+GPIO is hardware-neutral. USB interfaces, parallel ports, and appliance
+hardware expose only the capabilities they actually provide. The appliance
+interlock below is mandatory for that appliance, not a requirement that every
+GPIO device emulate arm feedback, watchdogs, or physical TX mutes. Missing
+optional capabilities are not faults; a missing capability required by the
+selected hardware safety contract or signal assignment fails closed.
+
 Every direct-codec appliance port is covered by the independent appliance
 hardware output interlock: one appliance-level safety gate plus separate
 physical TX mutes for each port's TX-A and TX-B legs. A low-current `3V3_SAFE`
@@ -39,6 +46,13 @@ nor the portable radio core owns the latch or takes a lock to operate it.
 The appliance adapter must explicitly arm only after a controlled hardware
 startup or recovery and must surface an arm failure to the control plane. It
 must not retry a safety fault by merely resuming watchdog traffic. Other
-hardware compositions remain free to provide their own equivalent physical
-safe-state mechanism. This decision adds no native-tick allocation, lock, or
+hardware compositions retain their own declared safe-state mechanisms; software
+must not claim physical interlock protection on hardware that lacks it.
+
+The software has no fixed port-count limit. It allocates endpoint state during
+control setup from configured hardware and available resources. The appliance's
+four-port board limit does not constrain USB, parallel-port, or other hardware
+compositions. One interlock context covers exactly the ports and site outputs
+connected to that physical gate. Its fault disarms them all, not unrelated
+hardware contexts. This decision adds no native-tick allocation, lock, or
 blocking operation.

@@ -190,8 +190,9 @@ buffer for that adapter). There is no transmit-mix resampler or additional
 output clock-recovery ring. The adapter converts only at its physical hardware
 boundary. ADR 0027 assigns hardware submission and any backend-specific
 partial-I/O staging to that adapter. ADR 0033 defines the
-appliance direct-codec profile, which uses external discrete CTCSS and therefore
-does not inject a native CTCSS tone.
+appliance direct-codec profile and independent CTCSS encode/decode source
+selection. DSP encode mixes the native tone into TX audio; external encode
+publishes encoder-enable intent without injecting a native CTCSS tone.
 
 A per-node active-traffic CTCSS encode policy is implemented under ADR 0042.
 Live local-receiver or connected-peer transmission qualifies encoding and its

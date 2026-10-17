@@ -1,6 +1,7 @@
 # Appliance signaling and output-interlock software
 
-Status: Software-only scope approved; written design awaiting review.
+Status: Software-only scope approved; revised 2026-10-17 after user review;
+written design awaiting approval.
 
 ## Scope and acceptance
 
@@ -31,51 +32,90 @@ software-only PTT gate would not satisfy ADR 0034.
 
 | Owner | Responsibility |
 | --- | --- |
-| `librptadvradio` | Signaling capability profile; existing COR/CTCSS qualification and DCS DSP; prepared PTT/external-CTCSS intent |
-| `rptadv-gpio-adapter` | Appliance-wide safety state, port leases, normalized snapshots, prepared output admission, and control-only transport calls |
+| `librptadvradio` | Independent CTCSS encode/decode selection; existing COR/CTCSS/DCS DSP; prepared PTT/external-CTCSS intent |
+| `rptadv-gpio-adapter` | Hardware-neutral GPIO capabilities, port leases, normalized snapshots, prepared outputs, and control-only transport calls; appliance safety state when that hardware is selected |
 | Existing controller | Existing PTT and activity-scoped CTCSS policy; no duplicate hang timer or telemetry policy |
 | Test backend | Simulated module presence, power/reset/watchdog health, arm feedback, and observable actuator/mute state |
 
-The new appliance operations are separate from CM119 discovery, HID, EEPROM,
-and parallel-port operations. A test backend must not be selectable by an
-installed service as a substitute for missing real hardware.
+GPIO is not appliance-specific. Sources include USB radio interfaces such as
+URIXB connected to a Raspberry Pi, existing CM119 interfaces, parallel ports,
+and appliance GPIO. Each backend reports the signals, directions, and safety
+facilities it actually provides. No device is assumed to provide every kind of
+GPIO, external CTCSS, analog monitoring, or a hardware interlock.
+
+Reuse existing device backends; the new capability contract must not change
+CM119 discovery, HID, EEPROM, or parallel-port behavior. Backend-specific pin
+mapping and additional device implementations remain out of this software-only
+phase. A test backend must not be selectable by an installed service as a
+substitute for missing real hardware.
 
 ## Signaling profile
 
-Add `appliance_direct_codec` beside the current native-audio signaling profile.
-The selected profile is immutable for a session. Changing profiles requires a
-quiesced session replacement, not a live reinterpretation of hardware state.
+Add `appliance_direct_codec` as a hardware capability profile beside the current
+native-audio profile. It does not force either CTCSS direction to use external
+hardware. Selected capabilities and CTCSS source assignments are immutable for
+a session; changing them requires a quiesced session replacement, not a live
+reinterpretation of hardware state.
 
 - COR selects normalized hardware COR or the existing DSP carrier detector.
-- Required CTCSS qualification uses normalized external decoder status, never
-  native CTCSS decode. Disabled tone qualification remains possible.
+- CTCSS encode and decode are separately configured as disabled, DSP, or
+  external. Support all capability-valid combinations, including external
+  encode with DSP decode and DSP encode with external decode. Selecting an
+  encoder never implies that a decoder exists or is selected.
+- DSP decode uses the existing native CTCSS detector. External decode uses the
+  normalized decoder-status input. Disabled decode adds no CTCSS qualification.
+- DSP encode uses the existing oscillator, level, routing, and turn-off
+  behavior, mixing the tone into the selected TX audio leg. It requires a
+  suitable audio path, not a dedicated analog CTCSS pin. External encode
+  produces only an encoder-enable action and never mixes a native CTCSS tone
+  into the audio. Never enable both encoding sources for one port.
 - DCS continues to use the existing native decoder and encoder. Do not add a
   DCS pin or a second DCS implementation. Unsupported simultaneous receive
   qualification combinations are rejected rather than assigned new semantics.
-- CTCSS encoding produces only an external encoder-enable action. No CTCSS
-  oscillator samples, reverse burst, or tail tone enter either TX audio leg.
 - Reuse the existing transmit-signaling state machine and controller-supplied
-  CTCSS inhibit. External enable is never asserted without effective PTT, and
-  remains subject to the appliance output interlock.
+  CTCSS inhibit for either encoder source. External enable is never asserted
+  without effective PTT and remains subject to the selected hardware's output
+  gate; the appliance requires its physical interlock.
 - External enable supports normal release and tone removal before PTT release.
   Native phase-shift/tail-tone requests are unsupported for external CTCSS;
   DCS turn-off retains its existing behavior.
-- The external encoder's frequency, deviation, and internal turn-off waveform
-  belong to that radio/encoder, not an on/off GPIO. Do not imply that native
+- When external encode is selected, its frequency, deviation, and turn-off
+  waveform belong to that radio/encoder, not an on/off GPIO. Do not imply that native
   CTCSS tuning fields configure it. Profile validation reports incompatible
   native-generation settings instead of silently emitting a different tone.
-- Raw external decoder status remains observable. No activity-scoped decode
-  policy is added; that wishlist requirement was withdrawn. Amend ADR 0033's
-  older decode-gating sentence accordingly during implementation.
+- Validate each selection against the chosen audio/GPIO backend's capabilities.
+  Missing required inputs or outputs cannot silently change the selected source
+  or bypass receive qualification. Report unsupported assignments and leave
+  that port safely inactive. Unused capabilities need not be present.
+- Raw external decoder status remains observable when provided. No
+  activity-scoped decode policy is added; that wishlist requirement was withdrawn.
 
 Program filtering, levels, duplex behavior, routing, native rate, and CM119
 signaling remain unchanged. DCS still joins program audio after its existing
 processing stages. The portable core performs no device I/O.
 
+## Port count and safety capabilities
+
+There is no fixed software limit on port count. Size port collections and
+preallocate callback-visible state from the configured endpoints during control
+setup. Practical capacity depends on hardware, memory, CPU, and I/O resources;
+allocation or admission failure must be explicit and safe. Neither the ABI nor
+an aggregate port mask may encode a four-port ceiling. The planned appliance's
+four slots remain a physical limit of that board only.
+
+Each hardware context owns its actual endpoints and capabilities. An appliance
+context covers the ports wired to its common physical interlock; that common
+fault does not disarm unrelated USB or parallel-port hardware. Such backends
+report hardware arm, watchdog, mutes, and feedback only if actually available.
+Do not fabricate those signals or require the appliance arm protocol from a
+device that lacks it. Preserve the existing safe-output behavior for those
+devices without claiming physical interlock protection. A backend lacking the
+required physical safety facilities cannot satisfy the appliance contract.
+
 ## Appliance safety contract
 
-One control-owned appliance context covers the common interlock and at most
-four configured port leases. Each port has a stable logical identity. A duplicate
+One control-owned context covers an appliance's common interlock and its
+configured port leases. Each port has a stable logical identity. A duplicate
 lease, missing required module, invalid snapshot, or unavailable required
 endpoint fails closed. Unconfigured empty slots are not faults.
 
@@ -123,15 +163,17 @@ current-epoch intent; it cannot replay an old PTT or site-output request.
 
 ## Real-time and lifecycle boundary
 
-Use the GPIO adapter's existing single service-owner pattern. Only that
-non-audio owner performs transport I/O, initialization, arm acknowledgment,
+Use the GPIO adapter's existing single service-owner pattern per hardware
+context. Only that non-audio owner performs transport I/O, initialization, arm acknowledgment,
 and recovery. Audio owners publish bounded prepared intent and read atomic
 snapshots; they never allocate, wait, log, or call a hardware transport.
-Each port retains one transmit intent producer. A fault revokes admission
-independently of the next audio callback.
+Each port retains one transmit intent producer. An interlock fault revokes
+admission for its covered ports independently of the next audio callback.
 
 Snapshots expose presence, health, arm state, current epoch, latched fault
 reason, requested versus confirmed output state, and transport failure.
+If a backend lacks output readback, report confirmation as unavailable; a
+successful write is not proof of the physical output state.
 Existing control status can consume these typed snapshots without inventing a
 new UI or alarm engine. Software PCM muting and suppressed intent complement,
 but cannot replace, the physical post-DAC mute and actuator gate.
@@ -145,8 +187,9 @@ requires disarm and controlled replacement.
 ## ABI and packaging
 
 Keep existing ABI-4 radio and ABI-1 GPIO operations/layouts unchanged. Add
-descriptor-tail operations with separately sized profile, action, safety,
-and transport records. New clients require and validate those tails before
+descriptor-tail operations with separately sized profile, capability, action,
+safety, and transport records. Port collections use counts/handles sized at
+setup, not a fixed four-element array. New clients validate those tails before
 use. Existing operations continue to mean current CM119/native behavior;
 they are not repurposed as appliance calls. All paths share internal logic.
 
@@ -177,17 +220,21 @@ while closing individual gaps.
 Required checks:
 
 1. CM119/native profile output and qualification remain unchanged.
-2. External COR/CTCSS assertion and loss, DSP COR, disabled tone qualification,
-   DCS decode/encode, exact variable frame counts, and no analog CTCSS injection.
-3. Existing CTCSS inhibit/hold policy controls external enable independently
-   from PTT; incompatible profile settings are rejected with useful errors.
+2. A data-driven matrix covers independent disabled/DSP/external CTCSS encode
+   and decode choices, including encoder-only hardware; external COR/CTCSS
+   assertion and loss; DSP COR; DCS; and exact variable frame counts. Native
+   CTCSS is generated only for DSP encode, never for external or disabled encode.
+3. Existing CTCSS inhibit/hold policy controls either encoder independently
+   from PTT. Missing required capabilities and incompatible settings fail safely
+   with useful errors; unused missing capabilities do not prevent operation.
 4. Cold start, missing/duplicate ports, missing or stale radio-ready confirmation,
    each health failure, transport failures, arm success/refusal/timeout, fault
    during arming, and shutdown while keyed.
 5. Healthy inputs and renewed watchdog activity never re-arm by themselves;
    only explicit recovery plus a new arm request succeeds.
 6. Stale intents/acknowledgments cannot cross fault, lease, or reload epochs.
-   A common fault releases every configured port and disables site outputs.
+   A common interlock fault releases every configured port and disables site
+   outputs covered by that interlock; unrelated hardware remains operational.
 7. Callback allocation/locking guards and service-stall tests: audio does not
    wait; the simulated physical interlock independently removes outputs.
 8. C ABI sizes/tail admission, old CM119 client compatibility, shared-object
@@ -195,6 +242,10 @@ Required checks:
 9. A hardware-free composed test dynamically loads the radio and GPIO DSOs,
    drives the real profile/session code with the simulated backend, and proves
    fault/explicit-recovery behavior across multiple configured ports.
+10. More than four configured ports work without callback allocation or a global
+    fixed-size port mask. Simulated USB/parallel-style capability subsets need
+    no appliance arm feedback. An appliance fault affects only its own covered
+    endpoints, and missing optional GPIO is not reported as a hardware fault.
 
 Mark ADRs 0033/0034 as software-implemented only after those checks pass.
 Keep real appliance integration and physical fault qualification explicitly
