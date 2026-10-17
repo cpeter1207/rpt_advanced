@@ -200,7 +200,7 @@ Identifiers, tails, and message macros share one ordered `content` grammar:
 | `{message_macro_name}` | Insert the configured message macro named `name` at this exact position |
 | `{message}` | Insert this section's Fluent `message_id`, using its bound values and independent text/TTS/Morse forms |
 | `{media}` | Insert this section's existing sound-file, speech-text, and Morse fallback choice as one segment |
-| `{tone_sequence}` | Play this section's configured tone sequence at this exact position |
+| `{tone_sequence}` | Play this section's configured tone sequence here; repeat the token wherever that sequence should play |
 
 Placeholders are structural tokens in the configuration's `content` field,
 not Fluent syntax or an expression language. Literal braces use `{{` and `}}`.
@@ -287,8 +287,10 @@ one utterance within those bounds, without introducing an artificial pause at
 every macro boundary. Files and tones preserve their explicit sequence points.
 
 Attention tones reuse the existing courtesy `tone_sequence` grammar and shared
-tone generator. For example, this alarm plays two attention bursts, then its
-localized speech or Morse message:
+tone generator. They may appear before a message, between messages, or after
+all messages, and may occur more than once in a macro. They are ordinary
+ordered segments, not a prefix-only option. For example, this alarm plays two
+attention bursts, then its localized speech or Morse message:
 
 ```ini
 [message temperature_alarm]
@@ -298,7 +300,25 @@ message_id = site-temperature-alarm
 arg_temperature = sensor:pa_temperature
 ```
 
-Here the tones are preceding content, not an alternative to speech or Morse.
+Here the tones precede the message because of their position in `content`,
+not because they are always a prefix. A reusable tone-only macro can place
+attention tones anywhere in a larger sequence:
+
+```ini
+[message attention]
+content = {tone_sequence}
+tone_sequence = 1000Hz / 200ms / -20dB, silence / 100ms, 1000Hz / 200ms / -20dB
+
+[message site_report]
+content = {message_macro_attention} {message_macro_time} {message_macro_attention} {message_macro_temperature} {message_macro_attention}
+```
+
+This plays attention, time, attention, temperature, then attention. Different
+tone-only macros can supply different attention sequences without adding a
+second tone-reference syntax. A tone-only macro needs no `message_id`, speech,
+or Morse text. Literal text and `{media}` segments can be interleaved as well.
+Whitespace separating structural tokens does not generate spoken content.
+Tones retain their position when an ordinary message falls back to Morse.
 Reusing the current media fallback field alone would not satisfy this rule.
 Tone level/duration remain explicit and subject to existing validation and
 transmit processing. Message macros may also insert sound files with `{media}`
@@ -394,10 +414,10 @@ beginning, including the station identity. Literal text is Morse-rendered,
 catalog macros use their `.morse` forms, and file segments use `morse_text`.
 Do not play tone sequences or file audio in this forced-Morse ID path; replace
 each file segment with its Morse fallback and require a usable complete Morse
-identification fallback. This preserves the existing
-rule that only Morse identification plays while an input is active. Alarm
-attention tones remain present before an ordinary speech-to-Morse fallback
-when the station is idle. Tails retain their receive-interruption policy below.
+identification fallback. This preserves the existing rule that only Morse
+identification plays while an input is active. Alarm attention tones remain at
+their configured positions during ordinary speech-to-Morse fallback when the
+station is idle. Tails retain their receive-interruption policy below.
 
 `interval_ms = 0` makes a tail eligible after every qualifying traffic release.
 A positive interval is minimum elapsed time since successful playback; it
@@ -483,8 +503,10 @@ translation bounds, and reuse inside identifiers/tails. Test literal text plus
 multiple macros, recorded media plus multiple macros, nested acyclic references,
 cycle/missing-reference handling, brace escaping, coherent dynamic values,
 per-segment bounds, natural measurement versus digit-wise node speech,
-attention-tone ordering/levels, and complete forced-Morse ID fallback. Verify
-that segment boundaries do not unkey, interleave telemetry, or prematurely
+attention tones before, between, and after messages, repeated/tone-only macros,
+tone ordering/levels through ordinary speech-to-Morse fallback, and complete
+forced-Morse ID fallback. Verify that segment boundaries do not unkey,
+interleave telemetry, or prematurely
 complete an ID/tail. Exhaustively test zero and positive tail delay, intervals,
 no recursive tails, receive interruption,
 all ID-deadline crossings above, and multiple named tails. Assert PTT sequencing,
