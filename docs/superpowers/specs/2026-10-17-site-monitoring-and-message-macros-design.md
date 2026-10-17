@@ -1,7 +1,12 @@
 # Site monitoring, message macros, and tail messages
 
 Date: 2026-10-17
-Status: Written design for owner review; implementation has not started.
+Status: Design approved 2026-10-17; implementation plans await review.
+
+Implementation plans:
+
+- [Message composition and tail playback](../plans/2026-10-17-message-composition-and-tail-playback.md)
+- [Site monitoring and actions](../plans/2026-10-17-site-monitoring-and-actions.md)
 
 ## Outcome and scope
 
