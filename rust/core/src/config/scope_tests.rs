@@ -8,6 +8,18 @@ fn documented_section_shapes_are_classified_without_prefix_matches() {
         ("radio usb", ScopeKind::RadioNode, Some("usb"), None),
         ("usb", ScopeKind::Node, Some("usb"), None),
         (
+            "message report",
+            ScopeKind::MessageGlobal,
+            None,
+            Some("report"),
+        ),
+        (
+            "message usb report",
+            ScopeKind::MessageNode,
+            Some("usb"),
+            Some("report"),
+        ),
+        (
             "identifier usb",
             ScopeKind::IdentifierNode,
             Some("usb"),
@@ -72,6 +84,10 @@ fn malformed_documented_shapes_are_not_reinterpreted_as_nodes() {
 fn scope_role_helpers_cover_named_and_node_owned_definitions() {
     assert!(is_named(ScopeKind::CourtesySet));
     assert!(is_named(ScopeKind::TemplateGlobal));
+    assert!(is_named(ScopeKind::MessageGlobal));
+    assert!(is_named(ScopeKind::MessageNode));
+    assert!(is_node_scoped(ScopeKind::MessageNode));
+    assert!(!is_node_scoped(ScopeKind::MessageGlobal));
     assert!(!is_named(ScopeKind::CourtesyNode));
     assert!(is_node_scoped(ScopeKind::ScheduleNode));
     assert!(!is_node_scoped(ScopeKind::TemplateGlobal));

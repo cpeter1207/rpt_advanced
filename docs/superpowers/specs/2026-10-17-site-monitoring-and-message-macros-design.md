@@ -1,7 +1,9 @@
 # Site monitoring, message macros, and tail messages
 
 Date: 2026-10-17
-Status: Design approved 2026-10-17; implementation plans await review.
+Status: Design approved 2026-10-17; native implementation plans approved
+2026-10-18. M1 receive interruption was implemented and operator-confirmed on
+524950. Composed messages, tails, and site monitoring remain in progress/planned.
 
 Implementation plans:
 

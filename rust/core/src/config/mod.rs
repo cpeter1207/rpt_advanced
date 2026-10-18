@@ -1,6 +1,7 @@
 //! Owned configuration parsing, schema validation, and inherited settings.
 
 mod document;
+mod messages;
 mod parse;
 mod schema;
 mod scope;
@@ -18,6 +19,7 @@ mod scope_tests;
 mod tests;
 
 pub use document::{ConfigDocument, ConfigEntry};
+pub use messages::{BindingSource, ResolvedMessageSettings};
 pub use schema::Schema;
 pub use settings::{
     Cm119GpioMode, Cm119Profile, CtcssTurnoffMode, DcsCode, LinkLookupMethod, NodeId,

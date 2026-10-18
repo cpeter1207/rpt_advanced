@@ -134,6 +134,15 @@ governs REST/WebSocket route and schema publication.
 
 ## Consequences
 
+Approved extension (2026-10-17): configured sensor/input queries (`*76` plus
+selector) and message-macro requests (`*77` plus selector) are public read-only
+operations. Selectors are canonical positive decimal strings, not link
+destinations; zero does not recall a prior destination. They cannot configure
+equipment or execute action macros. Prefixes inherit and may be remapped;
+conflicting selectors/prefixes are rejected. Replies preserve the originating
+connection and unkey/routing rules above. IDs and tails using the same composed
+content remain local-only. This extension is not yet implemented.
+
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot
 interrupt their origin while it is keyed. DTMF changes require command-map,

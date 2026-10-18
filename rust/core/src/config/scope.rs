@@ -24,6 +24,8 @@ pub(crate) enum ScopeKind {
     TimeNode,
     TemplateGlobal,
     TemplateNode,
+    MessageGlobal,
+    MessageNode,
     MacroGlobal,
     MacroNode,
     EventNode,
@@ -103,6 +105,8 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         ["time", node] => Scope::node(ScopeKind::TimeNode, node),
         ["template", label] => Scope::named(ScopeKind::TemplateGlobal, None, label),
         ["template", node, label] => Scope::named(ScopeKind::TemplateNode, Some(node), label),
+        ["message", label] => Scope::named(ScopeKind::MessageGlobal, None, label),
+        ["message", node, label] => Scope::named(ScopeKind::MessageNode, Some(node), label),
         ["macro", label] => Scope::named(ScopeKind::MacroGlobal, None, label),
         ["macro", node, label] => Scope::named(ScopeKind::MacroNode, Some(node), label),
         ["event", node, label] => Scope::named(ScopeKind::EventNode, Some(node), label),
@@ -111,7 +115,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         [known]
             if matches!(
                 *known,
-                "template" | "macro" | "event" | "permanent" | "schedule"
+                "template" | "message" | "macro" | "event" | "permanent" | "schedule"
             ) =>
         {
             return Err(());
@@ -129,6 +133,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
                     | "speech"
                     | "time"
                     | "template"
+                    | "message"
                     | "macro"
                     | "event"
                     | "permanent"
@@ -150,6 +155,8 @@ pub(crate) const fn is_named(kind: ScopeKind) -> bool {
             | ScopeKind::CourtesySet
             | ScopeKind::TemplateGlobal
             | ScopeKind::TemplateNode
+            | ScopeKind::MessageGlobal
+            | ScopeKind::MessageNode
             | ScopeKind::MacroGlobal
             | ScopeKind::MacroNode
             | ScopeKind::EventNode
@@ -172,6 +179,7 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::SpeechNode
             | ScopeKind::TimeNode
             | ScopeKind::TemplateNode
+            | ScopeKind::MessageNode
             | ScopeKind::MacroNode
             | ScopeKind::EventNode
             | ScopeKind::PermanentNode

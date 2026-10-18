@@ -10,9 +10,12 @@
 
 **Spec:** [Approved site-monitoring design](../specs/2026-10-17-site-monitoring-and-message-macros-design.md), approved 2026-10-17, including all-message receive interruption.
 
-**Status:** Approved for native implementation 2026-10-18. M1 implemented and
-targeted checks passed; deployment and manual validation await separate approval.
-M2 and later tasks have not started.
+**Status:** Approved for native implementation 2026-10-18. M1 commit `197f7e7`
+passed targeted checks and approved native installation on 524950. The operator
+confirmed the local interruption/repeat/courtesy test. Peer-source behavior has
+automated coverage, not a new live-link test. M2 is implemented and targeted tests,
+Clippy, formatting and Rustdoc pass. M3 is in progress; later tasks remain planned.
+No further deployment is implied by implementation approval.
 
 ## Global Constraints
 
@@ -75,7 +78,7 @@ New types below are private Rust product interfaces, not public C ABI additions.
 - [x] Run the failing named filters with `cargo test --locked -p rpt-advanced-core --lib morse_`, `... playback_failure_`, and `cargo test --locked -p rptadv-product --lib morse_`. Confirm assertion failures rather than missing libraries.
 - [x] Use existing all-source receive state, not RF-selected link state, for message form selection. Keep parrot/courtesy cancellation separate. Reuse the ready/retired generation handoff; pending retirement gates primary output until retry succeeds. Ensure `start` preserves selection across reused generations. Stop producer failure from becoming successful EOF. Render/retire remains bounded and allocation-free.
 - [x] Re-run the named filters and the existing `audio::playback::tests`, `controller::tests`, and `media::worker::tests` suites. Assert successful sample tails still drain and failures release demand without satisfying IDs. Update Rustdoc and ADR 0025's cancellation contract; commit the focused correction.
-- [ ] Before dependent live validation, request separate deployment approval. Reproduce local and linked receive interruption on 524950 and obtain confirmation; this plan itself grants neither RF activity nor a link connection. Automated/fake-source testing may proceed without a node.
+- [x] Obtain separate deployment approval and operator confirmation of local receive interruption on 524950. Linked-source interruption has automated coverage; no additional live-link test was authorized. Automated dependent work can proceed.
 
 ### M2: Compile ordered content and additive message catalogs
 
@@ -88,7 +91,7 @@ New types below are private Rust product interfaces, not public C ABI additions.
 - `BindingSource`: `Callsign`, `Node`, `Date`, `Time`, `DayOfWeek`, `Greeting`, `LinkStatus`, `Sensor(String)`, `Input(String)`, `TimeRemaining`. The last requires an invocation context.
 - `MessageArgument::{Number(f64), Forms(MessageForms)}` and `MessageCatalog::format_named(&self, id: &str, args: &BTreeMap<String, MessageArgument>) -> Result<MessageForms, CatalogError>`. The existing typed `format` shares the same per-attribute formatting/fallback implementation.
 
-- [ ] Write `composition_literal_multiple_macros`, `composition_file_then_macros`, `composition_attention_positions`, and `composition_cycle_or_overflow_warns_disabled`. Example assertion:
+- [x] Write `composition_literal_multiple_macros`, `composition_file_then_macros`, `composition_attention_positions`, and compiler error tests for cycles/overflow. M4 admission owns warning/disable handling. Example assertion:
 
 ```rust
 assert_eq!(expanded_kinds, ["tone", "time", "tone", "temperature", "tone"]);
@@ -96,10 +99,10 @@ assert!(!rendered_measurement.contains("node,"));
 assert_eq!(rendered_node, "node,5,2,4,9,5,0");
 ```
 
-- [ ] Write additive-catalog tests: an administrator adds one message without replacing shipped IDs; malformed/missing translated attributes fall back independently; 127-byte forms pass and 128-byte forms fail; a composition of two valid 100-byte forms is not rejected as one 200-byte message. Test numeric Fluent arguments, escaped braces, repeated references, invalid contextual binding, unknown names and node overrides.
-- [ ] Run `cargo test --locked -p rpt-advanced-core --lib composition_` and `... --lib messages::` to see the new assertions fail.
-- [ ] Implement one parser/compiler, preserving configuration order. Count expanded segments/bytes with checked arithmetic before checked allocation; do not add a fixed node/macro count or an expression engine. Invalid/cyclic definitions cannot recurse at runtime. Load shipped catalogs plus overlays, not the current replace-the-catalog behavior. Keep literal `[template]` and action `[macro]` semantics unchanged.
-- [ ] Re-run targeted tests and configuration scope/schema tests. Document developer contracts and planned status in ADRs 0009/0023; commit the compiler/catalog slice.
+- [x] Write additive-catalog tests: an administrator adds one message without replacing shipped IDs; malformed/missing translated attributes fall back independently; 127-byte forms pass and 128-byte forms fail; a composition of two valid 100-byte forms is not rejected as one 200-byte message. Test numeric Fluent arguments, escaped braces, repeated references, invalid contextual binding, unknown names and node overrides.
+- [x] Run the new composition and message tests to see assertions and missing-interface failures before implementation.
+- [x] Implement one parser/compiler, preserving configuration order. Count expanded segments/bytes with checked arithmetic before checked allocation; do not add a fixed node/macro count or an expression engine. Invalid/cyclic definitions cannot recurse at runtime. Load shipped catalogs plus overlays, not the current replace-the-catalog behavior. Keep literal `[template]` and action `[macro]` semantics unchanged.
+- [x] Re-run targeted tests and configuration scope/schema tests. Document developer contracts and planned status in ADRs 0009/0023; commit the compiler/catalog slice.
 
 ### M3: Stream one logical composition through the existing producer
 

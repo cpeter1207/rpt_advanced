@@ -980,7 +980,7 @@ fn scoped<'a>(
     document.lookup(key, &[node_scope.as_str(), family])
 }
 
-fn lookup_valid_scopes<T>(
+pub(super) fn lookup_valid_scopes<T>(
     document: &ConfigDocument,
     key: &str,
     scopes: &[String],
@@ -996,7 +996,11 @@ fn lookup_valid_scopes<T>(
     None
 }
 
-fn lookup_scopes(document: &ConfigDocument, key: &str, scopes: &[String]) -> Option<String> {
+pub(super) fn lookup_scopes(
+    document: &ConfigDocument,
+    key: &str,
+    scopes: &[String],
+) -> Option<String> {
     scopes
         .iter()
         .find_map(|scope| document.lookup(key, &[scope.as_str()]).map(str::to_owned))

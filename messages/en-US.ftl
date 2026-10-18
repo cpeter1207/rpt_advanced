@@ -120,6 +120,26 @@ time-announcement =
     .tts = { $greeting_tts }. The time is { $time }.
     .morse = { $time }
 
+site-time =
+    .text = { $time }
+    .tts = The time is { $time }.
+    .morse = { $time }
+
+site-temperature =
+    .text = Temperature: { $temperature }
+    .tts = Temperature is { $temperature }.
+    .morse = TEMP { $temperature }
+
+site-link-status =
+    .text = { $links }
+    .tts = { $links }
+    .morse = { $links }
+
+site-value-unavailable =
+    .text = { $label } unavailable
+    .tts = { $label } is unavailable.
+    .morse = { $label } UNAVAILABLE
+
 loop-rejected =
     .text = LINK TO NODE { $node } REJECTED: WOULD CREATE LOOP
     .tts = Connection to { $node } rejected because it would create a link loop

@@ -29,6 +29,7 @@ enum KnownScope {
     Speech,
     Time,
     Template,
+    Message,
     Macro,
     Event,
     Permanent,
@@ -52,6 +53,7 @@ impl KnownScope {
             ScopeKind::SpeechDefault | ScopeKind::SpeechNode => Self::Speech,
             ScopeKind::TimeDefault | ScopeKind::TimeNode => Self::Time,
             ScopeKind::TemplateGlobal | ScopeKind::TemplateNode => Self::Template,
+            ScopeKind::MessageGlobal | ScopeKind::MessageNode => Self::Message,
             ScopeKind::MacroGlobal | ScopeKind::MacroNode => Self::Macro,
             ScopeKind::EventNode => Self::Event,
             ScopeKind::PermanentNode => Self::Permanent,
@@ -342,6 +344,15 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         }
         KnownScope::Time => key == "format",
         KnownScope::Template => key == "text",
+        KnownScope::Message => {
+            matches!(
+                key,
+                "content" | "message_id" | "dtmf_id" | "tone_sequence" | "level_db"
+            ) || key
+                .strip_prefix("arg_")
+                .is_some_and(super::messages::identifier_valid)
+                || key_known(KnownScope::Announcement, key) && key != "interval_ms"
+        }
         KnownScope::Macro => matches!(key, "action" | "target_node"),
         KnownScope::Event => matches!(key, "at" | "template" | "message" | "macro"),
         KnownScope::Permanent => matches!(key, "remote_node" | "group_name"),
@@ -363,6 +374,17 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if matches!(kind, ScopeKind::MessageGlobal | ScopeKind::MessageNode) {
+        match key {
+            "message_id" => return value.is_empty() || super::messages::identifier_valid(value),
+            "dtmf_id" => return super::messages::selector_valid(value),
+            "content" => return crate::composition::syntax_valid(value),
+            key if key.starts_with("arg_") => {
+                return value.is_empty() || value.parse::<super::BindingSource>().is_ok();
+            }
+            _ => {}
+        }
+    }
     if key == "remote_node" && matches!(kind, ScopeKind::PermanentNode | ScopeKind::ScheduleNode) {
         return configured_node_list(value).is_some();
     }
@@ -548,6 +570,8 @@ fn configured_node_list(value: &str) -> Option<Vec<&str>> {
 
 fn default_value(kind: ScopeKind, key: &str) -> String {
     let value = match (kind, key) {
+        (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "content") => "{message}",
+        (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "level_db") => "-20",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "device_selection") => "exact",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_profile") => "dudeusb",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_ptt_inverted") => "no",
@@ -734,6 +758,11 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
         ScopeKind::SpeechNode => candidates.push(("speech".to_owned(), key)),
         ScopeKind::TimeNode => candidates.push(("time".to_owned(), key)),
         ScopeKind::MacroNode => candidates.push((format!("macro {label}"), key)),
+        ScopeKind::MessageNode => {
+            candidates.push((format!("message {label}"), key));
+            add_media_defaults(&mut candidates, key, node);
+        }
+        ScopeKind::MessageGlobal => add_media_defaults(&mut candidates, key, node),
         _ => {}
     }
     for (section, candidate_key) in candidates {

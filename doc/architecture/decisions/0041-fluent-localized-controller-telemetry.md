@@ -30,6 +30,16 @@ non-RF diagnostics retain their existing formatting behavior.
 
 ## Consequences
 
+Approved composed-message extension (2026-10-17): configuration may select
+catalog IDs and allowlisted value bindings for read-only message macros.
+DTMF supplies only a validated configured selector, never a catalog ID or
+expression. Shipped English remains the required baseline; administrator and
+packaged language catalogs layer above it, with independent attribute fallback.
+Partial administrator files can add messages without copying built-in IDs.
+Invalid optional attributes warn and use a lower-precedence valid form. The
+127-byte limit applies independently to each rendered segment/form, not to the
+entire composition. Composition runtime integration remains planned.
+
 Each built-in message maintains `.text`, `.tts`, and `.morse` entries in the
 catalog and is included in the installed product package. New built-in RF
 wording belongs in the English catalog and is covered by its completeness and
