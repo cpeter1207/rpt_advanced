@@ -24,6 +24,7 @@ enum KnownScope {
     Radio,
     Identifier,
     Announcement,
+    Tail,
     Courtesy { named: bool },
     Morse,
     Speech,
@@ -48,6 +49,7 @@ impl KnownScope {
             | ScopeKind::AnnouncementNode
             | ScopeKind::AnnouncementSet => Self::Announcement,
             ScopeKind::CourtesyDefault | ScopeKind::CourtesyNode => Self::Courtesy { named: false },
+            ScopeKind::TailDefault | ScopeKind::TailNode | ScopeKind::TailSet => Self::Tail,
             ScopeKind::CourtesySet => Self::Courtesy { named: true },
             ScopeKind::MorseDefault | ScopeKind::MorseNode => Self::Morse,
             ScopeKind::SpeechDefault | ScopeKind::SpeechNode => Self::Speech,
@@ -352,6 +354,11 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 || key_known(KnownScope::Announcement, key) && key != "interval_ms"
         }
         KnownScope::Macro => matches!(key, "action" | "target_node"),
+        KnownScope::Tail => {
+            matches!(key, "delay_ms" | "tone_sequence" | "level_db")
+                || super::messages::content_key(key)
+                || key_known(KnownScope::Announcement, key)
+        }
         KnownScope::Event => matches!(key, "at" | "template" | "message" | "macro"),
         KnownScope::Permanent => matches!(key, "remote_node" | "group_name"),
         KnownScope::Schedule => matches!(
@@ -379,6 +386,9 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             | ScopeKind::IdentifierDefault
             | ScopeKind::IdentifierNode
             | ScopeKind::IdentifierSet
+            | ScopeKind::TailDefault
+            | ScopeKind::TailNode
+            | ScopeKind::TailSet
     ) {
         match key {
             "message_id" => return value.is_empty() || super::messages::identifier_valid(value),
@@ -392,6 +402,13 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
     }
     if key == "remote_node" && matches!(kind, ScopeKind::PermanentNode | ScopeKind::ScheduleNode) {
         return configured_node_list(value).is_some();
+    }
+    if matches!(
+        kind,
+        ScopeKind::TailDefault | ScopeKind::TailNode | ScopeKind::TailSet
+    ) && matches!(key, "interval_ms" | "delay_ms")
+    {
+        return parse::unsigned(value, 0, u64::MAX / 48).is_some();
     }
     match key {
         "device_selection" => matches!(value, "exact" | "automatic_lowest_alsa_card"),
@@ -681,7 +698,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         {
             "600000"
         }
-        (_, "interval_ms" | "priority") => "0",
+        (_, "interval_ms" | "priority" | "delay_ms") => "0",
         (_, "first_key_only" | "regardless_of_activity" | "polite") => "no",
         (_, "polite_maximum_wait_ms") => "60000",
         (_, "speech_speed_percent" | "speed_percent") => "100",
@@ -753,6 +770,12 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
             candidates.push(("identifier".to_owned(), key));
         }
         ScopeKind::AnnouncementNode => candidates.push(("announcement".to_owned(), key)),
+        ScopeKind::TailNode => candidates.push(("tail".to_owned(), key)),
+        ScopeKind::TailSet => {
+            candidates.push((format!("tail {node}"), key));
+            candidates.push(("tail".to_owned(), key));
+            add_media_defaults(&mut candidates, key, node);
+        }
         ScopeKind::AnnouncementSet => {
             add_media_defaults(&mut candidates, key, node);
             candidates.push((format!("announcement {node}"), key));

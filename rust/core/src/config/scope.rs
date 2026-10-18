@@ -13,6 +13,9 @@ pub(crate) enum ScopeKind {
     AnnouncementDefault,
     AnnouncementNode,
     AnnouncementSet,
+    TailDefault,
+    TailNode,
+    TailSet,
     CourtesyDefault,
     CourtesyNode,
     CourtesySet,
@@ -95,6 +98,9 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
             Scope::named(ScopeKind::AnnouncementSet, Some(node), label)
         }
         ["courtesy"] => Scope::flat(ScopeKind::CourtesyDefault),
+        ["tail"] => Scope::flat(ScopeKind::TailDefault),
+        ["tail", node] => Scope::node(ScopeKind::TailNode, node),
+        ["tail", node, label] => Scope::named(ScopeKind::TailSet, Some(node), label),
         ["courtesy", node] => Scope::node(ScopeKind::CourtesyNode, node),
         ["courtesy", node, label] => Scope::named(ScopeKind::CourtesySet, Some(node), label),
         ["morse"] => Scope::flat(ScopeKind::MorseDefault),
@@ -128,6 +134,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
                     | "radio"
                     | "identifier"
                     | "announcement"
+                    | "tail"
                     | "courtesy"
                     | "morse"
                     | "speech"
@@ -152,6 +159,7 @@ pub(crate) const fn is_named(kind: ScopeKind) -> bool {
         kind,
         ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementSet
+            | ScopeKind::TailSet
             | ScopeKind::CourtesySet
             | ScopeKind::TemplateGlobal
             | ScopeKind::TemplateNode
@@ -172,6 +180,8 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::RadioNode
             | ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementNode
+            | ScopeKind::TailNode
+            | ScopeKind::TailSet
             | ScopeKind::AnnouncementSet
             | ScopeKind::CourtesyNode
             | ScopeKind::CourtesySet

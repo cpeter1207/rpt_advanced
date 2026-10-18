@@ -68,6 +68,49 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn composition_runtime_tail_resolves_only_at_each_release_attempt() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[tail 1000 time]\ncontent={message_macro_time}\n[message time]\nmessage_id=site-time\narg_time=time\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
+    ).unwrap();
+    assert!(messages.lock().unwrap().is_empty());
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.0; 960];
+    for minute in [7, 8] {
+        generation
+            .transmit()
+            .controller
+            .process_audio(true, false, &[], &mut audio);
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        let mut now = clock();
+        now.civil = Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, minute).unwrap(),
+            0,
+        ));
+        runtime.prepare_messages(now);
+        for _ in 0..22 {
+            generation
+                .transmit()
+                .controller
+                .process_audio(false, false, &[], &mut audio);
+        }
+    }
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The time is 9:07 AM.", "The time is 9:08 AM."]
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn composition_runtime_recurring_id_resolves_at_each_attempt() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));

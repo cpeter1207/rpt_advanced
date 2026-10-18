@@ -6,6 +6,14 @@ pub(super) struct TimeoutPolicy {
     until: Option<u64>,
 }
 impl TimeoutPolicy {
+    /// Do not consume local telemetry that this tick's watchdog will suppress.
+    pub fn allows_playback(&self, was_keyed: bool, receive: bool, now: u64, timeout: u64) -> bool {
+        self.until.map_or(
+            !was_keyed || timeout == 0 || now.saturating_sub(self.key) < timeout,
+            |until| !receive && now >= until,
+        )
+    }
+
     pub fn unkey(&mut self, now: u64) {
         self.key = now;
     }

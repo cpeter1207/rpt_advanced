@@ -204,6 +204,12 @@ impl MessageReader {
 }
 
 impl PcmStreamReader for MessageReader {
+    fn rewind(&mut self) {
+        if let Some(stream) = &mut self.stream {
+            stream.rewind();
+        }
+    }
+
     fn defer_before_output(&mut self) -> bool {
         self.cancel();
         true

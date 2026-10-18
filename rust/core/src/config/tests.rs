@@ -1588,3 +1588,39 @@ fn resolved_command_map_preserves_configured_and_fixed_actions() {
         crate::command::LinkAction::ReconnectPermanentAll
     );
 }
+#[test]
+fn tail_config_inheritance_and_order() {
+    use super::ResolvedTailSettings;
+    let config = ConfigDocument::parse("[524950]\n[speech]\nlevel_db=-8\n[morse]\nlevel_db=-18\n[tail]\ninterval_ms=300\ndelay_ms=12\ncontent={media}\nmorse_text=E\n[tail 524950]\ndelay_ms=25\n[tail 524950 b]\ndelay_ms=invalid\n[tail 524950 a]\ninterval_ms=0\ncontent=Ready\n").unwrap();
+    let node = NodeId::new("524950").unwrap();
+    let inherited = ResolvedTailSettings::resolve(&config, &node, "b").unwrap();
+    assert_eq!(
+        (inherited.value.interval_ms, inherited.value.delay_ms),
+        (300, 25)
+    );
+    assert_eq!(inherited.value.message.morse_defaults.level_db, -18);
+    assert_eq!(inherited.value.message.speech_defaults.level_db, -8);
+    assert_eq!(inherited.warnings.len(), 1);
+    assert_eq!(inherited.warnings[0].fallback, "25");
+    assert_eq!(
+        config.named_sections("tail", Some("524950")),
+        ["tail 524950 b", "tail 524950 a"]
+    );
+    let explicit = ResolvedTailSettings::resolve(&config, &node, "a")
+        .unwrap()
+        .value;
+    assert_eq!(explicit.interval_ms, 0);
+    assert_eq!(explicit.message.content, "Ready");
+    assert!(ResolvedTailSettings::resolve(&config, &node, "missing").is_err());
+    for invalid in [
+        "[tail 524950 a]\n[tail 524950 a]\n",
+        "[tail missing a]\n",
+        "[tail 524950 a extra]\n",
+    ] {
+        assert!(
+            ConfigDocument::parse(&format!("[524950]\n{invalid}"))
+                .and_then(|c| Schema::validate(&c))
+                .is_err()
+        );
+    }
+}

@@ -451,6 +451,7 @@ pub(super) enum Source {
     Courtesy(usize),
     Identifier(usize),
     Announcement(usize),
+    Tail(usize),
 }
 
 pub(super) struct TelemetryPlanner {

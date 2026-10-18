@@ -74,6 +74,18 @@ impl IdentifierPolicy {
         receiver_active: bool,
         full_duplex: bool,
     ) -> Option<usize> {
+        self.select_where(rules, now_ms, receiver_active, full_duplex, |_| true)
+    }
+
+    /// Select the highest-priority due rule allowed by current hang/deadline arbitration.
+    pub(crate) fn select_where(
+        &self,
+        rules: &[IdentifierRule],
+        now_ms: u64,
+        receiver_active: bool,
+        full_duplex: bool,
+        eligible: impl Fn(usize) -> bool,
+    ) -> Option<usize> {
         if receiver_active && !full_duplex {
             return None;
         }
@@ -86,6 +98,7 @@ impl IdentifierPolicy {
                     && (rule.regardless_of_activity || state.activity)
             };
             if due
+                && eligible(index)
                 && now_ms >= state.retry_after_ms
                 && selected.is_none_or(|current| rule.priority > rules[current].priority)
             {

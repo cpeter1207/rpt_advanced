@@ -124,64 +124,76 @@ impl ResolvedMessageSettings {
                 "unknown message definition",
             ));
         }
-        let text = |key| settings::lookup_scopes(document, key, &scopes).unwrap_or_default();
+        let mut value = Self::from_scopes(document, node, &scopes, "{message}")?;
+        value.dtmf_id = settings::lookup_valid_scopes(document, "dtmf_id", &scopes, |value| {
+            selector_valid(value).then(|| value.to_owned())
+        })
+        .filter(|value| !value.is_empty());
+        Ok(Resolution { value, warnings })
+    }
+
+    /// Resolve the same composition/media fields for a caller-owned scope hierarchy.
+    pub(super) fn from_scopes(
+        document: &ConfigDocument,
+        node: &NodeId,
+        scopes: &[String],
+        default_content: &str,
+    ) -> Result<Self, ConfigError> {
+        let text = |key| settings::lookup_scopes(document, key, scopes).unwrap_or_default();
         let optional = |key, valid: fn(&str) -> bool| {
-            settings::lookup_valid_scopes(document, key, &scopes, |value| {
+            settings::lookup_valid_scopes(document, key, scopes, |value| {
                 valid(value).then(|| value.to_owned())
             })
             .filter(|v| !v.is_empty())
         };
         let unsigned = |key, max, fallback| {
-            settings::lookup_valid_scopes(document, key, &scopes, |v| parse::unsigned(v, 1, max))
+            settings::lookup_valid_scopes(document, key, scopes, |v| parse::unsigned(v, 1, max))
                 .unwrap_or(fallback)
         };
         let level = |key, fallback| {
-            settings::lookup_valid_scopes(document, key, &scopes, |v| parse::signed(v, -60, 0))
+            settings::lookup_valid_scopes(document, key, scopes, |v| parse::signed(v, -60, 0))
                 .unwrap_or(fallback)
         };
         let mut speech = super::ResolvedSpeechSettings::resolve(document, node)?.value;
         let mut morse = super::ResolvedMorseSettings::resolve(document, node)?.value;
         speech.voice =
-            settings::lookup_scopes(document, "speech_model", &scopes).unwrap_or(speech.voice);
+            settings::lookup_scopes(document, "speech_model", scopes).unwrap_or(speech.voice);
         speech.speed_percent = unsigned("speech_speed_percent", 1000, speech.speed_percent);
         speech.level_db = level("speech_level_db", speech.level_db);
         morse.frequency_hz = unsigned("morse_frequency_hz", u32::MAX as u64, morse.frequency_hz);
         morse.speed_wpm = unsigned("morse_speed_wpm", 100, morse.speed_wpm);
         morse.level_db = level("morse_level_db", morse.level_db);
-        let (content, message_id, bindings) = resolve_content(document, &scopes, "{message}");
+        let (content, message_id, bindings) = resolve_content(document, scopes, default_content);
         let speech_text = text("speech_text");
         let morse_text = text("morse_text");
         let tone_sequence = text("tone_sequence");
-        Ok(Resolution {
-            warnings,
-            value: Self {
-                content,
-                message_id,
-                dtmf_id: optional("dtmf_id", selector_valid),
-                bindings,
-                media: MediaSource {
-                    file: optional("sound_file", |_| true).map(Into::into),
-                    speech: (!speech_text.is_empty()).then(|| SpeechSource {
-                        text: speech_text,
-                        model: speech.voice.clone().into(),
-                        speed_percent: speech.speed_percent as u32,
-                        level_db: speech.level_db as i32,
-                    }),
-                    morse: (!morse_text.is_empty()).then_some(MorseSource {
-                        text: morse_text,
-                        frequency_hz: morse.frequency_hz as f32,
-                        speed_wpm: morse.speed_wpm as u32,
-                        level_db: morse.level_db as i8,
-                    }),
-                    tone: (!tone_sequence.is_empty()).then(|| ToneSource {
-                        sequence: tone_sequence,
-                        level_db: level("level_db", -20) as i8,
-                    }),
-                    provider_gain_db: 0,
-                },
-                speech_defaults: speech,
-                morse_defaults: morse,
+        Ok(Self {
+            content,
+            message_id,
+            dtmf_id: None,
+            bindings,
+            media: MediaSource {
+                file: optional("sound_file", |_| true).map(Into::into),
+                speech: (!speech_text.is_empty()).then(|| SpeechSource {
+                    text: speech_text,
+                    model: speech.voice.clone().into(),
+                    speed_percent: speech.speed_percent as u32,
+                    level_db: speech.level_db as i32,
+                }),
+                morse: (!morse_text.is_empty()).then_some(MorseSource {
+                    text: morse_text,
+                    frequency_hz: morse.frequency_hz as f32,
+                    speed_wpm: morse.speed_wpm as u32,
+                    level_db: morse.level_db as i8,
+                }),
+                tone: (!tone_sequence.is_empty()).then(|| ToneSource {
+                    sequence: tone_sequence,
+                    level_db: level("level_db", -20) as i8,
+                }),
+                provider_gain_db: 0,
             },
+            speech_defaults: speech,
+            morse_defaults: morse,
         })
     }
 }

@@ -86,8 +86,10 @@ recurring-ID/message-command integration are implemented with targeted tests.
 One bounded control handoff owns preparation and reclamation; callback-side
 deferral before first output requests fresh values, while receive interruption
 retains the admitted attempt. Catalog IDs, required bindings, and complete Morse
-fallbacks are validated before admission. Tail scheduling and site acquisition
-and actions remain planned. Existing scheduled actions are unchanged.
+fallbacks are validated before admission. Release-triggered tails are implemented
+with sample-clock timing tests: original traffic hang, per-tail post-unkey delay,
+deadline-first IDs, and success-only cooldown. Site acquisition and actions
+remain planned. Existing scheduled actions and periodic announcements are unchanged.
 
 ## Implementation status — 2026-10-03
 

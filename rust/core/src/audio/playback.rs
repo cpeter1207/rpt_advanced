@@ -128,6 +128,24 @@ impl Playback {
         self.outcome = outcome;
     }
 
+    /// Retire an unstarted opportunity without claiming successful completion.
+    pub(crate) fn cancel(&mut self) {
+        self.finish(PlaybackOutcome::Cancelled);
+    }
+
+    /// Restart a preempted, already-admitted item with the same values and Morse latch.
+    pub(crate) fn rewind(&mut self) {
+        if let Some(stream) = &mut self.stream {
+            stream.rewind();
+        }
+        self.stream_started = true;
+        self.waiting_for_stream = true;
+        self.outcome = PlaybackOutcome::Active;
+        if self.morse.is_some() {
+            self.morse = Some(MorseSwitch::Pending);
+        }
+    }
+
     /// Hold an ineligible item without keeping a stale, never-played value snapshot.
     /// Begun playback retains its attempt and receive-driven Morse latch.
     pub fn defer(&mut self, receiving: bool) {

@@ -243,6 +243,16 @@ the old values; readmission captures a fresh snapshot. Device-only replacement
 retains the controller, recipes and media session together. These internal Rust
 interfaces do not change the public C ABI.
 
+Release-tail ownership — 2026-10-18: the shared controller preallocates ordered
+tail states. Qualified traffic release fixes the hang deadline independently
+of telemetry. Positive delays begin at actual controller unkey and do not
+restart when an ID intervenes. Expired polite-ID deadlines preempt a tail;
+its existing producer restarts the same captured attempt from the beginning,
+preserving Morse selection. Before first PCM, new receive cancels the opportunity;
+afterward it selects complete Morse. Timeout and half-duplex deferral cannot
+consume inaudible PCM or falsely advance cooldown. Only successful playback
+advances cooldown, and generated transmitter releases never arm another tail.
+
 Receive-interruption contract — 2026-10-18: qualified local receive or any
 connected peer's receive activity selects the complete Morse form of an
 admitted message, including an announcement or source-routed command reply.

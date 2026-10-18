@@ -139,3 +139,27 @@ fn composition_handoff_one_shot_ports_are_reclaimed_with_their_reader() {
         assert!(control.ports.is_empty());
     }
 }
+
+#[test]
+fn composition_tail_rewind_retains_attempt_values_and_morse() {
+    let mut control = MessagePreparation::new(2);
+    let mut media = control.register(0).unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut audio = [0.0];
+    media.0.render(false, &mut audio);
+    let request = control.take_request().unwrap();
+    assert!(
+        control
+            .complete(request.attempt, Ok(prepared(0.25, &drops)))
+            .is_ok()
+    );
+    assert_eq!(media.0.render(true, &mut audio), 1);
+    media.0.rewind();
+    assert_eq!(media.0.render(false, &mut audio), 1);
+    assert_eq!(audio, [-0.25]);
+    assert!(
+        control.take_request().is_none(),
+        "ID preemption is not a new value snapshot"
+    );
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+}

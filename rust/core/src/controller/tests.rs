@@ -34,6 +34,43 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn tail_scheduling_and_identifier_preemption_do_not_allocate_on_audio() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            hang_ms: 1,
+            ..Default::default()
+        },
+        vec![Identifier {
+            media: media(0.25, 1),
+            interval_ms: 2,
+            priority: 1,
+            first_key_only: false,
+            regardless_of_activity: false,
+            polite_maximum_wait_ms: Some(2),
+        }],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.set_tails(vec![Tail {
+        media: media(0.5, 480),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    let mut buffer = [0.0; 480];
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(true, false, &[], &mut buffer[..48]);
+    node.process_audio(false, false, &[], &mut buffer);
+    node.process_audio(true, false, &[], &mut buffer);
+    node.process_audio(false, false, &[], &mut buffer);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert!(node.satisfied[0] != 0, "expired ID was exercised");
+}
+
+#[test]
 fn composition_pre_sample_deferral_refreshes_attempt_without_audio_allocation() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings::default(),
@@ -2190,7 +2227,9 @@ fn every_release_announcements_follow_hang_once_and_ids_satisfy_lower_priority()
     assert_eq!(output.iter().filter(|v| **v == 0.1).count(), 1);
     assert_eq!(output.iter().filter(|v| **v == 0.15).count(), 0);
     assert_eq!(output.iter().filter(|v| **v == 0.2).count(), 1);
-    assert_eq!(&output[47..49], &[0.1, 0.2]);
+    // The polite ID now waits through the traffic-release hang deadline; the
+    // existing announcement remains due from the last transmitted sample.
+    assert_eq!(&output[47..49], &[0.2, 0.1]);
 }
 
 #[test]

@@ -286,6 +286,35 @@ fn composition_reuses_complete_program() {
 }
 
 #[test]
+fn composition_one_shot_rewind_keeps_its_producer_until_completion() {
+    let sources = vec![composition_tone(500), composition_tone(1_000)];
+    let expected = composition_render(sources.clone());
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            rpt_advanced_core::media::MediaProgram {
+                primary: sources,
+                morse: vec![],
+            },
+            true,
+        )
+        .unwrap();
+    session.start().unwrap();
+    reader.start();
+    let mut heard = false;
+    for _ in 0..10_000 {
+        if matches!(reader.render(&mut [0.0; 17]), PcmRead::Samples(_)) {
+            heard = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(heard);
+    reader.rewind();
+    assert_eq!(collect_samples(reader.as_mut(), &mut [0.0; 97]), expected);
+}
+
+#[test]
 fn composition_pending_successor_keeps_playback_active() {
     let (mut producer, consumer) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
     producer.write(&[0.25; 8]).unwrap();

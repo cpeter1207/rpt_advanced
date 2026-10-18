@@ -308,6 +308,27 @@ pub(super) fn controller(
         }
     }
     let mut courtesy = CourtesySettings::default();
+    let mut tails = Vec::new();
+    for label in labels(document, "tail", node.as_str()) {
+        let settings = crate::config::ResolvedTailSettings::resolve(document, node, label)?.value;
+        if settings.message.content == "{media}" && settings.message.media == MediaSource::default()
+        {
+            continue;
+        }
+        if let Some(index) = recipes.add(
+            settings.message,
+            &format!("tail {} {label}", node.as_str()),
+            catalog,
+        ) {
+            tails.push(crate::controller::Tail {
+                media: messages
+                    .register(index)
+                    .map_err(|_| RuntimeError::Preparation)?,
+                interval_ms: settings.interval_ms,
+                delay_ms: settings.delay_ms,
+            });
+        }
+    }
     for label in labels(document, "courtesy", node.as_str()) {
         let settings = ResolvedCourtesySettings::resolve(document, node, label)?.value;
         if let Some(prepared) = courtesy_media(&mut station, &settings, &status)? {
@@ -320,7 +341,7 @@ pub(super) fn controller(
             }
         }
     }
-    let (controller, mut control) = NodeController::new(
+    let (mut controller, mut control) = NodeController::new(
         ControllerSettings {
             parrot_enabled: settings.parrot_enabled,
             full_duplex: settings.full_duplex,
@@ -340,6 +361,9 @@ pub(super) fn controller(
     )
     .map_err(|_| RuntimeError::Preparation)?;
     control.set_message_preparation(messages);
+    controller
+        .set_tails(tails)
+        .map_err(|_| RuntimeError::Preparation)?;
     station.start().map_err(|_| RuntimeError::Preparation)?;
     Ok((controller, control, status, station, recipes))
 }

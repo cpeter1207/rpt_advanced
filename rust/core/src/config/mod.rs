@@ -6,6 +6,8 @@ mod parse;
 mod schema;
 mod scope;
 mod settings;
+mod tails;
+pub use tails::ResolvedTailSettings;
 
 #[cfg(test)]
 mod document_tests;

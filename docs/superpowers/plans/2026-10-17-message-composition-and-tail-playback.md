@@ -17,8 +17,9 @@ automated coverage, not a new live-link test. M2 is implemented and targeted tes
 Clippy, formatting and Rustdoc pass. M3 is implemented with targeted producer,
 ring, controller, runtime, Clippy, formatting and Rustdoc checks passing. M4 is
 implemented with targeted command/configuration, runtime, allocation, host,
-Clippy, formatting, and Rustdoc checks passing. M5 is next; later tasks remain
-planned. The full hosted gate has not run.
+Clippy, formatting, and Rustdoc checks passing. M5 is implemented; targeted tail,
+controller, configuration, runtime, producer, Clippy, formatting, and Rustdoc
+checks pass. M6 shared-host integration remains. The full hosted gate has not run.
 No further deployment is implied by implementation approval.
 
 ## Global Constraints
@@ -143,6 +144,11 @@ of queued command replies; it adds no second scheduler, renderer, or public ABI.
 - [x] Re-run affected config/command/runtime tests and allocation/routing fixtures. Verify missing site bindings resolve as unavailable/disabled with warnings until the site subsystem is configured, not fabricated zero values. Commit.
 
 ### M5: Add release-triggered tails and explicit ID deadline ordering
+
+Completed 2026-10-18. Evidence: `.work/message-composition/m5-final.log`.
+The named timing tests, per-tail delays, half-duplex/all-source admission,
+preemption restart, success-only cooldown, runtime value refresh, and callback
+allocation guard pass. Existing periodic announcements retain their timing.
 
 **Files:** New `rust/core/src/{config/tails.rs,controller/tail.rs,controller/tail_tests.rs}`; modify `config/{mod,scope,schema,settings}.rs`, `controller/{mod,announcement}.rs`, `policy/identifier.rs`, `runtime/prepare.rs` and associated tests.
 
