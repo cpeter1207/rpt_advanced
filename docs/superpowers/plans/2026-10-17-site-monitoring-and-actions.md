@@ -11,8 +11,8 @@
 **Spec:** [Approved site-monitoring design](../specs/2026-10-17-site-monitoring-and-message-macros-design.md), approved 2026-10-17. Message rendering uses the [companion implementation plan](2026-10-17-message-composition-and-tail-playback.md).
 
 **Status:** Native implementation approved 2026-10-18. The message prerequisite
-is locally implemented and tested. S1 configuration/measurement policy passes
-focused tests; S2–S7 remain. No node changes or deployment
+is locally implemented and tested. S1 configuration/measurement and S2 pure
+alarm/output/fan policy pass focused tests; S3–S7 remain. No node changes or deployment
 are authorized by this document.
 
 ## Global Constraints
@@ -78,11 +78,11 @@ Run named failing tests, implement the narrow task, rerun its tests, update Rust
 
 **Interfaces:** `SiteController::advance(&mut self, now_ms: u64, observations: &SiteObservations, ptt: &BTreeMap<NodeId, bool>) -> Vec<SiteEffect>` runs on control. `SiteObservations` maps stable configured sensor/input names to S1 observations. `SiteCommand` covers output on/off/pulse, alarm acknowledge/reset, extrema reset, fan automatic/manual demand and explicit protective inhibit. `SiteController::command(&mut self, command: SiteCommand, now_ms: u64) -> Result<Vec<SiteEffect>, SiteError>` is an already-authorized internal operation. `SiteEffect` distinguishes output requests, fan demand, transmit inhibition, named existing action macros and message requests. It never performs I/O or admission itself.
 
-- [ ] Add `site_alarm_transition_and_unknown` table cases for above/below/active/inactive/unavailable, hysteresis, trip/clear persistence and current/smoothed selection. Test an unrounded `13.96` against `14.0` even when displayed as `14.0`. Unknown interrupts continuity of persistence but never falsely clears an active threshold alarm.
-- [ ] Add `site_alarm_ack_reset_repeat`: trip actions run once, repeated messages do not repeat equipment actions, acknowledgment only silences repeats, latched state needs healthy clear plus reset. Reset during an unsafe condition fails and never resets a physical interlock.
-- [ ] Add `site_output_pulse_prior_state`: default pulse at `1000 ms` ends at `1500 ms`, restoring both initial-on and initial-off cases. A repeated pulse extends from the latest command; explicit on/off cancels it. Safe-state/fault wins immediately. Preserve the original deadline/prior state on unchanged reload.
-- [ ] Add `site_fan_demand_and_failure`: PTT run-on ends exactly `120000 ms` after release; temperature hysteresis and ordered duty curves; combined mode selects greater demand. Missing temperature requests full cooling; missing control reports fault. Test optional RPM/spin-up monitoring only where capabilities exist and manual commands cannot override protection.
-- [ ] Run core `site_` filters red, implement the pure state machines with monotonic fake-clock time, and rerun green. Do not reuse legacy GPIO pulse behavior that returns to a baseline instead of the prior logical state. Update Rustdoc; commit.
+- [x] Add `site_alarm_transition_and_unknown` table cases for above/below/active/inactive/unavailable, hysteresis, trip/clear persistence and current/smoothed selection. Test an unrounded `13.96` against `14.0` even when displayed as `14.0`. Unknown interrupts continuity of persistence but never falsely clears an active threshold alarm.
+- [x] Add `site_alarm_ack_reset_repeat`: trip actions run once, repeated messages do not repeat equipment actions, acknowledgment only silences repeats, latched state needs healthy clear plus reset. Reset during an unsafe condition fails and never resets a physical interlock.
+- [x] Add `site_output_pulse_prior_state`: default pulse at `1000 ms` ends at `1500 ms`, restoring both initial-on and initial-off cases. A repeated pulse extends from the latest command; explicit on/off cancels it. Safe-state/fault wins immediately. Preserve the original deadline/prior state on unchanged reload.
+- [x] Add `site_fan_demand_and_failure`: PTT run-on ends exactly `120000 ms` after release; temperature hysteresis and ordered duty curves; combined mode selects greater demand. Missing temperature requests full cooling; missing control reports fault. Test optional RPM/spin-up monitoring only where capabilities exist and manual commands cannot override protection.
+- [x] Run core `site_` filters red, implement the pure state machines with monotonic fake-clock time, and rerun green. Do not reuse legacy GPIO pulse behavior that returns to a baseline instead of the prior logical state. Update Rustdoc; commit.
 
 ### S3: Expose spare CM119/parallel I/O through the existing owner
 

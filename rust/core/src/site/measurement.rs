@@ -64,6 +64,12 @@ impl SensorState {
         }
     }
 
+    /// Clear extrema without fabricating a new acquisition or changing current data.
+    pub fn reset_extrema(&mut self) {
+        self.state.minimum = None;
+        self.state.maximum = None;
+    }
+
     /// Accept normalized adapter units once. Failed, nonfinite, future or older
     /// observations cannot replace or refresh last-good data. Repeated cached
     /// observations leave smoothing and extrema untouched.

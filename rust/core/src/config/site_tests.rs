@@ -126,3 +126,30 @@ fn site_config_schema_validates_all_nodes_and_reports_effective_fallback() {
             .any(|warning| warning.key == "unknown_option")
     );
 }
+
+#[test]
+fn site_policy_configuration_rejects_unsafe_references_and_inherits_defaults() {
+    let base = "[1000]\n[sensor 1000 heat]\n[input 1000 door]\n[output 1000 relay]\n";
+    for bad in [
+        "[alarm 1000 a]\nenabled=yes\nsource=missing\ncondition=unavailable\n",
+        "[alarm 1000 a]\nenabled=yes\nsource=heat\ncondition=above\ntrip_value=10\nclear_value=20\n",
+        "[alarm 1000 a]\nenabled=yes\nsource=door\ncondition=active\non_trip=output:missing:on\n",
+        "[alarm 1000 a]\nenabled=yes\nsource=door\ncondition=active\ntrip_message=missing\n",
+        "[fan 1000 f]\nenabled=yes\noutput=relay\nmode=temperature\ntemperature_sensor=heat\n",
+        "[fan 1000 a]\nenabled=yes\noutput=relay\n[fan 1000 b]\nenabled=yes\noutput=relay\n",
+    ] {
+        assert!(resolve(&format!("{base}{bad}")).is_err(), "{bad}");
+    }
+    let parsed = resolve(&format!("{base}[alarm]\ntrip_delay_ms=100\n[alarm 1000]\ntrip_delay_ms=200\n[alarm 1000 a]\ntrip_delay_ms=bad\n[fan]\nrun_on_ms=1000\n[fan 1000 f]\nrun_on_ms=bad\n")).unwrap();
+    assert_eq!(parsed.value.alarms[0].trip_delay_ms, 200);
+    assert_eq!(parsed.value.fans[0].run_on_ms, 1000);
+    assert_eq!(
+        parsed
+            .warnings
+            .iter()
+            .find(|warning| warning.key == "trip_delay_ms")
+            .unwrap()
+            .fallback,
+        "200"
+    );
+}

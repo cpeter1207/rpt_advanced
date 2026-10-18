@@ -5,12 +5,18 @@ use super::{
 };
 use std::collections::BTreeSet;
 
+#[path = "site_policy.rs"]
+mod policy;
+pub use policy::{AlarmCondition, AlarmSettings, FanMode, FanSettings, SiteAction};
+
 /// Configuration families sharing the site inheritance rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SiteKind {
     Sensor,
     Input,
     Output,
+    Alarm,
+    Fan,
 }
 
 impl SiteKind {
@@ -19,6 +25,8 @@ impl SiteKind {
             "sensor" => Some(Self::Sensor),
             "input" => Some(Self::Input),
             "output" => Some(Self::Output),
+            "alarm" => Some(Self::Alarm),
+            "fan" => Some(Self::Fan),
             _ => None,
         }
     }
@@ -28,6 +36,8 @@ impl SiteKind {
             Self::Sensor => "sensor",
             Self::Input => "input",
             Self::Output => "output",
+            Self::Alarm => "alarm",
+            Self::Fan => "fan",
         }
     }
 }
@@ -137,7 +147,7 @@ pub struct SensorSettings {
 }
 
 /// Resolved site digital input, independent of radio COR/CTCSS debounce.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InputSettings {
     /// Node-local stable name, shared with sensors.
     pub name: String,
@@ -152,9 +162,9 @@ pub struct InputSettings {
     /// Read-only query selector.
     pub dtmf_id: Option<String>,
     /// Ordered action references on a debounced active edge.
-    pub on_active: Vec<String>,
+    pub on_active: Vec<SiteAction>,
     /// Ordered action references on a debounced inactive edge.
-    pub on_inactive: Vec<String>,
+    pub on_inactive: Vec<SiteAction>,
 }
 
 /// Resolved logical output; hardware readback is not implied by a requested state.
@@ -185,6 +195,10 @@ pub struct ResolvedSiteSettings {
     pub inputs: Vec<InputSettings>,
     /// Site digital outputs in configuration order.
     pub outputs: Vec<OutputSettings>,
+    /// Threshold/health policies in configuration order.
+    pub alarms: Vec<AlarmSettings>,
+    /// Cooling policies in configuration order.
+    pub fans: Vec<FanSettings>,
 }
 
 impl ResolvedSiteSettings {
@@ -204,38 +218,51 @@ impl ResolvedSiteSettings {
 pub(super) fn key_known(kind: SiteKind, named: bool, key: &str) -> bool {
     let identity = matches!(key, "backend" | "device" | "channel" | "line" | "dtmf_id");
     (!identity || named)
-        && (matches!(key, "enabled" | "backend" | "device")
-            || match kind {
-                SiteKind::Sensor => matches!(
-                    key,
-                    "channel"
-                        | "label_message_id"
-                        | "unit"
-                        | "precision"
-                        | "poll_interval_ms"
-                        | "stale_after_ms"
-                        | "smoothing_ms"
-                        | "calibration"
-                        | "input_low"
-                        | "value_low"
-                        | "input_high"
-                        | "value_high"
-                        | "dtmf_id"
-                ),
-                SiteKind::Input => matches!(
-                    key,
-                    "line"
-                        | "active_level"
-                        | "debounce_ms"
-                        | "dtmf_id"
-                        | "on_active"
-                        | "on_inactive"
-                ),
-                SiteKind::Output => matches!(
-                    key,
-                    "line" | "active_level" | "startup_state" | "safe_state" | "pulse_ms"
-                ),
-            })
+        && match kind {
+            SiteKind::Sensor => matches!(
+                key,
+                "enabled"
+                    | "backend"
+                    | "device"
+                    | "channel"
+                    | "label_message_id"
+                    | "unit"
+                    | "precision"
+                    | "poll_interval_ms"
+                    | "stale_after_ms"
+                    | "smoothing_ms"
+                    | "calibration"
+                    | "input_low"
+                    | "value_low"
+                    | "input_high"
+                    | "value_high"
+                    | "dtmf_id"
+            ),
+            SiteKind::Input => matches!(
+                key,
+                "enabled"
+                    | "backend"
+                    | "device"
+                    | "line"
+                    | "active_level"
+                    | "debounce_ms"
+                    | "dtmf_id"
+                    | "on_active"
+                    | "on_inactive"
+            ),
+            SiteKind::Output => matches!(
+                key,
+                "enabled"
+                    | "backend"
+                    | "device"
+                    | "line"
+                    | "active_level"
+                    | "startup_state"
+                    | "safe_state"
+                    | "pulse_ms"
+            ),
+            SiteKind::Alarm | SiteKind::Fan => policy::key_known(kind, key),
+        }
 }
 
 fn finite(value: &str) -> Option<f64> {
@@ -243,15 +270,28 @@ fn finite(value: &str) -> Option<f64> {
 }
 
 pub(super) fn value_valid(kind: SiteKind, key: &str, value: &str) -> bool {
+    if matches!(kind, SiteKind::Alarm | SiteKind::Fan) {
+        return policy::value_valid(kind, key, value);
+    }
     match key {
         "enabled" => parse::boolean(value).is_some(),
-        "backend" => SiteBackend::parse(value).is_some_and(|backend| match kind {
-            SiteKind::Sensor => matches!(backend, SiteBackend::Hwmon | SiteBackend::Iio),
-            SiteKind::Input => matches!(
-                backend,
-                SiteBackend::Cm119 | SiteBackend::Parallel | SiteBackend::Gpiod
-            ),
-            SiteKind::Output => !matches!(backend, SiteBackend::Iio),
+        "on_active" | "on_inactive" => policy::actions(value).is_some(),
+        "backend" => SiteBackend::parse(value).is_some_and(|backend| {
+            matches!(
+                (kind, backend),
+                (SiteKind::Sensor, SiteBackend::Hwmon | SiteBackend::Iio)
+                    | (
+                        SiteKind::Input,
+                        SiteBackend::Cm119 | SiteBackend::Parallel | SiteBackend::Gpiod
+                    )
+                    | (
+                        SiteKind::Output,
+                        SiteBackend::Cm119
+                            | SiteBackend::Parallel
+                            | SiteBackend::Gpiod
+                            | SiteBackend::Hwmon
+                    )
+            )
         }),
         "device" | "channel" | "line" => {
             !value.is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
@@ -281,7 +321,7 @@ pub(super) fn default_value(key: &str) -> &'static str {
         "debounce_ms" => "50",
         "startup_state" | "safe_state" => "off",
         "pulse_ms" => "500",
-        _ => "",
+        _ => policy::default_value(key),
     }
 }
 
@@ -389,13 +429,8 @@ impl<'a> Fields<'a> {
             value_high,
         })
     }
-    fn actions(&self, key: &str) -> Vec<String> {
-        self.text(key)
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .collect()
+    fn actions(&self, key: &str) -> Vec<SiteAction> {
+        policy::actions(&self.text(key)).expect("validated action list")
     }
 }
 
@@ -407,7 +442,6 @@ pub(super) fn resolve_definitions(
     let mut warnings = Vec::new();
     let mut names = BTreeSet::new();
     let mut selectors = BTreeSet::new();
-    let mut outputs = BTreeSet::new();
     for kind in [SiteKind::Sensor, SiteKind::Input, SiteKind::Output] {
         for section in document.named_sections(kind.name(), Some(node.as_str())) {
             let name = section
@@ -429,44 +463,43 @@ pub(super) fn resolve_definitions(
                     "ambiguous site name or DTMF selector",
                 ));
             }
-            match kind {
-                SiteKind::Sensor => {
-                    let calibration = fields.calibration();
-                    if calibration.is_none() {
-                        fields.warn(&mut warnings, "calibration", "two-point calibration requires distinct finite source points and finite slope", "sensor disabled");
-                        enabled = false;
-                    }
-                    let poll_interval_ms = fields.number("poll_interval_ms");
-                    let stale_after_ms = settings::lookup_valid_scopes(
-                        document,
-                        "stale_after_ms",
-                        &fields.scopes,
-                        |raw| parse::unsigned(raw, poll_interval_ms + 1, u64::MAX),
-                    )
-                    .unwrap_or(5000.max(poll_interval_ms + 1));
-                    if fields.number("stale_after_ms") != stale_after_ms {
-                        fields.warn(
-                            &mut warnings,
-                            "stale_after_ms",
-                            "stale time must exceed polling interval",
-                            &stale_after_ms.to_string(),
-                        );
-                    }
-                    result.sensors.push(SensorSettings {
-                        name,
-                        enabled,
-                        endpoint,
-                        label_message_id: fields.text("label_message_id"),
-                        unit: fields.text("unit"),
-                        precision: fields.number("precision") as u8,
-                        poll_interval_ms,
-                        stale_after_ms,
-                        smoothing_ms: fields.number("smoothing_ms"),
-                        calibration: calibration.unwrap_or(Calibration::None),
-                        dtmf_id,
-                    });
+            if kind == SiteKind::Sensor {
+                let calibration = fields.calibration();
+                if calibration.is_none() {
+                    fields.warn(&mut warnings, "calibration", "two-point calibration requires distinct finite source points and finite slope", "sensor disabled");
+                    enabled = false;
                 }
-                SiteKind::Input => result.inputs.push(InputSettings {
+                let poll_interval_ms = fields.number("poll_interval_ms");
+                let stale_after_ms = settings::lookup_valid_scopes(
+                    document,
+                    "stale_after_ms",
+                    &fields.scopes,
+                    |raw| parse::unsigned(raw, poll_interval_ms + 1, u64::MAX),
+                )
+                .unwrap_or(5000.max(poll_interval_ms + 1));
+                if fields.number("stale_after_ms") != stale_after_ms {
+                    fields.warn(
+                        &mut warnings,
+                        "stale_after_ms",
+                        "stale time must exceed polling interval",
+                        &stale_after_ms.to_string(),
+                    );
+                }
+                result.sensors.push(SensorSettings {
+                    name,
+                    enabled,
+                    endpoint,
+                    label_message_id: fields.text("label_message_id"),
+                    unit: fields.text("unit"),
+                    precision: fields.number("precision") as u8,
+                    poll_interval_ms,
+                    stale_after_ms,
+                    smoothing_ms: fields.number("smoothing_ms"),
+                    calibration: calibration.unwrap_or(Calibration::None),
+                    dtmf_id,
+                });
+            } else if kind == SiteKind::Input {
+                result.inputs.push(InputSettings {
                     name,
                     enabled,
                     endpoint,
@@ -475,27 +508,21 @@ pub(super) fn resolve_definitions(
                     dtmf_id,
                     on_active: fields.actions("on_active"),
                     on_inactive: fields.actions("on_inactive"),
-                }),
-                SiteKind::Output => {
-                    if enabled && !outputs.insert(endpoint.clone().expect("enabled endpoint")) {
-                        return Err(ConfigError::structure(
-                            &fields.scopes[0],
-                            "physical output has multiple owners",
-                        ));
-                    }
-                    result.outputs.push(OutputSettings {
-                        name,
-                        enabled,
-                        endpoint,
-                        active_high: fields.text("active_level") == "high",
-                        startup_on: fields.text("startup_state") == "on",
-                        safe_on: fields.text("safe_state") == "on",
-                        pulse_ms: fields.number("pulse_ms"),
-                    });
-                }
+                });
+            } else {
+                result.outputs.push(OutputSettings {
+                    name,
+                    enabled,
+                    endpoint,
+                    active_high: fields.text("active_level") == "high",
+                    startup_on: fields.text("startup_state") == "on",
+                    safe_on: fields.text("safe_state") == "on",
+                    pulse_ms: fields.number("pulse_ms"),
+                });
             }
         }
     }
+    policy::resolve(document, node, &mut result)?;
     Ok(Resolution {
         value: result,
         warnings,

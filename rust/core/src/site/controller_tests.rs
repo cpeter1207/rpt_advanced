@@ -1,0 +1,243 @@
+use super::*;
+use crate::config::{ConfigDocument, NodeId, ResolvedSiteSettings};
+use crate::site::{FanOutput, Observation, OutputRequest, ReadingQuality, SiteError};
+use std::collections::BTreeMap;
+
+fn settings(extra: &str) -> ResolvedSiteSettings {
+    ResolvedSiteSettings::resolve(&ConfigDocument::parse(&format!("[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=iio\ndevice=adc\nchannel=v\nprecision=1\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=door\non_active=output:relay:pulse\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=relay\n[message trip]\ncontent=Warning\n[message repeat]\ncontent=Still unsafe\n[message clear]\ncontent=Recovered\n{extra}")).unwrap(), &NodeId::new("1000").unwrap()).unwrap().value
+}
+fn observation<T>(value: T, now: u64) -> Observation<T> {
+    Observation {
+        value: Some(value),
+        observed_at_ms: Some(now),
+        quality: ReadingQuality::Valid,
+    }
+}
+fn observations(value: f64, now: u64) -> SiteObservations {
+    SiteObservations {
+        sensors: BTreeMap::from([("supply".into(), observation(value, now))]),
+        inputs: BTreeMap::new(),
+        outputs: BTreeMap::from([(
+            "relay".into(),
+            FanOutput {
+                available: true,
+                pwm: false,
+            },
+        )]),
+    }
+}
+
+#[test]
+fn site_controller_alarm_actions_are_transition_only_and_keep_protection() {
+    let policy = settings(
+        "[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\nlatched=yes\nrepeat_interval_ms=100\non_trip=output:relay:on,inhibit:on\non_clear=output:relay:off,inhibit:off\ntrip_message=trip\nrepeat_message=repeat\nclear_message=clear\n",
+    );
+    let mut site = SiteController::new(policy);
+    site.advance(0, &observations(13.96, 0), &BTreeMap::new());
+    assert!(!site.snapshot(0).alarms["high"].active);
+    let trip = site.advance(100, &observations(14.0, 100), &BTreeMap::new());
+    assert_eq!(
+        trip,
+        vec![
+            SiteEffect::Output {
+                name: "relay".into(),
+                on: true
+            },
+            SiteEffect::TransmitInhibit(true),
+            SiteEffect::Message("trip".into())
+        ]
+    );
+    assert!(site.snapshot(100).transmit_inhibited);
+    let repeat = site.advance(200, &observations(14.0, 200), &BTreeMap::new());
+    assert_eq!(repeat, vec![SiteEffect::Message("repeat".into())]);
+    assert_eq!(
+        site.command(SiteCommand::AlarmReset("high".into()), 200),
+        Err(SiteError::Unsafe)
+    );
+    site.command(SiteCommand::Inhibit(false), 200).unwrap();
+    assert!(site.snapshot(200).transmit_inhibited);
+    site.command(SiteCommand::AlarmAcknowledge("high".into()), 200)
+        .unwrap();
+    assert!(
+        site.advance(300, &observations(14.0, 300), &BTreeMap::new())
+            .is_empty()
+    );
+    site.advance(400, &observations(12.0, 400), &BTreeMap::new());
+    assert_eq!(
+        site.command(SiteCommand::AlarmReset("high".into()), 400)
+            .unwrap(),
+        vec![
+            SiteEffect::Output {
+                name: "relay".into(),
+                on: false
+            },
+            SiteEffect::TransmitInhibit(false),
+            SiteEffect::Message("clear".into())
+        ]
+    );
+}
+
+#[test]
+fn site_controller_debounce_and_extrema_reset() {
+    let mut site = SiteController::new(settings(""));
+    let mut readings = observations(13.0, 0);
+    readings.inputs.insert("door".into(), observation(false, 0));
+    site.advance(0, &readings, &BTreeMap::new());
+    readings
+        .inputs
+        .insert("door".into(), observation(true, 100));
+    site.advance(100, &readings, &BTreeMap::new());
+    assert!(
+        site.advance(200, &readings, &BTreeMap::new()).is_empty(),
+        "cached input cannot prove a completed debounce"
+    );
+    readings
+        .inputs
+        .insert("door".into(), observation(true, 150));
+    assert_eq!(
+        site.advance(200, &readings, &BTreeMap::new()),
+        vec![SiteEffect::Output {
+            name: "relay".into(),
+            on: true
+        }]
+    );
+    assert!(site.advance(201, &readings, &BTreeMap::new()).is_empty());
+    assert_eq!(
+        site.advance(700, &readings, &BTreeMap::new()),
+        vec![SiteEffect::Output {
+            name: "relay".into(),
+            on: false
+        }]
+    );
+    site.command(SiteCommand::ResetExtrema("supply".into()), 700)
+        .unwrap();
+    assert!(site.snapshot(700).sensors["supply"].minimum.is_none());
+    assert!(
+        site.command(
+            SiteCommand::Output {
+                name: "missing".into(),
+                request: OutputRequest::On
+            },
+            700
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn site_controller_alarm_uses_selected_unrounded_measurement() {
+    let mut policy = settings(
+        "[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=9\nclear_value=8\nreading=smoothed\n",
+    );
+    policy.sensors[0].smoothing_ms = 1000;
+    let mut site = SiteController::new(policy);
+    site.advance(0, &observations(0.0, 0), &BTreeMap::new());
+    site.advance(100, &observations(10.0, 100), &BTreeMap::new());
+    assert!(!site.snapshot(100).alarms["high"].active);
+    site.advance(3000, &observations(10.0, 3000), &BTreeMap::new());
+    assert!(site.snapshot(3000).alarms["high"].active);
+}
+
+#[test]
+fn site_controller_lost_input_is_unknown_without_clearing_alarm() {
+    let mut site = SiteController::new(settings(
+        "[alarm 1000 door_open]\nenabled=yes\nsource=door\ncondition=active\nlatched=yes\non_trip=inhibit:on\non_clear=inhibit:off\n",
+    ));
+    let mut readings = observations(12.0, 0);
+    readings.inputs.insert("door".into(), observation(true, 0));
+    site.advance(0, &readings, &BTreeMap::new());
+    assert!(site.snapshot(0).alarms["door_open"].active);
+    readings.inputs.clear();
+    site.advance(100, &readings, &BTreeMap::new());
+    assert_eq!(
+        site.snapshot(100).inputs["door"].quality,
+        ReadingQuality::Unavailable
+    );
+    assert_eq!(
+        site.snapshot(100).alarms["door_open"].unsafe_condition,
+        None
+    );
+    assert!(site.snapshot(100).transmit_inhibited);
+    assert_eq!(
+        site.command(SiteCommand::AlarmReset("door_open".into()), 100),
+        Err(SiteError::Unsafe)
+    );
+}
+
+#[test]
+fn site_controller_failed_output_does_not_skip_protection_or_repeat_actions() {
+    let mut site = SiteController::new(settings(
+        "[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\non_trip=output:relay:on,inhibit:on\ntrip_message=trip\n",
+    ));
+    site.advance(0, &observations(12.0, 0), &BTreeMap::new());
+    let mut readings = observations(15.0, 100);
+    readings.outputs.clear();
+    assert_eq!(
+        site.advance(100, &readings, &BTreeMap::new()),
+        vec![
+            SiteEffect::Fault {
+                target: "alarm:high".into(),
+                error: SiteError::Unavailable
+            },
+            SiteEffect::TransmitInhibit(true),
+            SiteEffect::Message("trip".into())
+        ]
+    );
+    assert!(site.advance(101, &readings, &BTreeMap::new()).is_empty());
+}
+
+#[test]
+fn site_controller_fan_owner_blocks_direct_output_override() {
+    let mut policy = settings("");
+    policy.inputs[0].on_active.clear();
+    let extra = ResolvedSiteSettings::resolve(
+        &ConfigDocument::parse(
+            "[1000]\n[output 1000 relay]\n[fan 1000 cooling]\nenabled=yes\noutput=relay\n",
+        )
+        .unwrap(),
+        &NodeId::new("1000").unwrap(),
+    )
+    .unwrap()
+    .value;
+    policy.fans = extra.fans;
+    let mut site = SiteController::new(policy);
+    site.advance(0, &observations(12.0, 0), &BTreeMap::new());
+    assert_eq!(
+        site.command(
+            SiteCommand::Output {
+                name: "relay".into(),
+                request: OutputRequest::On
+            },
+            1
+        ),
+        Err(SiteError::Unsafe)
+    );
+    assert_eq!(
+        site.command(
+            SiteCommand::Fan {
+                name: "cooling".into(),
+                duty: Some(1.0)
+            },
+            1
+        )
+        .unwrap(),
+        vec![SiteEffect::Fan {
+            name: "cooling".into(),
+            duty: 1.0
+        }]
+    );
+    assert_eq!(
+        site.command(
+            SiteCommand::Fan {
+                name: "cooling".into(),
+                duty: None
+            },
+            2
+        )
+        .unwrap(),
+        vec![SiteEffect::Fan {
+            name: "cooling".into(),
+            duty: 0.0
+        }]
+    );
+}
