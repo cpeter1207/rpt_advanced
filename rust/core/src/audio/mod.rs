@@ -11,7 +11,7 @@ pub use link_queue::{
     AudioSpan, LinkAudioConsumer, LinkAudioProducer, LinkAudioQueue, LinkQueueError, ReadSpan,
 };
 pub use morse::{MorseError, MorseRenderer};
-pub use playback::Playback;
+pub use playback::{Playback, PlaybackOutcome};
 pub use tone::{ToneError, ToneSequence};
 
 /// A bounded source that renders normalized native PCM into caller-owned storage.
@@ -31,8 +31,19 @@ pub enum PcmRead {
     Pending,
     /// The producer completed and all ring samples have been drained.
     Finished,
-    /// The producer failed before yielding playable PCM; no transmit-worker fallback exists.
+    /// The producer or ring failed; any earlier samples do not constitute successful completion.
     Failed,
+}
+
+/// Nonblocking selection of a producer-rendered Morse replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MorseSwitch {
+    /// The replacement generation is selected; its PCM may still be pending.
+    Selected,
+    /// Primary output is gated while its endpoint waits for off-audio retirement.
+    Pending,
+    /// This item has no usable Morse fallback.
+    Unavailable,
 }
 
 /// Reads already-converted native PCM without waiting or allocating.
@@ -45,9 +56,9 @@ pub trait PcmStreamReader: Send {
 
     /// Replace the active streamed source with its producer-rendered Morse fallback.
     ///
-    /// Returns false when this reader has no producer-owned fallback.
-    fn select_morse_fallback(&mut self) -> bool {
-        false
+    /// Pending selection must be retried without reading any primary samples.
+    fn select_morse_fallback(&mut self) -> MorseSwitch {
+        MorseSwitch::Unavailable
     }
 
     /// Request producer cancellation without waiting; the worker owns cleanup.

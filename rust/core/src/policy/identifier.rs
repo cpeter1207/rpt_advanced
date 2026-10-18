@@ -3,6 +3,7 @@
 #[derive(Clone, Copy, Default)]
 struct IdentifierState {
     satisfied_ms: u64,
+    retry_after_ms: u64,
     activity: bool,
     first_key_pending: bool,
 }
@@ -84,11 +85,21 @@ impl IdentifierPolicy {
                 now_ms - state.satisfied_ms >= rule.interval_ms
                     && (rule.regardless_of_activity || state.activity)
             };
-            if due && selected.is_none_or(|current| rule.priority > rules[current].priority) {
+            if due
+                && now_ms >= state.retry_after_ms
+                && selected.is_none_or(|current| rule.priority > rules[current].priority)
+            {
                 selected = Some(index);
             }
         }
         selected
+    }
+
+    /// Defer an unsuccessful attempt by its configured interval without satisfying any ID.
+    pub fn defer(&mut self, rules: &[IdentifierRule], selected: usize, now_ms: u64) {
+        if let Some((rule, state)) = rules.get(selected).zip(self.states.get_mut(selected)) {
+            state.retry_after_ms = now_ms.saturating_add(rule.interval_ms);
+        }
     }
 
     /// Mark a successfully completed rule and every strictly lower-priority rule satisfied.

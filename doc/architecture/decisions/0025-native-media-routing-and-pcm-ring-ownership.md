@@ -219,6 +219,35 @@ and retired away from the audio callback. A failed source falls through to the
 next configured source before producing audio; a failure after audio begins
 ends that source without restarting its fallback.
 
+Receive-interruption contract — 2026-10-18: qualified local receive or any
+connected peer's receive activity selects the complete Morse form of an
+admitted message, including an announcement or source-routed command reply.
+This includes peers not selected for local RF. Source-unkey admission,
+half-duplex and safety rules still apply; interruption never changes the
+destination. Courtesy-only cancellation and local DTMF regeneration are separate.
+
+The callback gates the primary stream before reading another sample. Its
+generation is cancelled, including buffered samples and converter history;
+late primary writes cannot enter the replacement stream. Retirement
+backpressure means pending Morse selection, not missing Morse. Selection is
+latched until the attempt ends, including across unkey/rekey and preparation
+delays. Starting a reused stream cannot clear that selection. The producer
+continues to own all rendering and reclamation.
+
+A Morse replacement publishes its generation before returning the old ring.
+The producer waits for the old consumer endpoint to be retired before opening
+the replacement. Producer EOF alone cannot remove a one-shot job: the reader
+must acknowledge completion or cancellation and return the endpoint. This keeps
+late primary publication and replacement requests from racing with job removal.
+
+Playback distinguishes active, successful, failed and cancelled attempts.
+Only successful completion satisfies an identifier or an announcement interval;
+partial output followed by failure is not success. A failed recurring item
+waits its existing configured interval before another attempt, without changing
+its last successful completion or satisfying lower-priority IDs. A zero-interval
+announcement waits for the next traffic release. This prevents a failed source
+from being resubmitted on every audio sample or holding silent PTT.
+
 Each audio worker has an **RF-signaling edge publisher** for its owned state:
 receive qualification/decoder status in local receive, and physical PTT and
 transmit signaling in transmit. Publishers perform only immediate prepared

@@ -6,7 +6,7 @@ use crate::{
     link::ring::{InboundConsumer, InboundPolicy, InboundProducer, InboundRing},
 };
 use rpt_advanced_core::{
-    audio::{MorseRenderer, PcmRead, PcmStreamReader, ToneSequence},
+    audio::{MorseRenderer, MorseSwitch, PcmRead, PcmStreamReader, ToneSequence},
     media::{MediaError, MediaSource, PreparedAudio, StationMediaSession},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -65,7 +65,6 @@ struct StreamReader {
     generation: u64,
     delay_remaining: u64,
     consumer: Option<(u64, InboundConsumer)>,
-    emitted_audio: bool,
     morse_available: bool,
     fallback_morse_pending: bool,
 }
@@ -91,7 +90,6 @@ impl StreamReader {
         while let Ok((generation, delay, consumer)) = self.ready.pop() {
             if generation == self.generation {
                 self.delay_remaining = delay;
-                self.emitted_audio = false;
                 self.consumer = Some((generation, consumer));
                 return;
             }
@@ -101,6 +99,23 @@ impl StreamReader {
                 self.consumer = Some((generation, consumer));
                 return;
             }
+        }
+    }
+    fn finish_read(&mut self, produced: usize) -> PcmRead {
+        let failed = self.control.failed.load(Ordering::Acquire) == self.generation;
+        if produced != 0 {
+            // Preserve valid partial PCM, but never acknowledge a failed stream as EOF.
+            if failed {
+                PcmRead::Samples(produced)
+            } else {
+                PcmRead::FinalSamples(produced)
+            }
+        } else if !self.retire_consumer() {
+            PcmRead::Pending
+        } else if failed {
+            PcmRead::Failed
+        } else {
+            PcmRead::Finished
         }
     }
 }
@@ -163,18 +178,9 @@ impl PcmStreamReader for StreamReader {
                 Ok(Some(sample)) => {
                     output[produced] = sample;
                     produced += 1;
-                    self.emitted_audio = true;
                 }
                 Ok(None) if self.control.completed.load(Ordering::Acquire) == self.generation => {
-                    return if produced == 0 {
-                        if self.retire_consumer() {
-                            PcmRead::Finished
-                        } else {
-                            PcmRead::Pending
-                        }
-                    } else {
-                        PcmRead::FinalSamples(produced)
-                    };
+                    return self.finish_read(produced);
                 }
                 Ok(None) => {
                     return if produced == 0 {
@@ -184,17 +190,10 @@ impl PcmStreamReader for StreamReader {
                     };
                 }
                 Err(_) => {
-                    return if produced != 0 {
-                        PcmRead::FinalSamples(produced)
-                    } else if self.retire_consumer() {
-                        if self.emitted_audio {
-                            PcmRead::Finished
-                        } else {
-                            PcmRead::Failed
-                        }
-                    } else {
-                        PcmRead::Pending
-                    };
+                    self.control
+                        .failed
+                        .store(self.generation, Ordering::Release);
+                    return self.finish_read(produced);
                 }
             }
         }
@@ -222,36 +221,41 @@ impl PcmStreamReader for StreamReader {
         }
     }
 
-    fn select_morse_fallback(&mut self) -> bool {
+    fn select_morse_fallback(&mut self) -> MorseSwitch {
         if !self.morse_available {
-            return false;
+            return MorseSwitch::Unavailable;
         }
         if self.generation == 0 {
             self.fallback_morse_pending = true;
-            return true;
+            return MorseSwitch::Selected;
         }
-        let previous = self.generation;
-        let next = previous.wrapping_add(1).max(1);
-        self.control.cancelled.store(previous, Ordering::Release);
-        if !self.retire_consumer() {
-            return false;
+        if self.control.fallback_morse.load(Ordering::Acquire) != self.generation {
+            let next = self.generation.wrapping_add(1).max(1);
+            self.generation = next;
+            self.delay_remaining = 0;
+            // Replacement invalidates the old producer without terminating this job.
+            // Publish before retirement; retries must keep the same Morse generation.
+            self.control.fallback_morse.store(next, Ordering::Relaxed);
+            self.control.requested.store(next, Ordering::Release);
         }
-        while let Ok((generation, _, consumer)) = self.ready.pop() {
-            if let Err(rtrb::PushError::Full((generation, consumer))) =
-                self.retired.push((generation, consumer))
-            {
-                self.consumer = Some((generation, consumer));
-                return false;
-            }
+        if self
+            .consumer
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation != self.generation)
+            && !self.retire_consumer()
+        {
+            return MorseSwitch::Pending;
         }
-        self.generation = next;
-        self.delay_remaining = 0;
-        self.emitted_audio = false;
-        self.control.completed.store(0, Ordering::Relaxed);
-        self.control.failed.store(0, Ordering::Relaxed);
-        self.control.fallback_morse.store(next, Ordering::Release);
-        self.control.requested.store(next, Ordering::Release);
-        true
+        self.acquire_consumer();
+        if self
+            .consumer
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation != self.generation)
+        {
+            MorseSwitch::Pending
+        } else {
+            MorseSwitch::Selected
+        }
     }
 }
 
@@ -341,7 +345,6 @@ impl StationMediaSession for StationSession {
             generation: 0,
             delay_remaining: 0,
             consumer: None,
-            emitted_audio: false,
             morse_available: false,
             fallback_morse_pending: false,
         }))
@@ -435,7 +438,6 @@ impl StationSession {
             generation: 0,
             delay_remaining: 0,
             consumer: None,
-            emitted_audio: false,
             morse_available,
             fallback_morse_pending: false,
         }))
@@ -475,7 +477,12 @@ fn worker_loop(
                 worked = true;
             }
             let requested = job.control.requested.load(Ordering::Acquire);
-            if requested != 0 && requested != job.handled {
+            // A cancelled producer can publish late. Retire its endpoint before
+            // starting the replacement so the bounded ready queue cannot overflow.
+            if requested != 0
+                && requested != job.handled
+                && !job.control.consumer_outstanding.load(Ordering::Acquire)
+            {
                 job.handled = requested;
                 run_job(job, requested, &file, &speech, &stopping, InboundRing::open);
                 worked = true;
@@ -871,8 +878,8 @@ fn one_shot_done(job: &WorkerJob) -> bool {
             job.control.abandoned.load(Ordering::Acquire)
         } else {
             job.control.requested.load(Ordering::Acquire) == job.handled
-                && (job.control.completed.load(Ordering::Acquire) == job.handled
-                    || job.control.cancelled.load(Ordering::Acquire) == job.handled)
+                // Producer EOF is not reader completion: a Morse switch may follow.
+                && job.control.cancelled.load(Ordering::Acquire) == job.handled
                 && !job.control.consumer_outstanding.load(Ordering::Acquire)
         }
 }

@@ -12,6 +12,7 @@ pub struct Announcement {
 pub(super) struct AnnouncementState {
     pub announcement: Announcement,
     pub satisfied: u64,
+    pub retry_after: u64,
     pub release_pending: bool,
 }
 
@@ -20,7 +21,9 @@ impl AnnouncementState {
         if self.announcement.interval_ms == 0 {
             self.release_pending
         } else {
-            now.saturating_sub(self.satisfied) >= super::samples(self.announcement.interval_ms)
+            now >= self.retry_after
+                && now.saturating_sub(self.satisfied)
+                    >= super::samples(self.announcement.interval_ms)
         }
     }
 }

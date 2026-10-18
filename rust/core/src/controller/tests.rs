@@ -33,6 +33,191 @@ fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
 }
 
+#[test]
+fn morse_global_receive_routes() {
+    for source in 0..4 {
+        for (local, linked, activity) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, true),
+        ] {
+            for before_first_sample in [false, true] {
+                let peer = crate::link::PeerSignals::new();
+                let id = Identifier {
+                    media: media(0.75, 100),
+                    interval_ms: 100000,
+                    priority: 1,
+                    first_key_only: false,
+                    regardless_of_activity: true,
+                    polite_maximum_wait_ms: None,
+                };
+                let (mut node, mut control) = NodeController::new(
+                    ControllerSettings {
+                        full_duplex: true,
+                        ..ControllerSettings::default()
+                    },
+                    vec![id],
+                    vec![Announcement {
+                        media: media(0.75, 100),
+                        interval_ms: 100000,
+                    }],
+                    CourtesySettings::default(),
+                )
+                .unwrap();
+                node.process_audio(false, false, &[], &mut [0.0; 12000]);
+                node.telemetry.active = Some(match source {
+                    0 => telemetry::Source::Identifier(0),
+                    1 => telemetry::Source::Announcement(0),
+                    _ => {
+                        let reply = (source == 3).then(|| peer.reply_target());
+                        assert!(control.queue_prepared_status(media(0.75, 100).reply_to(reply)));
+                        node.telemetry.poll_status();
+                        node.telemetry.start_status();
+                        telemetry::Source::Status
+                    }
+                });
+                let render = |node: &mut NodeController, receiving, linked, active| {
+                    let mut radio = [0.0];
+                    let mut parrot = [0.0];
+                    let mut parrot_active = false;
+                    let mut replies = [PeerReplySample::default()];
+                    node.process_audio_with_parrot(
+                        receiving,
+                        linked,
+                        active,
+                        &[],
+                        &mut radio,
+                        ParrotOutput {
+                            samples: &mut parrot,
+                            active: &mut parrot_active,
+                            replies: Some(&mut replies),
+                            regeneration: None,
+                        },
+                    );
+                    if source == 3 {
+                        assert_eq!(radio, [0.0]);
+                        assert_eq!(replies[0].target, peer.reply_target().identity());
+                        replies[0].sample
+                    } else {
+                        radio[0]
+                    }
+                };
+                if !before_first_sample {
+                    assert_eq!(render(&mut node, false, false, false), 0.75);
+                }
+                assert_eq!(
+                    render(&mut node, local, linked, activity),
+                    0.0,
+                    "source {source}, receive {local}/{linked}/{activity}, initial {before_first_sample}"
+                );
+                let second = render(&mut node, false, false, false);
+                assert!(
+                    second > 0.0 && second < 0.5,
+                    "Morse must stay latched after unkey"
+                );
+                assert!(
+                    render(&mut node, local, linked, activity) > second,
+                    "another receive edge must not restart Morse"
+                );
+            }
+        }
+    }
+}
+
+struct FailedMedia;
+impl crate::audio::PcmStreamReader for FailedMedia {
+    fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+        crate::audio::PcmRead::Failed
+    }
+}
+
+#[test]
+fn playback_failure_does_not_satisfy_identifier() {
+    let ids = [1, 2]
+        .into_iter()
+        .map(|priority| Identifier {
+            media: PreparedMedia::new_stream(Box::new(FailedMedia)).unwrap(),
+            interval_ms: 1,
+            priority,
+            first_key_only: false,
+            regardless_of_activity: true,
+            polite_maximum_wait_ms: None,
+        })
+        .collect();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        ids,
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio(false, false, &[], &mut [0.0; 50]);
+    assert_eq!(node.satisfied, [0, 0]);
+    assert!(
+        node.ids.iter().all(|id| id.media.0.is_finished()),
+        "a failed high-priority ID must not starve another due ID"
+    );
+}
+
+#[test]
+fn playback_failure_retries_on_interval_without_silent_ptt() {
+    struct CountedFailure(Arc<std::sync::atomic::AtomicUsize>);
+    impl crate::audio::PcmStreamReader for CountedFailure {
+        fn start(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+            crate::audio::PcmRead::Failed
+        }
+    }
+    for announcement in [false, true] {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let media =
+            PreparedMedia::new_stream(Box::new(CountedFailure(Arc::clone(&attempts)))).unwrap();
+        let (ids, announcements) = if announcement {
+            (
+                vec![],
+                vec![Announcement {
+                    media,
+                    interval_ms: 10,
+                }],
+            )
+        } else {
+            (
+                vec![Identifier {
+                    media,
+                    interval_ms: 10,
+                    priority: 1,
+                    first_key_only: false,
+                    regardless_of_activity: true,
+                    polite_maximum_wait_ms: None,
+                }],
+                vec![],
+            )
+        };
+        let (mut node, _) = NodeController::new(
+            ControllerSettings::default(),
+            ids,
+            announcements,
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.process_audio(false, false, &[], &mut [0.0; 481]);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        node.process_audio(false, false, &[], &mut [0.0; 479]);
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            1,
+            "failed media must not retry per sample"
+        );
+        assert!(!node.keyed, "failed media must release demand");
+        assert!(node.satisfied.iter().all(|time| *time == 0));
+        assert!(node.announcements.iter().all(|a| a.satisfied == 0));
+        node.process_audio(false, false, &[], &mut [0.0]);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+}
+
 fn regenerate(
     node: &mut NodeController,
     receiving: bool,
@@ -236,6 +421,9 @@ struct PendingMedia;
 impl crate::audio::PcmStreamReader for PendingMedia {
     fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
         crate::audio::PcmRead::Pending
+    }
+    fn select_morse_fallback(&mut self) -> crate::audio::MorseSwitch {
+        crate::audio::MorseSwitch::Pending
     }
 }
 

@@ -119,7 +119,10 @@ fn test_pcm_stream_reports_partial_and_finished_reads_and_restarts_fallback() {
     let mut output = [0.0; 1];
     assert_eq!(stream.render(&mut output), PcmRead::Samples(1));
     assert_eq!(output[0], 0.25);
-    assert!(stream.select_morse_fallback());
+    assert_eq!(
+        stream.select_morse_fallback(),
+        crate::audio::MorseSwitch::Selected
+    );
     assert_eq!(stream.render(&mut output), PcmRead::FinalSamples(1));
     assert_eq!(output[0], 0.75);
     assert_eq!(stream.render(&mut output), PcmRead::Finished);

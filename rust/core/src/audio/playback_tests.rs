@@ -1,5 +1,5 @@
-use super::Playback;
-use crate::audio::{PcmRead, PcmStreamReader};
+use super::{Playback, PlaybackOutcome};
+use crate::audio::{MorseSwitch, PcmRead, PcmStreamReader};
 use std::collections::VecDeque;
 
 struct Stream(VecDeque<Option<Vec<f32>>>);
@@ -44,9 +44,9 @@ impl PcmStreamReader for ProducerFallbackStream {
         output.fill(if self.0 { 0.75 } else { 0.25 });
         PcmRead::Samples(output.len())
     }
-    fn select_morse_fallback(&mut self) -> bool {
+    fn select_morse_fallback(&mut self) -> MorseSwitch {
         self.0 = true;
-        true
+        MorseSwitch::Selected
     }
 }
 
@@ -63,6 +63,7 @@ fn playback_reads_only_streamed_pcm() {
     assert_eq!(playback.render(false, &mut output), 2);
     assert_eq!(&output[..2], &[0.25, 0.5]);
     assert!(!playback.is_finished());
+    assert_eq!(playback.outcome(), PlaybackOutcome::Active);
 
     assert_eq!(playback.render(false, &mut output), 0);
     assert!(playback.waiting_for_stream());
@@ -73,6 +74,7 @@ fn playback_reads_only_streamed_pcm() {
     assert!(!playback.waiting_for_stream());
     assert_eq!(playback.render(false, &mut output), 0);
     assert!(playback.is_finished());
+    assert_eq!(playback.outcome(), PlaybackOutcome::Succeeded);
 }
 
 #[test]
@@ -103,6 +105,7 @@ fn failed_stream_ends_without_transmit_worker_fallback_generation() {
     assert_eq!(playback.render(false, &mut output), 0);
     assert_eq!(output, [0.0; 8]);
     assert!(playback.is_finished());
+    assert_eq!(playback.outcome(), PlaybackOutcome::Failed);
 }
 
 #[test]
@@ -113,6 +116,7 @@ fn final_partial_samples_complete_playback_without_a_silent_followup_block() {
     assert_eq!(playback.render(false, &mut output), 3);
     assert_eq!(&output[..3], &[0.1, 0.2, 0.3]);
     assert!(playback.is_finished());
+    assert_eq!(playback.outcome(), PlaybackOutcome::Succeeded);
 }
 
 #[test]
@@ -121,6 +125,7 @@ fn stream_can_be_retired_by_its_non_audio_owner() {
     let mut playback = Playback::new_stream(Box::new(stream));
     assert!(playback.take_stream().is_some());
     assert!(playback.is_finished());
+    assert_eq!(playback.outcome(), PlaybackOutcome::Cancelled);
 }
 
 #[test]
@@ -130,6 +135,7 @@ fn receive_without_a_fallback_stops_and_restart_keeps_that_policy() {
 
     assert_eq!(playback.render(true, &mut output), 0);
     assert!(playback.is_finished());
+    assert_eq!(playback.outcome(), PlaybackOutcome::Cancelled);
     assert_eq!(playback.render(false, &mut output), 0);
 
     playback.restart(true);
@@ -176,9 +182,9 @@ fn absent_stream_is_started_as_finished_without_a_cancel_callback() {
     let mut playback = Playback {
         stream: None,
         stream_started: false,
-        stream_fallback: false,
+        morse: None,
         waiting_for_stream: false,
-        finished: false,
+        outcome: PlaybackOutcome::Active,
     };
     let mut output = [1.0; 2];
 

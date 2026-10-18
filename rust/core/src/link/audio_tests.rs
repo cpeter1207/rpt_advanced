@@ -402,7 +402,7 @@ fn ended_peer_reply_never_reaches_same_number_replacement() {
 }
 
 #[test]
-fn addressed_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback() {
+fn addressed_morse_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback() {
     use crate::controller::{MorseSettings, PreparedMedia};
     for fallback in [false, true] {
         let (mut peer, signal, mut output) = peer_with_kerchunk("200", 4, 0);
@@ -425,7 +425,7 @@ fn addressed_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback() {
             CourtesySettings::default(),
         )
         .unwrap();
-        let media = PreparedMedia::new(Some(vec![0.4; 2]), "", MorseSettings::default())
+        let media = PreparedMedia::new(Some(vec![0.4; 2]), "E", MorseSettings::default())
             .unwrap()
             .reply_to(Some(signal.reply_target()));
         assert!(control.queue_prepared_status(media));
@@ -443,9 +443,15 @@ fn addressed_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback() {
         dispatcher.dispatch(1);
         let mut sent = [0.0; 4];
         assert_eq!(output.read(&mut sent), 0);
-        assert_eq!(sent, [0.4, 0.4, 0.0, 0.0]);
+        let mut expected = [0.0; 4];
+        let mut morse = crate::audio::MorseRenderer::new("E", 20, 800.0, -6).unwrap();
+        assert_eq!(
+            crate::audio::AudioSource::render(&mut morse, &mut expected),
+            4
+        );
+        assert_eq!(sent, expected);
         assert_eq!(radio, [0.0; 4]);
-        assert_eq!(control.reclaim().count(), 1);
+        assert_eq!(control.reclaim().count(), 0, "Morse reply is still playing");
     }
 }
 

@@ -10,7 +10,9 @@
 
 **Spec:** [Approved site-monitoring design](../specs/2026-10-17-site-monitoring-and-message-macros-design.md), approved 2026-10-17, including all-message receive interruption.
 
-**Status:** Implementation plan awaiting review; no implementation or deployment authorized by this document.
+**Status:** Approved for native implementation 2026-10-18. M1 implemented and
+targeted checks passed; deployment and manual validation await separate approval.
+M2 and later tasks have not started.
 
 ## Global Constraints
 
@@ -68,11 +70,11 @@ New types below are private Rust product interfaces, not public C ABI additions.
 
 **Interfaces:** Keep `PcmStreamReader::{start,render,cancel}`. Replace the internal Boolean fallback result with `MorseSwitch::{Selected,Pending,Unavailable}` so retirement backpressure is not treated as missing Morse. Add `PlaybackOutcome::{Active,Succeeded,Failed,Cancelled}` and `Playback::outcome(&self) -> PlaybackOutcome`. Existing callers of `is_finished` may use termination for cleanup, but only `Succeeded` satisfies an ID or tail.
 
-- [ ] Write `morse_global_receive_routes`, a table-driven test covering local/peer receive, local/peer-routed status, IDs and announcements, initial activity and mid-playback activity. Assert no primary samples after the boundary, preserved reply target, and no restart on subsequent key/unkey changes.
-- [ ] Write product regressions `morse_reused_stream_restart`, `morse_pending_retirement_gates_primary`, and `morse_late_primary_writes_rejected`. Reuse fixture streams; assert retired/current converter history cannot leak, and a second invocation started in receive stays Morse. Add `playback_failure_does_not_satisfy_identifier`.
-- [ ] Run the failing named filters with `cargo test --locked -p rpt-advanced-core --lib morse_`, `... playback_failure_`, and `cargo test --locked -p rptadv-product --lib morse_`. Confirm assertion failures rather than missing libraries.
-- [ ] Use existing all-source receive state, not RF-selected link state, for message form selection. Keep parrot/courtesy cancellation separate. Reuse the ready/retired generation handoff; pending retirement gates primary output until retry succeeds. Ensure `start` preserves selection across reused generations. Stop producer failure from becoming successful EOF. Render/retire remains bounded and allocation-free.
-- [ ] Re-run the named filters and the existing `audio::playback::tests`, `controller::tests`, and `media::worker::tests` suites. Assert successful sample tails still drain and failures release demand without satisfying IDs. Update Rustdoc and ADR 0025's cancellation contract; commit the focused correction.
+- [x] Write `morse_global_receive_routes`, a table-driven test covering local/peer receive, local/peer-routed status, IDs and announcements, initial activity and mid-playback activity. Assert no primary samples after the boundary, preserved reply target, and no restart on subsequent key/unkey changes.
+- [x] Write product regressions `morse_reused_stream_restart`, `morse_pending_retirement_gates_primary`, and `morse_late_primary_writes_rejected`. Reuse fixture streams; assert retired/current converter history cannot leak, and a second invocation started in receive stays Morse. Add `playback_failure_does_not_satisfy_identifier`.
+- [x] Run the failing named filters with `cargo test --locked -p rpt-advanced-core --lib morse_`, `... playback_failure_`, and `cargo test --locked -p rptadv-product --lib morse_`. Confirm assertion failures rather than missing libraries.
+- [x] Use existing all-source receive state, not RF-selected link state, for message form selection. Keep parrot/courtesy cancellation separate. Reuse the ready/retired generation handoff; pending retirement gates primary output until retry succeeds. Ensure `start` preserves selection across reused generations. Stop producer failure from becoming successful EOF. Render/retire remains bounded and allocation-free.
+- [x] Re-run the named filters and the existing `audio::playback::tests`, `controller::tests`, and `media::worker::tests` suites. Assert successful sample tails still drain and failures release demand without satisfying IDs. Update Rustdoc and ADR 0025's cancellation contract; commit the focused correction.
 - [ ] Before dependent live validation, request separate deployment approval. Reproduce local and linked receive interruption on 524950 and obtain confirmation; this plan itself grants neither RF activity nor a link connection. Automated/fake-source testing may proceed without a node.
 
 ### M2: Compile ordered content and additive message catalogs

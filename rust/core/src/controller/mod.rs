@@ -6,7 +6,10 @@ mod parrot;
 mod telemetry;
 mod timeout;
 
-use crate::policy::{DuplexPolicy, IdentifierPolicy, IdentifierRule};
+use crate::{
+    audio::PlaybackOutcome,
+    policy::{DuplexPolicy, IdentifierPolicy, IdentifierRule},
+};
 pub use announcement::Announcement;
 use announcement::AnnouncementState;
 use courtesy::CourtesyPlanner;
@@ -224,6 +227,7 @@ impl NodeController {
                     .map(|announcement| AnnouncementState {
                         announcement,
                         satisfied: 0,
+                        retry_after: 0,
                         release_pending: false,
                     })
                     .collect(),
@@ -701,11 +705,10 @@ impl NodeController {
         let mut made = 0;
         let mut waiting_for_media = false;
         if let Some(playback) = playback {
-            let interrupt = (!peer_status
-                && receive
+            let interrupt = ((receive || source_activity)
                 && matches!(
                     rendered_source,
-                    Some(Source::Identifier(_) | Source::Status)
+                    Some(Source::Identifier(_) | Source::Announcement(_) | Source::Status)
                 ))
                 || (source_activity && rendered_source == Some(Source::Parrot));
             if (if peer_status {
@@ -720,9 +723,10 @@ impl NodeController {
             }
             waiting_for_media = playback.waiting_for_stream();
             if playback.is_finished() {
+                let outcome = playback.outcome();
                 self.telemetry.active = None;
                 match rendered_source {
-                    Some(Source::Identifier(index)) => {
+                    Some(Source::Identifier(index)) if outcome == PlaybackOutcome::Succeeded => {
                         self.identifiers.complete(&self.rules, index, self.now);
                         self.ids
                             .get(index)
@@ -738,10 +742,19 @@ impl NodeController {
                                 }
                             });
                     }
-                    Some(Source::Announcement(index)) => {
+                    Some(Source::Announcement(index)) if outcome == PlaybackOutcome::Succeeded => {
                         self.announcements.get_mut(index).into_iter().for_each(|a| {
                             a.satisfied = self.now;
                         });
+                    }
+                    Some(Source::Identifier(index)) => {
+                        self.identifiers.defer(&self.rules, index, self.now);
+                    }
+                    Some(Source::Announcement(index)) => {
+                        if let Some(a) = self.announcements.get_mut(index) {
+                            a.retry_after =
+                                self.now.saturating_add(samples(a.announcement.interval_ms));
+                        }
                     }
                     Some(Source::Status) => self.telemetry.finish_status(),
                     Some(Source::Parrot) => self.telemetry.finish_parrot(),

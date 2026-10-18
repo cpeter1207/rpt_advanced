@@ -559,6 +559,7 @@ struct TestPcmStream {
 impl PcmStreamReader for TestPcmStream {
     fn start(&mut self) {
         self.offset = 0;
+        self.use_fallback = false;
     }
     fn render(&mut self, output: &mut [f32]) -> PcmRead {
         let source = if self.use_fallback {
@@ -577,10 +578,14 @@ impl PcmStreamReader for TestPcmStream {
             PcmRead::Samples(count)
         }
     }
-    fn select_morse_fallback(&mut self) -> bool {
+    fn select_morse_fallback(&mut self) -> crate::audio::MorseSwitch {
         self.use_fallback = true;
         self.offset = 0;
-        !self.fallback.is_empty()
+        if self.fallback.is_empty() {
+            crate::audio::MorseSwitch::Unavailable
+        } else {
+            crate::audio::MorseSwitch::Selected
+        }
     }
 }
 
