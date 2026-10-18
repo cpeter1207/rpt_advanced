@@ -219,6 +219,18 @@ and retired away from the audio callback. A failed source falls through to the
 next configured source before producing audio; a failure after audio begins
 ends that source without restarting its fallback.
 
+Ordered composition contract — 2026-10-18: a program retains one playback
+generation, route, Morse latch and completion across all segments. The same
+producer opens each segment in order. A playing consumer and at most one
+prepared successor use the existing bounded ready/retired handoff. Waiting for
+the next segment is pending playback, never successful EOF or a PTT release.
+Each segment has an accepted-source-duration budget at the native sample rate;
+filter-delay padding is drained but not presented as message content. Empty
+FIFO occupancy alone is not EOF because the converter can retain samples.
+All endpoint and provider reclamation stays on the producer. Receive replaces
+the complete primary sequence with its complete Morse sequence, dropping
+decorative tones and files while retaining configured Morse substitutes.
+
 Receive-interruption contract — 2026-10-18: qualified local receive or any
 connected peer's receive activity selects the complete Morse form of an
 admitted message, including an announcement or source-routed command reply.

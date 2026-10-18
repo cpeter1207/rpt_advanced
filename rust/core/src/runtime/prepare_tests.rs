@@ -41,14 +41,15 @@ struct Session {
     fail_start: bool,
 }
 impl StationMediaSession for Session {
-    fn register(
+    fn register_program(
         &mut self,
-        source: MediaSource,
+        program: crate::media::MediaProgram,
+        _: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
         if self.fail_register {
             return Err(MediaError::Io);
         }
-        self.sources.lock().unwrap().push(source);
+        self.sources.lock().unwrap().extend(program.primary);
         Ok(Box::new(StreamReader {
             samples: vec![0.5, 0.25],
             offset: 0,

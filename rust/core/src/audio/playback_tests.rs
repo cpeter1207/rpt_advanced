@@ -184,6 +184,7 @@ fn absent_stream_is_started_as_finished_without_a_cancel_callback() {
         stream_started: false,
         morse: None,
         waiting_for_stream: false,
+        output_started: false,
         outcome: PlaybackOutcome::Active,
     };
     let mut output = [1.0; 2];

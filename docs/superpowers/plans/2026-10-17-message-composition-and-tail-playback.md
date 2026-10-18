@@ -14,7 +14,9 @@
 passed targeted checks and approved native installation on 524950. The operator
 confirmed the local interruption/repeat/courtesy test. Peer-source behavior has
 automated coverage, not a new live-link test. M2 is implemented and targeted tests,
-Clippy, formatting and Rustdoc pass. M3 is in progress; later tasks remain planned.
+Clippy, formatting and Rustdoc pass. M3 is implemented with targeted producer,
+ring, controller, runtime, Clippy, formatting and Rustdoc checks passing. M4 is
+starting; later tasks remain planned. The full hosted gate has not run.
 No further deployment is implied by implementation approval.
 
 ## Global Constraints
@@ -110,11 +112,11 @@ assert_eq!(rendered_node, "node,5,2,4,9,5,0");
 
 **Interfaces:** `MediaProgram { primary: Vec<MediaSource>, morse: Vec<MorseSource> }`; `MediaProgram::single(source: MediaSource) -> Self`. Add `StationMediaSession::register_program(&mut self, program: MediaProgram, one_shot: bool) -> Result<Box<dyn PcmStreamReader>, MediaError>` and make single-source registration use the same implementation. `PreparedMedia` and its route remain one item for the whole program.
 
-- [ ] Write `composition_stream_one_completion`, `composition_segment_rates_keep_final_samples`, `composition_file_success_keeps_following_macro`, and `composition_receive_restarts_full_morse`. Use fixture files at 22050 Hz and generated media at 48000 Hz; assert ordered output, all final samples, and exactly one successful completion. Inject pending producer work between segments; PTT must not drop between admitted segments.
-- [ ] Assert attention tones occur before/between/after messages while idle; ordinary speech failure preserves those positions. Forced Morse restarts the complete message and excludes decorative tones/files but retains each media segment's Morse substitute.
-- [ ] Run `cargo test --locked -p rptadv-product --lib composition_`; observe failure before implementation.
-- [ ] Iterate segments in the existing station producer. Reuse provider streams and shared-ring conversion for each source rate. Drain a completed segment before handing off its successor; do not report item EOF between segments, drop resampler tails, or apply gain twice. The reader stays one logical stream, with bounded ready/retired handoff and no callback destruction. On receive cancellation discard the old sequence rather than draining it audibly. No new provider ABI, converter, or renderer is expected.
-- [ ] Run the new filters plus existing worker/ring tests. Cover file and speech failure before/after samples, no-Morse content, cancellation, retirement backpressure, and reused programs. Update Rustdoc and commit.
+- [x] Write `composition_stream_one_completion`, `composition_segment_rates_keep_final_samples`, `composition_file_success_keeps_following_macro`, and `composition_receive_restarts_full_morse`. Use fixture files at 22050 Hz and generated media at 48000 Hz; assert ordered output, all final samples, and exactly one successful completion. Inject pending producer work between segments; PTT must not drop between admitted segments.
+- [x] Assert attention tones occur before/between/after messages while idle; ordinary speech failure preserves those positions. Forced Morse restarts the complete message and excludes decorative tones/files but retains each media segment's Morse substitute.
+- [x] Run `cargo test --locked -p rptadv-product --lib composition_`; observe failure before implementation.
+- [x] Iterate segments in the existing station producer. Reuse provider streams and shared-ring conversion for each source rate. Drain a completed segment before handing off its successor; do not report item EOF between segments, drop resampler tails, or apply gain twice. The reader stays one logical stream, with bounded ready/retired handoff and no callback destruction. On receive cancellation discard the old sequence rather than draining it audibly. No new provider ABI, converter, or renderer is expected.
+- [x] Run the new filters plus existing worker/ring tests. Cover file and speech failure before/after samples, no-Morse content, cancellation, retirement backpressure, and reused programs. Update Rustdoc and commit.
 
 ### M4: Resolve values per attempt and expose read-only macro commands
 

@@ -2,9 +2,7 @@ use super::*;
 use crate::{
     command::LinkAction,
     config::{ConfigDocument, ResolvedNodeSettings},
-    media::{
-        FileRequest, MediaError, MediaSource, PreparedAudio, SpeechRequest, StationMediaSession,
-    },
+    media::{FileRequest, MediaError, PreparedAudio, SpeechRequest, StationMediaSession},
     schedule::{CivilTime, Weekday},
 };
 use std::sync::{
@@ -30,12 +28,15 @@ impl crate::audio::PcmStreamReader for TestPcm {
 }
 struct TestStation(Option<Arc<Mutex<Vec<String>>>>);
 impl StationMediaSession for TestStation {
-    fn register(
+    fn register_program(
         &mut self,
-        source: MediaSource,
+        program: crate::media::MediaProgram,
+        _: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
-        if let (Some(messages), Some(speech)) = (&self.0, source.speech) {
-            messages.lock().unwrap().push(speech.text);
+        for source in program.primary {
+            if let (Some(messages), Some(speech)) = (&self.0, source.speech) {
+                messages.lock().unwrap().push(speech.text);
+            }
         }
         Ok(Box::new(TestPcm(0)))
     }
@@ -510,9 +511,10 @@ impl crate::audio::PcmStreamReader for PendingStream {
 
 struct StreamingStation(Arc<AtomicUsize>);
 impl StationMediaSession for StreamingStation {
-    fn register(
+    fn register_program(
         &mut self,
-        _: MediaSource,
+        _: crate::media::MediaProgram,
+        _: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
         Ok(Box::new(PendingStream))
     }
@@ -1802,9 +1804,10 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
     struct RejectingMedia;
     struct RejectingStation;
     impl StationMediaSession for RejectingStation {
-        fn register(
+        fn register_program(
             &mut self,
-            _: MediaSource,
+            _: crate::media::MediaProgram,
+            _: bool,
         ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
             Err(MediaError::Io)
         }

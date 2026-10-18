@@ -704,6 +704,7 @@ impl NodeController {
         let mut telemetry_sample = [0.0];
         let mut made = 0;
         let mut waiting_for_media = false;
+        let mut continuing_media = false;
         if let Some(playback) = playback {
             let interrupt = ((receive || source_activity)
                 && matches!(
@@ -722,6 +723,9 @@ impl NodeController {
                 playback.render(interrupt, &mut []);
             }
             waiting_for_media = playback.waiting_for_stream();
+            // Preparation alone does not key. Once audible, a composition owns
+            // PTT through pending segment boundaries until completion or failure.
+            continuing_media = playback.has_output() && !playback.is_finished();
             if playback.is_finished() {
                 let outcome = playback.outcome();
                 self.telemetry.active = None;
@@ -779,6 +783,7 @@ impl NodeController {
         let transmit = regeneration.is_some()
             || other
             || telemetry_audio
+            || (continuing_media && !peer_status)
             || (self.telemetry.active.is_some()
                 && !peer_status
                 && !waiting_for_media

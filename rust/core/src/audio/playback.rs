@@ -21,6 +21,7 @@ pub struct Playback {
     stream_started: bool,
     morse: Option<MorseSwitch>,
     waiting_for_stream: bool,
+    output_started: bool,
     outcome: PlaybackOutcome,
 }
 
@@ -32,6 +33,7 @@ impl Playback {
             stream_started: false,
             morse: None,
             waiting_for_stream: false,
+            output_started: false,
             outcome: PlaybackOutcome::Active,
         }
     }
@@ -80,10 +82,12 @@ impl Playback {
             .map_or(PcmRead::Finished, |stream| stream.render(output))
         {
             PcmRead::Samples(count) => {
+                self.output_started |= count != 0;
                 self.waiting_for_stream = false;
                 count.min(output.len())
             }
             PcmRead::FinalSamples(count) => {
+                self.output_started |= count != 0;
                 // The samples are already copied; release the producer without
                 // requiring another read of this now-terminal playback item.
                 self.finish(PlaybackOutcome::Succeeded);
@@ -108,6 +112,7 @@ impl Playback {
     pub fn restart(&mut self, receiving: bool) {
         self.outcome = PlaybackOutcome::Active;
         self.waiting_for_stream = false;
+        self.output_started = false;
         self.morse = None;
         self.stream_started = false;
         if receiving {
@@ -134,6 +139,12 @@ impl Playback {
     #[must_use]
     pub const fn waiting_for_stream(&self) -> bool {
         self.waiting_for_stream
+    }
+
+    /// Whether this attempt has emitted PCM; pending successors retain the same attempt.
+    #[must_use]
+    pub const fn has_output(&self) -> bool {
+        self.output_started
     }
 
     /// Whether the selected source is an active producer-backed stream.

@@ -499,6 +499,64 @@ fn pending_media_does_not_key_transmitter_while_producer_starts() {
 }
 
 #[test]
+fn composition_pending_between_segments_retains_ptt_only_after_audio_starts() {
+    struct Gapped {
+        phase: Arc<std::sync::atomic::AtomicUsize>,
+        started: bool,
+    }
+    impl crate::audio::PcmStreamReader for Gapped {
+        fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+            match self.phase.load(Ordering::Acquire) {
+                1 if !self.started => {
+                    self.started = true;
+                    output[0] = 0.25;
+                    crate::audio::PcmRead::Samples(1)
+                }
+                2 => {
+                    output[0] = 0.5;
+                    crate::audio::PcmRead::FinalSamples(1)
+                }
+                _ => crate::audio::PcmRead::Pending,
+            }
+        }
+    }
+    let phase = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let id = Identifier {
+        media: PreparedMedia::new_stream(Box::new(Gapped {
+            phase: Arc::clone(&phase),
+            started: false,
+        }))
+        .unwrap(),
+        interval_ms: 100_000,
+        priority: 1,
+        first_key_only: false,
+        regardless_of_activity: true,
+        polite_maximum_wait_ms: None,
+    };
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![id],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 4_800_000;
+    node.process_audio(false, false, &[], &mut [0.0; 64]);
+    assert!(!node.keyed, "preparation alone must not key");
+    phase.store(1, Ordering::Release);
+    node.process_audio(false, false, &[], &mut [0.0; 1]);
+    assert!(node.keyed);
+    node.process_audio(false, false, &[], &mut [0.0; 3_000]);
+    assert!(
+        node.keyed,
+        "one admitted composition must not unkey between segments"
+    );
+    phase.store(2, Ordering::Release);
+    node.process_audio(false, false, &[], &mut [0.0; 3_000]);
+    assert!(!node.keyed);
+}
+
+#[test]
 fn activity_snapshot_exposes_current_receive_state_and_bounded_status_capacity() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings::default(),
