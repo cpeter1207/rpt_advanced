@@ -19,7 +19,9 @@ ring, controller, runtime, Clippy, formatting and Rustdoc checks passing. M4 is
 implemented with targeted command/configuration, runtime, allocation, host,
 Clippy, formatting, and Rustdoc checks passing. M5 is implemented; targeted tail,
 controller, configuration, runtime, producer, Clippy, formatting, and Rustdoc
-checks pass. M6 shared-host integration remains. The full hosted gate has not run.
+checks pass. M6 shared-host integration and targeted developer checks pass.
+Final combined review and separately authorized PR preparation remain. The full
+hosted gate has not run.
 No further deployment is implied by implementation approval.
 
 ## Global Constraints
@@ -154,14 +156,19 @@ allocation guard pass. Existing periodic announcements retain their timing.
 
 **Interfaces:** `ResolvedTailSettings::resolve(document: &ConfigDocument, node: &NodeId, name: &str) -> Result<Resolution<Self>, ConfigError>` owns `content`, `interval_ms`, `delay_ms`, and inherited media settings. `TailState` records original traffic hang deadline, optional post-unkey delay deadline, pending/admitted attempt, and last successful completion. Extend the existing `Source` discriminator with `Tail(usize)`; use the same playback owner and arbitration, not another audio engine.
 
-- [ ] Write `tail_zero_and_positive_delay`: traffic ends at 1000 ms, hang=1000 ms; delay 0 starts tail at 2000 ms without unkey, delay 250 unkeys at 2000 ms and rekeys at 2250 ms. Use partition-independent fake sample clocks, no wall sleeps.
-- [ ] Write `tail_id_deadline_precedence` covering expiry before hang, exactly at hang, during delay, and during tail. Assert original hang/delay deadlines do not shift; an expired ID interrupts tail, which restarts with retained snapshot/Morse latch. Normal polite IDs wait for hang; pending polite ID follows tail if not expired.
-- [ ] Write `tail_receive_pending_vs_playing`: receive before start cancels the release opportunity; receive after start switches the admitted item to full Morse. Test multiple peers, new release, multiple tails in configuration order, and no false completion on interruption/failure. Each named tail applies its own delay and cannot overtake an earlier eligible tail; a controller-generated unkey starts no new release opportunity.
-- [ ] Write `tail_nonrecursive_cooldown`: interval 0 is once per traffic release; interval 1800000 ms is eligible only on a later release after a successful play and never keys from prolonged idle. IDs, courtesy, tails, and announcements cannot manufacture tail opportunities. Existing periodic announcements remain unchanged.
-- [ ] Run core `tail_` filters red. Implement the smallest explicit timing state in the existing controller, separating traffic hang origin from telemetry media activity. Use M1 success/Morse outcomes and M4 attempt handoff. Preserve safety/half-duplex and existing courtesy timing.
-- [ ] Run `tail_`, `polite_`, announcement, timeout, and variable-frame partition tests green. Document the scheduling state transitions in Rustdoc; commit.
+- [x] Write `tail_zero_and_positive_delay`: traffic ends at 1000 ms, hang=1000 ms; delay 0 starts tail at 2000 ms without unkey, delay 250 unkeys at 2000 ms and rekeys at 2250 ms. Use partition-independent fake sample clocks, no wall sleeps.
+- [x] Write `tail_id_deadline_precedence` covering expiry before hang, exactly at hang, during delay, and during tail. Assert original hang/delay deadlines do not shift; an expired ID interrupts tail, which restarts with retained snapshot/Morse latch. Normal polite IDs wait for hang; pending polite ID follows tail if not expired.
+- [x] Write `tail_receive_pending_vs_playing`: receive before start cancels the release opportunity; receive after start switches the admitted item to full Morse. Test multiple peers, new release, multiple tails in configuration order, and no false completion on interruption/failure. Each named tail applies its own delay and cannot overtake an earlier eligible tail; a controller-generated unkey starts no new release opportunity.
+- [x] Write `tail_nonrecursive_cooldown`: interval 0 is once per traffic release; interval 1800000 ms is eligible only on a later release after a successful play and never keys from prolonged idle. IDs, courtesy, tails, and announcements cannot manufacture tail opportunities. Existing periodic announcements remain unchanged.
+- [x] Run core `tail_` filters red. Implement the smallest explicit timing state in the existing controller, separating traffic hang origin from telemetry media activity. Use M1 success/Morse outcomes and M4 attempt handoff. Preserve safety/half-duplex and existing courtesy timing.
+- [x] Run `tail_`, `polite_`, announcement, timeout, and variable-frame partition tests green. Document the scheduling state transitions in Rustdoc; commit.
 
 ### M6: Verify the complete slice and prepare the review
+
+Local integration is verified for both host bindings through the shared product,
+including receive-driven Morse and producer restart. Existing core tests cover
+exact-peer routing and callback allocation. Before-PR operator documentation,
+fast push preflight, and the hosted gate remain deferred until authorized.
 
 **Files:** Affected developer docs, `WISHLIST.md`, `doc/architecture/{README.md,decisions/0009-scheduled-actions-and-macros.md,decisions/0023-unified-control-and-dtmf-policy.md,decisions/0025-native-media-routing-and-pcm-ring-ownership.md}`; before PR, `doc/configuration.md`, relevant `man/` pages and shipped examples.
 

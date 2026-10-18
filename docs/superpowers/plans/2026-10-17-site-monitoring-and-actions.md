@@ -10,7 +10,9 @@
 
 **Spec:** [Approved site-monitoring design](../specs/2026-10-17-site-monitoring-and-message-macros-design.md), approved 2026-10-17. Message rendering uses the [companion implementation plan](2026-10-17-message-composition-and-tail-playback.md).
 
-**Status:** Implementation plan awaiting review. No node changes or deployment authorized by this document.
+**Status:** Native implementation approved 2026-10-18. The message prerequisite
+is locally implemented and tested. S1 is starting. No node changes or deployment
+are authorized by this document.
 
 ## Global Constraints
 

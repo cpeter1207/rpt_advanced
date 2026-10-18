@@ -3,7 +3,8 @@
 Date: 2026-10-17
 Status: Design approved 2026-10-17; native implementation plans approved
 2026-10-18. M1 receive interruption was implemented and operator-confirmed on
-524950. Composed messages, tails, and site monitoring remain in progress/planned.
+524950. Composed messages and tails pass targeted tests; site monitoring remains
+in progress. The full hosted gate and additional physical tests have not run.
 
 Implementation plans:
 
@@ -29,8 +30,8 @@ Incoming local-receiver or linked-peer activity requires Morse-only message
 playback. An interrupted voiced message stops and switches to its complete
 Morse form; this rule applies to message macros and tails as well as IDs.
 
-This design does not authorize implementation, deployment, hardware changes,
-link connections, a release, or the unrelated unfinished wishlist features.
+Native implementation was approved separately. This design does not authorize
+deployment, hardware changes, link connections, a release, or unrelated features.
 Complete REST/WebSocket interfaces, historical measurement databases, remote
 sensor protocols, and new per-chip userspace drivers are outside this slice.
 

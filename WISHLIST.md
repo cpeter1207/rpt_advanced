@@ -319,14 +319,13 @@ configuration/API are not implemented by this change.
   according to configured endpoints and available resources. The appliance's
   four-port limit applies only to its physical board.
 
-**Material decisions needed before implementation**
+**Approved implementation — 2026-10-18**
 
-- Configuration for analog inputs, fan outputs, and external sensors beyond the
-  capability-based radio GPIO contract in ADRs 0033/0034.
-- Alarm/action catalog, default-safe output state, acknowledgment behavior, and
-  authorization for manual output control.
-- Sensor conversion/calibration model and retention/reporting policy for meter
-  history.
+The [site/message design](docs/superpowers/specs/2026-10-17-site-monitoring-and-message-macros-design.md)
+records configuration, calibration/freshness, alarms, safe outputs, fan policy,
+read-only DTMF queries, and localized reports. Composed messages and release tails
+are implemented with targeted tests; site acquisition and actions are underway.
+The full hosted gate and physical site-device qualification remain outstanding.
 
 ### Remote-base memories and scan lists
 
