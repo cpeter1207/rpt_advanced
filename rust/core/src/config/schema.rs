@@ -25,7 +25,9 @@ enum KnownScope {
     Identifier,
     Announcement,
     Tail,
-    Courtesy { named: bool },
+    Courtesy {
+        named: bool,
+    },
     Morse,
     Speech,
     Time,
@@ -35,6 +37,10 @@ enum KnownScope {
     Event,
     Permanent,
     Schedule,
+    Site {
+        kind: super::site::SiteKind,
+        named: bool,
+    },
 }
 
 impl KnownScope {
@@ -60,6 +66,10 @@ impl KnownScope {
             ScopeKind::EventNode => Self::Event,
             ScopeKind::PermanentNode => Self::Permanent,
             ScopeKind::ScheduleNode => Self::Schedule,
+            ScopeKind::SiteDefault(kind) | ScopeKind::SiteNode(kind) => {
+                Self::Site { kind, named: false }
+            }
+            ScopeKind::SiteSet(kind) => Self::Site { kind, named: true },
             ScopeKind::Unknown => return None,
         })
     }
@@ -174,6 +184,21 @@ impl Schema {
         validate_templates_and_macros(document)?;
         validate_events(document)?;
         validate_links(document)?;
+        let mut site_outputs = BTreeSet::new();
+        for node in document.nodes() {
+            let site = super::site::resolve_definitions(document, &super::NodeId::new(node)?)?;
+            for output in &site.value.outputs {
+                if output.enabled
+                    && !site_outputs.insert(output.endpoint.clone().expect("enabled endpoint"))
+                {
+                    return Err(ConfigError::structure(
+                        node,
+                        "physical site output has multiple node owners",
+                    ));
+                }
+            }
+            warnings.extend(site.warnings);
+        }
         Ok(Resolution {
             value: (),
             warnings,
@@ -183,6 +208,7 @@ impl Schema {
 
 fn key_known(kind: KnownScope, key: &str) -> bool {
     match kind {
+        KnownScope::Site { kind, named } => super::site::key_known(kind, named, key),
         KnownScope::Radio => {
             matches!(
                 key,
@@ -379,6 +405,11 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if let ScopeKind::SiteDefault(site) | ScopeKind::SiteNode(site) | ScopeKind::SiteSet(site) =
+        kind
+    {
+        return super::site::value_valid(site, key, value);
+    }
     if matches!(
         kind,
         ScopeKind::MessageGlobal
@@ -591,6 +622,18 @@ fn configured_node_list(value: &str) -> Option<Vec<&str>> {
 }
 
 fn default_value(kind: ScopeKind, key: &str) -> String {
+    if matches!(
+        kind,
+        ScopeKind::SiteDefault(_) | ScopeKind::SiteNode(_) | ScopeKind::SiteSet(_)
+    ) {
+        let value = super::site::default_value(key);
+        return if value.is_empty() {
+            "not configured"
+        } else {
+            value
+        }
+        .to_owned();
+    }
     let value = match (kind, key) {
         (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "content") => "{message}",
         (
@@ -761,6 +804,11 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
     let node = scope.node.unwrap_or_default();
     let label = scope.label.unwrap_or_default();
     match scope.kind {
+        ScopeKind::SiteNode(kind) => candidates.push((kind.name().to_owned(), key)),
+        ScopeKind::SiteSet(kind) if super::site::key_known(kind, false, key) => {
+            candidates.push((format!("{} {node}", kind.name()), key));
+            candidates.push((kind.name().to_owned(), key));
+        }
         ScopeKind::RadioNode => candidates.push(("radio".to_owned(), key)),
         ScopeKind::Node => candidates.push(("general".to_owned(), key)),
         ScopeKind::IdentifierNode => candidates.push(("identifier".to_owned(), key)),

@@ -11,7 +11,8 @@
 **Spec:** [Approved site-monitoring design](../specs/2026-10-17-site-monitoring-and-message-macros-design.md), approved 2026-10-17. Message rendering uses the [companion implementation plan](2026-10-17-message-composition-and-tail-playback.md).
 
 **Status:** Native implementation approved 2026-10-18. The message prerequisite
-is locally implemented and tested. S1 is starting. No node changes or deployment
+is locally implemented and tested. S1 configuration/measurement policy passes
+focused tests; S2–S7 remain. No node changes or deployment
 are authorized by this document.
 
 ## Global Constraints
@@ -65,11 +66,11 @@ Run named failing tests, implement the narrow task, rerun its tests, update Rust
 
 **Interfaces:** `ResolvedSiteSettings::resolve(document: &ConfigDocument, node: &NodeId) -> Result<Resolution<Self>, ConfigError>` returns ordered named definitions and resolved endpoint identities. `ReadingQuality::{Valid,Stale,Unavailable,Fault}`; `Observation<T> { value: Option<T>, observed_at_ms: Option<u64>, quality: ReadingQuality }`. `SensorState::observe(&mut self, reading: Observation<f64>, now_ms: u64)` accepts adapter-normalized source units. `SensorState::snapshot(&self, now_ms: u64) -> SensorSnapshot` returns calibrated current, smoothed, extrema/time and health; formatting is separate.
 
-- [ ] Add `site_config_inheritance_and_identity`, asserting instance > node > global defaults, no instance from defaults, disabled missing endpoints, one sensor/input name namespace, duplicate selector handling and no fixed count. Unknown values warn/fall back; conflicting physical output ownership is a true error.
-- [ ] Add `site_measurement_scale_once`: adapter input `2.0 V`, calibration `0..5 V -> 0..20 A`, yields `8.0 A`; precision changes no stored value. Test distinct finite calibration points and rejection/defaulting of NaN/infinity.
-- [ ] Add fake-clock `site_measurement_quality_extrema`: valid sample at `1000`, failed read at `2000` does not refresh its time or report zero; stale at the `5000 ms` age boundary. Extrema use unsmoothed valid values and retain their times. Unchanged reload preserves extrema; changed source/calibration resets them. Compare elapsed-time smoothing across unequal polling intervals.
-- [ ] Run `cargo test --locked -p rpt-advanced-core --lib site_` and confirm the new assertions fail. Implement resolved definitions and measurements without I/O or a formula parser. Re-run to PASS with nonzero test count.
-- [ ] Document units, time/freshness and reset contracts in Rustdoc. Commit this independently testable policy foundation.
+- [x] Add `site_config_inheritance_and_identity`, asserting instance > node > global defaults, no instance from defaults, disabled missing endpoints, one sensor/input name namespace, duplicate selector handling and no fixed count. Unknown values warn/fall back; conflicting physical output ownership is a true error.
+- [x] Add `site_measurement_scale_once`: adapter input `2.0 V`, calibration `0..5 V -> 0..20 A`, yields `8.0 A`; precision changes no stored value. Test distinct finite calibration points and rejection/defaulting of NaN/infinity.
+- [x] Add fake-clock `site_measurement_quality_extrema`: valid sample at `1000`, failed read at `2000` does not refresh its time or report zero; stale at the `5000 ms` age boundary. Extrema use unsmoothed valid values and retain their times. Unchanged reload preserves extrema; changed source/calibration resets them. Compare elapsed-time smoothing across unequal polling intervals.
+- [x] Run `cargo test --locked -p rpt-advanced-core --lib site_` and confirm the new assertions fail. Implement resolved definitions and measurements without I/O or a formula parser. Re-run to PASS with nonzero test count.
+- [x] Document units, time/freshness and reset contracts in Rustdoc. Commit this independently testable policy foundation.
 
 ### S2: Implement deterministic alarms, output pulses and fan demand
 

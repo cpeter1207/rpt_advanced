@@ -1,5 +1,7 @@
 //! Shared section-name classification.
 
+use super::site::SiteKind;
+
 /// One documented section role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScopeKind {
@@ -34,6 +36,9 @@ pub(crate) enum ScopeKind {
     EventNode,
     PermanentNode,
     ScheduleNode,
+    SiteDefault(SiteKind),
+    SiteNode(SiteKind),
+    SiteSet(SiteKind),
     Unknown,
 }
 
@@ -86,6 +91,18 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         return Err(());
     }
     let scope = match parts.as_slice() {
+        [family] if SiteKind::parse(family).is_some() => {
+            Scope::flat(ScopeKind::SiteDefault(SiteKind::parse(family).unwrap()))
+        }
+        [family, node] if SiteKind::parse(family).is_some() => {
+            Scope::node(ScopeKind::SiteNode(SiteKind::parse(family).unwrap()), node)
+        }
+        [family, node, label] if SiteKind::parse(family).is_some() => Scope::named(
+            ScopeKind::SiteSet(SiteKind::parse(family).unwrap()),
+            Some(node),
+            label,
+        ),
+        [family, ..] if SiteKind::parse(family).is_some() => return Err(()),
         ["general"] => Scope::flat(ScopeKind::General),
         ["radio"] => Scope::flat(ScopeKind::RadioDefault),
         ["radio", node] => Scope::node(ScopeKind::RadioNode, node),
@@ -158,6 +175,7 @@ pub(crate) const fn is_named(kind: ScopeKind) -> bool {
     matches!(
         kind,
         ScopeKind::IdentifierSet
+            | ScopeKind::SiteSet(_)
             | ScopeKind::AnnouncementSet
             | ScopeKind::TailSet
             | ScopeKind::CourtesySet
@@ -177,6 +195,8 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
     matches!(
         kind,
         ScopeKind::IdentifierNode
+            | ScopeKind::SiteNode(_)
+            | ScopeKind::SiteSet(_)
             | ScopeKind::RadioNode
             | ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementNode

@@ -1,5 +1,8 @@
 //! Control-plane site observations shared by message bindings and sensor policy.
 
+mod measurement;
+pub use measurement::{SensorSnapshot, SensorState, TimedValue};
+
 /// Health of one observed value, independent of its numeric or digital representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadingQuality {
