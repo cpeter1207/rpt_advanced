@@ -2,6 +2,7 @@
 
 mod announcement;
 mod courtesy;
+mod message;
 mod parrot;
 mod telemetry;
 mod timeout;
@@ -14,6 +15,8 @@ pub use announcement::Announcement;
 use announcement::AnnouncementState;
 use courtesy::CourtesyPlanner;
 pub use courtesy::CourtesySettings;
+pub(crate) use message::MessagePreparation;
+pub use message::{MessageAttemptId, MessageCompletion, MessageRequest};
 pub use parrot::{CapturedParrot, ParrotLevels};
 use parrot::{ParrotAck, ParrotCapture, ParrotLifecycle, ParrotRequest};
 use std::sync::{
@@ -720,7 +723,7 @@ impl NodeController {
             {
                 made = playback.render(interrupt, &mut telemetry_sample);
             } else {
-                playback.render(interrupt, &mut []);
+                playback.defer(interrupt);
             }
             waiting_for_media = playback.waiting_for_stream();
             // Preparation alone does not key. Once audible, a composition owns

@@ -2,6 +2,23 @@ use crate::composition::{Composition, CompositionError, Segment};
 use crate::config::{BindingSource, ConfigDocument, NodeId, ResolvedMessageSettings};
 use std::collections::BTreeMap;
 
+#[test]
+fn composition_identifier_content_preserves_media_inheritance() {
+    let config = ConfigDocument::parse("[524950]\n[identifier]\ncontent={message}\nmessage_id=site-time\narg_time=time\nspeech_level_db=-3\n[identifier 524950]\narg_time=\n[speech]\nlevel_db=-8\n[identifier 524950 regular]\ncontent={message_macro_time}\nmorse_text=ID\n").unwrap();
+    let resolved = crate::config::ResolvedIdentifierSettings::resolve(
+        &config,
+        &NodeId::new("524950").unwrap(),
+        Some("regular"),
+    )
+    .unwrap();
+    assert!(resolved.warnings.is_empty());
+    assert_eq!(resolved.value.content, "{message_macro_time}");
+    assert_eq!(resolved.value.message_id.as_deref(), Some("site-time"));
+    assert!(resolved.value.bindings.is_empty());
+    assert_eq!(resolved.value.speech_level_db, -8);
+    assert_eq!(resolved.value.morse_text, "ID");
+}
+
 fn definitions(text: &str, names: &[&str]) -> BTreeMap<String, ResolvedMessageSettings> {
     let document = ConfigDocument::parse(&format!("[524950]\n{text}")).unwrap();
     names
@@ -17,13 +34,28 @@ fn definitions(text: &str, names: &[&str]) -> BTreeMap<String, ResolvedMessageSe
         .collect()
 }
 
+fn compile(
+    content: &str,
+    definitions: &BTreeMap<String, ResolvedMessageSettings>,
+) -> Result<Composition, CompositionError> {
+    let document =
+        ConfigDocument::parse("[524950]\n[message root]\nmessage_id=site-time\nmorse_text=ID\n")
+            .unwrap();
+    let mut root =
+        ResolvedMessageSettings::resolve(&document, &NodeId::new("524950").unwrap(), "root")
+            .unwrap()
+            .value;
+    root.content = content.into();
+    Composition::compile(root, std::sync::Arc::new(definitions.clone()))
+}
+
 #[test]
 fn composition_literal_multiple_macros() {
     let defs = definitions(
         "[message time]\nmessage_id=site-time\n[message temperature]\nmessage_id=site-temperature\n",
         &["time", "temperature"],
     );
-    let composition = Composition::compile(
+    let composition = compile(
         "Station {{KG0BP}}. {message_macro_time} {message_macro_temperature}",
         &defs,
     )
@@ -31,7 +63,10 @@ fn composition_literal_multiple_macros() {
     assert_eq!(
         composition.segments(),
         &[
-            Segment::Literal("Station {KG0BP}.".into()),
+            Segment::Literal {
+                text: "Station {KG0BP}.".into(),
+                owner: None
+            },
             Segment::Message(Some("time".into())),
             Segment::Message(Some("temperature".into())),
         ]
@@ -42,7 +77,7 @@ fn composition_literal_multiple_macros() {
 fn composition_file_then_macros() {
     let defs = definitions("[message time]\nmessage_id=site-time\n", &["time"]);
     assert_eq!(
-        Composition::compile("{media} {message_macro_time}", &defs)
+        compile("{media} {message_macro_time}", &defs)
             .unwrap()
             .segments(),
         &[Segment::Media(None), Segment::Message(Some("time".into())),]
@@ -55,7 +90,7 @@ fn composition_attention_positions() {
         "[message attention]\ncontent={tone_sequence}\ntone_sequence=1000Hz / 200ms / -20dB\n[message time]\nmessage_id=site-time\n[message temperature]\nmessage_id=site-temperature\n",
         &["attention", "time", "temperature"],
     );
-    let composition = Composition::compile("{message_macro_attention} {message_macro_time} {message_macro_attention} {message_macro_temperature} {message_macro_attention}", &defs).unwrap();
+    let composition = compile("{message_macro_attention} {message_macro_time} {message_macro_attention} {message_macro_temperature} {message_macro_attention}", &defs).unwrap();
     assert_eq!(
         composition.segments(),
         &[
@@ -75,7 +110,7 @@ fn composition_cycle_or_overflow_is_rejected_before_expansion() {
         &["a", "b"],
     );
     assert_eq!(
-        Composition::compile("{message_macro_a}", &defs),
+        compile("{message_macro_a}", &defs),
         Err(CompositionError::Cycle)
     );
     let base = defs["a"].clone();
@@ -90,7 +125,7 @@ fn composition_cycle_or_overflow_is_rejected_before_expansion() {
         defs.insert(format!("n{index}"), definition);
     }
     assert_eq!(
-        Composition::compile("{message_macro_n0}", &defs),
+        compile("{message_macro_n0}", &defs),
         Err(CompositionError::TooLarge)
     );
 }
@@ -101,7 +136,7 @@ fn composition_segment_bounds_and_bad_tokens() {
         &format!("[message a]\ncontent={}\n", "x".repeat(100)),
         &["a"],
     );
-    let composition = Composition::compile("{message_macro_a}{message_macro_a}", &defs).unwrap();
+    let composition = compile("{message_macro_a}{message_macro_a}", &defs).unwrap();
     assert_eq!(composition.segments().len(), 2);
     for bad in [
         "{unknown}",
@@ -110,13 +145,14 @@ fn composition_segment_bounds_and_bad_tokens() {
         "broken}",
         &"x".repeat(128),
     ] {
-        assert!(Composition::compile(bad, &defs).is_err(), "{bad}");
+        assert!(compile(bad, &defs).is_err(), "{bad}");
     }
     assert_eq!(
-        Composition::compile("{{message_macro_a}}", &defs)
-            .unwrap()
-            .segments(),
-        &[Segment::Literal("{message_macro_a}".into())]
+        compile("{{message_macro_a}}", &defs).unwrap().segments(),
+        &[Segment::Literal {
+            text: "{message_macro_a}".into(),
+            owner: None
+        }]
     );
 }
 

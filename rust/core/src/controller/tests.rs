@@ -34,6 +34,61 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn composition_pre_sample_deferral_refreshes_attempt_without_audio_allocation() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut preparations = MessagePreparation::new(3);
+    let peer = crate::link::PeerSignals::new();
+    assert!(
+        control.queue_prepared_status(
+            preparations
+                .register(0)
+                .unwrap()
+                .reply_to(Some(peer.reply_target()))
+        )
+    );
+    control.set_message_preparation(preparations);
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let first = control.take_message_request().unwrap();
+    assert!(
+        control
+            .complete_message(first.attempt, Ok(media(0.5, 16)))
+            .is_ok()
+    );
+    peer.set_radio_keyed(true);
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert!(control.take_message_request().is_none());
+    peer.set_radio_keyed(false);
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    let second = control
+        .take_message_request()
+        .expect("deferred values need a fresh attempt");
+    assert_ne!(first.attempt, second.attempt);
+    assert!(
+        control
+            .complete_message(second.attempt, Err(ControllerError))
+            .is_ok()
+    );
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert!(!node.keyed);
+    assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
 fn morse_global_receive_routes() {
     for source in 0..4 {
         for (local, linked, activity) in [

@@ -774,6 +774,9 @@ impl Host {
                 self.runtime
                     .queue_status(local, action, last.as_deref(), clock, reply)
             }
+            LinkEffect::Message { selector, reply } => {
+                self.runtime.queue_message(local, &selector, reply)
+            }
             LinkEffect::SelectedRemote | LinkEffect::ParrotEnabled(_) | LinkEffect::None => Ok(()),
         }
     }
@@ -798,6 +801,7 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        self.runtime.prepare_messages(clock);
         for (local, lease) in &self.leases {
             if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {
                 worker.report_faults(local, clock.now_ms);

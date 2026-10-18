@@ -68,6 +68,182 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn composition_runtime_recurring_id_resolves_at_each_attempt() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[identifier 1000 regular]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_time}\n[message time]\nmessage_id=site-time\narg_time=time\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
+    ).unwrap();
+    assert!(messages.lock().unwrap().is_empty());
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.0; 960];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    assert!(audio.iter().all(|value| *value == 0.0));
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
+    for _ in 0..22 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+    }
+    let mut later = clock();
+    later.civil = Some((
+        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+        0,
+    ));
+    runtime.prepare_messages(later);
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The time is 9:07 AM.", "The time is 9:08 AM."]
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn composition_runtime_command_waits_for_unkey_and_keeps_exact_peer() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[message time]\nmessage_id=site-time\narg_time=time\ndtmf_id=1\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    runtime
+        .queue_message("1000", "1", Some(peer.reply_target()))
+        .unwrap();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.0; 960];
+    let mut parrot = [0.0; 960];
+    let mut parrot_active = false;
+    let mut replies = [crate::controller::PeerReplySample::default(); 960];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    runtime.prepare_messages(clock());
+    assert!(messages.lock().unwrap().is_empty());
+    peer.set_radio_keyed(false);
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
+    generation.transmit().controller.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        crate::controller::ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+            replies: Some(&mut replies),
+            regeneration: None,
+        },
+    );
+    assert!(audio.iter().all(|sample| *sample == 0.0));
+    assert!(
+        replies
+            .iter()
+            .any(|sample| sample.sample != 0.0 && sample.target == peer.reply_identity())
+    );
+    let other = crate::link::PeerSignals::new();
+    peer.end();
+    assert_eq!(
+        runtime.queue_message("1000", "1", Some(peer.reply_target())),
+        Err(RuntimeError::Rejected)
+    );
+    assert!(
+        runtime
+            .queue_message("1000", "1", Some(other.reply_target()))
+            .is_ok()
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn composition_runtime_full_queue_retries_after_adapter_replacement() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[message time]\nmessage_id=site-time\narg_time=time\ndtmf_id=1\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    for _ in 0..4 {
+        runtime
+            .queue_message("1000", "1", Some(peer.reply_target()))
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.queue_message("1000", "1", None),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.queue_message("1000", "2", None),
+        Err(RuntimeError::Rejected)
+    );
+    runtime.prepare_messages(clock());
+    assert!(messages.lock().unwrap().is_empty());
+    let settings = runtime.settings("1000").unwrap().clone();
+    assert_eq!(
+        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        Ok(2)
+    );
+    assert!(runtime.detached("1000", 1));
+    runtime.reclaim();
+    peer.end();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12001]);
+    runtime.prepare_messages(clock());
+    runtime.queue_message("1000", "1", None).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0]);
+    let mut later = clock();
+    later.civil = Some((
+        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+        0,
+    ));
+    runtime.prepare_messages(later);
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:08 AM."]);
+    drop(generation);
+    assert!(runtime.stop(1002));
+}
+
+#[test]
 fn pad_test_queues_one_local_stream_after_unkey() {
     use crate::runtime::dtmf::{DigitEvent, DigitOutcome, PadTestResult};
     let messages = Arc::new(Mutex::new(Vec::new()));

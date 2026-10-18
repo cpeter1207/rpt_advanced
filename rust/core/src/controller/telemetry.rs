@@ -171,6 +171,7 @@ impl ActivitySnapshot {
 
 /// Sole status producer and completed-media reclaimer; retain until audio stops.
 pub struct ControllerControl {
+    messages: Option<super::MessagePreparation>,
     pending: Producer<PreparedMedia>,
     completed: Consumer<PreparedMedia>,
     #[cfg(test)]
@@ -189,6 +190,38 @@ pub struct ControllerControl {
 }
 
 impl ControllerControl {
+    pub(crate) fn set_message_preparation(&mut self, messages: super::MessagePreparation) {
+        self.messages = Some(messages);
+    }
+
+    /// Reclaim retired composition streams and take one scalar preparation request on control.
+    pub fn take_message_request(&mut self) -> Option<super::MessageRequest> {
+        self.messages.as_mut()?.take_request()
+    }
+
+    /// Allocate a one-shot reader on control; values are requested only when playback starts.
+    pub(crate) fn prepare_message(
+        &mut self,
+        content_index: usize,
+    ) -> Result<PreparedMedia, ControllerError> {
+        self.messages
+            .as_mut()
+            .ok_or(ControllerError)?
+            .register(content_index)
+    }
+
+    /// Complete the exact attempt, retaining rejected ownership on control for retry or disposal.
+    pub fn complete_message(
+        &mut self,
+        attempt: super::MessageAttemptId,
+        result: Result<PreparedMedia, ControllerError>,
+    ) -> Result<(), super::MessageCompletion> {
+        match &mut self.messages {
+            Some(messages) => messages.complete(attempt, result),
+            None => Err(super::MessageCompletion { attempt, result }),
+        }
+    }
+
     pub(super) fn configure_parrot_lifecycle(
         &mut self,
         requests: Producer<ParrotRequest>,
@@ -454,6 +487,7 @@ impl TelemetryPlanner {
                 duck_gain: 10_f32.powf(f32::from(duck_db) / 20.0),
             },
             ControllerControl {
+                messages: None,
                 pending: producer,
                 completed: consumer,
                 #[cfg(test)]

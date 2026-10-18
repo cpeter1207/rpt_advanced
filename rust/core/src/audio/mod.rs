@@ -51,6 +51,13 @@ pub trait PcmStreamReader: Send {
     /// Start one playback pass without waiting or allocating.
     fn start(&mut self) {}
 
+    /// Invalidate values prepared before any PCM was played, if this reader resolves them.
+    /// Returns true when playback must start a fresh attempt after the deferral.
+    /// Static media keeps its prepared source and needs no new value snapshot.
+    fn defer_before_output(&mut self) -> bool {
+        false
+    }
+
     /// Copy currently available samples into caller-owned storage.
     fn render(&mut self, output: &mut [f32]) -> PcmRead;
 

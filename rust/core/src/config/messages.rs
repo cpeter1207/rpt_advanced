@@ -96,7 +96,7 @@ pub(super) fn identifier_valid(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
 
-pub(super) fn selector_valid(value: &str) -> bool {
+pub(crate) fn selector_valid(value: &str) -> bool {
     value.is_empty()
         || (value.len() <= 127
             && !value.starts_with('0')
@@ -148,42 +148,15 @@ impl ResolvedMessageSettings {
         morse.frequency_hz = unsigned("morse_frequency_hz", u32::MAX as u64, morse.frequency_hz);
         morse.speed_wpm = unsigned("morse_speed_wpm", 100, morse.speed_wpm);
         morse.level_db = level("morse_level_db", morse.level_db);
-        let mut bindings = BTreeMap::new();
-        for entry in document
-            .entries()
-            .iter()
-            .filter(|entry| scopes.contains(&entry.section))
-        {
-            if let Some(argument) = entry
-                .key
-                .strip_prefix("arg_")
-                .filter(|name| identifier_valid(name))
-            {
-                if let Some(source) =
-                    settings::lookup_valid_scopes(document, &entry.key, &scopes, |value| {
-                        if value.is_empty() {
-                            Some(None)
-                        } else {
-                            value.parse().ok().map(Some)
-                        }
-                    })
-                    .flatten()
-                {
-                    bindings.insert(argument.into(), source);
-                }
-            }
-        }
+        let (content, message_id, bindings) = resolve_content(document, &scopes, "{message}");
         let speech_text = text("speech_text");
         let morse_text = text("morse_text");
         let tone_sequence = text("tone_sequence");
         Ok(Resolution {
             warnings,
             value: Self {
-                content: settings::lookup_valid_scopes(document, "content", &scopes, |value| {
-                    crate::composition::syntax_valid(value).then(|| value.to_owned())
-                })
-                .unwrap_or_else(|| "{message}".into()),
-                message_id: optional("message_id", |v| v.is_empty() || identifier_valid(v)),
+                content,
+                message_id,
                 dtmf_id: optional("dtmf_id", selector_valid),
                 bindings,
                 media: MediaSource {
@@ -211,4 +184,51 @@ impl ResolvedMessageSettings {
             },
         })
     }
+}
+
+/// Share only composition inheritance; ID and macro media keep their own existing precedence.
+pub(super) fn resolve_content(
+    document: &ConfigDocument,
+    scopes: &[String],
+    default_content: &str,
+) -> (String, Option<String>, BTreeMap<String, BindingSource>) {
+    let content = settings::lookup_valid_scopes(document, "content", scopes, |value| {
+        crate::composition::syntax_valid(value).then(|| value.to_owned())
+    })
+    .unwrap_or_else(|| default_content.into());
+    let message_id = settings::lookup_valid_scopes(document, "message_id", scopes, |value| {
+        (value.is_empty() || identifier_valid(value)).then(|| value.to_owned())
+    })
+    .filter(|value| !value.is_empty());
+    let mut bindings = BTreeMap::new();
+    for entry in document
+        .entries()
+        .iter()
+        .filter(|entry| scopes.contains(&entry.section))
+    {
+        if let Some(argument) = entry
+            .key
+            .strip_prefix("arg_")
+            .filter(|name| identifier_valid(name))
+        {
+            if let Some(source) =
+                settings::lookup_valid_scopes(document, &entry.key, scopes, |value| {
+                    if value.is_empty() {
+                        Some(None)
+                    } else {
+                        value.parse().ok().map(Some)
+                    }
+                })
+                .flatten()
+            {
+                bindings.insert(argument.into(), source);
+            }
+        }
+    }
+    (content, message_id, bindings)
+}
+
+pub(super) fn content_key(key: &str) -> bool {
+    matches!(key, "content" | "message_id")
+        || key.strip_prefix("arg_").is_some_and(identifier_valid)
 }

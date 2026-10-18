@@ -231,6 +231,18 @@ All endpoint and provider reclamation stays on the producer. Receive replaces
 the complete primary sequence with its complete Morse sequence, dropping
 decorative tones and files while retaining configured Morse substitutes.
 
+Per-attempt values use a bounded control handoff. A preallocated reader publishes
+only a controller-generation/sequence pair and immutable recipe index. Control
+captures civil time, identities, link status and quality-tagged site observations,
+then returns a producer-backed stream for that exact attempt. Each reader has one
+request, ready and retirement credit; command-reader ports are reclaimed with
+their existing completed-status ownership. Failure also completes the request.
+Late or stale results are returned or destroyed only on control. A receive-driven
+Morse latch survives pending preparation. A deferral before any PCM invalidates
+the old values; readmission captures a fresh snapshot. Device-only replacement
+retains the controller, recipes and media session together. These internal Rust
+interfaces do not change the public C ABI.
+
 Receive-interruption contract — 2026-10-18: qualified local receive or any
 connected peer's receive activity selects the complete Morse form of an
 admitted message, including an announcement or source-routed command reply.

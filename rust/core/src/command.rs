@@ -51,10 +51,12 @@ pub enum LinkAction {
     ParrotDisable,
     /// Capture local keypad digits until receiver unkey, then read them back.
     PadTest,
+    /// Play one configured read-only message macro by its decimal selector.
+    Message,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 21;
+pub const ACTION_COUNT: usize = 22;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,7 +82,7 @@ impl CommandMapping {
 pub struct Command {
     /// Selected operation.
     pub action: LinkAction,
-    /// Decimal destination, or the empty string for node-free operations.
+    /// Decimal destination/Message selector, or empty for argument-free operations.
     pub node: String,
 }
 
@@ -148,7 +150,11 @@ impl DtmfCommandMap {
                 } else {
                     right
                 };
-                if equal || takes_node(longer.action) {
+                if equal
+                    || takes_node(longer.action)
+                    || left.action == LinkAction::Message
+                    || right.action == LinkAction::Message
+                {
                     return Err(CommandMapError::AmbiguousPrefix);
                 }
             }
@@ -208,7 +214,7 @@ impl DtmfCommandMap {
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805", "82",
+            "10", "722", "800", "801", "804", "805", "82", "77",
         ];
         let mappings = prefixes
             .into_iter()
@@ -313,6 +319,7 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::ParrotEnable,
         LinkAction::ParrotDisable,
         LinkAction::PadTest,
+        LinkAction::Message,
     ]
 }
 

@@ -1167,7 +1167,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
     }
     let overridden = ResolvedNodeSettings::resolve(
         &ConfigDocument::parse(&format!(
-            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=77\n"
+            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=78\n"
         ))
         .unwrap(),
         &node,
@@ -1181,7 +1181,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
             .unwrap()
             .mappings()
             .iter()
-            .any(|mapping| mapping.digits == "77")
+            .any(|mapping| mapping.digits == "78")
     );
 }
 
@@ -1487,7 +1487,7 @@ fn schedule_resolution_uses_empty_defaults_for_invalid_optional_selectors() {
 fn command_map_has_all_defaults_and_rejects_node_taking_prefix_collisions() {
     let document = ConfigDocument::parse("[node]\n").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&document, &NodeId::new("node").unwrap()).unwrap();
-    assert_eq!(resolved.value.link_commands.len(), 21);
+    assert_eq!(resolved.value.link_commands["link_command_message"], "77");
     assert_eq!(resolved.value.link_commands["fixed_10"], "10");
     assert_eq!(resolved.value.link_commands["fixed_722"], "722");
     let conflict = ConfigDocument::parse("[node]\nlink_command_disconnect=3\n").unwrap();

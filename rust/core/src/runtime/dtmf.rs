@@ -360,6 +360,11 @@ impl DtmfCommands {
                 });
         };
         let mut command = self.map.parse(&text)?;
+        if command.action == LinkAction::Message {
+            return (!command.node.is_empty()
+                && crate::config::message_selector_valid(&command.node))
+            .then(|| DigitOutcome::Operation(DigitOperation::new(command, None)));
+        }
         let mut admin_authorized = false;
         if command.node.len() >= 64 {
             return None;

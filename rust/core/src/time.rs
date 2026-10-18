@@ -53,19 +53,14 @@ impl TryFrom<u64> for TimeFormat {
     }
 }
 
-impl TimeAnnouncement {
-    /// Format a supplied local civil time without reading a system clock.
-    pub fn format(
-        hour: i32,
-        minute: i32,
-        format: TimeFormat,
-        catalog: &MessageCatalog,
-    ) -> Result<Self, TimeAnnouncementError> {
+impl TimeFormat {
+    /// Format a clock value without adding greeting/announcement wording or reading host time.
+    pub fn clock(self, hour: i32, minute: i32) -> Result<String, TimeAnnouncementError> {
         if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
             return Err(TimeAnnouncementError::InvalidTime);
         }
 
-        let morse = match format {
+        Ok(match self {
             TimeFormat::TwelveHour => {
                 let twelve_hour = match hour % 12 {
                     0 => 12,
@@ -75,7 +70,19 @@ impl TimeAnnouncement {
                 format!("{twelve_hour}:{minute:02} {suffix}")
             }
             TimeFormat::TwentyFourHour => format!("{hour:02}:{minute:02}"),
-        };
+        })
+    }
+}
+
+impl TimeAnnouncement {
+    /// Format a supplied local civil time without reading a system clock.
+    pub fn format(
+        hour: i32,
+        minute: i32,
+        format: TimeFormat,
+        catalog: &MessageCatalog,
+    ) -> Result<Self, TimeAnnouncementError> {
+        let morse = format.clock(hour, minute)?;
         let daypart = match hour {
             0..=11 => Daypart::Morning,
             12..=16 => Daypart::Afternoon,

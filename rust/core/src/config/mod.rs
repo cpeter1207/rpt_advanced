@@ -19,6 +19,7 @@ mod scope_tests;
 mod tests;
 
 pub use document::{ConfigDocument, ConfigEntry};
+pub(crate) use messages::selector_valid as message_selector_valid;
 pub use messages::{BindingSource, ResolvedMessageSettings};
 pub use schema::Schema;
 pub use settings::{

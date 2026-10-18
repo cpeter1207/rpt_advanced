@@ -16,7 +16,9 @@ confirmed the local interruption/repeat/courtesy test. Peer-source behavior has
 automated coverage, not a new live-link test. M2 is implemented and targeted tests,
 Clippy, formatting and Rustdoc pass. M3 is implemented with targeted producer,
 ring, controller, runtime, Clippy, formatting and Rustdoc checks passing. M4 is
-starting; later tasks remain planned. The full hosted gate has not run.
+implemented with targeted command/configuration, runtime, allocation, host,
+Clippy, formatting, and Rustdoc checks passing. M5 is next; later tasks remain
+planned. The full hosted gate has not run.
 No further deployment is implied by implementation approval.
 
 ## Global Constraints
@@ -122,17 +124,23 @@ assert_eq!(rendered_node, "node,5,2,4,9,5,0");
 
 **Files:** New `rust/core/src/runtime/composition.rs`; modify `runtime/{aggregate,prepare,render,dtmf}.rs`, `controller/telemetry.rs`, `command.rs`, `config/{schema,settings}.rs`, and `rust/product/src/host.rs`. Tests: new `runtime/composition_tests.rs`, existing `runtime/{dtmf,prepare,render}_tests.rs` and command/config tests.
 
-**Interfaces:** `MessageValueSnapshot` owns civil time, node/callsign, localized link forms, and named sensor/input `MessageArgument` values with quality/observation metadata. `Composition::prepare(&self, catalog: &MessageCatalog, values: &MessageValueSnapshot, media: &MediaDefaults) -> Result<MediaProgram, CompositionError>` resolves content once. `MediaDefaults { speech: ResolvedSpeechSettings, morse: ResolvedMorseSettings }` reuses the existing resolved types; each compiled media segment retains its own file/fallback and explicit overrides. Reuse the existing gain application, not a second gain model.
+**Interfaces:** `MessageValueSnapshot` owns civil time, node/callsign, localized link forms, and named sensor/input `MessageArgument` values with quality/observation metadata. `Composition::prepare(&self, catalog: &MessageCatalog, values: &MessageValueSnapshot) -> Result<MediaProgram, CompositionError>` resolves content once. Each compiled owner retains its existing resolved speech/Morse defaults, file/fallback and explicit overrides; no duplicate media-default argument is needed. Reuse the existing gain application, not a second gain model.
 
 For configured recurring media, use a bounded preallocated request/completion handoff: `MessageAttemptId { generation: u64, sequence: u64 }`, `MessageRequest { attempt: MessageAttemptId, content_index: usize }`. The transmit-side scheduler publishes only this request. Control resolves the current snapshot and returns `PreparedMedia` tagged by the same attempt through existing ownership-transfer machinery. New receive may latch Morse while preparation is pending; adoption must honor that latch. No strings or catalog work on audio.
 
 Add `ControllerControl::take_message_request(&mut self) -> Option<MessageRequest>` and `ControllerControl::complete_message(&mut self, attempt: MessageAttemptId, result: Result<PreparedMedia, ControllerError>) -> Result<(), MessageCompletion>`; `MessageCompletion` owns the rejected attempt/result for control-side retry or reclamation. A failed preparation must also complete the attempt so it cannot hold PTT or wait forever. Reuse the current bounded ownership queues rather than an audio task submission or new executor.
 
-- [ ] Write `composition_attempt_refresh_and_continuation`: two new attempts see updated time/values; receive-to-Morse and ID preemption retain the first attempt snapshot. A deferral before any sample starts a fresh attempt. Assert preparation completing after receive cannot emit voice, and preparation failure releases the pending attempt. A stale generation/attempt result is reclaimed off audio.
-- [ ] Write `composition_values_are_data`: sensor text containing `{message_macro_x}` remains literal; stale measurement replaces only its segment. Assert natural measurement/date/time versus digit-wise node pronunciation using independent `.tts`/`.morse` values.
-- [ ] Write `composition_dtmf_selector_preserves_last_link`: `*771#` selects macro 1 without altering remembered destination; `*770#` does not recall the last link. Test source unkey, timeout, remapping/collisions, peer disconnect/replacement, queue-full retry and exact reply route. No hardware action is admitted through this public command.
-- [ ] Run core `composition_` and DTMF test filters red, then implement the request handoff and `LinkAction::Message` with a selector-specific branch before the existing destination/`0` recall logic. Do not duplicate the collector. Extend recurring IDs and tails to request values at playback, not configuration reload. Use existing control clock/status data; the companion plan supplies site observations.
-- [ ] Re-run affected config/command/runtime tests and allocation/routing fixtures. Verify missing site bindings resolve as unavailable/disabled with warnings until the site subsystem is configured, not fabricated zero values. Commit.
+Implementation refinement: a prepared reader facade uses the existing playback
+scheduler to publish these requests. Each registered recipe has one bounded
+request/completion/retirement credit. Control unwraps prepared streams before
+publication and reclaims them afterward. This keeps completion delivery independent
+of queued command replies; it adds no second scheduler, renderer, or public ABI.
+
+- [x] Write `composition_attempt_refresh_and_continuation`: two new attempts see updated time/values; receive-to-Morse retains the first attempt snapshot. A deferral before any sample starts a fresh attempt. Assert preparation completing after receive cannot emit voice, and preparation failure releases the pending attempt. A stale generation/attempt result is reclaimed off audio. ID-priority continuation belongs to M5, where tail preemption is introduced.
+- [x] Write `composition_values_are_data`: sensor text containing `{message_macro_x}` remains literal; stale measurement replaces only its segment. Assert natural measurement/date/time versus digit-wise node pronunciation using independent `.tts`/`.morse` values.
+- [x] Write `composition_dtmf_selector_preserves_last_link`: `*771#` selects macro 1 without altering remembered destination; `*770#` does not recall the last link. Test source unkey, timeout, remapping/collisions, peer disconnect/replacement, queue-full retry and exact reply route. No hardware action is admitted through this public command.
+- [x] Run core `composition_` and DTMF test filters red, then implement the request handoff and `LinkAction::Message` with a selector-specific branch before the existing destination/`0` recall logic. Do not duplicate the collector. Extend recurring IDs to request values at playback, not configuration reload; M5 wires the new tail source. Use existing control clock/status data; the companion plan supplies site observations.
+- [x] Re-run affected config/command/runtime tests and allocation/routing fixtures. Verify missing site bindings resolve as unavailable/disabled with warnings until the site subsystem is configured, not fabricated zero values. Commit.
 
 ### M5: Add release-triggered tails and explicit ID deadline ordering
 

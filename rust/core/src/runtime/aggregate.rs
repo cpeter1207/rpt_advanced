@@ -93,6 +93,7 @@ struct ControlState<C: Send> {
     started_ms: u64,
     prior_activity_ms: Option<u64>,
     catalog: MessageCatalog,
+    messages: super::composition::MessageRecipes,
 }
 struct GroupAnnouncement {
     label: String,
@@ -367,9 +368,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
             prior_activity_ms: None,
             catalog: MessageCatalog::load(&node.settings.language)
                 .map_err(|_| RuntimeError::Preparation)?,
+            messages: super::composition::MessageRecipes::default(),
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
         std::mem::swap(&mut next.media_session, &mut node.control.media_session);
+        std::mem::swap(&mut next.messages, &mut node.control.messages);
         std::mem::swap(&mut next.digits, &mut node.control.digits);
         std::mem::swap(&mut next.activity, &mut node.control.activity);
         std::mem::swap(&mut next.started_ms, &mut node.control.started_ms);
@@ -518,8 +521,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
             if links.requires_civil_time() && clock.civil.is_none_or(|(_, second)| second >= 60) {
                 return Err(RuntimeError::Clock);
             }
-            let (controller, telemetry, status, media_session) =
-                prepare::controller(&document, &id, &settings, media, generation_id)?;
+            let (controller, telemetry, status, media_session, mut messages) =
+                prepare::controller(&document, &id, &settings, media, generation_id, &catalog)?;
+            warnings.append(&mut messages.warnings);
             let activity = controller.activity();
             let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
                 .map_err(|_| RuntimeError::Preparation)?;
@@ -560,6 +564,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 started_ms: clock.now_ms,
                 prior_activity_ms: existing.and_then(|node| node.control.activity_ms()),
                 catalog,
+                messages,
             };
             candidates.push(Candidate {
                 name: name.into(),
@@ -956,6 +961,110 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .as_mut()
             .is_some_and(|scheduler| scheduler.complete(&dispatch.token))
     }
+    /// Resolve newly admitted recurring messages on the frequent control pump, never on audio.
+    pub fn prepare_messages(&mut self, clock: RuntimeClock) {
+        for node in &mut self.nodes {
+            node.control.telemetry.reclaim().for_each(drop);
+            let Some(first) = node.control.telemetry.take_message_request() else {
+                continue;
+            };
+            let values = (|| {
+                let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
+                let (mut links, identity) =
+                    render::direct_status(node.links.manager(), &node.control.catalog)?;
+                links.tts = render::telemetry_speech(&links.tts, &[&identity]);
+                Ok::<_, RuntimeError>(super::MessageValueSnapshot {
+                    civil,
+                    time_format: TimeFormat::try_from(node.time_format)
+                        .map_err(|_| RuntimeError::Preparation)?,
+                    node: node.name.clone(),
+                    callsign: node.settings.callsign.clone(),
+                    links,
+                    sensors: Default::default(),
+                    inputs: Default::default(),
+                    time_remaining: None,
+                })
+            })();
+            let mut first = Some(first);
+            // At most one visit per configured recipe per pump. Fast failed retries
+            // cannot monopolize the host's other control work.
+            for _ in 0..node.control.messages.items.len() {
+                let Some(current) = first
+                    .take()
+                    .or_else(|| node.control.telemetry.take_message_request())
+                else {
+                    break;
+                };
+                let prepared = (|| {
+                    let values = values
+                        .as_ref()
+                        .map_err(|_| crate::controller::ControllerError)?;
+                    let recipe = node
+                        .control
+                        .messages
+                        .items
+                        .get(current.content_index)
+                        .ok_or(crate::controller::ControllerError)?;
+                    let program = recipe
+                        .prepare(&node.control.catalog, values)
+                        .map_err(|_| crate::controller::ControllerError)?;
+                    let stream = node
+                        .control
+                        .media_session
+                        .as_mut()
+                        .ok_or(crate::controller::ControllerError)?
+                        .register_program(program, true)
+                        .map_err(|_| crate::controller::ControllerError)?;
+                    crate::controller::PreparedMedia::new_stream(stream)
+                })();
+                // Both preparation failure and success settle the exact request.
+                // A rejected stale envelope is destroyed here on control.
+                let _ = node
+                    .control
+                    .telemetry
+                    .complete_message(current.attempt, prepared);
+            }
+        }
+    }
+
+    /// Admit a read-only macro to the existing reply queue; resolve values after source unkey.
+    /// A full queue rejects before creating an attempt, so a later retry uses fresh values.
+    pub fn queue_message(
+        &mut self,
+        local: &str,
+        selector: &str,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let index = *node
+            .control
+            .messages
+            .selectors
+            .get(selector)
+            .ok_or(RuntimeError::Rejected)?;
+        node.control.telemetry.reclaim().for_each(drop);
+        if reply.as_ref().is_some_and(crate::link::PeerReply::ended)
+            || !node.control.telemetry.can_queue_status()
+        {
+            return Err(RuntimeError::Rejected);
+        }
+        let prepared = node
+            .control
+            .telemetry
+            .prepare_message(index)
+            .map_err(|_| RuntimeError::Preparation)?
+            .reply_to(reply);
+        if node.control.telemetry.queue_prepared_status(prepared) {
+            Ok(())
+        } else {
+            Err(RuntimeError::Rejected)
+        }
+    }
+
     /// Queue existing time/direct/full/last-keyed telemetry, with speech failure falling back to Morse.
     pub fn queue_status(
         &mut self,

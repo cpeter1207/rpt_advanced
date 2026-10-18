@@ -243,6 +243,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "dtmf_regeneration_gap_ms"
                 | "dtmf_regeneration_level_dbfs"
                 | "link_command_pad_test"
+                | "link_command_message"
                 | "parrot_enabled"
                 | "dtmf_admin_unlock_hash"
                 | "dtmf_admin_lock_hash"
@@ -290,24 +291,25 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_parrot_disable"
         ),
         KnownScope::Identifier => {
-            matches!(
-                key,
-                "interval_ms"
-                    | "priority"
-                    | "first_key_only"
-                    | "regardless_of_activity"
-                    | "polite"
-                    | "polite_maximum_wait_ms"
-                    | "sound_file"
-                    | "speech_text"
-                    | "speech_model"
-                    | "speech_speed_percent"
-                    | "speech_level_db"
-                    | "morse_text"
-                    | "morse_speed_wpm"
-                    | "morse_frequency_hz"
-                    | "morse_level_db"
-            )
+            super::messages::content_key(key)
+                || matches!(
+                    key,
+                    "interval_ms"
+                        | "priority"
+                        | "first_key_only"
+                        | "regardless_of_activity"
+                        | "polite"
+                        | "polite_maximum_wait_ms"
+                        | "sound_file"
+                        | "speech_text"
+                        | "speech_model"
+                        | "speech_speed_percent"
+                        | "speech_level_db"
+                        | "morse_text"
+                        | "morse_speed_wpm"
+                        | "morse_frequency_hz"
+                        | "morse_level_db"
+                )
         }
         KnownScope::Announcement => matches!(
             key,
@@ -345,12 +347,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         KnownScope::Time => key == "format",
         KnownScope::Template => key == "text",
         KnownScope::Message => {
-            matches!(
-                key,
-                "content" | "message_id" | "dtmf_id" | "tone_sequence" | "level_db"
-            ) || key
-                .strip_prefix("arg_")
-                .is_some_and(super::messages::identifier_valid)
+            matches!(key, "dtmf_id" | "tone_sequence" | "level_db")
+                || super::messages::content_key(key)
                 || key_known(KnownScope::Announcement, key) && key != "interval_ms"
         }
         KnownScope::Macro => matches!(key, "action" | "target_node"),
@@ -374,7 +372,14 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
-    if matches!(kind, ScopeKind::MessageGlobal | ScopeKind::MessageNode) {
+    if matches!(
+        kind,
+        ScopeKind::MessageGlobal
+            | ScopeKind::MessageNode
+            | ScopeKind::IdentifierDefault
+            | ScopeKind::IdentifierNode
+            | ScopeKind::IdentifierSet
+    ) {
         match key {
             "message_id" => return value.is_empty() || super::messages::identifier_valid(value),
             "dtmf_id" => return super::messages::selector_valid(value),
@@ -571,6 +576,10 @@ fn configured_node_list(value: &str) -> Option<Vec<&str>> {
 fn default_value(kind: ScopeKind, key: &str) -> String {
     let value = match (kind, key) {
         (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "content") => "{message}",
+        (
+            ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet,
+            "content",
+        ) => "{media}",
         (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "level_db") => "-20",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "device_selection") => "exact",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_profile") => "dudeusb",
@@ -725,6 +734,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_parrot_enable" => "804",
         "link_command_parrot_disable" => "805",
         "link_command_pad_test" => "82",
+        "link_command_message" => "77",
         _ => return None,
     })
 }

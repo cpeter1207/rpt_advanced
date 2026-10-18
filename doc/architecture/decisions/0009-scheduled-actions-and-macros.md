@@ -81,8 +81,13 @@ configured sensor/input observations, or context-provided remaining time.
 Values are captured once per playback attempt and are never reparsed as code.
 Site input transitions and alarm actions are additional approved control-plane
 triggers. A protective action does not wait for telemetry admission.
-These extensions are planned; the existing scheduled implementation remains
-unchanged until its integration tests and implementation are complete.
+Composition compilation, additive catalogs, per-attempt value resolution, and
+recurring-ID/message-command integration are implemented with targeted tests.
+One bounded control handoff owns preparation and reclamation; callback-side
+deferral before first output requests fresh values, while receive interruption
+retains the admitted attempt. Catalog IDs, required bindings, and complete Morse
+fallbacks are validated before admission. Tail scheduling and site acquisition
+and actions remain planned. Existing scheduled actions are unchanged.
 
 ## Implementation status — 2026-10-03
 

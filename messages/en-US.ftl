@@ -120,6 +120,21 @@ time-announcement =
     .tts = { $greeting_tts }. The time is { $time }.
     .morse = { $time }
 
+binding-node =
+    .text = { $node }
+    .tts = node,{ $digits }
+    .morse = { $node }
+
+binding-date =
+    .text = { $date }
+    .tts = { $date }
+    .morse = { $date }
+
+binding-time =
+    .text = { $clock }
+    .tts = { $clock }
+    .morse = { $clock }
+
 site-time =
     .text = { $time }
     .tts = The time is { $time }.

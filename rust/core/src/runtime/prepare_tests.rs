@@ -126,10 +126,10 @@ fn settings() -> ResolvedIdentifierSettings {
 }
 
 #[test]
-fn every_telemetry_source_is_registered_with_the_station_pcm_producer() {
+fn static_telemetry_is_registered_and_identifiers_request_fresh_attempts() {
     let config = ConfigDocument::parse(
         "[1000]\n\
-         [identifier 1000 id]\nsound_file=id.wav\nspeech_text=ID\nmorse_text=ID\n\
+         [identifier 1000 id]\ninterval_ms=1\nregardless_of_activity=yes\nsound_file=id.wav\nspeech_text=ID\nmorse_text=ID\n\
          [announcement 1000 news]\nmorse_text=NEWS\n\
          [courtesy 1000 link]\ninput=link\ntone_sequence=500/10\nmorse_text=L\n",
     )
@@ -137,19 +137,29 @@ fn every_telemetry_source_is_registered_with_the_station_pcm_producer() {
     let node = NodeId::new("1000").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
     let media = media(false, false);
-    controller(&config, &node, &resolved, &media, 7).unwrap();
+    let (mut controller, mut control, _, _station, recipes) = controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+    )
+    .unwrap();
     assert!(media.started.load(Ordering::Acquire));
     let sources = media.sources.lock().unwrap();
-    assert_eq!(sources.len(), 3);
-    assert_eq!(
-        sources[0].file.as_deref(),
-        Some(std::path::Path::new("id.wav"))
-    );
-    assert_eq!(sources[0].speech.as_ref().unwrap().text, "ID");
-    assert_eq!(sources[0].morse.as_ref().unwrap().text, "ID");
-    assert_eq!(sources[1].morse.as_ref().unwrap().text, "NEWS");
-    assert_eq!(sources[2].tone.as_ref().unwrap().sequence, "500/10");
-    assert_eq!(sources[2].morse.as_ref().unwrap().text, "L");
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].morse.as_ref().unwrap().text, "NEWS");
+    assert_eq!(sources[1].tone.as_ref().unwrap().sequence, "500/10");
+    assert_eq!(sources[1].morse.as_ref().unwrap().text, "L");
+    controller.process_audio(false, false, &[], &mut [0.0; 960]);
+    let request = control.take_message_request().unwrap();
+    let source = &recipes.items[request.content_index]
+        .settings_for(None)
+        .media;
+    assert_eq!(source.file.as_deref(), Some(std::path::Path::new("id.wav")));
+    assert_eq!(source.speech.as_ref().unwrap().text, "ID");
+    assert_eq!(source.morse.as_ref().unwrap().text, "ID");
 }
 
 #[test]
@@ -167,7 +177,15 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
     let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
     let media = media(false, false);
 
-    controller(&config, &node, &resolved, &media, 7).unwrap();
+    controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+    )
+    .unwrap();
 
     let sources = media.sources.lock().unwrap();
     assert_eq!(sources.len(), 2);
@@ -236,15 +254,30 @@ fn config_failures_convert_to_the_runtime_error_boundary() {
 
 #[test]
 fn station_registration_and_start_fail_before_publishing_controller_state() {
-    let config = ConfigDocument::parse("[1000]\n[identifier 1000 id]\nmorse_text=ID\n").unwrap();
+    let config =
+        ConfigDocument::parse("[1000]\n[announcement 1000 news]\nmorse_text=NEWS\n").unwrap();
     let node = NodeId::new("1000").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
     assert!(matches!(
-        controller(&config, &node, &resolved, &media(true, false), 7),
+        controller(
+            &config,
+            &node,
+            &resolved,
+            &media(true, false),
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap()
+        ),
         Err(RuntimeError::Preparation)
     ));
     assert!(matches!(
-        controller(&config, &node, &resolved, &media(false, true), 7),
+        controller(
+            &config,
+            &node,
+            &resolved,
+            &media(false, true),
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap()
+        ),
         Err(RuntimeError::Preparation)
     ));
 }

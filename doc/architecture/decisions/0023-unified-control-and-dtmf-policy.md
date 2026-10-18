@@ -141,7 +141,9 @@ destinations; zero does not recall a prior destination. They cannot configure
 equipment or execute action macros. Prefixes inherit and may be remapped;
 conflicting selectors/prefixes are rejected. Replies preserve the originating
 connection and unkey/routing rules above. IDs and tails using the same composed
-content remain local-only. This extension is not yet implemented.
+content remain local-only. Message-macro requests are implemented with targeted
+command, routing, queue, and configuration tests. Site queries and tail playback
+remain planned; the full hosted gate for this extension has not run.
 
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot

@@ -128,6 +128,23 @@ impl Playback {
         self.outcome = outcome;
     }
 
+    /// Hold an ineligible item without keeping a stale, never-played value snapshot.
+    /// Begun playback retains its attempt and receive-driven Morse latch.
+    pub fn defer(&mut self, receiving: bool) {
+        if !self.output_started
+            && self
+                .stream
+                .as_mut()
+                .is_some_and(|stream| stream.defer_before_output())
+        {
+            self.stream_started = false;
+            self.waiting_for_stream = true;
+            self.morse = (receiving || self.morse.is_some()).then_some(MorseSwitch::Pending);
+        } else {
+            self.render(receiving, &mut []);
+        }
+    }
+
     /// Return the reader for retirement by its non-audio owner.
     pub fn take_stream(&mut self) -> Option<Box<dyn PcmStreamReader>> {
         self.outcome = PlaybackOutcome::Cancelled;

@@ -3,11 +3,12 @@
 use crate::{
     config::{
         ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings,
-        ResolvedCourtesySettings, ResolvedIdentifierSettings, ResolvedNodeSettings,
+        ResolvedCourtesySettings, ResolvedIdentifierSettings, ResolvedMessageSettings,
+        ResolvedMorseSettings, ResolvedNodeSettings, ResolvedSpeechSettings,
     },
     controller::{
         Announcement, ControllerControl, ControllerSettings, CourtesySettings, Identifier,
-        MorseSettings, NodeController, PreparedMedia,
+        MessagePreparation, MorseSettings, NodeController, PreparedMedia,
     },
     media::{
         FileRequest, MediaError, MediaSource, MorseSource, PreparedAudio, SpeechRequest,
@@ -237,6 +238,7 @@ type PreparedController = (
     ControllerControl,
     ResolvedIdentifierSettings,
     Box<dyn StationMediaSession>,
+    super::composition::MessageRecipes,
 );
 
 pub(super) fn controller(
@@ -245,17 +247,47 @@ pub(super) fn controller(
     settings: &ResolvedNodeSettings,
     media: &dyn NativeMediaPreparer,
     generation: u64,
+    catalog: &crate::messages::MessageCatalog,
 ) -> Result<PreparedController, RuntimeError> {
     let status = ResolvedIdentifierSettings::resolve(document, node, None)?.value;
     let mut station = media
         .station(node.as_str(), generation)
         .map_err(|_| RuntimeError::Preparation)?;
     let mut ids = Vec::new();
+    let mut recipes = super::composition::MessageRecipes::new(document, node, catalog)?;
+    let mut messages = MessagePreparation::new(generation);
     for label in labels(document, "identifier", node.as_str()) {
         let settings = ResolvedIdentifierSettings::resolve(document, node, Some(label))?.value;
-        if let Some(prepared) = prepared(&mut station, &settings)? {
+        let source = streaming_source(&settings, None, 0);
+        if settings.content == "{media}" && source == MediaSource::default() {
+            continue;
+        }
+        let invoking = ResolvedMessageSettings {
+            content: settings.content.clone(),
+            message_id: settings.message_id.clone(),
+            bindings: settings.bindings.clone(),
+            media: source,
+            speech_defaults: ResolvedSpeechSettings {
+                voice: settings.speech_model.clone(),
+                speed_percent: settings.speech_speed_percent,
+                level_db: settings.speech_level_db,
+            },
+            morse_defaults: ResolvedMorseSettings {
+                frequency_hz: settings.morse_frequency_hz,
+                speed_wpm: settings.morse_speed_wpm,
+                level_db: settings.morse_level_db,
+            },
+            dtmf_id: None,
+        };
+        if let Some(index) = recipes.add(
+            invoking,
+            &format!("identifier {} {label}", node.as_str()),
+            catalog,
+        ) {
             ids.push(Identifier {
-                media: prepared,
+                media: messages
+                    .register(index)
+                    .map_err(|_| RuntimeError::Preparation)?,
                 interval_ms: settings.interval_ms,
                 // The settings resolver bounds priority to i32::MAX.
                 priority: settings.priority as i32,
@@ -288,7 +320,7 @@ pub(super) fn controller(
             }
         }
     }
-    let (controller, control) = NodeController::new(
+    let (controller, mut control) = NodeController::new(
         ControllerSettings {
             parrot_enabled: settings.parrot_enabled,
             full_duplex: settings.full_duplex,
@@ -307,8 +339,9 @@ pub(super) fn controller(
         courtesy,
     )
     .map_err(|_| RuntimeError::Preparation)?;
+    control.set_message_preparation(messages);
     station.start().map_err(|_| RuntimeError::Preparation)?;
-    Ok((controller, control, status, station))
+    Ok((controller, control, status, station, recipes))
 }
 
 #[cfg(test)]
