@@ -625,7 +625,7 @@ fn egress_host_contract_and_asterisk_pcm() {
     table.peer_step_detach = None;
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
-    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v5, peer_prepare_audio);
+    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v6, peer_prepare_audio);
     for length in boundary..std::mem::size_of_val(&table) {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];
@@ -636,10 +636,10 @@ fn egress_host_contract_and_asterisk_pcm() {
                 length,
             )
         };
-        assert_eq!(
-            unsafe { HostServices::open(prefix.as_ptr().cast()) }.is_ok(),
-            length == boundary
-        );
+        assert!(matches!(
+            unsafe { HostServices::open(prefix.as_ptr().cast()) },
+            Err(Error::Admission)
+        ));
     }
     let (mut session, _control, state, mut output) = make_session("1000");
     output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]);

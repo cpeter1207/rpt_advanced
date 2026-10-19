@@ -580,7 +580,7 @@ mod tests {
         };
 
         unsafe extern "C" fn start(
-            _: *const crate::abi::rptadv_host_services_v5,
+            _: *const crate::abi::rptadv_host_services_v6,
             _: *const crate::abi::rptadv_control_descriptor_v1,
             _: *const crate::abi::rptadv_file_descriptor,
             _: *const crate::abi::rptadv_speech_descriptor,

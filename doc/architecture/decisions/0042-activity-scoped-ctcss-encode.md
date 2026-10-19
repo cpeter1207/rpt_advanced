@@ -37,7 +37,7 @@ names and shared-library SONAMEs do not change. USBRadioPlus ABI 3, RPT Advanced
 product ABI 3, and host-services ABI 4 must ship together.
 
 Those are the revisions at this feature's introduction. The current product
-and host-services descriptors are ABI 4 and ABI 5. Later revisions retain the
+and host-services descriptors are ABI 4 and ABI 6. Later revisions retain the
 independent PTT and CTCSS outputs; current headers define the required set.
 
 ## Consequences

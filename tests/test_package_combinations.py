@@ -69,9 +69,9 @@ def test_standalone_package_declares_its_native_runtime_providers() -> None:
 def test_radio_product_dependency_does_not_require_the_asterisk_integration() -> None:
     stanzas = package_stanzas()
     source = (ROOT / "debian/control").read_text().split("\n\n", 1)[0]
-    assert "libusbradioplus-product-dev" in source
+    assert "libusbradioplus-product-dev (>= 0.1.0~alpha24-1.deb13)" in source
     standalone = depends(stanzas["rpt-advanced"])
-    assert "libusbradioplus-product1" in standalone
+    assert "libusbradioplus-product1 (>= 0.1.0~alpha24-1.deb13)" in standalone
     assert "usbradioplus" not in standalone.replace("libusbradioplus-product1", "")
     for package in ("app-rpt-advanced", "librptadv-product1"):
         assert "usbradioplus" not in depends(stanzas[package])

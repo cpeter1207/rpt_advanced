@@ -17,6 +17,8 @@ fn main() {
         .allowlist_function("ast_(config_load2|variable_retrieve|config_destroy|srv_lookup|srv_cleanup|sockaddr_resolve|sockaddr_stringify_fmt|sendtext|senddigit|waitfor)")
         .allowlist_function("ast_(replace_sigchld|unreplace_sigchld)")
         .allowlist_type("rptadv_.*")
+        .allowlist_type("UrpAstSite.*")
+        .allowlist_var("URP_AST_(SITE_.*|OPTION_SITE_IO)")
         .allowlist_type("urp_ast_(direct_callbacks|link_attach)")
         .allowlist_var("URP_AST_(OPTION_DIRECT_CALLBACKS|DIRECT_CALLBACKS_ABI_VERSION|OPTION_LINK_ATTACH|LINK_ATTACH_ABI_VERSION)")
         .allowlist_function("ast_(request_and_dial|channel_state)")

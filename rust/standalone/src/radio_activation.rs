@@ -44,6 +44,9 @@ pub struct ActiveRadio {
     handle: Option<NonNull<c_void>>,
     stop: unsafe extern "C" fn(*mut c_void) -> i32,
     destroy: unsafe extern "C" fn(*mut c_void),
+    site_bind: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteBinding) -> i32,
+    site_publish: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteRequest) -> i32,
+    site_snapshot: unsafe extern "C" fn(*mut c_void, u32, *mut abi::UrpAstSiteSnapshot) -> i32,
 }
 
 impl ActiveRadio {
@@ -91,12 +94,24 @@ impl ActiveRadio {
         if callbacks.receive.is_none() || callbacks.transmit.is_none() || maximum_frames == 0 {
             return Err(RadioActivationError::InvalidCallbacks);
         }
-        let (Some(create), Some(start), Some(stop), Some(destroy)) = (
+        let (
+            Some(create),
+            Some(start),
+            Some(stop),
+            Some(destroy),
+            Some(site_bind),
+            Some(site_publish),
+            Some(site_snapshot),
+        ) = (
             api.native_create,
             api.native_start,
             api.native_stop,
             api.native_destroy,
-        ) else {
+            api.native_site_bind,
+            api.native_site_publish,
+            api.native_site_snapshot,
+        )
+        else {
             return Err(RadioActivationError::Product(-2));
         };
         let callbacks = abi::UrpAstDirectCallbacks {
@@ -133,6 +148,9 @@ impl ActiveRadio {
             handle: Some(handle),
             stop,
             destroy,
+            site_bind,
+            site_publish,
+            site_snapshot,
         };
         // SAFETY: successful create returns this stopped, uniquely owned station.
         let status = unsafe { start(handle.as_ptr()) };
@@ -140,6 +158,30 @@ impl ActiveRadio {
             return Err(RadioActivationError::Product(status));
         }
         Ok(active)
+    }
+
+    /// Queue spare-pin ownership on the existing worker; snapshots confirm service.
+    pub(crate) fn site_bind(&mut self, bank: u32, request: &abi::UrpAstSiteBinding) -> i32 {
+        self.handle.map_or(-1, |handle| {
+            // SAFETY: this owner retains the handle and the request is borrowed for this call.
+            unsafe { (self.site_bind)(handle.as_ptr(), bank, request) }
+        })
+    }
+
+    /// Queue steady output intent without opening a device or running I/O here.
+    pub(crate) fn site_publish(&mut self, bank: u32, request: &abi::UrpAstSiteRequest) -> i32 {
+        self.handle.map_or(-1, |handle| {
+            // SAFETY: this owner serializes control operations on its retained native handle.
+            unsafe { (self.site_publish)(handle.as_ptr(), bank, request) }
+        })
+    }
+
+    /// Copy the hardware owner's observation without refreshing its acquisition time.
+    pub(crate) fn site_snapshot(&mut self, bank: u32, output: &mut abi::UrpAstSiteSnapshot) -> i32 {
+        self.handle.map_or(-1, |handle| {
+            // SAFETY: the output is exclusively borrowed for this synchronous call.
+            unsafe { (self.site_snapshot)(handle.as_ptr(), bank, output) }
+        })
     }
 }
 
@@ -227,12 +269,106 @@ pub(crate) mod tests {
         CALLS.with(|calls| calls.borrow_mut().push("destroy"));
     }
 
+    unsafe extern "C" fn site_bind(
+        _: *mut c_void,
+        _: u32,
+        _: *const abi::UrpAstSiteBinding,
+    ) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn site_publish(
+        _: *mut c_void,
+        _: u32,
+        _: *const abi::UrpAstSiteRequest,
+    ) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn site_snapshot(
+        _: *mut c_void,
+        _: u32,
+        _: *mut abi::UrpAstSiteSnapshot,
+    ) -> i32 {
+        -1
+    }
+
     pub(crate) fn empty_active_radio() -> ActiveRadio {
         ActiveRadio {
             handle: None,
             stop,
             destroy,
+            site_bind,
+            site_publish,
+            site_snapshot,
         }
+    }
+
+    #[test]
+    fn site_bridge_forwards_on_the_same_native_owner() {
+        unsafe extern "C" fn bind(
+            handle: *mut c_void,
+            bank: u32,
+            request: *const abi::UrpAstSiteBinding,
+        ) -> i32 {
+            assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+            assert_eq!(bank, 1);
+            let request = unsafe { &*request };
+            assert_eq!((request.generation, request.output_mask), (73, 4));
+            assert_eq!((request.initial_high_mask, request.safe_high_mask), (4, 0));
+            -3
+        }
+        unsafe extern "C" fn publish(
+            handle: *mut c_void,
+            bank: u32,
+            request: *const abi::UrpAstSiteRequest,
+        ) -> i32 {
+            assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+            assert_eq!(bank, 1);
+            let request = unsafe { &*request };
+            assert_eq!(
+                (request.generation, request.output_mask, request.high_mask),
+                (74, 4, 4)
+            );
+            -4
+        }
+        unsafe extern "C" fn snapshot(
+            handle: *mut c_void,
+            bank: u32,
+            output: *mut abi::UrpAstSiteSnapshot,
+        ) -> i32 {
+            assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+            assert_eq!(bank, 1);
+            unsafe { (*output).generation = 74 };
+            0
+        }
+        CALLS.with(|calls| calls.borrow_mut().clear());
+        let mut radio = empty_active_radio();
+        radio.handle = Some(NonNull::<u8>::dangling().cast());
+        radio.site_bind = bind;
+        radio.site_publish = publish;
+        radio.site_snapshot = snapshot;
+        let binding = abi::UrpAstSiteBinding {
+            struct_size: std::mem::size_of::<abi::UrpAstSiteBinding>() as u32,
+            abi_version: 1,
+            generation: 73,
+            output_mask: 4,
+            initial_high_mask: 4,
+            safe_high_mask: 0,
+        };
+        let request = abi::UrpAstSiteRequest {
+            struct_size: std::mem::size_of::<abi::UrpAstSiteRequest>() as u32,
+            abi_version: 1,
+            generation: 74,
+            output_mask: 4,
+            high_mask: 4,
+        };
+        let mut observed: abi::UrpAstSiteSnapshot = unsafe { std::mem::zeroed() };
+        assert_eq!(radio.site_bind(1, &binding), -3);
+        assert_eq!(radio.site_publish(1, &request), -4);
+        assert_eq!(radio.site_snapshot(1, &mut observed), 0);
+        assert_eq!(observed.generation, 74);
+        CALLS.with(|calls| assert!(calls.borrow().is_empty(), "site I/O must not open hardware"));
+        drop(radio);
+        CALLS.with(|calls| assert_eq!(&*calls.borrow(), &["stop", "destroy"]));
     }
 
     #[test]
@@ -247,6 +383,9 @@ pub(crate) mod tests {
         api.native_start = Some(start);
         api.native_stop = Some(stop);
         api.native_destroy = Some(destroy);
+        api.native_site_bind = Some(site_bind);
+        api.native_site_publish = Some(site_publish);
+        api.native_site_snapshot = Some(site_snapshot);
         providers.abi_version = 1;
         config.receive_output_gain_db = -8;
         for (scenario, expected_status, expected_calls) in [
@@ -296,6 +435,9 @@ pub(crate) mod tests {
         api.native_start = Some(start);
         api.native_stop = Some(stop);
         api.native_destroy = Some(destroy);
+        api.native_site_bind = Some(site_bind);
+        api.native_site_publish = Some(site_publish);
+        api.native_site_snapshot = Some(site_snapshot);
         let callbacks = || ProductRadioCallbacks {
             receive: Some(receive),
             receive_context: std::ptr::null_mut(),

@@ -619,6 +619,9 @@ fn native_product_functions_complete(api: &crate::abi::UrpAstDescriptor) -> bool
         && api.native_start.is_some()
         && api.native_stop.is_some()
         && api.native_destroy.is_some()
+        && api.native_site_bind.is_some()
+        && api.native_site_publish.is_some()
+        && api.native_site_snapshot.is_some()
 }
 
 struct ProviderLibrary(Library);
@@ -1021,9 +1024,12 @@ pub(crate) mod tests {
         api.native_start = Some(fake_native_control);
         api.native_stop = Some(fake_native_control);
         api.native_destroy = Some(fake_native_destroy);
+        api.native_site_bind = Some(fake_site_bind);
+        api.native_site_publish = Some(fake_site_publish);
+        api.native_site_snapshot = Some(fake_site_snapshot);
 
         assert!(native_product_functions_complete(&api));
-        missing_fields!(api, native_product_functions_complete, native_create native_start native_stop native_destroy);
+        missing_fields!(api, native_product_functions_complete, native_create native_start native_stop native_destroy native_site_bind native_site_publish native_site_snapshot);
         let mut incomplete = api;
         incomplete.native_start = None;
         let providers = Box::leak(Box::new(super::ProviderSet {
@@ -1053,6 +1059,39 @@ pub(crate) mod tests {
     }
 
     unsafe extern "C" fn fake_native_destroy(_: *mut c_void) {}
+
+    unsafe extern "C" fn fake_site_bind(
+        _: *mut c_void,
+        _: u32,
+        _: *const crate::abi::UrpAstSiteBinding,
+    ) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn fake_site_publish(
+        _: *mut c_void,
+        _: u32,
+        _: *const crate::abi::UrpAstSiteRequest,
+    ) -> i32 {
+        -1
+    }
+    unsafe extern "C" fn fake_site_snapshot(
+        _: *mut c_void,
+        _: u32,
+        _: *mut crate::abi::UrpAstSiteSnapshot,
+    ) -> i32 {
+        -1
+    }
+
+    #[test]
+    fn site_bridge_requires_all_native_operations_before_hardware_creation() {
+        // SAFETY: nullable function pointers and scalar fields admit all-zero initialization.
+        let mut api: crate::abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.native_create = Some(fake_native_create);
+        api.native_start = Some(fake_native_control);
+        api.native_stop = Some(fake_native_control);
+        api.native_destroy = Some(fake_native_destroy);
+        assert!(!native_product_functions_complete(&api));
+    }
 
     #[test]
     fn provider_error_messages_are_stable() {

@@ -15,15 +15,18 @@ extern "C" {
 struct rptadv_control_descriptor_v1;
 struct rptadv_file_descriptor;
 struct rptadv_speech_descriptor;
+struct UrpAstSiteBinding;
+struct UrpAstSiteRequest;
+struct UrpAstSiteSnapshot;
 
 /** Exact incompatible product ABI revision. */
 #define RPTADV_PRODUCT_ABI_VERSION 4U
 /** Product capability name stored in its fixed-width descriptor field. */
 #define RPTADV_PRODUCT_CAPABILITY "rptadv.prod4"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 5U
+#define RPTADV_HOST_ABI_VERSION 6U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst5"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst6"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -182,7 +185,7 @@ typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, si
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v5 {
+struct rptadv_host_services_v6 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -224,6 +227,23 @@ struct rptadv_host_services_v5 {
                           void *transmit_context);
     /** Synchronously stop/hang up and detach both callbacks before returning. */
     void (*radio_destroy)(void *context, void *radio);
+
+    /** Control-only site I/O on the existing radio owner; never open another device.
+     * Bank 0 is CM119 and bank 1 is parallel-port I/O. Records use the installed
+     * USBRadioPlus site ABI. Zero means accepted, not physically read back.
+     * Binding/replacement generations and radio-pin exclusions are enforced by
+     * the owner. Snapshot acquisition times and submission/service generations
+     * are preserved. Nonzero provider errors pass through unchanged.
+     * Calls are serialized with other control operations and radio destruction,
+     * never made by an audio callback. Records are borrowed only during the call. */
+    int (*radio_site_bind)(void *context, void *radio, uint32_t bank,
+                           const struct UrpAstSiteBinding *binding);
+    /** Submit logical site output levels through the current binding. */
+    int (*radio_site_publish)(void *context, void *radio, uint32_t bank,
+                              const struct UrpAstSiteRequest *request);
+    /** Copy the current owner observation without synthesizing physical readback. */
+    int (*radio_site_snapshot)(void *context, void *radio, uint32_t bank,
+                               struct UrpAstSiteSnapshot *snapshot);
 
     /** Dial and return one uniquely owned peer. */
     int (*peer_dial)(void *context, const char *destination, size_t destination_length,
@@ -300,7 +320,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v5 *host,
+    int (*start)(const struct rptadv_host_services_v6 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,

@@ -25,10 +25,18 @@ The native radio transmit callback returns PTT and CTCSS enable separately; its
 activity policy remains in the controller, as specified by
 [ADR 0042](decisions/0042-activity-scoped-ctcss-encode.md).
 Before either incoming or outgoing peer media starts, the product binds it to
-its node's existing radio lease. Host-services ABI 5 forwards this control-only
+its node's existing radio lease. Host-services ABI 6 forwards this control-only
 operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
 USBRadioPlus retains ownership of the configured per-peer graph and its reload
 lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
+
+The same host table forwards site binding, output requests, and snapshots to
+that radio owner. Standalone borrows the native USBRadioPlus product handle;
+Asterisk sends an acknowledged site option on its existing channel. Neither
+path acquires a second CM119 or parallel-port owner. Provider timestamps,
+generation fences, error status, and the distinction between requested,
+serviced, and physically observed output remain intact. Acquisition and site
+policy integration are tracked by the site-monitoring implementation plan.
 
 Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that

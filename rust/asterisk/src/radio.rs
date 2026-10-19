@@ -26,6 +26,28 @@ impl Drop for Frame {
 }
 
 impl Radio {
+    /// Send one borrowed site command on the reserved channel. Require the exact
+    /// acknowledgment: Asterisk can return success for an unrecognized option.
+    pub(crate) fn site_control(&mut self, request: &mut ffi::UrpAstSiteControl) -> i32 {
+        request.accepted_abi_version = 0;
+        // SAFETY: the owned channel and exclusive payload remain live throughout setoption.
+        let result = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_SITE_IO as i32,
+                std::ptr::from_mut(request).cast(),
+                std::mem::size_of_val(request) as i32,
+                0,
+            )
+        };
+        if result != 0 {
+            result
+        } else if request.accepted_abi_version != ffi::URP_AST_SITE_OPTION_ABI_VERSION {
+            -1
+        } else {
+            0
+        }
+    }
     /// Synchronously attach this radio's link profile before the peer starts media.
     /// Peer construction has already installed its negotiated decoded read format.
     pub(crate) fn bind_peer(&self, peer: &mut crate::link::peer_io::PeerIo) -> Result<(), Error> {

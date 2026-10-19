@@ -1,5 +1,6 @@
 use super::*;
 use crate::fixture::{host, reset};
+use std::mem::size_of_val;
 
 const DIRECT_ACK_MISSING: u8 = 41;
 const DIRECT_ACK_WRONG: u8 = 42;
@@ -7,6 +8,69 @@ const DIRECT_OPTION_FAILED: u8 = 43;
 const LINK_ACK_MISSING: u8 = 44;
 const LINK_ACK_WRONG: u8 = 45;
 const LINK_OPTION_FAILED: u8 = 46;
+const SITE_ACK_MISSING: u8 = 47;
+const SITE_ACK_WRONG: u8 = 48;
+const SITE_OPTION_FAILED: u8 = 49;
+
+#[test]
+fn site_bridge_forwards_on_the_reserved_channel_and_requires_acknowledgment() {
+    for failure in [0, SITE_ACK_MISSING, SITE_ACK_WRONG, SITE_OPTION_FAILED] {
+        reset();
+        let null = ptr::null_mut();
+        // SAFETY: each record is borrowed synchronously; the sole channel owner is retained.
+        unsafe {
+            let mut radio = null;
+            assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+            host(|state| state.failure = failure);
+            let binding = ffi::UrpAstSiteBinding {
+                struct_size: size_of::<ffi::UrpAstSiteBinding>() as u32,
+                abi_version: 1,
+                generation: 10,
+                output_mask: 4,
+                initial_high_mask: 4,
+                safe_high_mask: 0,
+            };
+            let request = ffi::UrpAstSiteRequest {
+                struct_size: size_of::<ffi::UrpAstSiteRequest>() as u32,
+                abi_version: 1,
+                generation: 11,
+                output_mask: 4,
+                high_mask: 4,
+            };
+            let mut snapshot: ffi::UrpAstSiteSnapshot = std::mem::zeroed();
+            snapshot.struct_size = size_of_val(&snapshot) as u32;
+            snapshot.abi_version = 1;
+            snapshot.generation = 123;
+            let expected = match failure {
+                0 => 0,
+                SITE_OPTION_FAILED => -4,
+                _ => -1,
+            };
+            assert_eq!(radio_site_bind(null, radio, 1, &binding), expected);
+            assert_eq!(radio_site_publish(null, radio, 1, &request), expected);
+            assert_eq!(radio_site_snapshot(null, radio, 1, &mut snapshot), expected);
+            assert_eq!(snapshot.generation, if failure == 0 { 11 } else { 123 });
+            assert_eq!(snapshot.readback_valid_mask, 0);
+            assert_eq!(
+                host(|state| state.channels),
+                1,
+                "site I/O must borrow the radio channel"
+            );
+            assert_eq!(radio_site_bind(null, null, 1, &binding), -1);
+            assert_eq!(radio_site_bind(null, radio, 1, ptr::null()), -1);
+            assert_eq!(radio_site_publish(null, null, 1, &request), -1);
+            assert_eq!(radio_site_publish(null, radio, 1, ptr::null()), -1);
+            assert_eq!(radio_site_snapshot(null, null, 1, &mut snapshot), -1);
+            assert_eq!(radio_site_snapshot(null, radio, 1, ptr::null_mut()), -1);
+            drop((*radio.cast::<ReservedRadio>()).radio.take());
+            assert_eq!(radio_site_bind(null, radio, 1, &binding), -1);
+            assert_eq!(radio_site_publish(null, radio, 1, &request), -1);
+            assert_eq!(radio_site_snapshot(null, radio, 1, &mut snapshot), -1);
+            radio_destroy(null, radio);
+        }
+        host(|state| state.clean());
+    }
+}
 
 #[unsafe(no_mangle)]
 extern "C" fn ast_replace_sigchld() {}
@@ -39,6 +103,46 @@ unsafe extern "C" fn ast_channel_setoption(
     block: i32,
 ) -> i32 {
     assert_eq!(block, 0);
+    if option == 0x52505349 {
+        assert_eq!(length as usize, size_of::<ffi::UrpAstSiteControl>());
+        let site = unsafe { &mut *data.cast::<ffi::UrpAstSiteControl>() };
+        assert_eq!(site.struct_size as usize, size_of_val(site));
+        assert_eq!(site.abi_version, 1);
+        assert_eq!(site.accepted_abi_version, 0);
+        assert_eq!(site.bank, 1);
+        assert_eq!(channel, host(|state| state.token(0)));
+        match site.operation {
+            0 => assert_eq!(
+                (
+                    site.binding.generation,
+                    site.binding.output_mask,
+                    site.binding.initial_high_mask,
+                    site.binding.safe_high_mask
+                ),
+                (10, 4, 4, 0)
+            ),
+            1 => assert_eq!(
+                (
+                    site.request.generation,
+                    site.request.output_mask,
+                    site.request.high_mask
+                ),
+                (11, 4, 4)
+            ),
+            2 => {
+                site.snapshot.generation = 11;
+                site.snapshot.readback_valid_mask = 0;
+            }
+            _ => panic!("unknown site operation"),
+        }
+        let failure = host(|state| state.failure);
+        site.accepted_abi_version = match failure {
+            SITE_ACK_MISSING => 0,
+            SITE_ACK_WRONG => 2,
+            _ => 1,
+        };
+        return if failure == SITE_OPTION_FAILED { -4 } else { 0 };
+    }
     if option == 0x52504C41 {
         assert_eq!(length as usize, size_of::<ffi::urp_ast_link_attach>());
         let attachment = unsafe { &mut *data.cast::<ffi::urp_ast_link_attach>() };
@@ -195,7 +299,7 @@ fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
         command_notice(null, c"100".as_ptr(), 3, 0);
     }
     assert_eq!(boundary(-1, || panic!("callback fault")), -1);
-    assert_eq!(descriptor().abi_version, 5);
+    assert_eq!(descriptor().abi_version, 6);
 }
 
 #[test]

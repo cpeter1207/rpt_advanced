@@ -7,7 +7,7 @@ use crate::{
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
-    mem::{MaybeUninit, offset_of, size_of},
+    mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
 };
@@ -30,7 +30,7 @@ pub enum PeerInput<'a> {
 
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(abi::rptadv_host_services_v5);
+pub struct HostServices(abi::rptadv_host_services_v6);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
@@ -151,7 +151,7 @@ impl Backend for HostServices {
     }
 }
 
-fn complete(api: &abi::rptadv_host_services_v5) -> bool {
+fn complete(api: &abi::rptadv_host_services_v6) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -164,6 +164,9 @@ fn complete(api: &abi::rptadv_host_services_v5) -> bool {
         api.radio_open.is_some(),
         api.radio_activate.is_some(),
         api.radio_destroy.is_some(),
+        api.radio_site_bind.is_some(),
+        api.radio_site_publish.is_some(),
+        api.radio_site_snapshot.is_some(),
         api.peer_dial.is_some(),
         api.peer_bind_radio.is_some(),
         api.peer_rate.is_some(),
@@ -187,28 +190,16 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v5) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v6) -> Result<Self, Error> {
         if pointer.is_null() {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        let prefix = offset_of!(abi::rptadv_host_services_v5, peer_step_attach);
-        let async_end = offset_of!(abi::rptadv_host_services_v5, peer_observe);
-        let observe_end = offset_of!(abi::rptadv_host_services_v5, peer_prepare_audio);
-        let full = size_of::<abi::rptadv_host_services_v5>();
-        if size < full && ![prefix, async_end, observe_end].contains(&size) {
+        if size < size_of::<abi::rptadv_host_services_v6>() {
             return Err(Error::Admission);
         }
-        // A prefix-only host has no async tail. Never form a full-size reference to it.
-        let mut copied = MaybeUninit::<abi::rptadv_host_services_v5>::zeroed();
-        unsafe {
-            ptr::copy_nonoverlapping(
-                pointer.cast::<u8>(),
-                copied.as_mut_ptr().cast(),
-                size.min(full),
-            );
-        }
-        let api = unsafe { copied.assume_init() };
+        // ABI 6 requires a complete table, including the site operations.
+        let api = unsafe { pointer.read() };
         let async_count = [
             api.peer_step_attach.is_some(),
             api.peer_step_stop.is_some(),
@@ -227,8 +218,8 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
-        if api.abi_version != 5
-            || api.capability != *b"rptadv.hst5\0"
+        if api.abi_version != 6
+            || api.capability != *b"rptadv.hst6\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 5)
@@ -454,6 +445,57 @@ pub struct Radio {
 // SAFETY: the handle is uniquely owned and never used concurrently.
 unsafe impl Send for Radio {}
 impl Radio {
+    /// Replace site output claims on this radio's existing owner, off audio callbacks.
+    /// Zero accepts a request; the snapshot's serviced generation confirms application.
+    pub fn site_bind(&mut self, bank: u32, binding: &abi::UrpAstSiteBinding) -> Result<(), i32> {
+        let code = unsafe {
+            self.services.0.radio_site_bind.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bank,
+                binding,
+            )
+        };
+        (code == 0).then_some(()).ok_or(code)
+    }
+
+    /// Submit logical levels through the current site binding, preserving provider errors.
+    pub fn site_publish(&mut self, bank: u32, request: &abi::UrpAstSiteRequest) -> Result<(), i32> {
+        let code = unsafe {
+            self.services.0.radio_site_publish.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bank,
+                request,
+            )
+        };
+        (code == 0).then_some(()).ok_or(code)
+    }
+
+    /// Copy site observations on the control path. Input age and physical readback
+    /// remain provider observations, distinct from requested or serviced output levels.
+    pub fn site_snapshot(&mut self, bank: u32) -> Result<abi::UrpAstSiteSnapshot, i32> {
+        let mut snapshot: abi::UrpAstSiteSnapshot = unsafe { std::mem::zeroed() };
+        snapshot.struct_size = size_of::<abi::UrpAstSiteSnapshot>() as u32;
+        snapshot.abi_version = 1;
+        let code = unsafe {
+            self.services.0.radio_site_snapshot.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bank,
+                &mut snapshot,
+            )
+        };
+        if code != 0 {
+            return Err(code);
+        }
+        if snapshot.struct_size < size_of::<abi::UrpAstSiteSnapshot>() as u32
+            || snapshot.abi_version != 1
+        {
+            return Err(-1);
+        }
+        Ok(snapshot)
+    }
     /// Prepared native callback frame bound.
     pub fn maximum_frames(&self) -> usize {
         self.maximum_frames

@@ -78,7 +78,7 @@ future version. Runtime acknowledgment rejects older mixed installations safely.
 ### Explicit peer link processing (2026-09-25)
 
 The ABI 3/4 references in this dated section record their introduction. The
-current host-services descriptor is ABI 5 and the product descriptor is ABI 4,
+current host-services descriptor is ABI 6 and the product descriptor is ABI 4,
 as declared in `rust/product/include/rptadv_product.h`.
 
 Before starting either an incoming or outgoing peer's media owner, the product
@@ -110,7 +110,7 @@ peer-binding operation and its version-1 option payload are unchanged.
 
 ### Shared directory policy (2026-10-09)
 
-Host-services ABI 5 (`rptadv.hst5`) replaces the resolved-directory callback
+Host-services ABI 6 (`rptadv.hst6`) provides directory access
 with raw extnodes, selected SRV target/port, and numeric-address callbacks.
 The product owns static/DNS/external precedence, record validation, and source-IP
 authentication once. Asterisk owns config/DNS allocation and cleanup; standalone
@@ -125,12 +125,27 @@ Asterisk answers reject lookup, while standalone DNS failures permit external-fi
 fallback only when both sources are selected. An authoritative source mismatch
 never falls back. This extraction does not standardize those backend outcomes.
 
-The new host table rejects ABI 4 before callbacks. Update product, standalone, and
+The host table rejects earlier ABI revisions before callbacks. Update product, standalone, and
 Asterisk consumers together under ADR 0040; no old-alpha table is retained. The
 host-services contract is exchanged through the existing product start operation,
 not a separately exported DSO symbol, so this host-table change alone does not
 change a SONAME or invent a package release minimum. Existing product/integration
 packages continue requiring their matching builds.
+
+### Existing-owner site I/O (2026-10-19)
+
+The complete ABI 6 table requires bind, publish, and snapshot operations for
+site I/O. These are control-only calls on the existing radio handle. Standalone
+forwards to the native product's site operations. The Asterisk adapter uses
+the public `ast_channel_setoption` site envelope and requires explicit ABI
+acknowledgment, since an unknown option can return success without handling it.
+Neither adapter opens another hardware owner or performs physical I/O in the
+audio callback. Provider errors, acquisition times, and requested/submitted/
+serviced generations pass through without claiming independent readback.
+The released USBRadioPlus alpha24 SDK/runtime supplies this descriptor tail;
+its ABI and SONAME remain 1. Product ABI 4 and SONAME 1 remain unchanged.
+The full host table is mandatory; optional peer operations may be null but
+truncated older tables are not retained as compatibility paths.
 
 AllStarLink wire-protocol, directory, topology, and control interoperability
 remain required features. Matching ASL3 behavior on those interfaces is not a

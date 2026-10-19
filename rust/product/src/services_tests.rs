@@ -1,6 +1,7 @@
 use super::*;
 use std::{
     ffi::{c_char, c_void},
+    mem::size_of_val,
     ptr,
     sync::atomic::{AtomicU8, Ordering},
 };
@@ -10,6 +11,159 @@ static LOOKUP_MODE: AtomicU8 = AtomicU8::new(0);
 static RADIO_OPEN_MODE: AtomicU8 = AtomicU8::new(0);
 static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
 static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
+
+#[test]
+fn site_bridge_rejects_a_host_without_the_site_contract() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.abi_version = 5;
+    table.capability = *b"rptadv.hst5\0";
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+    table = unsafe { crate::fixture::host_descriptor().read() };
+    for length in [
+        std::mem::offset_of!(abi::rptadv_host_services_v6, radio_site_bind),
+        std::mem::offset_of!(abi::rptadv_host_services_v6, radio_site_publish),
+        std::mem::offset_of!(abi::rptadv_host_services_v6, radio_site_snapshot),
+    ] {
+        table.struct_size = length as u32;
+        assert!(matches!(
+            unsafe { HostServices::open(&table) },
+            Err(Error::Admission)
+        ));
+    }
+}
+
+#[test]
+fn site_bridge_requires_every_operation_and_preserves_owner_observations() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = unsafe { crate::fixture::host_descriptor().read() };
+    for missing in 0..3 {
+        let mut table = fixture;
+        match missing {
+            0 => table.radio_site_bind = None,
+            1 => table.radio_site_publish = None,
+            _ => table.radio_site_snapshot = None,
+        }
+        assert!(matches!(
+            unsafe { HostServices::open(&table) },
+            Err(Error::Admission)
+        ));
+    }
+    unsafe extern "C" fn bind(
+        _: *mut c_void,
+        radio: *mut c_void,
+        bank: u32,
+        request: *const abi::UrpAstSiteBinding,
+    ) -> i32 {
+        assert!(!radio.is_null());
+        assert!(bank <= 1);
+        let request = unsafe { &*request };
+        assert_eq!(
+            (
+                request.generation,
+                request.output_mask,
+                request.initial_high_mask,
+                request.safe_high_mask
+            ),
+            (71, 4, 4, 0)
+        );
+        if bank == 1 { -3 } else { 0 }
+    }
+    unsafe extern "C" fn publish(
+        _: *mut c_void,
+        radio: *mut c_void,
+        bank: u32,
+        request: *const abi::UrpAstSiteRequest,
+    ) -> i32 {
+        assert!(!radio.is_null());
+        assert!(bank <= 1);
+        let request = unsafe { &*request };
+        assert_eq!(
+            (request.generation, request.output_mask, request.high_mask),
+            (72, 4, 4)
+        );
+        if bank == 1 { 0 } else { -4 }
+    }
+    unsafe extern "C" fn snapshot(
+        _: *mut c_void,
+        radio: *mut c_void,
+        bank: u32,
+        output: *mut abi::UrpAstSiteSnapshot,
+    ) -> i32 {
+        assert!(!radio.is_null());
+        let output = unsafe { &mut *output };
+        assert_eq!(output.struct_size as usize, size_of_val(output));
+        assert_eq!(output.abi_version, 1);
+        output.generation = 72;
+        output.serviced_generation = 71;
+        output.observed_at_valid = 1;
+        output.observed_at_ms = 100;
+        output.snapshot_at_ms = 700;
+        output.input_quality = 2;
+        output.last_command_error = 2;
+        match bank {
+            1 => 0,
+            2 => -5,
+            3 => {
+                output.struct_size -= 1;
+                0
+            }
+            _ => {
+                output.abi_version = 2;
+                0
+            }
+        }
+    }
+    let services = host_services(|table| {
+        table.radio_site_bind = Some(bind);
+        table.radio_site_publish = Some(publish);
+        table.radio_site_snapshot = Some(snapshot);
+    });
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let binding = abi::UrpAstSiteBinding {
+        struct_size: size_of::<abi::UrpAstSiteBinding>() as u32,
+        abi_version: 1,
+        generation: 71,
+        output_mask: 4,
+        initial_high_mask: 4,
+        safe_high_mask: 0,
+    };
+    let request = abi::UrpAstSiteRequest {
+        struct_size: size_of::<abi::UrpAstSiteRequest>() as u32,
+        abi_version: 1,
+        generation: 72,
+        output_mask: 4,
+        high_mask: 4,
+    };
+    assert_eq!(radio.site_bind(1, &binding), Err(-3));
+    assert_eq!(radio.site_bind(0, &binding), Ok(()));
+    assert_eq!(radio.site_publish(1, &request), Ok(()));
+    assert_eq!(radio.site_publish(0, &request), Err(-4));
+    let observed = radio.site_snapshot(1).unwrap();
+    assert_eq!(
+        (observed.generation, observed.serviced_generation),
+        (72, 71)
+    );
+    assert_eq!(
+        (observed.observed_at_ms, observed.snapshot_at_ms),
+        (100, 700)
+    );
+    assert_eq!(
+        (
+            observed.input_quality,
+            observed.last_command_error,
+            observed.readback_valid_mask
+        ),
+        (2, 2, 0)
+    );
+    for (bank, error) in [(2, -5), (3, -1), (4, -1)] {
+        assert!(matches!(radio.site_snapshot(bank), Err(actual) if actual == error));
+    }
+}
 
 #[test]
 fn directory_host_revision_and_every_backend_callback_are_required() {
@@ -129,7 +283,7 @@ fn host_without_radio_link_binding_is_rejected_before_callbacks() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 5;
+    table.abi_version = 6;
     table.peer_bind_radio = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -154,7 +308,7 @@ fn direct_table_requires_both_activation_and_destroy() {
     ));
 }
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v5)) -> HostServices {
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v6)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -408,27 +562,33 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v5, peer_step_attach) as u32;
-    assert!(unsafe { HostServices::open(&table) }.is_ok());
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v6, peer_step_attach) as u32;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
     table.struct_size -= 1;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v5, peer_observe) as u32;
-    assert!(unsafe { HostServices::open(&table) }.is_ok());
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v6, peer_observe) as u32;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
     table.struct_size += 1;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v5, peer_destroy)
+    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v6, peer_destroy)
         + size_of::<usize>() * 2) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v5>() as u32;
+    table.struct_size = size_of::<abi::rptadv_host_services_v6>() as u32;
     table.peer_step_stop = Some(stop_only);
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -440,13 +600,13 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 5;
+    table.abi_version = 6;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.hst5\0";
+    table.capability = *b"rptadv.hst6\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
