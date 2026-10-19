@@ -16,11 +16,12 @@ use crate::{
     config::{
         ConfigDocument, ConfigWarning, NodeId, ResolvedEventSettings, ResolvedIdentifierSettings,
         ResolvedMacroSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
-        ResolvedScheduleSettings, ResolvedTemplateSettings, ResolvedTimeSettings, Schema,
+        ResolvedScheduleSettings, ResolvedSiteSettings, ResolvedTemplateSettings,
+        ResolvedTimeSettings, Schema,
     },
     controller::{ActivitySnapshot, ControllerControl, NodeController, ParrotLevels},
     media::{PreparedAudio, StationMediaSession},
-    messages::{Message, MessageCatalog},
+    messages::{Message, MessageArgument, MessageCatalog},
     schedule::{CivilTime, ScheduledWindow},
     template::MessageTemplate,
     time::{TimeAnnouncement, TimeFormat},
@@ -135,6 +136,7 @@ impl<C: Send> Drop for ControlState<C> {
 /// Stable per-node control identity, retained across successful generation swaps.
 pub struct RuntimeNode<A: Send, C: Send = ()> {
     name: String,
+    site: crate::site::SiteController,
     settings: ResolvedNodeSettings,
     bounds: GenerationSettings,
     host: NodeHost<DtmfWorker, RuntimeTransmit<A>>,
@@ -149,6 +151,10 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     group_announcements: Vec<GroupAnnouncement>,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
+    /// Station-owned site policy; callers deliver observations/effects off audio.
+    pub fn site(&mut self) -> &mut crate::site::SiteController {
+        &mut self.site
+    }
     /// Borrow a current/retiring adapter dispatcher only on control. Once exposed, its generation
     /// requires an explicit `detached` acknowledgment after dispatcher stop/drain before reclaim.
     pub fn adapter_control_mut(&mut self, generation: u64) -> Option<&mut C> {
@@ -249,6 +255,7 @@ impl RuntimeDispatch {
 struct Candidate<A: Send, C: Send> {
     name: String,
     settings: ResolvedNodeSettings,
+    site: ResolvedSiteSettings,
     bounds: GenerationSettings,
     generation: RuntimeGeneration<DtmfWorker, RuntimeTransmit<A>>,
     control: ControlState<C>,
@@ -569,6 +576,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             candidates.push(Candidate {
                 name: name.into(),
                 settings,
+                site: ResolvedSiteSettings::resolve(&document, &id)?.value,
                 bounds,
                 generation,
                 control,
@@ -690,6 +698,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     candidate.settings.dtmf_admin_timeout_ms,
                 );
                 old.settings = candidate.settings;
+                old.site.reconfigure(candidate.site);
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
                 old.time_format = candidate.time_format;
@@ -705,6 +714,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 );
                 next.push(RuntimeNode {
                     name: candidate.name,
+                    site: crate::site::SiteController::new(candidate.site),
                     settings: candidate.settings,
                     bounds: candidate.bounds,
                     host: NodeHost::new(candidate.generation),
@@ -970,6 +980,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             };
             let values = (|| {
                 let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
+                let site = node.site.snapshot(clock.now_ms);
                 let (mut links, identity) =
                     render::direct_status(node.links.manager(), &node.control.catalog)?;
                 links.tts = render::telemetry_speech(&links.tts, &[&identity]);
@@ -980,8 +991,36 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     node: node.name.clone(),
                     callsign: node.settings.callsign.clone(),
                     links,
-                    sensors: Default::default(),
-                    inputs: Default::default(),
+                    sensors: site
+                        .sensors
+                        .into_iter()
+                        .map(|(name, sensor)| {
+                            (
+                                name,
+                                crate::site::Observation {
+                                    value: sensor.current.value.map(MessageArgument::Number),
+                                    observed_at_ms: sensor.current.observed_at_ms,
+                                    quality: sensor.current.quality,
+                                },
+                            )
+                        })
+                        .collect(),
+                    inputs: site
+                        .inputs
+                        .into_iter()
+                        .map(|(name, input)| {
+                            (
+                                name,
+                                crate::site::Observation {
+                                    value: input
+                                        .value
+                                        .map(|value| MessageArgument::Number(f64::from(value))),
+                                    observed_at_ms: input.observed_at_ms,
+                                    quality: input.quality,
+                                },
+                            )
+                        })
+                        .collect(),
                     time_remaining: None,
                 })
             })();

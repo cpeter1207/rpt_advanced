@@ -68,6 +68,121 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn site_runtime_reload_keeps_history_and_original_pulse_deadline() {
+    use crate::site::{
+        FanOutput, Observation, OutputRequest, ReadingQuality, SiteCommand, SiteObservations,
+    };
+    let source = "[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=/dev/gpiochip0\nline=7\n";
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
+    };
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(source).unwrap(),
+        &Media,
+        adapter,
+        device,
+        clock(),
+    )
+    .unwrap();
+    let observations = SiteObservations {
+        sensors: [(
+            "supply".into(),
+            Observation {
+                value: Some(13.8),
+                observed_at_ms: Some(1000),
+                quality: ReadingQuality::Valid,
+            },
+        )]
+        .into(),
+        outputs: [(
+            "relay".into(),
+            FanOutput {
+                available: true,
+                pwm: false,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let site = runtime.node("1000").unwrap().site();
+    site.advance(1000, &observations, &Default::default());
+    site.command(
+        SiteCommand::Output {
+            name: "relay".into(),
+            request: OutputRequest::Pulse,
+        },
+        1000,
+    )
+    .unwrap();
+    let mut now = clock();
+    now.now_ms = 1200;
+    runtime
+        .reload(
+            ConfigDocument::parse(&format!("{source}pulse_ms=900\n")).unwrap(),
+            &Media,
+            adapter,
+            device,
+            now,
+        )
+        .unwrap();
+    let snapshot = runtime.node("1000").unwrap().site().snapshot(1200);
+    assert_eq!(snapshot.outputs["relay"].pulse_deadline_ms, Some(1500));
+    assert_eq!(snapshot.sensors["supply"].minimum.unwrap().value, 13.8);
+    assert!(runtime.detached("1000", 1));
+    runtime.reclaim();
+    runtime
+        .node("1000")
+        .unwrap()
+        .site()
+        .advance(1500, &observations, &Default::default());
+    assert!(!runtime.node("1000").unwrap().site().snapshot(1500).outputs["relay"].requested_on);
+    assert!(runtime.stop(1600));
+}
+
+#[test]
+fn site_runtime_message_uses_current_measurement_and_reports_stale_as_unavailable() {
+    use crate::site::{Observation, ReadingQuality, SiteObservations};
+    for (now_ms, expected) in [
+        (1000, "Temperature is 12.5."),
+        (6000, "outdoor is unavailable."),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(ConfigDocument::parse("[1000]\n[sensor 1000 outdoor]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=temp1_input\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\ndtmf_id=1\n").unwrap(), &CapturingMedia(messages.clone()), adapter, |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock()).unwrap();
+        runtime.node("1000").unwrap().site().advance(
+            1000,
+            &SiteObservations {
+                sensors: [(
+                    "outdoor".into(),
+                    Observation {
+                        value: Some(12.5),
+                        observed_at_ms: Some(1000),
+                        quality: ReadingQuality::Valid,
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        runtime.queue_message("1000", "1", None).unwrap();
+        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = rx.acquire_pair(&mut tx).unwrap();
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut [0.0; 12001]);
+        let mut now = clock();
+        now.now_ms = now_ms;
+        runtime.prepare_messages(now);
+        assert_eq!(*messages.lock().unwrap(), [expected]);
+        drop(generation);
+        assert!(runtime.stop(now_ms));
+    }
+}
+
+#[test]
 fn composition_runtime_tail_resolves_only_at_each_release_attempt() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
