@@ -8,7 +8,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Instant,
@@ -26,6 +26,8 @@ struct Fence {
     request: AtomicU64,
     acknowledged: AtomicU64,
     quality: AtomicU8,
+    // A committed queue exchange cannot be superseded by pause/close intent.
+    install: AtomicBool,
 }
 struct Request {
     index: usize,
@@ -123,6 +125,7 @@ impl DeviceWorker {
         self.requests = staged.requests;
         self.replies = staged.replies;
         self.pending = staged.pending;
+        self.fence.install.store(true, Ordering::Release);
         self.signal(INSTALL);
         true
     }
@@ -147,6 +150,7 @@ impl DeviceWorker {
             request: AtomicU64::new(RUN),
             acknowledged: AtomicU64::new(RUN),
             quality: AtomicU8::new(0),
+            install: AtomicBool::new(false),
         });
         let shared = Arc::clone(&fence);
         let thread = thread::Builder::new()
@@ -279,7 +283,26 @@ fn acquire(
     let mut seen = RUN;
     let mut prepared: Option<Handoff> = None;
     loop {
+        // Acquire intent first: a post-commit pause must observe the committed
+        // queue exchange before it can discard an uncommitted preparation.
         let request = fence.request.load(Ordering::Acquire);
+        if fence.install.swap(false, Ordering::AcqRel) {
+            let next = prepared.take().expect("commit requires a prepared barrier");
+            let retained = next
+                .settings
+                .iter()
+                .map(|binding| {
+                    settings
+                        .iter()
+                        .position(|old| old == binding)
+                        .and_then(|index| endpoints[index].take())
+                })
+                .collect();
+            endpoints = retained; // Only safely retired old contexts are dropped.
+            settings = next.settings;
+            requests = next.requests;
+            replies = next.replies;
+        }
         if request != seen {
             if request & KIND != RUN {
                 while let Ok(cancelled) = requests.pop() {
@@ -309,23 +332,6 @@ fn acquire(
                             }
                         }
                         prepared = Some(next);
-                    }
-                    INSTALL => {
-                        let next = prepared.take().expect("commit requires a prepared barrier");
-                        let retained = next
-                            .settings
-                            .iter()
-                            .map(|binding| {
-                                settings
-                                    .iter()
-                                    .position(|old| old == binding)
-                                    .and_then(|index| endpoints[index].take())
-                            })
-                            .collect();
-                        endpoints = retained; // Only safely retired old contexts are dropped.
-                        settings = next.settings;
-                        requests = next.requests;
-                        replies = next.replies;
                     }
                     _ => {
                         prepared = None;

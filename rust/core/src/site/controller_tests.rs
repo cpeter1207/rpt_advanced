@@ -28,6 +28,40 @@ fn observations(value: f64, now: u64) -> SiteObservations {
 }
 
 #[test]
+fn site_output_pending_acquisition_preserves_startup_without_claiming_availability() {
+    let mut policy = settings("");
+    policy.outputs[0].startup_on = true;
+    let mut site = SiteController::new(policy);
+    let pending = SiteObservations::default();
+    site.advance(0, &pending, &BTreeMap::new());
+    let output = site.snapshot(0).outputs["relay"];
+    assert!(
+        output.requested_on,
+        "startup demand must survive pending device acquisition"
+    );
+    assert!(output.fault, "pending must not claim available hardware");
+    assert_eq!(
+        site.command(
+            SiteCommand::Output {
+                name: "relay".into(),
+                request: OutputRequest::Pulse
+            },
+            0
+        ),
+        Err(SiteError::Unavailable)
+    );
+    site.advance(1, &observations(12.5, 1), &BTreeMap::new());
+    assert!(site.snapshot(1).outputs["relay"].requested_on);
+    assert!(!site.snapshot(1).outputs["relay"].fault);
+    site.advance(2, &pending, &BTreeMap::new());
+    assert!(
+        !site.snapshot(2).outputs["relay"].requested_on,
+        "lost known owner must request safe state"
+    );
+    assert!(site.snapshot(2).outputs["relay"].fault);
+}
+
+#[test]
 fn site_reload_preserves_pulse_fan_alarm_and_measurement_state() {
     let policy = settings(
         "[output 1000 cooling]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=fan\n[fan 1000 cooling]\nenabled=yes\noutput=cooling\nmode=ptt\nrun_on_ms=1000\n[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\nlatched=yes\non_trip=inhibit:on\n",

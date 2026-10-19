@@ -15,7 +15,8 @@ pub struct SiteObservations {
     pub sensors: BTreeMap<String, Observation<f64>>,
     /// Polarity-normalized digital snapshots; a missing entry is unavailable.
     pub inputs: BTreeMap<String, Observation<bool>>,
-    /// Real output availability/capabilities from each owner.
+    /// Real output availability/capabilities from each owner. Omit a not-yet-acquired
+    /// output; include unavailable once acquisition fails or a known owner is lost.
     pub outputs: BTreeMap<String, FanOutput>,
 }
 
@@ -294,7 +295,6 @@ impl SiteController {
         observations: &SiteObservations,
         ptt: &BTreeMap<NodeId, bool>,
     ) -> Vec<SiteEffect> {
-        self.availability.clone_from(&observations.outputs);
         self.ptt.clone_from(ptt);
         let mut effects = Vec::new();
         for policy in &self.settings.sensors {
@@ -308,14 +308,20 @@ impl SiteController {
             }
         }
         for policy in &self.settings.outputs {
-            self.outputs.get_mut(&policy.name).unwrap().advance(
-                now_ms,
-                observations
-                    .outputs
-                    .get(&policy.name)
-                    .is_some_and(|output| output.available),
-            );
+            let observation = observations.outputs.get(&policy.name);
+            // Pending first acquisition keeps startup demand but remains unavailable.
+            // A missing previously known owner is a fault, not a new startup.
+            if observation.is_some()
+                || self.availability.contains_key(&policy.name)
+                || !policy.enabled
+            {
+                self.outputs
+                    .get_mut(&policy.name)
+                    .unwrap()
+                    .advance(now_ms, observation.is_some_and(|output| output.available));
+            }
         }
+        self.availability.clone_from(&observations.outputs);
         for index in 0..self.settings.outputs.len() {
             let name = self.settings.outputs[index].name.clone();
             if self.settings.outputs[index].enabled

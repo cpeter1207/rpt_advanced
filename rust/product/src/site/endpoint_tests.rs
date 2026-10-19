@@ -20,6 +20,8 @@ static PROBE: Mutex<Probe> = Mutex::new(Probe {
     failure: false,
     invalid: false,
 });
+#[path = "acquisition_tests.rs"]
+mod acquisition;
 #[path = "worker_tests.rs"]
 mod workers;
 unsafe extern "C" fn gpio_open(

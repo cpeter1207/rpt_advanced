@@ -262,6 +262,42 @@ fn site_worker_reconfigure_retains_unchanged_output_and_safes_removed_line() {
 }
 
 #[test]
+fn site_worker_pause_cannot_lose_an_already_committed_queue_handoff() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    let mut host = NodeHost::new(generation(1));
+    let output = (
+        settings(SiteBackend::Gpiod),
+        Direction::Output {
+            active_high: true,
+            startup_on: false,
+            safe_on: false,
+        },
+    );
+    let mut input = settings(SiteBackend::Gpiod);
+    input.channel = "8".into();
+    let input = (input, Direction::Input { active_high: true });
+    let mut worker = DeviceWorker::start(backends(), vec![output.clone()], Instant::now()).unwrap();
+    for _ in 0..20 {
+        worker.pause(false);
+        until(|| worker.barrier().is_some());
+        assert!(worker.stage(vec![input.clone(), output.clone()]));
+        until(|| worker.barrier().is_some());
+        assert!(worker.commit());
+        worker.pause(false); // Cancellation may race the device's INSTALL observation.
+        until(|| worker.barrier().is_some());
+        assert!(worker.resume());
+        assert!(worker.submit(0, None, permit(&mut host)));
+        assert_eq!(
+            read_result(&mut worker).outcome,
+            Ok(Outcome::Reading(Sample::Digital(true)))
+        );
+    }
+    close(&mut worker);
+    host_cleanup(&mut host, 1);
+}
+
+#[test]
 fn site_worker_stale_permit_cannot_apply_observation_or_dispatch_queued_write() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     *PROBE.lock().unwrap() = Probe::default();
