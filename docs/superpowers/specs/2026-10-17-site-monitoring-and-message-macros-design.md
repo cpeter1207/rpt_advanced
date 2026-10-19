@@ -64,6 +64,10 @@ our requirements, not claims that every reference controller provides them.
   behind separately versioned dynamic adapters under ADR 0022. Ordinary IIO
   operating-system access stays in its hardware owner, not a generic OS facade.
 - Use stable device identity plus channel/line identity, not enumeration order.
+- For CM119 and parallel-port site I/O, `device` is the configured node number
+  whose radio already owns the interface; `line` is its physical pin number.
+  Reuse that owner and reject pins reserved for PTT, tone signaling, clipping,
+  or interlocks. Do not acquire another device handle for site access.
   Bind only configured endpoints and require only their declared capabilities.
 - Hardware I/O runs outside audio callbacks. Bounded backend work publishes
   immutable/atomic observations to station control; one slow backend cannot

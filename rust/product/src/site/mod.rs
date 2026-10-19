@@ -2,3 +2,4 @@
 
 pub mod backends;
 pub mod iio;
+pub mod worker;
