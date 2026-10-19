@@ -25,17 +25,66 @@ pub struct OutputStatus {
 }
 
 /// One serial acquisition owner per configured external physical device.
+#[derive(Default)]
 pub struct Acquisition {
     devices: Vec<Device>,
+    replacement: Option<Replacement>,
+    auto_resume: bool,
+}
+type DeviceKey = (SiteBackend, String);
+struct Replacement {
+    bindings: BTreeMap<DeviceKey, Vec<Binding>>,
+    fresh: BTreeMap<DeviceKey, Device>,
+    prepared: bool,
 }
 struct Device {
+    key: DeviceKey,
     worker: DeviceWorker,
     bindings: Vec<Binding>,
+    paused: bool,
 }
+#[derive(Clone)]
 enum Value {
     Sensor(Observation<f64>),
     Input(Observation<bool>),
     Output { status: OutputStatus, pwm: bool },
+}
+impl Device {
+    fn prepare(
+        key: DeviceKey,
+        bindings: Vec<Binding>,
+        backends: Arc<SiteBackends>,
+        epoch: Instant,
+    ) -> Result<Self, ReadingQuality> {
+        Ok(Self {
+            key,
+            worker: DeviceWorker::start(backends, physical(&bindings), epoch)?,
+            bindings,
+            paused: false,
+        })
+    }
+}
+fn physical(bindings: &[Binding]) -> Vec<(SiteEndpoint, Direction)> {
+    bindings
+        .iter()
+        .map(|binding| (binding.endpoint.clone(), binding.direction))
+        .collect()
+}
+/// Keep observations and live intent only when their source and logical identity survive.
+fn transfer(previous: &[Binding], next: &mut [Binding]) {
+    for binding in next {
+        if let Some(old) = previous.iter().find(|old| {
+            old.node == binding.node
+                && old.name == binding.name
+                && old.endpoint == binding.endpoint
+                && old.direction == binding.direction
+        }) {
+            binding.value = old.value.clone();
+            binding.observed = old.observed;
+            binding.last_attempt = old.last_attempt;
+            binding.due_ms = old.due_ms;
+        }
+    }
 }
 struct Binding {
     node: String,
@@ -230,6 +279,142 @@ fn bindings(
     devices
 }
 impl Acquisition {
+    /// Fence changed physical owners while unrelated devices continue acquisition.
+    pub fn begin(
+        &mut self,
+        settings: &BTreeMap<String, ResolvedSiteSettings>,
+        backends: Arc<SiteBackends>,
+        epoch: Instant,
+    ) -> bool {
+        if self.replacement.is_some() || self.devices.iter().any(|device| device.paused) {
+            return false;
+        }
+        let mut bindings = bindings(settings);
+        let mut fresh = BTreeMap::new();
+        let keys: Vec<_> = bindings
+            .keys()
+            .filter(|key| !self.devices.iter().any(|device| &device.key == *key))
+            .cloned()
+            .collect();
+        for key in keys {
+            let entries = bindings.remove(&key).expect("selected candidate key");
+            let Ok(mut device) =
+                Device::prepare(key.clone(), entries, Arc::clone(&backends), epoch)
+            else {
+                return false;
+            };
+            // No operations have been submitted; a new owner cannot touch hardware
+            // until commit, old-owner retirement, and explicit resume.
+            device.worker.pause(false);
+            device.paused = true;
+            fresh.insert(key, device);
+        }
+        for device in &mut self.devices {
+            let next = bindings.get(&device.key);
+            if next.is_none_or(|next| physical(next) != physical(&device.bindings)) {
+                device.worker.pause(next.is_none());
+                device.paused = true;
+            }
+        }
+        self.auto_resume = false;
+        self.replacement = Some(Replacement {
+            bindings,
+            fresh,
+            prepared: false,
+        });
+        true
+    }
+    /// Prepare retained-device bindings after their pause barrier.
+    pub fn stage(&mut self) -> bool {
+        if self.barrier() != Some(Ok(())) {
+            return false;
+        }
+        let Some(replacement) = &mut self.replacement else {
+            return false;
+        };
+        if replacement.prepared {
+            return false;
+        }
+        for device in self.devices.iter_mut().filter(|device| device.paused) {
+            if let Some(bindings) = replacement.bindings.get(&device.key) {
+                assert!(
+                    device.worker.stage(physical(bindings)),
+                    "acknowledged paused owner accepts its candidate"
+                );
+            }
+        }
+        replacement.prepared = true;
+        true
+    }
+    /// Publish bindings after successful runtime publication; return safely retired owners.
+    pub fn commit(&mut self) -> Result<Vec<DeviceWorker>, ReadingQuality> {
+        if self.barrier() != Some(Ok(()))
+            || !self
+                .replacement
+                .as_ref()
+                .is_some_and(|replacement| replacement.prepared)
+        {
+            return Err(ReadingQuality::Fault);
+        }
+        let mut replacement = self.replacement.take().expect("validated replacement");
+        let mut retained = Vec::new();
+        let mut retired = Vec::new();
+        for mut device in self.devices.drain(..) {
+            if let Some(mut bindings) = replacement.bindings.remove(&device.key) {
+                transfer(&device.bindings, &mut bindings);
+                if device.paused {
+                    assert!(
+                        device.worker.commit(),
+                        "prepared owner commits while paused"
+                    );
+                }
+                device.bindings = bindings;
+                retained.push(device);
+            } else {
+                retired.push(device.worker);
+            }
+        }
+        retained.extend(replacement.fresh.into_values());
+        self.devices = retained;
+        Ok(retired)
+    }
+    /// Cancel a candidate; return unused new owners for disposal outside control.
+    pub fn abort(&mut self) -> Vec<DeviceWorker> {
+        let retired = self
+            .replacement
+            .take()
+            .map(|replacement| {
+                replacement
+                    .fresh
+                    .into_values()
+                    .map(|device| device.worker)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for device in self.devices.iter_mut().filter(|device| device.paused) {
+            device.worker.pause(false);
+            // A preparation may already have applied the old safe state.
+            // Restore retained policy demand after the abort barrier, not startup.
+            for binding in &mut device.bindings {
+                binding.due_ms = 0;
+            }
+        }
+        self.auto_resume = true;
+        retired
+    }
+    /// Resume acknowledged owners after commit or abort without reopening them.
+    pub fn resume(&mut self) -> bool {
+        if self.replacement.is_some() {
+            return false;
+        }
+        self.auto_resume = true;
+        for device in self.devices.iter_mut().filter(|device| device.paused) {
+            if device.worker.resume() {
+                device.paused = false;
+            }
+        }
+        self.devices.iter().all(|device| !device.paused)
+    }
     /// Prepare bounded workers without performing hardware I/O on station control.
     pub fn prepare(
         settings: &BTreeMap<String, ResolvedSiteSettings>,
@@ -237,19 +422,13 @@ impl Acquisition {
         epoch: Instant,
     ) -> Result<Self, ReadingQuality> {
         let devices = bindings(settings)
-            .into_values()
-            .map(|bindings| {
-                let settings = bindings
-                    .iter()
-                    .map(|binding| (binding.endpoint.clone(), binding.direction))
-                    .collect();
-                Ok(Device {
-                    worker: DeviceWorker::start(Arc::clone(&backends), settings, epoch)?,
-                    bindings,
-                })
-            })
+            .into_iter()
+            .map(|(key, bindings)| Device::prepare(key, bindings, Arc::clone(&backends), epoch))
             .collect::<Result<_, ReadingQuality>>()?;
-        Ok(Self { devices })
+        Ok(Self {
+            devices,
+            ..Self::default()
+        })
     }
     /// Drain observations and submit only due operations with fresh generation permits.
     pub fn poll(
@@ -258,13 +437,16 @@ impl Acquisition {
         mut work: impl FnMut(&str) -> Option<GenerationWork>,
     ) -> BTreeMap<String, SiteObservations> {
         let mut snapshots = BTreeMap::new();
+        if self.auto_resume {
+            self.resume();
+        }
         for device in &mut self.devices {
             while let Some(reply) = device.worker.poll() {
                 device.bindings[reply.index].complete(reply);
             }
             for (index, binding) in device.bindings.iter_mut().enumerate() {
                 let demand = binding.demand();
-                if now_ms >= binding.due_ms || demand != binding.last_attempt {
+                if !device.paused && (now_ms >= binding.due_ms || demand != binding.last_attempt) {
                     if let Some(work) = work(&binding.node) {
                         if device.worker.submit(index, demand, work) {
                             binding.due_ms = now_ms.saturating_add(binding.interval_ms);
@@ -308,16 +490,20 @@ impl Acquisition {
     }
     /// Fence ordinary work and optionally require confirmed safe output submissions.
     pub fn pause(&mut self, safe: bool) {
+        self.auto_resume = false;
         for device in &mut self.devices {
             device.worker.pause(safe);
+            device.paused = true;
         }
     }
     /// Drain operation permits and inspect quiescence without waiting for device I/O.
     pub fn barrier(&mut self) -> Option<Result<(), ReadingQuality>> {
         let mut ready = true;
         let mut failed = false;
-        for device in &mut self.devices {
-            while device.worker.poll().is_some() {}
+        for device in self.devices.iter_mut().filter(|device| device.paused) {
+            while let Some(reply) = device.worker.poll() {
+                device.bindings[reply.index].complete(reply);
+            }
             match device.worker.barrier() {
                 None => ready = false,
                 Some(Err(_)) => failed = true,

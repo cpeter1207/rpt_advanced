@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "acquisition_reload_tests.rs"]
+mod reload;
+
 fn definitions(text: &str) -> BTreeMap<String, ResolvedSiteSettings> {
     let document = ConfigDocument::parse(text).unwrap();
     document
