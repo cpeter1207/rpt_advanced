@@ -6,7 +6,7 @@
   },
   {
     "repository": "rptadv-gpio-adapter",
-    "sha": "e4705695e7df98f222e569d27eda44f7c21f6fe2",
+    "sha": "a5bd54f310bbc98447c97d8f139d4fa503b2241a",
     "packages": ["librptadv-gpio-adapter1", "librptadv-gpio-adapter-dev"]
   },
   {
