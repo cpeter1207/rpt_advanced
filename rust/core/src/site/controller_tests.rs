@@ -28,6 +28,94 @@ fn observations(value: f64, now: u64) -> SiteObservations {
 }
 
 #[test]
+fn site_reload_preserves_pulse_fan_alarm_and_measurement_state() {
+    let policy = settings(
+        "[output 1000 cooling]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=fan\n[fan 1000 cooling]\nenabled=yes\noutput=cooling\nmode=ptt\nrun_on_ms=1000\n[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\nlatched=yes\non_trip=inhibit:on\n",
+    );
+    let mut site = SiteController::new(policy.clone());
+    let node = NodeId::new("1000").unwrap();
+    let mut readings = observations(15.0, 1000);
+    readings.outputs.insert(
+        "cooling".into(),
+        FanOutput {
+            available: true,
+            pwm: false,
+        },
+    );
+    site.advance(1000, &readings, &BTreeMap::from([(node.clone(), true)]));
+    site.command(
+        SiteCommand::Output {
+            name: "relay".into(),
+            request: OutputRequest::Pulse,
+        },
+        1000,
+    )
+    .unwrap();
+    site.command(SiteCommand::AlarmAcknowledge("high".into()), 1000)
+        .unwrap();
+    site.advance(1100, &readings, &BTreeMap::from([(node.clone(), false)]));
+    let mut replacement = policy;
+    replacement.sensors[0].precision = 3;
+    site.reconfigure(replacement);
+    let restored = site.snapshot(1200);
+    assert_eq!(restored.outputs["relay"].pulse_deadline_ms, Some(1500));
+    assert_eq!(restored.fans["cooling"].run_on_until_ms, Some(2100));
+    assert_eq!(restored.sensors["supply"].maximum.unwrap().value, 15.0);
+    assert!(restored.alarms["high"].acknowledged);
+    assert!(restored.transmit_inhibited);
+    let unkeyed = BTreeMap::from([(node, false)]);
+    site.advance(1500, &readings, &unkeyed);
+    assert!(!site.snapshot(1500).outputs["relay"].requested_on);
+    site.advance(2100, &readings, &unkeyed);
+    assert_eq!(site.snapshot(2100).fans["cooling"].duty, 0.0);
+}
+
+#[test]
+fn site_reload_resets_changed_endpoints_without_replaying_old_outputs() {
+    let policy = settings("");
+    let mut site = SiteController::new(policy.clone());
+    let mut readings = observations(14.0, 1000);
+    readings
+        .inputs
+        .insert("door".into(), observation(false, 1000));
+    site.advance(1000, &readings, &BTreeMap::new());
+    site.command(SiteCommand::Inhibit(true), 1000).unwrap();
+    site.command(
+        SiteCommand::Output {
+            name: "relay".into(),
+            request: OutputRequest::Pulse,
+        },
+        1000,
+    )
+    .unwrap();
+    let mut replacement = policy;
+    replacement.sensors[0].endpoint.as_mut().unwrap().device = "different-adc".into();
+    replacement.inputs[0].endpoint.as_mut().unwrap().device = "different-chip".into();
+    replacement.outputs[0].endpoint.as_mut().unwrap().device = "different-chip".into();
+    site.reconfigure(replacement.clone());
+    let changed = site.snapshot(1200);
+    assert_eq!(changed.outputs["relay"].pulse_deadline_ms, None);
+    assert!(!changed.outputs["relay"].requested_on);
+    assert!(changed.outputs["relay"].fault);
+    assert!(changed.sensors["supply"].maximum.is_none());
+    assert_eq!(changed.inputs["door"].quality, ReadingQuality::Unavailable);
+    assert!(changed.transmit_inhibited);
+    assert_eq!(
+        site.advance(1200, &readings, &BTreeMap::new()),
+        vec![SiteEffect::Output {
+            name: "relay".into(),
+            on: false
+        }]
+    );
+    replacement.outputs[0].enabled = false;
+    site.reconfigure(replacement);
+    assert!(site.snapshot(1201).outputs["relay"].fault);
+    site.reconfigure(ResolvedSiteSettings::default());
+    assert!(site.snapshot(1202).outputs.is_empty());
+    assert!(site.snapshot(1202).sensors.is_empty());
+}
+
+#[test]
 fn site_controller_alarm_actions_are_transition_only_and_keep_protection() {
     let policy = settings(
         "[alarm 1000 high]\nenabled=yes\nsource=supply\ncondition=above\ntrip_value=14\nclear_value=13\nlatched=yes\nrepeat_interval_ms=100\non_trip=output:relay:on,inhibit:on\non_clear=output:relay:off,inhibit:off\ntrip_message=trip\nrepeat_message=repeat\nclear_message=clear\n",

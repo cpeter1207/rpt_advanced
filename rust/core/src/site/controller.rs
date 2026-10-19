@@ -210,6 +210,83 @@ impl SiteController {
             ptt: BTreeMap::new(),
         }
     }
+    /// Replace policy only after device owners complete safe handoff. Preserve
+    /// unchanged deadlines, input debounce, alarm latches and measurement history.
+    /// The caller republishes the resulting aggregate inhibit/output snapshot.
+    pub fn reconfigure(&mut self, settings: ResolvedSiteSettings) {
+        let mut next = Self::new(settings);
+        let mut retained_outputs = BTreeSet::new();
+        let mut retained_inhibitors = BTreeSet::from(["manual".to_owned()]);
+        for policy in &next.settings.sensors {
+            if let Some(mut state) = self.sensors.remove(&policy.name) {
+                state.reconfigure(policy.clone());
+                next.sensors.insert(policy.name.clone(), state);
+            }
+        }
+        for policy in &next.settings.outputs {
+            if let Some(old) = self
+                .settings
+                .outputs
+                .iter()
+                .find(|old| old.name == policy.name)
+            {
+                if old.enabled == policy.enabled
+                    && old.endpoint == policy.endpoint
+                    && old.active_high == policy.active_high
+                {
+                    retained_outputs.insert(policy.name.clone());
+                }
+                if old.enabled == policy.enabled {
+                    let mut state = self
+                        .outputs
+                        .remove(&policy.name)
+                        .expect("configured output");
+                    state.reconfigure(policy.clone());
+                    next.outputs.insert(policy.name.clone(), state);
+                }
+            }
+        }
+        for policy in &next.settings.inputs {
+            if self.settings.inputs.contains(policy) {
+                next.inputs.insert(
+                    policy.name.clone(),
+                    self.inputs.remove(&policy.name).expect("configured input"),
+                );
+                retained_inhibitors.insert(format!("input:{}", policy.name));
+            }
+        }
+        for policy in &next.settings.alarms {
+            if self.settings.alarms.contains(policy) {
+                next.alarms.insert(
+                    policy.name.clone(),
+                    self.alarms.remove(&policy.name).expect("configured alarm"),
+                );
+                retained_inhibitors.insert(format!("alarm:{}", policy.name));
+            }
+        }
+        for policy in &next.settings.fans {
+            if self.settings.fans.contains(policy) && retained_outputs.contains(&policy.output) {
+                next.fans.insert(
+                    policy.name.clone(),
+                    self.fans.remove(&policy.name).expect("configured fan"),
+                );
+                if let Some(status) = self.fan_status.remove(&policy.name) {
+                    next.fan_status.insert(policy.name.clone(), status);
+                }
+            }
+        }
+        self.published_outputs
+            .retain(|name, _| retained_outputs.contains(name));
+        self.availability
+            .retain(|name, _| retained_outputs.contains(name));
+        self.inhibitors
+            .retain(|name| retained_inhibitors.contains(name));
+        next.published_outputs = std::mem::take(&mut self.published_outputs);
+        next.availability = std::mem::take(&mut self.availability);
+        next.inhibitors = std::mem::take(&mut self.inhibitors);
+        next.ptt = std::mem::take(&mut self.ptt);
+        *self = next;
+    }
     /// Apply one monotonic control snapshot. Timers run without waiting for I/O or speech.
     pub fn advance(
         &mut self,
