@@ -602,6 +602,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rptadv-gpiod-adapter"
+version = "0.1.0-alpha1"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "rptadv-jitter-adapter"
 version = "0.1.0-alpha11"
 dependencies = [

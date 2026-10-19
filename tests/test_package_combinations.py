@@ -128,6 +128,26 @@ def test_standalone_package_declares_its_service_account_provisioner() -> None:
     assert "adduser --system --group" in postinst
 
 
+def test_site_gpio_packages_are_optional_and_separately_installable() -> None:
+    stanzas = package_stanzas()
+    runtime = "librptadv-gpiod-adapter1"
+    assert "${shlibs:depends}" in depends(stanzas[runtime])
+    assert f"{runtime} (= ${{binary:version}})" in depends(
+        stanzas["librptadv-gpiod-adapter-dev"]
+    )
+    for entry in ("rpt-advanced", "app-rpt-advanced", "librptadv-product1"):
+        assert runtime not in depends(stanzas[entry])
+    assert (ROOT / f"debian/{runtime}.install").read_text().splitlines() == [
+        "usr/lib/*/rpt_advanced/librptadv_gpiod_adapter.so.1*"
+    ]
+    assert set(
+        (ROOT / "debian/librptadv-gpiod-adapter-dev.install").read_text().splitlines()
+    ) == {
+        "usr/include/rpt_advanced/gpiod/rptadv_gpiod_adapter.h",
+        "usr/lib/*/rpt_advanced/librptadv_gpiod_adapter.so",
+    }
+
+
 def test_standalone_build_profile_excludes_asterisk_adapter_packages() -> None:
     rules = (ROOT / "debian/rules").read_text()
 
@@ -147,6 +167,7 @@ if __name__ == "__main__":
         test_standalone_build_profile_excludes_asterisk_adapter_packages,
         test_resolver_runtime_and_development_manifests,
         test_jitter_runtime_and_development_manifests,
+        test_site_gpio_packages_are_optional_and_separately_installable,
     )
     for test in tests:
         test()

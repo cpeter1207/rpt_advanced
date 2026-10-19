@@ -120,3 +120,20 @@ requires it at startup and retains it through peer-task shutdown. The standalone
 jitter capability passed the native-platform gate, shipped in signed Debian
 packages, and was validated on node 524950 as recorded in ADR 0037. The Asterisk
 composition is unchanged.
+
+## Site GPIO capability (2026-10-19)
+
+`librptadv_gpiod_adapter.so.1` implements capability `rptadv.gpiod`, descriptor
+ABI 1, in a separate optional runtime/development package. Only this adapter
+imports libgpiod. Its complete sized records select an exact device path and
+line, polarity and startup/safe levels. Line acquisition applies the startup
+level atomically with direction; cleanup attempts the configured safe level.
+Callers serialize each live context and must confirm a safe write before
+retiring it when ownership handoff requires confirmation. Device failure does
+not permit a different chip to be selected. Output submission does not claim
+electrical readback or PWM support.
+
+The descriptor, device-boundary fixtures, dynamic-library linkage and package
+staging are verified locally. Selected-provider composition and site acquisition
+remain in the site-monitoring plan; physical wiring has not been qualified.
+The adapter is not an unconditional dependency of either controller entrypoint.

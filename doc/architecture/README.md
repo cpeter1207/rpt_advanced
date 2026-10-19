@@ -122,6 +122,7 @@ Rust's private ABI.
 | `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
 | `librptadv_speech_adapter.so.1` | Offline Piper synthesis, direct WAV reading, and speech-only level adjustment |
 | `librptadv_resolver_adapter.so.1` | Standalone system DNS/SRV resolution; no directory policy or Asterisk dependency |
+| `librptadv_gpiod_adapter.so.1` | Optional site digital lines through libgpiod; serialized non-audio ownership, no software PWM |
 
 The file and speech providers are independently replaceable and expose only
 their own operation. Speech does not invoke FFmpeg; file decoding does not

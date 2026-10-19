@@ -3,7 +3,7 @@ Section: hamradio
 Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
- libclang-dev, libspeexdsp-dev, pkg-config, dh-sequence-asterisk <!standalone>,
+ libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), pkg-config, dh-sequence-asterisk <!standalone>,
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha3),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha2),
  librptadvtone-dev (>= 0.1.0~alpha1),
@@ -166,3 +166,18 @@ Depends: ${misc:Depends}, librptadv-jitter-adapter1 (= ${binary:Version})
 Description: development files for the rpt_advanced jitter adapter
  Public C header, pkg-config metadata and unversioned linker name for the
  adaptive packet jitter adapter.
+
+Package: librptadv-gpiod-adapter1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: Linux GPIO adapter for rpt_advanced site equipment
+ Versioned Rust C-ABI adapter for configured digital inputs and outputs
+ through libgpiod, outside the real-time audio path.
+
+Package: librptadv-gpiod-adapter-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-gpiod-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced Linux GPIO adapter
+ Public C header and unversioned linker name for the Linux GPIO adapter.

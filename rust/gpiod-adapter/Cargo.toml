@@ -1,0 +1,12 @@
+[package]
+name = "rptadv-gpiod-adapter"
+version = "0.1.0-alpha1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+bindgen = "0.72.1"
