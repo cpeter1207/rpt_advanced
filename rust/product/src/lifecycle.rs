@@ -5,6 +5,7 @@ use crate::{
     host::Host,
     media::{FileDescriptor, NativeMediaPreparer, SpeechDescriptor},
     services::HostServices,
+    site::backends::SiteBackends,
 };
 use rpt_advanced_core::{
     audio::{DtmfDetector, MorseRenderer, ToneSequence},
@@ -67,6 +68,8 @@ pub(crate) struct Engine {
     drained: Condvar,
     ticker: Mutex<Option<JoinHandle<()>>>,
     jobs: Mutex<Vec<JoinHandle<()>>>,
+    // Drop selected provider code only after Host and endpoint workers retire.
+    site_backends: SiteBackends,
 }
 pub(crate) struct Call(Arc<Engine>);
 enum Dial {
@@ -738,6 +741,7 @@ unsafe extern "C" fn rptadv_product_start(
         MessageTemplate::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         schedule::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
+        let site_backends = SiteBackends::load(&document)?;
         let origin = Instant::now();
         let clock = capture(origin, services);
         let engine = Arc::new(Engine {
@@ -754,6 +758,7 @@ unsafe extern "C" fn rptadv_product_start(
             drained: Condvar::new(),
             ticker: Mutex::new(None),
             jobs: Mutex::new(Vec::new()),
+            site_backends,
         });
         let target = Arc::clone(&engine);
         let (send, receive) = mpsc::sync_channel(1);
@@ -796,6 +801,7 @@ unsafe extern "C" fn rptadv_product_reload(
     catch_unwind(AssertUnwindSafe(|| -> Result<(), RuntimeError> {
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let (engine, _call) = selected()?;
+        engine.site_backends.validate(&document)?;
         engine.reloading.store(true, Ordering::Release);
         engine.revision.fetch_add(1, Ordering::AcqRel);
         engine.lost_digits.store(true, Ordering::Release);

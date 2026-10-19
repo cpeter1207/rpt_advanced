@@ -32,6 +32,34 @@ fn active_configuration(extra: &str) -> String {
     format!("[1000]\nradio_channel=usb\nduplex=full\n{extra}")
 }
 
+#[test]
+fn site_backends_reload_rejection_preserves_live_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    let (engine, call) = selected().unwrap();
+    let active = engine
+        .run(|host| Ok(host.runtime.status(0)[0].1.active))
+        .unwrap();
+    let drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=/no-device\nline=0\n",
+    );
+    let result =
+        unsafe { descriptor().reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) };
+    let after = engine
+        .run(|host| Ok(host.runtime.status(0)[0].1.active))
+        .unwrap();
+    let after_drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(result, -1);
+    assert_eq!(after, active);
+    assert_eq!(after_drops, drops);
+}
+
 fn operation(action: LinkAction, node: &str) -> DigitOperation {
     DigitOperation::new(
         Command {

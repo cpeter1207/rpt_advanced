@@ -133,10 +133,19 @@ retiring it when ownership handoff requires confirmation. Device failure does
 not permit a different chip to be selected. Output submission does not claim
 electrical readback or PWM support.
 
-The descriptor, device-boundary fixtures, dynamic-library linkage and package
-staging are verified locally. Selected-provider composition and site acquisition
-remain in the site-monitoring plan; physical wiring has not been qualified.
+The descriptor, device-boundary fixtures, dynamic-library linkage, package
+staging and selected-provider composition are verified locally. Runtime site
+acquisition remains in the site-monitoring plan; physical wiring has not been qualified.
 The adapter is not an unconditional dependency of either controller entrypoint.
+
+The shared product selects site providers from enabled endpoints on enabled
+nodes. Startup retains each selected DSO after checking its complete size,
+version, capability and operation table. Reload validates against that retained
+set before gating controller work; it never loads replacement executable code.
+Adding a previously unloaded capability requires a controlled product restart
+or module reload. Removing its last endpoint does not unload the provider while
+the product is alive. Ordinary IIO filesystem access and the existing radio's
+CM119/parallel owner do not add optional library requirements.
 
 ## Site measurement capability (2026-10-19)
 
@@ -157,6 +166,6 @@ readback and does not implement software pulse generation. Safe handoff requires
 a successful explicit safe write; final destruction is best-effort.
 
 Hardware-free tests cover source units, library lifetime, alias/reuse handling,
-independent slow reads, and PWM capability/safe-state behavior. Selected-provider
-composition and live site acquisition remain part of the site-monitoring plan;
+independent slow reads, PWM capability/safe-state behavior and selected-provider
+composition. Live site acquisition remains part of the site-monitoring plan;
 these fixtures do not qualify physical sensor or fan hardware.

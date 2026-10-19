@@ -628,6 +628,7 @@ version = "0.1.0-alpha11"
 dependencies = [
  "bindgen",
  "libc",
+ "libloading",
  "rpt-advanced-core",
  "rpt-advanced-standalone",
  "rptadv-control-standalone-adapter",
