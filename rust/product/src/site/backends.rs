@@ -7,6 +7,9 @@ use rpt_advanced_core::{
 };
 use std::{collections::BTreeSet, mem::size_of, path::Path};
 
+#[path = "endpoint.rs"]
+pub mod endpoint;
+
 /// Complete immutable function table plus the executable code it borrows.
 struct Provider<T> {
     table: T,

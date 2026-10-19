@@ -52,10 +52,12 @@ impl SensorState {
         }
     }
 
-    /// Retain measurement history only when source identity and calibration agree.
+    /// Retain history only while enablement, source and calibration agree.
+    /// Enabling a sensor requires a fresh acquisition, not its old cached value.
     /// Display precision and polling changes do not rewrite measured values.
     pub fn reconfigure(&mut self, settings: SensorSettings) {
-        if self.settings.endpoint != settings.endpoint
+        if self.settings.enabled != settings.enabled
+            || self.settings.endpoint != settings.endpoint
             || self.settings.calibration != settings.calibration
         {
             *self = Self::new(settings);

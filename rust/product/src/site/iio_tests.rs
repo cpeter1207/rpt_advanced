@@ -1,6 +1,14 @@
 //! Isolated kernel-attribute fixtures; no physical IIO device is accessed.
 
+use crate::site::backends::{
+    SiteBackends,
+    endpoint::{Direction, Endpoint, Sample},
+};
 use crate::site::iio::IioReader;
+use rpt_advanced_core::{
+    config::{ConfigDocument, SiteBackend, SiteEndpoint},
+    site::ReadingQuality,
+};
 use std::{
     fs,
     path::PathBuf,
@@ -30,6 +38,43 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.0).unwrap();
     }
+}
+
+#[test]
+fn site_endpoint_iio_uses_normalized_input_and_never_claims_output() {
+    let fixture = Fixture::new();
+    fixture.put("in_temp_input", "25000\n");
+    let providers = std::sync::Arc::new(
+        SiteBackends::load(&ConfigDocument::parse("[1000]\n").unwrap()).unwrap(),
+    );
+    let settings = SiteEndpoint {
+        backend: SiteBackend::Iio,
+        device: fixture.0.join("adc").to_str().unwrap().to_owned(),
+        channel: "in_temp".into(),
+    };
+    let mut endpoint = Endpoint::open(
+        std::sync::Arc::clone(&providers),
+        &settings,
+        Direction::Input { active_high: true },
+    )
+    .unwrap();
+    assert_eq!(endpoint.read(), Ok(Sample::Number(25.0)));
+    fixture.put("in_temp_input", "nan\n");
+    assert_eq!(endpoint.read(), Err(ReadingQuality::Fault));
+    assert!(!endpoint.pwm());
+    assert_eq!(endpoint.safe(), Ok(()));
+    assert!(matches!(
+        Endpoint::open(
+            providers,
+            &settings,
+            Direction::Output {
+                active_high: true,
+                startup_on: false,
+                safe_on: false
+            }
+        ),
+        Err(ReadingQuality::Unavailable)
+    ));
 }
 
 #[test]

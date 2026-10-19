@@ -108,3 +108,23 @@ fn site_measurement_cached_or_bad_timestamps_do_not_refresh_values() {
     state.observe(reading(1.0, 2000), 2000);
     assert_eq!(state.snapshot(2000).current.value, Some(4.0));
 }
+
+#[test]
+fn site_measurement_disabled_reload_never_preserves_a_valid_reading() {
+    let mut policy = settings("");
+    let mut state = SensorState::new(policy.clone());
+    state.observe(reading(12.0, 1000), 1000);
+    policy.enabled = false;
+    state.reconfigure(policy.clone());
+    assert_eq!(
+        state.snapshot(1001).current.quality,
+        ReadingQuality::Unavailable
+    );
+    assert!(state.snapshot(1001).current.value.is_none());
+    policy.enabled = true;
+    state.reconfigure(policy);
+    assert_eq!(
+        state.snapshot(1002).current.quality,
+        ReadingQuality::Unavailable
+    );
+}
