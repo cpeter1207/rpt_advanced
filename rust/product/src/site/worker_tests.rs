@@ -202,3 +202,108 @@ fn site_worker_safe_failure_retains_owner_and_unchanged_resume_does_not_reopen()
     assert_eq!(PROBE.lock().unwrap().written.clone(), vec![1.0, 0.0, 0.0]);
     host_cleanup(&mut host, 1);
 }
+
+#[test]
+fn site_worker_reconfigure_retains_unchanged_output_and_safes_removed_line() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    let mut host = NodeHost::new(generation(1));
+    let output = (
+        settings(SiteBackend::Gpiod),
+        Direction::Output {
+            active_high: true,
+            startup_on: false,
+            safe_on: false,
+        },
+    );
+    let mut input = settings(SiteBackend::Gpiod);
+    input.channel = "8".into();
+    let input = (input, Direction::Input { active_high: true });
+    let mut worker = DeviceWorker::start(backends(), vec![output.clone()], Instant::now()).unwrap();
+    assert!(worker.submit(0, Some(1.0), permit(&mut host)));
+    assert!(read_result(&mut worker).outcome.is_ok());
+    worker.pause(false);
+    until(|| worker.barrier().is_some());
+    assert!(worker.stage(vec![input.clone(), output]));
+    until(|| worker.barrier().is_some());
+    assert_eq!(worker.barrier(), Some(Ok(())));
+    assert!(worker.commit());
+    until(|| worker.barrier().is_some());
+    assert!(worker.resume());
+    assert!(worker.submit(0, None, permit(&mut host)));
+    assert_eq!(
+        read_result(&mut worker).outcome,
+        Ok(Outcome::Reading(Sample::Digital(true)))
+    );
+    assert!(worker.submit(1, Some(0.0), permit(&mut host)));
+    assert!(read_result(&mut worker).outcome.is_ok());
+    assert_eq!(PROBE.lock().unwrap().opened.len(), 2);
+    assert_eq!(PROBE.lock().unwrap().written.clone(), [1.0, 0.0]);
+    assert_eq!(PROBE.lock().unwrap().closed, 0);
+    worker.pause(false);
+    until(|| worker.barrier().is_some());
+    PROBE.lock().unwrap().failure = true;
+    assert!(worker.stage(vec![input.clone()]));
+    until(|| worker.barrier().is_some());
+    assert_eq!(worker.barrier(), Some(Err(ReadingQuality::Fault)));
+    assert!(!worker.commit());
+    assert_eq!(PROBE.lock().unwrap().closed, 0);
+    PROBE.lock().unwrap().failure = false;
+    assert!(worker.stage(vec![input]));
+    until(|| worker.barrier().is_some());
+    assert_eq!(worker.barrier(), Some(Ok(())));
+    assert!(worker.commit());
+    until(|| worker.barrier().is_some());
+    assert_eq!(PROBE.lock().unwrap().closed, 1);
+    assert_eq!(PROBE.lock().unwrap().written.clone(), [1.0, 0.0, 0.0]);
+    close(&mut worker);
+    assert_eq!(PROBE.lock().unwrap().closed, 2);
+    host_cleanup(&mut host, 1);
+}
+
+#[test]
+fn site_worker_stale_permit_cannot_apply_observation_or_dispatch_queued_write() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    BLOCK_GPIO.store(true, Ordering::Release);
+    GPIO_ENTERED.store(false, Ordering::Release);
+    let mut host = NodeHost::new(generation(1));
+    let mut output = settings(SiteBackend::Gpiod);
+    output.channel = "8".into();
+    let mut worker = DeviceWorker::start(
+        backends(),
+        vec![
+            (
+                settings(SiteBackend::Gpiod),
+                Direction::Input { active_high: true },
+            ),
+            (
+                output,
+                Direction::Output {
+                    active_high: true,
+                    startup_on: false,
+                    safe_on: false,
+                },
+            ),
+        ],
+        Instant::now(),
+    )
+    .unwrap();
+    let release = ReleaseInput;
+    assert!(worker.submit(0, None, permit(&mut host)));
+    until(|| GPIO_ENTERED.load(Ordering::Acquire));
+    assert!(worker.submit(1, Some(1.0), permit(&mut host)));
+    host.control().publish(generation(2), 1).unwrap();
+    drop(release);
+    for _ in 0..2 {
+        let reply = read_result(&mut worker);
+        assert!(!reply.work.is_current());
+        assert_eq!(reply.outcome, Err(ReadingQuality::Unavailable));
+    }
+    assert_eq!(PROBE.lock().unwrap().opened.len(), 1);
+    assert!(PROBE.lock().unwrap().written.is_empty());
+    host.control().mark_detached(1).unwrap();
+    assert!(host.reclaim());
+    close(&mut worker);
+    host_cleanup(&mut host, 2);
+}

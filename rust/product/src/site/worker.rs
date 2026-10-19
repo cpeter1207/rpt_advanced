@@ -18,6 +18,9 @@ const RUN: u64 = 0;
 const PAUSE: u64 = 1;
 const SAFE: u64 = 2;
 const CLOSE: u64 = 3;
+const PREPARE: u64 = 4;
+const INSTALL: u64 = 5;
+const KIND: u64 = 7;
 
 struct Fence {
     request: AtomicU64,
@@ -28,6 +31,18 @@ struct Request {
     index: usize,
     demand: Option<f64>,
     work: GenerationWork,
+}
+
+/// Replacement queues cross the device boundary once, while ordinary work is fenced.
+struct Handoff {
+    settings: Vec<(SiteEndpoint, Direction)>,
+    requests: Consumer<Request>,
+    replies: Producer<Reply>,
+}
+struct Staged {
+    requests: Producer<Request>,
+    replies: Consumer<Reply>,
+    pending: Vec<bool>,
 }
 
 /// An acquisition or acknowledged command; no output claims electrical readback.
@@ -44,7 +59,7 @@ pub enum Outcome {
 
 /// Completed operation retaining its permit until station control validates it.
 pub struct Reply {
-    /// Index in the owner's immutable endpoint list.
+    /// Index in the owner's currently committed endpoint list.
     pub index: usize,
     /// Generation against which the operation was admitted.
     pub work: GenerationWork,
@@ -59,10 +74,58 @@ pub struct DeviceWorker {
     requests: Producer<Request>,
     replies: Consumer<Reply>,
     pending: Vec<bool>,
+    identity: SiteEndpoint,
+    handoffs: Producer<Handoff>,
+    staged: Option<Staged>,
     fence: Arc<Fence>,
     thread: Option<JoinHandle<()>>,
 }
 impl DeviceWorker {
+    /// Prepare changed bindings while paused, retaining unchanged physical contexts.
+    pub fn stage(&mut self, settings: Vec<(SiteEndpoint, Direction)>) -> bool {
+        if self.barrier().is_none()
+            || self.thread.is_none()
+            || self.pending.iter().any(|pending| *pending)
+            || !same_device(&settings, &self.identity)
+        {
+            return false;
+        }
+        let (requests, input) = RingBuffer::new(settings.len());
+        let (output, replies) = RingBuffer::new(settings.len());
+        let pending = vec![false; settings.len()];
+        assert!(
+            self.handoffs
+                .push(Handoff {
+                    settings,
+                    requests: input,
+                    replies: output
+                })
+                .is_ok()
+        );
+        self.staged = Some(Staged {
+            requests,
+            replies,
+            pending,
+        });
+        self.signal(PREPARE);
+        true
+    }
+    /// Commit prepared bindings while still paused; resume after its acknowledgement.
+    pub fn commit(&mut self) -> bool {
+        if self.fence.request.load(Ordering::Acquire) & KIND != PREPARE
+            || self.barrier() != Some(Ok(()))
+        {
+            return false;
+        }
+        let Some(staged) = self.staged.take() else {
+            return false;
+        };
+        self.requests = staged.requests;
+        self.replies = staged.replies;
+        self.pending = staged.pending;
+        self.signal(INSTALL);
+        true
+    }
     /// Start a dedicated non-audio acquisition owner; endpoints open only there.
     pub fn start(
         backends: Arc<SiteBackends>,
@@ -72,13 +135,13 @@ impl DeviceWorker {
         let Some((first, _)) = settings.first() else {
             return Err(ReadingQuality::Unavailable);
         };
-        if settings.iter().any(|(endpoint, _)| {
-            endpoint.backend != first.backend || endpoint.device != first.device
-        }) {
+        if !same_device(&settings, first) {
             return Err(ReadingQuality::Fault);
         }
+        let identity = first.clone();
         let (requests, input) = RingBuffer::new(settings.len());
         let (output, replies) = RingBuffer::new(settings.len());
+        let (handoffs, changes) = RingBuffer::new(1);
         let pending = vec![false; settings.len()];
         let fence = Arc::new(Fence {
             request: AtomicU64::new(RUN),
@@ -88,12 +151,15 @@ impl DeviceWorker {
         let shared = Arc::clone(&fence);
         let thread = thread::Builder::new()
             .name("rptadv-site-io".into())
-            .spawn(move || acquire(backends, settings, epoch, input, output, shared))
+            .spawn(move || acquire(backends, settings, epoch, input, output, changes, shared))
             .map_err(|_| ReadingQuality::Unavailable)?;
         Ok(Self {
             requests,
             replies,
             pending,
+            identity,
+            handoffs,
+            staged: None,
             fence,
             thread: Some(thread),
         })
@@ -101,7 +167,7 @@ impl DeviceWorker {
     /// Queue one read (`None`) or normalized write without waiting for device I/O.
     pub fn submit(&mut self, index: usize, demand: Option<f64>, work: GenerationWork) -> bool {
         if self.thread.is_none()
-            || self.fence.request.load(Ordering::Acquire) & 3 != RUN
+            || self.fence.request.load(Ordering::Acquire) & KIND != RUN
             || self.pending.get(index) != Some(&false)
             || !work.is_current()
         {
@@ -127,14 +193,16 @@ impl DeviceWorker {
         self.pending[reply.index] = false;
         Some(reply)
     }
-    /// Fence all ordinary work; safe handoff additionally submits each output's safe state.
+    /// Cancel any prepared binding change and fence ordinary work. Safe handoff also
+    /// submits every output's safe state. Drain replies before staging a replacement.
     pub fn pause(&mut self, safe: bool) {
+        self.staged = None;
         self.signal(if safe { SAFE } else { PAUSE });
     }
     /// Return an acknowledged quiescent barrier, including any safe-write failure.
     pub fn barrier(&self) -> Option<Result<(), ReadingQuality>> {
         let request = self.fence.request.load(Ordering::Acquire);
-        if request & 3 == RUN || self.fence.acknowledged.load(Ordering::Acquire) != request {
+        if request & KIND == RUN || self.fence.acknowledged.load(Ordering::Acquire) != request {
             return None;
         }
         Some(match self.fence.quality.load(Ordering::Acquire) {
@@ -144,7 +212,7 @@ impl DeviceWorker {
     }
     /// Resume an unchanged owner only after the barrier has acknowledged.
     pub fn resume(&mut self) -> bool {
-        if self.barrier() != Some(Ok(())) || self.thread.is_none() {
+        if self.barrier() != Some(Ok(())) || self.thread.is_none() || self.staged.is_some() {
             return false;
         }
         self.signal(RUN);
@@ -152,7 +220,8 @@ impl DeviceWorker {
     }
     /// Close after confirmed safe handoff. Join only outside station control.
     pub fn finish(&mut self) -> bool {
-        if self.fence.request.load(Ordering::Acquire) & 3 != SAFE || self.barrier() != Some(Ok(()))
+        if self.fence.request.load(Ordering::Acquire) & KIND != SAFE
+            || self.barrier() != Some(Ok(()))
         {
             return false;
         }
@@ -165,9 +234,10 @@ impl DeviceWorker {
     fn signal(&self, kind: u64) {
         // Only station control writes requests. Each request has a distinct acknowledgement.
         let previous = self.fence.request.load(Ordering::Relaxed);
-        self.fence
-            .request
-            .store((previous.wrapping_add(4) & !3) | kind, Ordering::Release);
+        self.fence.request.store(
+            (previous.wrapping_add(KIND + 1) & !KIND) | kind,
+            Ordering::Release,
+        );
         self.wake();
     }
     fn wake(&self) {
@@ -175,6 +245,13 @@ impl DeviceWorker {
             thread.thread().unpark();
         }
     }
+}
+
+/// Every binding belongs to this serial physical-device owner; empty means removal.
+fn same_device(settings: &[(SiteEndpoint, Direction)], identity: &SiteEndpoint) -> bool {
+    settings.iter().all(|(endpoint, _)| {
+        endpoint.backend == identity.backend && endpoint.device == identity.device
+    })
 }
 
 impl Drop for DeviceWorker {
@@ -190,19 +267,21 @@ impl Drop for DeviceWorker {
 
 fn acquire(
     backends: Arc<SiteBackends>,
-    settings: Vec<(SiteEndpoint, Direction)>,
+    mut settings: Vec<(SiteEndpoint, Direction)>,
     epoch: Instant,
     mut requests: Consumer<Request>,
     mut replies: Producer<Reply>,
+    mut changes: Consumer<Handoff>,
     fence: Arc<Fence>,
 ) {
     // Contexts are constructed, used, and destroyed only on this device owner.
     let mut endpoints: Vec<Option<Endpoint>> = (0..settings.len()).map(|_| None).collect();
     let mut seen = RUN;
+    let mut prepared: Option<Handoff> = None;
     loop {
         let request = fence.request.load(Ordering::Acquire);
         if request != seen {
-            if request & 3 != RUN {
+            if request & KIND != RUN {
                 while let Ok(cancelled) = requests.pop() {
                     respond(
                         &mut replies,
@@ -212,10 +291,45 @@ fn acquire(
                     );
                 }
                 let mut failed = false;
-                let already_safe = seen & 3 == SAFE && fence.quality.load(Ordering::Relaxed) == 0;
-                if request & 3 == SAFE || (request & 3 == CLOSE && !already_safe) {
+                let already_safe =
+                    seen & KIND == SAFE && fence.quality.load(Ordering::Relaxed) == 0;
+                if request & KIND == SAFE || (request & KIND == CLOSE && !already_safe) {
                     for endpoint in endpoints.iter_mut().flatten() {
                         failed |= endpoint.safe().is_err();
+                    }
+                }
+                match request & KIND {
+                    PREPARE => {
+                        let next = changes.pop().expect("stage publishes before its fence");
+                        for (binding, endpoint) in settings.iter().zip(&mut endpoints) {
+                            if !next.settings.contains(binding) {
+                                if let Some(endpoint) = endpoint {
+                                    failed |= endpoint.safe().is_err();
+                                }
+                            }
+                        }
+                        prepared = Some(next);
+                    }
+                    INSTALL => {
+                        let next = prepared.take().expect("commit requires a prepared barrier");
+                        let retained = next
+                            .settings
+                            .iter()
+                            .map(|binding| {
+                                settings
+                                    .iter()
+                                    .position(|old| old == binding)
+                                    .and_then(|index| endpoints[index].take())
+                            })
+                            .collect();
+                        endpoints = retained; // Only safely retired old contexts are dropped.
+                        settings = next.settings;
+                        requests = next.requests;
+                        replies = next.replies;
+                    }
+                    _ => {
+                        prepared = None;
+                        while changes.pop().is_ok() {}
                     }
                 }
                 fence.quality.store(u8::from(failed), Ordering::Relaxed);
@@ -223,10 +337,10 @@ fn acquire(
             }
             seen = request;
         }
-        if request & 3 == CLOSE {
+        if request & KIND == CLOSE {
             return;
         }
-        if request & 3 == RUN {
+        if request & KIND == RUN {
             if let Ok(operation) = requests.pop() {
                 let result = perform(&backends, &settings, &mut endpoints, &operation);
                 respond(&mut replies, operation, result, epoch);

@@ -9,7 +9,7 @@ use rpt_advanced_core::{
 use std::{ffi::c_void, mem::size_of, path::Path, ptr, sync::Arc};
 
 /// Physical role and logical startup/safe policy selected before acquisition.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// Digital active polarity; analog inputs ignore this field.
     Input {
