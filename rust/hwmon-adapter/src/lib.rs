@@ -12,6 +12,7 @@ mod abi {
     include!(concat!(env!("OUT_DIR"), "/abi.rs"));
 }
 use std::{
+    collections::BTreeSet,
     ffi::{CStr, CString, OsStr, c_void},
     fs::{File, OpenOptions},
     io::{Read, Seek, Write},
@@ -25,6 +26,30 @@ use std::{
 
 /// Only table initialization/retirement is serialized globally, never acquisition.
 static USERS: Mutex<usize> = Mutex::new(0);
+
+/// Physical PWM identities, claimed only during non-audio context open/close.
+static OUTPUTS: Mutex<BTreeSet<(u64, u64)>> = Mutex::new(BTreeSet::new());
+
+/// Reserve the opened attribute across path aliases before any startup write.
+struct OutputClaim((u64, u64));
+impl OutputClaim {
+    fn acquire(file: &File) -> Result<Self, i32> {
+        let metadata = file.metadata().map_err(|_| 1)?;
+        let identity = (metadata.dev(), metadata.ino());
+        if !OUTPUTS.lock().map_err(|_| 1)?.insert(identity) {
+            return Err(1);
+        }
+        Ok(Self(identity))
+    }
+}
+impl Drop for OutputClaim {
+    fn drop(&mut self) {
+        OUTPUTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
 
 /// Keep immutable libsensors tables alive across every device owner's reads.
 struct Lease;
@@ -161,6 +186,8 @@ struct Pwm {
     duty: File,
     mode: File,
     safe: f64,
+    // Released after final safe submission and file closure, including failed opens.
+    _claim: OutputClaim,
 }
 impl Pwm {
     fn open(directory: &File, channel: &str, startup: f64, safe: f64) -> Result<Self, i32> {
@@ -184,7 +211,13 @@ impl Pwm {
             .write(true)
             .open(path.join(channel))
             .map_err(unsupported)?;
-        let mut pwm = Self { duty, mode, safe };
+        let claim = OutputClaim::acquire(&duty)?;
+        let mut pwm = Self {
+            duty,
+            mode,
+            safe,
+            _claim: claim,
+        };
         pwm.write(startup)?;
         Ok(pwm)
     }

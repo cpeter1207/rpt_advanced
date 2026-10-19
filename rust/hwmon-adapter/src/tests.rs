@@ -411,3 +411,31 @@ fn site_hwmon_slow_device_does_not_serialize_another_device() {
     assert_eq!(first_result, (0, 1, 10.0));
     drop((first, second));
 }
+
+#[test]
+fn site_hwmon_pwm_alias_cannot_acquire_a_second_writer() {
+    let _serial = serial();
+    let fixture = Fixture::new();
+    fixture.put("a/pwm1", "0\n");
+    fixture.put("a/pwm1_enable", "1\n");
+    std::os::unix::fs::symlink(fixture.0.join("a"), fixture.0.join("alias")).unwrap();
+    let (result, owner) = fixture.open("a", "pwm1", 1, 25.0, 0.0);
+    assert_eq!(result, 0);
+    let (result, rejected) = fixture.open("alias", "pwm1", 1, 75.0, 0.0);
+    assert_eq!(result, 1, "physical aliases must share one output owner");
+    assert!(rejected.0.is_null());
+    assert!(
+        fs::read_to_string(fixture.0.join("a/pwm1"))
+            .unwrap()
+            .starts_with("64\n")
+    );
+    drop(owner);
+    let (result, replacement) = fixture.open("alias", "pwm1", 1, 75.0, 0.0);
+    assert_eq!(result, 0);
+    assert!(
+        fs::read_to_string(fixture.0.join("a/pwm1"))
+            .unwrap()
+            .starts_with("191\n")
+    );
+    drop(replacement);
+}
