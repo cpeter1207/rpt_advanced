@@ -12,7 +12,8 @@
 
 **Status:** Native implementation approved 2026-10-18. The message prerequisite
 is locally implemented and tested. S1 configuration/measurement and S2 pure
-alarm/output/fan policy pass focused tests; S3–S7 remain. No node changes or deployment
+alarm/output/fan policy and S3 existing-owner bridge pass focused tests. S4 IIO
+acquisition passes; external adapters and S5–S7 remain. No node changes or deployment
 are authorized by this document.
 
 ## Global Constraints
@@ -90,11 +91,17 @@ Run named failing tests, implement the narrow task, rerun its tests, update Rust
 
 **Interfaces:** A control-only radio site-I/O bridge borrows its existing radio handle. Define `SiteDigitalRequest { generation: u64, output_mask: u32, high_mask: u32 }` and `SiteDigitalSnapshot` with capabilities/reserved masks, actual input observation time/quality and separate requested/submitted/readback-valid output state. Operations are `site_publish(request) -> Result<(), SiteError>` and `site_snapshot() -> Result<SiteDigitalSnapshot, SiteError>`; CM119 and parallel banks are explicit endpoint identities. The shared product's host-service table forwards them to the current native/channel owner. C records include size/version, no Rust containers, and no external library types.
 
-- [ ] First test a reserved PTT/CTCSS/interlock/clip bit request is rejected without a hardware write, while a spare bit changes without altering any reserved bit. Assert ordinary input acquisition cannot open a second HID or parallel owner.
-- [ ] Add `site_owner_read_failure_is_not_fresh`, `site_owner_stale_generation_cannot_write`, `site_owner_reload_no_output_glitch`, and `site_owner_no_fabricated_readback`. Reuse native lifecycle/poll-failure fixtures and the existing radio interlock tests.
-- [ ] In USBRadioPlus's fresh native quality image run `cargo test --locked -p usbradioplus-driver --lib hardware_host::tests` and `cargo test --locked -p usbradioplus-product --lib tests::native`. In RPT Advanced's image run `make radio-interlock-check` and affected service-contract tests. Verify new tests fail before changes. Extend the existing service command/snapshot machinery and merge authorized masks only in that owner. Timestamp successful physical acquisition, not a later status read. Never execute I/O from this bridge's caller or audio.
-- [ ] Use existing typed command/descriptor extension points where possible; document any required descriptor/host revision and update exact version assertions/consumers together. ADR 0040 forbids a compatibility-only alternate implementation. Do not claim an unimplemented bridge works via a preexisting native function: current native API has only create/start/stop/destroy.
-- [ ] Re-run contract/lifecycle/interlock tests, document the ownership boundary and commit each component separately. A released provider dependency is required before the consumer PR gate: obtain release approval when ready, then update the pinned dependency manifest/image. No live changes are implied by this task.
+- [x] First test a reserved PTT/CTCSS/interlock/clip bit request is rejected without a hardware write, while a spare bit changes without altering any reserved bit. Assert ordinary input acquisition cannot open a second HID or parallel owner.
+- [x] Add `site_owner_read_failure_is_not_fresh`, `site_owner_stale_generation_cannot_write`, `site_owner_reload_no_output_glitch`, and `site_owner_no_fabricated_readback`. Reuse native lifecycle/poll-failure fixtures and the existing radio interlock tests.
+- [x] In USBRadioPlus's fresh native quality image run `cargo test --locked -p usbradioplus-driver --lib hardware_host::tests` and `cargo test --locked -p usbradioplus-product --lib tests::native`. In RPT Advanced's image run `make radio-interlock-check` and affected service-contract tests. Verify new tests fail before changes. Extend the existing service command/snapshot machinery and merge authorized masks only in that owner. Timestamp successful physical acquisition, not a later status read. Never execute I/O from this bridge's caller or audio.
+- [x] Use existing typed command/descriptor extension points where possible; document any required descriptor/host revision and update exact version assertions/consumers together. ADR 0040 forbids a compatibility-only alternate implementation. Do not claim an unimplemented bridge works via a preexisting native function: current native API has only create/start/stop/destroy.
+- [x] Re-run contract/lifecycle/interlock tests, document the ownership boundary and commit each component separately. A released provider dependency is required before the consumer PR gate: obtain release approval when ready, then update the pinned dependency manifest/image. No live changes are implied by this task.
+
+S3 verification: USBRadioPlus alpha24 and GPIO alpha4 providers are released.
+RPT host ABI6 bridge checkpoint `14763b1` passed targeted contracts, seven-port
+interlock composition, package combinations, strict lint and developer docs.
+Dependency-only PR43 passed the full hosted gate and merged; refreshed native
+quality images contain the required providers. S5 will consume the bridge.
 
 ### S4: Add the two external adapters and direct IIO acquisition
 
