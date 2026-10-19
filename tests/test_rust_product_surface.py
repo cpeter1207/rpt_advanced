@@ -24,6 +24,7 @@ STANDALONE_CONTROL = "librptadv_control_standalone_adapter.so.1"
 RESOLVER = "librptadv_resolver_adapter.so.1"
 JITTER = "librptadv_jitter_adapter.so.1"
 GPIOD = "librptadv_gpiod_adapter.so.1"
+HWMON = "librptadv_hwmon_adapter.so.1"
 STANDALONE_BINARY = "rpt-advanced"
 PRODUCT = "librptadv_product.so.1"
 RING_MINIMUM_VERSION = "3.0.0~alpha3"
@@ -53,6 +54,7 @@ ELF_DEPENDENCIES = {
     RESOLVER: {"libresolv.so.2"},
     JITTER: {"libspeexdsp.so.1"},
     GPIOD: {"libgpiod.so.3"},
+    HWMON: {"libsensors.so.5"},
 }
 EXPORTS = {
     "librptadv_asterisk_adapter.so.1": "rptadv_asterisk_descriptor_v1",
@@ -64,6 +66,7 @@ EXPORTS = {
     RESOLVER: "rptadv_resolver_adapter_descriptor_v1",
     JITTER: "rptadv_jitter_adapter_descriptor_v1",
     GPIOD: "rptadv_gpiod_adapter_descriptor_v1",
+    HWMON: "rptadv_hwmon_adapter_descriptor_v1",
 }
 MANUALS = (
     "README.md",
@@ -177,16 +180,18 @@ def staged(
         library / RESOLVER,
         library / JITTER,
         library / GPIOD,
+        library / HWMON,
     }
-    link = library / "librptadv_gpiod_adapter.so"
-    expected.add(link)
-    assert (stage / link).is_symlink()
-    assert (stage / link).readlink() == Path(GPIOD)
-    header = Path("usr/include/rpt_advanced/gpiod/rptadv_gpiod_adapter.h")
-    expected.add(header)
-    assert (stage / header).read_bytes() == (
-        root / "rust/gpiod-adapter/include/rptadv_gpiod_adapter.h"
-    ).read_bytes()
+    for name, soname in (("gpiod", GPIOD), ("hwmon", HWMON)):
+        link = library / f"librptadv_{name}_adapter.so"
+        expected.add(link)
+        assert (stage / link).is_symlink()
+        assert (stage / link).readlink() == Path(soname)
+        header = Path(f"usr/include/rpt_advanced/{name}/rptadv_{name}_adapter.h")
+        expected.add(header)
+        assert (stage / header).read_bytes() == (
+            root / f"rust/{name}-adapter/include/rptadv_{name}_adapter.h"
+        ).read_bytes()
     link = library / "librptadv_resolver_adapter.so"
     expected.add(link)
     assert (stage / link).is_symlink()
@@ -1041,9 +1046,10 @@ def verify_stage_policy() -> None:
         write(root, "rust/jitter-adapter/include/rptadv_jitter_adapter.h")
         write(stage, "usr/include/rpt_advanced/jitter/rptadv_jitter_adapter.h")
         (stage / library / "librptadv_jitter_adapter.so").symlink_to(JITTER)
-        write(root, "rust/gpiod-adapter/include/rptadv_gpiod_adapter.h")
-        write(stage, "usr/include/rpt_advanced/gpiod/rptadv_gpiod_adapter.h")
-        (stage / library / "librptadv_gpiod_adapter.so").symlink_to(GPIOD)
+        for name, soname in (("gpiod", GPIOD), ("hwmon", HWMON)):
+            write(root, f"rust/{name}-adapter/include/rptadv_{name}_adapter.h")
+            write(stage, f"usr/include/rpt_advanced/{name}/rptadv_{name}_adapter.h")
+            (stage / library / f"librptadv_{name}_adapter.so").symlink_to(soname)
         write(
             stage,
             "usr/lib/test-linux-gnu/pkgconfig/rptadv_jitter_adapter.pc",
@@ -1172,6 +1178,7 @@ def main() -> None:
             "rptadv_resolver_adapter",
             "rptadv_jitter_adapter",
             "rptadv_gpiod_adapter",
+            "rptadv_hwmon_adapter",
         ):
             assert (args.rustdoc / crate / "index.html").is_file(), (
                 f"missing Rustdoc: {crate}"

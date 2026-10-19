@@ -3,7 +3,7 @@ Section: hamradio
 Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
- libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), pkg-config, dh-sequence-asterisk <!standalone>,
+ libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha3),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha2),
  librptadvtone-dev (>= 0.1.0~alpha1),
@@ -181,3 +181,18 @@ Multi-Arch: same
 Depends: ${misc:Depends}, librptadv-gpiod-adapter1 (= ${binary:Version})
 Description: development files for the rpt_advanced Linux GPIO adapter
  Public C header and unversioned linker name for the Linux GPIO adapter.
+
+Package: librptadv-hwmon-adapter1
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: Linux sensor and PWM adapter for rpt_advanced site equipment
+ Versioned Rust C-ABI adapter for configured hwmon measurements and hardware
+ PWM outputs, outside the real-time audio path.
+
+Package: librptadv-hwmon-adapter-dev
+Architecture: amd64 arm64
+Multi-Arch: same
+Depends: ${misc:Depends}, librptadv-hwmon-adapter1 (= ${binary:Version})
+Description: development files for the rpt_advanced Linux sensor adapter
+ Public C header and unversioned linker name for the Linux sensor adapter.

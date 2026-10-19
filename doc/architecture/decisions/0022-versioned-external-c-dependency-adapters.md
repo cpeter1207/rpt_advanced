@@ -137,3 +137,26 @@ The descriptor, device-boundary fixtures, dynamic-library linkage and package
 staging are verified locally. Selected-provider composition and site acquisition
 remain in the site-monitoring plan; physical wiring has not been qualified.
 The adapter is not an unconditional dependency of either controller entrypoint.
+
+## Site measurement capability (2026-10-19)
+
+`librptadv_hwmon_adapter.so.1` implements the optional `rptadv.hwmon`
+capability with an ABI-1 descriptor and separate runtime/development packages.
+Only this adapter imports libsensors. A counted initialization lease retains
+its immutable tables until the last measurement closes; acquisition does not
+hold that lifecycle lock. An explicit empty library configuration prevents host
+compute expressions from applying a second calibration. The controller receives
+finite source-unit measurements and owns calibration, freshness and policy.
+
+An endpoint matches an opened directory's device/inode identity, including
+hwmon class symlinks. Reads use its retained directory FD, not a reusable
+enumeration path. Failures report fault without substituting zero or another
+device. Supported kernel PWM attributes are retained separately and require
+existing manual mode. PWM submission does not claim electrical/tachometer
+readback and does not implement software pulse generation. Safe handoff requires
+a successful explicit safe write; final destruction is best-effort.
+
+Hardware-free tests cover source units, library lifetime, alias/reuse handling,
+independent slow reads, and PWM capability/safe-state behavior. Selected-provider
+composition and live site acquisition remain part of the site-monitoring plan;
+these fixtures do not qualify physical sensor or fan hardware.

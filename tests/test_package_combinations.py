@@ -128,24 +128,27 @@ def test_standalone_package_declares_its_service_account_provisioner() -> None:
     assert "adduser --system --group" in postinst
 
 
-def test_site_gpio_packages_are_optional_and_separately_installable() -> None:
+def test_site_packages_are_optional_and_separately_installable() -> None:
     stanzas = package_stanzas()
-    runtime = "librptadv-gpiod-adapter1"
-    assert "${shlibs:depends}" in depends(stanzas[runtime])
-    assert f"{runtime} (= ${{binary:version}})" in depends(
-        stanzas["librptadv-gpiod-adapter-dev"]
-    )
-    for entry in ("rpt-advanced", "app-rpt-advanced", "librptadv-product1"):
-        assert runtime not in depends(stanzas[entry])
-    assert (ROOT / f"debian/{runtime}.install").read_text().splitlines() == [
-        "usr/lib/*/rpt_advanced/librptadv_gpiod_adapter.so.1*"
-    ]
-    assert set(
-        (ROOT / "debian/librptadv-gpiod-adapter-dev.install").read_text().splitlines()
-    ) == {
-        "usr/include/rpt_advanced/gpiod/rptadv_gpiod_adapter.h",
-        "usr/lib/*/rpt_advanced/librptadv_gpiod_adapter.so",
-    }
+    for name in ("gpiod", "hwmon"):
+        runtime = f"librptadv-{name}-adapter1"
+        assert "${shlibs:depends}" in depends(stanzas[runtime])
+        assert f"{runtime} (= ${{binary:version}})" in depends(
+            stanzas[f"librptadv-{name}-adapter-dev"]
+        )
+        for entry in ("rpt-advanced", "app-rpt-advanced", "librptadv-product1"):
+            assert runtime not in depends(stanzas[entry])
+        assert (ROOT / f"debian/{runtime}.install").read_text().splitlines() == [
+            f"usr/lib/*/rpt_advanced/librptadv_{name}_adapter.so.1*"
+        ]
+        assert set(
+            (ROOT / f"debian/librptadv-{name}-adapter-dev.install")
+            .read_text()
+            .splitlines()
+        ) == {
+            f"usr/include/rpt_advanced/{name}/rptadv_{name}_adapter.h",
+            f"usr/lib/*/rpt_advanced/librptadv_{name}_adapter.so",
+        }
 
 
 def test_standalone_build_profile_excludes_asterisk_adapter_packages() -> None:
@@ -167,7 +170,7 @@ if __name__ == "__main__":
         test_standalone_build_profile_excludes_asterisk_adapter_packages,
         test_resolver_runtime_and_development_manifests,
         test_jitter_runtime_and_development_manifests,
-        test_site_gpio_packages_are_optional_and_separately_installable,
+        test_site_packages_are_optional_and_separately_installable,
     )
     for test in tests:
         test()

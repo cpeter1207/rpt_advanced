@@ -38,6 +38,12 @@ generation fences, error status, and the distinction between requested,
 serviced, and physically observed output remain intact. Acquisition and site
 policy integration are tracked by the site-monitoring implementation plan.
 
+Optional site providers isolate libgpiod digital-line access and libsensors
+measurement access in separate ABI-1 shared objects. Kernel IIO acquisition
+remains ordinary filesystem I/O in the product's non-audio owner. The sensor
+adapter also provides supported kernel PWM writes; neither adapter implements
+station policy or software PWM. See ADR 0022 for identity and lifetime rules.
+
 Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that
 policy remains in the controller are defined by [ADR 0011](decisions/0011-versioned-functional-components.md).
