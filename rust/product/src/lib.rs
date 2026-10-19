@@ -16,6 +16,10 @@ pub mod link;
 pub mod media;
 mod radio_configuration;
 pub mod services;
+pub mod site;
+#[cfg(test)]
+#[path = "site/iio_tests.rs"]
+mod site_iio_tests;
 pub(crate) mod status_post;
 pub mod worker;
 
