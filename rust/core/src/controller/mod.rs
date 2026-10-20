@@ -48,7 +48,7 @@ pub struct Identifier {
     pub interval_ms: u64,
     /// Higher priorities satisfy lower-priority IDs on completion.
     pub priority: i32,
-    /// Trigger only on a qualifying transmitter rising edge.
+    /// Join the per-node round-robin choice on a qualifying transmitter rising edge.
     pub first_key_only: bool,
     /// Periodic IDs can run without qualifying receiver activity.
     pub regardless_of_activity: bool,
@@ -694,11 +694,8 @@ impl NodeController {
             || (self.release_pending && announcement_due.is_some());
         if may_transmit && demand && !self.keyed {
             let key_idle = self.key_idle.max(idle);
-            self.identifiers.first_key(&self.rules, key_idle);
-            for (id, due) in self.ids.iter().zip(&mut self.first_due) {
-                if id.first_key_only && key_idle >= samples(id.interval_ms) {
-                    *due = self.now;
-                }
+            if let Some(index) = self.identifiers.first_key(&self.rules, key_idle) {
+                self.first_due[index] = self.now;
             }
             self.key_idle = 0;
             selected = self.select_identifier(receiving, busy, after_hang);

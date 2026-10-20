@@ -2424,6 +2424,39 @@ fn first_key_identifier_waits_for_its_idle_interval() {
 }
 
 #[test]
+fn first_key_controller_plays_one_initial_id_and_rotates_on_later_keyups() {
+    let ids = [0.25, 0.5]
+        .into_iter()
+        .map(|value| Identifier {
+            media: media(value, 10),
+            interval_ms: 1,
+            priority: 1,
+            first_key_only: true,
+            regardless_of_activity: false,
+            polite_maximum_wait_ms: Some(60_000),
+        })
+        .collect();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..Default::default()
+        },
+        ids,
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for expected in [0.25, 0.5, 0.25] {
+        node.process_audio(false, false, &[], &mut [0.0; 3000]);
+        node.process_audio(true, false, &[], &mut [0.0; 48]);
+        let mut output = [0.0; 9600];
+        assert!(!node.process_audio(false, false, &[], &mut output));
+        let audible: Vec<_> = output.into_iter().filter(|sample| *sample != 0.0).collect();
+        assert_eq!(audible, vec![expected; 10]);
+    }
+}
+
+#[test]
 fn half_duplex_periodic_announcement_waits_for_receiver_and_delayed_courtesy() {
     let (mut node, _) = NodeController::new(
         ControllerSettings {

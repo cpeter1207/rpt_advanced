@@ -282,6 +282,18 @@ its last successful completion or satisfying lower-priority IDs. A zero-interval
 announcement waits for the next traffic release. This prevents a failed source
 from being resubmitted on every audio sample or holding silent PTT.
 
+Initial-ID selection — 2026-10-20: a qualifying transmitter rising edge arms
+one eligible `first_key_only` set per node. Selection rotates through the
+configured ID order, skipping sets whose idle interval has not elapsed and
+all periodic sets. It wraps after the last set. Unselected initial sets do
+not queue behind the selected one. Only that selected set starts a polite-wait
+deadline. A pending initial retains its choice, polite deadline and retry
+across rekey. A rising edge with no eligible set retains the rotation
+position. Periodic-ID priority, successful-completion satisfaction,
+receive-driven Morse fallback, and failed-attempt retry remain unchanged.
+The cursor belongs to the existing controller and survives device-only handoff;
+a replacement controller starts a new rotation.
+
 Each audio worker has an **RF-signaling edge publisher** for its owned state:
 receive qualification/decoder status in local receive, and physical PTT and
 transmit signaling in transmit. Publishers perform only immediate prepared

@@ -38,6 +38,7 @@ impl IdentifierRule {
 /// Per-node mutable identifier state, owned by its control path.
 pub struct IdentifierPolicy {
     states: Vec<IdentifierState>,
+    next_first_key: usize,
 }
 
 impl IdentifierPolicy {
@@ -46,6 +47,7 @@ impl IdentifierPolicy {
     pub fn new(rules: &[IdentifierRule]) -> Self {
         Self {
             states: vec![IdentifierState::default(); rules.len()],
+            next_first_key: 0,
         }
     }
 
@@ -56,13 +58,18 @@ impl IdentifierPolicy {
         }
     }
 
-    /// Arm eligible first-key rules after a qualifying idle interval.
-    pub fn first_key(&mut self, rules: &[IdentifierRule], idle_ms: u64) {
-        for (rule, state) in rules.iter().zip(&mut self.states) {
-            if rule.first_key_only && idle_ms >= rule.interval_ms {
-                state.first_key_pending = true;
-            }
+    /// Arm one idle-eligible initial ID in round-robin order and return its index.
+    /// An already pending initial keeps its deadline and retry until completion.
+    pub fn first_key(&mut self, rules: &[IdentifierRule], idle_ms: u64) -> Option<usize> {
+        if self.states.iter().any(|state| state.first_key_pending) {
+            return None;
         }
+        let selected = (self.next_first_key..rules.len())
+            .chain(0..self.next_first_key)
+            .find(|&index| rules[index].first_key_only && idle_ms >= rules[index].interval_ms)?;
+        self.states[selected].first_key_pending = true;
+        self.next_first_key = (selected + 1) % rules.len();
+        Some(selected)
     }
 
     /// Return the highest-priority due rule without consuming it.
