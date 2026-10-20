@@ -727,6 +727,8 @@ The controller takes turns through the sets and wraps after the last one.
 It skips a set whose idle interval has not elapsed. A pending initial ID keeps
 its turn while waiting to play, unless a higher-priority ID satisfies it.
 Periodic IDs still use their configured priority.
+A lower-priority periodic ID waits for a pending polite initial ID. Playing
+the initial ID also satisfies the lower-priority ID sets.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
