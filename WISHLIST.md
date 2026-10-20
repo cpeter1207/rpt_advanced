@@ -21,9 +21,10 @@ completion is not a claim of physical hardware qualification or deployment.
 
 ### Local receiver S-meter and spoken query
 
-**Status: Planned.** Conversational design approved on 2026-10-20; the
+**Status: Planned.** Written design approved on 2026-10-20; the
 [written specification](docs/superpowers/specs/2026-10-20-local-receiver-s-meter-design.md)
-is awaiting review. No implementation or node changes have started.
+and [implementation plan](docs/superpowers/plans/2026-10-20-local-receiver-s-meter.md)
+record the work. Plan review is pending; no implementation or node changes have started.
 
 - Measure suitable flat FM discriminator noise independently of COR selection,
   or reuse an external RSSI sensor acquired through the existing site adapters.

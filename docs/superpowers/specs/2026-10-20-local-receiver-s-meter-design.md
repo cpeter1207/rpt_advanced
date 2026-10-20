@@ -1,8 +1,8 @@
 # Local receiver S-meter
 
-Status: Proposed written specification; conversational design approved on
-2026-10-20. Includes the requested spoken DTMF query. Implementation and node
-deployment have not started.
+Status: Written specification approved on 2026-10-20, including the requested
+spoken DTMF query. The implementation plan is awaiting review; implementation
+and node deployment have not started.
 
 ## Purpose and scope
 
