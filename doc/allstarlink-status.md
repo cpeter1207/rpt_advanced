@@ -90,6 +90,13 @@ accepts `rpt_advanced command <local-node> <DTMF>` to send a command through
 the normal command rules. These CLI commands are not standalone service
 commands.
 
+`rpt_advanced link status <local-node>` also lists configured site meters,
+inputs, alarms, outputs, and fans. Readings include age and quality. Output
+requests and submitted values are separate from electrical readback.
+With the default command map, `*76<selector>#` reads a configured meter or input
+and `*77<selector>#` plays a named message. Unkey to hear the reply.
+See the [site settings and controls](configuration.md#site-meters-inputs-outputs-alarms-and-fans).
+
 The `fanout` line shows completed audio batches, the longest batch time in
 nanoseconds, and dropped audio blocks. Check host load if `dropped-blocks`
 keeps rising: some outgoing audio is being lost. The `media` counters are not

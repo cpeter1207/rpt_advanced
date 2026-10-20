@@ -1,6 +1,6 @@
 # ADR 0023: Unified control operations and DTMF policy
 
-Status: Accepted (DTMF feature slice released; broader interface catalog incomplete)
+Status: Partially implemented (DTMF slice released and operator-confirmed; broader interfaces pending)
 
 Reaffirmed 2026-09-17: this record's source-scoped telemetry routing is the
 required behavior. ADR 0025's earlier all-local restriction was an intermediate
@@ -125,12 +125,27 @@ the generator-capable DTMF shared-library descriptor; startup rejects an older
 provider. Tests cover both host ingress paths, source isolation, waveform
 boundaries, and transmitter safety. The full native PR gate passed with 100%
 production coverage, and both components were released. Node 524950 has the
-packages installed with its configuration preserved, but manual validation of
-these new DTMF behaviors has not yet been confirmed. The broader
+packages installed with its configuration preserved. The operator subsequently
+confirmed that DTMF pad testing and regeneration work correctly. Addressed relay
+behavior has automated coverage; that confirmation is not a manual test of every
+remote-command route. The broader
 CLI/REST/WebSocket control and status catalog remains incomplete. ADR 0016
 governs REST/WebSocket route and schema publication.
 
 ## Consequences
+
+Approved extension (2026-10-17): configured sensor/input queries (`*76` plus
+selector) and message-macro requests (`*77` plus selector) are public read-only
+operations. Selectors are canonical positive decimal strings, not link
+destinations; zero does not recall a prior destination. They cannot configure
+equipment or execute action macros. Prefixes inherit and may be remapped;
+conflicting selectors/prefixes are rejected. Replies preserve the originating
+connection and unkey/routing rules above. IDs and tails using the same composed
+content remain local-only. Message-macro requests are implemented with targeted
+command, routing, queue, and configuration tests. Local-only tail playback is
+implemented with release, deadline, interruption, and allocation tests. Site
+queries and typed site controls are implemented with targeted shared-product
+and adapter tests; the full hosted gate for this extension has not run.
 
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot
@@ -138,3 +153,13 @@ interrupt their origin while it is keyed. DTMF changes require command-map,
 authorization, muting, local-only regeneration, addressed relay, and RF-response
 tests in addition to DSP detection tests.
 REST/WebSocket route and schema publication remains governed by ADR 0016.
+
+Site-control boundary approved 2026-10-20: the product exposes a separate typed
+administrative operation for logical output on/off/pulse, fan automatic/manual
+demand, alarm acknowledgment/reset, extrema reset and manual transmit inhibit.
+The Asterisk CLI is already protected by its administrative host access; future
+adapters must authorize their caller before invoking this operation. The shared
+executor checks the active generation and ownership handoff before policy runs.
+Read-only DTMF site queries do not gain access to it. The standalone composition
+validates the same product table; this addition does not create a new remote
+CLI, REST, or WebSocket transport.

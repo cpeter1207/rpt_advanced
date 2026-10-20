@@ -21,6 +21,9 @@ inherited default when a safe configuration is possible.
 media defaults for all nodes. Add the node name, such as `[speech 524950]`, to
 change one node. Add a set name, such as `[identifier 524950 welcome]`, to set
 one ID. A set's values take priority over defaults, regardless of file order.
+`[tail]` and `[tail node]` set release-tail defaults; `[tail node name]`
+defines a tail. A named `[message name]` defines a reusable message. Use
+`[message node name]` to change that message for one node.
 An empty media path or text clears an inherited value. Courtesy uses one
 `level_db` for all media; other media sections can use `speech_*` and
 `morse_*` settings.
@@ -31,13 +34,17 @@ permanent links, and replacement schedules always name a node:
 `[event node label]`, `[permanent node label]`, or `[schedule node label]`.
 Template, macro, event, permanent-link, and schedule labels are case-sensitive
 single tokens and cannot contain whitespace or square brackets.
+The same name rules apply to messages, tails, and site items. Repeating one
+named definition is an error. A node-specific message may override a shared
+message of the same name.
 
 Node names are case-sensitive, limited to 63 bytes, and cannot contain spaces or square
 brackets. Media-set names are case-sensitive and cannot contain spaces or square brackets.
 Remote node numbers are decimal and limited to 63 digits. Scoped headers use
 one space between components. `general`,
 `identifier`, `announcement`, `courtesy`, `speech`, `morse`, `time`, `template`,
-`macro`, `event`, `permanent`, and `schedule` are reserved section names. Scoped identifier,
+`macro`, `event`, `permanent`, `schedule`, `message`, `tail`, `sensor`, `input`,
+`output`, `alarm`, and `fan` are reserved section names. Scoped identifier,
 announcement, courtesy, speech, Morse, time, template, macro, event, permanent, and schedule
 headers must name an existing node where their syntax includes a node name, which may be
 declared later in the file.
@@ -328,6 +335,8 @@ up to 63 DTMF digits from `0` through `9` and uppercase `A` through `D`.
 | `link_command_disconnect_all` | `806` | Disconnect and pause permanent links, including configured links. Temporary links stay connected. New manual links remain allowed. |
 | `link_command_last_keyed` | `72` | Report the most recently active direct linked node. |
 | `link_command_local_monitor` | `75` | Connect in local-monitor mode: receive locally without forwarding the peer to other links. |
+| `link_command_site_status` | `76` | Read the meter or input selected by its `dtmf_id`. |
+| `link_command_message` | `77` | Play the message selected by its `dtmf_id`. |
 | `link_command_disconnect_permanent` | `811` | Disconnect a manually created permanent link and stop its retries. Configured links follow their schedule; use `*806` to pause them. |
 | `link_command_permanent_monitor` | `812` | Make a permanent monitor link. |
 | `link_command_permanent_transceive` | `813` | Make a permanent transceive link. |
@@ -642,6 +651,21 @@ required English content rejects a candidate reload, preserving the active
 configuration and catalog. Built-in wording is edited in the selected FTL
 bundle, not embedded in source or copied into each node section.
 
+You may also add your own catalog entries. For example, add this entry to your
+local language file:
+
+```ftl
+site-battery =
+    .text = Battery
+    .tts = Battery voltage
+    .morse = BATTERY
+```
+
+Use `label_message_id = site-battery` in a sensor, or select a catalog entry
+with a message section's `message_id`. Keep separate `.text`, `.tts`, and
+`.morse` forms. Use `{ $argument }` in a form to insert its `arg_argument`
+binding. Morse text must use characters the Morse player supports.
+
 ## Link lifetime, recovery, and duplex
 
 Direct links created by DTMF, a CLI command, or a macro last only while the
@@ -698,6 +722,12 @@ For a local rejected request, RF status says `LINK REJECTED TOPOLOGY LOOP`.
 
 ## Identifier settings
 
+With several `first_key_only = yes` sets, each qualifying key-up selects one.
+The controller takes turns through the sets and wraps after the last one.
+It skips a set whose idle interval has not elapsed. A pending initial ID keeps
+its turn while waiting to play, unless a higher-priority ID satisfies it.
+Periodic IDs still use their configured priority.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `interval_ms` | 600000 | Positive ID interval in milliseconds. |
@@ -709,6 +739,219 @@ For a local rejected request, RF status says `LINK REJECTED TOPOLOGY LOOP`.
 | `sound_file` | empty | File path; missing or unusable files fall back to speech. |
 | `speech_text` | empty | Speech text; empty disables speech. |
 | `morse_text` | empty | Morse text; empty disables the terminal fallback. |
+
+IDs also accept the message `content`, `message_id`, and `arg_*` settings below.
+
+## Composed messages
+
+Use `[message name]` to define a reusable message and `[message node name]`
+to override it for one node. A message can contain words, a recording, tones,
+and other messages in any order. IDs and release tails can use the same content.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `content` | `{message}` | Ordered text and references. IDs and tails default to `{media}`. |
+| `message_id` | empty | Message name from the selected Fluent language file. |
+| `arg_name` | absent | Source for the Fluent argument called `name`. |
+| `dtmf_id` | absent | Positive decimal selector for this named message; no leading zero. |
+
+Content accepts these references:
+
+| Reference | Plays |
+| --- | --- |
+| `{message}` | The selected `message_id`, with its `arg_*` values. |
+| `{media}` | This section's sound file, speech, and Morse fallback. |
+| `{tone_sequence}` | This section's `tone_sequence`; use the courtesy-tone segment syntax. |
+| `{message_macro_name}` | The named message `name`. |
+
+Write `{{` or `}}` for a literal brace. Messages may refer to other messages,
+but cannot refer back to themselves in a loop. Keep each text, speech, or Morse
+part within 127 bytes. A composition may contain several such parts.
+
+Each message uses the normal `sound_file`, `speech_*`, and `morse_*` settings.
+A recording or spoken part needs a usable Morse fallback. During local or
+linked receive, playback changes to the complete Morse version. Attention
+tones may appear before, between, or after words. Separate media settings in a
+referenced message apply to that message's part.
+
+An `arg_*` value may be `callsign`, `node`, `date`, `time`, `day_of_week`,
+`greeting`, `link_status`, `sensor:name`, or `input:name`. Do not use
+`time_remaining` in IDs, tails, or ordinary message commands; it needs a
+deadline, such as the one supplied to a scheduled warning. Node numbers are spoken as digits;
+meter readings are spoken as numbers. Values are read when playback is admitted.
+A missing or stale site reading is reported as unavailable.
+
+For example:
+
+```ini
+[message clock]
+message_id = site-time
+arg_time = time
+dtmf_id = 1
+
+[message temperature]
+message_id = site-temperature
+arg_temperature = sensor:outdoor
+
+[identifier 524950 regular]
+content = This is the KG0BP repeater. {message_macro_clock} {message_macro_temperature}
+```
+
+Send `*771#`, then unkey, to hear message 1 with the default command map.
+Message and site selectors do not recall a linked node when `0` is entered.
+These read-only commands need no administrative unlock. A local RF request
+replies on the local transmitter. A linked request replies only to its sender.
+
+## Release tails
+
+Define each tail with `[tail node name]`. `[tail]` supplies shared defaults;
+`[tail node]` changes the defaults for one node. Use the ID media settings or
+message content above for what to play.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `interval_ms` | `0` | Minimum time between successful plays. Zero plays after each qualified transmission. |
+| `delay_ms` | `0` | Delay after the transmitter unkeys. Zero continues the current transmission after hang time. |
+| `content` | `{media}` | Tail message content. |
+
+With zero delay, the tail starts when hang time ends and keeps the transmitter
+keyed. With a positive delay, the transmitter unkeys after hang time, waits,
+then keys to play the tail. A tail with an interval waits for a later traffic
+release; it does not key the transmitter just because its interval elapsed.
+
+Tails play in configured order. A pending polite ID follows the tails unless
+its maximum wait has expired, in which case the ID plays first. New receive
+before a tail starts cancels that release opportunity. New receive during
+playback changes it to Morse. Failed or cancelled playback does not start the
+interval timer. IDs and other telemetry do not trigger another tail.
+
+## Site meters, inputs, outputs, alarms, and fans
+
+Define each item as `[sensor node name]`, `[input node name]`,
+`[output node name]`, `[alarm node name]`, or `[fan node name]`.
+Use the family alone, such as `[sensor]`, for shared defaults. Add a node,
+such as `[sensor 524950]`, for that node's defaults. Only a named section
+creates an item. Each family defaults to `enabled = no`.
+
+Set `backend`, `device`, and `channel` or `line` in each hardware item's named
+section. These fields and `dtmf_id` do not inherit. Sensor and input names and
+their DTMF selectors must be unique within a node. Each selector is a positive
+decimal number with no leading zero. Choose the exact device;
+the controller will not substitute another device if it is absent.
+
+| Backend | Use | Device and channel |
+| --- | --- | --- |
+| `hwmon` | Meters and supported PWM outputs | Exact kernel hwmon device directory. A sensor uses a channel such as `temp1_input`; an output uses a line such as `pwm1`. |
+| `iio` | Analog meters | Exact IIO device directory and channel stem, such as `in_voltage0`. |
+| `gpiod` | Digital inputs and outputs | GPIO chip path and numeric line offset. |
+| `cm119` | Spare radio GPIO | `device` is the node that owns the radio; `line` is GPIO 1–8, subject to availability. |
+| `parallel` | Spare radio parallel-port pins | `device` is the owning node; output pins are 2–9 and input pins are 10, 12, 13, 15. |
+
+Radio PTT, tone-control, interlock, and clipping-indicator pins cannot also be
+site outputs. A GPIO output is on/off only. PWM needs a device that provides
+PWM and is already in manual mode.
+
+### Meters
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `label_message_id` | empty | Localized meter label; empty uses its name. |
+| `unit` | empty | Reported unit, such as `volts`, `amps`, `celsius`, `watts`, `joules`, `rpm`, or `percent`. |
+| `precision` | `1` | Decimal places in reports, from 0 through 15. |
+| `poll_interval_ms` | `1000` | Time between reads; greater than zero. |
+| `stale_after_ms` | `5000` | Reading age limit; greater than the polling interval. |
+| `smoothing_ms` | `0` | Smoothing time; zero disables smoothing. |
+| `calibration` | `none` | Use `none` or `two_point`. |
+| `input_low`, `input_high` | absent | Two distinct readings in the device's source units. |
+| `value_low`, `value_high` | absent | Engineering values for those two readings. |
+| `dtmf_id` | absent | Positive decimal selector for `*76`. |
+
+Calibration is applied once. For hwmon, use the units reported by Linux, such
+as volts or degrees Celsius. Report precision does not round alarm thresholds
+or stored readings. Status includes current, smoothed, minimum, and maximum
+values. A failed read does not become a zero reading.
+
+### Digital inputs and outputs
+
+| Option | Applies to | Default | Meaning |
+| --- | --- | --- | --- |
+| `active_level` | Both | `high` | Physical active level: `high` or `low`. |
+| `debounce_ms` | Input | `50` | Time a new state must remain stable. |
+| `dtmf_id` | Input | absent | Positive decimal selector for `*76`. |
+| `on_active`, `on_inactive` | Input | empty | Actions when the input changes state. |
+| `startup_state` | Output | `off` | Initial logical state on first device acquisition. |
+| `safe_state` | Output | `off` | Logical state on fault or shutdown. |
+| `pulse_ms` | Output | `500` | Pulse duration; greater than zero. A pulse returns to the prior state. |
+
+### Alarms
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `source` | empty | Named sensor or input. |
+| `condition` | `unavailable` | `above`, `below`, `active`, `inactive`, or `unavailable`. |
+| `trip_value`, `clear_value` | absent | Sensor trip and recovery levels. For `above`, clear must be no higher than trip; for `below`, clear must be no lower. |
+| `reading` | `current` | Use the `current` or `smoothed` sensor value. |
+| `trip_delay_ms`, `clear_delay_ms` | `0` | Time the trip or recovery condition must hold. |
+| `latched` | `no` | Keep the alarm active until it has recovered and is reset. |
+| `trip_message`, `clear_message`, `repeat_message` | empty | Named messages to play on trip, recovery, or repeat. |
+| `repeat_interval_ms` | `0` | Time between repeat notices; zero disables repeats. |
+| `on_trip`, `on_clear` | empty | Ordered action lists. |
+
+Acknowledging an alarm silences its repeats. It does not clear an unsafe
+condition. Reset succeeds only after the source has recovered. Alarm actions
+run even when the telemetry queue is full. A lost reading stays unknown and
+cannot prove that the alarm has recovered.
+
+### Fans
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `output` | empty | Named output controlled by this fan. |
+| `mode` | `ptt` | `ptt`, `temperature`, or `combined`. Combined uses the greater demand. |
+| `ptt_nodes` | Owning node | Comma-separated nodes whose PTT runs the fan. |
+| `run_on_ms` | `120000` | Fan run-on after PTT drops. |
+| `temperature_sensor` | empty | Named temperature sensor. |
+| `on_temperature`, `off_temperature` | absent | On and off levels for temperature control. Off must be no higher than on. |
+| `temperature_curve` | empty | Ordered `temperature:duty` points, such as `30:0.2,50:1`. Duty is 0–1 and needs PWM. |
+| `rpm_sensor` | empty | Optional speed sensor. |
+| `minimum_rpm` | absent | Required positive speed when feedback is used. |
+| `spinup_ms` | `1000` | Time allowed for the fan to reach speed. |
+
+A fan owns its output. Do not also command that output directly. Missing
+required temperature requests full cooling. Manual fan demand cannot reduce
+protective cooling. An unavailable output or insufficient fan speed is a fault.
+
+### Site actions and commands
+
+Write comma-separated actions in `on_active`, `on_inactive`, `on_trip`, or
+`on_clear`:
+
+| Action | Meaning |
+| --- | --- |
+| `output:name:on`, `output:name:off`, `output:name:pulse` | Change a named output. |
+| `fan:name:auto`, `fan:name:0.75` | Restore automatic demand or set a duty from 0 to 1. |
+| `inhibit:on`, `inhibit:off` | Set or clear this source's transmit inhibit. |
+| `macro:name` | Run a configured action macro. |
+
+Send `*76<dtmf_id>#`, then unkey, to hear a meter or input. The reply goes to
+the requesting RF source. DTMF can read site status but cannot configure meters
+or operate outputs.
+
+The Asterisk CLI provides these site controls:
+
+```text
+rpt_advanced link status <node>
+rpt_advanced site output <node> <name> {on|off|pulse}
+rpt_advanced site alarm <node> <name> {acknowledge|reset}
+rpt_advanced site sensor <node> <name> reset-extrema
+rpt_advanced site fan <node> <name> {automatic|duty-from-0-to-1}
+rpt_advanced site inhibit <node> {on|off}
+```
+
+An accepted request is not proof of the electrical output level. Link status
+shows requested and submitted values, reading age, and faults. Output readback
+is shown as unavailable. Use a separate input or meter to check the circuit.
+Clearing manual transmit inhibit does not clear an alarm's inhibit.
 
 ## Announcement settings
 

@@ -8,6 +8,7 @@ pub const NATIVE_SAMPLE_RATE_HZ: u32 = 48_000;
 pub mod access;
 pub mod audio;
 pub mod command;
+pub mod composition;
 pub mod config;
 pub mod control;
 pub mod controller;
@@ -17,11 +18,15 @@ pub mod messages;
 pub mod policy;
 pub mod runtime;
 pub mod schedule;
+pub mod site;
 pub mod template;
 pub mod time;
 
 #[cfg(test)]
 mod messages_tests;
+
+#[cfg(test)]
+mod composition_tests;
 
 #[cfg(test)]
 mod time_tests;

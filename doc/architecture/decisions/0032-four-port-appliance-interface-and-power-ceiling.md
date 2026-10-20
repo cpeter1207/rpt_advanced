@@ -1,6 +1,6 @@
 # ADR 0032: Four-port appliance interface and power ceiling
 
-Status: Accepted
+Status: Planned physical implementation and qualification; decision accepted
 
 ## Context
 

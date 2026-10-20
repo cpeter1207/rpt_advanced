@@ -1,5 +1,7 @@
 //! Shared section-name classification.
 
+use super::site::SiteKind;
+
 /// One documented section role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScopeKind {
@@ -13,6 +15,9 @@ pub(crate) enum ScopeKind {
     AnnouncementDefault,
     AnnouncementNode,
     AnnouncementSet,
+    TailDefault,
+    TailNode,
+    TailSet,
     CourtesyDefault,
     CourtesyNode,
     CourtesySet,
@@ -24,11 +29,16 @@ pub(crate) enum ScopeKind {
     TimeNode,
     TemplateGlobal,
     TemplateNode,
+    MessageGlobal,
+    MessageNode,
     MacroGlobal,
     MacroNode,
     EventNode,
     PermanentNode,
     ScheduleNode,
+    SiteDefault(SiteKind),
+    SiteNode(SiteKind),
+    SiteSet(SiteKind),
     Unknown,
 }
 
@@ -81,6 +91,18 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         return Err(());
     }
     let scope = match parts.as_slice() {
+        [family] if SiteKind::parse(family).is_some() => {
+            Scope::flat(ScopeKind::SiteDefault(SiteKind::parse(family).unwrap()))
+        }
+        [family, node] if SiteKind::parse(family).is_some() => {
+            Scope::node(ScopeKind::SiteNode(SiteKind::parse(family).unwrap()), node)
+        }
+        [family, node, label] if SiteKind::parse(family).is_some() => Scope::named(
+            ScopeKind::SiteSet(SiteKind::parse(family).unwrap()),
+            Some(node),
+            label,
+        ),
+        [family, ..] if SiteKind::parse(family).is_some() => return Err(()),
         ["general"] => Scope::flat(ScopeKind::General),
         ["radio"] => Scope::flat(ScopeKind::RadioDefault),
         ["radio", node] => Scope::node(ScopeKind::RadioNode, node),
@@ -93,6 +115,9 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
             Scope::named(ScopeKind::AnnouncementSet, Some(node), label)
         }
         ["courtesy"] => Scope::flat(ScopeKind::CourtesyDefault),
+        ["tail"] => Scope::flat(ScopeKind::TailDefault),
+        ["tail", node] => Scope::node(ScopeKind::TailNode, node),
+        ["tail", node, label] => Scope::named(ScopeKind::TailSet, Some(node), label),
         ["courtesy", node] => Scope::node(ScopeKind::CourtesyNode, node),
         ["courtesy", node, label] => Scope::named(ScopeKind::CourtesySet, Some(node), label),
         ["morse"] => Scope::flat(ScopeKind::MorseDefault),
@@ -103,6 +128,8 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         ["time", node] => Scope::node(ScopeKind::TimeNode, node),
         ["template", label] => Scope::named(ScopeKind::TemplateGlobal, None, label),
         ["template", node, label] => Scope::named(ScopeKind::TemplateNode, Some(node), label),
+        ["message", label] => Scope::named(ScopeKind::MessageGlobal, None, label),
+        ["message", node, label] => Scope::named(ScopeKind::MessageNode, Some(node), label),
         ["macro", label] => Scope::named(ScopeKind::MacroGlobal, None, label),
         ["macro", node, label] => Scope::named(ScopeKind::MacroNode, Some(node), label),
         ["event", node, label] => Scope::named(ScopeKind::EventNode, Some(node), label),
@@ -111,7 +138,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         [known]
             if matches!(
                 *known,
-                "template" | "macro" | "event" | "permanent" | "schedule"
+                "template" | "message" | "macro" | "event" | "permanent" | "schedule"
             ) =>
         {
             return Err(());
@@ -124,11 +151,13 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
                     | "radio"
                     | "identifier"
                     | "announcement"
+                    | "tail"
                     | "courtesy"
                     | "morse"
                     | "speech"
                     | "time"
                     | "template"
+                    | "message"
                     | "macro"
                     | "event"
                     | "permanent"
@@ -146,10 +175,14 @@ pub(crate) const fn is_named(kind: ScopeKind) -> bool {
     matches!(
         kind,
         ScopeKind::IdentifierSet
+            | ScopeKind::SiteSet(_)
             | ScopeKind::AnnouncementSet
+            | ScopeKind::TailSet
             | ScopeKind::CourtesySet
             | ScopeKind::TemplateGlobal
             | ScopeKind::TemplateNode
+            | ScopeKind::MessageGlobal
+            | ScopeKind::MessageNode
             | ScopeKind::MacroGlobal
             | ScopeKind::MacroNode
             | ScopeKind::EventNode
@@ -162,9 +195,13 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
     matches!(
         kind,
         ScopeKind::IdentifierNode
+            | ScopeKind::SiteNode(_)
+            | ScopeKind::SiteSet(_)
             | ScopeKind::RadioNode
             | ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementNode
+            | ScopeKind::TailNode
+            | ScopeKind::TailSet
             | ScopeKind::AnnouncementSet
             | ScopeKind::CourtesyNode
             | ScopeKind::CourtesySet
@@ -172,6 +209,7 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::SpeechNode
             | ScopeKind::TimeNode
             | ScopeKind::TemplateNode
+            | ScopeKind::MessageNode
             | ScopeKind::MacroNode
             | ScopeKind::EventNode
             | ScopeKind::PermanentNode

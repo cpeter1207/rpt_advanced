@@ -1,6 +1,6 @@
 # ADR 0010: Configuration-owned permanent links and replacement windows
 
-Status: Accepted
+Status: Implemented; scheduler hardening remains tracked by ADR 0017
 
 ## Context
 

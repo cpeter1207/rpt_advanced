@@ -171,6 +171,8 @@ impl ActivitySnapshot {
 
 /// Sole status producer and completed-media reclaimer; retain until audio stops.
 pub struct ControllerControl {
+    site_inhibit: Arc<AtomicBool>,
+    messages: Option<super::MessagePreparation>,
     pending: Producer<PreparedMedia>,
     completed: Consumer<PreparedMedia>,
     #[cfg(test)]
@@ -189,6 +191,43 @@ pub struct ControllerControl {
 }
 
 impl ControllerControl {
+    /// Set station protection independently of telemetry admission and physical interlocks.
+    pub fn set_site_inhibit(&self, inhibited: bool) {
+        self.site_inhibit.store(inhibited, Ordering::Release);
+    }
+
+    pub(crate) fn set_message_preparation(&mut self, messages: super::MessagePreparation) {
+        self.messages = Some(messages);
+    }
+
+    /// Reclaim retired composition streams and take one scalar preparation request on control.
+    pub fn take_message_request(&mut self) -> Option<super::MessageRequest> {
+        self.messages.as_mut()?.take_request()
+    }
+
+    /// Allocate a one-shot reader on control; values are requested only when playback starts.
+    pub(crate) fn prepare_message(
+        &mut self,
+        content_index: usize,
+    ) -> Result<PreparedMedia, ControllerError> {
+        self.messages
+            .as_mut()
+            .ok_or(ControllerError)?
+            .register(content_index)
+    }
+
+    /// Complete the exact attempt, retaining rejected ownership on control for retry or disposal.
+    pub fn complete_message(
+        &mut self,
+        attempt: super::MessageAttemptId,
+        result: Result<PreparedMedia, ControllerError>,
+    ) -> Result<(), super::MessageCompletion> {
+        match &mut self.messages {
+            Some(messages) => messages.complete(attempt, result),
+            None => Err(super::MessageCompletion { attempt, result }),
+        }
+    }
+
     pub(super) fn configure_parrot_lifecycle(
         &mut self,
         requests: Producer<ParrotRequest>,
@@ -418,9 +457,11 @@ pub(super) enum Source {
     Courtesy(usize),
     Identifier(usize),
     Announcement(usize),
+    Tail(usize),
 }
 
 pub(super) struct TelemetryPlanner {
+    pub site_inhibit: Arc<AtomicBool>,
     pub active: Option<Source>,
     pub status: Option<PreparedMedia>,
     pending: Consumer<PreparedMedia>,
@@ -441,8 +482,10 @@ impl TelemetryPlanner {
         let (parrot_pending, parrot_consumer) = RingBuffer::new(1);
         let (parrot_completed, parrot_reclaimer) = RingBuffer::new(1);
         let parrot_busy = Arc::new(AtomicBool::new(false));
+        let site_inhibit = Arc::new(AtomicBool::new(false));
         (
             Self {
+                site_inhibit: site_inhibit.clone(),
                 active: None,
                 status: None,
                 pending,
@@ -454,6 +497,8 @@ impl TelemetryPlanner {
                 duck_gain: 10_f32.powf(f32::from(duck_db) / 20.0),
             },
             ControllerControl {
+                site_inhibit,
+                messages: None,
                 pending: producer,
                 completed: consumer,
                 #[cfg(test)]
@@ -559,6 +604,7 @@ struct TestPcmStream {
 impl PcmStreamReader for TestPcmStream {
     fn start(&mut self) {
         self.offset = 0;
+        self.use_fallback = false;
     }
     fn render(&mut self, output: &mut [f32]) -> PcmRead {
         let source = if self.use_fallback {
@@ -577,10 +623,14 @@ impl PcmStreamReader for TestPcmStream {
             PcmRead::Samples(count)
         }
     }
-    fn select_morse_fallback(&mut self) -> bool {
+    fn select_morse_fallback(&mut self) -> crate::audio::MorseSwitch {
         self.use_fallback = true;
         self.offset = 0;
-        !self.fallback.is_empty()
+        if self.fallback.is_empty() {
+            crate::audio::MorseSwitch::Unavailable
+        } else {
+            crate::audio::MorseSwitch::Selected
+        }
     }
 }
 

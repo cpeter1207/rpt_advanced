@@ -28,6 +28,9 @@ use std::{
 /// Maximum supported hardware voice frame, prepared before worker entry.
 pub const MAXIMUM_FRAMES: usize = 4096;
 
+#[path = "host_site.rs"]
+mod site;
+
 struct Lease {
     quiesced: bool,
     owners: Option<AudioOwners>,
@@ -147,6 +150,11 @@ pub struct Host {
     peers: Vec<PeerOwner>,
     operations: Vec<(String, DigitOutcome)>,
     status_post: StatusPostService,
+    site_acquisition: crate::site::acquisition::Acquisition,
+    site_radio: crate::site::radio::RadioSite,
+    site_transition: Option<site::Transition>,
+    site_retired: Vec<crate::site::worker::DeviceWorker>,
+    site_delivery: site::Delivery,
     epoch: Instant,
 }
 
@@ -286,6 +294,11 @@ impl Host {
             peers: Vec::new(),
             operations: Vec::new(),
             status_post: StatusPostService::default(),
+            site_acquisition: Default::default(),
+            site_delivery: Default::default(),
+            site_radio: Default::default(),
+            site_transition: None,
+            site_retired: Vec::new(),
             epoch,
         };
         host.configure_status_posts(clock.now_ms);
@@ -386,6 +399,7 @@ impl Host {
         let leases = &mut self.leases;
         let epoch = self.epoch;
         let services = self.services;
+        let revision = self.runtime.revision();
         let result = self.runtime.reload(
             document,
             &self.media,
@@ -419,6 +433,9 @@ impl Host {
             },
             clock,
         );
+        if self.runtime.revision() != revision {
+            self.commit_sites()?;
+        }
         self.prune_leases();
         result?;
         self.activate_dispatchers(clock.now_ms);
@@ -725,6 +742,7 @@ impl Host {
                 &topology
             }
         );
+        self.write_site_status(local, &mut result)?;
         Ok(result)
     }
     /// Execute consequences which never require a blocking outbound dial.
@@ -774,6 +792,12 @@ impl Host {
                 self.runtime
                     .queue_status(local, action, last.as_deref(), clock, reply)
             }
+            LinkEffect::Message { selector, reply } => {
+                self.runtime.queue_message(local, &selector, reply)
+            }
+            LinkEffect::SiteStatus { selector, reply } => {
+                self.runtime.queue_site_report(local, &selector, reply)
+            }
             LinkEffect::SelectedRemote | LinkEffect::ParrotEnabled(_) | LinkEffect::None => Ok(()),
         }
     }
@@ -798,6 +822,8 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        self.advance_sites(clock);
+        self.runtime.prepare_messages(clock);
         for (local, lease) in &self.leases {
             if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {
                 worker.report_faults(local, clock.now_ms);
@@ -991,6 +1017,9 @@ impl Host {
     }
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        if self.site_shutdown(now_ms) != Ok(true) {
+            return false;
+        }
         self.status_post.request_stop();
         let statuses = self.runtime.status(now_ms);
         for peer in &self.peers {

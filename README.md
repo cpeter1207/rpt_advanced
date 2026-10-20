@@ -3,6 +3,7 @@
 rpt_advanced is a repeater controller with AllStarLink linking, station IDs,
 courtesy tones, announcements, and scheduled links. It supports half-duplex
 and full-duplex radio systems.
+It can read site meters, control GPIO outputs and cooling fans, and play alarms.
 
 Run it as a Linux service without Asterisk, or install the optional
 `app-rpt-advanced` package to run it in Asterisk with USBRadioPlus.

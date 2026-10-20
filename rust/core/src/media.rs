@@ -59,6 +59,25 @@ pub struct MediaSource {
     pub morse: Option<MorseSource>,
 }
 
+/// Ordered segments sharing one playback lifetime, route and completion outcome.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaProgram {
+    /// Ordinary playback; each segment retains its own source fallback chain.
+    pub primary: Vec<MediaSource>,
+    /// Complete receive-interruption substitute, restarted from its beginning.
+    pub morse: Vec<MorseSource>,
+}
+
+impl MediaProgram {
+    /// Wrap one existing source without changing its normal or interrupted playback.
+    pub fn single(source: MediaSource) -> Self {
+        Self {
+            morse: source.morse.iter().cloned().collect(),
+            primary: vec![source],
+        }
+    }
+}
+
 /// Generated tone sequence rendered by the station-telemetry producer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToneSource {
@@ -96,15 +115,24 @@ pub struct SpeechSource {
 
 /// Generation-owned builder/control for one serialized station media worker.
 pub trait StationMediaSession: Send {
+    /// Register a complete sequence; one-shot programs may arrive after worker startup.
+    fn register_program(
+        &mut self,
+        program: MediaProgram,
+        one_shot: bool,
+    ) -> Result<Box<dyn PcmStreamReader>, MediaError>;
+
     /// Register an immutable source chain and return its callback-safe reader.
-    fn register(&mut self, source: MediaSource) -> Result<Box<dyn PcmStreamReader>, MediaError>;
+    fn register(&mut self, source: MediaSource) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+        self.register_program(MediaProgram::single(source), false)
+    }
 
     /// Register one-shot telemetry generated after the station worker starts.
     fn register_once(
         &mut self,
         source: MediaSource,
     ) -> Result<Box<dyn PcmStreamReader>, MediaError> {
-        self.register(source)
+        self.register_program(MediaProgram::single(source), true)
     }
 
     /// Stream already validated PCM through the same station ring used for decoded media.

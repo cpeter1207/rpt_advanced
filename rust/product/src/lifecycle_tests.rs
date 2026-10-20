@@ -32,6 +32,122 @@ fn active_configuration(extra: &str) -> String {
     format!("[1000]\nradio_channel=usb\nduplex=full\n{extra}")
 }
 
+#[test]
+fn site_lifecycle_installs_configured_acquisition_before_station_polling() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\n",
+    );
+    assert_eq!(unsafe { start(&configuration) }, 0);
+    let (engine, call) = selected().unwrap();
+    let readings = engine.run(|host| Ok(host.poll_sites(0))).unwrap();
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(
+        readings["1000"].inputs["door"].quality,
+        rpt_advanced_core::site::ReadingQuality::Unavailable
+    );
+}
+
+#[test]
+fn site_backends_reload_rejection_preserves_live_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    let (engine, call) = selected().unwrap();
+    let active = engine
+        .run(|host| Ok(host.runtime.status(0)[0].1.active))
+        .unwrap();
+    let drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=/no-device\nline=0\n",
+    );
+    let result =
+        unsafe { descriptor().reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) };
+    let after = engine
+        .run(|host| Ok(host.runtime.status(0)[0].1.active))
+        .unwrap();
+    let after_drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(result, -1);
+    assert_eq!(after, active);
+    assert_eq!(after_drops, drops);
+}
+
+#[test]
+fn site_lifecycle_reload_replaces_bindings_without_reopening_same_radio() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    let drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\n",
+    );
+    let result =
+        unsafe { descriptor().reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) };
+    let (engine, call) = selected().unwrap();
+    let readings = engine.run(|host| Ok(host.poll_sites(0))).unwrap();
+    let after_drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(result, 0);
+    assert_eq!(after_drops, drops);
+    assert!(
+        readings
+            .get("1000")
+            .is_some_and(|node| node.inputs.contains_key("door"))
+    );
+}
+
+#[test]
+fn site_alarm_link_action_is_dispatched_without_a_schedule_tick() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    crate::fixture::RADIO_READY.store(1, Ordering::Release);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\n\
+         [alarm 1000 missing]\nenabled=yes\nsource=door\ncondition=unavailable\non_trip=macro:connect\n\
+         [macro 1000 connect]\naction=connect\ntarget_node=2000\n",
+    );
+    assert_eq!(unsafe { start(&configuration) }, 0);
+    let (engine, call) = selected().unwrap();
+    engine.pump(engine.clock(), false).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        engine.pump(engine.clock(), false).unwrap();
+        if engine.jobs.lock().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "site action dial did not complete"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        engine
+            .run(|host| host.status_text("1000"))
+            .unwrap()
+            .contains("  2000: transceive")
+    );
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    crate::fixture::RADIO_READY.store(0, Ordering::Release);
+}
+
 fn operation(action: LinkAction, node: &str) -> DigitOperation {
     DigitOperation::new(
         Command {
@@ -120,7 +236,8 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
     crate::fixture::PEER_OPENS.store(0, Ordering::Relaxed);
     let radio_ready_before = crate::fixture::RADIO_READY.swap(1, Ordering::AcqRel);
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
-    let configuration = "[1000]\nradio_channel=usb\nduplex=full\n";
+    let configuration =
+        "[1000]\nradio_channel=usb\nduplex=full\n[sensor 1000 battery]\nunit=volts\ndtmf_id=1\n";
     assert_eq!(unsafe { start(configuration) }, 0);
     assert_eq!(
         unsafe {
@@ -170,6 +287,10 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
             0
         );
         let text = std::str::from_utf8(&status).unwrap();
+        assert!(
+            text.contains("sensor battery value=None quality=Unavailable"),
+            "{text}"
+        );
         if text.contains("2000") {
             break;
         }
@@ -763,7 +884,7 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
         .unwrap_or_else(|error| error.into_inner());
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
-    let configuration = active_configuration("");
+    let configuration = active_configuration("[sensor 1000 battery]\nunit=volts\ndtmf_id=1\n");
     assert_eq!(unsafe { start(&configuration) }, 0);
 
     assert_eq!(
@@ -871,15 +992,17 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
     assert_eq!(unsafe { start(&configuration) }, 0);
     let mut completed = 99;
-    for digit in b"*722" {
-        completed = 99;
-        assert_eq!(
-            unsafe { descriptor().digit.unwrap()(c"1000".as_ptr(), 4, *digit, &mut completed) },
-            0
-        );
-        assert!(completed <= 1);
+    for command in [b"*722".as_slice(), b"*761#"] {
+        for digit in command {
+            completed = 99;
+            assert_eq!(
+                unsafe { descriptor().digit.unwrap()(c"1000".as_ptr(), 4, *digit, &mut completed) },
+                0
+            );
+            assert!(completed <= 1);
+        }
+        assert_eq!(completed, 1);
     }
-    assert_eq!(completed, 1);
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
 }
 

@@ -1,6 +1,6 @@
 # ADR 0012: Runtime dependencies point inward through explicit layers
 
-Status: Accepted
+Status: Accepted; ongoing architecture policy
 
 ## Context
 

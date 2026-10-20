@@ -1167,7 +1167,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
     }
     let overridden = ResolvedNodeSettings::resolve(
         &ConfigDocument::parse(&format!(
-            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=77\n"
+            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=78\n"
         ))
         .unwrap(),
         &node,
@@ -1181,7 +1181,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
             .unwrap()
             .mappings()
             .iter()
-            .any(|mapping| mapping.digits == "77")
+            .any(|mapping| mapping.digits == "78")
     );
 }
 
@@ -1487,7 +1487,7 @@ fn schedule_resolution_uses_empty_defaults_for_invalid_optional_selectors() {
 fn command_map_has_all_defaults_and_rejects_node_taking_prefix_collisions() {
     let document = ConfigDocument::parse("[node]\n").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&document, &NodeId::new("node").unwrap()).unwrap();
-    assert_eq!(resolved.value.link_commands.len(), 21);
+    assert_eq!(resolved.value.link_commands["link_command_message"], "77");
     assert_eq!(resolved.value.link_commands["fixed_10"], "10");
     assert_eq!(resolved.value.link_commands["fixed_722"], "722");
     let conflict = ConfigDocument::parse("[node]\nlink_command_disconnect=3\n").unwrap();
@@ -1587,4 +1587,68 @@ fn resolved_command_map_preserves_configured_and_fixed_actions() {
         map.parse("816").unwrap().action,
         crate::command::LinkAction::ReconnectPermanentAll
     );
+}
+#[test]
+fn tail_config_inheritance_and_order() {
+    use super::ResolvedTailSettings;
+    let config = ConfigDocument::parse("[524950]\n[speech]\nlevel_db=-8\n[morse]\nlevel_db=-18\n[tail]\ninterval_ms=300\ndelay_ms=12\ncontent={media}\nmorse_text=E\n[tail 524950]\ndelay_ms=25\n[tail 524950 b]\ndelay_ms=invalid\n[tail 524950 a]\ninterval_ms=0\ncontent=Ready\n").unwrap();
+    let node = NodeId::new("524950").unwrap();
+    let inherited = ResolvedTailSettings::resolve(&config, &node, "b").unwrap();
+    assert_eq!(
+        (inherited.value.interval_ms, inherited.value.delay_ms),
+        (300, 25)
+    );
+    assert_eq!(inherited.value.message.morse_defaults.level_db, -18);
+    assert_eq!(inherited.value.message.speech_defaults.level_db, -8);
+    assert_eq!(inherited.warnings.len(), 1);
+    assert_eq!(inherited.warnings[0].fallback, "25");
+    assert_eq!(
+        config.named_sections("tail", Some("524950")),
+        ["tail 524950 b", "tail 524950 a"]
+    );
+    let explicit = ResolvedTailSettings::resolve(&config, &node, "a")
+        .unwrap()
+        .value;
+    assert_eq!(explicit.interval_ms, 0);
+    assert_eq!(explicit.message.content, "Ready");
+    assert!(ResolvedTailSettings::resolve(&config, &node, "missing").is_err());
+    for invalid in [
+        "[tail 524950 a]\n[tail 524950 a]\n",
+        "[tail missing a]\n",
+        "[tail 524950 a extra]\n",
+    ] {
+        assert!(
+            ConfigDocument::parse(&format!("[524950]\n{invalid}"))
+                .and_then(|c| Schema::validate(&c))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn composition_schema_reports_inherited_defaults_and_rejects_message_intervals() {
+    let document = ConfigDocument::parse(
+        "[1000]\n[identifier]\ncontent={broken\n[sensor]\nprecision=2\n[sensor 1000]\nprecision=invalid\n[tail]\ndelay_ms=17\n[tail 1000]\ndelay_ms=invalid\n[message report]\ninterval_ms=10\nunsupported_option=on\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&document).unwrap().warnings;
+    for (section, key, fallback) in [
+        ("identifier", "content", "{media}"),
+        ("sensor 1000", "precision", "2"),
+        ("tail 1000", "delay_ms", "17"),
+        ("message report", "interval_ms", "not configured"),
+        ("message report", "unsupported_option", "not configured"),
+    ] {
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.section == section && warning.key == key)
+            .expect("invalid field must produce a warning");
+        assert_eq!(warning.fallback, fallback);
+    }
+    let ignored = warnings
+        .iter()
+        .find(|warning| warning.key == "unsupported_option")
+        .unwrap();
+    assert_eq!(ignored.value, "on");
+    assert_eq!(ignored.message, "unknown option ignored");
 }

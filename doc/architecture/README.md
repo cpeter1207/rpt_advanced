@@ -25,10 +25,27 @@ The native radio transmit callback returns PTT and CTCSS enable separately; its
 activity policy remains in the controller, as specified by
 [ADR 0042](decisions/0042-activity-scoped-ctcss-encode.md).
 Before either incoming or outgoing peer media starts, the product binds it to
-its node's existing radio lease. Host-services ABI 5 forwards this control-only
+its node's existing radio lease. Host-services ABI 6 forwards this control-only
 operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
 USBRadioPlus retains ownership of the configured per-peer graph and its reload
 lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
+
+The same host table forwards site binding, output requests, and snapshots to
+that radio owner. Standalone borrows the native USBRadioPlus product handle;
+Asterisk sends an acknowledged site option on its existing channel. Neither
+path acquires a second CM119 or parallel-port owner. Provider timestamps,
+generation fences, error status, and the distinction between requested,
+serviced, and physically observed output remain intact. The shared product
+owns bounded acquisition, calibration, alarms, fan/output policy and localized
+reports. Per-device workers serialize physical access outside station control
+and audio. The site-monitoring plan tracks remaining validation and physical
+qualification, not a second implementation path.
+
+Optional site providers isolate libgpiod digital-line access and libsensors
+measurement access in separate ABI-1 shared objects. Kernel IIO acquisition
+remains ordinary filesystem I/O in the product's non-audio owner. The sensor
+adapter also provides supported kernel PWM writes; neither adapter implements
+station policy or software PWM. See ADR 0022 for identity and lifetime rules.
 
 Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that
@@ -48,8 +65,7 @@ this extraction.
 
 The USBRadioPlus hardware cutover uses one channel implementation backed by
 the dynamic PortAudio/ALSA and GPIO adapters, with no `res_usbradio` imports or
-module requirement. Released alpha18's combined native tick runs in the
-PortAudio playback callback. The Rust implementation instead provides
+module requirement. The Rust implementation provides
 independently paced PortAudio input and output callback entry points; Asterisk
 frame delivery and device-control I/O remain outside those callbacks. The
 `app_rpt` 8 kHz and `RadioPlusAdvanced` 48 kHz protocols remain separate.
@@ -60,10 +76,10 @@ receive worker and a DAC/adapter-output-clocked transmit worker. The callback
 split is implemented in USBRadioPlus. The rpt_advanced Rust
 product now implements generational `NodeHost` ownership, coherent paired
 receive/transmit calls, local and per-peer inbound rings, telemetry streaming
-through its ring, and the program-audio loopback dispatcher. This does not
-claim completion of USBRadioPlus's separate direct-hardware local/telemetry-ring
-topology or shared-clock adapter cutover;
-none of those changes was part of released alpha18.
+through its ring, and the program-audio loopback dispatcher. The product owns
+those controller rings and mixing; USBRadioPlus does not need a duplicate
+controller-ring topology. The optional verified shared-clock adapter path
+remains pending under ADR 0027.
 Separately, [ADR 0039](decisions/0039-retire-usbradioplus-native-mode.md)
 retires USBRadioPlus's driver-native software-repeat and native parrot modes.
 They are removed from ASL3 support and are not rpt_advanced prerequisites.
@@ -115,6 +131,7 @@ Rust's private ABI.
 | `librptadv_file_adapter.so.1` | Offline local-file decoding through FFmpeg |
 | `librptadv_speech_adapter.so.1` | Offline Piper synthesis, direct WAV reading, and speech-only level adjustment |
 | `librptadv_resolver_adapter.so.1` | Standalone system DNS/SRV resolution; no directory policy or Asterisk dependency |
+| `librptadv_gpiod_adapter.so.1` | Optional site digital lines through libgpiod; serialized non-audio ownership, no software PWM |
 
 The file and speech providers are independently replaceable and expose only
 their own operation. Speech does not invoke FFmpeg; file decoding does not
@@ -142,12 +159,13 @@ safe resource management rather than a mechanical C-style translation. Unsafe
 code is confined to audited ABI and real-time-buffer boundaries as defined by
 [ADR 0015](decisions/0015-idiomatic-high-level-rust.md).
 
-The versioned REST API publishes its code-derived OpenAPI contract and
-interactive documentation alongside the API as defined by
-[ADR 0016](decisions/0016-code-derived-openapi-contract.md). Asterisk CLI,
-REST, and configurable DTMF submit the shared controller operation catalog;
-WebSocket is intentionally status-streaming only as defined by
-[ADR 0023](decisions/0023-unified-control-and-dtmf-policy.md).
+REST, WebSocket, and code-derived OpenAPI/interactive documentation remain
+planned under [ADR 0016](decisions/0016-code-derived-openapi-contract.md).
+Current Asterisk CLI and configurable DTMF operations exist, but complete
+interface parity is still pending under
+[ADR 0023](decisions/0023-unified-control-and-dtmf-policy.md). The planned REST
+interface will use the same controller operation catalog; WebSocket is
+intentionally status-streaming only.
 
 External and separately released project components are dynamic dependencies.
 Deliberately separated private Rust components use `dylib`. Every C-facing

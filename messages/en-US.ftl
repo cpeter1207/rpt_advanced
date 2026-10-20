@@ -120,6 +120,96 @@ time-announcement =
     .tts = { $greeting_tts }. The time is { $time }.
     .morse = { $time }
 
+binding-node =
+    .text = { $node }
+    .tts = node,{ $digits }
+    .morse = { $node }
+
+binding-date =
+    .text = { $date }
+    .tts = { $date }
+    .morse = { $date }
+
+binding-time =
+    .text = { $clock }
+    .tts = { $clock }
+    .morse = { $clock }
+
+site-time =
+    .text = { $time }
+    .tts = The time is { $time }.
+    .morse = { $time }
+
+site-temperature =
+    .text = Temperature: { $temperature }
+    .tts = Temperature is { $temperature }.
+    .morse = TEMP { $temperature }
+
+site-link-status =
+    .text = { $links }
+    .tts = { $links }
+    .morse = { $links }
+
+site-value-unavailable =
+    .text = { $label } unavailable
+    .tts = { $label } is unavailable.
+    .morse = { $label } UNAVAILABLE
+
+site-query-unavailable =
+    .text = Requested site reading unavailable
+    .tts = The requested site reading is unavailable.
+    .morse = SITE READING UNAVAILABLE
+
+site-meter-report =
+    .text = { $label }: { $value }{ $unit }
+    .tts = { $label } is { $value }{ $unit }.
+    .morse = { $label } { $value }{ $unit }
+
+site-input-active =
+    .text = { $label } active
+    .tts = { $label } is active.
+    .morse = { $label } ACTIVE
+
+site-input-inactive =
+    .text = { $label } inactive
+    .tts = { $label } is inactive.
+    .morse = { $label } INACTIVE
+
+site-unit-volts =
+    .text = volts
+    .tts = volts
+    .morse = V
+
+site-unit-amps =
+    .text = amps
+    .tts = amps
+    .morse = A
+
+site-unit-celsius =
+    .text = degrees Celsius
+    .tts = degrees Celsius
+    .morse = C
+
+site-unit-watts =
+    .text = watts
+    .tts = watts
+    .morse = W
+
+site-unit-joules =
+    .text = joules
+    .tts = joules
+    .morse = J
+
+site-unit-rpm =
+    .text = RPM
+    .tts = revolutions per minute
+    .morse = RPM
+
+site-unit-percent =
+    .text = percent
+    .tts = percent
+    .morse = PERCENT
+
 loop-rejected =
     .text = LINK TO NODE { $node } REJECTED: WOULD CREATE LOOP
     .tts = Connection to { $node } rejected because it would create a link loop

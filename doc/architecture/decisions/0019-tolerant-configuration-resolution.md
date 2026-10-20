@@ -1,6 +1,6 @@
 # ADR 0019: Configuration resolves unknown input through warnings and defaults
 
-Status: Accepted
+Status: Implemented for current configuration parsing and resolution; ongoing policy
 
 ## Context
 

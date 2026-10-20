@@ -130,8 +130,8 @@ embeds the radio product implementation. Native calls retain the existing
 callback topology and introduce no program queue or extra audio conversion.
 
 `librptadv_product.so.1` owns controller configuration parsing and inheritance
-once. Product ABI 4 (`rptadv.prod4`) adds synchronous configuration and secrets
-inspection. Visitors receive typed resolved records and borrowed UTF-8 spans,
+once. Product ABI 5 (`rptadv.prod5`) provides synchronous configuration and secrets
+inspection and a typed, already-authorized site-control operation. Visitors receive typed resolved records and borrowed UTF-8 spans,
 valid only during the call. Standalone copies those records; no Rust parser
 layout crosses the boundary. Configuration inspection does not create workers,
 open devices, alter mixers, or require Asterisk. Secure secrets-file opening and
@@ -140,10 +140,18 @@ mode/owner validation remain host I/O. Secret diagnostics never contain input.
 The product rejects old descriptors before invoking their operations. This is
 an initial-alpha table revision under ADR 0040, not an additional compatibility
 implementation. The existing controller-product SONAME remains 1; its shipped
-hosts require the matching package build and exact product ABI 4. The new radio
+hosts require the matching package build and exact product ABI 5. The new radio
 product has separate runtime and development packages, without Asterisk or
 controller dependencies. A module installation may require that runtime, but
 installing the standalone service must not require either Asterisk module.
+
+The site operation runs on the existing generation-checked control executor.
+It uses shared output, fan, alarm and measurement policy; it does not open
+hardware or overload the link-command API. Requested output is not proof of
+physical service. Manual inhibit release cannot clear alarm protection or a
+hardware interlock. Both hosts must reject an older or incomplete product table
+before using it. The ABI change requires rebuilding both hosts with the product;
+host-services ABI 6 and its device-ownership contract are unchanged.
 
 The native request preserves the current standalone radio-session settings,
 explicit processing graphs, gain scales, and one/two-channel physical routing.

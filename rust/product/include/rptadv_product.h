@@ -15,15 +15,18 @@ extern "C" {
 struct rptadv_control_descriptor_v1;
 struct rptadv_file_descriptor;
 struct rptadv_speech_descriptor;
+struct UrpAstSiteBinding;
+struct UrpAstSiteRequest;
+struct UrpAstSiteSnapshot;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 4U
+#define RPTADV_PRODUCT_ABI_VERSION 5U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod4"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod5"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 5U
+#define RPTADV_HOST_ABI_VERSION 6U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst5"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst6"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -182,7 +185,7 @@ typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, si
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v5 {
+struct rptadv_host_services_v6 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -224,6 +227,23 @@ struct rptadv_host_services_v5 {
                           void *transmit_context);
     /** Synchronously stop/hang up and detach both callbacks before returning. */
     void (*radio_destroy)(void *context, void *radio);
+
+    /** Control-only site I/O on the existing radio owner; never open another device.
+     * Bank 0 is CM119 and bank 1 is parallel-port I/O. Records use the installed
+     * USBRadioPlus site ABI. Zero means accepted, not physically read back.
+     * Binding/replacement generations and radio-pin exclusions are enforced by
+     * the owner. Snapshot acquisition times and submission/service generations
+     * are preserved. Nonzero provider errors pass through unchanged.
+     * Calls are serialized with other control operations and radio destruction,
+     * never made by an audio callback. Records are borrowed only during the call. */
+    int (*radio_site_bind)(void *context, void *radio, uint32_t bank,
+                           const struct UrpAstSiteBinding *binding);
+    /** Submit logical site output levels through the current binding. */
+    int (*radio_site_publish)(void *context, void *radio, uint32_t bank,
+                              const struct UrpAstSiteRequest *request);
+    /** Copy the current owner observation without synthesizing physical readback. */
+    int (*radio_site_snapshot)(void *context, void *radio, uint32_t bank,
+                               struct UrpAstSiteSnapshot *snapshot);
 
     /** Dial and return one uniquely owned peer. */
     int (*peer_dial)(void *context, const char *destination, size_t destination_length,
@@ -287,6 +307,44 @@ struct rptadv_host_services_v5 {
     int (*peer_set_deadline)(void *context, void *peer, uint64_t wake_after_ns);
 };
 
+/** Exact revision of a typed site control request. */
+#define RPTADV_SITE_COMMAND_ABI_VERSION 1U
+/** Request a configured logical output on. */
+#define RPTADV_SITE_OUTPUT_ON 1U
+/** Request a configured logical output off. */
+#define RPTADV_SITE_OUTPUT_OFF 2U
+/** Pulse using the configured duration, restoring the prior logical state. */
+#define RPTADV_SITE_OUTPUT_PULSE 3U
+/** Silence alarm repeats without clearing protection. */
+#define RPTADV_SITE_ALARM_ACKNOWLEDGE 4U
+/** Reset only a recovered alarm. */
+#define RPTADV_SITE_ALARM_RESET 5U
+/** Reset retained sensor extrema. */
+#define RPTADV_SITE_RESET_EXTREMA 6U
+/** Restore automatic fan demand. */
+#define RPTADV_SITE_FAN_AUTOMATIC 7U
+/** Add normalized manual fan demand; never reduce protective demand. */
+#define RPTADV_SITE_FAN_DUTY 8U
+/** Assert the manual RF inhibit. */
+#define RPTADV_SITE_INHIBIT_ON 9U
+/** Release only the manual RF inhibit, never alarms or hardware interlocks. */
+#define RPTADV_SITE_INHIBIT_OFF 10U
+
+/** An already-authorized control request, never a physical I/O call.
+ * Names are borrowed UTF-8 configured identities. Inhibit operations require
+ * an empty target; all other operations require a nonempty target. Only FAN_DUTY
+ * uses value, which must be finite in [0,1]; other operations require zero.
+ * The host must authenticate administrative callers before invoking this API.
+ */
+struct rptadv_site_command_v1 {
+    uint32_t struct_size; /**< Exact readable record size. */
+    uint32_t abi_version; /**< Exact RPTADV_SITE_COMMAND_ABI_VERSION. */
+    uint32_t operation;   /**< One RPTADV_SITE_* operation. */
+    const char *target;   /**< Borrowed target name, not NUL terminated. */
+    size_t target_length; /**< Name byte count; null is valid only for zero length. */
+    double value;         /**< Normalized manual fan demand, otherwise zero. */
+};
+
 /** Portable runtime entry points.
  * Strings and sinks are borrowed only for each synchronous call. Authorization
  * returns zero when current policy permits handoff. Incoming returns
@@ -300,7 +358,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v5 *host,
+    int (*start)(const struct rptadv_host_services_v6 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,
@@ -333,6 +391,14 @@ struct rptadv_product_descriptor_v1 {
     int (*inspect_secrets)(const char *configuration, size_t configuration_length,
                            rptadv_secret_sink secret, void *secret_context,
                            rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
+    /** Apply site policy on the current serialized control generation.
+     * Returns 0 when policy accepts the request (not proof of physical service),
+     * -1 when unavailable/reloading/stopping, -2 for unknown node/target,
+     * -3 when unsafe, or -4 for an invalid request. Requested/submitted/observed
+     * state and downstream hardware faults remain visible in status. This entry
+     * neither changes link-command semantics nor emits a spoken CLI reply. */
+    int (*site_command)(const char *local, size_t local_length,
+                        const struct rptadv_site_command_v1 *request);
 };
 
 /** Return immutable process-lifetime product metadata.

@@ -787,6 +787,12 @@ fn parse_dcs_code(raw: &str) -> Option<DcsCode> {
 /// Owned identifier media and scheduling defaults after scope resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedIdentifierSettings {
+    /// Ordered content, retaining the existing media chain when absent.
+    pub content: String,
+    /// Optional localized message embedded by this identifier.
+    pub message_id: Option<String>,
+    /// Per-attempt values supplied to the identifier's catalog message.
+    pub bindings: std::collections::BTreeMap<String, super::BindingSource>,
     /// Positive identifier interval in milliseconds.
     pub interval_ms: u64,
     /// Nonnegative scheduler priority.
@@ -980,7 +986,7 @@ fn scoped<'a>(
     document.lookup(key, &[node_scope.as_str(), family])
 }
 
-fn lookup_valid_scopes<T>(
+pub(super) fn lookup_valid_scopes<T>(
     document: &ConfigDocument,
     key: &str,
     scopes: &[String],
@@ -996,7 +1002,11 @@ fn lookup_valid_scopes<T>(
     None
 }
 
-fn lookup_scopes(document: &ConfigDocument, key: &str, scopes: &[String]) -> Option<String> {
+pub(super) fn lookup_scopes(
+    document: &ConfigDocument,
+    key: &str,
+    scopes: &[String],
+) -> Option<String> {
     scopes
         .iter()
         .find_map(|scope| document.lookup(key, &[scope.as_str()]).map(str::to_owned))
@@ -1605,6 +1615,8 @@ impl ResolvedIdentifierSettings {
         }
         identifier_scopes.push(format!("identifier {}", node.as_str()));
         identifier_scopes.push("identifier".to_owned());
+        let (content, message_id, bindings) =
+            super::messages::resolve_content(document, &identifier_scopes, "{media}");
         let named_count = usize::from(set.is_some());
         let number = |key, default, minimum| {
             lookup_valid_scopes(document, key, &identifier_scopes, |raw| {
@@ -1618,6 +1630,9 @@ impl ResolvedIdentifierSettings {
         };
         Ok(Resolution {
             value: Self {
+                content,
+                message_id,
+                bindings,
                 interval_ms: number("interval_ms", 600_000, 1),
                 priority: lookup_valid_scopes(document, "priority", &identifier_scopes, |raw| {
                     parse::unsigned(raw, 0, i32::MAX as u64)
@@ -2050,7 +2065,7 @@ fn lookup_valid<T>(
     None
 }
 
-fn command_keys() -> [&'static str; 21] {
+fn command_keys() -> [&'static str; crate::command::ACTION_COUNT] {
     [
         "link_command_disconnect",
         "link_command_monitor",
@@ -2073,6 +2088,8 @@ fn command_keys() -> [&'static str; 21] {
         "link_command_parrot_enable",
         "link_command_parrot_disable",
         "link_command_pad_test",
+        "link_command_message",
+        "link_command_site_status",
     ]
 }
 
@@ -2099,6 +2116,8 @@ fn default_command(key: &str) -> String {
         "link_command_parrot_enable" => "804",
         "link_command_parrot_disable" => "805",
         "link_command_pad_test" => "82",
+        "link_command_message" => "77",
+        "link_command_site_status" => "76",
         _ => "",
     }
     .to_owned()
@@ -2133,6 +2152,8 @@ fn command_action(key: &str) -> Option<LinkAction> {
         "link_command_parrot_enable" => LinkAction::ParrotEnable,
         "link_command_parrot_disable" => LinkAction::ParrotDisable,
         "link_command_pad_test" => LinkAction::PadTest,
+        "link_command_message" => LinkAction::Message,
+        "link_command_site_status" => LinkAction::SiteStatus,
         _ => return None,
     })
 }

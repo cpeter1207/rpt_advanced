@@ -153,6 +153,72 @@ struct RadioHandle {
     active: Option<crate::radio_activation::ActiveRadio>,
 }
 
+/// Replace site claims on the already-active native radio, never a second device owner.
+///
+/// # Safety
+/// `radio` is a live reserved handle and `binding` is readable for this synchronous call.
+/// The caller serializes control operations with radio destruction.
+pub unsafe extern "C" fn radio_site_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    bank: u32,
+    binding: *const crate::abi::UrpAstSiteBinding,
+) -> i32 {
+    let (Some(handle), Some(binding)) = (unsafe { radio.cast::<RadioHandle>().as_mut() }, unsafe {
+        binding.as_ref()
+    }) else {
+        return -1;
+    };
+    handle
+        .active
+        .as_mut()
+        .map_or(-1, |active| active.site_bind(bank, binding))
+}
+
+/// Submit site levels through the existing native owner; acceptance is not readback.
+///
+/// # Safety
+/// `radio` is live and `request` is readable for the serialized control call.
+pub unsafe extern "C" fn radio_site_publish(
+    _: *mut c_void,
+    radio: *mut c_void,
+    bank: u32,
+    request: *const crate::abi::UrpAstSiteRequest,
+) -> i32 {
+    let (Some(handle), Some(request)) = (unsafe { radio.cast::<RadioHandle>().as_mut() }, unsafe {
+        request.as_ref()
+    }) else {
+        return -1;
+    };
+    handle
+        .active
+        .as_mut()
+        .map_or(-1, |active| active.site_publish(bank, request))
+}
+
+/// Copy the native owner's site observation without changing its timestamps or quality.
+///
+/// # Safety
+/// `radio` is live and `snapshot` is exclusively writable during this serialized control call.
+pub unsafe extern "C" fn radio_site_snapshot(
+    _: *mut c_void,
+    radio: *mut c_void,
+    bank: u32,
+    snapshot: *mut crate::abi::UrpAstSiteSnapshot,
+) -> i32 {
+    let (Some(handle), Some(snapshot)) =
+        (unsafe { radio.cast::<RadioHandle>().as_mut() }, unsafe {
+            snapshot.as_mut()
+        })
+    else {
+        return -1;
+    };
+    handle
+        .active
+        .as_mut()
+        .map_or(-1, |active| active.site_snapshot(bank, snapshot))
+}
+
 /// Resolve a product radio name without opening audio or GPIO hardware.
 pub fn reserve_radio(
     radios: &[ResolvedRadioNode],
@@ -323,6 +389,45 @@ mod tests {
         radio_destroy, radio_open, reserve_radio,
     };
     use crate::resolve_radio_nodes;
+
+    #[test]
+    fn site_bridge_rejects_null_or_inactive_handles_without_opening_hardware() {
+        use super::{radio_site_bind, radio_site_publish, radio_site_snapshot};
+        let radios = resolve_radio_nodes("[1000]\n[radio 1000]\n").unwrap();
+        let mut handle = RadioHandle {
+            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            active: None,
+        };
+        let binding: crate::abi::UrpAstSiteBinding = unsafe { std::mem::zeroed() };
+        let request: crate::abi::UrpAstSiteRequest = unsafe { std::mem::zeroed() };
+        let mut snapshot: crate::abi::UrpAstSiteSnapshot = unsafe { std::mem::zeroed() };
+        snapshot.generation = 123;
+        for active in [false, true] {
+            handle.active = active.then(crate::radio_activation::tests::empty_active_radio);
+            let radio = std::ptr::from_mut(&mut handle).cast();
+            for radio in [std::ptr::null_mut(), radio] {
+                // SAFETY: the stack owner and records stay live; null inputs test rejection.
+                unsafe {
+                    for input in [std::ptr::null(), &raw const binding] {
+                        assert_eq!(radio_site_bind(std::ptr::null_mut(), radio, 0, input), -1);
+                    }
+                    for input in [std::ptr::null(), &raw const request] {
+                        assert_eq!(
+                            radio_site_publish(std::ptr::null_mut(), radio, 0, input),
+                            -1
+                        );
+                    }
+                    for output in [std::ptr::null_mut(), &raw mut snapshot] {
+                        assert_eq!(
+                            radio_site_snapshot(std::ptr::null_mut(), radio, 0, output),
+                            -1
+                        );
+                    }
+                }
+                assert_eq!(snapshot.generation, 123);
+            }
+        }
+    }
 
     #[test]
     fn reserves_an_enabled_radio_by_channel_or_node_without_opening_hardware() {

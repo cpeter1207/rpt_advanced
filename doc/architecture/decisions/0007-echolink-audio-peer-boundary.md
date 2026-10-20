@@ -1,6 +1,6 @@
 # ADR 0007: EchoLink audio-peer boundary
 
-Status: Accepted
+Status: Planned; decision accepted
 
 ## Context
 

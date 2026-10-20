@@ -1,6 +1,6 @@
 # ADR 0009: Scheduled actions and macros stay in the control plane
 
-Status: Accepted
+Status: Implemented; scheduler hardening remains tracked by ADR 0017
 
 ## Context
 
@@ -64,6 +64,35 @@ template expansion, message preparation, and macro dispatch cannot occur in an
 audio callback. A bounded IAX dial may delay later serialized control work but
 cannot delay audio; scheduler health and control-queue delay remain observable.
 Additional triggers or substitutions require a new requirement and ADR update.
+
+## Approved extension — composed messages and site actions
+
+The 2026-10-17 message/site specification adds read-only `[message name]`
+definitions with per-node overrides, separate from action `[macro]` and literal
+`[template]` definitions. Ordered content can contain literal text, catalog
+messages, existing media, attention tones, and acyclic message references.
+Control validates and sizes expansion before playback; callbacks never expand
+content or query sensors. Each segment retains independently bounded text,
+speech, and Morse forms. Administrator catalogs augment the shipped Fluent
+catalog with per-attribute fallback.
+
+Bindings select callsign, node, local date/time/day/greeting, link status,
+configured sensor/input observations, or context-provided remaining time.
+Values are captured once per playback attempt and are never reparsed as code.
+Site input transitions and alarm actions are additional approved control-plane
+triggers. A protective action does not wait for telemetry admission.
+Composition compilation, additive catalogs, per-attempt value resolution, and
+recurring-ID/message-command integration are implemented with targeted tests.
+One bounded control handoff owns preparation and reclamation; callback-side
+deferral before first output requests fresh values, while receive interruption
+retains the admitted attempt. Catalog IDs, required bindings, and complete Morse
+fallbacks are validated before admission. Release-triggered tails are implemented
+with sample-clock timing tests: original traffic hang, per-tail post-unkey delay,
+deadline-first IDs, and success-only cooldown. Bounded site acquisition and
+equipment actions are implemented with targeted tests. Protective effects do
+not wait for message capacity or unrelated owner reloads. Full hosted feature
+validation and physical site-device qualification remain outstanding. Existing
+scheduled actions and periodic announcements are unchanged.
 
 ## Implementation status — 2026-10-03
 

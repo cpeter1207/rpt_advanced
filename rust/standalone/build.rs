@@ -52,6 +52,7 @@ fn main() {
             env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())
         ))
         .allowlist_type("rptadv_.*")
+        .allowlist_var("RPTADV_SITE_.*")
         .allowlist_type("Urp.*")
         .allowlist_function("rptadv_product_descriptor_v1")
         .layout_tests(false)

@@ -34,7 +34,11 @@ fn prepared_audio_rejects_unplayable_data_and_retains_source_rate() {
 fn prepared_pcm_requires_station_adapter_support() {
     struct LegacyStation;
     impl StationMediaSession for LegacyStation {
-        fn register(&mut self, _: MediaSource) -> Result<Box<dyn PcmStreamReader>, MediaError> {
+        fn register_program(
+            &mut self,
+            _: MediaProgram,
+            _: bool,
+        ) -> Result<Box<dyn PcmStreamReader>, MediaError> {
             Err(MediaError::Unavailable)
         }
         fn start(&mut self) -> Result<(), MediaError> {

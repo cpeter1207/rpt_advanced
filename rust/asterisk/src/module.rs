@@ -11,7 +11,7 @@ pub type CliCallback =
 /// Pinned CLI metadata and its registered application. Drop only after callback admission
 /// closes and accepted calls have drained; Asterisk never sees relocated entry storage.
 pub struct Registration {
-    entries: Box<[ffi::ast_cli_entry; 3]>,
+    entries: Box<[ffi::ast_cli_entry; 4]>,
 }
 // SAFETY: ownership moves only on lifecycle/control; the entries stay boxed and are
 // never accessed by Rust while Asterisk invokes handlers against their fixed addresses.
@@ -27,18 +27,18 @@ impl Registration {
     pub unsafe fn register(
         module: *mut ffi::ast_module,
         application: ApplicationCallback,
-        handlers: [CliCallback; 3],
+        handlers: [CliCallback; 4],
     ) -> Result<Self, crate::Error> {
         if module.is_null() {
             return Err(crate::Error::Registration);
         }
-        let mut entries: Box<[ffi::ast_cli_entry; 3]> = Box::new(unsafe { std::mem::zeroed() });
+        let mut entries: Box<[ffi::ast_cli_entry; 4]> = Box::new(unsafe { std::mem::zeroed() });
         for (index, handler) in handlers.into_iter().enumerate() {
             entries[index].handler = Some(handler);
-            entries[index].summary = if index == 2 {
-                c"Inject an rpt_advanced DTMF command".as_ptr()
-            } else {
-                c"Control rpt_advanced links".as_ptr()
+            entries[index].summary = match index {
+                2 => c"Inject an rpt_advanced DTMF command".as_ptr(),
+                3 => c"Control rpt_advanced site equipment".as_ptr(),
+                _ => c"Control rpt_advanced links".as_ptr(),
             };
         }
         // SAFETY: strings are static; module/callback lifetime is the caller's contract.
@@ -58,7 +58,7 @@ impl Registration {
         let registration = Self { entries };
         // Drop also unregisters all CLI entries after a partial registration failure.
         if unsafe {
-            ffi::__ast_cli_register_multiple(registration.entries.as_ptr().cast_mut(), 3, module)
+            ffi::__ast_cli_register_multiple(registration.entries.as_ptr().cast_mut(), 4, module)
         } != 0
         {
             return Err(crate::Error::Registration);
@@ -70,7 +70,7 @@ impl Drop for Registration {
     fn drop(&mut self) {
         // SAFETY: callbacks have drained; the pinned entries stay alive through unregistration.
         unsafe {
-            ffi::ast_cli_unregister_multiple(self.entries.as_mut_ptr(), 3);
+            ffi::ast_cli_unregister_multiple(self.entries.as_mut_ptr(), 4);
             ffi::ast_unregister_application(c"RptAdvanced".as_ptr());
         }
     }

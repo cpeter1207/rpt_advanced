@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "site_tests.rs"]
+mod site;
+
 thread_local! {
     static AUDIO_ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
@@ -31,6 +34,306 @@ static TEST_ALLOCATOR: AllocationCounter = AllocationCounter;
 
 fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
+}
+
+#[test]
+fn composition_completion_without_preparation_returns_the_callers_media() {
+    let (_, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let attempt = MessageAttemptId {
+        generation: 7,
+        sequence: 3,
+    };
+    let rejected = control
+        .complete_message(attempt, Ok(media(0.5, 1)))
+        .expect_err("an unconfigured preparation owner cannot accept a completion");
+    assert_eq!(rejected.attempt, attempt);
+    let mut returned = rejected.result.unwrap();
+    let mut output = [0.0];
+    assert_eq!(returned.0.render(false, &mut output), 1);
+    assert_eq!(output, [0.5]);
+}
+
+#[test]
+fn tail_scheduling_and_identifier_preemption_do_not_allocate_on_audio() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            hang_ms: 1,
+            ..Default::default()
+        },
+        vec![Identifier {
+            media: media(0.25, 1),
+            interval_ms: 2,
+            priority: 1,
+            first_key_only: false,
+            regardless_of_activity: false,
+            polite_maximum_wait_ms: Some(2),
+        }],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.set_tails(vec![Tail {
+        media: media(0.5, 480),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    let mut buffer = [0.0; 480];
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(true, false, &[], &mut buffer[..48]);
+    node.process_audio(false, false, &[], &mut buffer);
+    node.process_audio(true, false, &[], &mut buffer);
+    node.process_audio(false, false, &[], &mut buffer);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert!(node.satisfied[0] != 0, "expired ID was exercised");
+}
+
+#[test]
+fn composition_pre_sample_deferral_refreshes_attempt_without_audio_allocation() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut preparations = MessagePreparation::new(3);
+    let peer = crate::link::PeerSignals::new();
+    assert!(
+        control.queue_prepared_status(
+            preparations
+                .register(0)
+                .unwrap()
+                .reply_to(Some(peer.reply_target()))
+        )
+    );
+    control.set_message_preparation(preparations);
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let first = control.take_message_request().unwrap();
+    assert!(
+        control
+            .complete_message(first.attempt, Ok(media(0.5, 16)))
+            .is_ok()
+    );
+    peer.set_radio_keyed(true);
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert!(control.take_message_request().is_none());
+    peer.set_radio_keyed(false);
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    let second = control
+        .take_message_request()
+        .expect("deferred values need a fresh attempt");
+    assert_ne!(first.attempt, second.attempt);
+    assert!(
+        control
+            .complete_message(second.attempt, Err(ControllerError))
+            .is_ok()
+    );
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let calls = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(calls, Some(0));
+    assert!(!node.keyed);
+    assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
+fn morse_global_receive_routes() {
+    for source in 0..4 {
+        for (local, linked, activity) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, true),
+        ] {
+            for before_first_sample in [false, true] {
+                let peer = crate::link::PeerSignals::new();
+                let id = Identifier {
+                    media: media(0.75, 100),
+                    interval_ms: 100000,
+                    priority: 1,
+                    first_key_only: false,
+                    regardless_of_activity: true,
+                    polite_maximum_wait_ms: None,
+                };
+                let (mut node, mut control) = NodeController::new(
+                    ControllerSettings {
+                        full_duplex: true,
+                        ..ControllerSettings::default()
+                    },
+                    vec![id],
+                    vec![Announcement {
+                        media: media(0.75, 100),
+                        interval_ms: 100000,
+                    }],
+                    CourtesySettings::default(),
+                )
+                .unwrap();
+                node.process_audio(false, false, &[], &mut [0.0; 12000]);
+                node.telemetry.active = Some(match source {
+                    0 => telemetry::Source::Identifier(0),
+                    1 => telemetry::Source::Announcement(0),
+                    _ => {
+                        let reply = (source == 3).then(|| peer.reply_target());
+                        assert!(control.queue_prepared_status(media(0.75, 100).reply_to(reply)));
+                        node.telemetry.poll_status();
+                        node.telemetry.start_status();
+                        telemetry::Source::Status
+                    }
+                });
+                let render = |node: &mut NodeController, receiving, linked, active| {
+                    let mut radio = [0.0];
+                    let mut parrot = [0.0];
+                    let mut parrot_active = false;
+                    let mut replies = [PeerReplySample::default()];
+                    node.process_audio_with_parrot(
+                        receiving,
+                        linked,
+                        active,
+                        &[],
+                        &mut radio,
+                        ParrotOutput {
+                            samples: &mut parrot,
+                            active: &mut parrot_active,
+                            replies: Some(&mut replies),
+                            regeneration: None,
+                        },
+                    );
+                    if source == 3 {
+                        assert_eq!(radio, [0.0]);
+                        assert_eq!(replies[0].target, peer.reply_target().identity());
+                        replies[0].sample
+                    } else {
+                        radio[0]
+                    }
+                };
+                if !before_first_sample {
+                    assert_eq!(render(&mut node, false, false, false), 0.75);
+                }
+                assert_eq!(
+                    render(&mut node, local, linked, activity),
+                    0.0,
+                    "source {source}, receive {local}/{linked}/{activity}, initial {before_first_sample}"
+                );
+                let second = render(&mut node, false, false, false);
+                assert!(
+                    second > 0.0 && second < 0.5,
+                    "Morse must stay latched after unkey"
+                );
+                assert!(
+                    render(&mut node, local, linked, activity) > second,
+                    "another receive edge must not restart Morse"
+                );
+            }
+        }
+    }
+}
+
+struct FailedMedia;
+impl crate::audio::PcmStreamReader for FailedMedia {
+    fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+        crate::audio::PcmRead::Failed
+    }
+}
+
+#[test]
+fn playback_failure_does_not_satisfy_identifier() {
+    let ids = [1, 2]
+        .into_iter()
+        .map(|priority| Identifier {
+            media: PreparedMedia::new_stream(Box::new(FailedMedia)).unwrap(),
+            interval_ms: 1,
+            priority,
+            first_key_only: false,
+            regardless_of_activity: true,
+            polite_maximum_wait_ms: None,
+        })
+        .collect();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        ids,
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio(false, false, &[], &mut [0.0; 50]);
+    assert_eq!(node.satisfied, [0, 0]);
+    assert!(
+        node.ids.iter().all(|id| id.media.0.is_finished()),
+        "a failed high-priority ID must not starve another due ID"
+    );
+}
+
+#[test]
+fn playback_failure_retries_on_interval_without_silent_ptt() {
+    struct CountedFailure(Arc<std::sync::atomic::AtomicUsize>);
+    impl crate::audio::PcmStreamReader for CountedFailure {
+        fn start(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
+            crate::audio::PcmRead::Failed
+        }
+    }
+    for announcement in [false, true] {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let media =
+            PreparedMedia::new_stream(Box::new(CountedFailure(Arc::clone(&attempts)))).unwrap();
+        let (ids, announcements) = if announcement {
+            (
+                vec![],
+                vec![Announcement {
+                    media,
+                    interval_ms: 10,
+                }],
+            )
+        } else {
+            (
+                vec![Identifier {
+                    media,
+                    interval_ms: 10,
+                    priority: 1,
+                    first_key_only: false,
+                    regardless_of_activity: true,
+                    polite_maximum_wait_ms: None,
+                }],
+                vec![],
+            )
+        };
+        let (mut node, _) = NodeController::new(
+            ControllerSettings::default(),
+            ids,
+            announcements,
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.process_audio(false, false, &[], &mut [0.0; 481]);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        node.process_audio(false, false, &[], &mut [0.0; 479]);
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            1,
+            "failed media must not retry per sample"
+        );
+        assert!(!node.keyed, "failed media must release demand");
+        assert!(node.satisfied.iter().all(|time| *time == 0));
+        assert!(node.announcements.iter().all(|a| a.satisfied == 0));
+        node.process_audio(false, false, &[], &mut [0.0]);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
 }
 
 fn regenerate(
@@ -237,6 +540,9 @@ impl crate::audio::PcmStreamReader for PendingMedia {
     fn render(&mut self, _: &mut [f32]) -> crate::audio::PcmRead {
         crate::audio::PcmRead::Pending
     }
+    fn select_morse_fallback(&mut self) -> crate::audio::MorseSwitch {
+        crate::audio::MorseSwitch::Pending
+    }
 }
 
 #[test]
@@ -307,6 +613,64 @@ fn pending_media_does_not_key_transmitter_while_producer_starts() {
         node.telemetry.active,
         Some(telemetry::Source::Identifier(0))
     ));
+    assert!(!node.keyed);
+}
+
+#[test]
+fn composition_pending_between_segments_retains_ptt_only_after_audio_starts() {
+    struct Gapped {
+        phase: Arc<std::sync::atomic::AtomicUsize>,
+        started: bool,
+    }
+    impl crate::audio::PcmStreamReader for Gapped {
+        fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+            match self.phase.load(Ordering::Acquire) {
+                1 if !self.started => {
+                    self.started = true;
+                    output[0] = 0.25;
+                    crate::audio::PcmRead::Samples(1)
+                }
+                2 => {
+                    output[0] = 0.5;
+                    crate::audio::PcmRead::FinalSamples(1)
+                }
+                _ => crate::audio::PcmRead::Pending,
+            }
+        }
+    }
+    let phase = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let id = Identifier {
+        media: PreparedMedia::new_stream(Box::new(Gapped {
+            phase: Arc::clone(&phase),
+            started: false,
+        }))
+        .unwrap(),
+        interval_ms: 100_000,
+        priority: 1,
+        first_key_only: false,
+        regardless_of_activity: true,
+        polite_maximum_wait_ms: None,
+    };
+    let (mut node, _) = NodeController::new(
+        ControllerSettings::default(),
+        vec![id],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 4_800_000;
+    node.process_audio(false, false, &[], &mut [0.0; 64]);
+    assert!(!node.keyed, "preparation alone must not key");
+    phase.store(1, Ordering::Release);
+    node.process_audio(false, false, &[], &mut [0.0; 1]);
+    assert!(node.keyed);
+    node.process_audio(false, false, &[], &mut [0.0; 3_000]);
+    assert!(
+        node.keyed,
+        "one admitted composition must not unkey between segments"
+    );
+    phase.store(2, Ordering::Release);
+    node.process_audio(false, false, &[], &mut [0.0; 3_000]);
     assert!(!node.keyed);
 }
 
@@ -1889,7 +2253,9 @@ fn every_release_announcements_follow_hang_once_and_ids_satisfy_lower_priority()
     assert_eq!(output.iter().filter(|v| **v == 0.1).count(), 1);
     assert_eq!(output.iter().filter(|v| **v == 0.15).count(), 0);
     assert_eq!(output.iter().filter(|v| **v == 0.2).count(), 1);
-    assert_eq!(&output[47..49], &[0.1, 0.2]);
+    // The polite ID now waits through the traffic-release hang deadline; the
+    // existing announcement remains due from the last transmitted sample.
+    assert_eq!(&output[47..49], &[0.2, 0.1]);
 }
 
 #[test]
@@ -2078,6 +2444,39 @@ fn first_key_identifier_waits_for_its_idle_interval() {
     assert!(node.process_event(true, false));
     node.process_audio(true, false, &[], &mut [0.0; 960]);
     assert!(node.telemetry.active.is_none());
+}
+
+#[test]
+fn first_key_controller_plays_one_initial_id_and_rotates_on_later_keyups() {
+    let ids = [0.25, 0.5]
+        .into_iter()
+        .map(|value| Identifier {
+            media: media(value, 10),
+            interval_ms: 1,
+            priority: 1,
+            first_key_only: true,
+            regardless_of_activity: false,
+            polite_maximum_wait_ms: Some(60_000),
+        })
+        .collect();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..Default::default()
+        },
+        ids,
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for expected in [0.25, 0.5, 0.25] {
+        node.process_audio(false, false, &[], &mut [0.0; 3000]);
+        node.process_audio(true, false, &[], &mut [0.0; 48]);
+        let mut output = [0.0; 9600];
+        assert!(!node.process_audio(false, false, &[], &mut output));
+        let audible: Vec<_> = output.into_iter().filter(|sample| *sample != 0.0).collect();
+        assert_eq!(audible, vec![expected; 10]);
+    }
 }
 
 #[test]

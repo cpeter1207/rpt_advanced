@@ -1,6 +1,8 @@
 //! Generation-protected node ownership and control-plane scheduling.
 
 mod aggregate;
+mod composition;
+pub use composition::MessageValueSnapshot;
 pub mod dtmf;
 mod prepare;
 mod render;

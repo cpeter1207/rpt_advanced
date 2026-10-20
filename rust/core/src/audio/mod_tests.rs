@@ -12,6 +12,9 @@ impl PcmStreamReader for MinimalReader {
 fn optional_stream_controls_default_to_no_fallback_and_nonblocking_noop() {
     let mut reader = MinimalReader;
     reader.start();
-    assert!(!reader.select_morse_fallback());
+    assert_eq!(
+        reader.select_morse_fallback(),
+        super::MorseSwitch::Unavailable
+    );
     reader.cancel();
 }

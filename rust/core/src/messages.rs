@@ -3,6 +3,7 @@
 use crate::schedule::Weekday;
 use fluent_bundle::{FluentArgs, FluentResource, concurrent::FluentBundle};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -17,7 +18,7 @@ const ADMIN_DIRS: [&str; 2] = [
     "/etc/rpt_advanced/messages",
     "/etc/asterisk/rpt_advanced/messages",
 ];
-const MAX_MESSAGE_BYTES: usize = 127;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 127;
 const ATTRIBUTES: [&str; 3] = ["text", "tts", "morse"];
 const REQUIRED_IDS: &[&str] = &[
     "no-links",
@@ -186,6 +187,15 @@ pub struct MessageForms {
     pub morse: String,
 }
 
+/// A configuration-selected argument, formatted independently for each audience.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MessageArgument {
+    /// Natural numeric value, retaining Fluent plural/number formatting.
+    Number(f64),
+    /// Already localized identity, time, status, or unavailable-value wording.
+    Forms(MessageForms),
+}
+
 /// Catalog loading, validation, or formatting failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogError {
@@ -195,6 +205,8 @@ pub enum CatalogError {
     InvalidEnglish,
     /// A formatted RF message exceeds the 127-byte telemetry bound.
     OutputTooLong,
+    /// A configured message, attribute, or required argument could not be resolved.
+    InvalidMessage,
 }
 
 type Bundle = FluentBundle<FluentResource>;
@@ -202,7 +214,8 @@ type Bundle = FluentBundle<FluentResource>;
 /// One configuration generation's validated Fluent catalog.
 pub struct MessageCatalog {
     english: Bundle,
-    translated: Option<Bundle>,
+    // Low-to-high precedence; lookup falls back separately for each attribute.
+    overlays: Vec<Bundle>,
     translation_warnings: Vec<String>,
 }
 
@@ -235,20 +248,24 @@ impl MessageCatalog {
         admin_dirs: &[PathBuf],
         package_dirs: &[PathBuf],
     ) -> Result<Self, CatalogError> {
-        let read_catalog = |directories: &[PathBuf], locale: &str| {
-            directories
-                .iter()
-                .find_map(|directory| read_optional(&catalog_path(directory, locale)))
-        };
-        let english = read_catalog(admin_dirs, "en-US")
-            .or_else(|| read_catalog(package_dirs, "en-US"))
-            .unwrap_or_else(|| ENGLISH.to_owned());
-        let translation = if locale == "en-US" {
-            read_catalog(admin_dirs, locale).or_else(|| read_catalog(package_dirs, locale))
-        } else {
-            read_catalog(admin_dirs, locale).or_else(|| read_catalog(package_dirs, locale))
-        };
-        Self::from_sources(locale, &english, translation.as_deref())
+        let mut catalog = Self::from_sources("en-US", ENGLISH, None)?;
+        for language in std::iter::once("en-US").chain((locale != "en-US").then_some(locale)) {
+            let before = catalog.overlays.len();
+            for directory in package_dirs.iter().rev().chain(admin_dirs.iter().rev()) {
+                if let Some(source) = read_optional(&catalog_path(directory, language)) {
+                    catalog.add_overlay(language, &source);
+                }
+            }
+            if language != "en-US"
+                && before == catalog.overlays.len()
+                && catalog.translation_warnings.is_empty()
+            {
+                catalog
+                    .translation_warnings
+                    .push("catalog unavailable".into());
+            }
+        }
+        Ok(catalog)
     }
 
     /// Validate an English source and add a best-effort optional locale overlay.
@@ -267,7 +284,7 @@ impl MessageCatalog {
                 Some(source) => match parse_bundle(locale, source) {
                     Err(()) => (None, vec!["catalog is malformed".into()]),
                     Ok(bundle) => {
-                        let warnings = validate_translation(&bundle);
+                        let warnings = validate_translation(&bundle, true);
                         (Some(bundle), warnings)
                     }
                 },
@@ -275,27 +292,82 @@ impl MessageCatalog {
         };
         Ok(Self {
             english,
-            translated,
+            overlays: translated.into_iter().collect(),
             translation_warnings,
         })
     }
 
+    fn add_overlay(&mut self, locale: &str, source: &str) {
+        match parse_bundle(locale, source) {
+            Ok(bundle) => {
+                self.translation_warnings
+                    .extend(validate_translation(&bundle, false));
+                self.overlays.push(bundle);
+            }
+            Err(()) => self
+                .translation_warnings
+                .push("catalog is malformed".into()),
+        }
+    }
+
     /// Format three RF variants, falling back independently to English per attribute.
     pub fn format(&self, message: &Message<'_>) -> Result<MessageForms, CatalogError> {
-        let id = message.id();
-        let args = message.args();
+        self.format_attributes(message.id(), |_| message.args())
+    }
+
+    /// Format a validated configuration-selected ID; arguments are data, never content tokens.
+    pub fn format_named(
+        &self,
+        id: &str,
+        args: &BTreeMap<String, MessageArgument>,
+    ) -> Result<MessageForms, CatalogError> {
+        self.format_attributes(id, |attribute| {
+            let mut values = FluentArgs::new();
+            for (name, value) in args {
+                match value {
+                    MessageArgument::Number(value) => values.set(name, *value),
+                    MessageArgument::Forms(forms) => values.set(
+                        name,
+                        match attribute {
+                            "text" => forms.text.as_str(),
+                            "tts" => forms.tts.as_str(),
+                            _ => forms.morse.as_str(),
+                        },
+                    ),
+                }
+            }
+            values
+        })
+    }
+
+    fn format_attributes<'a>(
+        &self,
+        id: &str,
+        arguments: impl Fn(&str) -> FluentArgs<'a>,
+    ) -> Result<MessageForms, CatalogError> {
         let mut output = Vec::with_capacity(3);
         for attribute in ATTRIBUTES {
-            let translated = self.translated.as_ref().and_then(|bundle| {
-                format_attribute(bundle, id, attribute, &args)
-                    .filter(|text| text.len() <= MAX_MESSAGE_BYTES)
-            });
-            let text = translated
-                .or_else(|| format_attribute(&self.english, id, attribute, &args))
-                .ok_or(CatalogError::InvalidEnglish)?;
-            if text.len() > MAX_MESSAGE_BYTES {
-                return Err(CatalogError::OutputTooLong);
-            }
+            let args = arguments(attribute);
+            let mut too_long = false;
+            let text = self
+                .overlays
+                .iter()
+                .rev()
+                .chain(std::iter::once(&self.english))
+                .find_map(|bundle| {
+                    let text = format_attribute(bundle, id, attribute, &args)?;
+                    if text.len() > MAX_MESSAGE_BYTES {
+                        too_long = true;
+                        None
+                    } else {
+                        Some(text)
+                    }
+                })
+                .ok_or(if too_long {
+                    CatalogError::OutputTooLong
+                } else {
+                    CatalogError::InvalidMessage
+                })?;
             output.push(text);
         }
         let mut output = output.into_iter();
@@ -517,11 +589,19 @@ fn validate_english(bundle: &Bundle) -> Result<(), CatalogError> {
     Ok(())
 }
 
-fn validate_translation(bundle: &Bundle) -> Vec<String> {
+fn validate_translation(bundle: &Bundle, require_builtin_attributes: bool) -> Vec<String> {
     let mut warnings = Vec::new();
     for id in REQUIRED_IDS {
         let args = required_sample_args(id);
         for attribute in ATTRIBUTES {
+            if !require_builtin_attributes
+                && bundle
+                    .get_message(id)
+                    .and_then(|message| message.get_attribute(attribute))
+                    .is_none()
+            {
+                continue;
+            }
             if format_attribute(bundle, id, attribute, &args)
                 .is_none_or(|text| text.len() > MAX_MESSAGE_BYTES)
             {

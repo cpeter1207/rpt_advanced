@@ -1,10 +1,18 @@
 //! Owned configuration parsing, schema validation, and inherited settings.
 
 mod document;
+mod messages;
 mod parse;
 mod schema;
 mod scope;
 mod settings;
+mod site;
+mod tails;
+pub use site::{
+    AlarmCondition, AlarmSettings, Calibration, FanMode, FanSettings, InputSettings,
+    OutputSettings, ResolvedSiteSettings, SensorSettings, SiteAction, SiteBackend, SiteEndpoint,
+};
+pub use tails::ResolvedTailSettings;
 
 #[cfg(test)]
 mod document_tests;
@@ -18,6 +26,8 @@ mod scope_tests;
 mod tests;
 
 pub use document::{ConfigDocument, ConfigEntry};
+pub(crate) use messages::selector_valid as message_selector_valid;
+pub use messages::{BindingSource, ResolvedMessageSettings};
 pub use schema::Schema;
 pub use settings::{
     Cm119GpioMode, Cm119Profile, CtcssTurnoffMode, DcsCode, LinkLookupMethod, NodeId,

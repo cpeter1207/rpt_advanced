@@ -20,18 +20,19 @@ impl Product {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
                 != size_of::<ffi::rptadv_product_descriptor_v1>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 4
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 5
         {
             return None;
         }
         let descriptor = unsafe { &*pointer };
-        (descriptor.capability == *b"rptadv.prod4\0\0\0\0"
+        (descriptor.capability == *b"rptadv.prod5\0\0\0\0"
             && descriptor.start.is_some()
             && descriptor.reload.is_some()
             && descriptor.stop.is_some()
             && descriptor.authorize_incoming.is_some()
             && descriptor.incoming.is_some()
             && descriptor.link_command.is_some()
+            && descriptor.site_command.is_some()
             && descriptor.link_status.is_some()
             && descriptor.digit.is_some()
             && descriptor.inspect_configuration.is_some()
@@ -45,7 +46,7 @@ impl Product {
     /// remains loaded until a successful product stop.
     pub unsafe fn start(
         &self,
-        host: *const ffi::rptadv_host_services_v5,
+        host: *const ffi::rptadv_host_services_v6,
         control: *const ffi::rptadv_control_descriptor_v1,
         file: *const ffi::rptadv_file_descriptor,
         speech: *const ffi::rptadv_speech_descriptor,
@@ -117,6 +118,19 @@ impl Product {
                 action,
             ) == 0
         }
+    }
+    /// Apply an authenticated site operation through shared policy. Zero accepts
+    /// the request; it does not claim that hardware has serviced it.
+    pub fn site_command(&self, local: &str, operation: u32, target: &str, value: f64) -> i32 {
+        let request = ffi::rptadv_site_command_v1 {
+            struct_size: size_of::<ffi::rptadv_site_command_v1>() as u32,
+            abi_version: ffi::RPTADV_SITE_COMMAND_ABI_VERSION,
+            operation,
+            target: target.as_ptr().cast(),
+            target_length: target.len(),
+            value,
+        };
+        unsafe { self.0.site_command.unwrap()(local.as_ptr().cast(), local.len(), &request) }
     }
     /// Emit link status through one synchronous borrowed sink.
     /// # Safety

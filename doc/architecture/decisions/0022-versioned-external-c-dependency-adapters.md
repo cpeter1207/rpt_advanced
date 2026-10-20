@@ -116,7 +116,78 @@ links SpeexDSP and owns its types, FFI and lifetime. Protocol/controller code
 uses neutral bounded packet operations; codecs and PCM-ring PLC remain separate.
 It ships its own ABI-1 descriptor, SONAME and runtime/development packages,
 following the resolver adapter's workspace pattern. The standalone composition
-requires it at startup and retains it through peer-task shutdown. Local composed
-tests cover the boundary; hosted and live acceptance are tracked by ADR 0037.
-The Asterisk composition is unchanged. This implementation has not been deployed
-to the running node.
+requires it at startup and retains it through peer-task shutdown. The standalone
+jitter capability passed the native-platform gate, shipped in signed Debian
+packages, and was validated on node 524950 as recorded in ADR 0037. The Asterisk
+composition is unchanged.
+
+## Site GPIO capability (2026-10-19)
+
+`librptadv_gpiod_adapter.so.1` implements capability `rptadv.gpiod`, descriptor
+ABI 1, in a separate optional runtime/development package. Only this adapter
+imports libgpiod. Its complete sized records select an exact device path and
+line, polarity and startup/safe levels. Line acquisition applies the startup
+level atomically with direction; cleanup attempts the configured safe level.
+Callers serialize each live context and must confirm a safe write before
+retiring it when ownership handoff requires confirmation. Device failure does
+not permit a different chip to be selected. Output submission does not claim
+electrical readback or PWM support.
+
+The descriptor, device-boundary fixtures, dynamic-library linkage, package
+staging and selected-provider composition are verified locally. The shared
+product supplies bounded acquisition and station policy on its existing
+control owner. Physical wiring has not been qualified; the feature's full
+hosted gate remains outstanding.
+The adapter is not an unconditional dependency of either controller entrypoint.
+
+The shared product selects site providers from enabled endpoints on enabled
+nodes. Startup retains each selected DSO after checking its complete size,
+version, capability and operation table. Reload validates against that retained
+set before gating controller work; it never loads replacement executable code.
+Adding a previously unloaded capability requires a controlled product restart
+or module reload. Removing its last endpoint does not unload the provider while
+the product is alive. Ordinary IIO filesystem access and the existing radio's
+CM119/parallel owner do not add optional library requirements.
+
+## Site measurement capability (2026-10-19)
+
+`librptadv_hwmon_adapter.so.1` implements the optional `rptadv.hwmon`
+capability with an ABI-1 descriptor and separate runtime/development packages.
+Only this adapter imports libsensors. A counted initialization lease retains
+its immutable tables until the last measurement closes; acquisition does not
+hold that lifecycle lock. An explicit empty library configuration prevents host
+compute expressions from applying a second calibration. The controller receives
+finite source-unit measurements and owns calibration, freshness and policy.
+
+An endpoint matches an opened directory's device/inode identity, including
+hwmon class symlinks. Reads use its retained directory FD, not a reusable
+enumeration path. Failures report fault without substituting zero or another
+device. Supported kernel PWM attributes are retained separately and require
+existing manual mode. PWM submission does not claim electrical/tachometer
+readback and does not implement software pulse generation. Safe handoff requires
+a successful explicit safe write; final destruction is best-effort.
+
+Hardware-free tests cover source units, library lifetime, alias/reuse handling,
+independent slow reads, PWM capability/safe-state behavior and selected-provider
+composition. Shared-product acquisition and policy use these adapters outside
+audio callbacks; these fixtures do not qualify physical sensor or fan hardware.
+
+### Site reload ownership (2026-10-20)
+
+The new, not-yet-released GPIO and hwmon tables also require `set_safe`, a
+serialized memory-only retirement-level update. Matching complete descriptor
+sizes are required; product and providers must be built together for this first
+release. Descriptor ABI and SONAME remain 1. No released table is replaced.
+
+A physical endpoint's role and polarity define its retained request. Startup
+levels apply only on first acquisition. Editing startup or safe policy retains
+the handle, current demand, acknowledgments and pulse deadline. The device
+owner updates retirement metadata only at committed handoff, before resuming;
+an aborted preparation retains the old safe level. An invalid provider response
+keeps that owner fenced and diagnosed, never silently reopened.
+
+Reload fences changed owners individually. Unrelated acquisition, output
+timers, cooling and alarm protection continue while they acknowledge. Cached
+radio output masks do not prove current service: the successful shared service
+cycle must remain fresh. Stale status retains historical submission values
+without claiming current availability or electrical readback.

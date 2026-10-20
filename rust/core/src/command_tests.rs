@@ -1,6 +1,40 @@
 use super::{CommandMapError, CommandMapping, DtmfCommandMap, LinkAction};
 
 #[test]
+fn site_dtmf_query_has_a_separate_remappable_selector_prefix() {
+    let map = DtmfCommandMap::standard();
+    let report = map.parse("761").expect("site report command");
+    assert_eq!(report.node, "1");
+    assert_ne!(report.action, LinkAction::Message);
+    for other in ["76", "761", "7"] {
+        assert_eq!(
+            DtmfCommandMap::new(vec![
+                CommandMapping::new("76", report.action),
+                CommandMapping::new(other, LinkAction::Status),
+            ]),
+            Err(CommandMapError::AmbiguousPrefix)
+        );
+    }
+    let remapped = DtmfCommandMap::new(vec![CommandMapping::new("91", report.action)]).unwrap();
+    assert_eq!(remapped.parse("912").unwrap().node, "2");
+}
+
+#[test]
+fn composition_message_prefix_cannot_be_shadowed_by_status() {
+    for other in ["77", "771", "7"] {
+        assert_eq!(
+            DtmfCommandMap::new(vec![
+                CommandMapping::new("77", LinkAction::Message),
+                CommandMapping::new(other, LinkAction::Status),
+            ]),
+            Err(CommandMapError::AmbiguousPrefix)
+        );
+    }
+    let map = DtmfCommandMap::new(vec![CommandMapping::new("91", LinkAction::Message)]).unwrap();
+    assert_eq!(map.parse("912").unwrap().node, "2");
+}
+
+#[test]
 fn validated_mappings_and_errors_preserve_operator_diagnostics() {
     let mappings = vec![CommandMapping::new("7", LinkAction::Status)];
     assert_eq!(
@@ -40,6 +74,8 @@ fn mappings() -> Vec<CommandMapping> {
         ("804", LinkAction::ParrotEnable),
         ("805", LinkAction::ParrotDisable),
         ("82", LinkAction::PadTest),
+        ("77", LinkAction::Message),
+        ("76", LinkAction::SiteStatus),
     ]
     .into_iter()
     .map(|(digits, action)| CommandMapping::new(digits, action))

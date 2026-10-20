@@ -16,11 +16,12 @@ use crate::{
     config::{
         ConfigDocument, ConfigWarning, NodeId, ResolvedEventSettings, ResolvedIdentifierSettings,
         ResolvedMacroSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
-        ResolvedScheduleSettings, ResolvedTemplateSettings, ResolvedTimeSettings, Schema,
+        ResolvedScheduleSettings, ResolvedSiteSettings, ResolvedTemplateSettings,
+        ResolvedTimeSettings, Schema,
     },
     controller::{ActivitySnapshot, ControllerControl, NodeController, ParrotLevels},
     media::{PreparedAudio, StationMediaSession},
-    messages::{Message, MessageCatalog},
+    messages::{Message, MessageArgument, MessageCatalog},
     schedule::{CivilTime, ScheduledWindow},
     template::MessageTemplate,
     time::{TimeAnnouncement, TimeFormat},
@@ -93,6 +94,7 @@ struct ControlState<C: Send> {
     started_ms: u64,
     prior_activity_ms: Option<u64>,
     catalog: MessageCatalog,
+    messages: super::composition::MessageRecipes,
 }
 struct GroupAnnouncement {
     label: String,
@@ -134,6 +136,7 @@ impl<C: Send> Drop for ControlState<C> {
 /// Stable per-node control identity, retained across successful generation swaps.
 pub struct RuntimeNode<A: Send, C: Send = ()> {
     name: String,
+    site: crate::site::SiteController,
     settings: ResolvedNodeSettings,
     bounds: GenerationSettings,
     host: NodeHost<DtmfWorker, RuntimeTransmit<A>>,
@@ -148,6 +151,36 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     group_announcements: Vec<GroupAnnouncement>,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
+    /// Station-owned site policy; callers deliver observations/effects off audio.
+    pub fn site(&mut self) -> &mut crate::site::SiteController {
+        &mut self.site
+    }
+    /// Apply already-authorized site policy on control. The RF gate must be
+    /// published before returning, independently of hardware or media admission.
+    pub fn site_command(
+        &mut self,
+        command: crate::site::SiteCommand,
+        now_ms: u64,
+    ) -> Result<Vec<crate::site::SiteEffect>, crate::site::SiteError> {
+        let result = self.site.command(command, now_ms);
+        self.control
+            .telemetry
+            .set_site_inhibit(self.site.transmit_inhibited());
+        result
+    }
+    /// Advance station protection and publish its RF gate independently of media admission.
+    pub fn advance_site(
+        &mut self,
+        now_ms: u64,
+        observations: &crate::site::SiteObservations,
+        ptt: &std::collections::BTreeMap<NodeId, bool>,
+    ) -> Vec<crate::site::SiteEffect> {
+        let effects = self.site.advance(now_ms, observations, ptt);
+        self.control
+            .telemetry
+            .set_site_inhibit(self.site.transmit_inhibited());
+        effects
+    }
     /// Borrow a current/retiring adapter dispatcher only on control. Once exposed, its generation
     /// requires an explicit `detached` acknowledgment after dispatcher stop/drain before reclaim.
     pub fn adapter_control_mut(&mut self, generation: u64) -> Option<&mut C> {
@@ -248,6 +281,7 @@ impl RuntimeDispatch {
 struct Candidate<A: Send, C: Send> {
     name: String,
     settings: ResolvedNodeSettings,
+    site: ResolvedSiteSettings,
     bounds: GenerationSettings,
     generation: RuntimeGeneration<DtmfWorker, RuntimeTransmit<A>>,
     control: ControlState<C>,
@@ -367,9 +401,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
             prior_activity_ms: None,
             catalog: MessageCatalog::load(&node.settings.language)
                 .map_err(|_| RuntimeError::Preparation)?,
+            messages: super::composition::MessageRecipes::default(),
         };
         std::mem::swap(&mut next.telemetry, &mut node.control.telemetry);
         std::mem::swap(&mut next.media_session, &mut node.control.media_session);
+        std::mem::swap(&mut next.messages, &mut node.control.messages);
         std::mem::swap(&mut next.digits, &mut node.control.digits);
         std::mem::swap(&mut next.activity, &mut node.control.activity);
         std::mem::swap(&mut next.started_ms, &mut node.control.started_ms);
@@ -518,8 +554,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
             if links.requires_civil_time() && clock.civil.is_none_or(|(_, second)| second >= 60) {
                 return Err(RuntimeError::Clock);
             }
-            let (controller, telemetry, status, media_session) =
-                prepare::controller(&document, &id, &settings, media, generation_id)?;
+            let (controller, telemetry, status, media_session, mut messages) =
+                prepare::controller(&document, &id, &settings, media, generation_id, &catalog)?;
+            warnings.append(&mut messages.warnings);
             let activity = controller.activity();
             let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
                 .map_err(|_| RuntimeError::Preparation)?;
@@ -560,10 +597,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 started_ms: clock.now_ms,
                 prior_activity_ms: existing.and_then(|node| node.control.activity_ms()),
                 catalog,
+                messages,
             };
             candidates.push(Candidate {
                 name: name.into(),
                 settings,
+                site: ResolvedSiteSettings::resolve(&document, &id)?.value,
                 bounds,
                 generation,
                 control,
@@ -665,6 +704,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     self.effects
                         .push((old.name.clone(), LinkEffect::Detach(removed)));
                 }
+                // Seed retained protection before a callback can acquire the replacement.
+                old.site.reconfigure(candidate.site);
+                candidate
+                    .control
+                    .telemetry
+                    .set_site_inhibit(old.site.transmit_inhibited());
                 old.host
                     .control()
                     .publish_prepared(candidate.generation, clock.now_ms)
@@ -700,6 +745,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 );
                 next.push(RuntimeNode {
                     name: candidate.name,
+                    site: crate::site::SiteController::new(candidate.site),
                     settings: candidate.settings,
                     bounds: candidate.bounds,
                     host: NodeHost::new(candidate.generation),
@@ -956,6 +1002,195 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .as_mut()
             .is_some_and(|scheduler| scheduler.complete(&dispatch.token))
     }
+    /// Resolve newly admitted recurring messages on the frequent control pump, never on audio.
+    pub fn prepare_messages(&mut self, clock: RuntimeClock) {
+        for node in &mut self.nodes {
+            node.control.telemetry.reclaim().for_each(drop);
+            let Some(first) = node.control.telemetry.take_message_request() else {
+                continue;
+            };
+            let values = (|| {
+                let (civil, _) = clock.civil.ok_or(RuntimeError::Clock)?;
+                let site = node.site.snapshot(clock.now_ms);
+                let (mut links, identity) =
+                    render::direct_status(node.links.manager(), &node.control.catalog)?;
+                links.tts = render::telemetry_speech(&links.tts, &[&identity]);
+                Ok::<_, RuntimeError>(super::MessageValueSnapshot {
+                    civil,
+                    time_format: TimeFormat::try_from(node.time_format)
+                        .map_err(|_| RuntimeError::Preparation)?,
+                    node: node.name.clone(),
+                    callsign: node.settings.callsign.clone(),
+                    links,
+                    sensors: site
+                        .sensors
+                        .into_iter()
+                        .map(|(name, sensor)| {
+                            (
+                                name,
+                                crate::site::Observation {
+                                    value: sensor.current.value.map(MessageArgument::Number),
+                                    observed_at_ms: sensor.current.observed_at_ms,
+                                    quality: sensor.current.quality,
+                                },
+                            )
+                        })
+                        .collect(),
+                    inputs: site
+                        .inputs
+                        .into_iter()
+                        .map(|(name, input)| {
+                            (
+                                name,
+                                crate::site::Observation {
+                                    value: input
+                                        .value
+                                        .map(|value| MessageArgument::Number(f64::from(value))),
+                                    observed_at_ms: input.observed_at_ms,
+                                    quality: input.quality,
+                                },
+                            )
+                        })
+                        .collect(),
+                    time_remaining: None,
+                })
+            })();
+            let mut first = Some(first);
+            // At most one visit per configured recipe per pump. Fast failed retries
+            // cannot monopolize the host's other control work.
+            for _ in 0..node.control.messages.items.len() {
+                let Some(current) = first
+                    .take()
+                    .or_else(|| node.control.telemetry.take_message_request())
+                else {
+                    break;
+                };
+                let prepared = (|| {
+                    let values = values
+                        .as_ref()
+                        .map_err(|_| crate::controller::ControllerError)?;
+                    let recipe = node
+                        .control
+                        .messages
+                        .items
+                        .get(current.content_index)
+                        .ok_or(crate::controller::ControllerError)?;
+                    let program = recipe
+                        .prepare(&node.control.catalog, values)
+                        .map_err(|_| crate::controller::ControllerError)?;
+                    let stream = node
+                        .control
+                        .media_session
+                        .as_mut()
+                        .ok_or(crate::controller::ControllerError)?
+                        .register_program(program, true)
+                        .map_err(|_| crate::controller::ControllerError)?;
+                    crate::controller::PreparedMedia::new_stream(stream)
+                })();
+                // Both preparation failure and success settle the exact request.
+                // A rejected stale envelope is destroyed here on control.
+                let _ = node
+                    .control
+                    .telemetry
+                    .complete_message(current.attempt, prepared);
+            }
+        }
+    }
+
+    /// Resolve an already validated site action through the ordinary typed macro contract.
+    pub fn site_macro(&self, local: &str, name: &str) -> Result<Command, RuntimeError> {
+        macro_command(&self.document, &NodeId::new(local)?, name)
+    }
+
+    /// Queue a compiled named local notification; false means retry admission, not an action retry.
+    pub fn queue_named_message(&mut self, local: &str, name: &str) -> Result<bool, RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let index = *node
+            .control
+            .messages
+            .names
+            .get(name)
+            .ok_or(RuntimeError::Preparation)?;
+        node.control.telemetry.reclaim().for_each(drop);
+        if !node.control.telemetry.can_queue_status() {
+            return Ok(false);
+        }
+        Self::queue_message_index(node, index, None)?;
+        Ok(true)
+    }
+
+    /// Admit a read-only site report, retaining the exact requesting connection.
+    pub fn queue_site_report(
+        &mut self,
+        local: &str,
+        selector: &str,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
+        if selector.is_empty() || !crate::config::message_selector_valid(selector) {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let index = node
+            .control
+            .messages
+            .site_selectors
+            .get(selector)
+            .copied()
+            .unwrap_or(node.control.messages.site_unavailable);
+        Self::queue_message_index(node, index, reply)
+    }
+
+    /// Admit a read-only macro to the existing reply queue; resolve values after source unkey.
+    /// A full queue rejects before creating an attempt, so a later retry uses fresh values.
+    pub fn queue_message(
+        &mut self,
+        local: &str,
+        selector: &str,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let index = *node
+            .control
+            .messages
+            .selectors
+            .get(selector)
+            .ok_or(RuntimeError::Rejected)?;
+        Self::queue_message_index(node, index, reply)
+    }
+    fn queue_message_index(
+        node: &mut RuntimeNode<A, C>,
+        index: usize,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
+        node.control.telemetry.reclaim().for_each(drop);
+        if reply.as_ref().is_some_and(crate::link::PeerReply::ended)
+            || !node.control.telemetry.can_queue_status()
+        {
+            return Err(RuntimeError::Rejected);
+        }
+        let prepared = node
+            .control
+            .telemetry
+            .prepare_message(index)
+            .map_err(|_| RuntimeError::Preparation)?
+            .reply_to(reply);
+        // Only this serialized producer can consume the capacity admitted above.
+        assert!(node.control.telemetry.queue_prepared_status(prepared));
+        Ok(())
+    }
+
     /// Queue existing time/direct/full/last-keyed telemetry, with speech failure falling back to Morse.
     pub fn queue_status(
         &mut self,
@@ -1414,17 +1649,7 @@ fn prepare_events(document: &ConfigDocument, node: &NodeId) -> Result<Vec<Event>
         let operation = if event.macro_name.is_empty() {
             None
         } else {
-            let settings =
-                ResolvedMacroSettings::resolve(document, Some(node), &event.macro_name)?.value;
-            Some(Command {
-                action: match settings.action() {
-                    crate::schedule::ScheduledAction::Connect => LinkAction::Transceive,
-                    crate::schedule::ScheduledAction::Disconnect => LinkAction::Disconnect,
-                    crate::schedule::ScheduledAction::DisconnectAll => LinkAction::DisconnectAll,
-                    crate::schedule::ScheduledAction::ReconnectAll => LinkAction::ReconnectAll,
-                },
-                node: settings.target_node,
-            })
+            Some(macro_command(document, node, &event.macro_name)?)
         };
         events.push(Event {
             spec: EventSpec {
@@ -1437,6 +1662,22 @@ fn prepare_events(document: &ConfigDocument, node: &NodeId) -> Result<Vec<Event>
         });
     }
     Ok(events)
+}
+fn macro_command(
+    document: &ConfigDocument,
+    node: &NodeId,
+    name: &str,
+) -> Result<Command, RuntimeError> {
+    let settings = ResolvedMacroSettings::resolve(document, Some(node), name)?.value;
+    Ok(Command {
+        action: match settings.action() {
+            crate::schedule::ScheduledAction::Connect => LinkAction::Transceive,
+            crate::schedule::ScheduledAction::Disconnect => LinkAction::Disconnect,
+            crate::schedule::ScheduledAction::DisconnectAll => LinkAction::DisconnectAll,
+            crate::schedule::ScheduledAction::ReconnectAll => LinkAction::ReconnectAll,
+        },
+        node: settings.target_node,
+    })
 }
 fn prepare_links(
     document: &ConfigDocument,

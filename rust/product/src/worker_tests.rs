@@ -31,9 +31,10 @@ impl rpt_advanced_core::runtime::NativeMediaPreparer for Media {
 }
 struct EmptyStation;
 impl rpt_advanced_core::media::StationMediaSession for EmptyStation {
-    fn register(
+    fn register_program(
         &mut self,
-        _: rpt_advanced_core::media::MediaSource,
+        _: rpt_advanced_core::media::MediaProgram,
+        _: bool,
     ) -> Result<Box<dyn rpt_advanced_core::audio::PcmStreamReader>, MediaError> {
         Ok(Box::new(EmptyStream))
     }

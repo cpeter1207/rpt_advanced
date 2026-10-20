@@ -24,15 +24,23 @@ enum KnownScope {
     Radio,
     Identifier,
     Announcement,
-    Courtesy { named: bool },
+    Tail,
+    Courtesy {
+        named: bool,
+    },
     Morse,
     Speech,
     Time,
     Template,
+    Message,
     Macro,
     Event,
     Permanent,
     Schedule,
+    Site {
+        kind: super::site::SiteKind,
+        named: bool,
+    },
 }
 
 impl KnownScope {
@@ -47,15 +55,21 @@ impl KnownScope {
             | ScopeKind::AnnouncementNode
             | ScopeKind::AnnouncementSet => Self::Announcement,
             ScopeKind::CourtesyDefault | ScopeKind::CourtesyNode => Self::Courtesy { named: false },
+            ScopeKind::TailDefault | ScopeKind::TailNode | ScopeKind::TailSet => Self::Tail,
             ScopeKind::CourtesySet => Self::Courtesy { named: true },
             ScopeKind::MorseDefault | ScopeKind::MorseNode => Self::Morse,
             ScopeKind::SpeechDefault | ScopeKind::SpeechNode => Self::Speech,
             ScopeKind::TimeDefault | ScopeKind::TimeNode => Self::Time,
             ScopeKind::TemplateGlobal | ScopeKind::TemplateNode => Self::Template,
+            ScopeKind::MessageGlobal | ScopeKind::MessageNode => Self::Message,
             ScopeKind::MacroGlobal | ScopeKind::MacroNode => Self::Macro,
             ScopeKind::EventNode => Self::Event,
             ScopeKind::PermanentNode => Self::Permanent,
             ScopeKind::ScheduleNode => Self::Schedule,
+            ScopeKind::SiteDefault(kind) | ScopeKind::SiteNode(kind) => {
+                Self::Site { kind, named: false }
+            }
+            ScopeKind::SiteSet(kind) => Self::Site { kind, named: true },
             ScopeKind::Unknown => return None,
         })
     }
@@ -170,6 +184,21 @@ impl Schema {
         validate_templates_and_macros(document)?;
         validate_events(document)?;
         validate_links(document)?;
+        let mut site_outputs = BTreeSet::new();
+        for node in document.nodes() {
+            let site = super::site::resolve_definitions(document, &super::NodeId::new(node)?)?;
+            for output in &site.value.outputs {
+                if output.enabled
+                    && !site_outputs.insert(output.endpoint.clone().expect("enabled endpoint"))
+                {
+                    return Err(ConfigError::structure(
+                        node,
+                        "physical site output has multiple node owners",
+                    ));
+                }
+            }
+            warnings.extend(site.warnings);
+        }
         Ok(Resolution {
             value: (),
             warnings,
@@ -179,6 +208,7 @@ impl Schema {
 
 fn key_known(kind: KnownScope, key: &str) -> bool {
     match kind {
+        KnownScope::Site { kind, named } => super::site::key_known(kind, named, key),
         KnownScope::Radio => {
             matches!(
                 key,
@@ -241,6 +271,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "dtmf_regeneration_gap_ms"
                 | "dtmf_regeneration_level_dbfs"
                 | "link_command_pad_test"
+                | "link_command_message"
+                | "link_command_site_status"
                 | "parrot_enabled"
                 | "dtmf_admin_unlock_hash"
                 | "dtmf_admin_lock_hash"
@@ -288,24 +320,25 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_parrot_disable"
         ),
         KnownScope::Identifier => {
-            matches!(
-                key,
-                "interval_ms"
-                    | "priority"
-                    | "first_key_only"
-                    | "regardless_of_activity"
-                    | "polite"
-                    | "polite_maximum_wait_ms"
-                    | "sound_file"
-                    | "speech_text"
-                    | "speech_model"
-                    | "speech_speed_percent"
-                    | "speech_level_db"
-                    | "morse_text"
-                    | "morse_speed_wpm"
-                    | "morse_frequency_hz"
-                    | "morse_level_db"
-            )
+            super::messages::content_key(key)
+                || matches!(
+                    key,
+                    "interval_ms"
+                        | "priority"
+                        | "first_key_only"
+                        | "regardless_of_activity"
+                        | "polite"
+                        | "polite_maximum_wait_ms"
+                        | "sound_file"
+                        | "speech_text"
+                        | "speech_model"
+                        | "speech_speed_percent"
+                        | "speech_level_db"
+                        | "morse_text"
+                        | "morse_speed_wpm"
+                        | "morse_frequency_hz"
+                        | "morse_level_db"
+                )
         }
         KnownScope::Announcement => matches!(
             key,
@@ -342,7 +375,17 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         }
         KnownScope::Time => key == "format",
         KnownScope::Template => key == "text",
+        KnownScope::Message => {
+            matches!(key, "dtmf_id" | "tone_sequence" | "level_db")
+                || super::messages::content_key(key)
+                || key_known(KnownScope::Announcement, key) && key != "interval_ms"
+        }
         KnownScope::Macro => matches!(key, "action" | "target_node"),
+        KnownScope::Tail => {
+            matches!(key, "delay_ms" | "tone_sequence" | "level_db")
+                || super::messages::content_key(key)
+                || key_known(KnownScope::Announcement, key)
+        }
         KnownScope::Event => matches!(key, "at" | "template" | "message" | "macro"),
         KnownScope::Permanent => matches!(key, "remote_node" | "group_name"),
         KnownScope::Schedule => matches!(
@@ -363,8 +406,41 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if let ScopeKind::SiteDefault(site) | ScopeKind::SiteNode(site) | ScopeKind::SiteSet(site) =
+        kind
+    {
+        return super::site::value_valid(site, key, value);
+    }
+    if matches!(
+        kind,
+        ScopeKind::MessageGlobal
+            | ScopeKind::MessageNode
+            | ScopeKind::IdentifierDefault
+            | ScopeKind::IdentifierNode
+            | ScopeKind::IdentifierSet
+            | ScopeKind::TailDefault
+            | ScopeKind::TailNode
+            | ScopeKind::TailSet
+    ) {
+        match key {
+            "message_id" => return value.is_empty() || super::messages::identifier_valid(value),
+            "dtmf_id" => return super::messages::selector_valid(value),
+            "content" => return crate::composition::syntax_valid(value),
+            key if key.starts_with("arg_") => {
+                return value.is_empty() || value.parse::<super::BindingSource>().is_ok();
+            }
+            _ => {}
+        }
+    }
     if key == "remote_node" && matches!(kind, ScopeKind::PermanentNode | ScopeKind::ScheduleNode) {
         return configured_node_list(value).is_some();
+    }
+    if matches!(
+        kind,
+        ScopeKind::TailDefault | ScopeKind::TailNode | ScopeKind::TailSet
+    ) && matches!(key, "interval_ms" | "delay_ms")
+    {
+        return parse::unsigned(value, 0, u64::MAX / 48).is_some();
     }
     match key {
         "device_selection" => matches!(value, "exact" | "automatic_lowest_alsa_card"),
@@ -547,7 +623,25 @@ fn configured_node_list(value: &str) -> Option<Vec<&str>> {
 }
 
 fn default_value(kind: ScopeKind, key: &str) -> String {
+    if matches!(
+        kind,
+        ScopeKind::SiteDefault(_) | ScopeKind::SiteNode(_) | ScopeKind::SiteSet(_)
+    ) {
+        let value = super::site::default_value(key);
+        return if value.is_empty() {
+            "not configured"
+        } else {
+            value
+        }
+        .to_owned();
+    }
     let value = match (kind, key) {
+        (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "content") => "{message}",
+        (
+            ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet,
+            "content",
+        ) => "{media}",
+        (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "level_db") => "-20",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "device_selection") => "exact",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_profile") => "dudeusb",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_ptt_inverted") => "no",
@@ -648,7 +742,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         {
             "600000"
         }
-        (_, "interval_ms" | "priority") => "0",
+        (_, "interval_ms" | "priority" | "delay_ms") => "0",
         (_, "first_key_only" | "regardless_of_activity" | "polite") => "no",
         (_, "polite_maximum_wait_ms") => "60000",
         (_, "speech_speed_percent" | "speed_percent") => "100",
@@ -701,6 +795,8 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_parrot_enable" => "804",
         "link_command_parrot_disable" => "805",
         "link_command_pad_test" => "82",
+        "link_command_message" => "77",
+        "link_command_site_status" => "76",
         _ => return None,
     })
 }
@@ -710,6 +806,11 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
     let node = scope.node.unwrap_or_default();
     let label = scope.label.unwrap_or_default();
     match scope.kind {
+        ScopeKind::SiteNode(kind) => candidates.push((kind.name().to_owned(), key)),
+        ScopeKind::SiteSet(kind) if super::site::key_known(kind, false, key) => {
+            candidates.push((format!("{} {node}", kind.name()), key));
+            candidates.push((kind.name().to_owned(), key));
+        }
         ScopeKind::RadioNode => candidates.push(("radio".to_owned(), key)),
         ScopeKind::Node => candidates.push(("general".to_owned(), key)),
         ScopeKind::IdentifierNode => candidates.push(("identifier".to_owned(), key)),
@@ -719,6 +820,12 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
             candidates.push(("identifier".to_owned(), key));
         }
         ScopeKind::AnnouncementNode => candidates.push(("announcement".to_owned(), key)),
+        ScopeKind::TailNode => candidates.push(("tail".to_owned(), key)),
+        ScopeKind::TailSet => {
+            candidates.push((format!("tail {node}"), key));
+            candidates.push(("tail".to_owned(), key));
+            add_media_defaults(&mut candidates, key, node);
+        }
         ScopeKind::AnnouncementSet => {
             add_media_defaults(&mut candidates, key, node);
             candidates.push((format!("announcement {node}"), key));
@@ -734,6 +841,11 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
         ScopeKind::SpeechNode => candidates.push(("speech".to_owned(), key)),
         ScopeKind::TimeNode => candidates.push(("time".to_owned(), key)),
         ScopeKind::MacroNode => candidates.push((format!("macro {label}"), key)),
+        ScopeKind::MessageNode => {
+            candidates.push((format!("message {label}"), key));
+            add_media_defaults(&mut candidates, key, node);
+        }
+        ScopeKind::MessageGlobal => add_media_defaults(&mut candidates, key, node),
         _ => {}
     }
     for (section, candidate_key) in candidates {

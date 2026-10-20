@@ -1,6 +1,6 @@
 # ADR 0024: Voting receivers and simulcast use explicit timing boundaries
 
-Status: Accepted
+Status: Planned; decision accepted
 
 ## Context
 

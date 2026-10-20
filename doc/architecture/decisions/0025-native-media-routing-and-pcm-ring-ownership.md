@@ -219,6 +219,81 @@ and retired away from the audio callback. A failed source falls through to the
 next configured source before producing audio; a failure after audio begins
 ends that source without restarting its fallback.
 
+Ordered composition contract — 2026-10-18: a program retains one playback
+generation, route, Morse latch and completion across all segments. The same
+producer opens each segment in order. A playing consumer and at most one
+prepared successor use the existing bounded ready/retired handoff. Waiting for
+the next segment is pending playback, never successful EOF or a PTT release.
+Each segment has an accepted-source-duration budget at the native sample rate;
+filter-delay padding is drained but not presented as message content. Empty
+FIFO occupancy alone is not EOF because the converter can retain samples.
+All endpoint and provider reclamation stays on the producer. Receive replaces
+the complete primary sequence with its complete Morse sequence, dropping
+decorative tones and files while retaining configured Morse substitutes.
+
+Per-attempt values use a bounded control handoff. A preallocated reader publishes
+only a controller-generation/sequence pair and immutable recipe index. Control
+captures civil time, identities, link status and quality-tagged site observations,
+then returns a producer-backed stream for that exact attempt. Each reader has one
+request, ready and retirement credit; command-reader ports are reclaimed with
+their existing completed-status ownership. Failure also completes the request.
+Late or stale results are returned or destroyed only on control. A receive-driven
+Morse latch survives pending preparation. A deferral before any PCM invalidates
+the old values; readmission captures a fresh snapshot. Device-only replacement
+retains the controller, recipes and media session together. These internal Rust
+interfaces do not change the public C ABI.
+
+Release-tail ownership — 2026-10-18: the shared controller preallocates ordered
+tail states. Qualified traffic release fixes the hang deadline independently
+of telemetry. Positive delays begin at actual controller unkey and do not
+restart when an ID intervenes. Expired polite-ID deadlines preempt a tail;
+its existing producer restarts the same captured attempt from the beginning,
+preserving Morse selection. Before first PCM, new receive cancels the opportunity;
+afterward it selects complete Morse. Timeout and half-duplex deferral cannot
+consume inaudible PCM or falsely advance cooldown. Only successful playback
+advances cooldown, and generated transmitter releases never arm another tail.
+
+Receive-interruption contract — 2026-10-18: qualified local receive or any
+connected peer's receive activity selects the complete Morse form of an
+admitted message, including an announcement or source-routed command reply.
+This includes peers not selected for local RF. Source-unkey admission,
+half-duplex and safety rules still apply; interruption never changes the
+destination. Courtesy-only cancellation and local DTMF regeneration are separate.
+
+The callback gates the primary stream before reading another sample. Its
+generation is cancelled, including buffered samples and converter history;
+late primary writes cannot enter the replacement stream. Retirement
+backpressure means pending Morse selection, not missing Morse. Selection is
+latched until the attempt ends, including across unkey/rekey and preparation
+delays. Starting a reused stream cannot clear that selection. The producer
+continues to own all rendering and reclamation.
+
+A Morse replacement publishes its generation before returning the old ring.
+The producer waits for the old consumer endpoint to be retired before opening
+the replacement. Producer EOF alone cannot remove a one-shot job: the reader
+must acknowledge completion or cancellation and return the endpoint. This keeps
+late primary publication and replacement requests from racing with job removal.
+
+Playback distinguishes active, successful, failed and cancelled attempts.
+Only successful completion satisfies an identifier or an announcement interval;
+partial output followed by failure is not success. A failed recurring item
+waits its existing configured interval before another attempt, without changing
+its last successful completion or satisfying lower-priority IDs. A zero-interval
+announcement waits for the next traffic release. This prevents a failed source
+from being resubmitted on every audio sample or holding silent PTT.
+
+Initial-ID selection — 2026-10-20: a qualifying transmitter rising edge arms
+one eligible `first_key_only` set per node. Selection rotates through the
+configured ID order, skipping sets whose idle interval has not elapsed and
+all periodic sets. It wraps after the last set. Unselected initial sets do
+not queue behind the selected one. Only that selected set starts a polite-wait
+deadline. A pending initial retains its choice, polite deadline and retry
+across rekey. A rising edge with no eligible set retains the rotation
+position. Periodic-ID priority, successful-completion satisfaction,
+receive-driven Morse fallback, and failed-attempt retry remain unchanged.
+The cursor belongs to the existing controller and survives device-only handoff;
+a replacement controller starts a new rotation.
+
 Each audio worker has an **RF-signaling edge publisher** for its owned state:
 receive qualification/decoder status in local receive, and physical PTT and
 transmit signaling in transmit. Publishers perform only immediate prepared

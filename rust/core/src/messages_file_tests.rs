@@ -7,6 +7,75 @@ use std::{
 
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
+#[test]
+fn composition_catalog_admin_english_is_additive_per_attribute() {
+    let directories = TemporaryCatalogs::new();
+    fs::write(
+        directories.admin().join("en-US.ftl"),
+        "no-links =\n    .text = ADMIN\n",
+    )
+    .unwrap();
+    let catalog = MessageCatalog::load_from_catalog_dirs(
+        "en-US",
+        &[directories.admin()],
+        &[directories.package()],
+    )
+    .unwrap();
+    let forms = catalog.format(&Message::NoLinks).unwrap();
+    assert_eq!(forms.text, "ADMIN");
+    assert_eq!(forms.tts, "No links");
+    assert_eq!(
+        catalog.format(&Message::LastKeyedNone).unwrap().morse,
+        "NO LAST KEYED"
+    );
+}
+
+#[test]
+fn composition_catalog_adds_custom_ids_without_copying_shipped_messages() {
+    let directories = TemporaryCatalogs::new();
+    fs::write(
+        directories.admin().join("en-US.ftl"),
+        "site-custom =\n    .text = Battery\n    .tts = Battery voltage\n    .morse = BATTERY\n",
+    )
+    .unwrap();
+    fs::write(
+        directories.admin().join("fr.ftl"),
+        "site-custom =\n    .tts = Tension\n",
+    )
+    .unwrap();
+    let catalog =
+        MessageCatalog::load_from_catalog_dirs("fr", &[directories.admin()], &[]).unwrap();
+    let custom = catalog
+        .format_named("site-custom", &Default::default())
+        .unwrap();
+    assert_eq!(custom.tts, "Tension");
+    assert_eq!(custom.morse, "BATTERY");
+    assert!(catalog.format(&Message::NoLinks).is_ok());
+    assert!(catalog.translation_warnings().is_empty());
+}
+
+#[test]
+fn composition_catalog_admin_translation_keeps_package_attributes() {
+    let directories = TemporaryCatalogs::new();
+    fs::write(
+        directories.admin().join("fr-CA.ftl"),
+        "no-links =\n    .text = ADMIN\n    .tts = { $invalid }\n",
+    )
+    .unwrap();
+    fs::write(
+        directories.package().join("fr-CA.ftl"),
+        "no-links =\n    .tts = PACKAGE\n",
+    )
+    .unwrap();
+    let catalog = MessageCatalog::load_from_catalog_dirs(
+        "fr-CA",
+        &[directories.admin()],
+        &[directories.package()],
+    )
+    .unwrap();
+    assert_eq!(catalog.format(&Message::NoLinks).unwrap().tts, "PACKAGE");
+}
+
 struct TemporaryCatalogs(PathBuf);
 
 impl TemporaryCatalogs {
@@ -121,4 +190,18 @@ fn catalog_loader_uses_embedded_english_when_no_catalog_files_exist() {
     .unwrap();
     assert_eq!(catalog.format(&Message::NoLinks).unwrap().text, "NO LINKS");
     assert_eq!(catalog.translation_warnings(), &["catalog unavailable"]);
+}
+
+#[test]
+fn malformed_catalog_overlay_falls_back_with_one_useful_warning() {
+    let directories = TemporaryCatalogs::new();
+    fs::write(directories.admin().join("fr-CA.ftl"), "no-links = {\n").unwrap();
+    let catalog = MessageCatalog::load_from_catalog_dirs(
+        "fr-CA",
+        &[directories.admin()],
+        &[directories.package()],
+    )
+    .unwrap();
+    assert_eq!(catalog.format(&Message::NoLinks).unwrap().text, "NO LINKS");
+    assert_eq!(catalog.translation_warnings(), &["catalog is malformed"]);
 }

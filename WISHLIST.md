@@ -10,73 +10,76 @@ the requirement is implemented.
 DTMF parrot controls, pad testing, local-transmitter regeneration, and addressed
 ASL command forwarding are implemented per ADRs 0023 and 0025. The controller
 component extraction, including DTMF generation, is released per ADR 0011.
-These completed requirements are absent from the open entries below.
+The standalone controller, shared radio core, direct PortAudio composition,
+Rust migration, and `res_usbradio` removal are also implemented. Their ongoing
+constraints remain in the ADRs; only remaining work is listed below.
+
+Status audit: 2026-10-17, against merged code and tests. Software-contract
+completion is not a claim of physical hardware qualification or deployment.
 
 ## Entries
 
-### Split native receive and transmit workers
+### Verified shared-clock native audio
+
+**Status: Partially implemented.** Independent input/output callbacks, local
+and per-peer inbound rings, telemetry streaming, snapshot intervals, and
+generation-safe reload are implemented. Only the optional verified shared-clock
+adapter path remains pending under ADRs 0003, 0025, and 0027.
 
 **Requirements**
 
-- Implement the 2026-09-13 amendments to ADRs 0025--0028: call the local receive
-  worker on audio input for DSP squelch, CTCSS/DCS decode, deemphasis, and local
-  receive processing, then write processed audio to its local receive inbound
-  PCM ring.
-- Run transmit on DAC/adapter output demand. Mix native-rate output from local
-  receive, per-link inbound, and telemetry playout rings; add profile-selected
-  DCS or CTCSS; fill the adapter-owned output buffer directly (PortAudio's
-  callback output buffer for that adapter).
-- Render all telemetry—including Morse and tone—on the separate
-  station-telemetry worker and stream its PCM through the telemetry ring. The
-  transmit worker consumes PCM only; the control-message queue is not an audio
-  ring. This telemetry-routing requirement is implemented.
-- Assign all inbound source-rate conversion and drift correction to those
-  rings. Do not keep a second raw-capture converter, resample the transmit mix,
-  or add a PortAudio output ring/timer. Preserve routing, receive qualification,
-  PTT safety, and pre-access-tone link delivery.
-- Validate unequal RX/TX frame counts, independent clock drift, stalled input
-  or output, per-owner DSP/event queues, and coherent generation adoption and
-  safe reload/unload across both workers.
-- Verify the optional shared-clock receive-then-transmit path only when the
-  adapter can prove and supply aligned frames; unknown clock relationships
-  remain independently paced.
-- Publish RF edge events immediately and meter/FIFO/status snapshots on the
-  separately configured per-node interval with global fallback, default 50 ms.
+- Integrate and qualify the paired receive-then-transmit path only when an
+  adapter can prove that ADC/DAC clocks are shared and supply aligned frames.
+- Use the existing local inbound ring in unity pass-through, with no adaptive
+  correction or redundant converter. Its target reserve is the configured
+  squelch delay; zero adds no local-ring delay.
+- Adopt one coherent generation across the paired calls. Retain bounded frame
+  handling, elapsed-sample timing, receive qualification, and PTT safety.
 
 **Decisions recorded**
 
-- The RPT Advanced product has independent receive/transmit callbacks, local
-  and per-peer inbound rings, and the program-audio loopback. Status, speech,
-  file, Morse, and tone media now use the station producer and telemetry PCM
-  ring; transmit playback only consumes that ring. Other split-worker items
-  below remain pending.
-- The current RPT Advanced radio adapter does not yet invoke the shared-clock
-  paired-owner path. The configurable snapshot interval is implemented as
-  `status_snapshot_interval_ms`, with per-node override, `[general]` fallback,
-  and a 50 ms default. RX and TX publish independently on the first callback
-  ending at or after each sample-count deadline; control retains each latest
-  snapshot for CLI status. The optional shared-clock paired-owner path remains
-  pending.
-- The existing supported native rate remains 48 kHz. The adapter supplies its
-  clock/cadence; the transmit worker has no separate pacing source.
-- Outbound codec conversion and detector-private decimation remain separate
-  from the inbound-ring conversion contract. CTCSS sources and appliance
-  physical interlocks follow ADRs 0033/0034.
-- Workers may execute directly in input/output callbacks; no extra OS threads
-  are required by the split. Versioned compatible ABI evolution is required.
-- An adapter that knows ADC/DAC are drift-free and can deliver aligned frames
-  may call receive then transmit back-to-back. Use the same local inbound ring
-  in unity pass-through with no adaptive correction or redundant converter.
-  In shared-clock mode, target reserve equals configured squelch delay, so zero
-  delay adds no local-ring delay. Keep one coherent generation across the pair.
-  This is not a promise of zero device/DSP latency. Unknown clock relationships
-  remain asynchronous; independent link and telemetry rings keep their recovery.
+- Unknown clock relationships remain independently paced. The current
+  PortAudio adapter uses separate capture and playback streams at 48 kHz.
+- The independent-clock composition is complete; this item does not require
+  duplicate controller rings or a second mixer in USBRadioPlus.
+- Device and DSP latency remain even when local-ring delay is zero. Peer and
+  telemetry rings retain their independent recovery.
+- The implemented `status_snapshot_interval_ms` has per-node overrides, a
+  global fallback, and a 50 ms default. RF edge events publish immediately;
+  periodic snapshots publish at the first callback ending at or after their deadline.
+
+**Material decisions needed before implementation**
+
+None.
+
+### Scheduler health, overnight inactivity grace, and civil-time validation
+
+**Status: Partially implemented.** Permanent and scheduled groups, fallback
+selection, warnings, macros, and route ownership are implemented. ADR 0017
+still has two implementation gaps and outstanding civil-time regression tests.
+
+**Requirements**
+
+- Expose scheduler control-task submission failures and control-queue delay
+  through health counters and rate-limited warnings.
+- At cold start, retain the preceding selected window's inactivity grace across
+  midnight even when its end time is earlier than `24:00`. Cover an end at
+  `23:59`, five minutes of grace, and startup at `00:01`.
+- Complete the required explicit daylight-saving and clock-step regression
+  fixtures; the existing backward-timestamp tests are not that full validation.
+
+**Decisions recorded**
+
+- Preserve current best-effort scheduling and activity-based inactivity timing.
+- Do not add overnight window syntax, catch-up execution, or durable events.
 
 **Material decisions needed before implementation**
 
 None.
 
 ### EchoLink audio interoperability
+
+**Status: Planned.** No EchoLink adapter is implemented.
 
 **Requirements**
 
@@ -141,6 +144,11 @@ None.
 None.
 
 ### Complete control and status interfaces
+
+**Status: Partially implemented.** Current CLI/DTMF controls, remapping,
+hashed unlock/lock, source-scoped replies, parrot controls, and pad testing are
+implemented. Complete operation/status parity, REST, WebSocket, OIDC, and
+code-derived OpenAPI documentation remain pending under ADRs 0016 and 0023.
 
 **Requirements**
 
@@ -210,6 +218,9 @@ None.
 
 ### Mode- and frequency-agile remote base
 
+**Status: Planned.** Hamlib control, speech squelch, and remote-base operations
+remain unimplemented under ADR 0004.
+
 **Requirements**
 
 - Support a node as a mode- and frequency-agile remote base using Hamlib's
@@ -276,9 +287,14 @@ None.
 provide independent CTCSS source profiles, capability-based multiport GPIO,
 explicit arm/readiness, epoch-gated output intent, and fault recovery. Tests
 compose the real radio and GPIO shared libraries with simulated hardware.
-Device integration and physical interlock qualification remain pending.
-Analog monitoring, sensors, fan control, general alarms/actions, and their
-configuration/API are not implemented by this change.
+The radio, GPIO, and controller PRs merged after their native Debian 13
+amd64/arm64 gates passed. Device integration and physical interlock qualification
+remain pending; those software gates are not a release or device rollout.
+Analog monitoring, sensors, fan control, general alarms/actions, configuration,
+read-only DTMF reports and typed shared-product controls now have implemented
+software and targeted tests. The full hosted gate and physical site-device
+qualification remain outstanding. New REST/WebSocket transports are not part
+of this implementation.
 
 **Requirements**
 
@@ -306,16 +322,17 @@ configuration/API are not implemented by this change.
   according to configured endpoints and available resources. The appliance's
   four-port limit applies only to its physical board.
 
-**Material decisions needed before implementation**
+**Approved implementation — 2026-10-18**
 
-- Configuration for analog inputs, fan outputs, and external sensors beyond the
-  capability-based radio GPIO contract in ADRs 0033/0034.
-- Alarm/action catalog, default-safe output state, acknowledgment behavior, and
-  authorization for manual output control.
-- Sensor conversion/calibration model and retention/reporting policy for meter
-  history.
+The [site/message design](docs/superpowers/specs/2026-10-17-site-monitoring-and-message-macros-design.md)
+records configuration, calibration/freshness, alarms, safe outputs, fan policy,
+read-only DTMF queries, and localized reports. Composed messages, release tails,
+bounded site acquisition and equipment actions are implemented with targeted tests.
+The full hosted gate and physical site-device qualification remain outstanding.
 
 ### Remote-base memories and scan lists
+
+**Status: Planned.** Requires the remote-base capability and decisions below.
 
 **Requirements**
 
@@ -334,6 +351,11 @@ configuration/API are not implemented by this change.
   persisted through administrative REST/CLI operations.
 
 ### Operational configuration management
+
+**Status: Partially implemented.** Tolerant parsing, validation, transactional
+reload, and failed-reload/device rollback exist under ADRs 0001 and 0019.
+Standalone also has `--check-config`. Operator backup, Asterisk CLI/REST
+validation commands, historical rollback, and audit workflows remain planned.
 
 **Requirements**
 
@@ -356,6 +378,12 @@ configuration/API are not implemented by this change.
   audit fields.
 
 ### Local audio sources, voting, and recorded messages
+
+**Status: Partially implemented.** Multiple configured nodes, local-file
+telemetry decoding/playback, announcements, and temporary parrot replay exist.
+Network audio sources, voter interoperability/native voting and simulcast,
+persistent over-air message storage/playback management, and REST uploads
+remain planned. Local-file decoding does not imply network stream support.
 
 **Requirements**
 
@@ -420,124 +448,36 @@ reverse patch, paging, and SIP/VoIP-provider integration remain unimplemented.
   dialing restrictions, emergency-call policy, recording policy, and caller-ID
   behavior.
 
-### Shared radio core and direct PortAudio adapter
+### Generic audio-device control extraction
+
+**Status: Deferred.** The named squelch, CTCSS, DCS, GPIO/parallel signaling,
+and controller-function extractions are implemented and independently released
+under ADR 0011. Generic audio-device control is the remaining deferred boundary.
 
 **Requirements**
 
-- Move code common to the USBRadioPlus legacy and modern implementations into
-  a dynamically linked shared object named `librptadvradio`.
-- `librptadvradio` must not depend on OSS or PortAudio. The ASL legacy and
-  modern channel adapters use the versioned audio-I/O adapter instead.
-- Have standalone `rpt-advanced` select `librptadvradio` and the versioned
-  PortAudio adapter rather than depend on `libportaudio2` directly.
-- Add one focused source part that connects a CM119 through PortAudio's ALSA
-  backend using PortAudio's minimum recommended latency.
-- PortAudio input calls only the `librptadvradio` local receive worker; output
-  calls its transmit worker to fill the callback buffer directly. Neither
-  performs controller, configuration, or blocking work.
-- Keep this boundary suitable for the eventual standalone application without
-  introducing standalone-only features in this work.
+- Define a platform-neutral audio-device control contract without changing
+  radio behavior or duplicating the existing PortAudio/ALSA adapter.
+- Keep platform I/O outside `librptadvradio` and its portable DSP components.
+- Once its boundary is defined, distribute the extracted component as its own
+  versioned shared library, repository, and Debian runtime/development packages.
 
 **Decisions recorded**
 
-- The shared object owns portable USBRadioPlus radio behavior. After the
-  hardware-adapter cutover, maintain one ASL3 compatibility implementation,
-  not separate legacy/modern resource-module backends (ADR 0028).
-- `app_rpt_advanced` may depend on public Asterisk APIs but not ASL3. Minimize
-  ASL3 dependencies and constrain them to the optional ASL3 adapter; retain
-  AllStarLink protocol interoperability independently (ADR 0036).
-  Minimize new Asterisk dependencies and confine them to the thin module
-  adapter so standalone transition does not redesign the core. The hardware
-  appliance has no Asterisk or ASL3 dependency, including build and packages.
-  Controller execution and lifecycle use neutral contracts. Isolate the
-  current Asterisk taskprocessor behind a control-path adapter (ADR 0038),
-  preserving ordering, admission/failure behavior, and reload/unload safety.
-  Other Asterisk-specific thread handling stays in its integration adapter.
-- `librptadvradio` is a separately versioned repository and Debian package,
-  with a published ABI consumed by USBRadioPlus and standalone `rpt-advanced`.
-- PortAudio/ALSA remains an audio-adapter dependency, not a `librptadvradio`
-  dependency. OSS and `res_usbradio` are removed under ADR 0028.
-- Adapters own direct CM119 mixer, GPIO/PTT/COR, EEPROM, and device-selection
-  I/O. `librptadvradio` receives those services through a platform-neutral
-  callback contract.
-- Standalone `rpt-advanced` selects the `librptadvradio` and PortAudio adapter
-  descriptors. The adapter alone links `libportaudio2` and ALSA; the optional
-  `app_rpt_advanced.so` uses `RadioPlusAdvanced` instead.
-- The direct PortAudio/ALSA CM119 adapter coexists as a selectable per-node
-  path with the Asterisk adapters. Configuration rejects concurrent ownership
-  of one device.
-- Each configured radio owns one full-duplex PortAudio stream at 48 kHz.
-  Higher native rates are unsupported under ADR 0035. RNNoise and native
-  processing use that rate directly; inbound rings own source conversion and
-  independent-clock recovery, while outbound codec conversion stays at egress.
-- Its CM119 PortAudio source part uses ALSA with the device's
-  `defaultLowInputLatency` and `defaultLowOutputLatency` values.
-- The real-time callbacks delegate to the shared library's separate receive
-  and transmit workers under the accepted ADR 0027 amendment.
-- A verified shared-clock adapter may invoke those workers back-to-back in one
-  full-duplex callback with a local-ring target reserve equal only to configured
-  squelch delay under ADR 0027.
-- Implementation status — 2026-10-12: `librptadvradio` and the versioned
-  PortAudio/ALSA adapter are separately packaged shared objects used by
-  USBRadioPlus. The standalone `rpt-advanced` service directly selects
-  `librptadvradio.so.4`, `librptadv_portaudio_alsa_adapter.so.2`, and
-  `libusbradioplus_product.so.1` descriptors, with corresponding runtime
-  package dependencies and no Asterisk or ASL3 dependency. The optional
-  `app_rpt_advanced.so` adapter still uses `RadioPlusAdvanced` for its Asterisk
-  composition. ADR 0005's standalone execution and ADR 0028's
-  `res_usbradio` dependency removal are implemented. USBRadioPlus's separate
-  direct-hardware local/telemetry-ring topology and a verified shared-clock
-  adapter remain outside this status.
+- PortAudio/ALSA owns current audio-device I/O. OSS and `res_usbradio` are
+  removed, not future backends to restore.
+- Existing radio and controller components remain dynamically linked; their
+  completed extraction is not open work.
 
-### Independently versioned radio components
+**Material decisions needed before implementation**
 
-**Requirements**
+- The distinct audio-device control responsibility and its boundary with the
+  existing audio and GPIO adapters.
 
-- Split discrete `librptadvradio` functional components into independently
-  versioned shared objects, each maintained in its own repository and released
-  like `rate_adjusting_pcm_ring`.
-- Candidate component boundaries include squelch, CTCSS detection and
-  generation, DCS detection and generation, parallel-port and GPIO control,
-  and audio-device control.
-- Keep a component that is already working correctly isolated from unrelated
-  fixes or features in another radio function.
-- Retain `librptadvradio` as the radio-core integration layer; it consumes the
-  component shared objects rather than duplicating their implementations.
+### Standalone appliance integration and ingress security
 
-**Decisions recorded**
-
-- Each extracted functional component has its own source repository, versioned
-  shared-library ABI, and release process.
-- Every extracted shared library—including `rate_adjusting_pcm_ring` and all
-  future separations—ships as a separate Debian runtime package and
-  development package with a normal SONAME compatibility policy. Consumers
-  declare a minimum compatible ABI rather than pinning an exact build.
-- The component split is intended to constrain change scope and regression
-  risk; it does not add features or alter radio behavior.
-- The established rule remains in force: OSS and PortAudio stay outside
-  `librptadvradio` and its portable signal-processing components.
-- CTCSS detection and generation form one independently versioned CTCSS
-  component; DCS detection and generation form one independently versioned
-  DCS component.
-- Audio-device control is a platform-neutral control contract. PortAudio and
-  OSS remain adapter dependencies.
-- GPIO and parallel-port components implement signaling semantics with
-  adapter-supplied pin I/O, rather than direct Linux device access.
-- Extraction order is squelch, CTCSS, DCS, then GPIO/parallel-port control.
-  Audio-device control remains deferred until its boundary is defined.
-- Implementation status — 2026-10-12: the independently released PCM-ring,
-  samplerate, FFmpeg, RNNoise, GPIO/parallel, PortAudio/ALSA, and portable radio
-  core components remain present. Squelch, CTCSS encode/decode, DCS
-  encode/decode, and portable GPIO/parallel signaling are released components.
-  `librptadvradio` v0.1.0-alpha.8 dynamically consumes the ABI-2 squelch and
-  CTCSS libraries and ABI-1 DCS library; the GPIO adapter v0.1.0-alpha.3
-  dynamically consumes the ABI-1 signaling library. The GPIO adapter retains
-  device I/O; the signaling component owns portable semantics only. Generic
-  audio-device control remains deferred until its boundary is defined.
-
-### Standalone lock-free controller
-
-**Status — 2026-10-16:** Partially implemented. Standalone execution,
+**Status — 2026-10-17:** Standalone execution is implemented. The remaining
+appliance integration and ingress-security work is planned. Standalone execution,
 AllStarLink registration and calls, the resolver boundary, and Tokio peer
 ingress/egress are released and live-validated under ADRs 0005, 0022 and 0037.
 The appliance hardware, ingress security, REST/WebSocket services, and other
@@ -545,16 +485,16 @@ future capabilities below are not covered by that completion status.
 
 **Requirements**
 
-- Run rpt_advanced as a standalone application with no dependency on Asterisk.
-- Keep audio I/O and PCM inter-thread exchange strictly lock-free.
-- Scale standalone ingress to hundreds or thousands of peers using Tokio
-  readiness, bounded per-peer mailboxes and one serialized task per connection
-  on a shared worker pool under ADR 0037. A peer-local asynchronous mutex is
-  permitted where needed; neither other peers nor audio may wait on it. Tokio
-  internals are not required to be lock-free. No OS thread per peer or spin gate.
-- Implement enough IAX2 to interoperate with current AllStarLink nodes.
-- Keep the standalone application small, fast, and suitable for inexpensive
-  hardware.
+- Integrate the standalone service with the appliance's selected radio ports
+  and hardware safety mechanisms under ADRs 0032--0034.
+- Complete appliance compliance, offline update/recovery trust, rotation, and
+  revocation qualification under ADR 0030. Signed APT distribution already exists.
+- Provide the appliance-hosted OIDC, proxy, WAF, TLS, and trusted-proxy ingress
+  described below and in ADR 0006.
+- Share the REST/WebSocket work with the control-interface entry and the
+  hardware work with the site-I/O entry; these are not duplicate implementations.
+- Preserve the implemented standalone, lock-free audio, and per-peer Tokio
+  ownership boundaries, with low resource use on inexpensive hardware.
 
 **Decisions recorded**
 
@@ -563,8 +503,8 @@ future capabilities below are not covered by that completion status.
   0022); directory policy remains shared with the Asterisk composition.
   This boundary is implemented, not a remaining standalone feature.
 - Both module and standalone controller execution use neutral worker and
-  lifecycle contracts. The replaceable control-path adapter currently uses
-  Asterisk's taskprocessor; standalone selects a non-Asterisk implementation
+  lifecycle contracts. The replaceable control-path adapter uses
+  Asterisk's taskprocessor for that composition; standalone uses its owned executor
   with identical functional semantics (ADRs 0036/0038).
 - The control-path adapter owns only taskprocessor submission, serialized FIFO
   execution, backend resources, and safe stop/drain. Scheduling, task meaning,

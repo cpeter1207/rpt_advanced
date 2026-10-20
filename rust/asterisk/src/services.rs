@@ -182,6 +182,79 @@ unsafe extern "C" fn radio_destroy(_context: *mut c_void, radio: *mut c_void) {
         }
     });
 }
+/// Serialize one site option through the already-reserved channel; never open hardware here.
+unsafe fn site_control(radio: *mut c_void, request: &mut ffi::UrpAstSiteControl) -> i32 {
+    let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
+        return -1;
+    };
+    reserved
+        .radio
+        .as_mut()
+        .map_or(-1, |radio| radio.site_control(request))
+}
+
+fn site_request(operation: u32, bank: u32) -> ffi::UrpAstSiteControl {
+    // SAFETY: this C record contains only integers and nested integer records.
+    let mut request: ffi::UrpAstSiteControl = unsafe { std::mem::zeroed() };
+    request.struct_size = size_of::<ffi::UrpAstSiteControl>() as u32;
+    request.abi_version = ffi::URP_AST_SITE_OPTION_ABI_VERSION;
+    request.operation = operation;
+    request.bank = bank;
+    request
+}
+
+unsafe extern "C" fn radio_site_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    bank: u32,
+    binding: *const ffi::UrpAstSiteBinding,
+) -> i32 {
+    boundary(-1, || {
+        let Some(binding) = (unsafe { binding.as_ref() }) else {
+            return -1;
+        };
+        let mut request = site_request(ffi::URP_AST_SITE_BIND, bank);
+        request.binding = *binding;
+        unsafe { site_control(radio, &mut request) }
+    })
+}
+
+unsafe extern "C" fn radio_site_publish(
+    _: *mut c_void,
+    radio: *mut c_void,
+    bank: u32,
+    output: *const ffi::UrpAstSiteRequest,
+) -> i32 {
+    boundary(-1, || {
+        let Some(output) = (unsafe { output.as_ref() }) else {
+            return -1;
+        };
+        let mut request = site_request(ffi::URP_AST_SITE_PUBLISH, bank);
+        request.request = *output;
+        unsafe { site_control(radio, &mut request) }
+    })
+}
+
+unsafe extern "C" fn radio_site_snapshot(
+    _: *mut c_void,
+    radio: *mut c_void,
+    bank: u32,
+    output: *mut ffi::UrpAstSiteSnapshot,
+) -> i32 {
+    boundary(-1, || {
+        let Some(output) = (unsafe { output.as_mut() }) else {
+            return -1;
+        };
+        let mut request = site_request(ffi::URP_AST_SITE_SNAPSHOT, bank);
+        request.snapshot = *output;
+        let result = unsafe { site_control(radio, &mut request) };
+        if result == 0 {
+            *output = request.snapshot;
+        }
+        result
+    })
+}
+
 unsafe extern "C" fn peer_dial(
     context: *mut c_void,
     destination: *const c_char,
@@ -337,14 +410,14 @@ unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     });
 }
 
-struct Services(ffi::rptadv_host_services_v5);
+struct Services(ffi::rptadv_host_services_v6);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v5 {
-    struct_size: size_of::<ffi::rptadv_host_services_v5>() as u32,
-    abi_version: 5,
-    capability: *b"rptadv.hst5\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v6 {
+    struct_size: size_of::<ffi::rptadv_host_services_v6>() as u32,
+    abi_version: 6,
+    capability: *b"rptadv.hst6\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -357,6 +430,9 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v5 {
     radio_open: Some(radio_open),
     radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
+    radio_site_bind: Some(radio_site_bind),
+    radio_site_publish: Some(radio_site_publish),
+    radio_site_snapshot: Some(radio_site_snapshot),
     peer_dial: Some(peer_dial),
     peer_bind_radio: Some(peer_bind_radio),
     peer_rate: Some(peer_rate),
@@ -378,7 +454,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v5 {
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v5 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v6 {
     &SERVICES.0
 }
 

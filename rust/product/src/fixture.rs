@@ -318,10 +318,35 @@ unsafe extern "C" fn peer_destroy(_: *mut c_void, handle: *mut c_void) {
     }
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v5 = crate::abi::rptadv_host_services_v5 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v5>() as u32,
-    abi_version: 5,
-    capability: *b"rptadv.hst5\0",
+unsafe extern "C" fn site_bind(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: u32,
+    _: *const crate::abi::UrpAstSiteBinding,
+) -> i32 {
+    -1
+}
+unsafe extern "C" fn site_publish(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: u32,
+    _: *const crate::abi::UrpAstSiteRequest,
+) -> i32 {
+    -1
+}
+unsafe extern "C" fn site_snapshot(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: u32,
+    _: *mut crate::abi::UrpAstSiteSnapshot,
+) -> i32 {
+    -1
+}
+
+static mut HOST: crate::abi::rptadv_host_services_v6 = crate::abi::rptadv_host_services_v6 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v6>() as u32,
+    abi_version: 6,
+    capability: *b"rptadv.hst6\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -334,6 +359,9 @@ static mut HOST: crate::abi::rptadv_host_services_v5 = crate::abi::rptadv_host_s
     radio_open: Some(radio_open),
     radio_activate: Some(radio_activate),
     radio_destroy: Some(radio_destroy),
+    radio_site_bind: Some(site_bind),
+    radio_site_publish: Some(site_publish),
+    radio_site_snapshot: Some(site_snapshot),
     peer_dial: Some(peer_dial),
     peer_bind_radio: Some(peer_bind_radio),
     peer_rate: Some(peer_rate),
@@ -354,7 +382,7 @@ static mut HOST: crate::abi::rptadv_host_services_v5 = crate::abi::rptadv_host_s
     peer_set_deadline: None,
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v5 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v6 {
     &raw const HOST
 }
 

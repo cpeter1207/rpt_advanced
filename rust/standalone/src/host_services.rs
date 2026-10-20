@@ -3,7 +3,10 @@
 use crate::{
     abi, directory,
     iax::{IaxClient, IaxError, IaxEvent, IaxPeer},
-    radio_host::{RadioHostContext, peer_bind_radio, radio_activate, radio_destroy, radio_open},
+    radio_host::{
+        RadioHostContext, peer_bind_radio, radio_activate, radio_destroy, radio_open,
+        radio_site_bind, radio_site_publish, radio_site_snapshot,
+    },
     secrets::SecretsFile,
 };
 use std::{
@@ -32,7 +35,7 @@ struct PeerIngress {
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
-    descriptor: Box<abi::rptadv_host_services_v5>,
+    descriptor: Box<abi::rptadv_host_services_v6>,
 }
 
 impl HostServicesOwner {
@@ -60,10 +63,10 @@ impl HostServicesOwner {
             secrets,
             ingress,
         });
-        let descriptor = Box::new(abi::rptadv_host_services_v5 {
-            struct_size: size_of::<abi::rptadv_host_services_v5>() as u32,
-            abi_version: 5,
-            capability: *b"rptadv.hst5\0",
+        let descriptor = Box::new(abi::rptadv_host_services_v6 {
+            struct_size: size_of::<abi::rptadv_host_services_v6>() as u32,
+            abi_version: 6,
+            capability: *b"rptadv.hst6\0",
             context: ptr::from_mut(context.as_mut()).cast(),
             local_time: Some(local_time),
             command_notice: Some(command_notice),
@@ -76,6 +79,9 @@ impl HostServicesOwner {
             radio_open: Some(open_radio),
             radio_activate: Some(activate_radio),
             radio_destroy: Some(destroy_radio),
+            radio_site_bind: Some(radio_site_bind),
+            radio_site_publish: Some(radio_site_publish),
+            radio_site_snapshot: Some(radio_site_snapshot),
             peer_dial: Some(peer_dial),
             peer_bind_radio: Some(peer_bind_radio),
             peer_rate: Some(peer_rate),
@@ -102,7 +108,7 @@ impl HostServicesOwner {
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
-    pub fn descriptor(&self) -> &abi::rptadv_host_services_v5 {
+    pub fn descriptor(&self) -> &abi::rptadv_host_services_v6 {
         let _keep_context_alive = &self.context;
         self.descriptor.as_ref()
     }
@@ -789,10 +795,10 @@ mod tests {
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
-            size_of::<crate::abi::rptadv_host_services_v5>() as u32
+            size_of::<crate::abi::rptadv_host_services_v6>() as u32
         );
-        assert_eq!(api.abi_version, 5);
-        assert_eq!(api.capability, *b"rptadv.hst5\0");
+        assert_eq!(api.abi_version, 6);
+        assert_eq!(api.capability, *b"rptadv.hst6\0");
         assert!(!api.context.is_null());
         assert!(api.local_time.is_some());
         assert!(api.peer_dial.is_some());

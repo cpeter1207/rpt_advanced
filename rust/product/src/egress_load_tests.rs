@@ -255,7 +255,7 @@ fn egress_full_path_load() {
         HostServicesOwner::new(vec![], Some(retained), SecretsFile::parse("").unwrap()).unwrap();
     let mut table = Box::new(unsafe {
         ptr::from_ref(owner.descriptor())
-            .cast::<abi::rptadv_host_services_v5>()
+            .cast::<abi::rptadv_host_services_v6>()
             .read()
     });
     table.radio_open = Some(radio_open);

@@ -3,6 +3,8 @@ OUTPUT_DIRECTORY = build/docs
 INPUT = module/app_rpt_advanced_loader.c \
         rust/resolver-adapter/include/rptadv_resolver_adapter.h \
         rust/jitter-adapter/include/rptadv_jitter_adapter.h \
+        rust/gpiod-adapter/include/rptadv_gpiod_adapter.h \
+        rust/hwmon-adapter/include/rptadv_hwmon_adapter.h \
         rust/asterisk/include/rptadv_asterisk_adapter.h \
         rust/product/include/rptadv_product.h \
         rust/control-abi/include/rptadv_control_adapter.h \

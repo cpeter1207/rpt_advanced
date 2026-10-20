@@ -16,22 +16,29 @@ CFLAGS ?= -O2 -g
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror
 HEADERS := rust/jitter-adapter/include/rptadv_jitter_adapter.h rust/resolver-adapter/include/rptadv_resolver_adapter.h rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
 CPPFLAGS += $(addprefix -I,$(dir $(HEADERS)))
+HEADERS += rust/gpiod-adapter/include/rptadv_gpiod_adapter.h
+HEADERS += rust/hwmon-adapter/include/rptadv_hwmon_adapter.h
 LOADER := module/app_rpt_advanced_loader.c
 ADAPTERS := asterisk control_asterisk file speech
 STANDALONE_ADAPTERS := control_standalone resolver jitter
+SITE_ADAPTERS := gpiod hwmon
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
 LIBRARIES += build/librptadv_product.so.1
 STANDALONE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(STANDALONE_ADAPTERS)))
-INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES)
+SITE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(SITE_ADAPTERS)))
+INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES)
 RUST_OUTPUT := $(abspath $(CARGO_TARGET_DIR))/release
 TEST_ENV = LIBRARY_PATH="$(RUST_OUTPUT):$$LIBRARY_PATH" LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH" RPT_ADVANCED_LIBDIR="$(CURDIR)/build"
 MANUALS := README.md QUALITY.md AGENTS.md WISHLIST.md COPYING $(wildcard doc/*.md doc/architecture/*.md doc/architecture/decisions/*.md)
 DIST_FILES := Makefile COPYING AGENTS.md Doxyfile .clang-format .gitignore .github/dependencies.json Cargo.toml Cargo.lock rust-toolchain.toml rust $(LOADER) $(wildcard tests/*.py) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c examples doc debian messages README.md QUALITY.md WISHLIST.md
+DIST_FILES += tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
 
 .PHONY: all rust-build standalone-build standalone-check standalone-install artifacts quality lint static-analysis docs dependency-boundary product-surface product-abi-check rust-quality rust-check rust-coverage loader-check loader-coverage check coverage install install-check integration dist distcheck platform-verify ci clean
 # The small loader must reflect directory overrides even when Rust DSOs are unchanged.
 .PHONY: build/app_rpt_advanced.so
 .PHONY: install-jitter-development jitter-ring-check radio-interlock-check
+.PHONY: install-site-development
+.PHONY: site-gpio-check site-hwmon-check
 all: build/app_rpt_advanced.so
 
 build:
@@ -43,7 +50,7 @@ rust-build: | build
 	@set -e; for name in $(ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
-	@set -e; for name in $(STANDALONE_ADAPTERS); do \
+	@set -e; for name in $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
@@ -51,10 +58,10 @@ rust-build: | build
 
 standalone-build: | build
 	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
-		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter
+		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter
 	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
-	@set -e; for name in file speech $(STANDALONE_ADAPTERS); do \
+	@set -e; for name in file speech $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" \
 			"build/librptadv_$${name}_adapter.so.1"; \
 		done
@@ -65,7 +72,7 @@ standalone-check: standalone-build
 	python3 tests/test_standalone_service.py
 	python3 tests/test_package_combinations.py
 
-$(LIBRARIES) $(STANDALONE_LIBRARIES): rust-build
+$(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES): rust-build
 	@test -f $@
 
 build/app_rpt_advanced.so: $(LOADER) $(HEADERS) $(LIBRARIES)
@@ -87,6 +94,7 @@ dependency-boundary:
 lint:
 	$(CARGO) fmt --all -- --check
 	clang-format --dry-run --Werror $(LOADER) $(HEADERS) tests/radio_fixture.c tests/test_loader.c tests/test_product_abi.c tests/test_jitter_ring.c tests/test_radio_interlock.c
+	clang-format --dry-run --Werror tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
 	ruff check tests/*.py
 	ruff format --check tests/*.py
 
@@ -94,7 +102,7 @@ static-analysis: dependency-boundary product-surface
 	# AST_MODULE_INFO is external declaration machinery, not a callable API.
 	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 $(CPPFLAGS) '-DAST_MODULE_INFO(key,flags,description,...)=;' $(LOADER)
 	clang-tidy $(LOADER) --warnings-as-errors='*' -- $(CPPFLAGS) $(MODULE_FLAGS) -fblocks
-	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 tests/test_radio_interlock.c
+	cppcheck --check-level=exhaustive --enable=warning,style,performance,portability --error-exitcode=1 --std=c11 tests/test_radio_interlock.c tests/test_site_gpio_abi.c tests/test_site_hwmon_abi.c
 	$(TEST_ENV) $(CARGO) clippy --locked --workspace --all-targets -- -D warnings
 
 rust-quality:
@@ -109,7 +117,7 @@ docs: | build
 
 quality: lint static-analysis docs
 
-check: rust-build loader-check jitter-ring-check radio-interlock-check
+check: rust-build loader-check jitter-ring-check radio-interlock-check site-gpio-check site-hwmon-check
 	$(TEST_ENV) $(CARGO) test --locked --workspace
 
 rust-check: rust-quality check
@@ -162,6 +170,18 @@ build/test_radio_interlock: tests/test_radio_interlock.c | build
 radio-interlock-check: build/test_radio_interlock
 	./build/test_radio_interlock
 
+build/test_site_gpio_abi: tests/test_site_gpio_abi.c rust/gpiod-adapter/include/rptadv_gpiod_adapter.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -UNDEBUG $< -ldl -o $@
+
+site-gpio-check: build/test_site_gpio_abi build/librptadv_gpiod_adapter.so.1
+	./build/test_site_gpio_abi "$(CURDIR)/build/librptadv_gpiod_adapter.so.1"
+
+build/test_site_hwmon_abi: tests/test_site_hwmon_abi.c rust/hwmon-adapter/include/rptadv_hwmon_adapter.h | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -UNDEBUG $< -ldl -o $@
+
+site-hwmon-check: build/test_site_hwmon_abi build/librptadv_hwmon_adapter.so.1
+	./build/test_site_hwmon_abi "$(CURDIR)/build/librptadv_hwmon_adapter.so.1"
+
 loader-check: build/test_loader
 	./build/test_loader
 
@@ -180,7 +200,15 @@ install-jitter-development:
 	sed -e 's|@prefix@|$(prefix)|g' -e 's|@libdir@|$(libdir)|g' -e 's|@version@|$(VERSION)|g' \
 		debian/rptadv_jitter_adapter.pc.in > $(DESTDIR)$(prefix)/lib/$(multiarch)/pkgconfig/rptadv_jitter_adapter.pc
 
-install: all install-jitter-development
+install-site-development:
+	install -d $(DESTDIR)$(libdir)
+	@set -e; for name in $(SITE_ADAPTERS); do \
+		ln -sfn "librptadv_$${name}_adapter.so.1" "$(DESTDIR)$(libdir)/librptadv_$${name}_adapter.so"; \
+		install -D -m 0644 "rust/$$name-adapter/include/rptadv_$${name}_adapter.h" \
+			"$(DESTDIR)$(prefix)/include/rpt_advanced/$$name/rptadv_$${name}_adapter.h"; \
+	done
+
+install: all install-jitter-development install-site-development
 	install -d $(DESTDIR)$(asteriskmoddir) $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -D -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/app_rpt_advanced.so $(DESTDIR)$(asteriskmoddir)/
@@ -205,11 +233,11 @@ install: all install-jitter-development
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/asterisk/rpt_advanced/messages/en-US.ftl
 	install -D -m 0644 messages/en-US.ftl $(DESTDIR)$(prefix)/share/rpt-advanced/messages/en-US.ftl
 
-standalone-install: standalone-build install-jitter-development
+standalone-install: standalone-build install-jitter-development install-site-development
 	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
 	install -m 0755 build/librptadv_product.so.1 build/librptadv_file_adapter.so.1 \
-		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) \
+		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) \
 		$(DESTDIR)$(libdir)/
 	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
 	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
@@ -240,7 +268,7 @@ install-check: artifacts
 build/chan_rpt_fixture.so: tests/radio_fixture.c rust/product/include/rptadv_product.h | build
 	$(CC) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@
 
-integration: install-check build/chan_rpt_fixture.so
+integration: install-check build/chan_rpt_fixture.so site-gpio-check site-hwmon-check
 	install -m 0755 build/chan_rpt_fixture.so build/stage$(asteriskmoddir)/
 	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_rust_asterisk_lifecycle.py
 	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_asterisk_integration.py

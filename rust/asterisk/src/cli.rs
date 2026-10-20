@@ -1,10 +1,14 @@
-//! Administrative input validation shared by the three public CLI registrations.
+//! Administrative input validation for the public CLI registrations.
 use crate::bindings as ffi;
 use std::{
     ffi::{CStr, CString, c_char, c_int},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr,
 };
+
+#[path = "cli_site.rs"]
+mod site;
+pub(crate) use site::callback as site_callback;
 
 fn output(fd: c_int, text: &str) {
     if let Ok(text) = CString::new(text) {

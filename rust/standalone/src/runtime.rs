@@ -72,8 +72,8 @@ impl ProductRuntime {
             return Err(RuntimeError::InvalidDescriptor);
         };
         if product.struct_size < size_of::<abi::rptadv_product_descriptor_v1>() as u32
-            || product.abi_version != 4
-            || product.capability != *b"rptadv.prod4\0\0\0\0"
+            || product.abi_version != 5
+            || product.capability != *b"rptadv.prod5\0\0\0\0"
         {
             return Err(RuntimeError::InvalidDescriptor);
         }
@@ -281,7 +281,7 @@ mod tests {
     static ACCEPTED_PEER: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn start_without_counts(
-        _: *const abi::rptadv_host_services_v5,
+        _: *const abi::rptadv_host_services_v6,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -297,7 +297,7 @@ mod tests {
     static AUTHORIZED: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" fn start(
-        _: *const abi::rptadv_host_services_v5,
+        _: *const abi::rptadv_host_services_v6,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -310,7 +310,7 @@ mod tests {
     }
 
     unsafe extern "C" fn fail_start(
-        _: *const abi::rptadv_host_services_v5,
+        _: *const abi::rptadv_host_services_v6,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -383,7 +383,7 @@ mod tests {
 
     fn descriptor(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v5,
+            *const abi::rptadv_host_services_v6,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -407,7 +407,7 @@ mod tests {
 
     fn descriptor_with_reload(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v5,
+            *const abi::rptadv_host_services_v6,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -429,14 +429,15 @@ mod tests {
     ) -> &'static abi::rptadv_product_descriptor_v1 {
         Box::leak(Box::new(abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 4,
-            capability: *b"rptadv.prod4\0\0\0\0",
+            abi_version: 5,
+            capability: *b"rptadv.prod5\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
             authorize_incoming: authorize,
             incoming: None,
             link_command: None,
+            site_command: None,
             link_status: None,
             digit: None,
             inspect_configuration: None,

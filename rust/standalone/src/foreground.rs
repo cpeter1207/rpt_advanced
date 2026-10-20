@@ -580,7 +580,7 @@ mod tests {
         };
 
         unsafe extern "C" fn start(
-            _: *const crate::abi::rptadv_host_services_v5,
+            _: *const crate::abi::rptadv_host_services_v6,
             _: *const crate::abi::rptadv_control_descriptor_v1,
             _: *const crate::abi::rptadv_file_descriptor,
             _: *const crate::abi::rptadv_speech_descriptor,
@@ -620,14 +620,15 @@ mod tests {
 
         let descriptor = Box::leak(Box::new(crate::abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<crate::abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 4,
-            capability: *b"rptadv.prod4\0\0\0\0",
+            abi_version: 5,
+            capability: *b"rptadv.prod5\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
             authorize_incoming: Some(authorize),
             incoming: Some(incoming),
             link_command: None,
+            site_command: None,
             link_status: None,
             digit: None,
             inspect_configuration: None,

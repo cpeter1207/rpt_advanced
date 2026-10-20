@@ -1,6 +1,6 @@
 # ADR 0008: Per-node transmitter protection
 
-Status: Accepted
+Status: Implemented
 
 ## Context
 

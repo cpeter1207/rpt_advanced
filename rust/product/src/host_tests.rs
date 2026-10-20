@@ -1,6 +1,8 @@
 use super::*;
 #[path = "egress_load_tests.rs"]
 mod egress_load;
+#[path = "site_host_tests.rs"]
+mod site;
 use crate::{
     abi,
     link::session::tests::{Input, peer, peer_with_async},
@@ -26,7 +28,7 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v5 =
+    let mut table: abi::rptadv_host_services_v6 =
         unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -381,6 +383,87 @@ fn render_queued_telemetry(host: &mut Host, owners: &mut AudioOwners) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+#[test]
+fn composition_shared_host_pump_preserves_receive_interruption() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // Both composition hosts hand the same prepared program to this shared product.
+    for (device, local) in [("native-cm119", true), ("RadioPlus/1000", false)] {
+        let config = document(
+            device,
+            "kerchunk_max_ms=0\n[message notice]\ncontent={tone_sequence} {media}\ntone_sequence=600/1000\nmorse_text=E\ndtmf_id=1\n",
+        );
+        let mut host = Host::start(config, media(), services(), Instant::now(), clock()).unwrap();
+        let lease = Arc::clone(&host.leases[0].1);
+        assert!(lease.lock().unwrap().quiesce());
+        let mut owners = lease.lock().unwrap().owners.take().unwrap();
+        host.immediate(
+            "1000",
+            LinkEffect::Message {
+                selector: "1".into(),
+                reply: None,
+            },
+            clock(),
+        )
+        .unwrap();
+        let mut heard_primary = false;
+        for _ in 0..1000 {
+            let mut audio = [0.0; 48];
+            owners
+                .1
+                .acquire()
+                .unwrap()
+                .state()
+                .controller
+                .process_audio(false, false, &[], &mut audio);
+            host.pump(clock()).unwrap();
+            if audio.iter().any(|sample| *sample != 0.0) {
+                heard_primary = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(heard_primary);
+        // The receive edge cancels a one-second attention segment. Its full Morse
+        // replacement must finish far sooner, even after receive falls again.
+        owners
+            .1
+            .acquire()
+            .unwrap()
+            .state()
+            .controller
+            .process_audio(local, !local, &[], &mut [0.0; 48]);
+        let mut heard_morse = false;
+        let mut finished = false;
+        let mut audible = 0;
+        for _ in 0..1000 {
+            let mut audio = [0.0; 48];
+            let keyed = owners
+                .1
+                .acquire()
+                .unwrap()
+                .state()
+                .controller
+                .process_audio(false, false, &[], &mut audio);
+            audible += audio.iter().filter(|sample| **sample != 0.0).count();
+            heard_morse |= audible != 0;
+            host.pump(clock()).unwrap();
+            if heard_morse && !keyed {
+                finished = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            finished && audible < 10_000,
+            "primary must not resume: {device}, audible={audible}"
+        );
+        lease.lock().unwrap().owners = Some(owners);
+        assert!(host.stop(30));
+    }
 }
 
 #[test]

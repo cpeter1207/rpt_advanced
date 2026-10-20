@@ -41,14 +41,15 @@ struct Session {
     fail_start: bool,
 }
 impl StationMediaSession for Session {
-    fn register(
+    fn register_program(
         &mut self,
-        source: MediaSource,
+        program: crate::media::MediaProgram,
+        _: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
         if self.fail_register {
             return Err(MediaError::Io);
         }
-        self.sources.lock().unwrap().push(source);
+        self.sources.lock().unwrap().extend(program.primary);
         Ok(Box::new(StreamReader {
             samples: vec![0.5, 0.25],
             offset: 0,
@@ -125,10 +126,10 @@ fn settings() -> ResolvedIdentifierSettings {
 }
 
 #[test]
-fn every_telemetry_source_is_registered_with_the_station_pcm_producer() {
+fn static_telemetry_is_registered_and_identifiers_request_fresh_attempts() {
     let config = ConfigDocument::parse(
         "[1000]\n\
-         [identifier 1000 id]\nsound_file=id.wav\nspeech_text=ID\nmorse_text=ID\n\
+         [identifier 1000 id]\ninterval_ms=1\nregardless_of_activity=yes\nsound_file=id.wav\nspeech_text=ID\nmorse_text=ID\n\
          [announcement 1000 news]\nmorse_text=NEWS\n\
          [courtesy 1000 link]\ninput=link\ntone_sequence=500/10\nmorse_text=L\n",
     )
@@ -136,19 +137,32 @@ fn every_telemetry_source_is_registered_with_the_station_pcm_producer() {
     let node = NodeId::new("1000").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
     let media = media(false, false);
-    controller(&config, &node, &resolved, &media, 7).unwrap();
+    let (mut controller, mut control, _, _station, recipes) = controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+    )
+    .unwrap();
     assert!(media.started.load(Ordering::Acquire));
     let sources = media.sources.lock().unwrap();
-    assert_eq!(sources.len(), 3);
-    assert_eq!(
-        sources[0].file.as_deref(),
-        Some(std::path::Path::new("id.wav"))
-    );
-    assert_eq!(sources[0].speech.as_ref().unwrap().text, "ID");
-    assert_eq!(sources[0].morse.as_ref().unwrap().text, "ID");
-    assert_eq!(sources[1].morse.as_ref().unwrap().text, "NEWS");
-    assert_eq!(sources[2].tone.as_ref().unwrap().sequence, "500/10");
-    assert_eq!(sources[2].morse.as_ref().unwrap().text, "L");
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0].morse.as_ref().unwrap().text, "NEWS");
+    assert_eq!(sources[1].tone.as_ref().unwrap().sequence, "500/10");
+    assert_eq!(sources[1].morse.as_ref().unwrap().text, "L");
+    controller.process_audio(false, false, &[], &mut [0.0; 960]);
+    let request = control.take_message_request().unwrap();
+    let super::super::composition::MessageRecipe::Composition(recipe) =
+        &recipes.items[request.content_index]
+    else {
+        panic!("identifier composition");
+    };
+    let source = &recipe.settings_for(None).media;
+    assert_eq!(source.file.as_deref(), Some(std::path::Path::new("id.wav")));
+    assert_eq!(source.speech.as_ref().unwrap().text, "ID");
+    assert_eq!(source.morse.as_ref().unwrap().text, "ID");
 }
 
 #[test]
@@ -157,6 +171,7 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
         "[1000]\n\
          [identifier 1000 empty]\n\
          [announcement 1000 empty]\n\
+         [announcement 1000 recorded]\nsound_file=news.wav\n\
          [courtesy 1000 empty]\ninput=link\n\
          [courtesy 1000 receiver]\ninput=receiver\nmorse_text=R\n\
          [courtesy 1000 peer]\ninput=link\nremote_node=2000\nmorse_text=P\n",
@@ -166,12 +181,73 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
     let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
     let media = media(false, false);
 
-    controller(&config, &node, &resolved, &media, 7).unwrap();
+    controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+    )
+    .unwrap();
 
     let sources = media.sources.lock().unwrap();
-    assert_eq!(sources.len(), 2);
-    assert_eq!(sources[0].morse.as_ref().unwrap().text, "R");
-    assert_eq!(sources[1].morse.as_ref().unwrap().text, "P");
+    assert_eq!(sources.len(), 3);
+    assert_eq!(
+        sources[0].file.as_deref(),
+        Some(std::path::Path::new("news.wav"))
+    );
+    assert_eq!(sources[1].morse.as_ref().unwrap().text, "R");
+    assert_eq!(sources[2].morse.as_ref().unwrap().text, "P");
+}
+
+#[test]
+fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
+    let config = ConfigDocument::parse(
+        "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n\
+         [identifier 1000 broken]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_missing}\n\
+         [tail 1000 empty]\n\
+         [tail 1000 broken]\ncontent={message_macro_missing}\n\
+         [tail 1000 recorded]\nsound_file=tail.wav\nmorse_text=TAIL\n",
+    )
+    .unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    let media = media(false, false);
+    let (mut controller, mut control, _, _station, recipes) = controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+    )
+    .unwrap();
+    let disabled = recipes
+        .warnings
+        .iter()
+        .filter(|warning| warning.fallback == "definition disabled")
+        .map(|warning| warning.section.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(disabled, ["identifier 1000 broken", "tail 1000 broken"]);
+    let mut requests = Vec::new();
+    for receiving in [true, false, false] {
+        controller.process_audio(receiving, false, &[], &mut [0.0; 48]);
+        if let Some(request) = control.take_message_request() {
+            requests.push(request);
+        }
+    }
+    assert_eq!(requests.len(), 1);
+    let super::super::composition::MessageRecipe::Composition(recipe) =
+        &recipes.items[requests[0].content_index]
+    else {
+        panic!("recorded tail composition");
+    };
+    assert_eq!(
+        recipe.settings_for(None).media.file.as_deref(),
+        Some(std::path::Path::new("tail.wav"))
+    );
+    assert!(media.sources.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -235,15 +311,30 @@ fn config_failures_convert_to_the_runtime_error_boundary() {
 
 #[test]
 fn station_registration_and_start_fail_before_publishing_controller_state() {
-    let config = ConfigDocument::parse("[1000]\n[identifier 1000 id]\nmorse_text=ID\n").unwrap();
+    let config =
+        ConfigDocument::parse("[1000]\n[announcement 1000 news]\nmorse_text=NEWS\n").unwrap();
     let node = NodeId::new("1000").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
     assert!(matches!(
-        controller(&config, &node, &resolved, &media(true, false), 7),
+        controller(
+            &config,
+            &node,
+            &resolved,
+            &media(true, false),
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap()
+        ),
         Err(RuntimeError::Preparation)
     ));
     assert!(matches!(
-        controller(&config, &node, &resolved, &media(false, true), 7),
+        controller(
+            &config,
+            &node,
+            &resolved,
+            &media(false, true),
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap()
+        ),
         Err(RuntimeError::Preparation)
     ));
 }

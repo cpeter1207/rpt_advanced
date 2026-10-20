@@ -1,9 +1,698 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
+fn segment(ring: InboundConsumer, budget: u64) -> SegmentConsumer {
+    SegmentConsumer {
+        ring,
+        progress: Arc::new(SegmentProgress {
+            budget: AtomicU64::new(budget),
+            undrainable: AtomicBool::new(false),
+        }),
+        consumed: 0,
+    }
+}
+
+#[test]
+fn finite_segment_stops_at_its_published_budget_until_more_source_arrives() {
+    let (mut producer, consumer) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+    producer.write(&[0.25; 8]).unwrap();
+    let mut consumer = segment(consumer, 0);
+
+    assert_eq!(consumer.render_sample().unwrap(), None);
+    assert_eq!(consumer.consumed, 0);
+    assert!(!consumer.finished(false));
+
+    consumer.progress.budget.store(1, Ordering::Release);
+    assert!(consumer.render_sample().unwrap().is_some());
+    assert_eq!(consumer.render_sample().unwrap(), None);
+    assert_eq!(consumer.consumed, 1);
+    assert!(!consumer.finished(false));
+    drop(producer);
+    assert!(consumer.finished(false));
+}
+
 static READS: AtomicUsize = AtomicUsize::new(0);
 static READING: AtomicBool = AtomicBool::new(false);
 static RELEASE_READ: AtomicBool = AtomicBool::new(false);
+
+fn composition_tone(frequency: u32) -> MediaSource {
+    MediaSource {
+        tone: Some(rpt_advanced_core::media::ToneSource {
+            sequence: format!("{frequency}/10"),
+            level_db: -6,
+        }),
+        ..MediaSource::default()
+    }
+}
+
+#[test]
+fn composition_boundary_rechecks_late_generation() {
+    let (mut current, current_rx) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+    current.write(&[0.25]).unwrap();
+    drop(current);
+    let (mut stale, stale_rx) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+    stale.write(&[0.75; 8]).unwrap();
+    drop(stale);
+    let (mut ready_tx, ready) = RingBuffer::new(1);
+    ready_tx.push((1, 0, segment(stale_rx, 8))).unwrap();
+    let (retired, _retired_rx) = RingBuffer::new(1);
+    let control = Arc::new(JobControl::default());
+    control.requested.store(2, Ordering::Release);
+    let mut reader = StreamReader {
+        control,
+        ready,
+        retired,
+        generation: 2,
+        delay_remaining: 0,
+        consumer: Some((2, segment(current_rx, 1))),
+        morse_available: true,
+        fallback_morse_pending: false,
+    };
+    let mut output = [0.0; 16];
+    assert_eq!(reader.render(&mut output), PcmRead::Samples(1));
+    assert_eq!(&output[1..], &[0.0; 15]);
+}
+
+#[test]
+fn composition_failure_preserves_pending_converter_tail() {
+    let (mut producer, consumer) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+    let (_ready_tx, ready) = RingBuffer::new(1);
+    let (retired, _retired_rx) = RingBuffer::new(1);
+    let control = Arc::new(JobControl::default());
+    control.requested.store(1, Ordering::Release);
+    control.failed.store(1, Ordering::Release);
+    control.completed.store(1, Ordering::Release);
+    let mut reader = StreamReader {
+        control,
+        ready,
+        retired,
+        generation: 1,
+        delay_remaining: 0,
+        consumer: Some((1, segment(consumer, 8))),
+        morse_available: false,
+        fallback_morse_pending: false,
+    };
+    // Model converter latency: a temporary empty result is not lost source PCM.
+    assert_eq!(reader.render(&mut [0.0; 16]), PcmRead::Pending);
+    producer.write(&[0.25; 8]).unwrap();
+    drop(producer);
+    assert_eq!(reader.render(&mut [0.0; 16]), PcmRead::Samples(8));
+    assert_eq!(reader.render(&mut [0.0; 16]), PcmRead::Failed);
+}
+
+fn composition_morse(text: &str) -> rpt_advanced_core::media::MorseSource {
+    rpt_advanced_core::media::MorseSource {
+        text: text.into(),
+        speed_wpm: 20,
+        frequency_hz: 800.0,
+        level_db: -6,
+    }
+}
+
+fn composition_render(primary: Vec<MediaSource>) -> Vec<f32> {
+    let file = fixture_context(fixture(22_050, 441, 0.25), true, false);
+    let mut session = StationSession::new("1000".into(), 1, file, context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            rpt_advanced_core::media::MediaProgram {
+                primary,
+                morse: vec![],
+            },
+            false,
+        )
+        .unwrap();
+    session.start().unwrap();
+    reader.start();
+    collect_samples(reader.as_mut(), &mut [0.0; 97])
+}
+
+#[test]
+fn composition_file_success_keeps_following_macro() {
+    let file = MediaSource {
+        file: Some("test.wav".into()),
+        ..MediaSource::default()
+    };
+    let following = composition_tone(1_000);
+    let mut expected = composition_render(vec![file.clone()]);
+    expected.extend(composition_render(vec![following.clone()]));
+    assert_eq!(composition_render(vec![file, following]), expected);
+}
+
+#[test]
+fn composition_segment_rates_keep_final_samples() {
+    let sources = vec![
+        composition_tone(500),
+        MediaSource {
+            file: Some("test.wav".into()),
+            ..MediaSource::default()
+        },
+        composition_tone(1_000),
+    ];
+    let expected: Vec<_> = sources
+        .iter()
+        .flat_map(|source| composition_render(vec![source.clone()]))
+        .collect();
+    assert!(expected.len() >= 1_920);
+    assert_eq!(composition_render(sources), expected);
+}
+
+#[test]
+fn composition_producer_waits_for_the_two_live_segment_consumers() {
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            MediaProgram {
+                primary: vec![
+                    composition_tone(500),
+                    composition_tone(750),
+                    composition_tone(1_000),
+                ],
+                morse: vec![],
+            },
+            false,
+        )
+        .unwrap();
+    let mut job = session.jobs.pop().unwrap();
+    let control = Arc::clone(&job.control);
+    reader.start();
+    let file = Arc::clone(&session.file);
+    let speech = Arc::clone(&session.speech);
+    let stopping = Arc::clone(&session.stopping);
+    let worker = thread::spawn(move || {
+        run_job(&mut job, 1, &file, &speech, &stopping, InboundRing::open);
+        job
+    });
+    // Acquire the playing segment, leaving its successor ready and neither retired.
+    let mut prefix = Vec::new();
+    for _ in 0..1_000 {
+        if control.consumer_outstanding.load(Ordering::Acquire) == 2 {
+            break;
+        }
+        let mut output = [0.0; 1];
+        match reader.render(&mut output) {
+            PcmRead::Samples(1) => prefix.push(output[0]),
+            PcmRead::Pending => {}
+            other => panic!("producer completed before backpressure: {other:?}"),
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(control.consumer_outstanding.load(Ordering::Acquire), 2);
+    thread::sleep(Duration::from_millis(5));
+    assert_eq!(control.completed.load(Ordering::Acquire), 0);
+    assert_eq!(control.failed.load(Ordering::Acquire), 0);
+    let remaining = collect_samples(reader.as_mut(), &mut [0.0; 64]);
+    assert_eq!(prefix.len() + remaining.len(), 1_440);
+    assert_eq!(
+        worker
+            .join()
+            .unwrap()
+            .control
+            .completed
+            .load(Ordering::Acquire),
+        1
+    );
+}
+
+#[test]
+fn composition_fractional_source_duration_excludes_flush_guard() {
+    for count in [1, 8, 440, 442] {
+        let file = fixture_context(fixture(22_050, count, 0.25), true, false);
+        let mut session = StationSession::new("1000".into(), 1, file, context(None)).unwrap();
+        let mut reader = session
+            .register(MediaSource {
+                file: Some("test.wav".into()),
+                ..MediaSource::default()
+            })
+            .unwrap();
+        session.start().unwrap();
+        reader.start();
+        assert_eq!(
+            collect_samples(reader.as_mut(), &mut [0.0; 97]).len(),
+            (count * 48_000).div_ceil(22_050),
+            "source samples={count}"
+        );
+    }
+}
+
+#[test]
+fn composition_stream_one_completion() {
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            rpt_advanced_core::media::MediaProgram {
+                primary: vec![
+                    composition_tone(500),
+                    composition_tone(1_000),
+                    composition_tone(1_500),
+                ],
+                morse: vec![],
+            },
+            false,
+        )
+        .unwrap();
+    session.start().unwrap();
+    reader.start();
+    let mut count = 0;
+    let mut final_samples = false;
+    for _ in 0..10_000 {
+        match reader.render(&mut [0.0; 31]) {
+            PcmRead::Samples(n) => {
+                assert!(!final_samples);
+                count += n;
+            }
+            PcmRead::FinalSamples(n) => {
+                assert!(!final_samples);
+                final_samples = true;
+                count += n;
+            }
+            PcmRead::Pending => thread::sleep(Duration::from_millis(1)),
+            PcmRead::Finished => {
+                assert!(count >= 1_440);
+                return;
+            }
+            PcmRead::Failed => panic!("valid program failed"),
+        }
+    }
+    panic!("program did not complete");
+}
+
+#[test]
+fn composition_receive_restarts_full_morse() {
+    let morse = vec![composition_morse("E"), composition_morse("T")];
+    let expected: Vec<_> = morse
+        .iter()
+        .flat_map(|source| {
+            composition_render(vec![MediaSource {
+                morse: Some(source.clone()),
+                ..MediaSource::default()
+            }])
+        })
+        .collect();
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            rpt_advanced_core::media::MediaProgram {
+                primary: vec![composition_tone(500), composition_tone(1_000)],
+                morse,
+            },
+            false,
+        )
+        .unwrap();
+    session.start().unwrap();
+    reader.start();
+    let mut heard = false;
+    for _ in 0..10_000 {
+        if matches!(reader.render(&mut [0.0; 17]), PcmRead::Samples(_)) {
+            heard = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(heard);
+    assert_ne!(reader.select_morse_fallback(), MorseSwitch::Unavailable);
+    assert_eq!(collect_samples(reader.as_mut(), &mut [0.0; 97]), expected);
+}
+
+#[test]
+fn composition_attention_positions_survive_speech_fallback() {
+    let message = MediaSource {
+        speech: Some(rpt_advanced_core::media::SpeechSource {
+            text: "unavailable".into(),
+            model: "missing.onnx".into(),
+            speed_percent: 100,
+            level_db: -6,
+        }),
+        morse: Some(composition_morse("E")),
+        ..MediaSource::default()
+    };
+    let sources = vec![
+        composition_tone(500),
+        message.clone(),
+        composition_tone(1_000),
+        message,
+        composition_tone(1_500),
+    ];
+    let expected: Vec<_> = sources
+        .iter()
+        .flat_map(|source| composition_render(vec![source.clone()]))
+        .collect();
+    assert_eq!(composition_render(sources), expected);
+}
+
+#[test]
+fn composition_reuses_complete_program() {
+    let sources = vec![composition_tone(500), composition_tone(1_000)];
+    let expected = composition_render(sources.clone());
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            rpt_advanced_core::media::MediaProgram {
+                primary: sources,
+                morse: vec![],
+            },
+            false,
+        )
+        .unwrap();
+    session.start().unwrap();
+    for _ in 0..2 {
+        reader.start();
+        assert_eq!(collect_samples(reader.as_mut(), &mut [0.0; 97]), expected);
+        reader.cancel();
+    }
+}
+
+#[test]
+fn composition_one_shot_rewind_keeps_its_producer_until_completion() {
+    let sources = vec![composition_tone(500), composition_tone(1_000)];
+    let expected = composition_render(sources.clone());
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            rpt_advanced_core::media::MediaProgram {
+                primary: sources,
+                morse: vec![],
+            },
+            true,
+        )
+        .unwrap();
+    session.start().unwrap();
+    reader.start();
+    let mut heard = false;
+    for _ in 0..10_000 {
+        if matches!(reader.render(&mut [0.0; 17]), PcmRead::Samples(_)) {
+            heard = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(heard);
+    reader.rewind();
+    assert_eq!(collect_samples(reader.as_mut(), &mut [0.0; 97]), expected);
+}
+
+#[test]
+fn composition_pending_successor_keeps_playback_active() {
+    let (mut producer, consumer) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+    producer.write(&[0.25; 8]).unwrap();
+    drop(producer);
+    let control = Arc::new(JobControl::default());
+    let (mut ready_tx, ready) = RingBuffer::new(1);
+    let (retired, mut retired_rx) = RingBuffer::new(1);
+    ready_tx.push((1, 0, segment(consumer, 8))).unwrap();
+    let reader = StreamReader {
+        control,
+        ready,
+        retired,
+        generation: 0,
+        delay_remaining: 0,
+        consumer: None,
+        morse_available: false,
+        fallback_morse_pending: false,
+    };
+    let mut playback = rpt_advanced_core::audio::Playback::new_stream(Box::new(reader));
+    assert_eq!(playback.render(false, &mut [0.0; 16]), 8);
+    drop(retired_rx.pop().unwrap());
+    assert_eq!(playback.render(false, &mut [0.0; 16]), 0);
+    assert!(playback.waiting_for_stream());
+    assert_eq!(
+        playback.outcome(),
+        rpt_advanced_core::audio::PlaybackOutcome::Active
+    );
+    let (mut producer, consumer) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+    producer.write(&[0.5; 8]).unwrap();
+    drop(producer);
+    ready_tx.push((1, 0, segment(consumer, 8))).unwrap();
+    assert_eq!(playback.render(false, &mut [0.0; 16]), 8);
+    assert!(!playback.is_finished());
+}
+
+#[test]
+fn morse_reused_stream_restart() {
+    let control = Arc::new(JobControl::default());
+    control.requested.store(1, Ordering::Release);
+    let (_ready, ready) = RingBuffer::new(1);
+    let (retired, _retired_rx) = RingBuffer::new(1);
+    let reader = StreamReader {
+        control: Arc::clone(&control),
+        ready,
+        retired,
+        generation: 1,
+        delay_remaining: 0,
+        consumer: None,
+        morse_available: true,
+        fallback_morse_pending: false,
+    };
+    let mut playback = rpt_advanced_core::audio::Playback::new_stream(Box::new(reader));
+    playback.restart(true);
+    assert_eq!(playback.render(false, &mut [0.0]), 0);
+    assert_eq!(
+        control.fallback_morse.load(Ordering::Acquire),
+        control.requested.load(Ordering::Acquire),
+        "restart must keep the selected Morse generation"
+    );
+}
+
+#[test]
+fn morse_pending_retirement_gates_primary() {
+    let (_, occupied) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    let (_, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    let (mut retired, mut retired_rx) = RingBuffer::new(1);
+    retired.push((0, segment(occupied, u64::MAX))).unwrap();
+    let (_ready, ready) = RingBuffer::new(1);
+    let control = Arc::new(JobControl::default());
+    control.requested.store(1, Ordering::Release);
+    let reader = StreamReader {
+        control: Arc::clone(&control),
+        ready,
+        retired,
+        generation: 1,
+        delay_remaining: 0,
+        consumer: Some((1, segment(consumer, u64::MAX))),
+        morse_available: true,
+        fallback_morse_pending: false,
+    };
+    let mut playback = rpt_advanced_core::audio::Playback::new_stream(Box::new(reader));
+    assert_eq!(playback.render(true, &mut [0.0]), 0);
+    assert!(
+        !playback.is_finished(),
+        "retirement pressure is not a missing Morse fallback"
+    );
+    drop(retired_rx.pop().unwrap());
+    assert_eq!(playback.render(false, &mut [0.0]), 0);
+    assert!(!playback.is_finished());
+    assert_eq!(
+        control.fallback_morse.load(Ordering::Acquire),
+        control.requested.load(Ordering::Acquire)
+    );
+}
+
+#[test]
+fn morse_late_primary_writes_rejected() {
+    let (mut old_producer, old_consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    let (mut late_producer, late_consumer) =
+        InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    let (mut ready_tx, ready) = RingBuffer::new(2);
+    let (retired, mut retired_rx) = RingBuffer::new(2);
+    let control = Arc::new(JobControl::default());
+    control.requested.store(1, Ordering::Release);
+    let mut reader = StreamReader {
+        control: Arc::clone(&control),
+        ready,
+        retired,
+        generation: 1,
+        delay_remaining: 0,
+        consumer: Some((1, segment(old_consumer, u64::MAX))),
+        morse_available: true,
+        fallback_morse_pending: false,
+    };
+    reader.select_morse_fallback();
+    old_producer.write(&[0.75; 64]).unwrap();
+    late_producer.write(&[0.75; 64]).unwrap();
+    ready_tx
+        .push((1, 0, segment(late_consumer, u64::MAX)))
+        .unwrap();
+    let mut output = [0.0; 16];
+    assert_eq!(reader.render(&mut output), PcmRead::Pending);
+    assert_eq!(output, [0.0; 16]);
+    assert_eq!(retired_rx.pop().unwrap().0, 1);
+    assert_eq!(retired_rx.pop().unwrap().0, 1);
+    assert_eq!(control.requested.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn morse_failed_stream_tail_is_not_success() {
+    for provider_failure in [false, true] {
+        let (mut producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+        producer.write(&[0.25; 8]).unwrap();
+        let control = Arc::new(JobControl::default());
+        control.requested.store(1, Ordering::Release);
+        control.completed.store(1, Ordering::Release);
+        if provider_failure {
+            control.failed.store(1, Ordering::Release);
+        }
+        let (_ready, ready) = RingBuffer::new(1);
+        let (retired, _retired_rx) = RingBuffer::new(1);
+        let consumer = if provider_failure {
+            consumer
+        } else {
+            crate::link::ring::tests::sample_then_fail_consumer()
+        };
+        let mut reader = StreamReader {
+            control,
+            ready,
+            retired,
+            generation: 1,
+            delay_remaining: 0,
+            consumer: Some((
+                1,
+                segment(consumer, if provider_failure { 8 } else { u64::MAX }),
+            )),
+            morse_available: false,
+            fallback_morse_pending: false,
+        };
+        assert!(matches!(reader.render(&mut [0.0; 64]), PcmRead::Samples(n) if n > 0));
+        assert_eq!(reader.render(&mut [0.0; 64]), PcmRead::Failed);
+    }
+}
+
+#[test]
+fn morse_switch_pending_cannot_retire_a_one_shot_job() {
+    let control = Arc::new(JobControl::default());
+    control.requested.store(1, Ordering::Release);
+    control.completed.store(1, Ordering::Release);
+    let (ready_tx, ready) = RingBuffer::new(1);
+    let (mut retired, retired_rx) = RingBuffer::new(1);
+    let (_, occupied) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    let (_, primary) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    retired.push((0, segment(occupied, u64::MAX))).unwrap();
+    let mut reader = StreamReader {
+        control: Arc::clone(&control),
+        ready,
+        retired,
+        generation: 1,
+        delay_remaining: 0,
+        consumer: Some((1, segment(primary, u64::MAX))),
+        morse_available: true,
+        fallback_morse_pending: false,
+    };
+    let mut job = WorkerJob {
+        source: WorkerSource::Program(MediaProgram::single(MediaSource::default())),
+        control,
+        ready: ready_tx,
+        retired: retired_rx,
+        handled: 1,
+        one_shot: true,
+    };
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Pending);
+    let selected = job.control.requested.load(Ordering::Acquire);
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Pending);
+    assert_eq!(job.control.requested.load(Ordering::Acquire), selected);
+    assert_eq!(job.control.fallback_morse.load(Ordering::Acquire), selected);
+    drop(job.retired.pop().unwrap());
+    job.control.consumer_outstanding.store(0, Ordering::Release);
+    assert!(
+        !one_shot_done(&job),
+        "pending Morse selection is not terminal cancellation"
+    );
+}
+
+#[test]
+fn morse_replacement_waits_for_late_primary_consumer() {
+    let (mut session, marker, mut marker_reader) = registered_file_job(fixture(48000, 0, 0.0));
+    marker_reader.start();
+    let marker_control = Arc::clone(&marker.control);
+    let control = Arc::new(JobControl::default());
+    control.requested.store(2, Ordering::Release);
+    control.fallback_morse.store(2, Ordering::Release);
+    control.consumer_outstanding.store(1, Ordering::Release);
+    let (mut ready_tx, ready) = RingBuffer::new(1);
+    let (retired, retired_rx) = RingBuffer::new(1);
+    let (mut old_producer, old_consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    old_producer.write(&[0.75; 64]).unwrap();
+    ready_tx
+        .push((1, 0, segment(old_consumer, u64::MAX)))
+        .unwrap();
+    let mut reader = StreamReader {
+        control: Arc::clone(&control),
+        ready,
+        retired,
+        generation: 2,
+        delay_remaining: 0,
+        consumer: None,
+        morse_available: true,
+        fallback_morse_pending: false,
+    };
+    let job = WorkerJob {
+        source: WorkerSource::Program(MediaProgram::single(MediaSource {
+            morse: Some(rpt_advanced_core::media::MorseSource {
+                text: "E".into(),
+                speed_wpm: 20,
+                frequency_hz: 800.0,
+                level_db: -6,
+            }),
+            ..MediaSource::default()
+        })),
+        control: Arc::clone(&control),
+        ready: ready_tx,
+        retired: retired_rx,
+        handled: 1,
+        one_shot: true,
+    };
+    let (_requests, requests) = RingBuffer::new(1);
+    let file = Arc::clone(&session.file);
+    let speech = Arc::clone(&session.speech);
+    let stopping = Arc::clone(&session.stopping);
+    session.worker = Some(thread::spawn(move || {
+        worker_loop(vec![job, marker], requests, file, speech, stopping);
+    }));
+    // The second job confirms that the worker visited the replacement before audio drains ready.
+    for _ in 0..1000 {
+        if marker_control.completed.load(Ordering::Acquire) == 1 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(marker_control.completed.load(Ordering::Acquire), 1);
+    assert_eq!(
+        control.failed.load(Ordering::Acquire),
+        0,
+        "a late primary endpoint must not fail replacement publication"
+    );
+    let pcm = collect_samples(&mut reader, &mut [0.0; 64]);
+    assert!((2880..=2882).contains(&pcm.len()));
+    assert!(
+        pcm.iter().all(|sample| sample.abs() < 0.6),
+        "no old primary PCM"
+    );
+}
+
+#[test]
+fn morse_final_samples_retire_producer_without_an_extra_read() {
+    let control = Arc::new(JobControl::default());
+    control.completed.store(1, Ordering::Release);
+    let (mut producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+    producer.write(&[0.25; 8]).unwrap();
+    let (_ready, ready) = RingBuffer::new(1);
+    let (retired, mut retired_rx) = RingBuffer::new(1);
+    let reader = StreamReader {
+        control: Arc::clone(&control),
+        ready,
+        retired,
+        generation: 0,
+        delay_remaining: 0,
+        consumer: Some((1, segment(consumer, 8))),
+        morse_available: true,
+        fallback_morse_pending: false,
+    };
+    let mut playback = rpt_advanced_core::audio::Playback::new_stream(Box::new(reader));
+    assert!(playback.render(false, &mut [0.0; 64]) > 0);
+    assert_eq!(
+        playback.outcome(),
+        rpt_advanced_core::audio::PlaybackOutcome::Succeeded
+    );
+    assert_eq!(control.cancelled.load(Ordering::Acquire), 1);
+    assert_eq!(retired_rx.pop().unwrap().0, 1);
+}
 
 struct Fixture {
     open_code: i32,
@@ -454,12 +1143,12 @@ fn worker_loop_reclaims_consumer_after_stream_generation_is_cancelled() {
     assert_eq!(reader.render(&mut [0.0; 64]), PcmRead::Pending);
 
     for _ in 0..1_000 {
-        if !control.consumer_outstanding.load(Ordering::Acquire) {
+        if control.consumer_outstanding.load(Ordering::Acquire) == 0 {
             break;
         }
         thread::sleep(Duration::from_millis(1));
     }
-    assert!(!control.consumer_outstanding.load(Ordering::Acquire));
+    assert!(control.consumer_outstanding.load(Ordering::Acquire) == 0);
     stopping.store(true, Ordering::Release);
     worker.join().unwrap();
 }
@@ -798,7 +1487,7 @@ fn active_producer_streams_tone_then_morse_fallback_on_fresh_registration() {
         .register_once(source)
         .expect("a fresh telemetry stream can be submitted to the active producer");
     reader.start();
-    assert!(reader.select_morse_fallback());
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Selected);
     assert!((2_880..=2_882).contains(&collect_stream(reader.as_mut(), &mut output)));
 }
 
@@ -828,7 +1517,7 @@ fn receive_present_before_first_playback_selects_morse_fallback() {
         })
         .unwrap();
 
-    assert!(reader.select_morse_fallback());
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Selected);
     reader.start();
 
     let mut output = [0.0; 64];
@@ -914,12 +1603,12 @@ fn media_worker_reclaims_retired_consumer_after_one_shot_playback() {
 
     assert!(!collect_samples(reader.as_mut(), &mut [0.0; 64]).is_empty());
     for _ in 0..1_000 {
-        if !control.consumer_outstanding.load(Ordering::Acquire) {
+        if control.consumer_outstanding.load(Ordering::Acquire) == 0 {
             break;
         }
         thread::sleep(Duration::from_millis(1));
     }
-    assert!(!control.consumer_outstanding.load(Ordering::Acquire));
+    assert!(control.consumer_outstanding.load(Ordering::Acquire) == 0);
     stopping.store(true, Ordering::Release);
     worker.join().unwrap();
 }
@@ -940,8 +1629,7 @@ fn reader_fills_requested_output_from_available_ring_samples() {
         retired,
         generation: 1,
         delay_remaining: delay,
-        consumer: Some((1, consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(consumer, 4096))),
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -965,15 +1653,16 @@ fn reader_returns_pending_or_partial_samples_while_a_live_producer_is_empty() {
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(consumer, 1))),
         morse_available: false,
         fallback_morse_pending: false,
     };
     assert_eq!(reader.render(&mut [0.0; 8]), PcmRead::Pending);
 
     producer.write(&[0.25; 4096]).unwrap();
-    assert!(matches!(reader.render(&mut [0.0; 5000]), PcmRead::Samples(n) if n > 0));
+    let mut output = [0.0; 8];
+    assert_eq!(reader.render(&mut output), PcmRead::Samples(1));
+    assert_eq!(&output[1..], &[0.0; 7]);
 }
 
 #[test]
@@ -987,8 +1676,7 @@ fn reader_preserves_error_and_completion_states() {
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, failed)),
-        emitted_audio: false,
+        consumer: Some((1, segment(failed, u64::MAX))),
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1004,15 +1692,14 @@ fn reader_preserves_error_and_completion_states() {
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(consumer, u64::MAX))),
         morse_available: false,
         fallback_morse_pending: false,
     };
     let mut output = [0.0; 2];
-    assert_eq!(reader.render(&mut output), PcmRead::FinalSamples(1));
+    assert_eq!(reader.render(&mut output), PcmRead::Samples(1));
     assert_eq!(output[0], 0.25);
-    assert_eq!(reader.render(&mut output), PcmRead::Finished);
+    assert_eq!(reader.render(&mut output), PcmRead::Failed);
     drop(retired_rx.pop().unwrap());
 }
 
@@ -1021,7 +1708,7 @@ fn failed_reader_keeps_its_consumer_when_the_retirement_queue_is_full() {
     let (_unused, occupied) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let failed = crate::link::ring::tests::failed_sample_consumer();
     let (mut retired, _retired_rx) = RingBuffer::new(1);
-    retired.push((0, occupied)).unwrap();
+    retired.push((0, segment(occupied, u64::MAX))).unwrap();
     let (_ready, ready) = RingBuffer::new(1);
     let mut reader = StreamReader {
         control: Arc::new(JobControl::default()),
@@ -1029,8 +1716,7 @@ fn failed_reader_keeps_its_consumer_when_the_retirement_queue_is_full() {
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, failed)),
-        emitted_audio: true,
+        consumer: Some((1, segment(failed, u64::MAX))),
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1046,7 +1732,7 @@ fn cancel_retires_a_consumer_published_before_callback_acquired_it() {
     control.requested.store(1, Ordering::Release);
     let (mut ready, ready_rx) = RingBuffer::new(1);
     let (retired, mut retired_rx) = RingBuffer::new(1);
-    ready.push((1, 0, consumer)).unwrap();
+    ready.push((1, 0, segment(consumer, u64::MAX))).unwrap();
     let mut reader = StreamReader {
         control,
         ready: ready_rx,
@@ -1054,7 +1740,6 @@ fn cancel_retires_a_consumer_published_before_callback_acquired_it() {
         generation: 1,
         delay_remaining: 0,
         consumer: None,
-        emitted_audio: false,
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1069,9 +1754,11 @@ fn cancel_preserves_ready_owners_when_retirement_is_backpressured() {
     let (_unused, occupied) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (_unused, ready_consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (mut retired, _retired_rx) = RingBuffer::new(1);
-    retired.push((0, occupied)).unwrap();
+    retired.push((0, segment(occupied, u64::MAX))).unwrap();
     let (mut ready_tx, ready) = RingBuffer::new(1);
-    ready_tx.push((1, 0, ready_consumer)).unwrap();
+    ready_tx
+        .push((1, 0, segment(ready_consumer, u64::MAX)))
+        .unwrap();
     let mut reader = StreamReader {
         control: Arc::new(JobControl::default()),
         ready,
@@ -1079,7 +1766,6 @@ fn cancel_preserves_ready_owners_when_retirement_is_backpressured() {
         generation: 1,
         delay_remaining: 0,
         consumer: None,
-        emitted_audio: false,
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1094,7 +1780,7 @@ fn active_fallback_waits_when_a_consumer_cannot_be_retired() {
     let (_unused, occupied) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (_unused, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (mut retired, _retired_rx) = RingBuffer::new(1);
-    retired.push((0, occupied)).unwrap();
+    retired.push((0, segment(occupied, u64::MAX))).unwrap();
     let (_ready, ready) = RingBuffer::new(1);
     let mut reader = StreamReader {
         control: Arc::new(JobControl::default()),
@@ -1102,14 +1788,13 @@ fn active_fallback_waits_when_a_consumer_cannot_be_retired() {
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(consumer, u64::MAX))),
         morse_available: true,
         fallback_morse_pending: false,
     };
 
-    assert!(!reader.select_morse_fallback());
-    assert_eq!(reader.generation, 1);
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Pending);
+    assert_eq!(reader.generation, 2);
     assert!(reader.consumer.is_some());
 }
 
@@ -1118,9 +1803,11 @@ fn morse_fallback_retains_a_ready_consumer_when_retirement_is_full() {
     let (_unused, occupied) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (_unused, ready_consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (mut retired, _retired_rx) = RingBuffer::new(1);
-    retired.push((0, occupied)).unwrap();
+    retired.push((0, segment(occupied, u64::MAX))).unwrap();
     let (mut ready_tx, ready) = RingBuffer::new(1);
-    ready_tx.push((1, 0, ready_consumer)).unwrap();
+    ready_tx
+        .push((1, 0, segment(ready_consumer, u64::MAX)))
+        .unwrap();
     let mut reader = StreamReader {
         control: Arc::new(JobControl::default()),
         ready,
@@ -1128,40 +1815,43 @@ fn morse_fallback_retains_a_ready_consumer_when_retirement_is_full() {
         generation: 1,
         delay_remaining: 0,
         consumer: None,
-        emitted_audio: false,
         morse_available: true,
         fallback_morse_pending: false,
     };
 
-    assert!(!reader.select_morse_fallback());
-    assert_eq!(reader.generation, 1);
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Pending);
+    assert_eq!(reader.generation, 2);
     assert!(reader.consumer.is_some());
 }
 
 #[test]
-fn morse_fallback_retires_the_current_and_ready_consumers_when_capacity_exists() {
+fn morse_fallback_retires_primary_but_keeps_a_ready_replacement() {
     let (_unused, active_consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (_unused, ready_consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (retired, mut retired_rx) = RingBuffer::new(2);
     let (mut ready_tx, ready) = RingBuffer::new(1);
-    ready_tx.push((2, 0, ready_consumer)).unwrap();
+    ready_tx
+        .push((2, 0, segment(ready_consumer, u64::MAX)))
+        .unwrap();
     let mut reader = StreamReader {
         control: Arc::new(JobControl::default()),
         ready,
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, active_consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(active_consumer, u64::MAX))),
         morse_available: true,
         fallback_morse_pending: false,
     };
 
-    assert!(reader.select_morse_fallback());
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Selected);
     assert_eq!(reader.generation, 2);
-    assert!(reader.consumer.is_none());
-    assert!(retired_rx.pop().is_ok());
-    assert!(retired_rx.pop().is_ok());
+    assert_eq!(
+        reader.consumer.as_ref().map(|(generation, _)| *generation),
+        Some(2)
+    );
+    assert_eq!(retired_rx.pop().unwrap().0, 1);
+    assert!(retired_rx.pop().is_err());
 }
 
 #[test]
@@ -1176,7 +1866,6 @@ fn stream_reader_reports_empty_cancelled_pending_and_failed_states() {
         generation: 0,
         delay_remaining: 0,
         consumer: None,
-        emitted_audio: false,
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1202,9 +1891,13 @@ fn stream_reader_discards_stale_consumers_and_preserves_backpressured_owners() {
         InboundRing::open(48000, InboundPolicy::Media).unwrap();
     retired_source.write(&[0.25; 8]).unwrap();
     let (mut retired, mut retired_rx) = RingBuffer::new(1);
-    retired.push((7, retired_consumer)).unwrap();
+    retired
+        .push((7, segment(retired_consumer, u64::MAX)))
+        .unwrap();
     let (mut ready_tx, ready) = RingBuffer::new(1);
-    ready_tx.push((1, 0, stale_consumer)).unwrap();
+    ready_tx
+        .push((1, 0, segment(stale_consumer, u64::MAX)))
+        .unwrap();
     let mut reader = StreamReader {
         control: Arc::new(JobControl::default()),
         ready,
@@ -1212,7 +1905,6 @@ fn stream_reader_discards_stale_consumers_and_preserves_backpressured_owners() {
         generation: 2,
         delay_remaining: 0,
         consumer: None,
-        emitted_audio: false,
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1230,9 +1922,9 @@ fn acquiring_a_stale_ready_consumer_retains_it_when_reclaimer_is_full() {
     let (_unused, stale) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (_unused, occupied) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (mut retired, _retired_rx) = RingBuffer::new(1);
-    retired.push((0, occupied)).unwrap();
+    retired.push((0, segment(occupied, u64::MAX))).unwrap();
     let (mut ready_tx, ready) = RingBuffer::new(1);
-    ready_tx.push((1, 0, stale)).unwrap();
+    ready_tx.push((1, 0, segment(stale, u64::MAX))).unwrap();
     let mut reader = StreamReader {
         control: Arc::new(JobControl::default()),
         ready,
@@ -1240,7 +1932,6 @@ fn acquiring_a_stale_ready_consumer_retains_it_when_reclaimer_is_full() {
         generation: 2,
         delay_remaining: 0,
         consumer: None,
-        emitted_audio: false,
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1261,8 +1952,7 @@ fn render_retires_a_consumer_from_an_older_generation() {
         retired,
         generation: 2,
         delay_remaining: 0,
-        consumer: Some((1, consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(consumer, u64::MAX))),
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1276,7 +1966,7 @@ fn render_keeps_a_completed_consumer_when_retirement_queue_is_full() {
     let (_producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
     let (mut retired, mut retired_rx) = RingBuffer::new(1);
     let (_unused_producer, placeholder) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
-    retired.push((0, placeholder)).unwrap();
+    retired.push((0, segment(placeholder, u64::MAX))).unwrap();
     let control = Arc::new(JobControl::default());
     control.completed.store(1, Ordering::Release);
     let (_ready, ready) = RingBuffer::new(1);
@@ -1286,8 +1976,7 @@ fn render_keeps_a_completed_consumer_when_retirement_queue_is_full() {
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(consumer, 0))),
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1310,14 +1999,13 @@ fn fallback_is_unavailable_without_morse_and_pending_until_first_start() {
         generation: 0,
         delay_remaining: 0,
         consumer: None,
-        emitted_audio: false,
         morse_available: false,
         fallback_morse_pending: false,
     };
-    assert!(!reader.select_morse_fallback());
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Unavailable);
 
     reader.morse_available = true;
-    assert!(reader.select_morse_fallback());
+    assert_eq!(reader.select_morse_fallback(), MorseSwitch::Selected);
     reader.start();
     assert_eq!(reader.control.fallback_morse.load(Ordering::Acquire), 1);
 }
@@ -1388,7 +2076,7 @@ fn producer_reports_ring_open_delay_and_initial_write_failures() {
         );
         assert_eq!(job.control.failed.load(Ordering::Acquire), 1);
         assert_eq!(job.control.completed.load(Ordering::Acquire), 1);
-        assert!(!job.control.consumer_outstanding.load(Ordering::Acquire));
+        assert!(job.control.consumer_outstanding.load(Ordering::Acquire) == 0);
         assert_eq!(reader.render(&mut [0.0; 64]), PcmRead::Failed);
     }
 }
@@ -1397,7 +2085,7 @@ fn producer_reports_ring_open_delay_and_initial_write_failures() {
 fn producer_reports_a_full_ready_queue_without_leaking_its_consumer() {
     let (session, mut job, mut reader) = registered_file_job(fixture(48000, 8, 0.25));
     let (_, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
-    job.ready.push((0, 0, consumer)).unwrap();
+    job.ready.push((0, 0, segment(consumer, u64::MAX))).unwrap();
     reader.start();
 
     run_job(
@@ -1411,7 +2099,7 @@ fn producer_reports_a_full_ready_queue_without_leaking_its_consumer() {
 
     assert_eq!(job.control.failed.load(Ordering::Acquire), 1);
     assert_eq!(job.control.completed.load(Ordering::Acquire), 1);
-    assert!(!job.control.consumer_outstanding.load(Ordering::Acquire));
+    assert!(job.control.consumer_outstanding.load(Ordering::Acquire) == 0);
     assert_eq!(reader.render(&mut [0.0; 64]), PcmRead::Failed);
 }
 
@@ -1460,7 +2148,7 @@ fn producer_marks_late_read_streaming_write_and_padding_failures() {
         let job = worker.join().unwrap();
         assert_eq!(control.failed.load(Ordering::Acquire), 1);
         assert_eq!(control.completed.load(Ordering::Acquire), 1);
-        assert!(!job.control.consumer_outstanding.load(Ordering::Acquire));
+        assert!(job.control.consumer_outstanding.load(Ordering::Acquire) == 0);
     }
 }
 
@@ -1498,7 +2186,8 @@ fn producer_cancellation_stops_initial_and_later_write_paths_without_failure() {
     );
     assert_eq!(job.control.cancelled.load(Ordering::Acquire), 1);
     assert_eq!(job.control.failed.load(Ordering::Acquire), 0);
-    assert!(!job.control.consumer_outstanding.load(Ordering::Acquire));
+    assert!(job.control.consumer_outstanding.load(Ordering::Acquire) == 0);
+    assert_eq!(job.control.completed.load(Ordering::Acquire), 0);
 
     let mut later = fixture(48000, 8, 0.25);
     later.cancel_after_later_read = true;
@@ -1624,8 +2313,7 @@ fn stream_reader_marks_partial_final_audio_and_retires_after_drain() {
         retired,
         generation: 1,
         delay_remaining: 2,
-        consumer: Some((1, consumer)),
-        emitted_audio: false,
+        consumer: Some((1, segment(consumer, 8))),
         morse_available: false,
         fallback_morse_pending: false,
     };
@@ -1653,6 +2341,18 @@ fn one_shot_registration_validates_sources_queue_and_session_state() {
         context(None),
     )
     .unwrap();
+    assert_eq!(
+        session
+            .register_program(
+                MediaProgram {
+                    primary: vec![],
+                    morse: vec![composition_morse("E")],
+                },
+                false,
+            )
+            .err(),
+        Some(MediaError::InvalidRequest)
+    );
     assert_eq!(
         session.register(MediaSource::default()).err(),
         Some(MediaError::InvalidRequest)
@@ -1701,15 +2401,13 @@ fn one_shot_jobs_finish_only_after_terminal_state_and_consumer_release() {
     assert!(!one_shot_done(&job));
     job.control.requested.store(1, Ordering::Release);
     job.control.completed.store(1, Ordering::Release);
-    assert!(one_shot_done(&job));
+    assert!(!one_shot_done(&job));
     job.control.completed.store(0, Ordering::Release);
     job.control.cancelled.store(1, Ordering::Release);
     assert!(one_shot_done(&job));
     job.control.cancelled.store(0, Ordering::Release);
     assert!(!one_shot_done(&job));
-    job.control
-        .consumer_outstanding
-        .store(true, Ordering::Release);
+    job.control.consumer_outstanding.store(1, Ordering::Release);
     assert!(!one_shot_done(&job));
 }
 

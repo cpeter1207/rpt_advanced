@@ -1,6 +1,6 @@
 # ADR 0016: Control APIs are versioned and code-derived
 
-Status: Accepted
+Status: Planned; decision accepted
 
 ## Context
 

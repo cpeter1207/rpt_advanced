@@ -3,6 +3,85 @@ use super::messages::{CatalogError, Message, MessageCatalog};
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
 #[test]
+fn composition_shipped_site_messages_keep_independent_forms() {
+    use super::messages::{MessageArgument, MessageForms};
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (id, name) in [
+        ("site-time", "time"),
+        ("site-temperature", "temperature"),
+        ("site-link-status", "links"),
+        ("site-value-unavailable", "label"),
+    ] {
+        let args = std::collections::BTreeMap::from([(
+            name.into(),
+            MessageArgument::Forms(MessageForms {
+                text: "DISPLAY".into(),
+                tts: "SPEECH".into(),
+                morse: "MORSE".into(),
+            }),
+        )]);
+        let forms = catalog.format_named(id, &args).unwrap();
+        assert!(forms.text.contains("DISPLAY"));
+        assert!(forms.tts.contains("SPEECH"));
+        assert!(forms.morse.contains("MORSE"));
+    }
+}
+
+#[test]
+fn composition_named_forms_keep_numbers_and_audience_values_separate() {
+    use super::messages::{MessageArgument, MessageForms};
+    let source = format!(
+        "{ENGLISH}\nsite-test =\n    .text = {{ $node }} {{ $value }}\n    .tts = {{ $node }} {{ $value }}\n    .morse = {{ $node }} {{ $value }}\n"
+    );
+    let catalog = MessageCatalog::from_sources("en-US", &source, None).unwrap();
+    let args = std::collections::BTreeMap::from([
+        ("value".into(), MessageArgument::Number(12.5)),
+        (
+            "node".into(),
+            MessageArgument::Forms(MessageForms {
+                text: "524950".into(),
+                tts: "node,5,2,4,9,5,0".into(),
+                morse: "524950".into(),
+            }),
+        ),
+    ]);
+    let forms = catalog.format_named("site-test", &args).unwrap();
+    assert_eq!(forms.tts, "node,5,2,4,9,5,0 12.5");
+    assert_eq!(forms.morse, "524950 12.5");
+    assert!(catalog.format_named("unknown", &args).is_err());
+    assert!(
+        catalog
+            .format_named("site-test", &Default::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn composition_named_forms_enforce_independent_byte_bounds_and_fallback() {
+    for size in [100, 127, 128] {
+        let value = "x".repeat(size);
+        let source = format!(
+            "{ENGLISH}\nsite-test =\n    .text = {value}\n    .tts = {value}\n    .morse = {value}\n"
+        );
+        let catalog = MessageCatalog::from_sources(
+            "fr",
+            &source,
+            Some("site-test =\n    .text = traduit\n    .tts = { $wrong }\n"),
+        )
+        .unwrap();
+        let forms = catalog.format_named("site-test", &Default::default());
+        if size <= 127 {
+            let forms = forms.unwrap();
+            assert_eq!(forms.text, "traduit");
+            assert_eq!(forms.tts, value);
+            assert_eq!(forms.morse, value);
+        } else {
+            assert_eq!(forms, Err(CatalogError::OutputTooLong));
+        }
+    }
+}
+
+#[test]
 fn pad_test_forms_are_localized_and_bounded() {
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
     let forms = catalog.format_pad_test("*#ABCD0123456789", false).unwrap();

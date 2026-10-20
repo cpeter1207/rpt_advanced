@@ -1,6 +1,6 @@
 # ADR 0030: Appliance update trust and compliance boundary
 
-Status: Accepted
+Status: Partially implemented (signed APT distribution); appliance trust and qualification pending
 
 ## Context
 

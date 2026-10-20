@@ -1,5 +1,59 @@
 use super::*;
 
+#[test]
+fn site_dtmf_query_does_not_unlock_or_replace_the_last_link() {
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    feed_symbols(&mut commands, "*355553#");
+    let selected = feed_symbols(&mut commands, "*761#");
+    let [DigitOutcome::Operation(operation)] = selected.as_slice() else {
+        panic!("site selector")
+    };
+    assert_eq!(operation.command.node, "1");
+    assert!(!operation.admin_authorized);
+    for invalid in ["*76#", "*760#", "*7601#"] {
+        assert!(feed_symbols(&mut commands, invalid).is_empty());
+    }
+    let recalled = feed_symbols(&mut commands, "*30#");
+    let [DigitOutcome::Operation(operation)] = recalled.as_slice() else {
+        panic!("link recall")
+    };
+    assert_eq!(operation.command.node, "55553");
+}
+
+#[test]
+fn composition_dtmf_selector_preserves_last_link() {
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    assert_eq!(feed_symbols(&mut commands, "*355553#").len(), 1);
+    let selected = feed_symbols(&mut commands, "*771#");
+    let [DigitOutcome::Operation(operation)] = selected.as_slice() else {
+        panic!("message selector")
+    };
+    assert_eq!(operation.command.action, LinkAction::Message);
+    assert_eq!(operation.command.node, "1");
+    assert!(!operation.admin_authorized);
+    for invalid in ["*77#", "*770#", "*7701#"] {
+        assert!(feed_symbols(&mut commands, invalid).is_empty());
+    }
+    let recalled = feed_symbols(&mut commands, "*30#");
+    let [DigitOutcome::Operation(operation)] = recalled.as_slice() else {
+        panic!("link recall")
+    };
+    assert_eq!(operation.command.node, "55553");
+    for end in [
+        DigitEvent::Unkey { now_ms: 2 },
+        DigitEvent::Digit {
+            digit: '\0',
+            now_ms: 4000,
+        },
+    ] {
+        assert!(feed_symbols(&mut commands, "*772").is_empty());
+        let Some(DigitOutcome::Operation(operation)) = commands.feed(end) else {
+            panic!("message termination")
+        };
+        assert_eq!(operation.command.node, "2");
+    }
+}
+
 fn feed_symbols(commands: &mut DtmfCommands, symbols: &str) -> Vec<DigitOutcome> {
     symbols
         .chars()

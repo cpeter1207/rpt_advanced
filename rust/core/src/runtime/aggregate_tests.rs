@@ -2,9 +2,7 @@ use super::*;
 use crate::{
     command::LinkAction,
     config::{ConfigDocument, ResolvedNodeSettings},
-    media::{
-        FileRequest, MediaError, MediaSource, PreparedAudio, SpeechRequest, StationMediaSession,
-    },
+    media::{FileRequest, MediaError, PreparedAudio, SpeechRequest, StationMediaSession},
     schedule::{CivilTime, Weekday},
 };
 use std::sync::{
@@ -30,12 +28,15 @@ impl crate::audio::PcmStreamReader for TestPcm {
 }
 struct TestStation(Option<Arc<Mutex<Vec<String>>>>);
 impl StationMediaSession for TestStation {
-    fn register(
+    fn register_program(
         &mut self,
-        source: MediaSource,
+        program: crate::media::MediaProgram,
+        _: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
-        if let (Some(messages), Some(speech)) = (&self.0, source.speech) {
-            messages.lock().unwrap().push(speech.text);
+        for source in program.primary {
+            if let (Some(messages), Some(speech)) = (&self.0, source.speech) {
+                messages.lock().unwrap().push(speech.text);
+            }
         }
         Ok(Box::new(TestPcm(0)))
     }
@@ -65,6 +66,682 @@ impl NativeMediaPreparer for Media {
     }
 }
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
+
+#[test]
+fn site_manual_command_publishes_inhibit_without_waiting_for_poll() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nduplex=full\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut actual = Vec::new();
+    for inhibit in [true, false] {
+        runtime
+            .node("1000")
+            .unwrap()
+            .site_command(crate::site::SiteCommand::Inhibit(inhibit), 0)
+            .unwrap();
+        let mut guard = tx.acquire().unwrap();
+        let mut audio = [0.25; 48];
+        actual.push(
+            guard
+                .state()
+                .controller
+                .process_audio(true, false, &[], &mut audio),
+        );
+    }
+    assert!(runtime.stop(0));
+    assert_eq!(actual, [false, true]);
+}
+
+#[test]
+fn site_inhibit_is_seeded_before_reloaded_audio_becomes_available() {
+    let document = ConfigDocument::parse("[1000]\nduplex=full\n").unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        document.clone(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let node = runtime.node("1000").unwrap();
+    node.site()
+        .command(crate::site::SiteCommand::Inhibit(true), 0)
+        .unwrap();
+    runtime
+        .reload(
+            document,
+            &Media,
+            adapter,
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.25; 48];
+    generation
+        .transmit()
+        .controller
+        .process_audio(true, false, &[], &mut audio);
+    let muted = audio.iter().all(|sample| *sample == 0.0);
+    drop(generation);
+    assert!(runtime.stop(0));
+    assert!(
+        muted,
+        "replacement must start with the retained safety inhibit"
+    );
+}
+
+#[test]
+fn site_runtime_reload_keeps_history_and_original_pulse_deadline() {
+    use crate::site::{
+        FanOutput, Observation, OutputRequest, ReadingQuality, SiteCommand, SiteObservations,
+    };
+    let source = "[1000]\n[sensor 1000 supply]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=/dev/gpiochip0\nline=7\n";
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
+    };
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(source).unwrap(),
+        &Media,
+        adapter,
+        device,
+        clock(),
+    )
+    .unwrap();
+    let observations = SiteObservations {
+        sensors: [(
+            "supply".into(),
+            Observation {
+                value: Some(13.8),
+                observed_at_ms: Some(1000),
+                quality: ReadingQuality::Valid,
+            },
+        )]
+        .into(),
+        outputs: [(
+            "relay".into(),
+            FanOutput {
+                available: true,
+                pwm: false,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let site = runtime.node("1000").unwrap().site();
+    site.advance(1000, &observations, &Default::default());
+    site.command(
+        SiteCommand::Output {
+            name: "relay".into(),
+            request: OutputRequest::Pulse,
+        },
+        1000,
+    )
+    .unwrap();
+    let mut now = clock();
+    now.now_ms = 1200;
+    runtime
+        .reload(
+            ConfigDocument::parse(&format!("{source}pulse_ms=900\n")).unwrap(),
+            &Media,
+            adapter,
+            device,
+            now,
+        )
+        .unwrap();
+    let snapshot = runtime.node("1000").unwrap().site().snapshot(1200);
+    assert_eq!(snapshot.outputs["relay"].pulse_deadline_ms, Some(1500));
+    assert_eq!(snapshot.sensors["supply"].minimum.unwrap().value, 13.8);
+    assert!(runtime.detached("1000", 1));
+    runtime.reclaim();
+    runtime
+        .node("1000")
+        .unwrap()
+        .site()
+        .advance(1500, &observations, &Default::default());
+    assert!(!runtime.node("1000").unwrap().site().snapshot(1500).outputs["relay"].requested_on);
+    assert!(runtime.stop(1600));
+}
+
+#[test]
+fn site_runtime_message_uses_current_measurement_and_reports_stale_as_unavailable() {
+    use crate::site::{Observation, ReadingQuality, SiteObservations};
+    for (now_ms, expected) in [
+        (1000, "Temperature is 12.5."),
+        (6000, "outdoor is unavailable."),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(ConfigDocument::parse("[1000]\n[sensor 1000 outdoor]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=temp1_input\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\ndtmf_id=1\n").unwrap(), &CapturingMedia(messages.clone()), adapter, |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock()).unwrap();
+        runtime.node("1000").unwrap().site().advance(
+            1000,
+            &SiteObservations {
+                sensors: [(
+                    "outdoor".into(),
+                    Observation {
+                        value: Some(12.5),
+                        observed_at_ms: Some(1000),
+                        quality: ReadingQuality::Valid,
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        runtime.queue_message("1000", "1", None).unwrap();
+        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = rx.acquire_pair(&mut tx).unwrap();
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut [0.0; 12001]);
+        let mut now = clock();
+        now.now_ms = now_ms;
+        runtime.prepare_messages(now);
+        assert_eq!(*messages.lock().unwrap(), [expected]);
+        drop(generation);
+        assert!(runtime.stop(now_ms));
+    }
+}
+
+#[test]
+fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
+    use crate::site::{Observation, ReadingQuality, SiteObservations};
+    for (selector, now_ms, expected) in [
+        ("1", 1000, "battery is 13.3 volts."),
+        ("1", 6000, "battery is unavailable."),
+        ("2", 1000, "door is inactive."),
+        ("99", 1000, "The requested site reading is unavailable."),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\n[sensor 1000 battery]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\nunit=volts\nprecision=1\ndtmf_id=1\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=/dev/gpiochip0\nline=3\ndtmf_id=2\n").unwrap(),
+            &CapturingMedia(messages.clone()), adapter,
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
+        ).unwrap();
+        let peer = crate::link::PeerSignals::new();
+        peer.set_radio_keyed(true);
+        runtime
+            .queue_site_report("1000", selector, Some(peer.reply_target()))
+            .unwrap();
+        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = rx.acquire_pair(&mut tx).unwrap();
+        let mut audio = [0.0; 960];
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        runtime.prepare_messages(clock());
+        assert!(messages.lock().unwrap().is_empty());
+        runtime.node("1000").unwrap().site().advance(
+            1000,
+            &SiteObservations {
+                sensors: [(
+                    "battery".into(),
+                    Observation {
+                        value: Some(13.26),
+                        observed_at_ms: Some(1000),
+                        quality: ReadingQuality::Valid,
+                    },
+                )]
+                .into(),
+                inputs: [(
+                    "door".into(),
+                    Observation {
+                        value: Some(false),
+                        observed_at_ms: Some(1000),
+                        quality: ReadingQuality::Valid,
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        peer.set_radio_keyed(false);
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        runtime.prepare_messages(RuntimeClock { now_ms, ..clock() });
+        assert_eq!(*messages.lock().unwrap(), [expected]);
+        let mut parrot = [0.0; 960];
+        let mut active = false;
+        let mut replies = [crate::controller::PeerReplySample::default(); 960];
+        generation.transmit().controller.process_audio_with_parrot(
+            false,
+            false,
+            false,
+            &[],
+            &mut audio,
+            crate::controller::ParrotOutput {
+                samples: &mut parrot,
+                active: &mut active,
+                replies: Some(&mut replies),
+                regeneration: None,
+            },
+        );
+        assert!(audio.iter().all(|sample| *sample == 0.0));
+        assert!(
+            replies
+                .iter()
+                .any(|sample| sample.sample != 0.0 && sample.target == peer.reply_identity())
+        );
+        assert_eq!(
+            runtime.node("1000").unwrap().site().snapshot(1000).sensors["battery"]
+                .current
+                .value,
+            Some(13.26),
+            "display precision never rounds policy readings"
+        );
+        drop(generation);
+        assert!(runtime.stop(now_ms));
+    }
+}
+
+#[test]
+fn site_report_rejects_empty_and_noncanonical_selectors_before_admission() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    for selector in ["", "0", "01", "unknown"] {
+        assert_eq!(
+            runtime.queue_site_report("1000", selector, None),
+            Err(RuntimeError::Rejected)
+        );
+    }
+    assert_eq!(
+        runtime.queue_site_report("missing", "1", None),
+        Err(RuntimeError::MissingNode)
+    );
+    for _ in 0..4 {
+        runtime.queue_site_report("1000", "99", None).unwrap();
+    }
+    assert_eq!(
+        runtime.queue_site_report("1000", "99", None),
+        Err(RuntimeError::Rejected),
+        "invalid selectors must not consume reply capacity"
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[message ready]\ncontent=Ready\ndtmf_id=1\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime.queue_named_message("missing", "ready"),
+        Err(RuntimeError::MissingNode)
+    );
+    assert_eq!(
+        runtime.queue_named_message("1000", "missing"),
+        Err(RuntimeError::Preparation)
+    );
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    for _ in 0..4 {
+        runtime
+            .queue_message("1000", "1", Some(peer.reply_target()))
+            .unwrap();
+    }
+    assert_eq!(runtime.queue_named_message("1000", "ready"), Ok(false));
+    runtime.prepare_messages(clock());
+    assert!(messages.lock().unwrap().is_empty());
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    peer.end();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12001]);
+    runtime.prepare_messages(clock());
+    assert_eq!(runtime.queue_named_message("1000", "ready"), Ok(true));
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0]);
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["Ready"]);
+    let mut audio = [0.0; 960];
+    let mut parrot = [0.0; 960];
+    let mut active = false;
+    let mut replies = [crate::controller::PeerReplySample::default(); 960];
+    generation.transmit().controller.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        crate::controller::ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+            replies: Some(&mut replies),
+            regeneration: None,
+        },
+    );
+    assert!(audio.iter().any(|sample| *sample != 0.0));
+    assert!(replies.iter().all(|sample| sample.sample == 0.0));
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn composition_runtime_ids_and_tails_keep_identification_with_unavailable_meter() {
+    use crate::site::{Observation, ReadingQuality, SiteObservations};
+    for family in ["identifier", "tail"] {
+        for valid in [true, false] {
+            let messages = Arc::new(Mutex::new(Vec::new()));
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let timing = if family == "identifier" {
+                "interval_ms=1\nregardless_of_activity=yes\n"
+            } else {
+                ""
+            };
+            let document = ConfigDocument::parse(&format!(
+                "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[sensor 1000 outdoor]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=temp1_input\n[{family} 1000 regular]\n{timing}content=Repeater. {{message_macro_temperature}} {{message_macro_time}}\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\n[message time]\nmessage_id=site-time\narg_time=time\n"
+            )).unwrap();
+            let mut runtime = Runtime::start(
+                document,
+                &CapturingMedia(messages.clone()),
+                adapter,
+                |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+                clock(),
+            )
+            .unwrap();
+            let readings = SiteObservations {
+                sensors: [(
+                    "outdoor".into(),
+                    Observation {
+                        value: Some(12.5),
+                        observed_at_ms: Some(1000),
+                        quality: if valid {
+                            ReadingQuality::Valid
+                        } else {
+                            ReadingQuality::Fault
+                        },
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            };
+            runtime
+                .node("1000")
+                .unwrap()
+                .site()
+                .advance(1000, &readings, &Default::default());
+            let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+            let mut generation = rx.acquire_pair(&mut tx).unwrap();
+            generation.transmit().controller.process_audio(
+                family == "tail",
+                false,
+                &[],
+                &mut [0.0; 960],
+            );
+            generation
+                .transmit()
+                .controller
+                .process_audio(false, false, &[], &mut [0.0; 960]);
+            runtime.prepare_messages(RuntimeClock {
+                now_ms: 1000,
+                ..clock()
+            });
+            let reading = if valid {
+                "Temperature is 12.5."
+            } else {
+                "outdoor is unavailable."
+            };
+            assert_eq!(
+                *messages.lock().unwrap(),
+                ["Repeater.", reading, "The time is 9:07 AM."],
+                "{family} valid={valid}"
+            );
+            drop(generation);
+            assert!(runtime.stop(1000));
+        }
+    }
+}
+
+#[test]
+fn composition_runtime_tail_resolves_only_at_each_release_attempt() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[tail 1000 time]\ncontent={message_macro_time}\n[message time]\nmessage_id=site-time\narg_time=time\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
+    ).unwrap();
+    assert!(messages.lock().unwrap().is_empty());
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.0; 960];
+    for minute in [7, 8] {
+        generation
+            .transmit()
+            .controller
+            .process_audio(true, false, &[], &mut audio);
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        let mut now = clock();
+        now.civil = Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, minute).unwrap(),
+            0,
+        ));
+        runtime.prepare_messages(now);
+        for _ in 0..22 {
+            generation
+                .transmit()
+                .controller
+                .process_audio(false, false, &[], &mut audio);
+        }
+    }
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The time is 9:07 AM.", "The time is 9:08 AM."]
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn composition_runtime_recurring_id_resolves_at_each_attempt() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[identifier 1000 regular]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_time}\n[message time]\nmessage_id=site-time\narg_time=time\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
+    ).unwrap();
+    assert!(messages.lock().unwrap().is_empty());
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.0; 960];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    assert!(audio.iter().all(|value| *value == 0.0));
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
+    for _ in 0..22 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+    }
+    let mut later = clock();
+    later.civil = Some((
+        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+        0,
+    ));
+    runtime.prepare_messages(later);
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The time is 9:07 AM.", "The time is 9:08 AM."]
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn composition_runtime_command_waits_for_unkey_and_keeps_exact_peer() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[message time]\nmessage_id=site-time\narg_time=time\ndtmf_id=1\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    runtime
+        .queue_message("1000", "1", Some(peer.reply_target()))
+        .unwrap();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.0; 960];
+    let mut parrot = [0.0; 960];
+    let mut parrot_active = false;
+    let mut replies = [crate::controller::PeerReplySample::default(); 960];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    runtime.prepare_messages(clock());
+    assert!(messages.lock().unwrap().is_empty());
+    peer.set_radio_keyed(false);
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
+    generation.transmit().controller.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        crate::controller::ParrotOutput {
+            samples: &mut parrot,
+            active: &mut parrot_active,
+            replies: Some(&mut replies),
+            regeneration: None,
+        },
+    );
+    assert!(audio.iter().all(|sample| *sample == 0.0));
+    assert!(
+        replies
+            .iter()
+            .any(|sample| sample.sample != 0.0 && sample.target == peer.reply_identity())
+    );
+    let other = crate::link::PeerSignals::new();
+    peer.end();
+    assert_eq!(
+        runtime.queue_message("1000", "1", Some(peer.reply_target())),
+        Err(RuntimeError::Rejected)
+    );
+    assert!(
+        runtime
+            .queue_message("1000", "1", Some(other.reply_target()))
+            .is_ok()
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn composition_runtime_full_queue_retries_after_adapter_replacement() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[message time]\nmessage_id=site-time\narg_time=time\ndtmf_id=1\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    for _ in 0..4 {
+        runtime
+            .queue_message("1000", "1", Some(peer.reply_target()))
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.queue_message("1000", "1", None),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.queue_message("1000", "2", None),
+        Err(RuntimeError::Rejected)
+    );
+    runtime.prepare_messages(clock());
+    assert!(messages.lock().unwrap().is_empty());
+    let settings = runtime.settings("1000").unwrap().clone();
+    assert_eq!(
+        runtime.replace_adapter("1000", adapter("1000", &settings).unwrap(), 1001),
+        Ok(2)
+    );
+    assert!(runtime.detached("1000", 1));
+    runtime.reclaim();
+    peer.end();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12001]);
+    runtime.prepare_messages(clock());
+    runtime.queue_message("1000", "1", None).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0]);
+    let mut later = clock();
+    later.civil = Some((
+        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+        0,
+    ));
+    runtime.prepare_messages(later);
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:08 AM."]);
+    drop(generation);
+    assert!(runtime.stop(1002));
+}
 
 #[test]
 fn pad_test_queues_one_local_stream_after_unkey() {
@@ -510,9 +1187,10 @@ impl crate::audio::PcmStreamReader for PendingStream {
 
 struct StreamingStation(Arc<AtomicUsize>);
 impl StationMediaSession for StreamingStation {
-    fn register(
+    fn register_program(
         &mut self,
-        _: MediaSource,
+        _: crate::media::MediaProgram,
+        _: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
         Ok(Box::new(PendingStream))
     }
@@ -1802,9 +2480,10 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
     struct RejectingMedia;
     struct RejectingStation;
     impl StationMediaSession for RejectingStation {
-        fn register(
+        fn register_program(
             &mut self,
-            _: MediaSource,
+            _: crate::media::MediaProgram,
+            _: bool,
         ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
             Err(MediaError::Io)
         }

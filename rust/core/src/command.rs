@@ -51,10 +51,14 @@ pub enum LinkAction {
     ParrotDisable,
     /// Capture local keypad digits until receiver unkey, then read them back.
     PadTest,
+    /// Play one configured read-only message macro by its decimal selector.
+    Message,
+    /// Query one configured sensor or digital input by its decimal selector.
+    SiteStatus,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 21;
+pub const ACTION_COUNT: usize = 23;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,7 +84,7 @@ impl CommandMapping {
 pub struct Command {
     /// Selected operation.
     pub action: LinkAction,
-    /// Decimal destination, or the empty string for node-free operations.
+    /// Decimal destination/Message selector, or empty for argument-free operations.
     pub node: String,
 }
 
@@ -148,7 +152,11 @@ impl DtmfCommandMap {
                 } else {
                     right
                 };
-                if equal || takes_node(longer.action) {
+                if equal
+                    || takes_node(longer.action)
+                    || matches!(left.action, LinkAction::Message | LinkAction::SiteStatus)
+                    || matches!(right.action, LinkAction::Message | LinkAction::SiteStatus)
+                {
                     return Err(CommandMapError::AmbiguousPrefix);
                 }
             }
@@ -208,7 +216,7 @@ impl DtmfCommandMap {
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805", "82",
+            "10", "722", "800", "801", "804", "805", "82", "77", "76",
         ];
         let mappings = prefixes
             .into_iter()
@@ -313,6 +321,8 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::ParrotEnable,
         LinkAction::ParrotDisable,
         LinkAction::PadTest,
+        LinkAction::Message,
+        LinkAction::SiteStatus,
     ]
 }
 

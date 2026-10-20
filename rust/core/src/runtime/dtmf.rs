@@ -360,6 +360,11 @@ impl DtmfCommands {
                 });
         };
         let mut command = self.map.parse(&text)?;
+        if matches!(command.action, LinkAction::Message | LinkAction::SiteStatus) {
+            // The command map already requires a nonempty argument for these actions.
+            return crate::config::message_selector_valid(&command.node)
+                .then(|| DigitOutcome::Operation(DigitOperation::new(command, None)));
+        }
         let mut admin_authorized = false;
         if command.node.len() >= 64 {
             return None;
