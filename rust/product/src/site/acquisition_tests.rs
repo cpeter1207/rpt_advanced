@@ -15,6 +15,82 @@ use std::{
 #[path = "acquisition_reload_tests.rs"]
 mod reload;
 
+pub(super) static IN_CONTROL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+unsafe extern "C" fn observed_submit(
+    context: *mut c_void,
+    task: abi::rptadv_control_task_v1,
+) -> i32 {
+    IN_CONTROL.store(true, Ordering::Release);
+    let result = unsafe { (*crate::fixture::control_descriptor()).submit.unwrap()(context, task) };
+    IN_CONTROL.store(false, Ordering::Release);
+    result
+}
+
+#[test]
+fn site_engine_retires_external_device_workers_outside_control_even_when_drain_fails() {
+    let _lifecycle = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let api = unsafe { &*crate::lifecycle::rptadv_product_descriptor_v1() };
+    assert_eq!(unsafe { api.stop.unwrap()() }, 0);
+    for drain_failure in [false, true] {
+        *PROBE.lock().unwrap() = Probe::default();
+        crate::lifecycle::SKIP_TICKER_THREAD.store(true, Ordering::Release);
+        let configuration = "[1000]\nradio_channel=usb\nduplex=full\n";
+        let mut control = unsafe { crate::fixture::control_descriptor().read() };
+        control.submit = Some(observed_submit);
+        let mut host = unsafe { crate::fixture::host_descriptor().read() };
+        host.context = ptr::without_provenance_mut(1);
+        assert_eq!(
+            unsafe {
+                api.start.unwrap()(
+                    Box::leak(Box::new(host)),
+                    Box::leak(Box::new(control)),
+                    rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                    rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                    configuration.as_ptr().cast(),
+                    configuration.len(),
+                )
+            },
+            0
+        );
+        let (engine, call) = crate::lifecycle::selected().unwrap();
+        let acquisition = Acquisition::prepare(
+            &definitions("[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\nstartup_state=on\nsafe_state=off\n"),
+            backends(), Instant::now(),
+        ).unwrap();
+        engine
+            .run(move |host| {
+                host.install_sites(acquisition, crate::site::radio::RadioSite::default());
+                Ok(())
+            })
+            .unwrap();
+        until(|| {
+            engine
+                .run(|host| {
+                    host.poll_sites(0);
+                    Ok(())
+                })
+                .unwrap();
+            !PROBE.lock().unwrap().written.is_empty()
+        });
+        drop(call);
+        crate::fixture::CONTROL_STOP_RESULT.store(usize::from(drain_failure), Ordering::Release);
+        assert_eq!(
+            unsafe { api.stop.unwrap()() },
+            if drain_failure { -1 } else { 0 }
+        );
+        assert_eq!(unsafe { api.stop.unwrap()() }, 0);
+        let probe = PROBE.lock().unwrap();
+        assert_eq!(probe.closed, 1);
+        assert!(!probe.closed_on_control);
+        assert_eq!(probe.written.last(), Some(&0.0));
+    }
+}
+
 fn definitions(text: &str) -> BTreeMap<String, ResolvedSiteSettings> {
     let document = ConfigDocument::parse(text).unwrap();
     document

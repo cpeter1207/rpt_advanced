@@ -5,6 +5,10 @@ use rpt_advanced_core::{
     site::{Observation, ReadingQuality},
 };
 
+#[path = "radio_bank.rs"]
+mod bank;
+pub use bank::{Operation, RadioSite};
+
 /// Select an existing bank and bit, never a new radio/device handle.
 pub fn pin(backend: SiteBackend, line: &str, output: bool) -> Result<(u32, u32), ReadingQuality> {
     let line = line

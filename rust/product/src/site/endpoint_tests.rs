@@ -9,6 +9,7 @@ struct Probe {
     opened: Vec<(u32, u32, f64, f64)>,
     written: Vec<f64>,
     closed: usize,
+    closed_on_control: bool,
     failure: bool,
     invalid: bool,
 }
@@ -17,6 +18,7 @@ static PROBE: Mutex<Probe> = Mutex::new(Probe {
     opened: Vec::new(),
     written: Vec::new(),
     closed: 0,
+    closed_on_control: false,
     failure: false,
     invalid: false,
 });
@@ -125,7 +127,9 @@ unsafe extern "C" fn capabilities(_: *mut c_void, c: *mut u32) -> i32 {
     0
 }
 unsafe extern "C" fn destroy(_: *mut c_void) {
-    PROBE.lock().unwrap().closed += 1;
+    let mut probe = PROBE.lock().unwrap();
+    probe.closed += 1;
+    probe.closed_on_control |= acquisition::IN_CONTROL.load(std::sync::atomic::Ordering::Acquire);
 }
 fn backends() -> Arc<SiteBackends> {
     Arc::new(SiteBackends {

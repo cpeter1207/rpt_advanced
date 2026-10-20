@@ -717,6 +717,21 @@ pub struct RadioWorker {
     last_report_ms: u64,
 }
 impl RadioWorker {
+    /// Borrow this live owner's cached site state or bounded command queue on control.
+    pub(crate) fn site_operation(
+        &mut self,
+        bank: u32,
+        operation: crate::site::radio::Operation,
+    ) -> Result<Option<crate::abi::UrpAstSiteSnapshot>, i32> {
+        use crate::site::radio::Operation;
+        let radio = self.radio.as_mut().ok_or(-7)?;
+        match operation {
+            Operation::Snapshot => radio.site_snapshot(bank).map(Some),
+            Operation::Bind(binding) => radio.site_bind(bank, &binding).map(|()| None),
+            Operation::Publish(request) => radio.site_publish(bank, &request).map(|()| None),
+        }
+    }
+
     /// Bind a peer on control while this worker retains its live radio lease.
     pub fn bind_peer(&self, peer: &mut PeerIo) -> Result<(), Error> {
         peer.bind_radio(self.radio.as_ref().expect("live radio reservation"))

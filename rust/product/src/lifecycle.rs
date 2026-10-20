@@ -44,7 +44,7 @@ type HostOperation = Box<dyn FnOnce(&mut Host) -> Result<ErasedResult, RuntimeEr
 #[cfg(test)]
 static FAIL_DIAL_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
-static SKIP_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
+pub(crate) static SKIP_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static FAIL_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
@@ -53,6 +53,9 @@ static PANIC_TICKER_THREAD: AtomicBool = AtomicBool::new(false);
 static HOST_STOP_MODE: AtomicU64 = AtomicU64::new(0);
 
 static ENGINE: Mutex<Option<Arc<Engine>>> = Mutex::new(None);
+
+#[path = "lifecycle_site.rs"]
+mod site;
 
 pub(crate) struct Engine {
     executor: ControlClient,
@@ -69,7 +72,7 @@ pub(crate) struct Engine {
     ticker: Mutex<Option<JoinHandle<()>>>,
     jobs: Mutex<Vec<JoinHandle<()>>>,
     // Drop selected provider code only after Host and endpoint workers retire.
-    site_backends: SiteBackends,
+    site_backends: Arc<SiteBackends>,
 }
 pub(crate) struct Call(Arc<Engine>);
 enum Dial {
@@ -585,6 +588,9 @@ impl Engine {
                 return false;
             }
         }
+        if !self.stop_sites() {
+            return false;
+        }
         let engine = Arc::clone(self);
         let (send, receive) = mpsc::sync_channel(1);
         if self
@@ -605,29 +611,30 @@ impl Engine {
                     1 => false,
                     _ => stopped,
                 };
-                let retired_status_posts = if stopped {
-                    host.as_mut().map(Host::take_status_posts)
+                let retired = if stopped {
+                    host.as_mut()
+                        .map(|host| (host.take_status_posts(), host.take_sites()))
                 } else {
                     None
                 };
                 if stopped {
                     *host = None;
                 }
-                let _ = send.send((stopped, retired_status_posts));
+                let _ = send.send((stopped, retired));
             }))
             .is_err()
         {
             return false;
         }
-        let Ok((true, retired_status_posts)) = receive.recv() else {
+        let Ok((true, retired)) = receive.recv() else {
             return false;
         };
         if self.executor.stop_and_drain().is_err() {
             return false;
         }
-        // The HTTP worker may finish an in-flight request; join it only after leaving the
-        // serialized lifecycle executor so network latency cannot stall control work.
-        drop(retired_status_posts);
+        // HTTP and physical-device owners may still be leaving their worker loops.
+        // Join them outside the serialized lifecycle executor.
+        drop(retired);
         true
     }
 }
@@ -741,8 +748,21 @@ unsafe extern "C" fn rptadv_product_start(
         MessageTemplate::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         schedule::provider_ready().map_err(|_| RuntimeError::Preparation)?;
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
-        let site_backends = SiteBackends::load(&document)?;
+        let site_backends = Arc::new(SiteBackends::load(&document)?);
         let origin = Instant::now();
+        let settings = crate::site::configured(&document)?;
+        // Retain this envelope outside control: rejected tasks and failed radio
+        // activation must not join dormant device workers on the station executor.
+        let sites = Arc::new(Mutex::new(Some((
+            crate::site::acquisition::Acquisition::prepare(
+                &settings,
+                Arc::clone(&site_backends),
+                origin,
+            )
+            .map_err(|_| RuntimeError::Preparation)?,
+            crate::site::radio::RadioSite::prepare(&settings)
+                .map_err(|_| RuntimeError::Preparation)?,
+        ))));
         let clock = capture(origin, services);
         let engine = Arc::new(Engine {
             executor,
@@ -761,12 +781,19 @@ unsafe extern "C" fn rptadv_product_start(
             site_backends,
         });
         let target = Arc::clone(&engine);
+        let candidate = Arc::clone(&sites);
         let (send, receive) = mpsc::sync_channel(1);
         engine
             .executor
             .submit(ControlTask::lifecycle(move || {
                 let result = Host::start(document, media, services, origin, clock);
-                let result = result.map(|host| {
+                let result = result.map(|mut host| {
+                    let (acquisition, radio) = candidate
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take()
+                        .expect("one prepared initial site owner");
+                    host.install_sites(acquisition, radio);
                     *target.host.lock().unwrap_or_else(|e| e.into_inner()) = Some(host)
                 });
                 let _ = send.send(result);
@@ -801,20 +828,7 @@ unsafe extern "C" fn rptadv_product_reload(
     catch_unwind(AssertUnwindSafe(|| -> Result<(), RuntimeError> {
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let (engine, _call) = selected()?;
-        engine.site_backends.validate(&document)?;
-        engine.reloading.store(true, Ordering::Release);
-        engine.revision.fetch_add(1, Ordering::AcqRel);
-        engine.lost_digits.store(true, Ordering::Release);
-        let clock = engine.clock();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            engine.run_inner(true, move |host| host.reload(document, clock))
-        }))
-        .unwrap_or(Err(RuntimeError::Preparation));
-        engine.reloading.store(false, Ordering::Release);
-        if result.is_ok() {
-            let _ = engine.pump(engine.clock(), true);
-        }
-        result
+        engine.reload_configuration(document)
     }))
     .ok()
     .and_then(Result::ok)

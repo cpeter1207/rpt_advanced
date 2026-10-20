@@ -1,6 +1,8 @@
 use super::*;
 #[path = "egress_load_tests.rs"]
 mod egress_load;
+#[path = "site_host_tests.rs"]
+mod site;
 use crate::{
     abi,
     link::session::tests::{Input, peer, peer_with_async},

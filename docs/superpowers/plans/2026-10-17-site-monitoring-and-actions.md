@@ -12,8 +12,9 @@
 
 **Status:** Native implementation approved 2026-10-18. The message prerequisite
 is locally implemented and tested. S1 configuration/measurement and S2 pure
-alarm/output/fan policy and S3 existing-owner bridge pass focused tests. S4 IIO
-acquisition passes; external adapters and S5–S7 remain. No node changes or deployment
+alarm/output/fan policy and S3 existing-owner bridge pass focused tests. S4 IIO,
+external adapters and selected-provider composition pass scoped tests. S5 state
+transfer is locally tested; runtime acquisition and S6–S7 remain. No node changes or deployment
 are authorized by this document.
 
 ## Global Constraints
@@ -111,11 +112,16 @@ quality images contain the required providers. S5 will consume the bridge.
 
 `IioReader::open(root: &Path, device: &str, channel: &str) -> Result<Self, SiteError>` and `IioReader::read(&mut self) -> Result<f64, SiteError>` live in the acquisition owner; test root is an isolated fixture directory. No generic sensor library or OS facade is added.
 
-- [ ] Add dynamic-descriptor fixtures for missing/short/wrong-version tables, null handles, failed open/read/write, unsupported capability and synchronous cleanup. Add `site_hwmon_source_units`, `site_gpiod_stable_line_and_polarity`, `site_iio_scale_offset_once`, and `site_pwm_requires_real_capability`. Device absence must not silently bind the next enumerated device.
-- [ ] Run failing tests for the two new crate packages and product `site_iio_` filters. Inspect the released Debian 13 library headers/documentation when writing bindings; use existing bindgen/package conventions rather than implementing sensor/chip drivers.
-- [ ] Implement separately versioned `librptadv_hwmon_adapter.so.1` and `librptadv_gpiod_adapter.so.1`. Use hwmon/library capabilities for actual measurements and supported writable controls; if writable PWM is absent, report it unsupported. Libgpiod supplies digital lines, not software PWM. IIO applies the selected kernel channel's scale/offset exactly once.
-- [ ] Add package/header/install and descriptor-loader tests. Only selected capabilities are mandatory: a node with no hwmon/libgpiod endpoints must not fail because an unselected provider is absent. Selected incompatible providers fail composition/reload safely; do not silently switch backend.
-- [ ] Run the focused adapter/IIO suites, package staging assertions and Rustdoc. Commit code/developer docs. Update workflow image dependency definitions with released libraries and verify derived native manifests before consumer checks; do not change workflow implementations in the production repository.
+- [x] Add dynamic-descriptor fixtures for missing/short/wrong-version tables, null handles, failed open/read/write, unsupported capability and synchronous cleanup. Add `site_hwmon_source_units`, `site_gpiod_stable_line_and_polarity`, `site_iio_scale_offset_once`, and `site_pwm_requires_real_capability`. Device absence must not silently bind the next enumerated device.
+- [x] Run failing tests for the two new crate packages and product `site_iio_` filters. Inspect the released Debian 13 library headers/documentation when writing bindings; use existing bindgen/package conventions rather than implementing sensor/chip drivers.
+- [x] Implement separately versioned `librptadv_hwmon_adapter.so.1` and `librptadv_gpiod_adapter.so.1`. Use hwmon/library capabilities for actual measurements and supported writable controls; if writable PWM is absent, report it unsupported. Libgpiod supplies digital lines, not software PWM. IIO applies the selected kernel channel's scale/offset exactly once.
+- [x] Add package/header/install and descriptor-loader tests. Only selected capabilities are mandatory: a node with no hwmon/libgpiod endpoints must not fail because an unselected provider is absent. Selected incompatible providers fail composition/reload safely; do not silently switch backend.
+- [x] Run the focused adapter/IIO suites, package staging assertions and Rustdoc. Commit code/developer docs. Update workflow image dependency definitions with released libraries and verify derived native manifests before consumer checks; do not change workflow implementations in the production repository.
+
+Local recovery checkpoints: `7c5557c` (gpiod), `1a23654` (hwmon), `df40018`
+(provider lifetime/admission). Strict scoped tests, package checks and developer
+documentation passed in the current native image. Full production coverage and
+hosted branch validation remain S7; no physical sensor hardware was tested.
 
 ### S5: Wire bounded acquisition, state transfer and safe shutdown
 

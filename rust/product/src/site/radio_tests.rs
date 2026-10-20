@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "radio_bank_tests.rs"]
+mod bank;
+
 fn snapshot() -> abi::UrpAstSiteSnapshot {
     abi::UrpAstSiteSnapshot {
         struct_size: size_of::<abi::UrpAstSiteSnapshot>() as u32,

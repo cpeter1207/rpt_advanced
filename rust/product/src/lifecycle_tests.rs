@@ -33,6 +33,27 @@ fn active_configuration(extra: &str) -> String {
 }
 
 #[test]
+fn site_lifecycle_installs_configured_acquisition_before_station_polling() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\n",
+    );
+    assert_eq!(unsafe { start(&configuration) }, 0);
+    let (engine, call) = selected().unwrap();
+    let readings = engine.run(|host| Ok(host.poll_sites(0))).unwrap();
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(
+        readings["1000"].inputs["door"].quality,
+        rpt_advanced_core::site::ReadingQuality::Unavailable
+    );
+}
+
+#[test]
 fn site_backends_reload_rejection_preserves_live_generation() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -58,6 +79,34 @@ fn site_backends_reload_rejection_preserves_live_generation() {
     assert_eq!(result, -1);
     assert_eq!(after, active);
     assert_eq!(after_drops, drops);
+}
+
+#[test]
+fn site_lifecycle_reload_replaces_bindings_without_reopening_same_radio() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    let drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\n",
+    );
+    let result =
+        unsafe { descriptor().reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) };
+    let (engine, call) = selected().unwrap();
+    let readings = engine.run(|host| Ok(host.poll_sites(0))).unwrap();
+    let after_drops = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(result, 0);
+    assert_eq!(after_drops, drops);
+    assert!(
+        readings
+            .get("1000")
+            .is_some_and(|node| node.inputs.contains_key("door"))
+    );
 }
 
 fn operation(action: LinkAction, node: &str) -> DigitOperation {

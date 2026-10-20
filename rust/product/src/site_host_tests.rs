@@ -1,0 +1,378 @@
+//! Shared Host uses the existing live radio handle for station site observations.
+use super::*;
+use crate::site::{acquisition::Acquisition, radio::RadioSite};
+use rpt_advanced_core::{
+    config::{NodeId, ResolvedSiteSettings},
+    site::ReadingQuality,
+};
+
+struct BankFixture {
+    generation: u64,
+    mask: u32,
+    high: u32,
+    writes: Vec<(u32, u32)>,
+}
+static BANK: Mutex<BankFixture> = Mutex::new(BankFixture {
+    generation: 7,
+    mask: 0,
+    high: 0,
+    writes: Vec::new(),
+});
+unsafe extern "C" fn bank_snapshot(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: u32,
+    result: *mut abi::UrpAstSiteSnapshot,
+) -> i32 {
+    let state = BANK.lock().unwrap();
+    unsafe {
+        (*result).generation = state.generation;
+        (*result).output_mask = 0xff;
+        (*result).claimed_mask = state.mask;
+        (*result).requested_high_mask = state.high;
+        (*result).submitted_high_mask = state.high;
+        (*result).serviced_high_mask = state.high;
+        (*result).submitted_generation = state.generation;
+        (*result).serviced_generation = state.generation;
+    }
+    0
+}
+unsafe extern "C" fn bank_bind(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: u32,
+    value: *const abi::UrpAstSiteBinding,
+) -> i32 {
+    let value = unsafe { &*value };
+    let mut state = BANK.lock().unwrap();
+    assert_eq!(value.generation, state.generation);
+    let added = value.output_mask & !state.mask;
+    state.high = (state.high & !added) | (value.initial_high_mask & added);
+    state.mask = value.output_mask;
+    state.generation += 13;
+    let write = (state.mask, state.high);
+    state.writes.push(write);
+    0
+}
+unsafe extern "C" fn bank_publish(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: u32,
+    value: *const abi::UrpAstSiteRequest,
+) -> i32 {
+    let value = unsafe { &*value };
+    let mut state = BANK.lock().unwrap();
+    assert_eq!(value.generation, state.generation);
+    state.high = value.high_mask;
+    let write = (state.mask, state.high);
+    state.writes.push(write);
+    0
+}
+fn bank_host() -> Host {
+    *BANK.lock().unwrap() = BankFixture {
+        generation: 7,
+        mask: 0,
+        high: 0,
+        writes: Vec::new(),
+    };
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.context = ptr::without_provenance_mut(1);
+    table.radio_site_snapshot = Some(bank_snapshot);
+    table.radio_site_bind = Some(bank_bind);
+    table.radio_site_publish = Some(bank_publish);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let document = document(
+        "usb",
+        "[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n",
+    );
+    let radio = RadioSite::prepare(
+        &[(
+            "1000".into(),
+            ResolvedSiteSettings::resolve(&document, &NodeId::new("1000").unwrap())
+                .unwrap()
+                .value,
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .unwrap();
+    let mut host = Host::start(document, media(), services, Instant::now(), clock()).unwrap();
+    host.install_sites(Acquisition::default(), radio);
+    host.poll_sites(0);
+    host.poll_sites(1);
+    assert_eq!(BANK.lock().unwrap().high, 0x40);
+    host
+}
+
+#[test]
+fn site_host_shutdown_acknowledges_safe_release_before_destroying_radio() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host();
+    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    for now in 2..8 {
+        if host.stop(now) {
+            break;
+        }
+        assert_eq!(
+            crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+            drops
+        );
+    }
+    assert!(host.stop(8));
+    assert_eq!(
+        BANK.lock().unwrap().writes,
+        [(0x40, 0x40), (0x40, 0), (0, 0)]
+    );
+}
+
+#[test]
+fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host();
+    let revision = host.runtime.revision();
+    let backends =
+        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+    let mut candidate = Some(
+        Acquisition::prepare_reload(
+            &Default::default(),
+            backends,
+            host.epoch,
+            host.site_acquisition.keys(),
+        )
+        .unwrap(),
+    );
+    let mut radio = Some(RadioSite::default());
+    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        host.begin_site_reload(
+            revision + 1,
+            &mut candidate,
+            &mut radio,
+            &Default::default()
+        ),
+        Err(RuntimeError::Rejected)
+    );
+    assert!(candidate.is_some() && radio.is_some());
+    host.begin_site_reload(revision, &mut candidate, &mut radio, &Default::default())
+        .unwrap();
+    let mut ready = false;
+    for now in 2..8 {
+        ready = host.site_barrier(now).unwrap();
+        if ready {
+            break;
+        }
+    }
+    assert!(ready);
+    assert_eq!(
+        BANK.lock().unwrap().writes,
+        [(0x40, 0x40), (0x40, 0), (0, 0)]
+    );
+    drop(host.abort_sites());
+    host.poll_sites(10);
+    host.poll_sites(11);
+    assert_eq!(BANK.lock().unwrap().high, 0x40);
+    assert_eq!(
+        crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+        drops
+    );
+    for now in 12..18 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(18));
+}
+
+unsafe extern "C" fn observation(
+    _: *mut c_void,
+    handle: *mut c_void,
+    bank: u32,
+    output: *mut abi::UrpAstSiteSnapshot,
+) -> i32 {
+    assert_eq!(unsafe { crate::fixture::radio_name(handle) }, "1000\0usb");
+    assert_eq!(bank, 0);
+    unsafe {
+        (*output).generation = 7;
+        (*output).input_mask = 2;
+        (*output).input_high_mask = 2;
+        (*output).input_quality = 1;
+        (*output).observed_at_ms = 950;
+        (*output).observed_at_valid = 1;
+        (*output).snapshot_at_ms = 1000;
+    }
+    0
+}
+
+#[test]
+fn site_host_publishes_site_replacement_with_runtime_before_post_reload_polling() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for notification_error in [false, true] {
+        let mut host = bank_host();
+        let backends =
+            Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+        let mut candidate = Some(
+            Acquisition::prepare_reload(
+                &Default::default(),
+                backends,
+                host.epoch,
+                host.site_acquisition.keys(),
+            )
+            .unwrap(),
+        );
+        let mut radio = Some(RadioSite::default());
+        host.begin_site_reload(
+            host.runtime.revision(),
+            &mut candidate,
+            &mut radio,
+            &Default::default(),
+        )
+        .unwrap();
+        for now in 2..8 {
+            if host.site_barrier(now).unwrap() {
+                break;
+            }
+        }
+        let mut session = None;
+        if notification_error {
+            host.runtime.incoming("1000", "2000", true).unwrap();
+            host.runtime.incoming("1000", "3000", true).unwrap();
+            let (io, state) = peer(48000);
+            let (_producer, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+            let (mut pending, control) =
+                PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+            host.peers.push(PeerOwner {
+                local: "1000".into(),
+                remote: "2000".into(),
+                mode: Mode::TRANSCEIVE,
+                group: None,
+                announced: true,
+                control,
+            });
+            state
+                .lock()
+                .unwrap()
+                .input
+                .push_back(Input::Text(b"D 3000 4000 11 9"));
+            pending.step(clock().now_ms).unwrap();
+            session = Some(pending);
+        }
+        let revision = host.runtime.revision();
+        let result = host.reload(document("usb", ""), clock());
+        assert_eq!(
+            result,
+            if notification_error {
+                Err(RuntimeError::Rejected)
+            } else {
+                Ok(())
+            }
+        );
+        assert!(host.runtime.revision() > revision);
+        host.poll_sites(12);
+        let removed = host.site_radio.output_status("1000", "relay").is_none();
+        drop(host.abort_sites());
+        for now in 13..20 {
+            if host.stop(now) {
+                break;
+            }
+        }
+        assert!(host.stop(20));
+        assert!(
+            removed,
+            "published configuration must not retain the removed site binding"
+        );
+        drop(session);
+    }
+}
+
+#[test]
+fn site_engine_shutdown_drives_safe_barriers_before_stopping_radio() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let api = unsafe { &*crate::lifecycle::rptadv_product_descriptor_v1() };
+    assert_eq!(unsafe { api.stop.unwrap()() }, 0);
+    *BANK.lock().unwrap() = BankFixture {
+        generation: 7,
+        mask: 0,
+        high: 0,
+        writes: Vec::new(),
+    };
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.context = ptr::without_provenance_mut(1);
+    table.radio_site_snapshot = Some(bank_snapshot);
+    table.radio_site_bind = Some(bank_bind);
+    table.radio_site_publish = Some(bank_publish);
+    let configuration = "[1000]\nradio_channel=usb\nduplex=full\n[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n";
+    assert_eq!(
+        unsafe {
+            api.start.unwrap()(
+                Box::leak(Box::new(table)),
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                configuration.as_ptr().cast(),
+                configuration.len(),
+            )
+        },
+        0
+    );
+    let (engine, call) = crate::lifecycle::selected().unwrap();
+    engine
+        .run(|host| {
+            host.poll_sites(1);
+            host.poll_sites(2);
+            Ok(())
+        })
+        .unwrap();
+    drop(call);
+    let stopped = unsafe { api.stop.unwrap()() };
+    // Clean the real fixture even while the missing lifecycle drive is under test.
+    for _ in 0..5 {
+        if unsafe { api.stop.unwrap()() } == 0 {
+            break;
+        }
+    }
+    assert_eq!(stopped, 0);
+    assert_eq!(
+        BANK.lock().unwrap().writes,
+        [(0x40, 0x40), (0x40, 0), (0, 0)]
+    );
+}
+
+#[test]
+fn site_host_polls_configured_owner_without_a_second_radio_reservation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.context = ptr::without_provenance_mut(1);
+    table.radio_site_snapshot = Some(observation);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let document = document(
+        "usb",
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\nactive_level=low\n",
+    );
+    let site = ResolvedSiteSettings::resolve(&document, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    let radio = RadioSite::prepare(&[("1000".to_owned(), site)].into_iter().collect()).unwrap();
+    let mut host = Host::start(document, media(), services, Instant::now(), clock()).unwrap();
+    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    host.install_sites(Acquisition::default(), radio);
+    let values = host.poll_sites(2000);
+    let input = &values["1000"].inputs["door"];
+    assert_eq!(input.value, Some(false));
+    assert_eq!(input.observed_at_ms, Some(1950));
+    assert_eq!(input.quality, ReadingQuality::Valid);
+    assert_eq!(
+        crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+        drops
+    );
+    assert!(host.stop(2100));
+}

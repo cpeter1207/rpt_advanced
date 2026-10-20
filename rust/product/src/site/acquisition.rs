@@ -11,7 +11,11 @@ use rpt_advanced_core::{
     runtime::GenerationWork,
     site::{FanOutput, Observation, ReadingQuality, SiteObservations},
 };
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Instant,
+};
 
 /// Logical demand and driver submission, never independent electrical readback.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +36,11 @@ pub struct Acquisition {
     auto_resume: bool,
 }
 type DeviceKey = (SiteBackend, String);
+/// Inert candidate whose new worker allocation/failed cleanup occurs outside control.
+pub struct PreparedAcquisition {
+    known: BTreeSet<DeviceKey>,
+    replacement: Replacement,
+}
 struct Replacement {
     bindings: BTreeMap<DeviceKey, Vec<Binding>>,
     fresh: BTreeMap<DeviceKey, Device>,
@@ -279,50 +288,73 @@ fn bindings(
     devices
 }
 impl Acquisition {
-    /// Fence changed physical owners while unrelated devices continue acquisition.
-    pub fn begin(
-        &mut self,
+    /// Copy current identities before preparing a candidate outside station control.
+    pub fn keys(&self) -> BTreeSet<DeviceKey> {
+        self.devices
+            .iter()
+            .map(|device| device.key.clone())
+            .collect()
+    }
+    /// Allocate only new, paused owners outside control; no operation is submitted here.
+    pub fn prepare_reload(
         settings: &BTreeMap<String, ResolvedSiteSettings>,
         backends: Arc<SiteBackends>,
         epoch: Instant,
-    ) -> bool {
-        if self.replacement.is_some() || self.devices.iter().any(|device| device.paused) {
-            return false;
-        }
+        known: BTreeSet<DeviceKey>,
+    ) -> Result<PreparedAcquisition, ReadingQuality> {
         let mut bindings = bindings(settings);
         let mut fresh = BTreeMap::new();
         let keys: Vec<_> = bindings
             .keys()
-            .filter(|key| !self.devices.iter().any(|device| &device.key == *key))
+            .filter(|key| !known.contains(*key))
             .cloned()
             .collect();
         for key in keys {
             let entries = bindings.remove(&key).expect("selected candidate key");
-            let Ok(mut device) =
-                Device::prepare(key.clone(), entries, Arc::clone(&backends), epoch)
-            else {
-                return false;
-            };
+            let mut device = Device::prepare(key.clone(), entries, Arc::clone(&backends), epoch)?;
             // No operations have been submitted; a new owner cannot touch hardware
             // until commit, old-owner retirement, and explicit resume.
             device.worker.pause(false);
             device.paused = true;
             fresh.insert(key, device);
         }
+        Ok(PreparedAcquisition {
+            known,
+            replacement: Replacement {
+                bindings,
+                fresh,
+                prepared: false,
+            },
+        })
+    }
+    /// Fence changed owners; return rejected preparation for disposal outside control.
+    /// Also drain operations for radio nodes whose generation cannot retain old permits.
+    pub fn begin(
+        &mut self,
+        candidate: PreparedAcquisition,
+        replaced: &BTreeSet<String>,
+    ) -> Result<(), PreparedAcquisition> {
+        if self.replacement.is_some()
+            || self.devices.iter().any(|device| device.paused)
+            || self.keys() != candidate.known
+        {
+            return Err(candidate);
+        }
         for device in &mut self.devices {
-            let next = bindings.get(&device.key);
-            if next.is_none_or(|next| physical(next) != physical(&device.bindings)) {
+            let next = candidate.replacement.bindings.get(&device.key);
+            if next.is_none_or(|next| physical(next) != physical(&device.bindings))
+                || device
+                    .bindings
+                    .iter()
+                    .any(|binding| replaced.contains(&binding.node))
+            {
                 device.worker.pause(next.is_none());
                 device.paused = true;
             }
         }
         self.auto_resume = false;
-        self.replacement = Some(Replacement {
-            bindings,
-            fresh,
-            prepared: false,
-        });
-        true
+        self.replacement = Some(candidate.replacement);
+        Ok(())
     }
     /// Prepare retained-device bindings after their pause barrier.
     pub fn stage(&mut self) -> bool {
