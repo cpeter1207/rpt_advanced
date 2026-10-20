@@ -154,9 +154,12 @@ fn static_telemetry_is_registered_and_identifiers_request_fresh_attempts() {
     assert_eq!(sources[1].morse.as_ref().unwrap().text, "L");
     controller.process_audio(false, false, &[], &mut [0.0; 960]);
     let request = control.take_message_request().unwrap();
-    let source = &recipes.items[request.content_index]
-        .settings_for(None)
-        .media;
+    let super::super::composition::MessageRecipe::Composition(recipe) =
+        &recipes.items[request.content_index]
+    else {
+        panic!("identifier composition");
+    };
+    let source = &recipe.settings_for(None).media;
     assert_eq!(source.file.as_deref(), Some(std::path::Path::new("id.wav")));
     assert_eq!(source.speech.as_ref().unwrap().text, "ID");
     assert_eq!(source.morse.as_ref().unwrap().text, "ID");

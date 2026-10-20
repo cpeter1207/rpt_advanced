@@ -742,6 +742,7 @@ impl Host {
                 &topology
             }
         );
+        self.write_site_status(local, &mut result)?;
         Ok(result)
     }
     /// Execute consequences which never require a blocking outbound dial.
@@ -793,6 +794,9 @@ impl Host {
             }
             LinkEffect::Message { selector, reply } => {
                 self.runtime.queue_message(local, &selector, reply)
+            }
+            LinkEffect::SiteStatus { selector, reply } => {
+                self.runtime.queue_site_report(local, &selector, reply)
             }
             LinkEffect::SelectedRemote | LinkEffect::ParrotEnabled(_) | LinkEffect::None => Ok(()),
         }

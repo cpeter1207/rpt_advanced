@@ -1110,6 +1110,31 @@ impl<A: Send, C: Send> Runtime<A, C> {
         Ok(true)
     }
 
+    /// Admit a read-only site report, retaining the exact requesting connection.
+    pub fn queue_site_report(
+        &mut self,
+        local: &str,
+        selector: &str,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
+        if selector.is_empty() || !crate::config::message_selector_valid(selector) {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let index = node
+            .control
+            .messages
+            .site_selectors
+            .get(selector)
+            .copied()
+            .unwrap_or(node.control.messages.site_unavailable);
+        Self::queue_message_index(node, index, reply)
+    }
+
     /// Admit a read-only macro to the existing reply queue; resolve values after source unkey.
     /// A full queue rejects before creating an attempt, so a later retry uses fresh values.
     pub fn queue_message(

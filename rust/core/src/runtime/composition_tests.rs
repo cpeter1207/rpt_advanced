@@ -25,7 +25,11 @@ fn composition_catalog_contract_is_checked_before_admission() {
             &MessageCatalog::load("en-US").unwrap(),
         )
         .unwrap();
-        assert_eq!(recipes.items.len(), 1, "{invalid}");
+        assert_eq!(
+            recipes.names.keys().collect::<Vec<_>>(),
+            ["good"],
+            "{invalid}"
+        );
         assert!(!recipes.warnings.is_empty());
         assert!(recipes.selectors.contains_key("2"));
     }

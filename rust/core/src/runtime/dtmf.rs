@@ -360,7 +360,7 @@ impl DtmfCommands {
                 });
         };
         let mut command = self.map.parse(&text)?;
-        if command.action == LinkAction::Message {
+        if matches!(command.action, LinkAction::Message | LinkAction::SiteStatus) {
             return (!command.node.is_empty()
                 && crate::config::message_selector_valid(&command.node))
             .then(|| DigitOutcome::Operation(DigitOperation::new(command, None)));

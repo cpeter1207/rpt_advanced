@@ -3,7 +3,7 @@
 use super::render;
 use crate::{
     composition::{Composition, CompositionError, Segment},
-    config::{BindingSource, ResolvedMessageSettings},
+    config::{BindingSource, ResolvedMessageSettings, ResolvedSiteSettings},
     media::{MediaProgram, MediaSource, MorseSource, SpeechSource},
     messages::{
         Daypart, MAX_MESSAGE_BYTES, Message, MessageArgument, MessageCatalog, MessageForms,
@@ -21,9 +21,11 @@ use std::{
 #[derive(Default)]
 pub(super) struct MessageRecipes {
     definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
-    pub items: Vec<Composition>,
+    pub items: Vec<MessageRecipe>,
     pub selectors: BTreeMap<String, usize>,
     pub names: BTreeMap<String, usize>,
+    pub site_selectors: BTreeMap<String, usize>,
+    pub site_unavailable: usize,
     pub warnings: Vec<crate::config::ConfigWarning>,
 }
 
@@ -81,6 +83,79 @@ impl MessageRecipes {
                 }
             }
         }
+        let site = ResolvedSiteSettings::resolve(document, node)?.value;
+        let defaults = ResolvedMessageSettings::from_scopes(document, node, &[], "")?;
+        let site_prefix = crate::config::ResolvedNodeSettings::resolve(document, node)?
+            .value
+            .link_commands["link_command_site_status"]
+            .len();
+        for (name, source, selector, label, unit, precision) in site
+            .sensors
+            .iter()
+            .map(|sensor| {
+                (
+                    sensor.name.as_str(),
+                    BindingSource::Sensor(sensor.name.clone()),
+                    &sensor.dtmf_id,
+                    sensor.label_message_id.as_str(),
+                    sensor.unit.as_str(),
+                    sensor.precision,
+                )
+            })
+            .chain(site.inputs.iter().map(|input| {
+                (
+                    input.name.as_str(),
+                    BindingSource::Input(input.name.clone()),
+                    &input.dtmf_id,
+                    "",
+                    "",
+                    0,
+                )
+            }))
+        {
+            let Some(selector) = selector else {
+                continue;
+            };
+            if site_prefix + selector.len() > 127 {
+                result.warnings.push(crate::config::ConfigWarning::new(
+                    0,
+                    node.as_str(),
+                    "dtmf_id",
+                    selector,
+                    "selector and effective prefix exceed the command length",
+                    "not DTMF addressable",
+                ));
+                continue;
+            }
+            let label = catalog
+                .format_named(label, &BTreeMap::new())
+                .unwrap_or_else(|_| forms(name));
+            let mut unit = catalog
+                .format_named(&format!("site-unit-{unit}"), &BTreeMap::new())
+                .unwrap_or_else(|_| forms(unit));
+            for text in [&mut unit.text, &mut unit.tts, &mut unit.morse] {
+                if !text.is_empty() {
+                    text.insert(0, ' ');
+                }
+            }
+            let index = result.items.len();
+            result.items.push(MessageRecipe::Site(Box::new(SiteReport {
+                source: Some(source),
+                label,
+                unit,
+                precision,
+                settings: defaults.clone(),
+            })));
+            result.site_selectors.insert(selector.clone(), index);
+        }
+        result.site_unavailable = result.items.len();
+        result.items.push(MessageRecipe::Site(Box::new(SiteReport {
+            source: None,
+            label: forms(""),
+            unit: forms(""),
+            precision: 0,
+            settings: defaults,
+        })));
         Ok(result)
     }
 
@@ -122,7 +197,8 @@ impl MessageRecipes {
                     }
                 }
                 let index = self.items.len();
-                self.items.push(recipe);
+                self.items
+                    .push(MessageRecipe::Composition(Box::new(recipe)));
                 Some(index)
             }
             Err(error) => {
@@ -141,6 +217,79 @@ impl MessageRecipes {
             reason,
             "definition disabled",
         ));
+    }
+}
+
+/// Recipes share admission, generation fencing and exact-source reply routing.
+pub(super) enum MessageRecipe {
+    Composition(Box<Composition>),
+    Site(Box<SiteReport>),
+}
+
+pub(super) struct SiteReport {
+    source: Option<BindingSource>,
+    label: MessageForms,
+    unit: MessageForms,
+    precision: u8,
+    settings: ResolvedMessageSettings,
+}
+
+impl MessageRecipe {
+    pub fn prepare(
+        &self,
+        catalog: &MessageCatalog,
+        values: &MessageValueSnapshot,
+    ) -> Result<MediaProgram, CompositionError> {
+        match self {
+            Self::Composition(recipe) => recipe.prepare(catalog, values),
+            Self::Site(report) => {
+                let mut arguments = BTreeMap::from([(
+                    "label".into(),
+                    MessageArgument::Forms(report.label.clone()),
+                )]);
+                let id = match &report.source {
+                    None => "site-query-unavailable",
+                    Some(source) => match values.binding(source, catalog)? {
+                        Some(MessageArgument::Number(value)) => match source {
+                            BindingSource::Input(_) if value == 0.0 => "site-input-inactive",
+                            BindingSource::Input(_) => "site-input-active",
+                            _ => {
+                                arguments.insert(
+                                    "value".into(),
+                                    uniform(&format!(
+                                        "{:.*}",
+                                        usize::from(report.precision),
+                                        value
+                                    )),
+                                );
+                                arguments.insert(
+                                    "unit".into(),
+                                    MessageArgument::Forms(report.unit.clone()),
+                                );
+                                "site-meter-report"
+                            }
+                        },
+                        _ => "site-value-unavailable",
+                    },
+                };
+                let rendered = catalog
+                    .format_named(id, &arguments)
+                    .map_err(|_| CompositionError::Preparation)?;
+                let source = spoken_source(rendered, &report.settings)?;
+                Ok(MediaProgram {
+                    morse: source.morse.iter().cloned().collect(),
+                    primary: vec![source],
+                })
+            }
+        }
+    }
+}
+
+fn forms(value: &str) -> MessageForms {
+    MessageForms {
+        text: value.into(),
+        tts: value.into(),
+        morse: value.into(),
     }
 }
 

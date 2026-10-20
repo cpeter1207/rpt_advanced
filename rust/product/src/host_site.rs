@@ -31,6 +31,87 @@ pub(crate) struct SiteBasis {
 }
 
 impl Host {
+    /// Append control snapshots only; requested/submitted values never imply electrical readback.
+    pub(super) fn write_site_status(
+        &mut self,
+        local: &str,
+        text: &mut String,
+    ) -> Result<(), RuntimeError> {
+        use std::fmt::Write;
+        let now_ms = self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let snapshot = self
+            .runtime
+            .node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .site()
+            .snapshot(now_ms);
+        let age = |observed: Option<u64>| observed.map(|time| now_ms.saturating_sub(time));
+        let _ = writeln!(
+            text,
+            "  site transmit-inhibited={}",
+            snapshot.transmit_inhibited
+        );
+        for (name, sensor) in snapshot.sensors {
+            let _ = writeln!(
+                text,
+                "    sensor {name} value={:?} quality={:?} age-ms={:?} smoothed={:?} minimum={:?} maximum={:?}",
+                sensor.current.value,
+                sensor.current.quality,
+                age(sensor.current.observed_at_ms),
+                sensor.smoothed,
+                sensor.minimum,
+                sensor.maximum
+            );
+        }
+        for (name, input) in snapshot.inputs {
+            let _ = writeln!(
+                text,
+                "    input {name} value={:?} quality={:?} age-ms={:?}",
+                input.value,
+                input.quality,
+                age(input.observed_at_ms)
+            );
+        }
+        for (name, alarm) in snapshot.alarms {
+            let _ = writeln!(
+                text,
+                "    alarm {name} active={} acknowledged={} unsafe={:?} reset-ready={}",
+                alarm.active, alarm.acknowledged, alarm.unsafe_condition, alarm.reset_ready
+            );
+        }
+        for (name, output) in snapshot.outputs {
+            let submitted = self
+                .site_radio
+                .output_status(local, &name)
+                .or_else(|| self.site_acquisition.output_status(local, &name));
+            let _ = writeln!(
+                text,
+                "    output {name} requested-on={} fault={} pulse-deadline-ms={:?} submitted={:?} submission-quality={:?} readback=unavailable",
+                output.requested_on,
+                output.fault,
+                output.pulse_deadline_ms,
+                submitted.as_ref().and_then(|state| state.submitted),
+                submitted.map_or(
+                    rpt_advanced_core::site::ReadingQuality::Unavailable,
+                    |state| state.quality
+                )
+            );
+        }
+        for (name, fan) in snapshot.fans {
+            let _ = writeln!(
+                text,
+                "    fan {name} requested-duty={} fault={} run-on-until-ms={:?}",
+                fan.duty, fan.fault, fan.run_on_until_ms
+            );
+        }
+        for ((node, target), fault) in &self.site_delivery.faults {
+            if node == local {
+                let _ = writeln!(text, "    site-action {target} fault={fault:?}");
+            }
+        }
+        Ok(())
+    }
+
     /// Drive station policy on the existing control owner, without waiting for I/O or media.
     pub(super) fn advance_sites(&mut self, clock: RuntimeClock) {
         if self.site_delivery.revision != self.runtime.revision() {

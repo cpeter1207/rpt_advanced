@@ -133,7 +133,7 @@ impl ResolvedMessageSettings {
     }
 
     /// Resolve the same composition/media fields for a caller-owned scope hierarchy.
-    pub(super) fn from_scopes(
+    pub(crate) fn from_scopes(
         document: &ConfigDocument,
         node: &NodeId,
         scopes: &[String],

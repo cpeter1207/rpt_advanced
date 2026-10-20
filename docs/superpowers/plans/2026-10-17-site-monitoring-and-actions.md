@@ -13,9 +13,11 @@
 **Status:** Native implementation approved 2026-10-18. The message prerequisite
 is locally implemented and tested. S1 configuration/measurement and S2 pure
 alarm/output/fan policy and S3 existing-owner bridge pass focused tests. S4 IIO,
-external adapters and selected-provider composition pass scoped tests. S5 state
-transfer is locally tested; runtime acquisition and S6–S7 remain. No node changes or deployment
-are authorized by this document.
+external adapters and selected-provider composition pass scoped tests. S5
+acquisition, state transfer and safe shutdown pass targeted tests. S6 protective
+actions, RF inhibition, exact-source site queries and status pass targeted tests.
+Authorized site controls and S7 remain. No node changes or deployment are
+authorized by this document.
 
 ## Global Constraints
 
@@ -129,11 +131,11 @@ hosted branch validation remain S7; no physical sensor hardware was tested.
 
 **Interfaces:** `SiteService::prepare(settings: ResolvedSiteSettings, generation: GenerationWork, backends: SiteBackends) -> Result<Self, SiteError>` acquires only configured endpoints. `SiteService::poll(&mut self, now_ms: u64) -> SiteObservations` submits due bounded requests and drains results without waiting. `SiteService::publish(&mut self, effects: &[SiteEffect])` queues owner commands. `SiteService::retire(&mut self)` initiates safe handoff and waits for owner quiescence only during non-audio teardown. `SiteBackends` is the selected retained provider set, not an additional public plugin framework.
 
-- [ ] Add `site_slow_device_isolation`: one fixture read remains pending while another device/node continues; pending polls coalesce rather than create an unbounded backlog. No sensor gets its own thread. State snapshots distinguish desired, submitted and observed outputs.
-- [ ] Add `site_reload_preserves_pulse_and_fan_deadlines`: pulse begun at `1000`, ending at `1500`, reloaded at `1200` still ends at `1500`; PTT fan run-on likewise retains its original deadline. Removed output attempts safe state before retirement; failure remains visible and rejects unsafe replacement ownership.
-- [ ] Add `site_stale_work_ignored` and `site_shutdown_no_replayed_write`: generation validation before physical dispatch and before result application, and a synchronized ownership barrier that prevents old work racing a new owner. Ignoring an old result is not enough to prevent an old physical write.
-- [ ] Run product `site_` tests red. Use one bounded serial acquisition owner per physical device, shared by its sensors, or reuse the already-running CM119/parallel owner. Feed its bounded results into existing `Host::pump` through the existing control executor. Do not add another station-policy thread or make control wait for a read. Respect library-global serialization inside the adapter without propagating it to audio or other backends.
-- [ ] Preserve unchanged owners and transfer state; safe-handoff changed endpoints before canceling their timers. Reuse `GenerationWork` and `Engine::run` lifecycle validation. A stuck device can fault its own owner but must not permit a second writer or block unrelated station service. Re-run tests plus existing control rejection/drain and reload suites; update Rustdoc and commit.
+- [x] Add `site_slow_device_isolation`: one fixture read remains pending while another device/node continues; pending polls coalesce rather than create an unbounded backlog. No sensor gets its own thread. State snapshots distinguish desired, submitted and observed outputs.
+- [x] Add `site_reload_preserves_pulse_and_fan_deadlines`: pulse begun at `1000`, ending at `1500`, reloaded at `1200` still ends at `1500`; PTT fan run-on likewise retains its original deadline. Removed output attempts safe state before retirement; failure remains visible and rejects unsafe replacement ownership.
+- [x] Add `site_stale_work_ignored` and `site_shutdown_no_replayed_write`: generation validation before physical dispatch and before result application, and a synchronized ownership barrier that prevents old work racing a new owner. Ignoring an old result is not enough to prevent an old physical write.
+- [x] Run product `site_` tests red. Use one bounded serial acquisition owner per physical device, shared by its sensors, or reuse the already-running CM119/parallel owner. Feed its bounded results into existing `Host::pump` through the existing control executor. Do not add another station-policy thread or make control wait for a read. Respect library-global serialization inside the adapter without propagating it to audio or other backends.
+- [x] Preserve unchanged owners and transfer state; safe-handoff changed endpoints before canceling their timers. Reuse `GenerationWork` and `Engine::run` lifecycle validation. A stuck device can fault its own owner but must not permit a second writer or block unrelated station service. Re-run tests plus existing control rejection/drain and reload suites; update Rustdoc and commit.
 
 ### S6: Connect reports, actions and status without bypassing safety
 
@@ -141,8 +143,8 @@ hosted branch validation remain S7; no physical sensor hardware was tested.
 
 **Interfaces:** `SiteController::snapshot(&self, now_ms: u64) -> SiteSnapshot` exposes reading age/quality, alarms/latches/acknowledgment, output requested/submitted/observed state and fan demand/RPM/fault. `SiteSnapshot` supplies companion M4 `MessageValueSnapshot` bindings. `LinkAction::SiteStatus` carries a validated selector, not a link destination. `SiteEffect` from S2 uses existing generation-scoped command dispatch and bounded transmit-inhibit intent; it must not reuse CTCSS-only inhibition as a transmitter interlock.
 
-- [ ] Add `site_dtmf_query_scope`: `*761#` reports sensor/input 1 without administrative unlock, does not alter the last link target, and responds only after the exact source unkeys. Zero does not recall a link, duplicate/remapped prefixes are checked, and no query can write hardware. Unknown/stale values get localized unavailable forms.
-- [ ] Add `site_alarm_actions_independent_of_telemetry`: saturate the media queue and assert a trip's output/inhibit actions are submitted immediately and once in configured order. Repeat notification only repeats speech; input edges debounce once. Unsolicited alarms stay local and wait for normal admission, then obey receive-driven Morse interruption.
+- [x] Add `site_dtmf_query_scope`: `*761#` reports sensor/input 1 without administrative unlock, does not alter the last link target, and responds only after the exact source unkeys. Zero does not recall a link, duplicate/remapped prefixes are checked, and no query can write hardware. Unknown/stale values get localized unavailable forms.
+- [x] Add `site_alarm_actions_independent_of_telemetry`: saturate the media queue and assert a trip's output/inhibit actions are submitted immediately and once in configured order. Repeat notification only repeats speech; input edges debounce once. Unsolicited alarms stay local and wait for normal admission, then obey receive-driven Morse interruption.
 - [ ] Add `site_actions_preserve_interlock`: manual on/fan commands, reset and existing named action macros cannot bypass a configured inhibit or physical interlock. Validate action references/typed arguments at reload, no recursion or arbitrary shell. Ensure a failing action is diagnosed without erasing the unsafe condition.
 - [ ] Run these tests red, connect S1/S2/S5 to M4's shared snapshot/message preparation and existing command dispatcher, then rerun green. Keep protective effects separate from the existing `event_command` path that waits for telemetry admission. Add read-only status and existing authorized CLI operations, not new REST/WebSocket transports or DTMF administration.
 - [ ] Verify IDs/tails can report site values using the same snapshot and localized message segments. Unavailable measurements do not erase identification text. Update Rustdoc; commit.

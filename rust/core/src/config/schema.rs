@@ -272,6 +272,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "dtmf_regeneration_level_dbfs"
                 | "link_command_pad_test"
                 | "link_command_message"
+                | "link_command_site_status"
                 | "parrot_enabled"
                 | "dtmf_admin_unlock_hash"
                 | "dtmf_admin_lock_hash"
@@ -795,6 +796,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_parrot_disable" => "805",
         "link_command_pad_test" => "82",
         "link_command_message" => "77",
+        "link_command_site_status" => "76",
         _ => return None,
     })
 }

@@ -86,6 +86,13 @@ pub enum LinkEffect {
         /// Originating endpoint; absence selects the local transmitter.
         reply: Option<PeerReply>,
     },
+    /// Query one site reading without changing remembered link destinations.
+    SiteStatus {
+        /// Canonical sensor/input selector.
+        selector: String,
+        /// Exact source connection, or the local receiver.
+        reply: Option<PeerReply>,
+    },
     /// Change the live node's parrot state; apply buffer lifecycle work on control.
     ParrotEnabled(bool),
     /// No physical operation is needed (for example resumed retry intent).
@@ -497,13 +504,20 @@ impl NodeLinkControl {
         }
         let remote = operation.command.node;
         let effect = match operation.command.action {
-            LinkAction::Message => {
+            action @ (LinkAction::Message | LinkAction::SiteStatus) => {
                 if remote.is_empty() || !crate::config::message_selector_valid(&remote) {
                     return Err(AdmissionError::Invalid);
                 }
-                LinkEffect::Message {
-                    selector: remote,
-                    reply: operation.reply,
+                if action == LinkAction::SiteStatus {
+                    LinkEffect::SiteStatus {
+                        selector: remote,
+                        reply: operation.reply,
+                    }
+                } else {
+                    LinkEffect::Message {
+                        selector: remote,
+                        reply: operation.reply,
+                    }
                 }
             }
             LinkAction::Monitor

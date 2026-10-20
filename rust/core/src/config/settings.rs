@@ -2089,6 +2089,7 @@ fn command_keys() -> [&'static str; crate::command::ACTION_COUNT] {
         "link_command_parrot_disable",
         "link_command_pad_test",
         "link_command_message",
+        "link_command_site_status",
     ]
 }
 
@@ -2116,6 +2117,7 @@ fn default_command(key: &str) -> String {
         "link_command_parrot_disable" => "805",
         "link_command_pad_test" => "82",
         "link_command_message" => "77",
+        "link_command_site_status" => "76",
         _ => "",
     }
     .to_owned()
@@ -2151,6 +2153,7 @@ fn command_action(key: &str) -> Option<LinkAction> {
         "link_command_parrot_disable" => LinkAction::ParrotDisable,
         "link_command_pad_test" => LinkAction::PadTest,
         "link_command_message" => LinkAction::Message,
+        "link_command_site_status" => LinkAction::SiteStatus,
         _ => return None,
     })
 }

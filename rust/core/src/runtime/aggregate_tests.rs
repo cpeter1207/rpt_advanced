@@ -224,6 +224,102 @@ fn site_runtime_message_uses_current_measurement_and_reports_stale_as_unavailabl
 }
 
 #[test]
+fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
+    use crate::site::{Observation, ReadingQuality, SiteObservations};
+    for (selector, now_ms, expected) in [
+        ("1", 1000, "battery is 13.3 volts."),
+        ("1", 6000, "battery is unavailable."),
+        ("2", 1000, "door is inactive."),
+        ("99", 1000, "The requested site reading is unavailable."),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse("[1000]\n[sensor 1000 battery]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\nunit=volts\nprecision=1\ndtmf_id=1\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=/dev/gpiochip0\nline=3\ndtmf_id=2\n").unwrap(),
+            &CapturingMedia(messages.clone()), adapter,
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>), clock(),
+        ).unwrap();
+        let peer = crate::link::PeerSignals::new();
+        peer.set_radio_keyed(true);
+        runtime
+            .queue_site_report("1000", selector, Some(peer.reply_target()))
+            .unwrap();
+        let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = rx.acquire_pair(&mut tx).unwrap();
+        let mut audio = [0.0; 960];
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        runtime.prepare_messages(clock());
+        assert!(messages.lock().unwrap().is_empty());
+        runtime.node("1000").unwrap().site().advance(
+            1000,
+            &SiteObservations {
+                sensors: [(
+                    "battery".into(),
+                    Observation {
+                        value: Some(13.26),
+                        observed_at_ms: Some(1000),
+                        quality: ReadingQuality::Valid,
+                    },
+                )]
+                .into(),
+                inputs: [(
+                    "door".into(),
+                    Observation {
+                        value: Some(false),
+                        observed_at_ms: Some(1000),
+                        quality: ReadingQuality::Valid,
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+            &Default::default(),
+        );
+        peer.set_radio_keyed(false);
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        runtime.prepare_messages(RuntimeClock { now_ms, ..clock() });
+        assert_eq!(*messages.lock().unwrap(), [expected]);
+        let mut parrot = [0.0; 960];
+        let mut active = false;
+        let mut replies = [crate::controller::PeerReplySample::default(); 960];
+        generation.transmit().controller.process_audio_with_parrot(
+            false,
+            false,
+            false,
+            &[],
+            &mut audio,
+            crate::controller::ParrotOutput {
+                samples: &mut parrot,
+                active: &mut active,
+                replies: Some(&mut replies),
+                regeneration: None,
+            },
+        );
+        assert!(audio.iter().all(|sample| *sample == 0.0));
+        assert!(
+            replies
+                .iter()
+                .any(|sample| sample.sample != 0.0 && sample.target == peer.reply_identity())
+        );
+        assert_eq!(
+            runtime.node("1000").unwrap().site().snapshot(1000).sensors["battery"]
+                .current
+                .value,
+            Some(13.26),
+            "display precision never rounds policy readings"
+        );
+        drop(generation);
+        assert!(runtime.stop(now_ms));
+    }
+}
+
+#[test]
 fn composition_runtime_tail_resolves_only_at_each_release_attempt() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));

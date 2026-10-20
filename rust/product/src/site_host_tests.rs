@@ -174,6 +174,41 @@ fn site_host_alarm_actions_do_not_wait_for_full_telemetry_queue() {
 }
 
 #[test]
+fn site_host_status_separates_requested_submitted_and_unavailable_readback() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host_with(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n[sensor 1000 battery]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=in1_input\n",
+    );
+    host.pump(RuntimeClock {
+        now_ms: 10,
+        ..clock()
+    })
+    .unwrap();
+    host.epoch = Instant::now() - std::time::Duration::from_secs(6);
+    let text = host.status_text("1000").unwrap();
+    assert!(text.contains("site transmit-inhibited=false"), "{text}");
+    assert!(
+        text.contains("input door value=Some(false) quality=Valid age-ms=Some("),
+        "{text}"
+    );
+    assert!(
+        text.contains("sensor battery value=None quality=Unavailable"),
+        "{text}"
+    );
+    assert!(text.contains("output relay requested-on=true"), "{text}");
+    assert!(text.contains("submitted=Some((1.0,"), "{text}");
+    assert!(text.contains("readback=unavailable"), "{text}");
+    for now in 6000..6008 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(6008));
+}
+
+#[test]
 fn site_host_shutdown_acknowledges_safe_release_before_destroying_radio() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
