@@ -351,6 +351,104 @@ fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
 }
 
 #[test]
+fn site_report_rejects_empty_and_noncanonical_selectors_before_admission() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    for selector in ["", "0", "01", "unknown"] {
+        assert_eq!(
+            runtime.queue_site_report("1000", selector, None),
+            Err(RuntimeError::Rejected)
+        );
+    }
+    assert_eq!(
+        runtime.queue_site_report("missing", "1", None),
+        Err(RuntimeError::MissingNode)
+    );
+    for _ in 0..4 {
+        runtime.queue_site_report("1000", "99", None).unwrap();
+    }
+    assert_eq!(
+        runtime.queue_site_report("1000", "99", None),
+        Err(RuntimeError::Rejected),
+        "invalid selectors must not consume reply capacity"
+    );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[message ready]\ncontent=Ready\ndtmf_id=1\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime.queue_named_message("missing", "ready"),
+        Err(RuntimeError::MissingNode)
+    );
+    assert_eq!(
+        runtime.queue_named_message("1000", "missing"),
+        Err(RuntimeError::Preparation)
+    );
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    for _ in 0..4 {
+        runtime
+            .queue_message("1000", "1", Some(peer.reply_target()))
+            .unwrap();
+    }
+    assert_eq!(runtime.queue_named_message("1000", "ready"), Ok(false));
+    runtime.prepare_messages(clock());
+    assert!(messages.lock().unwrap().is_empty());
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    peer.end();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12001]);
+    runtime.prepare_messages(clock());
+    assert_eq!(runtime.queue_named_message("1000", "ready"), Ok(true));
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0]);
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["Ready"]);
+    let mut audio = [0.0; 960];
+    let mut parrot = [0.0; 960];
+    let mut active = false;
+    let mut replies = [crate::controller::PeerReplySample::default(); 960];
+    generation.transmit().controller.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut audio,
+        crate::controller::ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+            replies: Some(&mut replies),
+            regeneration: None,
+        },
+    );
+    assert!(audio.iter().any(|sample| *sample != 0.0));
+    assert!(replies.iter().all(|sample| sample.sample == 0.0));
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn composition_runtime_ids_and_tails_keep_identification_with_unavailable_meter() {
     use crate::site::{Observation, ReadingQuality, SiteObservations};
     for family in ["identifier", "tail"] {

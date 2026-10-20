@@ -135,9 +135,10 @@ impl Playback {
 
     /// Restart a preempted, already-admitted item with the same values and Morse latch.
     pub(crate) fn rewind(&mut self) {
-        if let Some(stream) = &mut self.stream {
-            stream.rewind();
-        }
+        self.stream
+            .as_mut()
+            .expect("admitted playback retains its stream until retirement")
+            .rewind();
         self.stream_started = true;
         self.waiting_for_stream = true;
         self.outcome = PlaybackOutcome::Active;

@@ -10,7 +10,7 @@ fn site_dtmf_query_does_not_unlock_or_replace_the_last_link() {
     };
     assert_eq!(operation.command.node, "1");
     assert!(!operation.admin_authorized);
-    for invalid in ["*760#", "*7601#"] {
+    for invalid in ["*76#", "*760#", "*7601#"] {
         assert!(feed_symbols(&mut commands, invalid).is_empty());
     }
     let recalled = feed_symbols(&mut commands, "*30#");
@@ -31,7 +31,7 @@ fn composition_dtmf_selector_preserves_last_link() {
     assert_eq!(operation.command.action, LinkAction::Message);
     assert_eq!(operation.command.node, "1");
     assert!(!operation.admin_authorized);
-    for invalid in ["*770#", "*7701#"] {
+    for invalid in ["*77#", "*770#", "*7701#"] {
         assert!(feed_symbols(&mut commands, invalid).is_empty());
     }
     let recalled = feed_symbols(&mut commands, "*30#");

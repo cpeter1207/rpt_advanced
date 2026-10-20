@@ -37,6 +37,29 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn composition_completion_without_preparation_returns_the_callers_media() {
+    let (_, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let attempt = MessageAttemptId {
+        generation: 7,
+        sequence: 3,
+    };
+    let rejected = control
+        .complete_message(attempt, Ok(media(0.5, 1)))
+        .expect_err("an unconfigured preparation owner cannot accept a completion");
+    assert_eq!(rejected.attempt, attempt);
+    let mut returned = rejected.result.unwrap();
+    let mut output = [0.0];
+    assert_eq!(returned.0.render(false, &mut output), 1);
+    assert_eq!(output, [0.5]);
+}
+
+#[test]
 fn tail_scheduling_and_identifier_preemption_do_not_allocate_on_audio() {
     let (mut node, _) = NodeController::new(
         ControllerSettings {

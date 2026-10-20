@@ -171,6 +171,7 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
         "[1000]\n\
          [identifier 1000 empty]\n\
          [announcement 1000 empty]\n\
+         [announcement 1000 recorded]\nsound_file=news.wav\n\
          [courtesy 1000 empty]\ninput=link\n\
          [courtesy 1000 receiver]\ninput=receiver\nmorse_text=R\n\
          [courtesy 1000 peer]\ninput=link\nremote_node=2000\nmorse_text=P\n",
@@ -191,9 +192,62 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
     .unwrap();
 
     let sources = media.sources.lock().unwrap();
-    assert_eq!(sources.len(), 2);
-    assert_eq!(sources[0].morse.as_ref().unwrap().text, "R");
-    assert_eq!(sources[1].morse.as_ref().unwrap().text, "P");
+    assert_eq!(sources.len(), 3);
+    assert_eq!(
+        sources[0].file.as_deref(),
+        Some(std::path::Path::new("news.wav"))
+    );
+    assert_eq!(sources[1].morse.as_ref().unwrap().text, "R");
+    assert_eq!(sources[2].morse.as_ref().unwrap().text, "P");
+}
+
+#[test]
+fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
+    let config = ConfigDocument::parse(
+        "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n\
+         [identifier 1000 broken]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_missing}\n\
+         [tail 1000 empty]\n\
+         [tail 1000 broken]\ncontent={message_macro_missing}\n\
+         [tail 1000 recorded]\nsound_file=tail.wav\nmorse_text=TAIL\n",
+    )
+    .unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    let media = media(false, false);
+    let (mut controller, mut control, _, _station, recipes) = controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+    )
+    .unwrap();
+    let disabled = recipes
+        .warnings
+        .iter()
+        .filter(|warning| warning.fallback == "definition disabled")
+        .map(|warning| warning.section.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(disabled, ["identifier 1000 broken", "tail 1000 broken"]);
+    let mut requests = Vec::new();
+    for receiving in [true, false, false] {
+        controller.process_audio(receiving, false, &[], &mut [0.0; 48]);
+        if let Some(request) = control.take_message_request() {
+            requests.push(request);
+        }
+    }
+    assert_eq!(requests.len(), 1);
+    let super::super::composition::MessageRecipe::Composition(recipe) =
+        &recipes.items[requests[0].content_index]
+    else {
+        panic!("recorded tail composition");
+    };
+    assert_eq!(
+        recipe.settings_for(None).media.file.as_deref(),
+        Some(std::path::Path::new("tail.wav"))
+    );
+    assert!(media.sources.lock().unwrap().is_empty());
 }
 
 #[test]

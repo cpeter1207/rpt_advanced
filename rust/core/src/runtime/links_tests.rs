@@ -36,6 +36,45 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn read_only_selectors_reject_invalid_arguments_and_keep_the_exact_reply() {
+    let mut host = NodeHost::new(generation(1));
+    let mut links = links();
+    let signals = crate::link::PeerSignals::new();
+    for action in [LinkAction::SiteStatus, LinkAction::Message] {
+        for selector in ["", "0", "01", "unknown"] {
+            assert!(matches!(
+                links.command(
+                    operation(action, selector),
+                    host.control().work().unwrap(),
+                    0,
+                    false,
+                ),
+                Err(AdmissionError::Invalid)
+            ));
+        }
+        for reply in [None, Some(signals.reply_target())] {
+            let mut request = operation(action, "1");
+            request.reply = reply.clone();
+            let effect = links
+                .command(request, host.control().work().unwrap(), 0, false)
+                .unwrap();
+            let (selector, actual_reply) = match effect {
+                LinkEffect::SiteStatus { selector, reply } if action == LinkAction::SiteStatus => {
+                    (selector, reply)
+                }
+                LinkEffect::Message { selector, reply } if action == LinkAction::Message => {
+                    (selector, reply)
+                }
+                _ => panic!("read-only selector was interpreted as another operation"),
+            };
+            assert_eq!(selector, "1");
+            assert_eq!(actual_reply, reply);
+        }
+    }
+    assert!(links.manager().snapshot().is_empty());
+}
+
+#[test]
 fn remote_origin_reclamation_preserves_last_node_redial() {
     let mut links = links();
     links.accept("2000", true).unwrap();

@@ -12,6 +12,25 @@ fn segment(ring: InboundConsumer, budget: u64) -> SegmentConsumer {
     }
 }
 
+#[test]
+fn finite_segment_stops_at_its_published_budget_until_more_source_arrives() {
+    let (mut producer, consumer) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
+    producer.write(&[0.25; 8]).unwrap();
+    let mut consumer = segment(consumer, 0);
+
+    assert_eq!(consumer.render_sample().unwrap(), None);
+    assert_eq!(consumer.consumed, 0);
+    assert!(!consumer.finished(false));
+
+    consumer.progress.budget.store(1, Ordering::Release);
+    assert!(consumer.render_sample().unwrap().is_some());
+    assert_eq!(consumer.render_sample().unwrap(), None);
+    assert_eq!(consumer.consumed, 1);
+    assert!(!consumer.finished(false));
+    drop(producer);
+    assert!(consumer.finished(false));
+}
+
 static READS: AtomicUsize = AtomicUsize::new(0);
 static READING: AtomicBool = AtomicBool::new(false);
 static RELEASE_READ: AtomicBool = AtomicBool::new(false);
@@ -135,6 +154,63 @@ fn composition_segment_rates_keep_final_samples() {
         .collect();
     assert!(expected.len() >= 1_920);
     assert_eq!(composition_render(sources), expected);
+}
+
+#[test]
+fn composition_producer_waits_for_the_two_live_segment_consumers() {
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(
+            MediaProgram {
+                primary: vec![
+                    composition_tone(500),
+                    composition_tone(750),
+                    composition_tone(1_000),
+                ],
+                morse: vec![],
+            },
+            false,
+        )
+        .unwrap();
+    let mut job = session.jobs.pop().unwrap();
+    let control = Arc::clone(&job.control);
+    reader.start();
+    let file = Arc::clone(&session.file);
+    let speech = Arc::clone(&session.speech);
+    let stopping = Arc::clone(&session.stopping);
+    let worker = thread::spawn(move || {
+        run_job(&mut job, 1, &file, &speech, &stopping, InboundRing::open);
+        job
+    });
+    // Acquire the playing segment, leaving its successor ready and neither retired.
+    let mut prefix = Vec::new();
+    for _ in 0..1_000 {
+        if control.consumer_outstanding.load(Ordering::Acquire) == 2 {
+            break;
+        }
+        let mut output = [0.0; 1];
+        match reader.render(&mut output) {
+            PcmRead::Samples(1) => prefix.push(output[0]),
+            PcmRead::Pending => {}
+            other => panic!("producer completed before backpressure: {other:?}"),
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(control.consumer_outstanding.load(Ordering::Acquire), 2);
+    thread::sleep(Duration::from_millis(5));
+    assert_eq!(control.completed.load(Ordering::Acquire), 0);
+    assert_eq!(control.failed.load(Ordering::Acquire), 0);
+    let remaining = collect_samples(reader.as_mut(), &mut [0.0; 64]);
+    assert_eq!(prefix.len() + remaining.len(), 1_440);
+    assert_eq!(
+        worker
+            .join()
+            .unwrap()
+            .control
+            .completed
+            .load(Ordering::Acquire),
+        1
+    );
 }
 
 #[test]
@@ -1577,14 +1653,16 @@ fn reader_returns_pending_or_partial_samples_while_a_live_producer_is_empty() {
         retired,
         generation: 1,
         delay_remaining: 0,
-        consumer: Some((1, segment(consumer, u64::MAX))),
+        consumer: Some((1, segment(consumer, 1))),
         morse_available: false,
         fallback_morse_pending: false,
     };
     assert_eq!(reader.render(&mut [0.0; 8]), PcmRead::Pending);
 
     producer.write(&[0.25; 4096]).unwrap();
-    assert!(matches!(reader.render(&mut [0.0; 5000]), PcmRead::Samples(n) if n > 0));
+    let mut output = [0.0; 8];
+    assert_eq!(reader.render(&mut output), PcmRead::Samples(1));
+    assert_eq!(&output[1..], &[0.0; 7]);
 }
 
 #[test]
@@ -2263,6 +2341,18 @@ fn one_shot_registration_validates_sources_queue_and_session_state() {
         context(None),
     )
     .unwrap();
+    assert_eq!(
+        session
+            .register_program(
+                MediaProgram {
+                    primary: vec![],
+                    morse: vec![composition_morse("E")],
+                },
+                false,
+            )
+            .err(),
+        Some(MediaError::InvalidRequest)
+    );
     assert_eq!(
         session.register(MediaSource::default()).err(),
         Some(MediaError::InvalidRequest)

@@ -191,3 +191,17 @@ fn catalog_loader_uses_embedded_english_when_no_catalog_files_exist() {
     assert_eq!(catalog.format(&Message::NoLinks).unwrap().text, "NO LINKS");
     assert_eq!(catalog.translation_warnings(), &["catalog unavailable"]);
 }
+
+#[test]
+fn malformed_catalog_overlay_falls_back_with_one_useful_warning() {
+    let directories = TemporaryCatalogs::new();
+    fs::write(directories.admin().join("fr-CA.ftl"), "no-links = {\n").unwrap();
+    let catalog = MessageCatalog::load_from_catalog_dirs(
+        "fr-CA",
+        &[directories.admin()],
+        &[directories.package()],
+    )
+    .unwrap();
+    assert_eq!(catalog.format(&Message::NoLinks).unwrap().text, "NO LINKS");
+    assert_eq!(catalog.translation_warnings(), &["catalog is malformed"]);
+}

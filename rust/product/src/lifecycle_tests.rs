@@ -109,6 +109,45 @@ fn site_lifecycle_reload_replaces_bindings_without_reopening_same_radio() {
     );
 }
 
+#[test]
+fn site_alarm_link_action_is_dispatched_without_a_schedule_tick() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    crate::fixture::RADIO_READY.store(1, Ordering::Release);
+    let configuration = active_configuration(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=2\n\
+         [alarm 1000 missing]\nenabled=yes\nsource=door\ncondition=unavailable\non_trip=macro:connect\n\
+         [macro 1000 connect]\naction=connect\ntarget_node=2000\n",
+    );
+    assert_eq!(unsafe { start(&configuration) }, 0);
+    let (engine, call) = selected().unwrap();
+    engine.pump(engine.clock(), false).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        engine.pump(engine.clock(), false).unwrap();
+        if engine.jobs.lock().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "site action dial did not complete"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        engine
+            .run(|host| host.status_text("1000"))
+            .unwrap()
+            .contains("  2000: transceive")
+    );
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    crate::fixture::RADIO_READY.store(0, Ordering::Release);
+}
+
 fn operation(action: LinkAction, node: &str) -> DigitOperation {
     DigitOperation::new(
         Command {

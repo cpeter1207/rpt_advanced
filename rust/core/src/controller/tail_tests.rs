@@ -46,6 +46,10 @@ fn tail_zero_and_positive_delay() {
             assert_eq!(at(&mut node, 2249, false), (false, 0.0));
             assert_eq!(at(&mut node, 2250, false), (true, 0.5));
         }
+        assert!(
+            !node.tails.waiting_for_unkey(node.now),
+            "started playback cannot begin another post-unkey delay"
+        );
     }
 }
 
@@ -103,6 +107,8 @@ fn tail_receive_pending_vs_playing() {
     let (_, interrupted) = at(&mut node, 3501, true);
     assert_ne!(interrupted, 0.5, "primary must stop at receive boundary");
     assert!(node.telemetry.active == Some(Source::Tail(0)));
+    at(&mut node, 3502, false);
+    assert!(node.telemetry.active == Some(Source::Tail(0)));
 }
 
 #[test]
@@ -114,6 +120,10 @@ fn tail_nonrecursive_cooldown() {
     assert_eq!(at(&mut node, 2_002_000, false), (true, 0.5));
     let mut rest = [0.0; 4800];
     node.process_audio(false, false, &[], &mut rest);
+    at(&mut node, 2_003_000, true);
+    at(&mut node, 2_004_000, false);
+    assert_eq!(at(&mut node, 2_005_000, false).1, 0.0);
+    assert!(!node.tails.pending(), "cooldown excludes this release");
     assert!(
         !at(&mut node, 4_000_000, false).0,
         "generated unkey is not a release"
@@ -296,4 +306,103 @@ fn tail_preempted_primary_restarts_at_its_beginning() {
     assert_eq!(at(&mut node, 2001, false).1, 0.25);
     node.process_audio(false, false, &[], &mut [0.0; 479]);
     assert_eq!(at(&mut node, 2011, false).1, 0.1);
+}
+
+#[test]
+fn tail_invalid_durations_preserve_the_previously_installed_policy() {
+    let overflow = u64::MAX / 48 + 1;
+    for (interval_ms, delay_ms) in [(overflow, 0), (0, overflow)] {
+        let mut node = fixture(0, 0, vec![]);
+        assert!(
+            node.set_tails(vec![Tail {
+                media: pcm(0.25, 1),
+                interval_ms,
+                delay_ms,
+            }])
+            .is_err()
+        );
+        at(&mut node, 0, true);
+        at(&mut node, 1000, false);
+        assert_eq!(at(&mut node, 2000, false), (true, 0.5));
+    }
+}
+
+#[test]
+fn tail_kerchunk_suppression_does_not_arm_a_later_idle_playback() {
+    let mut node = fixture(0, 0, vec![]);
+    node.settings.kerchunk_max_ms = 100;
+    at(&mut node, 0, true);
+    at(&mut node, 50, false);
+    assert_eq!(at(&mut node, 2000, false), (false, 0.0));
+    assert!(!node.tails.pending());
+}
+
+#[test]
+fn tail_receive_cancels_an_attempt_before_any_prepared_pcm() {
+    let mut node = fixture(0, 0, vec![]);
+    let mut preparation = MessagePreparation::new(1);
+    node.set_tails(vec![Tail {
+        media: preparation.register(0).unwrap(),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    at(&mut node, 0, true);
+    at(&mut node, 1000, false);
+    at(&mut node, 2000, false);
+    let first = preparation.take_request().unwrap();
+    at(&mut node, 2001, true);
+    assert!(node.telemetry.active.is_none());
+    assert!(!node.tails.pending());
+    assert!(
+        preparation
+            .complete(first.attempt, Ok(pcm(0.75, 1)))
+            .is_ok()
+    );
+    at(&mut node, 2002, false);
+    assert_eq!(at(&mut node, 3002, false).1, 0.0);
+    let second = preparation.take_request().unwrap();
+    assert_ne!(first.attempt, second.attempt);
+    assert!(
+        preparation
+            .complete(second.attempt, Ok(pcm(0.25, 1)))
+            .is_ok()
+    );
+    assert_eq!(at(&mut node, 3003, false).1, 0.25);
+}
+
+#[test]
+fn tail_identifier_preempts_pending_values_only_on_an_audio_sample() {
+    let mut node = fixture(0, 0, vec![identifier(1000, 1001)]);
+    let mut preparation = MessagePreparation::new(1);
+    node.set_tails(vec![Tail {
+        media: preparation.register(0).unwrap(),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    at(&mut node, 0, true);
+    at(&mut node, 1000, false);
+    at(&mut node, 2000, false);
+    let first = preparation.take_request().unwrap();
+    node.now = samples(2001);
+    node.process_event(false, false);
+    assert!(node.telemetry.active == Some(Source::Tail(0)));
+    assert_eq!(at(&mut node, 2001, false).1, 0.25);
+    assert!(node.telemetry.active == Some(Source::Identifier(0)));
+    assert!(
+        preparation
+            .complete(first.attempt, Ok(pcm(0.75, 1)))
+            .is_ok()
+    );
+    node.process_audio(false, false, &[], &mut [0.0; 479]);
+    assert_eq!(at(&mut node, 2011, false).1, 0.0);
+    let second = preparation.take_request().unwrap();
+    assert_ne!(first.attempt, second.attempt);
+    assert!(
+        preparation
+            .complete(second.attempt, Ok(pcm(0.5, 1)))
+            .is_ok()
+    );
+    assert_eq!(at(&mut node, 2012, false).1, 0.5);
 }

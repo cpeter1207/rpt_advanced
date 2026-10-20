@@ -48,6 +48,25 @@ impl PcmStreamReader for ProducerFallbackStream {
         self.0 = true;
         MorseSwitch::Selected
     }
+    fn defer_before_output(&mut self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn deferred_playback_preserves_primary_until_receive_latches_morse() {
+    let mut playback = Playback::new_stream(Box::new(ProducerFallbackStream(false)));
+    let mut output = [0.0];
+
+    playback.defer(false);
+    assert_eq!(playback.render(false, &mut output), 1);
+    assert_eq!(output, [0.25]);
+
+    playback.restart(false);
+    playback.defer(true);
+    playback.defer(false);
+    assert_eq!(playback.render(false, &mut output), 1);
+    assert_eq!(output, [0.75]);
 }
 
 #[test]

@@ -16,7 +16,10 @@ impl Engine {
         {
             return true;
         }
-        let deadline = Instant::now() + HANDOFF_TIMEOUT;
+        self.stop_sites_until(Instant::now() + HANDOFF_TIMEOUT)
+    }
+
+    fn stop_sites_until(self: &Arc<Self>, deadline: Instant) -> bool {
         loop {
             let now = self.clock().now_ms;
             match self.site_control(move |host| host.site_shutdown(now)) {
@@ -47,7 +50,14 @@ impl Engine {
     }
 
     fn wait_sites(self: &Arc<Self>, resume: bool) -> Result<(), RuntimeError> {
-        let deadline = Instant::now() + HANDOFF_TIMEOUT;
+        self.wait_sites_until(resume, Instant::now() + HANDOFF_TIMEOUT)
+    }
+
+    fn wait_sites_until(
+        self: &Arc<Self>,
+        resume: bool,
+        deadline: Instant,
+    ) -> Result<(), RuntimeError> {
         loop {
             let now = self.clock().now_ms;
             let ready = self.run(move |host| {
@@ -117,3 +127,7 @@ impl Engine {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_site_tests.rs"]
+mod tests;

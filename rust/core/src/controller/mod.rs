@@ -724,7 +724,8 @@ impl NodeController {
             } else if let Some(index) = self.tails.ready(self.now) {
                 let item = &mut self.tails.items[index];
                 if !item.suspended {
-                    item.tail.media.0.restart(receive || source_activity);
+                    // A fresh tail is ready only after all traffic has released.
+                    item.tail.media.0.restart(false);
                 }
                 item.suspended = false;
                 self.telemetry.active = Some(Source::Tail(index));
@@ -837,10 +838,9 @@ impl NodeController {
                         self.identifiers.defer(&self.rules, index, self.now);
                     }
                     Some(Source::Announcement(index)) => {
-                        if let Some(a) = self.announcements.get_mut(index) {
-                            a.retry_after =
-                                self.now.saturating_add(samples(a.announcement.interval_ms));
-                        }
+                        let a = &mut self.announcements[index];
+                        a.retry_after =
+                            self.now.saturating_add(samples(a.announcement.interval_ms));
                     }
                     Some(Source::Status) => self.telemetry.finish_status(),
                     Some(Source::Parrot) => self.telemetry.finish_parrot(),

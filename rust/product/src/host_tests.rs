@@ -400,7 +400,15 @@ fn composition_shared_host_pump_preserves_receive_interruption() {
         let lease = Arc::clone(&host.leases[0].1);
         assert!(lease.lock().unwrap().quiesce());
         let mut owners = lease.lock().unwrap().owners.take().unwrap();
-        host.runtime.queue_message("1000", "1", None).unwrap();
+        host.immediate(
+            "1000",
+            LinkEffect::Message {
+                selector: "1".into(),
+                reply: None,
+            },
+            clock(),
+        )
+        .unwrap();
         let mut heard_primary = false;
         for _ in 0..1000 {
             let mut audio = [0.0; 48];

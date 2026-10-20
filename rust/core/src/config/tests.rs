@@ -1624,3 +1624,31 @@ fn tail_config_inheritance_and_order() {
         );
     }
 }
+
+#[test]
+fn composition_schema_reports_inherited_defaults_and_rejects_message_intervals() {
+    let document = ConfigDocument::parse(
+        "[1000]\n[identifier]\ncontent={broken\n[sensor]\nprecision=2\n[sensor 1000]\nprecision=invalid\n[tail]\ndelay_ms=17\n[tail 1000]\ndelay_ms=invalid\n[message report]\ninterval_ms=10\nunsupported_option=on\n",
+    )
+    .unwrap();
+    let warnings = Schema::validate(&document).unwrap().warnings;
+    for (section, key, fallback) in [
+        ("identifier", "content", "{media}"),
+        ("sensor 1000", "precision", "2"),
+        ("tail 1000", "delay_ms", "17"),
+        ("message report", "interval_ms", "not configured"),
+        ("message report", "unsupported_option", "not configured"),
+    ] {
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.section == section && warning.key == key)
+            .expect("invalid field must produce a warning");
+        assert_eq!(warning.fallback, fallback);
+    }
+    let ignored = warnings
+        .iter()
+        .find(|warning| warning.key == "unsupported_option")
+        .unwrap();
+    assert_eq!(ignored.value, "on");
+    assert_eq!(ignored.message, "unknown option ignored");
+}

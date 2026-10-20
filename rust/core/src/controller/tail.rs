@@ -120,9 +120,12 @@ impl TailPlanner {
 
     pub fn unkeyed(&mut self, now: u64) {
         if self.waiting_for_unkey(now) {
-            if let Some(item) = self.items.iter_mut().find(|item| item.pending) {
-                item.deadline = Some(now.saturating_add(samples(item.tail.delay_ms)));
-            }
+            let item = self
+                .items
+                .iter_mut()
+                .find(|item| item.pending)
+                .expect("waiting for unkey requires a pending tail");
+            item.deadline = Some(now.saturating_add(samples(item.tail.delay_ms)));
         }
     }
 

@@ -1186,11 +1186,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .prepare_message(index)
             .map_err(|_| RuntimeError::Preparation)?
             .reply_to(reply);
-        if node.control.telemetry.queue_prepared_status(prepared) {
-            Ok(())
-        } else {
-            Err(RuntimeError::Rejected)
-        }
+        // Only this serialized producer can consume the capacity admitted above.
+        assert!(node.control.telemetry.queue_prepared_status(prepared));
+        Ok(())
     }
 
     /// Queue existing time/direct/full/last-keyed telemetry, with speech failure falling back to Morse.
