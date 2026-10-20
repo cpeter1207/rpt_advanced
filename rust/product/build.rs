@@ -32,6 +32,7 @@ fn main() {
         .allowlist_var("RPCR3_.*")
         .allowlist_var("RPTADV_MEDIA_.*")
         .allowlist_var("RPTADV_PEER_EVENT_.*")
+        .allowlist_var("RPTADV_SITE_.*")
         .allowlist_var("RPTADV_PEER_OBSERVATION_.*")
         .layout_tests(false)
         .generate_comments(false)

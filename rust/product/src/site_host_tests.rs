@@ -174,6 +174,76 @@ fn site_host_alarm_actions_do_not_wait_for_full_telemetry_queue() {
 }
 
 #[test]
+fn site_commands_preserve_protection_and_reject_during_owner_handoff() {
+    use rpt_advanced_core::site::{OutputRequest, SiteCommand};
+    let _serial = crate::fixture::LIFECYCLE.lock().unwrap();
+    let mut host = bank_host_with(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
+         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
+         latched=yes\non_trip=inhibit:on\non_clear=inhibit:off\n",
+    );
+    for now_ms in 10..14 {
+        host.pump(RuntimeClock { now_ms, ..clock() }).unwrap();
+    }
+    assert!(
+        host.site_command("1000", SiteCommand::Inhibit(false), clock())
+            .is_ok()
+    );
+    assert!(
+        host.site_command("1000", SiteCommand::AlarmReset("open".into()), clock())
+            .is_err()
+    );
+    assert!(
+        host.site_command(
+            "1000",
+            SiteCommand::AlarmAcknowledge("open".into()),
+            clock()
+        )
+        .is_ok()
+    );
+    host.site_command(
+        "1000",
+        SiteCommand::Output {
+            name: "relay".into(),
+            request: OutputRequest::Off,
+        },
+        clock(),
+    )
+    .unwrap();
+    host.poll_sites(14);
+    assert_eq!(BANK.lock().unwrap().high, 0);
+    let snapshot = host.runtime.node("1000").unwrap().site().snapshot(14);
+    assert!(snapshot.transmit_inhibited);
+    assert!(snapshot.alarms["open"].active && snapshot.alarms["open"].acknowledged);
+    assert!(
+        host.site_command("missing", SiteCommand::Inhibit(false), clock())
+            .is_err()
+    );
+    assert!(
+        host.site_command(
+            "1000",
+            SiteCommand::Output {
+                name: "ptt".into(),
+                request: OutputRequest::On,
+            },
+            clock()
+        )
+        .is_err()
+    );
+    let _ = host.site_shutdown(15);
+    assert!(
+        host.site_command("1000", SiteCommand::Inhibit(false), clock())
+            .is_err()
+    );
+    for now in 16..24 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(24));
+}
+
+#[test]
 fn site_host_status_separates_requested_submitted_and_unavailable_readback() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

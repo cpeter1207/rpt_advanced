@@ -78,7 +78,7 @@ future version. Runtime acknowledgment rejects older mixed installations safely.
 ### Explicit peer link processing (2026-09-25)
 
 The ABI 3/4 references in this dated section record their introduction. The
-current host-services descriptor is ABI 6 and the product descriptor is ABI 4,
+current host-services descriptor is ABI 6 and the product descriptor is ABI 5,
 as declared in `rust/product/include/rptadv_product.h`.
 
 Before starting either an incoming or outgoing peer's media owner, the product

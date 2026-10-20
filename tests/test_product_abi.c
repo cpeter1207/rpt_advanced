@@ -5,7 +5,7 @@
 #include <rptadv_product.h>
 #include <string.h>
 
-_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 4, "update product ABI probe deliberately");
+_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 5, "update product ABI probe deliberately");
 _Static_assert(RPTADV_HOST_ABI_VERSION == 6, "update host ABI probe deliberately");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {
@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
     assert(product->start && product->reload && product->stop && product->authorize_incoming);
     assert(product->incoming && product->link_command && product->link_status && product->digit);
     assert(product->inspect_configuration && product->inspect_secrets);
+    assert(product->site_command);
     const char configuration[] = "[1000]\nnode_enabled=no\n";
     unsigned count = 0;
     assert(product->inspect_configuration(configuration, sizeof(configuration) - 1, node, &count,

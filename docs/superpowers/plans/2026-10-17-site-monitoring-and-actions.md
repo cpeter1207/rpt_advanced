@@ -16,7 +16,8 @@ alarm/output/fan policy and S3 existing-owner bridge pass focused tests. S4 IIO,
 external adapters and selected-provider composition pass scoped tests. S5
 acquisition, state transfer and safe shutdown pass targeted tests. S6 protective
 actions, RF inhibition, exact-source site queries and status pass targeted tests.
-Authorized site controls and S7 remain. No node changes or deployment are
+Typed site controls were approved 2026-10-20 and are being implemented through
+product ABI 5 with both host consumers updated together. S7 remains. No node changes or deployment are
 authorized by this document.
 
 ## Global Constraints
@@ -152,8 +153,10 @@ hosted branch validation remain S7; no physical sensor hardware was tested.
 2026-10-19 focused evidence: five runtime composition cases include ID/tail meter
 readings and unavailable-value preservation. Nine composition cases also prove
 configured source identities do not warn merely because they are disabled or
-lack a selector. Scoped Clippy and Rustdoc pass. S6 administrative entry-point
-approval and S7 shared-product integration/coverage remain outstanding.
+lack a selector. Scoped Clippy and Rustdoc pass. The administrative entry point
+was approved on October 20: typed product ABI 5 operations share the current
+control owner, and both hosts require that descriptor. Focused API, CLI and
+immediate-inhibit tests pass; S7 integration/coverage remains outstanding.
 
 ### S7: Validate shared compositions, packaging and recorded status
 

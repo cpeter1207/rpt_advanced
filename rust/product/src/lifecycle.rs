@@ -675,7 +675,8 @@ fn document(text: &str) -> Result<ConfigDocument, RuntimeError> {
     Ok(document)
 }
 
-unsafe fn input<'a>(
+/// Borrow validated UTF-8 bytes for the duration of one product ABI call.
+pub(crate) unsafe fn input<'a>(
     pointer: *const std::ffi::c_char,
     length: usize,
 ) -> Result<&'a str, RuntimeError> {
@@ -1025,8 +1026,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 4,
-    capability: *b"rptadv.prod4\0\0\0\0",
+    abi_version: 5,
+    capability: *b"rptadv.prod5\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),
@@ -1037,6 +1038,7 @@ static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descr
     digit: Some(rptadv_product_digit),
     inspect_configuration: Some(crate::configuration::inspect_configuration),
     inspect_secrets: Some(crate::configuration::inspect_secrets),
+    site_command: Some(crate::site::command::execute),
 };
 
 /// Return immutable process-lifetime product metadata.

@@ -16,6 +16,36 @@ pub(crate) fn incoming_result(result: i32) {
 }
 
 static DIGITS: Mutex<String> = Mutex::new(String::new());
+pub(crate) static SITE_REQUESTS: Mutex<Vec<(String, u32, String, f64)>> = Mutex::new(Vec::new());
+
+unsafe extern "C" fn site_command(
+    local: *const std::ffi::c_char,
+    length: usize,
+    request: *const ffi::rptadv_site_command_v1,
+) -> i32 {
+    let local = unsafe { std::slice::from_raw_parts(local.cast::<u8>(), length) };
+    let request = unsafe { &*request };
+    assert_eq!(
+        request.struct_size as usize,
+        size_of::<ffi::rptadv_site_command_v1>()
+    );
+    assert_eq!(request.abi_version, 1);
+    let target =
+        unsafe { std::slice::from_raw_parts(request.target.cast::<u8>(), request.target_length) };
+    SITE_REQUESTS.lock().unwrap().push((
+        std::str::from_utf8(local).unwrap().into(),
+        request.operation,
+        std::str::from_utf8(target).unwrap().into(),
+        request.value,
+    ));
+    match local {
+        b"missing" => -2,
+        b"unsafe" => -3,
+        b"invalid" => -4,
+        b"unavailable" => -1,
+        _ => 0,
+    }
+}
 
 unsafe extern "C" fn start(
     _: *const ffi::rptadv_host_services_v6,
@@ -151,8 +181,8 @@ unsafe extern "C" fn digit(
 
 static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<ffi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 4,
-    capability: *b"rptadv.prod4\0\0\0\0",
+    abi_version: 5,
+    capability: *b"rptadv.prod5\0\0\0\0",
     start: Some(start),
     reload: Some(reload),
     stop: Some(stop),
@@ -163,6 +193,7 @@ static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descr
     digit: Some(digit),
     inspect_configuration: Some(inspect_configuration),
     inspect_secrets: Some(inspect_secrets),
+    site_command: Some(site_command),
 };
 
 unsafe extern "C" fn inspect_configuration(
@@ -198,6 +229,7 @@ impl Drop for Clear {
             .unwrap_or_else(|error| error.into_inner())
             .clear();
         INCOMING_RESULT.set(0);
+        SITE_REQUESTS.lock().unwrap().clear();
     }
 }
 
@@ -216,7 +248,7 @@ pub(crate) fn with_running(operation: impl FnOnce()) {
 #[test]
 fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() {
     assert!(unsafe { Product::open(ptr::null()) }.is_none());
-    for field in 0..13 {
+    for field in 0..14 {
         let mut descriptor = DESCRIPTOR;
         match field {
             0 => descriptor.struct_size -= 1,
@@ -231,7 +263,8 @@ fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() 
             9 => descriptor.link_status = None,
             10 => descriptor.digit = None,
             11 => descriptor.inspect_configuration = None,
-            _ => descriptor.inspect_secrets = None,
+            12 => descriptor.inspect_secrets = None,
+            _ => descriptor.site_command = None,
         }
         assert!(
             unsafe { Product::open(&descriptor) }.is_none(),

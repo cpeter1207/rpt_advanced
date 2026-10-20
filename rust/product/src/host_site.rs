@@ -31,6 +31,24 @@ pub(crate) struct SiteBasis {
 }
 
 impl Host {
+    /// Apply an authorized site request on the current control owner.
+    pub(crate) fn site_command(
+        &mut self,
+        local: &str,
+        command: rpt_advanced_core::site::SiteCommand,
+        clock: RuntimeClock,
+    ) -> Result<(), SiteError> {
+        if self.site_transition.is_some() {
+            return Err(SiteError::Unavailable);
+        }
+        let effects = self
+            .runtime
+            .node(local)
+            .ok_or(SiteError::UnknownName)?
+            .site_command(command, clock.now_ms)?;
+        self.site_effects(local, effects, clock);
+        Ok(())
+    }
     /// Append control snapshots only; requested/submitted values never imply electrical readback.
     pub(super) fn write_site_status(
         &mut self,

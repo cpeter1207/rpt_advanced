@@ -66,7 +66,7 @@ unsafe extern "C" fn __ast_cli_register_multiple(
     HOST.with(|host| {
         let mut h = host.borrow_mut();
         assert_eq!(h.module, module as usize);
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
         h.entries = entries as usize;
         if h.failure == 2 { -1 } else { 0 }
     })
@@ -79,7 +79,7 @@ unsafe extern "C" fn ast_cli_unregister_multiple(
     HOST.with(|host| {
         let mut h = host.borrow_mut();
         assert_eq!(h.entries, entries as usize);
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
         h.entries = 0;
         h.unregisters.push("cli");
     });
@@ -88,7 +88,7 @@ unsafe extern "C" fn ast_cli_unregister_multiple(
 #[test]
 fn registration_passes_real_module_identity_and_rolls_back_partial_cli_registration() {
     assert!(matches!(
-        unsafe { Registration::register(ptr::null_mut(), incoming, [cli; 3]) },
+        unsafe { Registration::register(ptr::null_mut(), incoming, [cli; 4]) },
         Err(crate::Error::Registration)
     ));
     for failure in 0..=2 {
@@ -99,7 +99,7 @@ fn registration_passes_real_module_identity_and_rolls_back_partial_cli_registrat
             }
         });
         let registration = unsafe {
-            Registration::register(0x1234_usize as *mut ffi::ast_module, incoming, [cli; 3])
+            Registration::register(0x1234_usize as *mut ffi::ast_module, incoming, [cli; 4])
         };
         assert_eq!(registration.is_ok(), failure == 0);
         HOST.with(|host| {

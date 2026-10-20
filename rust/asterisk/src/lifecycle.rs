@@ -104,6 +104,7 @@ unsafe extern "C" fn load(
                     crate::cli::link_callback,
                     crate::cli::alias_callback,
                     crate::cli::command_callback,
+                    crate::cli::site_callback,
                 ],
             )
         };

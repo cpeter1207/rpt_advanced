@@ -155,6 +155,19 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     pub fn site(&mut self) -> &mut crate::site::SiteController {
         &mut self.site
     }
+    /// Apply already-authorized site policy on control. The RF gate must be
+    /// published before returning, independently of hardware or media admission.
+    pub fn site_command(
+        &mut self,
+        command: crate::site::SiteCommand,
+        now_ms: u64,
+    ) -> Result<Vec<crate::site::SiteEffect>, crate::site::SiteError> {
+        let result = self.site.command(command, now_ms);
+        self.control
+            .telemetry
+            .set_site_inhibit(self.site.transmit_inhibited());
+        result
+    }
     /// Advance station protection and publish its RF gate independently of media admission.
     pub fn advance_site(
         &mut self,

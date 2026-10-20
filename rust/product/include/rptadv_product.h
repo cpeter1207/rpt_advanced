@@ -20,9 +20,9 @@ struct UrpAstSiteRequest;
 struct UrpAstSiteSnapshot;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 4U
+#define RPTADV_PRODUCT_ABI_VERSION 5U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod4"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod5"
 /** Exact incompatible host-services ABI revision. */
 #define RPTADV_HOST_ABI_VERSION 6U
 /** Host-services capability name stored in its fixed-width descriptor field. */
@@ -307,6 +307,44 @@ struct rptadv_host_services_v6 {
     int (*peer_set_deadline)(void *context, void *peer, uint64_t wake_after_ns);
 };
 
+/** Exact revision of a typed site control request. */
+#define RPTADV_SITE_COMMAND_ABI_VERSION 1U
+/** Request a configured logical output on. */
+#define RPTADV_SITE_OUTPUT_ON 1U
+/** Request a configured logical output off. */
+#define RPTADV_SITE_OUTPUT_OFF 2U
+/** Pulse using the configured duration, restoring the prior logical state. */
+#define RPTADV_SITE_OUTPUT_PULSE 3U
+/** Silence alarm repeats without clearing protection. */
+#define RPTADV_SITE_ALARM_ACKNOWLEDGE 4U
+/** Reset only a recovered alarm. */
+#define RPTADV_SITE_ALARM_RESET 5U
+/** Reset retained sensor extrema. */
+#define RPTADV_SITE_RESET_EXTREMA 6U
+/** Restore automatic fan demand. */
+#define RPTADV_SITE_FAN_AUTOMATIC 7U
+/** Add normalized manual fan demand; never reduce protective demand. */
+#define RPTADV_SITE_FAN_DUTY 8U
+/** Assert the manual RF inhibit. */
+#define RPTADV_SITE_INHIBIT_ON 9U
+/** Release only the manual RF inhibit, never alarms or hardware interlocks. */
+#define RPTADV_SITE_INHIBIT_OFF 10U
+
+/** An already-authorized control request, never a physical I/O call.
+ * Names are borrowed UTF-8 configured identities. Inhibit operations require
+ * an empty target; all other operations require a nonempty target. Only FAN_DUTY
+ * uses value, which must be finite in [0,1]; other operations require zero.
+ * The host must authenticate administrative callers before invoking this API.
+ */
+struct rptadv_site_command_v1 {
+    uint32_t struct_size; /**< Exact readable record size. */
+    uint32_t abi_version; /**< Exact RPTADV_SITE_COMMAND_ABI_VERSION. */
+    uint32_t operation;   /**< One RPTADV_SITE_* operation. */
+    const char *target;   /**< Borrowed target name, not NUL terminated. */
+    size_t target_length; /**< Name byte count; null is valid only for zero length. */
+    double value;         /**< Normalized manual fan demand, otherwise zero. */
+};
+
 /** Portable runtime entry points.
  * Strings and sinks are borrowed only for each synchronous call. Authorization
  * returns zero when current policy permits handoff. Incoming returns
@@ -353,6 +391,14 @@ struct rptadv_product_descriptor_v1 {
     int (*inspect_secrets)(const char *configuration, size_t configuration_length,
                            rptadv_secret_sink secret, void *secret_context,
                            rptadv_text_sink_v1 diagnostic, void *diagnostic_context);
+    /** Apply site policy on the current serialized control generation.
+     * Returns 0 when policy accepts the request (not proof of physical service),
+     * -1 when unavailable/reloading/stopping, -2 for unknown node/target,
+     * -3 when unsafe, or -4 for an invalid request. Requested/submitted/observed
+     * state and downstream hardware faults remain visible in status. This entry
+     * neither changes link-command semantics nor emits a spoken CLI reply. */
+    int (*site_command)(const char *local, size_t local_length,
+                        const struct rptadv_site_command_v1 *request);
 };
 
 /** Return immutable process-lifetime product metadata.

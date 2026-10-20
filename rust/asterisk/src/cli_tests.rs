@@ -23,7 +23,12 @@ fn callbacks_initialize_and_fail_closed_when_runtime_is_unloaded() {
     output(1, "ignored\0message");
     // SAFETY: callbacks borrow only the valid local entry/argument storage below.
     unsafe {
-        for callback in [link_callback, alias_callback, command_callback] {
+        for callback in [
+            link_callback,
+            alias_callback,
+            command_callback,
+            site_callback,
+        ] {
             let mut entry: ffi::ast_cli_entry = std::mem::zeroed();
             assert!(callback(ptr::null_mut(), ffi::CLI_INIT, ptr::null_mut()).is_null());
             assert!(callback(&mut entry, ffi::CLI_INIT, ptr::null_mut()).is_null());
@@ -69,7 +74,88 @@ fn callbacks_initialize_and_fail_closed_when_runtime_is_unloaded() {
             );
         }
     }
-    OUTPUT.with(|messages| assert_eq!(messages.borrow().len(), 2));
+    assert_eq!(
+        invoke_site(&["inhibit", "1000", "on"]),
+        ffi::RESULT_FAILURE as *mut c_char
+    );
+    OUTPUT.with(|messages| assert_eq!(messages.borrow().len(), 3));
+}
+
+#[test]
+fn site_cli_routes_typed_controls_without_using_dtmf_or_links() {
+    crate::lifecycle::tests::with_running(|| {
+        for (words, expected) in [
+            (vec!["output", "1000", "relay", "on"], (1, "relay", 0.0)),
+            (vec!["output", "1000", "relay", "off"], (2, "relay", 0.0)),
+            (vec!["output", "1000", "relay", "pulse"], (3, "relay", 0.0)),
+            (vec!["alarm", "1000", "hot", "acknowledge"], (4, "hot", 0.0)),
+            (vec!["alarm", "1000", "hot", "reset"], (5, "hot", 0.0)),
+            (
+                vec!["sensor", "1000", "battery", "reset-extrema"],
+                (6, "battery", 0.0),
+            ),
+            (
+                vec!["fan", "1000", "cooling", "automatic"],
+                (7, "cooling", 0.0),
+            ),
+            (vec!["fan", "1000", "cooling", "0.75"], (8, "cooling", 0.75)),
+            (vec!["inhibit", "1000", "on"], (9, "", 0.0)),
+            (vec!["inhibit", "1000", "off"], (10, "", 0.0)),
+        ] {
+            assert_eq!(invoke_site(&words), ptr::null_mut(), "{words:?}");
+            assert_eq!(
+                crate::lifecycle::tests::SITE_REQUESTS.lock().unwrap().pop(),
+                Some(("1000".into(), expected.0, expected.1.into(), expected.2))
+            );
+        }
+        for words in [
+            vec!["output", "1000", "relay", "invalid"],
+            vec!["fan", "1000", "cooling", "NaN"],
+            vec!["fan", "1000", "cooling", "inf"],
+            vec!["fan", "1000", "cooling", "-0.1"],
+            vec!["fan", "1000", "cooling", "1.1"],
+            vec!["fan", "1000", "cooling", "bad"],
+            vec!["fan", "1000"],
+            vec!["inhibit", "1000", "invalid"],
+            vec!["alarm", "1000", "hot", "on"],
+            vec!["sensor", "1000", "battery", "on"],
+            vec!["inhibit", "", "on"],
+            vec!["output", "1000", "", "on"],
+        ] {
+            assert_eq!(invoke_site(&words), ffi::RESULT_SHOWUSAGE as *mut c_char);
+        }
+        assert!(
+            crate::lifecycle::tests::SITE_REQUESTS
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        for (local, reason) in [
+            ("missing", "unknown node"),
+            ("unsafe", "safety policy"),
+            ("invalid", "invalid site request"),
+            ("unavailable", "operation unavailable"),
+        ] {
+            assert_eq!(
+                invoke_site(&["inhibit", local, "on"]),
+                ffi::RESULT_FAILURE as *mut c_char
+            );
+            OUTPUT.with(|messages| assert!(messages.borrow().last().unwrap().contains(reason)));
+        }
+    });
+}
+
+fn invoke_site(words: &[&str]) -> *mut c_char {
+    let owned: Vec<_> = ["rpt_advanced", "site"]
+        .into_iter()
+        .chain(words.iter().copied())
+        .map(|word| CString::new(word).unwrap())
+        .collect();
+    let argv: Vec<_> = owned.iter().map(|word| word.as_ptr()).collect();
+    let mut args: ffi::ast_cli_args = unsafe { std::mem::zeroed() };
+    args.argc = argv.len() as i32;
+    args.argv = argv.as_ptr();
+    unsafe { site_callback(ptr::null_mut(), 0, &mut args) }
 }
 
 #[test]

@@ -29,3 +29,4 @@ pub(crate) fn configured(
     }
     Ok(settings)
 }
+pub(crate) mod command;

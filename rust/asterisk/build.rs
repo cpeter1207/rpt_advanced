@@ -17,6 +17,7 @@ fn main() {
         .allowlist_function("ast_(config_load2|variable_retrieve|config_destroy|srv_lookup|srv_cleanup|sockaddr_resolve|sockaddr_stringify_fmt|sendtext|senddigit|waitfor)")
         .allowlist_function("ast_(replace_sigchld|unreplace_sigchld)")
         .allowlist_type("rptadv_.*")
+        .allowlist_var("RPTADV_SITE_.*")
         .allowlist_type("UrpAstSite.*")
         .allowlist_var("URP_AST_(SITE_.*|OPTION_SITE_IO)")
         .allowlist_type("urp_ast_(direct_callbacks|link_attach)")

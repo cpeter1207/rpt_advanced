@@ -68,6 +68,37 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn site_manual_command_publishes_inhibit_without_waiting_for_poll() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nduplex=full\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut actual = Vec::new();
+    for inhibit in [true, false] {
+        runtime
+            .node("1000")
+            .unwrap()
+            .site_command(crate::site::SiteCommand::Inhibit(inhibit), 0)
+            .unwrap();
+        let mut guard = tx.acquire().unwrap();
+        let mut audio = [0.25; 48];
+        actual.push(
+            guard
+                .state()
+                .controller
+                .process_audio(true, false, &[], &mut audio),
+        );
+    }
+    assert!(runtime.stop(0));
+    assert_eq!(actual, [false, true]);
+}
+
+#[test]
 fn site_inhibit_is_seeded_before_reloaded_audio_becomes_available() {
     let document = ConfigDocument::parse("[1000]\nduplex=full\n").unwrap();
     let log = Arc::new(Mutex::new(Vec::new()));

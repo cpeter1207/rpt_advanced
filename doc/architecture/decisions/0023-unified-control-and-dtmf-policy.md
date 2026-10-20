@@ -152,3 +152,13 @@ interrupt their origin while it is keyed. DTMF changes require command-map,
 authorization, muting, local-only regeneration, addressed relay, and RF-response
 tests in addition to DSP detection tests.
 REST/WebSocket route and schema publication remains governed by ADR 0016.
+
+Site-control boundary approved 2026-10-20: the product exposes a separate typed
+administrative operation for logical output on/off/pulse, fan automatic/manual
+demand, alarm acknowledgment/reset, extrema reset and manual transmit inhibit.
+The Asterisk CLI is already protected by its administrative host access; future
+adapters must authorize their caller before invoking this operation. The shared
+executor checks the active generation and ownership handoff before policy runs.
+Read-only DTMF site queries do not gain access to it. The standalone composition
+validates the same product table; this addition does not create a new remote
+CLI, REST, or WebSocket transport.
