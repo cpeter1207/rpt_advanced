@@ -21,6 +21,8 @@ use std::{
 #[derive(Default)]
 pub(super) struct MessageRecipes {
     definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
+    // Configuration identity is independent of enablement or current read quality.
+    site_sources: Vec<BindingSource>,
     pub items: Vec<MessageRecipe>,
     pub selectors: BTreeMap<String, usize>,
     pub names: BTreeMap<String, usize>,
@@ -52,8 +54,19 @@ impl MessageRecipes {
                 ResolvedMessageSettings::resolve(document, node, name)?.value,
             );
         }
+        let site = ResolvedSiteSettings::resolve(document, node)?.value;
         let mut result = Self {
             definitions: Arc::new(definitions),
+            site_sources: site
+                .sensors
+                .iter()
+                .map(|sensor| BindingSource::Sensor(sensor.name.clone()))
+                .chain(
+                    site.inputs
+                        .iter()
+                        .map(|input| BindingSource::Input(input.name.clone())),
+                )
+                .collect(),
             ..Self::default()
         };
         let definitions = result.definitions.clone();
@@ -83,7 +96,6 @@ impl MessageRecipes {
                 }
             }
         }
-        let site = ResolvedSiteSettings::resolve(document, node)?.value;
         let defaults = ResolvedMessageSettings::from_scopes(document, node, &[], "")?;
         let site_prefix = crate::config::ResolvedNodeSettings::resolve(document, node)?
             .value
@@ -182,6 +194,9 @@ impl MessageRecipes {
                             return None;
                         }
                         for source in bindings.values() {
+                            if self.site_sources.contains(source) {
+                                continue;
+                            }
                             if let BindingSource::Sensor(name) | BindingSource::Input(name) = source
                             {
                                 self.warnings.push(crate::config::ConfigWarning::new(

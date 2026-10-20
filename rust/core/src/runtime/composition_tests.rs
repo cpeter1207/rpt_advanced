@@ -9,6 +9,38 @@ use crate::{
 use std::sync::Arc;
 
 #[test]
+fn composition_site_bindings_warn_only_for_missing_source_kind() {
+    for kind in ["sensor", "input"] {
+        for declaration in ["", "sensor", "input"] {
+            let section = if declaration.is_empty() {
+                String::new()
+            } else {
+                // A disabled definition without a DTMF selector is still configured.
+                format!("[{declaration} 524950 reading]\nenabled=no\n")
+            };
+            let document = ConfigDocument::parse(&format!(
+                "[524950]\n[message root]\ncontent=Repeater. {{message_macro_value}}\n[message value]\nmessage_id=site-temperature\narg_temperature={kind}:reading\n{section}"
+            )).unwrap();
+            let recipes = MessageRecipes::new(
+                &document,
+                &NodeId::new("524950").unwrap(),
+                &MessageCatalog::load("en-US").unwrap(),
+            )
+            .unwrap();
+            assert!(recipes.names.contains_key("root"));
+            assert_eq!(
+                recipes
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.value == "reading"),
+                kind != declaration,
+                "binding={kind} declaration={declaration}"
+            );
+        }
+    }
+}
+
+#[test]
 fn composition_catalog_contract_is_checked_before_admission() {
     for invalid in [
         "message_id=not-a-shipped-or-admin-message\n",

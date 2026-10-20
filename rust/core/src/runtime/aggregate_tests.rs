@@ -320,6 +320,82 @@ fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
 }
 
 #[test]
+fn composition_runtime_ids_and_tails_keep_identification_with_unavailable_meter() {
+    use crate::site::{Observation, ReadingQuality, SiteObservations};
+    for family in ["identifier", "tail"] {
+        for valid in [true, false] {
+            let messages = Arc::new(Mutex::new(Vec::new()));
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let timing = if family == "identifier" {
+                "interval_ms=1\nregardless_of_activity=yes\n"
+            } else {
+                ""
+            };
+            let document = ConfigDocument::parse(&format!(
+                "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[sensor 1000 outdoor]\nenabled=yes\nbackend=hwmon\ndevice=/sys/selected\nchannel=temp1_input\n[{family} 1000 regular]\n{timing}content=Repeater. {{message_macro_temperature}} {{message_macro_time}}\n[message temperature]\nmessage_id=site-temperature\narg_temperature=sensor:outdoor\n[message time]\nmessage_id=site-time\narg_time=time\n"
+            )).unwrap();
+            let mut runtime = Runtime::start(
+                document,
+                &CapturingMedia(messages.clone()),
+                adapter,
+                |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+                clock(),
+            )
+            .unwrap();
+            let readings = SiteObservations {
+                sensors: [(
+                    "outdoor".into(),
+                    Observation {
+                        value: Some(12.5),
+                        observed_at_ms: Some(1000),
+                        quality: if valid {
+                            ReadingQuality::Valid
+                        } else {
+                            ReadingQuality::Fault
+                        },
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            };
+            runtime
+                .node("1000")
+                .unwrap()
+                .site()
+                .advance(1000, &readings, &Default::default());
+            let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+            let mut generation = rx.acquire_pair(&mut tx).unwrap();
+            generation.transmit().controller.process_audio(
+                family == "tail",
+                false,
+                &[],
+                &mut [0.0; 960],
+            );
+            generation
+                .transmit()
+                .controller
+                .process_audio(false, false, &[], &mut [0.0; 960]);
+            runtime.prepare_messages(RuntimeClock {
+                now_ms: 1000,
+                ..clock()
+            });
+            let reading = if valid {
+                "Temperature is 12.5."
+            } else {
+                "outdoor is unavailable."
+            };
+            assert_eq!(
+                *messages.lock().unwrap(),
+                ["Repeater.", reading, "The time is 9:07 AM."],
+                "{family} valid={valid}"
+            );
+            drop(generation);
+            assert!(runtime.stop(1000));
+        }
+    }
+}
+
+#[test]
 fn composition_runtime_tail_resolves_only_at_each_release_attempt() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));

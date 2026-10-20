@@ -147,7 +147,13 @@ hosted branch validation remain S7; no physical sensor hardware was tested.
 - [x] Add `site_alarm_actions_independent_of_telemetry`: saturate the media queue and assert a trip's output/inhibit actions are submitted immediately and once in configured order. Repeat notification only repeats speech; input edges debounce once. Unsolicited alarms stay local and wait for normal admission, then obey receive-driven Morse interruption.
 - [ ] Add `site_actions_preserve_interlock`: manual on/fan commands, reset and existing named action macros cannot bypass a configured inhibit or physical interlock. Validate action references/typed arguments at reload, no recursion or arbitrary shell. Ensure a failing action is diagnosed without erasing the unsafe condition.
 - [ ] Run these tests red, connect S1/S2/S5 to M4's shared snapshot/message preparation and existing command dispatcher, then rerun green. Keep protective effects separate from the existing `event_command` path that waits for telemetry admission. Add read-only status and existing authorized CLI operations, not new REST/WebSocket transports or DTMF administration.
-- [ ] Verify IDs/tails can report site values using the same snapshot and localized message segments. Unavailable measurements do not erase identification text. Update Rustdoc; commit.
+- [x] Verify IDs/tails can report site values using the same snapshot and localized message segments. Unavailable measurements do not erase identification text. Update Rustdoc; commit.
+
+2026-10-19 focused evidence: five runtime composition cases include ID/tail meter
+readings and unavailable-value preservation. Nine composition cases also prove
+configured source identities do not warn merely because they are disabled or
+lack a selector. Scoped Clippy and Rustdoc pass. S6 administrative entry-point
+approval and S7 shared-product integration/coverage remain outstanding.
 
 ### S7: Validate shared compositions, packaging and recorded status
 
