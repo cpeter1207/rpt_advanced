@@ -32,6 +32,10 @@ unsafe extern "C" fn gpio_open(
     e: *const abi::rptadv_gpiod_endpoint_v1,
     c: *mut *mut c_void,
 ) -> i32 {
+    workers::OPEN_ENTERED.store(true, std::sync::atomic::Ordering::Release);
+    while workers::BLOCK_OPEN.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     let e = unsafe { &*e };
     if e.struct_size as usize != size_of::<abi::rptadv_gpiod_endpoint_v1>()
         || e.abi_version != 1

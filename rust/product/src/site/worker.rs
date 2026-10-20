@@ -119,9 +119,10 @@ impl DeviceWorker {
         {
             return false;
         }
-        let Some(staged) = self.staged.take() else {
-            return false;
-        };
+        let staged = self
+            .staged
+            .take()
+            .expect("prepared barrier retains staged queues");
         self.requests = staged.requests;
         self.replies = staged.replies;
         self.pending = staged.pending;
@@ -335,7 +336,7 @@ fn acquire(
                     }
                     _ => {
                         prepared = None;
-                        while changes.pop().is_ok() {}
+                        let _ = changes.pop(); // The management queue holds one handoff.
                     }
                 }
                 fence.quality.store(u8::from(failed), Ordering::Relaxed);

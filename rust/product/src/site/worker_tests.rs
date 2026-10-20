@@ -9,6 +9,8 @@ use std::{
 
 pub(super) static BLOCK_GPIO: AtomicBool = AtomicBool::new(false);
 pub(super) static GPIO_ENTERED: AtomicBool = AtomicBool::new(false);
+pub(super) static BLOCK_OPEN: AtomicBool = AtomicBool::new(false);
+pub(super) static OPEN_ENTERED: AtomicBool = AtomicBool::new(false);
 
 fn until(mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -24,6 +26,7 @@ struct ReleaseInput;
 impl Drop for ReleaseInput {
     fn drop(&mut self) {
         BLOCK_GPIO.store(false, Ordering::Release);
+        BLOCK_OPEN.store(false, Ordering::Release);
     }
 }
 fn generation(id: u64) -> RuntimeGeneration<(), ()> {
@@ -58,6 +61,8 @@ fn close(worker: &mut DeviceWorker) {
     until(|| worker.barrier().is_some());
     assert_eq!(worker.barrier(), Some(Ok(())));
     assert!(worker.finish());
+    assert!(!worker.stage(Vec::new()));
+    assert!(!worker.resume());
 }
 fn host_cleanup(host: &mut NodeHost<(), ()>, generation: u64) {
     host.control().stop(0).unwrap();
@@ -86,6 +91,10 @@ fn site_worker_slow_device_isolated_and_repeated_polls_bounded() {
     )
     .unwrap();
     let release = ReleaseInput;
+    assert_eq!(slow.barrier(), None);
+    assert!(!slow.stage(Vec::new()));
+    assert!(!slow.commit());
+    assert!(!slow.finish());
     assert!(slow.submit(0, None, permit(&mut host)));
     until(|| GPIO_ENTERED.load(Ordering::Acquire));
     for _ in 0..1000 {
@@ -144,7 +153,11 @@ fn site_worker_fence_cancels_old_queued_writes_before_handoff() {
     assert_eq!(worker.barrier(), None); // Physical read is still using the old owner.
     drop(release);
     until(|| worker.barrier().is_some());
+    assert!(!worker.stage(Vec::new())); // Undrained replies still own old permits.
     while worker.poll().is_some() {}
+    let mut other = settings(SiteBackend::Gpiod);
+    other.device = "another-device".into();
+    assert!(!worker.stage(vec![(other, Direction::Input { active_high: true })]));
     assert!(PROBE.lock().unwrap().written.is_empty());
     host.control().publish(generation(2), 1).unwrap();
     host.control().mark_detached(1).unwrap();
@@ -227,6 +240,7 @@ fn site_worker_reconfigure_retains_unchanged_output_and_safes_removed_line() {
     assert!(worker.stage(vec![input.clone(), output]));
     until(|| worker.barrier().is_some());
     assert_eq!(worker.barrier(), Some(Ok(())));
+    assert!(!worker.resume()); // Prepared bindings must be committed first.
     assert!(worker.commit());
     until(|| worker.barrier().is_some());
     assert!(worker.resume());
@@ -326,6 +340,7 @@ fn site_worker_stale_permit_cannot_apply_observation_or_dispatch_queued_write() 
     )
     .unwrap();
     let release = ReleaseInput;
+    let stale = permit(&mut host);
     assert!(worker.submit(0, None, permit(&mut host)));
     until(|| GPIO_ENTERED.load(Ordering::Acquire));
     assert!(worker.submit(1, Some(1.0), permit(&mut host)));
@@ -338,6 +353,79 @@ fn site_worker_stale_permit_cannot_apply_observation_or_dispatch_queued_write() 
     }
     assert_eq!(PROBE.lock().unwrap().opened.len(), 1);
     assert!(PROBE.lock().unwrap().written.is_empty());
+    assert!(!worker.submit(0, None, stale));
+    host.control().mark_detached(1).unwrap();
+    assert!(host.reclaim());
+    close(&mut worker);
+    host_cleanup(&mut host, 2);
+}
+
+#[test]
+fn site_worker_rejects_mixed_owners_and_removes_unopened_endpoints() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    let direction = Direction::Input { active_high: true };
+    let input = (settings(SiteBackend::Gpiod), direction);
+    assert!(matches!(
+        DeviceWorker::start(backends(), Vec::new(), Instant::now()),
+        Err(ReadingQuality::Unavailable)
+    ));
+    for mut other in [settings(SiteBackend::Hwmon), settings(SiteBackend::Gpiod)] {
+        other.device = "other-device".into();
+        assert!(matches!(
+            DeviceWorker::start(
+                backends(),
+                vec![input.clone(), (other, direction)],
+                Instant::now()
+            ),
+            Err(ReadingQuality::Fault)
+        ));
+    }
+    let mut worker = DeviceWorker::start(backends(), vec![input], Instant::now()).unwrap();
+    worker.pause(false);
+    until(|| worker.barrier().is_some());
+    assert!(worker.stage(Vec::new()));
+    until(|| worker.barrier().is_some());
+    assert!(worker.commit());
+    until(|| worker.barrier().is_some());
+    close(&mut worker);
+    let mut host = NodeHost::new(generation(1));
+    assert!(!worker.submit(0, None, permit(&mut host)));
+    host_cleanup(&mut host, 1);
+    let probe = PROBE.lock().unwrap();
+    assert!(probe.opened.is_empty());
+    assert!(probe.written.is_empty());
+    assert_eq!(probe.closed, 0);
+}
+
+#[test]
+fn site_worker_revalidates_generation_after_slow_open_before_reading() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    GPIO_ENTERED.store(false, Ordering::Release);
+    OPEN_ENTERED.store(false, Ordering::Release);
+    BLOCK_OPEN.store(true, Ordering::Release);
+    let mut host = NodeHost::new(generation(1));
+    let mut worker = DeviceWorker::start(
+        backends(),
+        vec![(
+            settings(SiteBackend::Gpiod),
+            Direction::Input { active_high: true },
+        )],
+        Instant::now(),
+    )
+    .unwrap();
+    let release = ReleaseInput;
+    assert!(worker.submit(0, None, permit(&mut host)));
+    until(|| OPEN_ENTERED.load(Ordering::Acquire));
+    host.control().publish(generation(2), 1).unwrap();
+    drop(release);
+    assert_eq!(
+        read_result(&mut worker).outcome,
+        Err(ReadingQuality::Unavailable)
+    );
+    assert!(!GPIO_ENTERED.load(Ordering::Acquire));
+    assert_eq!(PROBE.lock().unwrap().opened.len(), 1);
     host.control().mark_detached(1).unwrap();
     assert!(host.reclaim());
     close(&mut worker);
