@@ -261,7 +261,39 @@ pub(super) fn key_known(kind: SiteKind, named: bool, key: &str) -> bool {
                     | "safe_state"
                     | "pulse_ms"
             ),
-            SiteKind::Alarm | SiteKind::Fan => policy::key_known(kind, key),
+            SiteKind::Alarm => matches!(
+                key,
+                "enabled"
+                    | "source"
+                    | "condition"
+                    | "trip_value"
+                    | "clear_value"
+                    | "reading"
+                    | "trip_delay_ms"
+                    | "clear_delay_ms"
+                    | "latched"
+                    | "repeat_interval_ms"
+                    | "on_trip"
+                    | "on_clear"
+                    | "trip_message"
+                    | "clear_message"
+                    | "repeat_message"
+            ),
+            SiteKind::Fan => matches!(
+                key,
+                "enabled"
+                    | "output"
+                    | "mode"
+                    | "ptt_nodes"
+                    | "run_on_ms"
+                    | "temperature_sensor"
+                    | "on_temperature"
+                    | "off_temperature"
+                    | "temperature_curve"
+                    | "rpm_sensor"
+                    | "minimum_rpm"
+                    | "spinup_ms"
+            ),
         }
 }
 

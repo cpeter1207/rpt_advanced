@@ -190,44 +190,6 @@ pub struct FanSettings {
     pub spinup_ms: u64,
 }
 
-pub(super) fn key_known(kind: SiteKind, key: &str) -> bool {
-    key == "enabled"
-        || match kind {
-            SiteKind::Alarm => matches!(
-                key,
-                "source"
-                    | "condition"
-                    | "trip_value"
-                    | "clear_value"
-                    | "reading"
-                    | "trip_delay_ms"
-                    | "clear_delay_ms"
-                    | "latched"
-                    | "repeat_interval_ms"
-                    | "on_trip"
-                    | "on_clear"
-                    | "trip_message"
-                    | "clear_message"
-                    | "repeat_message"
-            ),
-            SiteKind::Fan => matches!(
-                key,
-                "output"
-                    | "mode"
-                    | "ptt_nodes"
-                    | "run_on_ms"
-                    | "temperature_sensor"
-                    | "on_temperature"
-                    | "off_temperature"
-                    | "temperature_curve"
-                    | "rpm_sensor"
-                    | "minimum_rpm"
-                    | "spinup_ms"
-            ),
-            _ => false,
-        }
-}
-
 fn curve(value: &str) -> Option<Vec<(f64, f64)>> {
     let points: Vec<_> = value
         .split(',')

@@ -41,7 +41,7 @@ pub struct AlarmSnapshot {
 pub struct AlarmState {
     settings: AlarmSettings,
     state: AlarmSnapshot,
-    pending: Option<(bool, u64)>,
+    pending_since: Option<u64>,
     repeat_at: Option<u64>,
 }
 impl AlarmState {
@@ -55,7 +55,7 @@ impl AlarmState {
                 unsafe_condition: None,
                 reset_ready: false,
             },
-            pending: None,
+            pending_since: None,
             repeat_at: None,
         }
     }
@@ -96,11 +96,8 @@ impl AlarmState {
         self.state.reset_ready = false;
         match self.state.unsafe_condition {
             Some(unsafe_now) if unsafe_now != self.state.active => {
-                let since = match self.pending {
-                    Some((value, since)) if value == unsafe_now => since,
-                    _ => now_ms,
-                };
-                self.pending = Some((unsafe_now, since));
+                // A pending transition is always the opposite of active state.
+                let since = *self.pending_since.get_or_insert(now_ms);
                 let delay = if unsafe_now {
                     self.settings.trip_delay_ms
                 } else {
@@ -110,7 +107,7 @@ impl AlarmState {
                     if unsafe_now {
                         self.state.active = true;
                         self.state.acknowledged = false;
-                        self.pending = None;
+                        self.pending_since = None;
                         self.repeat_at = (self.settings.repeat_interval_ms > 0)
                             .then(|| now_ms.saturating_add(self.settings.repeat_interval_ms));
                         events.push(AlarmEvent::Trip);
@@ -122,7 +119,7 @@ impl AlarmState {
                     }
                 }
             }
-            _ => self.pending = None,
+            _ => self.pending_since = None,
         }
         if self.state.active
             && !self.state.acknowledged
@@ -151,7 +148,7 @@ impl AlarmState {
     fn clear(&mut self) {
         self.state.active = false;
         self.state.acknowledged = false;
-        self.pending = None;
+        self.pending_since = None;
         self.repeat_at = None;
         self.state.reset_ready = false;
     }

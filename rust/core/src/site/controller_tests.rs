@@ -363,3 +363,179 @@ fn site_controller_fan_owner_blocks_direct_output_override() {
         }]
     );
 }
+
+#[test]
+fn site_input_bounce_and_invalid_time_cannot_trigger_actions() {
+    let mut policy = settings("");
+    policy.inputs[0].on_inactive = vec![crate::config::SiteAction::Output {
+        name: "relay".into(),
+        request: OutputRequest::Off,
+    }];
+    let mut site = SiteController::new(policy);
+    for (time, value, event) in [
+        (0, false, false),
+        (100, true, false),
+        (120, false, false),
+        (150, true, false),
+        (199, true, false),
+        (200, true, true),
+        (250, false, false),
+        (300, false, true),
+    ] {
+        let mut readings = observations(12.0, time);
+        readings
+            .inputs
+            .insert("door".into(), observation(value, time));
+        let effects = site.advance(time, &readings, &BTreeMap::new());
+        if time != 0 {
+            assert_eq!(!effects.is_empty(), event, "time {time}");
+        }
+    }
+    assert!(!site.snapshot(300).outputs["relay"].requested_on);
+    for invalid in [
+        observation(true, 500),
+        observation(true, 100),
+        Observation {
+            value: Some(true),
+            observed_at_ms: None,
+            quality: ReadingQuality::Valid,
+        },
+    ] {
+        let mut readings = observations(12.0, 400);
+        readings.inputs.insert("door".into(), invalid);
+        assert!(site.advance(400, &readings, &BTreeMap::new()).is_empty());
+        let input = &site.snapshot(400).inputs["door"];
+        assert_eq!(input.quality, ReadingQuality::Fault);
+        assert_eq!(input.value, Some(false));
+        assert_eq!(input.observed_at_ms, Some(300));
+    }
+}
+
+#[test]
+fn site_reload_adds_and_disables_instances_without_retaining_old_demand() {
+    let mut policy = settings("[alarm 1000 unused]\n[fan 1000 unused]\n");
+    let mut site = SiteController::new(policy.clone());
+    site.advance(0, &observations(12.0, 0), &BTreeMap::new());
+    assert_eq!(
+        site.command(
+            SiteCommand::Fan {
+                name: "missing".into(),
+                duty: None
+            },
+            0
+        ),
+        Err(SiteError::Unavailable)
+    );
+    assert!(
+        site.command(
+            SiteCommand::Output {
+                name: "relay".into(),
+                request: OutputRequest::On
+            },
+            0
+        )
+        .is_ok(),
+        "disabled fans must not reserve an output"
+    );
+    assert!(
+        site.command(SiteCommand::AlarmReset("unused".into()), 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        site.command(
+            SiteCommand::Fan {
+                name: "unused".into(),
+                duty: None
+            },
+            0
+        ),
+        Err(SiteError::Unavailable)
+    );
+    assert_eq!(site.fan_output("unused"), None);
+    assert_eq!(site.fan_output("missing"), None);
+    let mut added = policy.sensors[0].clone();
+    added.name = "new".into();
+    policy.sensors.push(added);
+    let mut added = policy.outputs[0].clone();
+    added.name = "new".into();
+    added.endpoint.as_mut().unwrap().channel = "new".into();
+    policy.outputs.push(added);
+    policy.outputs[0].active_high = false;
+    policy.alarms[0].source = "supply".into();
+    site.reconfigure(policy.clone());
+    assert_eq!(
+        site.snapshot(10).sensors["new"].current.quality,
+        ReadingQuality::Unavailable
+    );
+    assert!(site.snapshot(10).outputs["new"].fault);
+    policy.sensors[0].enabled = false;
+    policy.inputs[0].enabled = false;
+    policy.outputs[0].enabled = false;
+    site.reconfigure(policy);
+    site.advance(20, &SiteObservations::default(), &BTreeMap::new());
+    assert_eq!(
+        site.snapshot(20).sensors["supply"].current.quality,
+        ReadingQuality::Unavailable
+    );
+    assert_eq!(
+        site.snapshot(20).inputs["door"].quality,
+        ReadingQuality::Unavailable
+    );
+    assert!(site.snapshot(20).outputs["relay"].fault);
+}
+
+#[test]
+fn site_thermal_fan_actions_and_reload_follow_current_ownership() {
+    let mut policy = settings(
+        "[output 1000 cooling]\nenabled=yes\nbackend=hwmon\ndevice=chip\nline=pwm1\n[fan 1000 cooling]\nenabled=yes\noutput=cooling\nmode=temperature\ntemperature_sensor=supply\non_temperature=14\noff_temperature=12\n",
+    );
+    policy.inputs[0].on_active = vec![
+        crate::config::SiteAction::Macro("resume".into()),
+        crate::config::SiteAction::Fan {
+            name: "cooling".into(),
+            duty: Some(0.5),
+        },
+    ];
+    let mut site = SiteController::new(policy.clone());
+    site.reconfigure(policy.clone()); // No status exists before first acquisition.
+    assert_eq!(site.fan_output("cooling"), Some("cooling"));
+    let mut readings = observations(10.0, 0);
+    readings.outputs.insert(
+        "cooling".into(),
+        FanOutput {
+            available: true,
+            pwm: true,
+        },
+    );
+    readings.inputs.insert("door".into(), observation(false, 0));
+    site.advance(0, &readings, &BTreeMap::new());
+    readings
+        .inputs
+        .insert("door".into(), observation(true, 100));
+    site.advance(100, &readings, &BTreeMap::new());
+    readings
+        .inputs
+        .insert("door".into(), observation(true, 150));
+    let effects = site.advance(150, &readings, &BTreeMap::new());
+    assert_eq!(
+        effects,
+        vec![
+            SiteEffect::Macro("resume".into()),
+            SiteEffect::Fan {
+                name: "cooling".into(),
+                duty: 0.5
+            }
+        ]
+    );
+    site.reconfigure(policy.clone());
+    assert_eq!(site.snapshot(200).fans["cooling"].duty, 0.5);
+    policy.outputs[1].active_high = false;
+    site.reconfigure(policy.clone());
+    assert!(site.snapshot(200).fans.is_empty());
+    site.advance(200, &readings, &BTreeMap::new());
+    assert_eq!(site.snapshot(200).fans["cooling"].duty, 0.0);
+    policy.fans[0].run_on_ms = 0;
+    site.reconfigure(policy);
+    assert!(site.snapshot(200).fans.is_empty());
+}

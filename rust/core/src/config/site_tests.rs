@@ -153,3 +153,108 @@ fn site_policy_configuration_rejects_unsafe_references_and_inherits_defaults() {
         "200"
     );
 }
+
+#[test]
+fn site_config_rejects_bad_endpoint_identity_before_acquisition() {
+    for (key, value) in [
+        ("backend", "missing".into()),
+        ("device", "".into()),
+        ("device", "x".repeat(256)),
+        ("channel", "v\t0".into()),
+    ] {
+        let parsed = resolve(&format!("[1000]\n[sensor 1000 v]\nenabled=yes\nbackend=iio\ndevice=adc\nchannel=v\n{key}={value}\n")).unwrap();
+        assert!(!parsed.value.sensors[0].enabled, "{key}={value}");
+        assert!(!parsed.warnings.is_empty());
+    }
+    let parsed = resolve("[1000]\n[input 1000 door]\non_inactive=inhibit:off\n[output 1000 relay]\nsafe_state=on\npulse_ms=50\n").unwrap();
+    assert_eq!(
+        parsed.value.inputs[0].on_inactive,
+        vec![SiteAction::Inhibit(false)]
+    );
+    assert!(parsed.value.outputs[0].safe_on);
+    assert_eq!(parsed.value.outputs[0].pulse_ms, 50);
+}
+
+#[test]
+fn site_policy_bad_actions_are_not_partially_applied() {
+    for action in [
+        "macro:",
+        "macro:bad name",
+        "macro:[bad]",
+        &format!("macro:{}", "a".repeat(64)),
+        "output:relay:toggle",
+        "output::on",
+        "fan::auto",
+        "fan:f:NaN",
+        "fan:f:2",
+        "shell:ls",
+    ] {
+        let parsed = resolve(&format!(
+            "[1000]\n[input 1000 door]\non_active=inhibit:on,{action}\n"
+        ))
+        .unwrap();
+        assert!(parsed.value.inputs[0].on_active.is_empty(), "{action}");
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.key == "on_active")
+        );
+    }
+    let parsed = resolve("[1000]\n[2000]\n[macro resume]\naction=connect\ntarget_node=2000\n[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\non_active=macro:resume,fan:cooling:0.5\non_inactive=fan:cooling:auto\n[output 1000 relay]\n[fan 1000 cooling]\nptt_nodes=1000,2000\nmode=invalid\n[alarm 1000 a]\ncondition=invalid\n").unwrap();
+    assert_eq!(parsed.value.inputs[0].on_active.len(), 2);
+    assert_eq!(
+        parsed.value.inputs[0].on_inactive,
+        vec![SiteAction::Fan {
+            name: "cooling".into(),
+            duty: None
+        }]
+    );
+    assert_eq!(parsed.value.fans[0].ptt_nodes.len(), 2);
+    assert_eq!(parsed.value.fans[0].mode, FanMode::Ptt);
+    assert_eq!(
+        parsed.value.alarms[0].condition,
+        AlarmCondition::Unavailable
+    );
+}
+
+#[test]
+fn site_policy_fan_references_and_curve_boundaries() {
+    let base = "[1000]\n[sensor 1000 heat]\n[output 1000 relay]\n";
+    for extra in [
+        "ptt_nodes=2000\n",
+        "mode=temperature\ntemperature_sensor=missing\n",
+        "rpm_sensor=heat\n",
+        "rpm_sensor=missing\nminimum_rpm=500\n",
+    ] {
+        assert!(
+            resolve(&format!(
+                "{base}[fan 1000 f]\nenabled=yes\noutput=relay\n{extra}"
+            ))
+            .is_err(),
+            "{extra}"
+        );
+    }
+    for value in ["", "bad node"] {
+        let parsed = resolve(&format!("{base}[fan 1000 f]\nptt_nodes={value}\n")).unwrap();
+        assert_eq!(
+            parsed.value.fans[0].ptt_nodes,
+            vec![NodeId::new("1000").unwrap()]
+        );
+        assert!(!parsed.warnings.is_empty());
+    }
+    for curve in [
+        "20:0.2",
+        "20:0.2,10:0.8",
+        "10:0.8,20:0.2",
+        "-1e308:0,1e308:1",
+    ] {
+        let parsed = resolve(&format!("{base}[fan 1000 f]\ntemperature_curve={curve}\n")).unwrap();
+        assert!(parsed.value.fans[0].temperature_curve.is_empty(), "{curve}");
+        assert!(!parsed.warnings.is_empty());
+    }
+    for action in ["output:missing:on", "macro:missing", "fan:missing:auto"] {
+        assert!(resolve(&format!("{base}[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=chip\nline=door\non_active={action}\n")).is_err());
+    }
+    assert!(resolve(&format!("{base}[alarm 1000 a]\nenabled=yes\nsource=missing\ncondition=above\ntrip_value=10\nclear_value=9\n")).is_err());
+}

@@ -100,7 +100,7 @@ pub struct SiteSnapshot {
 struct InputState {
     value: Observation<bool>,
     last_sample: Option<u64>,
-    pending: Option<(bool, u64)>,
+    pending_since: Option<u64>,
 }
 impl InputState {
     fn new() -> Self {
@@ -111,7 +111,7 @@ impl InputState {
                 quality: ReadingQuality::Unavailable,
             },
             last_sample: None,
-            pending: None,
+            pending_since: None,
         }
     }
     fn observe(
@@ -122,7 +122,7 @@ impl InputState {
     ) -> Option<bool> {
         if reading.quality != ReadingQuality::Valid {
             self.value.quality = reading.quality;
-            self.pending = None;
+            self.pending_since = None;
             return None;
         }
         let valid = reading
@@ -133,7 +133,7 @@ impl InputState {
             });
         let Some((value, time)) = valid else {
             self.value.quality = ReadingQuality::Fault;
-            self.pending = None;
+            self.pending_since = None;
             return None;
         };
         if self.last_sample == Some(time) {
@@ -143,18 +143,15 @@ impl InputState {
         self.value.quality = ReadingQuality::Valid;
         if self.value.value.is_none() || self.value.value == Some(value) {
             self.value = reading.clone();
-            self.pending = None;
+            self.pending_since = None;
             return None;
         }
-        let since = match self.pending {
-            Some((pending, since)) if pending == value => since,
-            _ => time,
-        };
-        self.pending = Some((value, since));
+        // The pending value is necessarily opposite to the debounced value.
+        let since = *self.pending_since.get_or_insert(time);
         if time.saturating_sub(since) < settings.debounce_ms {
             return None;
         }
-        self.pending = None;
+        self.pending_since = None;
         self.value = reading.clone();
         Some(value)
     }

@@ -439,3 +439,154 @@ fn site_hwmon_pwm_alias_cannot_acquire_a_second_writer() {
     );
     drop(replacement);
 }
+
+#[test]
+fn site_hwmon_rejects_malformed_descriptors_without_acquisition() {
+    let _serial = serial();
+    let api = unsafe { &*rptadv_hwmon_adapter_descriptor_v1() };
+    let device = b"/sys/class/hwmon/hwmon0";
+    let channel = b"temp1_input";
+    let endpoint = abi::rptadv_hwmon_endpoint_v1 {
+        struct_size: size_of::<abi::rptadv_hwmon_endpoint_v1>() as u32,
+        abi_version: 1,
+        device: device.as_ptr(),
+        device_length: device.len(),
+        channel: channel.as_ptr(),
+        channel_length: channel.len(),
+        output: 0,
+        startup_percent: 0.0,
+        safe_percent: 0.0,
+    };
+    let mut context = ptr::null_mut();
+    unsafe {
+        assert_eq!(api.open.unwrap()(ptr::null(), &mut context), -1);
+        assert_eq!(api.open.unwrap()(&endpoint, ptr::null_mut()), -1);
+        for change in 0..9 {
+            let mut invalid = endpoint;
+            match change {
+                0 => invalid.struct_size = 0,
+                1 => invalid.abi_version = 2,
+                2 => invalid.device = ptr::null(),
+                3 => invalid.device_length = 0,
+                4 => invalid.device_length = usize::MAX,
+                5 => invalid.output = 2,
+                6 => invalid.startup_percent = f64::NAN,
+                7 => invalid.safe_percent = 101.0,
+                _ => {
+                    invalid.device = c"".as_ptr().cast();
+                    invalid.device_length = 1;
+                }
+            }
+            assert_eq!(api.open.unwrap()(&invalid, &mut context), -1, "{change}");
+            assert!(context.is_null());
+        }
+        for device in [b"relative".as_slice(), b"/\xff"] {
+            let invalid = abi::rptadv_hwmon_endpoint_v1 {
+                device: device.as_ptr(),
+                device_length: device.len(),
+                ..endpoint
+            };
+            assert_eq!(api.open.unwrap()(&invalid, &mut context), -1);
+        }
+        assert_eq!(api.read.unwrap()(ptr::null_mut(), ptr::null_mut()), -1);
+        assert_eq!(api.write.unwrap()(ptr::null_mut(), ptr::null()), -1);
+        assert_eq!(
+            api.capabilities.unwrap()(ptr::null_mut(), ptr::null_mut()),
+            -1
+        );
+    }
+}
+
+#[test]
+fn site_hwmon_capabilities_and_backend_failures_are_truthful() {
+    let _serial = serial();
+    let fixture = Fixture::new();
+    fixture.put("file", "not a directory");
+    assert_eq!(fixture.open("file", "temp1_input", 0, 0.0, 0.0).0, -1);
+    *CHIPS.lock().unwrap() = vec![];
+    assert_eq!(fixture.open("a", "temp1_input", 0, 0.0, 0.0).0, 1);
+    for (kind, flags) in [(0x201, 1), (0x200, 0)] {
+        let mut chip = Chip::new(&fixture.0.join("a"));
+        chip.subfeatures[0].type_ = kind;
+        chip.subfeatures[0].flags = flags;
+        *CHIPS.lock().unwrap() = vec![chip];
+        assert_eq!(fixture.open("a", "temp1_input", 0, 0.0, 0.0).0, 2);
+    }
+    *CHIPS.lock().unwrap() = vec![Chip::new(&fixture.0.join("a"))];
+    for name in ["wrong", "pwm", "pwmx", "pwm1"] {
+        assert_eq!(fixture.open("a", name, 1, 0.0, 0.0).0, 2, "{name}");
+    }
+    fixture.put("a/pwm1_enable", "1\n");
+    assert_eq!(fixture.open("a", "pwm1", 1, 0.0, 0.0).0, 2);
+    fs::create_dir(fixture.0.join("a/pwm1")).unwrap();
+    assert_eq!(fixture.open("a", "pwm1", 1, 0.0, 0.0).0, 1);
+    fs::remove_dir(fixture.0.join("a/pwm1")).unwrap();
+    fixture.put("a/pwm1", "0\n");
+    fixture.put("a/temp1_input", "20");
+    for (channel, output, expected) in [
+        ("temp1_input", 0, abi::RPTADV_HWMON_INPUT),
+        ("pwm1", 1, abi::RPTADV_HWMON_PWM),
+    ] {
+        let (result, handle) = fixture.open("a", channel, output, 0.0, 0.0);
+        assert_eq!(result, 0);
+        let mut capability = 0;
+        unsafe {
+            assert_eq!(
+                DESCRIPTOR.capabilities.unwrap()(handle.0, &mut capability),
+                0
+            );
+            assert_eq!(capability, expected);
+            assert_eq!(
+                DESCRIPTOR.capabilities.unwrap()(handle.0, ptr::null_mut()),
+                -1
+            );
+            assert_eq!(DESCRIPTOR.read.unwrap()(handle.0, ptr::null_mut()), -1);
+            assert_eq!(DESCRIPTOR.write.unwrap()(handle.0, ptr::null()), -1);
+        }
+    }
+}
+
+// Linux resource limits exercise real stdio/file failure paths without a
+// production test hook. All adapter tests hold SERIAL, and the original soft
+// limit is restored before assertions, cleanup, or resuming a caught panic.
+#[repr(C)]
+struct ResourceLimit {
+    current: u64,
+    maximum: u64,
+}
+unsafe extern "C" {
+    fn getrlimit(resource: u32, limit: *mut ResourceLimit) -> i32;
+    fn setrlimit(resource: u32, limit: *const ResourceLimit) -> i32;
+}
+fn with_soft_limit<T>(resource: u32, current: u64, operation: impl FnOnce() -> T) -> T {
+    let mut saved = ResourceLimit {
+        current: 0,
+        maximum: 0,
+    };
+    assert_eq!(unsafe { getrlimit(resource, &mut saved) }, 0);
+    let limited = ResourceLimit {
+        current,
+        maximum: saved.maximum,
+    };
+    assert_eq!(unsafe { setrlimit(resource, &limited) }, 0);
+    let result = catch_unwind(AssertUnwindSafe(operation));
+    assert_eq!(unsafe { setrlimit(resource, &saved) }, 0);
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+#[test]
+fn site_hwmon_exhausted_descriptors_and_partial_writes_fail_safely() {
+    let _serial = serial();
+    let fixture = Fixture::new();
+    fixture.put("a/pwm1_enable", "1\n");
+    fixture.put("a/pwm1", "0\n");
+    let directory = File::open(fixture.0.join("a")).unwrap();
+    let result = with_soft_limit(7, 0, || Measurement::open(directory, "temp1_input"));
+    assert!(matches!(result, Err(1)));
+    assert_eq!(*USERS.lock().unwrap(), 0);
+    let result = with_soft_limit(1, 1, || fixture.open("a", "pwm1", 1, 100.0, 0.0));
+    assert_eq!(result.0, 1);
+    assert!(result.1.0.is_null());
+    assert!(OUTPUTS.lock().unwrap().is_empty());
+    assert_eq!(fixture.open("a", "pwm1", 1, 100.0, 0.0).0, 0);
+}

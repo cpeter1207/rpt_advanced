@@ -100,3 +100,24 @@ fn site_alarm_ack_reset_repeat() {
     assert_eq!(state.advance(400, &analog(15.0)), vec![AlarmEvent::Trip]);
     assert!(!state.snapshot().acknowledged);
 }
+
+#[test]
+fn site_alarm_disabled_or_invalid_observations_cannot_trip_or_clear() {
+    let mut disabled = AlarmState::new(settings("enabled=no\n"));
+    assert!(disabled.advance(0, &analog(100.0)).is_empty());
+    assert!(!disabled.snapshot().active);
+    assert_eq!(disabled.reset(), Ok(None));
+    for (extra, trip) in [
+        ("", 15.0),
+        ("condition=below\ntrip_value=11\nclear_value=12\n", 10.0),
+    ] {
+        let mut state = AlarmState::new(settings(extra));
+        assert_eq!(state.advance(0, &analog(trip)), vec![AlarmEvent::Trip]);
+        for invalid in [AlarmValue::Number(f64::NAN), AlarmValue::Digital(false)] {
+            assert!(state.advance(1, &sample(Some(invalid))).is_empty());
+            assert!(state.snapshot().active);
+            assert_eq!(state.snapshot().unsafe_condition, None);
+            assert_eq!(state.reset(), Err(SiteError::Unsafe));
+        }
+    }
+}

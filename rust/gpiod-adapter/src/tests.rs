@@ -188,7 +188,7 @@ fn site_gpiod_rejects_invalid_records_before_acquiring_a_line() {
     unsafe {
         assert_eq!(api.open.unwrap()(ptr::null(), &mut handle), -1);
         assert_eq!(api.open.unwrap()(&endpoint(), ptr::null_mut()), -1);
-        for change in 0..8 {
+        for change in 0..9 {
             let mut config = endpoint();
             match change {
                 0 => config.struct_size = 0,
@@ -198,7 +198,8 @@ fn site_gpiod_rejects_invalid_records_before_acquiring_a_line() {
                 4 => config.output = 2,
                 5 => config.active_low = 2,
                 6 => config.startup_active = 2,
-                _ => config.safe_active = 2,
+                7 => config.safe_active = 2,
+                _ => config.device_length = usize::MAX,
             }
             assert_eq!(api.open.unwrap()(&config, &mut handle), -1);
             assert!(handle.is_null());

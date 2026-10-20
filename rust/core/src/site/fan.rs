@@ -46,13 +46,6 @@ impl FanState {
             started_at: None,
         }
     }
-    /// Preserve original run-on/spin-up deadlines on an unchanged policy reload.
-    pub fn reconfigure(&mut self, settings: FanSettings) {
-        if self.settings == settings {
-            return;
-        }
-        *self = Self::new(settings);
-    }
     /// Set additional manual cooling demand, or return to automatic operation.
     pub fn manual(&mut self, duty: Option<f64>) -> Result<(), SiteError> {
         if duty.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {

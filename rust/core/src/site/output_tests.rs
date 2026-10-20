@@ -51,3 +51,21 @@ fn site_output_retrigger_explicit_command_and_fault() {
     output.advance(4500, true);
     assert!(!output.snapshot().requested_on);
 }
+
+#[test]
+fn site_output_changed_polarity_resets_pulse_and_disabled_rejects_commands() {
+    let mut output = OutputState::new(settings(""));
+    output.advance(0, true);
+    output.command(OutputRequest::Pulse, 100).unwrap();
+    output.reconfigure(settings("active_level=low\n"));
+    assert!(!output.snapshot().requested_on);
+    assert_eq!(output.snapshot().pulse_deadline_ms, None);
+    assert!(output.snapshot().fault);
+    output.reconfigure(settings("active_level=low\nenabled=no\nsafe_state=on\n"));
+    output.advance(200, true);
+    assert!(output.snapshot().requested_on);
+    assert_eq!(
+        output.command(OutputRequest::Off, 200),
+        Err(SiteError::Unavailable)
+    );
+}

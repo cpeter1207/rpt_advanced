@@ -17,8 +17,7 @@ fn available(pwm: bool) -> FanOutput {
 
 #[test]
 fn site_fan_demand_and_failure() {
-    let policy = settings("");
-    let mut fan = FanState::new(policy.clone());
+    let mut fan = FanState::new(settings(""));
     assert_eq!(
         fan.advance(0, &ptt(true), None, None, available(false))
             .duty,
@@ -29,7 +28,6 @@ fn site_fan_demand_and_failure() {
             .duty,
         1.0
     );
-    fan.reconfigure(policy);
     assert_eq!(
         fan.advance(120999, &ptt(false), None, None, available(false))
             .duty,
@@ -107,4 +105,26 @@ fn site_fan_curve_combined_and_rpm_capability() {
     );
     assert!(fan.manual(Some(f64::NAN)).is_err());
     assert!(fan.manual(Some(1.1)).is_err());
+}
+
+#[test]
+fn site_fan_disabled_stable_ptt_and_invalid_tach() {
+    let mut disabled = FanState::new(settings("enabled=no\n"));
+    assert_eq!(
+        disabled.advance(100, &ptt(true), None, None, available(false)),
+        FanSnapshot {
+            duty: 0.0,
+            fault: false,
+            run_on_until_ms: None,
+        }
+    );
+    let mut fan = FanState::new(settings("rpm_sensor=tach\nminimum_rpm=500\nspinup_ms=0\n"));
+    assert!(
+        !fan.advance(0, &ptt(true), None, Some(600.0), available(false))
+            .fault
+    );
+    let running = fan.advance(100, &ptt(true), None, Some(f64::NAN), available(false));
+    assert_eq!(running.duty, 1.0);
+    assert_eq!(running.run_on_until_ms, None);
+    assert!(running.fault);
 }
