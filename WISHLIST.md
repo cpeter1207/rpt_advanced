@@ -19,6 +19,23 @@ completion is not a claim of physical hardware qualification or deployment.
 
 ## Entries
 
+### Local receiver S-meter and spoken query
+
+**Status: Planned.** Conversational design approved on 2026-10-20; the
+[written specification](docs/superpowers/specs/2026-10-20-local-receiver-s-meter-design.md)
+is awaiting review. No implementation or node changes have started.
+
+- Measure suitable flat FM discriminator noise independently of COR selection,
+  or reuse an external RSSI sensor acquired through the existing site adapters.
+- Support shared defaults, per-node selection, calibrated dBm/S-unit estimates,
+  relative quieting, measurable-range bounds and explicit observation validity.
+- Reuse public, remappable `*76<dtmf_id>#` for a localized spoken report with
+  the existing Morse fallback and source-only routing after unkey.
+- Retain a local query's actual receive-burst observation so delayed command
+  handling does not report post-unkey noise or a later station instead.
+- Keep raw measurement, sensor acquisition and telemetry with their current
+  owners; do not change audio processing, gains or squelch behavior.
+
 ### Verified shared-clock native audio
 
 **Status: Partially implemented.** Independent input/output callbacks, local
