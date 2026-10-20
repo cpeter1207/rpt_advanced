@@ -76,7 +76,9 @@ typedef struct rptadv_gpiod_descriptor_v1 {
     int32_t (*set_safe)(void *context, uint32_t active);
 } rptadv_gpiod_descriptor_v1;
 
-/** Return the immutable descriptor, retained until this DSO unloads. */
+/** Return the immutable descriptor, retained until this DSO unloads.
+ * @return Immutable ABI 1 table, never NULL; the caller must not free it.
+ */
 const rptadv_gpiod_descriptor_v1 *rptadv_gpiod_adapter_descriptor_v1(void);
 #ifdef __cplusplus
 }

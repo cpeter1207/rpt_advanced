@@ -77,7 +77,9 @@ typedef struct rptadv_hwmon_descriptor_v1 {
     int32_t (*set_safe)(void *, double percent);
 } rptadv_hwmon_descriptor_v1;
 
-/** Return the immutable descriptor for this DSO's lifetime. */
+/** Return the immutable descriptor for this DSO's lifetime.
+ * @return Immutable ABI 1 table, never NULL; the caller must not free it.
+ */
 const rptadv_hwmon_descriptor_v1 *rptadv_hwmon_adapter_descriptor_v1(void);
 #ifdef __cplusplus
 }
