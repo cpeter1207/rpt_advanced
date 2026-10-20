@@ -85,6 +85,24 @@ fn composition_file_then_macros() {
 }
 
 #[test]
+fn composition_media_requires_a_renderable_nonempty_morse_fallback() {
+    for text in ["", " ", "你好"] {
+        let mut defs = definitions("[message file]\ncontent={media}\nmorse_text=E\n", &["file"]);
+        defs.get_mut("file")
+            .unwrap()
+            .media
+            .morse
+            .as_mut()
+            .unwrap()
+            .text = text.into();
+        assert_eq!(
+            compile("{message_macro_file}", &defs),
+            Err(CompositionError::MissingDefinition)
+        );
+    }
+}
+
+#[test]
 fn composition_attention_positions() {
     let defs = definitions(
         "[message attention]\ncontent={tone_sequence}\ntone_sequence=1000Hz / 200ms / -20dB\n[message time]\nmessage_id=site-time\n[message temperature]\nmessage_id=site-temperature\n",
@@ -225,4 +243,32 @@ fn composition_configuration_clears_bindings_and_validates_shapes() {
     for value in ["sensor:", "input:a:b", "sensor:two names", "unknown:name"] {
         assert!(value.parse::<BindingSource>().is_err());
     }
+    assert!(
+        format!("sensor:{}", "x".repeat(64))
+            .parse::<BindingSource>()
+            .is_err()
+    );
+    assert!(
+        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "missing").is_err()
+    );
+    let long = "1".repeat(128);
+    let doc = ConfigDocument::parse(&format!(
+        "[524950]\n[message a]\nmessage_id=site-time\ndtmf_id=1\n\
+         [message 524950 a]\nmessage_id=\ndtmf_id={long}\n\
+         [message b]\nmessage_id=1bad\n"
+    ))
+    .unwrap();
+    let resolved =
+        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "a").unwrap();
+    assert!(resolved.value.message_id.is_none());
+    assert_eq!(resolved.value.dtmf_id.as_deref(), Some("1"));
+    let invalid =
+        ResolvedMessageSettings::resolve(&doc, &NodeId::new("524950").unwrap(), "b").unwrap();
+    assert!(invalid.value.message_id.is_none());
+    assert!(
+        invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.value == "1bad")
+    );
 }

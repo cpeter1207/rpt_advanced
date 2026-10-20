@@ -265,7 +265,7 @@ impl MessageRecipe {
                 let id = match &report.source {
                     None => "site-query-unavailable",
                     Some(source) => match values.binding(source, catalog)? {
-                        Some(MessageArgument::Number(value)) => match source {
+                        BoundValue::Available(MessageArgument::Number(value)) => match source {
                             BindingSource::Input(_) if value == 0.0 => "site-input-inactive",
                             BindingSource::Input(_) => "site-input-active",
                             _ => {
@@ -329,12 +329,19 @@ pub struct MessageValueSnapshot {
     pub time_remaining: Option<MessageArgument>,
 }
 
+/// An unavailable site reading retains its identity instead of losing it as `None`.
+#[derive(Debug, PartialEq)]
+enum BoundValue<'a> {
+    Available(MessageArgument),
+    Unavailable(&'a str),
+}
+
 impl MessageValueSnapshot {
-    fn binding(
+    fn binding<'a>(
         &self,
-        source: &BindingSource,
+        source: &'a BindingSource,
         catalog: &MessageCatalog,
-    ) -> Result<Option<MessageArgument>, CompositionError> {
+    ) -> Result<BoundValue<'a>, CompositionError> {
         let (year, month, day, weekday, hour, minute) = self.civil.components();
         let forms = match source {
             BindingSource::Sensor(name) | BindingSource::Input(name) => {
@@ -343,17 +350,18 @@ impl MessageValueSnapshot {
                 } else {
                     &self.inputs
                 };
-                return Ok(values.get(name).filter(|reading| {
+                let value = values.get(name).filter(|reading| {
                     reading.quality == ReadingQuality::Valid && reading.observed_at_ms.is_some()
                 }).and_then(|reading| reading.value.as_ref()).filter(|value| {
                     !matches!(value, MessageArgument::Number(number) if !number.is_finite())
-                }).cloned());
+                }).cloned();
+                return Ok(value.map_or(BoundValue::Unavailable(name), BoundValue::Available));
             }
             BindingSource::TimeRemaining => {
                 return self
                     .time_remaining
                     .clone()
-                    .map(Some)
+                    .map(BoundValue::Available)
                     .ok_or(CompositionError::Preparation);
             }
             BindingSource::Callsign => MessageForms {
@@ -414,7 +422,7 @@ impl MessageValueSnapshot {
                 .map_err(|_| CompositionError::Preparation)?,
             BindingSource::LinkStatus => self.links.clone(),
         };
-        Ok(Some(MessageArgument::Forms(forms)))
+        Ok(BoundValue::Available(MessageArgument::Forms(forms)))
     }
 }
 
@@ -441,17 +449,16 @@ fn message_forms(
 ) -> Result<MessageForms, CompositionError> {
     let mut arguments = BTreeMap::new();
     for (name, source) in &settings.bindings {
-        let Some(value) = values.binding(source, catalog)? else {
-            let label = match source {
-                BindingSource::Sensor(name) | BindingSource::Input(name) => name,
-                _ => name,
-            };
-            return catalog
-                .format_named(
-                    "site-value-unavailable",
-                    &BTreeMap::from([("label".into(), uniform(label))]),
-                )
-                .map_err(|_| CompositionError::Preparation);
+        let value = match values.binding(source, catalog)? {
+            BoundValue::Available(value) => value,
+            BoundValue::Unavailable(label) => {
+                return catalog
+                    .format_named(
+                        "site-value-unavailable",
+                        &BTreeMap::from([("label".into(), uniform(label))]),
+                    )
+                    .map_err(|_| CompositionError::Preparation);
+            }
         };
         arguments.insert(name.clone(), value);
     }

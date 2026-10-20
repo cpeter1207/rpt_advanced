@@ -130,17 +130,11 @@ impl MessagePreparation {
         else {
             return Err(MessageCompletion { attempt, result });
         };
-        // One request credit covers pending, playing, and returned ownership.
+        // A matching waiting credit proves the previous completion was consumed.
         // Only control converts the envelope or drops any of its other fields.
-        if port.ready.is_full() {
-            return Err(MessageCompletion { attempt, result });
-        }
         let result = result.and_then(|mut media| media.0.take_stream().ok_or(ControllerError));
         let queued = port.ready.push(Ready { attempt, result });
-        assert!(
-            queued.is_ok(),
-            "single preparation producer owns reserved capacity"
-        );
+        assert!(queued.is_ok());
         port.waiting = None;
         Ok(())
     }
@@ -166,10 +160,7 @@ impl MessageReader {
         stream.cancel();
         // A new request is taken only after control reclaims the previous stream.
         let returned = self.retired.push(stream);
-        assert!(
-            returned.is_ok(),
-            "one stream credit reserves its return slot"
-        );
+        assert!(returned.is_ok());
     }
 
     fn poll(&mut self) {
@@ -189,16 +180,14 @@ impl MessageReader {
             .desired
             .filter(|_| !self.failed && !self.outstanding && self.stream.is_none())
         {
-            if self
-                .requests
-                .push(MessageRequest {
-                    attempt,
-                    content_index: self.content_index,
-                })
-                .is_ok()
-            {
-                self.outstanding = true;
-            }
+            // The credit returns only when Ready is consumed, after control has
+            // popped the prior request. Cancellation never resets that credit.
+            let queued = self.requests.push(MessageRequest {
+                attempt,
+                content_index: self.content_index,
+            });
+            assert!(queued.is_ok());
+            self.outstanding = true;
         }
     }
 }

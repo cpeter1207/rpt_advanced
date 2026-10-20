@@ -127,7 +127,9 @@ fn composition_value_forms_and_invalid_observations() {
         (BindingSource::Date, "2026-10-18", "2026-10-18"),
         (BindingSource::Time, "1:25 PM", "1:25 PM"),
     ] {
-        let Some(MessageArgument::Forms(forms)) = values.binding(&source, &catalog).unwrap() else {
+        let BoundValue::Available(MessageArgument::Forms(forms)) =
+            values.binding(&source, &catalog).unwrap()
+        else {
             panic!("forms")
         };
         assert_eq!(forms.tts, speech);
@@ -159,11 +161,11 @@ fn composition_value_forms_and_invalid_observations() {
                 value,
             },
         );
-        assert!(
+        assert_eq!(
             values
                 .binding(&BindingSource::Sensor("meter".into()), &catalog)
-                .unwrap()
-                .is_none()
+                .unwrap(),
+            BoundValue::Unavailable("meter")
         );
     }
 }
@@ -296,4 +298,130 @@ fn composition_numeric_values_do_not_become_node_numbers() {
         "Temperature is 75."
     );
     assert_eq!(program.morse[0].text, "TEMP 75");
+}
+
+#[test]
+fn composition_civil_and_deadline_bindings_keep_their_own_context() {
+    let catalog = MessageCatalog::load("en-US").unwrap();
+    let mut values = snapshot();
+    for (source, expected) in [
+        (BindingSource::DayOfWeek, "Sunday"),
+        (BindingSource::LinkStatus, "No links"),
+    ] {
+        let BoundValue::Available(MessageArgument::Forms(forms)) =
+            values.binding(&source, &catalog).unwrap()
+        else {
+            panic!("expected localized forms");
+        };
+        assert_eq!(forms.tts, expected);
+    }
+    for (hour, expected) in [
+        (0, "Good Morning"),
+        (12, "Good Afternoon"),
+        (17, "Good Evening"),
+    ] {
+        values.civil = CivilTime::new(2026, 10, 18, Weekday::Sunday, hour, 0).unwrap();
+        let BoundValue::Available(MessageArgument::Forms(forms)) =
+            values.binding(&BindingSource::Greeting, &catalog).unwrap()
+        else {
+            panic!("expected greeting");
+        };
+        assert_eq!(forms.tts, expected);
+    }
+    assert_eq!(
+        values.binding(&BindingSource::TimeRemaining, &catalog),
+        Err(CompositionError::Preparation)
+    );
+    values.time_remaining = Some(MessageArgument::Number(60.0));
+    assert_eq!(
+        values.binding(&BindingSource::TimeRemaining, &catalog),
+        Ok(BoundValue::Available(MessageArgument::Number(60.0)))
+    );
+    values.inputs.insert(
+        "door".into(),
+        Observation {
+            value: Some(MessageArgument::Number(1.0)),
+            observed_at_ms: Some(1),
+            quality: ReadingQuality::Valid,
+        },
+    );
+    assert_eq!(
+        values.binding(&BindingSource::Input("door".into()), &catalog),
+        Ok(BoundValue::Available(MessageArgument::Number(1.0)))
+    );
+}
+
+#[test]
+fn composition_media_and_attention_preserve_order_and_fallback() {
+    let recipe = recipe(
+        "[message root]\ncontent={tone_sequence} {media} {tone_sequence}\n\
+         tone_sequence=1000Hz / 200ms / -20dB\nsound_file=id.wav\nmorse_text=E\n",
+    );
+    let program = recipe
+        .prepare(&MessageCatalog::load("en-US").unwrap(), &snapshot())
+        .unwrap();
+    assert!(
+        recipe
+            .validate_catalog(&MessageCatalog::load("en-US").unwrap())
+            .is_ok()
+    );
+    assert_eq!(program.primary.len(), 3);
+    assert!(program.primary[0].tone.is_some());
+    assert_eq!(
+        program.primary[1].file.as_deref(),
+        Some(std::path::Path::new("id.wav"))
+    );
+    assert_eq!(program.primary[2], program.primary[0]);
+    assert_eq!(program.morse.len(), 1);
+    assert_eq!(program.morse[0].text, "E");
+    let mut settings = recipe.settings_for(None).clone();
+    settings.speech_defaults.voice.clear();
+    let source = spoken_source(
+        MessageForms {
+            text: "ID".into(),
+            tts: "ID".into(),
+            morse: "ID".into(),
+        },
+        &settings,
+    )
+    .unwrap();
+    assert!(source.speech.is_none());
+    assert_eq!(source.morse.unwrap().text, "ID");
+}
+
+#[test]
+fn composition_site_selectors_respect_command_size_and_report_active_input() {
+    let catalog = MessageCatalog::load("en-US").unwrap();
+    let document = ConfigDocument::parse(&format!(
+        "[524950]\n[input 524950 door]\ndtmf_id=1\n\
+         [sensor 524950 long]\ndtmf_id={}\n",
+        "2".repeat(126)
+    ))
+    .unwrap();
+    let recipes =
+        MessageRecipes::new(&document, &NodeId::new("524950").unwrap(), &catalog).unwrap();
+    assert!(recipes.site_selectors.contains_key("1"));
+    assert!(!recipes.site_selectors.contains_key(&"2".repeat(126)));
+    assert!(
+        recipes
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("command length"))
+    );
+    let mut values = snapshot();
+    values.inputs.insert(
+        "door".into(),
+        Observation {
+            value: Some(MessageArgument::Number(1.0)),
+            observed_at_ms: Some(1),
+            quality: ReadingQuality::Valid,
+        },
+    );
+    let program = recipes.items[recipes.site_selectors["1"]]
+        .prepare(&catalog, &values)
+        .unwrap();
+    assert_eq!(
+        program.primary[0].speech.as_ref().unwrap().text,
+        "door is active."
+    );
 }

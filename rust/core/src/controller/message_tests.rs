@@ -163,3 +163,26 @@ fn composition_tail_rewind_retains_attempt_values_and_morse() {
     );
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn composition_handoff_stale_failure_cannot_fail_a_new_attempt() {
+    let mut control = MessagePreparation::new(5);
+    let mut media = control.register(0).unwrap().0.take_stream().unwrap();
+    media.rewind();
+    assert_eq!(media.render(&mut [0.0]), PcmRead::Pending);
+    media.start();
+    let old = control.take_request().unwrap();
+    media.cancel();
+    assert!(control.complete(old.attempt, Err(ControllerError)).is_ok());
+    assert_eq!(media.render(&mut [0.0]), PcmRead::Pending);
+    media.start();
+    let current = control.take_request().unwrap();
+    assert_ne!(old.attempt, current.attempt);
+    assert!(
+        control
+            .complete(current.attempt, Err(ControllerError))
+            .is_ok()
+    );
+    assert_eq!(media.select_morse_fallback(), MorseSwitch::Unavailable);
+    assert_eq!(media.render(&mut [0.0]), PcmRead::Failed);
+}
