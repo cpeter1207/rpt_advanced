@@ -678,6 +678,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     self.effects
                         .push((old.name.clone(), LinkEffect::Detach(removed)));
                 }
+                // Seed retained protection before a callback can acquire the replacement.
+                old.site.reconfigure(candidate.site);
+                candidate
+                    .control
+                    .telemetry
+                    .set_site_inhibit(old.site.transmit_inhibited());
                 old.host
                     .control()
                     .publish_prepared(candidate.generation, clock.now_ms)
@@ -698,7 +704,6 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     candidate.settings.dtmf_admin_timeout_ms,
                 );
                 old.settings = candidate.settings;
-                old.site.reconfigure(candidate.site);
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
                 old.time_format = candidate.time_format;

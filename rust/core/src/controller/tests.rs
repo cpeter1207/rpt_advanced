@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "site_tests.rs"]
+mod site;
+
 thread_local! {
     static AUDIO_ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }

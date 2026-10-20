@@ -569,7 +569,8 @@ impl NodeController {
         }
         self.receiver = receiving;
         self.linked = linked;
-        let may_transmit = self.settings.full_duplex || !receiving;
+        let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
+        let may_transmit = !inhibited && (self.settings.full_duplex || !receiving);
         let active_before = self.telemetry.active;
         let peer_before =
             active_before == Some(Source::Status) && self.telemetry.peer_status().is_some();
@@ -906,7 +907,7 @@ impl NodeController {
         }
         let was_keyed = self.keyed;
         self.keyed = self.timeout.apply(
-            requested,
+            requested && !inhibited,
             was_keyed,
             receive,
             self.now,
@@ -983,6 +984,8 @@ impl NodeController {
             } else {
                 0.0
             }
+        } else if inhibited {
+            0.0
         } else {
             (local + link + telemetry).clamp(-1.0, 1.0)
         }

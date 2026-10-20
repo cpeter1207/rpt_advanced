@@ -68,6 +68,47 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn site_inhibit_is_seeded_before_reloaded_audio_becomes_available() {
+    let document = ConfigDocument::parse("[1000]\nduplex=full\n").unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        document.clone(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let node = runtime.node("1000").unwrap();
+    node.site()
+        .command(crate::site::SiteCommand::Inhibit(true), 0)
+        .unwrap();
+    runtime
+        .reload(
+            document,
+            &Media,
+            adapter,
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    let mut audio = [0.25; 48];
+    generation
+        .transmit()
+        .controller
+        .process_audio(true, false, &[], &mut audio);
+    let muted = audio.iter().all(|sample| *sample == 0.0);
+    drop(generation);
+    assert!(runtime.stop(0));
+    assert!(
+        muted,
+        "replacement must start with the retained safety inhibit"
+    );
+}
+
+#[test]
 fn site_runtime_reload_keeps_history_and_original_pulse_deadline() {
     use crate::site::{
         FanOutput, Observation, OutputRequest, ReadingQuality, SiteCommand, SiteObservations,

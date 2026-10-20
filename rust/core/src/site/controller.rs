@@ -598,6 +598,10 @@ impl SiteController {
         }
         Ok(effects)
     }
+    /// Aggregate protection without allocating a full measurement snapshot.
+    pub fn transmit_inhibited(&self) -> bool {
+        !self.inhibitors.is_empty()
+    }
     /// Read one coherent policy snapshot without I/O or timer advancement.
     pub fn snapshot(&self, now_ms: u64) -> SiteSnapshot {
         SiteSnapshot {
@@ -622,7 +626,7 @@ impl SiteController {
                 .map(|(name, state)| (name.clone(), state.snapshot()))
                 .collect(),
             fans: self.fan_status.clone(),
-            transmit_inhibited: !self.inhibitors.is_empty(),
+            transmit_inhibited: self.transmit_inhibited(),
         }
     }
 }

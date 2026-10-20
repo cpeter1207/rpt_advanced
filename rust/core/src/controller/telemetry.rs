@@ -171,6 +171,7 @@ impl ActivitySnapshot {
 
 /// Sole status producer and completed-media reclaimer; retain until audio stops.
 pub struct ControllerControl {
+    site_inhibit: Arc<AtomicBool>,
     messages: Option<super::MessagePreparation>,
     pending: Producer<PreparedMedia>,
     completed: Consumer<PreparedMedia>,
@@ -190,6 +191,11 @@ pub struct ControllerControl {
 }
 
 impl ControllerControl {
+    /// Set station protection independently of telemetry admission and physical interlocks.
+    pub fn set_site_inhibit(&self, inhibited: bool) {
+        self.site_inhibit.store(inhibited, Ordering::Release);
+    }
+
     pub(crate) fn set_message_preparation(&mut self, messages: super::MessagePreparation) {
         self.messages = Some(messages);
     }
@@ -455,6 +461,7 @@ pub(super) enum Source {
 }
 
 pub(super) struct TelemetryPlanner {
+    pub site_inhibit: Arc<AtomicBool>,
     pub active: Option<Source>,
     pub status: Option<PreparedMedia>,
     pending: Consumer<PreparedMedia>,
@@ -475,8 +482,10 @@ impl TelemetryPlanner {
         let (parrot_pending, parrot_consumer) = RingBuffer::new(1);
         let (parrot_completed, parrot_reclaimer) = RingBuffer::new(1);
         let parrot_busy = Arc::new(AtomicBool::new(false));
+        let site_inhibit = Arc::new(AtomicBool::new(false));
         (
             Self {
+                site_inhibit: site_inhibit.clone(),
                 active: None,
                 status: None,
                 pending,
@@ -488,6 +497,7 @@ impl TelemetryPlanner {
                 duck_gain: 10_f32.powf(f32::from(duck_db) / 20.0),
             },
             ControllerControl {
+                site_inhibit,
                 messages: None,
                 pending: producer,
                 completed: consumer,
