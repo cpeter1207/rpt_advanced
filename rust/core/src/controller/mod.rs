@@ -495,17 +495,25 @@ impl NodeController {
         let expired = |index: usize| {
             self.ids[index].polite_maximum_wait_ms.is_some() && self.id_ready(index, true)
         };
-        self.identifiers
-            .select(&self.rules, self.now, receiving, self.settings.full_duplex)
+        let selected =
+            self.identifiers
+                .select(&self.rules, self.now, receiving, self.settings.full_duplex);
+        let minimum_priority = selected
+            .filter(|&index| {
+                self.ids[index].first_key_only && self.ids[index].polite_maximum_wait_ms.is_some()
+            })
+            .map_or(i32::MIN, |index| self.ids[index].priority);
+        selected
             .filter(|&index| expired(index) || (after_hang && self.id_ready(index, busy)))
             .or_else(|| {
-                // Only a hard deadline may bypass a higher-priority waiting ID.
+                // A polite initial covers lower-priority IDs; their deadlines cannot bypass it.
+                // Periodic IDs retain their hard-deadline arbitration.
                 self.identifiers.select_where(
                     &self.rules,
                     self.now,
                     receiving,
                     self.settings.full_duplex,
-                    expired,
+                    |index| expired(index) && self.ids[index].priority >= minimum_priority,
                 )
             })
     }
