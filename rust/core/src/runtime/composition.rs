@@ -23,6 +23,7 @@ pub(super) struct MessageRecipes {
     definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
     pub items: Vec<Composition>,
     pub selectors: BTreeMap<String, usize>,
+    pub names: BTreeMap<String, usize>,
     pub warnings: Vec<crate::config::ConfigWarning>,
 }
 
@@ -57,6 +58,7 @@ impl MessageRecipes {
         for (name, settings) in definitions.iter() {
             let section = format!("message {} {name}", node.as_str());
             if let Some(index) = result.add(settings.clone(), &section, catalog) {
+                result.names.insert(name.clone(), index);
                 if let Some(selector) = &settings.dtmf_id {
                     if prefix_length + selector.len() > 127 {
                         result.warnings.push(crate::config::ConfigWarning::new(

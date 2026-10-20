@@ -602,6 +602,14 @@ impl SiteController {
     pub fn transmit_inhibited(&self) -> bool {
         !self.inhibitors.is_empty()
     }
+    /// Configured exclusive output for one cooling policy, never another hardware owner.
+    pub fn fan_output(&self, name: &str) -> Option<&str> {
+        self.settings
+            .fans
+            .iter()
+            .find(|fan| fan.name == name && fan.enabled)
+            .map(|fan| fan.output.as_str())
+    }
     /// Read one coherent policy snapshot without I/O or timer advancement.
     pub fn snapshot(&self, now_ms: u64) -> SiteSnapshot {
         SiteSnapshot {

@@ -435,7 +435,7 @@ impl Engine {
         }
         drop(jobs);
         let lost = self.lost_digits.swap(false, Ordering::AcqRel);
-        let operations = self.run(move |host| {
+        let (operations, site_links) = self.run(move |host| {
             if lost {
                 host.lost_digits();
             }
@@ -443,8 +443,11 @@ impl Engine {
             if schedule {
                 host.runtime.tick_links(clock);
             }
-            Ok(host.take_operations())
+            Ok((host.take_operations(), host.take_site_links()))
         })?;
+        for (local, effect) in site_links {
+            self.background(local, effect, revision, false)?;
+        }
         for (local, operation) in operations {
             if self
                 .digit_effect(&local, operation)

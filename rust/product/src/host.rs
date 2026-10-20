@@ -154,6 +154,7 @@ pub struct Host {
     site_radio: crate::site::radio::RadioSite,
     site_transition: Option<site::Transition>,
     site_retired: Vec<crate::site::worker::DeviceWorker>,
+    site_delivery: site::Delivery,
     epoch: Instant,
 }
 
@@ -294,6 +295,7 @@ impl Host {
             operations: Vec::new(),
             status_post: StatusPostService::default(),
             site_acquisition: Default::default(),
+            site_delivery: Default::default(),
             site_radio: Default::default(),
             site_transition: None,
             site_retired: Vec::new(),
@@ -816,6 +818,7 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        self.advance_sites(clock);
         self.runtime.prepare_messages(clock);
         for (local, lease) in &self.leases {
             if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {

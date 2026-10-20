@@ -155,6 +155,19 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     pub fn site(&mut self) -> &mut crate::site::SiteController {
         &mut self.site
     }
+    /// Advance station protection and publish its RF gate independently of media admission.
+    pub fn advance_site(
+        &mut self,
+        now_ms: u64,
+        observations: &crate::site::SiteObservations,
+        ptt: &std::collections::BTreeMap<NodeId, bool>,
+    ) -> Vec<crate::site::SiteEffect> {
+        let effects = self.site.advance(now_ms, observations, ptt);
+        self.control
+            .telemetry
+            .set_site_inhibit(self.site.transmit_inhibited());
+        effects
+    }
     /// Borrow a current/retiring adapter dispatcher only on control. Once exposed, its generation
     /// requires an explicit `detached` acknowledgment after dispatcher stop/drain before reclaim.
     pub fn adapter_control_mut(&mut self, generation: u64) -> Option<&mut C> {
@@ -1071,6 +1084,32 @@ impl<A: Send, C: Send> Runtime<A, C> {
         }
     }
 
+    /// Resolve an already validated site action through the ordinary typed macro contract.
+    pub fn site_macro(&self, local: &str, name: &str) -> Result<Command, RuntimeError> {
+        macro_command(&self.document, &NodeId::new(local)?, name)
+    }
+
+    /// Queue a compiled named local notification; false means retry admission, not an action retry.
+    pub fn queue_named_message(&mut self, local: &str, name: &str) -> Result<bool, RuntimeError> {
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let index = *node
+            .control
+            .messages
+            .names
+            .get(name)
+            .ok_or(RuntimeError::Preparation)?;
+        node.control.telemetry.reclaim().for_each(drop);
+        if !node.control.telemetry.can_queue_status() {
+            return Ok(false);
+        }
+        Self::queue_message_index(node, index, None)?;
+        Ok(true)
+    }
+
     /// Admit a read-only macro to the existing reply queue; resolve values after source unkey.
     /// A full queue rejects before creating an attempt, so a later retry uses fresh values.
     pub fn queue_message(
@@ -1090,6 +1129,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .selectors
             .get(selector)
             .ok_or(RuntimeError::Rejected)?;
+        Self::queue_message_index(node, index, reply)
+    }
+    fn queue_message_index(
+        node: &mut RuntimeNode<A, C>,
+        index: usize,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
         node.control.telemetry.reclaim().for_each(drop);
         if reply.as_ref().is_some_and(crate::link::PeerReply::ended)
             || !node.control.telemetry.can_queue_status()
@@ -1567,17 +1613,7 @@ fn prepare_events(document: &ConfigDocument, node: &NodeId) -> Result<Vec<Event>
         let operation = if event.macro_name.is_empty() {
             None
         } else {
-            let settings =
-                ResolvedMacroSettings::resolve(document, Some(node), &event.macro_name)?.value;
-            Some(Command {
-                action: match settings.action() {
-                    crate::schedule::ScheduledAction::Connect => LinkAction::Transceive,
-                    crate::schedule::ScheduledAction::Disconnect => LinkAction::Disconnect,
-                    crate::schedule::ScheduledAction::DisconnectAll => LinkAction::DisconnectAll,
-                    crate::schedule::ScheduledAction::ReconnectAll => LinkAction::ReconnectAll,
-                },
-                node: settings.target_node,
-            })
+            Some(macro_command(document, node, &event.macro_name)?)
         };
         events.push(Event {
             spec: EventSpec {
@@ -1590,6 +1626,22 @@ fn prepare_events(document: &ConfigDocument, node: &NodeId) -> Result<Vec<Event>
         });
     }
     Ok(events)
+}
+fn macro_command(
+    document: &ConfigDocument,
+    node: &NodeId,
+    name: &str,
+) -> Result<Command, RuntimeError> {
+    let settings = ResolvedMacroSettings::resolve(document, Some(node), name)?.value;
+    Ok(Command {
+        action: match settings.action() {
+            crate::schedule::ScheduledAction::Connect => LinkAction::Transceive,
+            crate::schedule::ScheduledAction::Disconnect => LinkAction::Disconnect,
+            crate::schedule::ScheduledAction::DisconnectAll => LinkAction::DisconnectAll,
+            crate::schedule::ScheduledAction::ReconnectAll => LinkAction::ReconnectAll,
+        },
+        node: settings.target_node,
+    })
 }
 fn prepare_links(
     document: &ConfigDocument,

@@ -1,8 +1,21 @@
 //! Site acquisition borrows physical owners only on serialized station control.
 use super::*;
 use crate::site::{acquisition::Acquisition, radio::RadioSite};
-use rpt_advanced_core::site::SiteObservations;
+use rpt_advanced_core::{
+    config::NodeId,
+    runtime::dtmf::DigitOperation,
+    site::{SiteEffect, SiteError, SiteObservations},
+};
 use std::collections::BTreeMap;
+
+/// Control-owned delivery, bounded by configured message/action identities.
+#[derive(Default)]
+pub(super) struct Delivery {
+    revision: u64,
+    pending: Vec<(String, String)>,
+    faults: BTreeMap<(String, String), SiteError>,
+    links: Vec<(String, LinkEffect)>,
+}
 
 pub(super) struct Transition {
     shutdown: bool,
@@ -18,6 +31,132 @@ pub(crate) struct SiteBasis {
 }
 
 impl Host {
+    /// Drive station policy on the existing control owner, without waiting for I/O or media.
+    pub(super) fn advance_sites(&mut self, clock: RuntimeClock) {
+        if self.site_delivery.revision != self.runtime.revision() {
+            self.site_delivery = Delivery {
+                revision: self.runtime.revision(),
+                ..Default::default()
+            };
+        }
+        if self.site_transition.is_some() {
+            return;
+        }
+        let mut observations = self.poll_sites(clock.now_ms);
+        let ptt = self
+            .leases
+            .iter()
+            .map(|(name, lease)| {
+                let keyed = lease
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .status
+                    .transmit_keyed();
+                (NodeId::new(name).expect("configured node"), keyed)
+            })
+            .collect();
+        let names: Vec<_> = self
+            .runtime
+            .node_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        for local in names {
+            let values = observations.remove(&local).unwrap_or_default();
+            let effects =
+                self.runtime
+                    .node(&local)
+                    .unwrap()
+                    .advance_site(clock.now_ms, &values, &ptt);
+            self.site_effects(&local, effects, clock);
+        }
+        let mut pending = std::mem::take(&mut self.site_delivery.pending);
+        pending.retain(
+            |(local, name)| match self.runtime.queue_named_message(local, name) {
+                Ok(accepted) => !accepted,
+                Err(_) => {
+                    self.site_delivery
+                        .faults
+                        .insert((local.clone(), name.clone()), SiteError::Unavailable);
+                    false
+                }
+            },
+        );
+        self.site_delivery.pending = pending;
+    }
+    fn site_output(&mut self, local: &str, name: &str, demand: f64) -> Result<(), SiteError> {
+        let result = if self.site_radio.output_status(local, name).is_some() {
+            self.site_radio.output(local, name, demand)
+        } else {
+            self.site_acquisition.output(local, name, demand)
+        };
+        result.map_err(|_| SiteError::Unavailable)
+    }
+    /// Apply equipment effects once; only coalesced notifications wait for queue space.
+    fn site_effects(&mut self, local: &str, effects: Vec<SiteEffect>, clock: RuntimeClock) {
+        for effect in effects {
+            let (target, result) = match effect {
+                SiteEffect::Output { name, on } => {
+                    let result = self.site_output(local, &name, f64::from(on));
+                    (name, result)
+                }
+                SiteEffect::Fan { name, duty } => {
+                    let output = self
+                        .runtime
+                        .node(local)
+                        .and_then(|node| node.site().fan_output(&name))
+                        .map(str::to_owned);
+                    let result = output
+                        .ok_or(SiteError::UnknownName)
+                        .and_then(|output| self.site_output(local, &output, duty));
+                    (name, result)
+                }
+                // RuntimeNode publishes the aggregate gate before handing effects to this host.
+                SiteEffect::TransmitInhibit(_) => continue,
+                SiteEffect::Macro(name) => {
+                    let result = self
+                        .runtime
+                        .site_macro(local, &name)
+                        .and_then(|command| {
+                            self.runtime.command(
+                                local,
+                                DigitOperation::new(command, None),
+                                clock,
+                                false,
+                            )
+                        })
+                        .and_then(|effect| {
+                            if matches!(effect, LinkEffect::Connect(_)) {
+                                self.site_delivery.links.push((local.to_owned(), effect));
+                                Ok(())
+                            } else {
+                                self.immediate(local, effect, clock)
+                            }
+                        })
+                        .map_err(|_| SiteError::Unavailable);
+                    (name, result)
+                }
+                SiteEffect::Message(name) => {
+                    let key = (local.to_owned(), name);
+                    if !self.site_delivery.pending.contains(&key) {
+                        self.site_delivery.pending.push(key);
+                    }
+                    continue;
+                }
+                SiteEffect::Fault { target, error } => (target, Err(error)),
+            };
+            let key = (local.to_owned(), target);
+            if let Err(error) = result {
+                self.site_delivery.faults.insert(key, error);
+            } else {
+                self.site_delivery.faults.remove(&key);
+            }
+        }
+    }
+    /// Transfer generation-protected dials to the existing off-control dispatcher.
+    pub(crate) fn take_site_links(&mut self) -> Vec<(String, LinkEffect)> {
+        std::mem::take(&mut self.site_delivery.links)
+    }
     /// Identify radio replacements and removed nodes using the runtime's own comparison.
     pub(crate) fn site_basis(&self, document: &ConfigDocument) -> Result<SiteBasis, RuntimeError> {
         use rpt_advanced_core::config::NodeId;

@@ -28,6 +28,9 @@ unsafe extern "C" fn bank_snapshot(
     unsafe {
         (*result).generation = state.generation;
         (*result).output_mask = 0xff;
+        (*result).input_mask = 0xff;
+        (*result).input_quality = 1;
+        (*result).observed_at_valid = 1;
         (*result).claimed_mask = state.mask;
         (*result).requested_high_mask = state.high;
         (*result).submitted_high_mask = state.high;
@@ -69,6 +72,9 @@ unsafe extern "C" fn bank_publish(
     0
 }
 fn bank_host() -> Host {
+    bank_host_with("")
+}
+fn bank_host_with(extra: &str) -> Host {
     *BANK.lock().unwrap() = BankFixture {
         generation: 7,
         mask: 0,
@@ -83,7 +89,9 @@ fn bank_host() -> Host {
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let document = document(
         "usb",
-        "[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n",
+        &format!(
+            "[output 1000 relay]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=7\nstartup_state=on\nsafe_state=off\n{extra}"
+        ),
     );
     let radio = RadioSite::prepare(
         &[(
@@ -102,6 +110,67 @@ fn bank_host() -> Host {
     host.poll_sites(1);
     assert_eq!(BANK.lock().unwrap().high, 0x40);
     host
+}
+
+#[test]
+fn site_host_alarm_actions_do_not_wait_for_full_telemetry_queue() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host_with(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
+         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
+         on_trip=output:relay:off,inhibit:on,macro:stop\ntrip_message=notice\n\
+         repeat_message=notice\nrepeat_interval_ms=1\n\
+         [macro stop]\naction=connect\ntarget_node=2000\n\
+         [message notice]\ncontent={media}\nmorse_text=E\ndtmf_id=1\n",
+    );
+    for _ in 0..4 {
+        host.runtime.queue_message("1000", "1", None).unwrap();
+    }
+    assert!(host.runtime.queue_message("1000", "1", None).is_err());
+    for now_ms in 10..14 {
+        host.pump(RuntimeClock { now_ms, ..clock() }).unwrap();
+    }
+    let snapshot = host.runtime.node("1000").unwrap().site().snapshot(14);
+    assert!(snapshot.alarms["open"].active);
+    assert!(snapshot.transmit_inhibited);
+    assert_eq!(BANK.lock().unwrap().high, 0);
+    let operations = host.take_site_links();
+    assert_eq!(
+        operations.len(),
+        1,
+        "repeated notices must not replay actions"
+    );
+    assert!(matches!(&operations[0].1, LinkEffect::Connect(attempt) if attempt.remote() == "2000"));
+    drop(operations);
+    // Site pins must be released while the radio owner still services commands.
+    for now in 14..20 {
+        if host.site_shutdown(now) == Ok(true) {
+            break;
+        }
+    }
+    assert_eq!(host.site_shutdown(20), Ok(true));
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let mut audio = [0.25; 48];
+    let keyed = owners
+        .1
+        .acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(true, false, &[], &mut audio);
+    assert!(!keyed);
+    assert_eq!(audio, [0.0; 48]);
+    lease.lock().unwrap().owners = Some(owners);
+    for now in 20..28 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(28));
 }
 
 #[test]
