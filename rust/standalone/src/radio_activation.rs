@@ -66,7 +66,7 @@ impl ActiveRadio {
             struct_size: std::mem::size_of::<abi::UrpAstProviderManifest>() as u32,
             abi_version: 1,
             ffmpeg: std::ptr::from_ref(descriptors.ffmpeg).cast(),
-            radio: std::ptr::from_ref(descriptors.radio).cast(),
+            radio: descriptors.radio,
             audio: std::ptr::from_ref(descriptors.audio).cast(),
             gpio: std::ptr::from_ref(descriptors.gpio).cast(),
             rnnoise: std::ptr::null(),
@@ -205,6 +205,7 @@ pub(crate) mod tests {
     thread_local! {
         static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         static RESULTS: Cell<(i32, bool, i32)> = const { Cell::new((0, true, 0)) };
+        static EXPECTED_RADIO: Cell<Option<*const c_void>> = const { Cell::new(None) };
     }
     unsafe extern "C" fn create(
         args: *const abi::UrpNativeCreateArgs,
@@ -223,6 +224,18 @@ pub(crate) mod tests {
         );
         assert_eq!(config.receive_output_gain_db, -8);
         assert_eq!(providers.abi_version, 1);
+        if let Some(expected) = EXPECTED_RADIO.get() {
+            assert_eq!(providers.radio, expected);
+            // SAFETY: this test retains the complete published descriptor while
+            // the native owner borrows its full session table, not only its header.
+            let radio = unsafe {
+                &*providers
+                    .radio
+                    .cast::<crate::providers::tests::PublishedRadioDescriptor>()
+            };
+            assert_eq!(radio.struct_size, 112);
+            assert_eq!(radio.abi_version, 4);
+        }
         assert_eq!(callbacks.abi_version, 3);
         assert_eq!(
             callbacks.struct_size as usize,
@@ -300,6 +313,61 @@ pub(crate) mod tests {
             site_publish,
             site_snapshot,
         }
+    }
+
+    #[test]
+    fn released_radio_descriptor_is_forwarded_unchanged_to_the_native_owner() {
+        use crate::providers::tests::{PublishedRadioDescriptor, replace_descriptor};
+
+        let mut providers = ProviderSet::load().unwrap();
+        // SAFETY: the ABI record contains only scalars and nullable pointers.
+        let mut native: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        native.struct_size = std::mem::size_of_val(&native) as u32;
+        native.abi_version = 1;
+        native.capability_name = c"usbradioplus.product1".as_ptr();
+        native.native_create = Some(create);
+        native.native_start = Some(start);
+        native.native_stop = Some(stop);
+        native.native_destroy = Some(destroy);
+        native.native_site_bind = Some(site_bind);
+        native.native_site_publish = Some(site_publish);
+        native.native_site_snapshot = Some(site_snapshot);
+        replace_descriptor(&mut providers, "libusbradioplus_product.so.1", native);
+        let descriptor = PublishedRadioDescriptor::new();
+        assert_eq!(std::mem::size_of_val(&descriptor), 112);
+        replace_descriptor(&mut providers, "librptadvradio.so.4", descriptor);
+        // SAFETY: the provider set retains this fixture descriptor throughout activation.
+        let expected = unsafe {
+            providers
+                .descriptor("librptadvradio.so.4")
+                .unwrap()
+                .as_ptr()
+        };
+        let providers = Box::leak(Box::new(providers));
+        let radio = crate::configuration::resolve_radio_nodes(
+            "[1000]\nradio_channel=fixture\n[radio 1000]\nreceive_output_gain_db=-8\n",
+        )
+        .unwrap()
+        .remove(0);
+        CALLS.with(|calls| calls.borrow_mut().clear());
+        RESULTS.set((0, true, 0));
+        EXPECTED_RADIO.set(Some(expected));
+        let active = ActiveRadio::open(
+            providers,
+            &radio,
+            73,
+            128,
+            ProductRadioCallbacks {
+                receive: Some(receive),
+                receive_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                transmit: Some(transmit),
+                transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
+            },
+        )
+        .unwrap();
+        drop(active);
+        EXPECTED_RADIO.set(None);
+        CALLS.with(|calls| assert_eq!(&*calls.borrow(), &["create", "start", "stop", "destroy"]));
     }
 
     #[test]

@@ -1,3 +1,10 @@
+rpt-advanced (0.1.0~alpha13-1) unstable; urgency=medium
+
+  * Start the standalone controller with the released ABI-4 radio library.
+  * Validate the published radio descriptor without requiring unused extensions.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Tue, 20 Oct 2026 11:13:00 -0500
+
 rpt-advanced (0.1.0~alpha12-1) unstable; urgency=medium
 
   * Add site meters, alarms, outputs, and fans with GPIO and hwmon support.
