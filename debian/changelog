@@ -1,3 +1,11 @@
+rpt-advanced (0.1.0~alpha12-1) unstable; urgency=medium
+
+  * Add site meters, alarms, outputs, and fans with GPIO and hwmon support.
+  * Compose messages, identifiers, and tail messages from reusable message parts.
+  * Rotate initial identifiers, playing one on each qualifying key-up.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Tue, 20 Oct 2026 10:20:00 -0500
+
 rpt-advanced (0.1.0~alpha11-1) unstable; urgency=medium
 
   * Add the local DTMF pad test with translated digit reports.
