@@ -2420,6 +2420,12 @@ fn first_key_polite_wait_starts_at_key_and_zero_samples_do_not_play() {
         node.telemetry.active,
         Some(telemetry::Source::Identifier(0))
     ));
+    let mut output = [0.0; 48];
+    node.process_audio(true, false, &[], &mut output);
+    assert!(
+        output[10..].iter().any(|sample| *sample != 0.0),
+        "the deadline must select Morse, not the ten-sample voice ID"
+    );
 }
 
 #[test]
@@ -2477,6 +2483,64 @@ fn first_key_controller_plays_one_initial_id_and_rotates_on_later_keyups() {
         let audible: Vec<_> = output.into_iter().filter(|sample| *sample != 0.0).collect();
         assert_eq!(audible, vec![expected; 10]);
     }
+}
+
+#[test]
+fn first_key_does_not_play_an_expired_periodic_id_before_its_initial_id() {
+    let ids = [(0.25, 10, true), (0.5, 10, true), (0.75, 0, false)]
+        .into_iter()
+        .map(|(value, priority, first_key_only)| Identifier {
+            media: media(value, 10),
+            interval_ms: 940_000,
+            priority,
+            first_key_only,
+            regardless_of_activity: false,
+            polite_maximum_wait_ms: Some(60_000),
+        })
+        .collect();
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..Default::default()
+        },
+        ids,
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    // The station has been idle past both the periodic interval and polite wait.
+    node.now = samples(1_000_001);
+    node.process_event(true, false);
+    for (polite, expected) in [(None, Some(2)), (Some(60_000), None)] {
+        node.ids[0].polite_maximum_wait_ms = polite;
+        assert_eq!(node.select_identifier(true, true, false), expected);
+    }
+    let mut played = Vec::new();
+    let mut previous = None;
+    for (receiving, count) in [(true, 4_800), (false, 9_600)] {
+        for _ in 0..count {
+            node.process_audio(receiving, false, &[], &mut [0.0]);
+            let current = match node.telemetry.active {
+                Some(Source::Identifier(index)) => Some(index),
+                _ => None,
+            };
+            if current != previous {
+                if let Some(index) = current {
+                    played.push(index);
+                }
+            }
+            previous = current;
+        }
+        if receiving {
+            assert!(
+                played.is_empty(),
+                "the initial ID must retain its polite wait"
+            );
+        }
+    }
+    assert_eq!(played, vec![0], "one initial ID must cover this key-up");
+    assert_ne!(node.satisfied[0], 0);
+    assert_eq!(node.satisfied[0], node.satisfied[2]);
 }
 
 #[test]

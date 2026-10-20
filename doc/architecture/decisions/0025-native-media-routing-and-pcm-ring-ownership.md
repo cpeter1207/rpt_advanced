@@ -289,7 +289,11 @@ all periodic sets. It wraps after the last set. Unselected initial sets do
 not queue behind the selected one. Only that selected set starts a polite-wait
 deadline. A pending initial retains its choice, polite deadline and retry
 across rekey. A rising edge with no eligible set retains the rotation
-position. Periodic-ID priority, successful-completion satisfaction,
+position. A pending higher-priority polite initial keeps its own deadline;
+an expired lower-priority periodic ID cannot bypass it. Successful initial
+playback satisfies that periodic ID through the normal priority rule, without
+queuing a separate identification for the same key-up. Periodic-to-periodic
+deadline arbitration, successful-completion satisfaction,
 receive-driven Morse fallback, and failed-attempt retry remain unchanged.
 The cursor belongs to the existing controller and survives device-only handoff;
 a replacement controller starts a new rotation.
