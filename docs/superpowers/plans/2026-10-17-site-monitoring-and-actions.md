@@ -156,15 +156,16 @@ configured source identities do not warn merely because they are disabled or
 lack a selector. Scoped Clippy and Rustdoc pass. The administrative entry point
 was approved on October 20: typed product ABI 5 operations share the current
 control owner, and both hosts require that descriptor. Focused API, CLI and
-immediate-inhibit tests pass; S7 integration/coverage remains outstanding.
+immediate-inhibit tests pass. Shared host integration, package/descriptor probes,
+and targeted strict coverage pass; full hosted validation remains outstanding.
 
 ### S7: Validate shared compositions, packaging and recorded status
 
 **Files:** `doc/architecture/{README.md,decisions/0009-scheduled-actions-and-macros.md,decisions/0022-versioned-external-c-dependency-adapters.md,decisions/0023-unified-control-and-dtmf-policy.md,decisions/0033-appliance-radio-signaling-capability-profile.md,decisions/0034-appliance-hardware-output-interlock.md}`, `WISHLIST.md`, dependency/version checks and package fixtures. Before PR: configuration manual pages, `doc/configuration.md` and shipped examples.
 
-- [ ] Run deterministic standalone/Asterisk shared-product integration fixtures for configured digital input, calibrated sensor query, alarm action, fan demand, reload and shutdown. Verify callback allocation/blocking guards and unchanged radio/interlock tests. Software fixtures are not physical wiring qualification.
+- [x] Run deterministic standalone/Asterisk shared-product integration fixtures for configured digital input, calibrated sensor query, alarm action, fan demand, reload and shutdown. Verify callback allocation/blocking guards and unchanged radio/interlock tests. Software fixtures are not physical wiring qualification.
 - [ ] Close changed-source test/coverage/Rustdoc issues using the `.work/` checklist; remove unreachable code rather than suppressing coverage. Verify runtime/dev packages, descriptor checks and selected provider dependencies. Run only the fast preflight locally before any approved push; the authorized PR's hosted full gate remains mandatory.
-- [ ] Update architecture/status to distinguish implemented software, untested hardware capabilities and unfinished wishlist work. Before PR, write plain operating instructions, disabled examples, endpoint/capability requirements, and explicit unavailable/fault behavior. Do not present arbitrary URI-family wiring as validated.
+- [x] Update architecture/status to distinguish implemented software, untested hardware capabilities and unfinished wishlist work. Before PR, write plain operating instructions, disabled examples, endpoint/capability requirements, and explicit unavailable/fault behavior. Do not present arbitrary URI-family wiring as validated.
 - [ ] Commit owned paths. Obtain separate approvals for PR/release sequencing and node testing. If representative sensor/fan hardware is unavailable, report that limitation without inventing a physical pass or adding hardware-specific work.
 
 ## Handoff

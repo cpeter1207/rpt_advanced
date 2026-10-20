@@ -52,6 +52,19 @@ sudo apt-get install app-rpt-advanced usbradioplus
 APT installs the required shared libraries. Do not copy library files from a
 different release over the installed files.
 
+For optional site hardware, install the matching provider package:
+
+```sh
+sudo apt-get install librptadv-gpiod-adapter1 librptadv-hwmon-adapter1
+```
+
+`gpiod` supplies Linux GPIO lines. `hwmon` supplies hardware meters and supported
+PWM fan outputs. IIO meters use the kernel's device files. Give the service
+account access only to the devices it needs. To add a provider that is not
+loaded, first set up and check the configuration with the required site items
+enabled. Then restart the standalone service, or unload and load the Asterisk
+module, to activate that provider.
+
 You may also download Debian packages for your architecture from a
 [release](https://github.com/cpeter1207/rpt_advanced/releases).
 Put the runtime packages from that release in an empty directory, then run:

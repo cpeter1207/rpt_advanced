@@ -143,7 +143,8 @@ Neither adapter opens another hardware owner or performs physical I/O in the
 audio callback. Provider errors, acquisition times, and requested/submitted/
 serviced generations pass through without claiming independent readback.
 The released USBRadioPlus alpha24 SDK/runtime supplies this descriptor tail;
-its ABI and SONAME remain 1. Product ABI 4 and SONAME 1 remain unchanged.
+its ABI and SONAME remain 1. The controller product uses descriptor ABI 5 for
+the typed site controls in ADR 0023; its SONAME remains 1.
 The full host table is mandatory; optional peer operations may be null but
 truncated older tables are not retained as compatibility paths.
 

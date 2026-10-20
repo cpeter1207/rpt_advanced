@@ -167,14 +167,16 @@ allocation guard pass. Existing periodic announcements retain their timing.
 
 Local integration is verified for both host bindings through the shared product,
 including receive-driven Morse and producer restart. Existing core tests cover
-exact-peer routing and callback allocation. Before-PR operator documentation,
-fast push preflight, and the hosted gate remain deferred until authorized.
+exact-peer routing and callback allocation. Operator documentation and fast
+push preflight are complete. The approved PR also includes one-at-a-time
+round-robin initial IDs; all 545 core tests and strict policy coverage pass.
+The full hosted gate remains required before merge.
 
 **Files:** Affected developer docs, `WISHLIST.md`, `doc/architecture/{README.md,decisions/0009-scheduled-actions-and-macros.md,decisions/0023-unified-control-and-dtmf-policy.md,decisions/0025-native-media-routing-and-pcm-ring-ownership.md}`; before PR, `doc/configuration.md`, relevant `man/` pages and shipped examples.
 
-- [ ] Add shared-product integration cases exercising identical config in standalone and Asterisk compositions with deterministic media/receive fixtures. Assert no voice during any active receive source, one item per composition, correct peer destination, and no audio allocation/blocking.
+- [x] Add shared-product integration cases exercising identical config in standalone and Asterisk compositions with deterministic media/receive fixtures. Assert no voice during any active receive source, one item per composition, correct peer destination, and no audio allocation/blocking.
 - [ ] Run only affected tests/coverage and Rustdoc while closing gaps; keep the completed-item ledger in `.work/`. Run `make lint static-analysis` once in the fresh image before an approved push. Do not use local `make rust-check` or `make quality` as a substitute for the hosted PR gate.
-- [ ] Before an approved PR, update concise operating instructions and examples, including positive-tail-delay rekey behavior and Morse fallback. Preserve the 127-byte per-form versus whole-composition distinction. Mark only verified implemented requirements complete, leaving site acquisition for the companion plan.
+- [x] Before an approved PR, update concise operating instructions and examples, including positive-tail-delay rekey behavior and Morse fallback. Preserve the 127-byte per-form versus whole-composition distinction. Mark only verified implemented requirements complete, leaving site acquisition for the companion plan.
 - [ ] Commit explicit owned files. On later push/PR authorization, require native Debian 13 tests, package/install checks, and 100% production coverage on amd64 before merge. Obtain separate permission for any package release or node test.
 
 ## Handoff

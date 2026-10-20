@@ -16,6 +16,14 @@ Morse, according to the configured set. Piper and its voice model must be
 installed separately for speech; sound files use FFmpeg. Configure the node,
 radio, signaling, and media in the [configuration reference](configuration.md).
 
+When several initial IDs are configured, the controller plays one per
+qualifying key-up and takes turns through the eligible sets. Message content
+can combine words, sound files, tones, and named messages. Release tails can
+continue the transmission after hang time or rekey after a delay. Configure
+these under [identifier settings](configuration.md#identifier-settings),
+[composed messages](configuration.md#composed-messages), and
+[release tails](configuration.md#release-tails).
+
 The standalone service uses local audio devices and CM119 signaling through the
 separately packaged USBRadioPlus radio runtime. Configure `[radio]` or
 `[radio <node>]` and enable the node before starting it. The Asterisk adapter
@@ -45,6 +53,17 @@ only to that peer after it unkeys. On the Asterisk path, the Asterisk CLI can
 show direct-link status and send an administrative DTMF command. The standalone
 service does not offer those CLI commands; use its service status and journal
 for process checks.
+
+## Site meters and control
+
+Named sensors can report voltage, current, temperature, and other readings
+from Linux hwmon or IIO devices. Digital inputs and outputs can use spare radio
+GPIO, a parallel port, or Linux GPIO lines. Configure alarms, transmit inhibits,
+output pulses, and fan cooling in the [site settings](configuration.md#site-meters-inputs-outputs-alarms-and-fans).
+
+Read meters or inputs with `*76<selector>#` and play named messages with
+`*77<selector>#`, then unkey. The Asterisk CLI shows reading age and quality,
+and provides output, fan, alarm, and manual-inhibit controls.
 
 ## Check receive audio with parrot
 
