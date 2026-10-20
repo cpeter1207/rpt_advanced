@@ -53,7 +53,7 @@ unsafe extern "C" fn gpio_open(
         f64::from(e.startup_active),
         f64::from(e.safe_active),
     ));
-    unsafe { *c = ptr::dangling_mut::<u8>().cast() };
+    unsafe { *c = ptr::without_provenance_mut((e.output + 1) as usize) };
     0
 }
 unsafe extern "C" fn hwmon_open(
@@ -69,7 +69,7 @@ unsafe extern "C" fn hwmon_open(
         .unwrap()
         .opened
         .push((e.output, 0, e.startup_percent, e.safe_percent));
-    unsafe { *c = ptr::dangling_mut::<u8>().cast() };
+    unsafe { *c = ptr::without_provenance_mut((e.output + 1) as usize) };
     0
 }
 unsafe extern "C" fn gpio_read(_: *mut c_void, o: *mut abi::rptadv_gpiod_observation_v1) -> i32 {
@@ -140,17 +140,10 @@ unsafe extern "C" fn hwmon_set_safe(_: *mut c_void, value: f64) -> i32 {
     p.safety.push(value);
     0
 }
-unsafe extern "C" fn capabilities(_: *mut c_void, c: *mut u32) -> i32 {
+unsafe extern "C" fn capabilities(context: *mut c_void, c: *mut u32) -> i32 {
     let p = PROBE.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe {
-        *c = if p.invalid {
-            0
-        } else if p.opened.last().unwrap().0 == 1 {
-            2
-        } else {
-            1
-        }
-    };
+    // Opaque role sentinels keep independent device opens from sharing capability state.
+    unsafe { *c = if p.invalid { 0 } else { context.addr() as u32 } };
     0
 }
 unsafe extern "C" fn destroy(_: *mut c_void) {
