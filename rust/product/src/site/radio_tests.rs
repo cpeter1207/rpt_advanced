@@ -47,6 +47,7 @@ fn site_radio_physical_pins_and_reserved_masks_use_the_existing_owner() {
     let mut physical = snapshot();
     assert_eq!(validate(&physical, 2, false), Ok(()));
     assert_eq!(validate(&physical, 0xc0, true), Ok(()));
+    assert!(validate(&physical, 0, false).is_err());
     assert!(validate(&physical, 1, false).is_err());
     physical.reserved_mask = 0x40;
     assert!(validate(&physical, 0xc0, true).is_err());
@@ -79,4 +80,16 @@ fn site_radio_observation_preserves_age_and_never_normalizes_a_failed_read() {
     assert_eq!(missing.value, None);
     assert_eq!(missing.observed_at_ms, None);
     assert_eq!(missing.quality, ReadingQuality::Unavailable);
+    physical.observed_at_valid = 1;
+    physical.observed_at_ms = physical.snapshot_at_ms + 1;
+    assert_eq!(
+        input(&physical, 2, true, 7000).quality,
+        ReadingQuality::Unavailable
+    );
+    physical.observed_at_ms = physical.snapshot_at_ms;
+    physical.input_quality = 0;
+    assert_eq!(
+        input(&physical, 2, true, 7000).quality,
+        ReadingQuality::Unavailable
+    );
 }

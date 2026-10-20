@@ -63,6 +63,7 @@ fn site_endpoint_iio_uses_normalized_input_and_never_claims_output() {
     assert_eq!(endpoint.read(), Err(ReadingQuality::Fault));
     assert!(!endpoint.pwm());
     assert_eq!(endpoint.safe(), Ok(()));
+    assert_eq!(endpoint.write(0.0), Err(ReadingQuality::Unavailable));
     assert!(matches!(
         Endpoint::open(
             providers,
@@ -163,12 +164,29 @@ fn site_iio_requires_a_supported_input_with_units() {
     fixture.put("in_voltage0_raw", "42");
     // An unscaled ADC code is not a voltage measurement.
     assert!(IioReader::open(&fixture.0, "adc", "in_voltage0").is_err());
+    assert!(IioReader::open(&fixture.0, "", "in_voltage0").is_err());
     for channel in [
         "../in_voltage0",
         "in_voltage0/raw",
         "out_voltage0",
         "in_mystery0",
+        "in_voltagewrong",
     ] {
         assert!(IioReader::open(&fixture.0, "adc", channel).is_err());
     }
+    fixture.put("in_temp_1_input", "22000");
+    assert_eq!(
+        IioReader::open(&fixture.0, "adc", "in_temp_1")
+            .unwrap()
+            .read()
+            .unwrap(),
+        22.0
+    );
+    fixture.put("in_current0_raw", "100");
+    fixture.put("in_current_offset", "1");
+    assert!(IioReader::open(&fixture.0, "adc", "in_current0").is_err());
+    // A present but unreadable attribute must not be treated as a missing one.
+    std::os::unix::fs::symlink("in_voltage0_input", fixture.0.join("adc/in_voltage0_input"))
+        .unwrap();
+    assert!(IioReader::open(&fixture.0, "adc", "in_voltage0").is_err());
 }

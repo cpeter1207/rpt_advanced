@@ -197,7 +197,8 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
     crate::fixture::PEER_OPENS.store(0, Ordering::Relaxed);
     let radio_ready_before = crate::fixture::RADIO_READY.swap(1, Ordering::AcqRel);
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
-    let configuration = "[1000]\nradio_channel=usb\nduplex=full\n";
+    let configuration =
+        "[1000]\nradio_channel=usb\nduplex=full\n[sensor 1000 battery]\nunit=volts\ndtmf_id=1\n";
     assert_eq!(unsafe { start(configuration) }, 0);
     assert_eq!(
         unsafe {
@@ -247,6 +248,10 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
             0
         );
         let text = std::str::from_utf8(&status).unwrap();
+        assert!(
+            text.contains("sensor battery value=None quality=Unavailable"),
+            "{text}"
+        );
         if text.contains("2000") {
             break;
         }
@@ -840,7 +845,7 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
         .unwrap_or_else(|error| error.into_inner());
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
-    let configuration = active_configuration("");
+    let configuration = active_configuration("[sensor 1000 battery]\nunit=volts\ndtmf_id=1\n");
     assert_eq!(unsafe { start(&configuration) }, 0);
 
     assert_eq!(
@@ -948,15 +953,17 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
     assert_eq!(unsafe { start(&configuration) }, 0);
     let mut completed = 99;
-    for digit in b"*722" {
-        completed = 99;
-        assert_eq!(
-            unsafe { descriptor().digit.unwrap()(c"1000".as_ptr(), 4, *digit, &mut completed) },
-            0
-        );
-        assert!(completed <= 1);
+    for command in [b"*722".as_slice(), b"*761#"] {
+        for digit in command {
+            completed = 99;
+            assert_eq!(
+                unsafe { descriptor().digit.unwrap()(c"1000".as_ptr(), 4, *digit, &mut completed) },
+                0
+            );
+            assert!(completed <= 1);
+        }
+        assert_eq!(completed, 1);
     }
-    assert_eq!(completed, 1);
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
 }
 

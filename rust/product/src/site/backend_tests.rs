@@ -81,6 +81,7 @@ fn site_backends_absent_unselected_is_allowed_selected_is_required() {
     }
     let disabled = ConfigDocument::parse("[1000]\nnode_enabled=no\n[input 1000 door]\nenabled=yes\nbackend=gpiod\ndevice=/absent\nline=0\n").unwrap();
     assert!(SiteBackends::load_at(&disabled, &fixture.0).is_ok());
+    assert!(crate::site::configured(&disabled).unwrap().is_empty());
     let output = ConfigDocument::parse(
         "[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=/absent\nline=0\n",
     )

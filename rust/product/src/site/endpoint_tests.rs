@@ -12,6 +12,7 @@ struct Probe {
     closed_on_control: bool,
     failure: bool,
     invalid: bool,
+    reply: Option<(u32, u32, u32, i32)>,
 }
 static SERIAL: Mutex<()> = Mutex::new(());
 static PROBE: Mutex<Probe> = Mutex::new(Probe {
@@ -21,6 +22,7 @@ static PROBE: Mutex<Probe> = Mutex::new(Probe {
     closed_on_control: false,
     failure: false,
     invalid: false,
+    reply: None,
 });
 #[path = "acquisition_tests.rs"]
 mod acquisition;
@@ -69,6 +71,12 @@ unsafe extern "C" fn gpio_read(_: *mut c_void, o: *mut abi::rptadv_gpiod_observa
     }
     let o = unsafe { &mut *o };
     let p = PROBE.lock().unwrap();
+    if let Some((size, version, quality, code)) = p.reply {
+        o.struct_size = size;
+        o.abi_version = version;
+        o.quality = quality;
+        return code;
+    }
     if p.failure {
         return 1;
     }
@@ -282,4 +290,43 @@ fn site_endpoint_requires_the_selected_capability_without_fallback() {
         ));
         assert_eq!(PROBE.lock().unwrap().closed, 1);
     }
+}
+
+#[test]
+fn site_endpoint_rejects_bad_observation_records_and_success_without_context() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    let direction = Direction::Input { active_high: true };
+    let mut endpoint =
+        Endpoint::open(backends(), &settings(SiteBackend::Gpiod), direction).unwrap();
+    let size = size_of::<abi::rptadv_gpiod_observation_v1>() as u32;
+    for (record, expected) in [
+        ((size - 1, 1, 1, 0), ReadingQuality::Fault),
+        ((size, 2, 1, 0), ReadingQuality::Fault),
+        ((size, 1, 0, 0), ReadingQuality::Unavailable),
+        ((size, 1, 2, 0), ReadingQuality::Fault),
+        ((size, 1, 1, 2), ReadingQuality::Unavailable),
+    ] {
+        PROBE.lock().unwrap().reply = Some(record);
+        assert_eq!(endpoint.read(), Err(expected), "{record:?}");
+    }
+    drop(endpoint);
+    unsafe extern "C" fn empty_open(
+        _: *const abi::rptadv_gpiod_endpoint_v1,
+        _: *mut *mut c_void,
+    ) -> i32 {
+        0
+    }
+    let mut providers = backends();
+    Arc::get_mut(&mut providers)
+        .unwrap()
+        .gpiod
+        .as_mut()
+        .unwrap()
+        .table
+        .open = Some(empty_open);
+    assert!(matches!(
+        Endpoint::open(providers, &settings(SiteBackend::Gpiod), direction),
+        Err(ReadingQuality::Fault)
+    ));
 }
