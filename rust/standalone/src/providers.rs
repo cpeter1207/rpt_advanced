@@ -262,8 +262,8 @@ pub struct ProviderSet {
 pub struct RadioRuntimeDescriptors {
     /// Shared native station owner.
     pub product: &'static crate::abi::UrpAstDescriptor,
-    /// Radio-core session API.
-    pub radio: &'static crate::abi::rptadv_radio_descriptor,
+    /// Retained radio capability; the native owner validates its consumed session prefix.
+    pub radio: *const c_void,
     /// PortAudio/ALSA stream API.
     pub audio: &'static crate::abi::rptadv_audio_adapter_descriptor,
     /// CM119 HID/GPIO API.
@@ -512,7 +512,9 @@ impl ProviderSet {
     ) -> Result<RadioRuntimeDescriptors, ProviderError> {
         Ok(RadioRuntimeDescriptors {
             product: self.native_product_descriptor()?,
-            radio: self.typed_descriptor("librptadvradio.so.4")?,
+            radio: self
+                .checked_descriptor::<NamedDescriptorHeader>("librptadvradio.so.4")?
+                .as_ptr(),
             audio: self.typed_descriptor("librptadv_portaudio_alsa_adapter.so.2")?,
             gpio: self.typed_descriptor("librptadv_gpio_adapter.so.1")?,
             ffmpeg: self.typed_descriptor("librptadv_ffmpeg_adapter.so.1")?,
@@ -559,6 +561,17 @@ impl ProviderSet {
     }
 
     fn typed_descriptor<T>(&self, library: &'static str) -> Result<&T, ProviderError> {
+        let pointer = self.checked_descriptor::<T>(library)?;
+        // SAFETY: the shared validation checks the complete requested type, and this
+        // borrow retains the provider set and its library for the reference's lifetime.
+        Ok(unsafe { pointer.cast::<T>().as_ref() })
+    }
+
+    /// Validate the consumed prefix while preserving the original descriptor pointer.
+    fn checked_descriptor<T>(
+        &self,
+        library: &'static str,
+    ) -> Result<NonNull<c_void>, ProviderError> {
         let provider = self
             .descriptors
             .iter()
@@ -577,9 +590,7 @@ impl ProviderSet {
         if descriptor_size(provider.descriptor.as_ptr(), spec.layout) < std::mem::size_of::<T>() {
             return Err(ProviderError::IncompleteDescriptor(library));
         }
-        // SAFETY: load_at checked ABI identity and this method checks the full structure size;
-        // each caller uses the corresponding public C header's generated Rust type.
-        Ok(unsafe { provider.descriptor.cast::<T>().as_ref() })
+        Ok(provider.descriptor)
     }
 }
 
@@ -749,6 +760,64 @@ pub(crate) mod tests {
         super::ProviderSet {
             _libraries: Vec::new(),
             descriptors: Vec::new(),
+        }
+    }
+
+    /// Published alpha8 ABI-4 storage, without the later optional profile tail.
+    #[repr(C)]
+    pub(crate) struct PublishedRadioDescriptor {
+        pub(crate) struct_size: u32,
+        pub(crate) abi_version: u32,
+        pub(crate) capability_name: *const c_char,
+        operations: [unsafe extern "C" fn(); 12],
+    }
+
+    impl PublishedRadioDescriptor {
+        pub(crate) fn new() -> Self {
+            unsafe extern "C" fn unused() {
+                panic!("standalone must forward radio operations without calling them")
+            }
+            Self {
+                struct_size: std::mem::size_of::<Self>() as u32,
+                abi_version: 4,
+                capability_name: c"rptadv.radio-core".as_ptr(),
+                operations: [unused; 12],
+            }
+        }
+    }
+
+    #[test]
+    fn released_radio_descriptor_preserves_header_validation() {
+        const NAME: &str = "librptadvradio.so.4";
+        for (size, version, capability, expected) in [
+            (112, 4, c"rptadv.radio-core", None),
+            (
+                15,
+                4,
+                c"rptadv.radio-core",
+                Some(ProviderError::IncompatibleDescriptor(NAME)),
+            ),
+            (
+                112,
+                5,
+                c"rptadv.radio-core",
+                Some(ProviderError::IncompatibleDescriptor(NAME)),
+            ),
+            (
+                112,
+                4,
+                c"rptadv.other",
+                Some(ProviderError::IncompatibleDescriptor(NAME)),
+            ),
+        ] {
+            let mut providers = super::ProviderSet::load().unwrap();
+            let mut descriptor = PublishedRadioDescriptor::new();
+            descriptor.struct_size = size;
+            descriptor.abi_version = version;
+            descriptor.capability_name = capability.as_ptr();
+            replace_descriptor(&mut providers, NAME, descriptor);
+            let providers = Box::leak(Box::new(providers));
+            assert_eq!(providers.radio_runtime_descriptors().err(), expected);
         }
     }
 

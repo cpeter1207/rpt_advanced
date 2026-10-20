@@ -1020,6 +1020,8 @@ mod tests {
         });
 
         wait_for_log(&receiver, "standalone runtime started");
+        // Exercise ordinary idle polling before driving the reload requests.
+        thread::sleep(Duration::from_millis(100));
         fs::write(
             &path,
             "[general]\nnode_enabled=no\nstatus_snapshot_interval_ms=100\n[524950]\n",
