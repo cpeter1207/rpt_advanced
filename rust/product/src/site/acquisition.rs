@@ -445,6 +445,15 @@ impl Acquisition {
                 device.bindings[reply.index].complete(reply);
             }
             for (index, binding) in device.bindings.iter_mut().enumerate() {
+                if let Value::Output { status, .. } = &mut binding.value {
+                    if status.quality == ReadingQuality::Valid
+                        && status
+                            .submitted
+                            .is_some_and(|(_, at)| now_ms.saturating_sub(at) >= binding.stale_ms)
+                    {
+                        status.quality = ReadingQuality::Stale;
+                    }
+                }
                 let demand = binding.demand();
                 if !device.paused && (now_ms >= binding.due_ms || demand != binding.last_attempt) {
                     if let Some(work) = work(&binding.node) {

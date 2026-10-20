@@ -181,3 +181,35 @@ fn site_acquisition_slow_node_cannot_stall_or_refresh_another_nodes_measurement(
     second.control().mark_detached(1).unwrap();
     assert!(second.reclaim());
 }
+
+#[test]
+fn site_acquisition_expired_output_ack_is_not_reported_as_current_availability() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    *PROBE.lock().unwrap() = Probe::default();
+    let epoch = Instant::now();
+    let mut host = host("1000");
+    let settings = definitions(
+        "[1000]\n[output 1000 relay]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n",
+    );
+    let mut service = Acquisition::prepare(&settings, backends(), epoch).unwrap();
+    until(|| {
+        service.poll(0, |_| host.control().work());
+        service
+            .output_status("1000", "relay")
+            .unwrap()
+            .submitted
+            .is_some()
+    });
+    let submitted = service
+        .output_status("1000", "relay")
+        .unwrap()
+        .submitted
+        .unwrap();
+    let snapshots = service.poll(submitted.1 + 5000, |_| host.control().work());
+    assert!(!snapshots["1000"].outputs["relay"].available);
+    assert_eq!(
+        service.output_status("1000", "relay").unwrap().quality,
+        ReadingQuality::Stale
+    );
+    close(&mut service, &mut host);
+}
