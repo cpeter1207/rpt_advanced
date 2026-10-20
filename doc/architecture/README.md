@@ -35,8 +35,11 @@ that radio owner. Standalone borrows the native USBRadioPlus product handle;
 Asterisk sends an acknowledged site option on its existing channel. Neither
 path acquires a second CM119 or parallel-port owner. Provider timestamps,
 generation fences, error status, and the distinction between requested,
-serviced, and physically observed output remain intact. Acquisition and site
-policy integration are tracked by the site-monitoring implementation plan.
+serviced, and physically observed output remain intact. The shared product
+owns bounded acquisition, calibration, alarms, fan/output policy and localized
+reports. Per-device workers serialize physical access outside station control
+and audio. The site-monitoring plan tracks remaining validation and physical
+qualification, not a second implementation path.
 
 Optional site providers isolate libgpiod digital-line access and libsensors
 measurement access in separate ABI-1 shared objects. Kernel IIO acquisition

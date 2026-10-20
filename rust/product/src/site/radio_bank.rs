@@ -111,6 +111,13 @@ impl Bank {
             self.fault(ReadingQuality::Unavailable);
             return;
         }
+        if self.touched {
+            if let Err(quality) = service_quality(snapshot) {
+                self.fault(quality);
+                return;
+            }
+        }
+        self.error = None;
         if let Some(pending) = &self.pending {
             if snapshot.rejected_commands != pending.rejected
                 || (!pending.binding && snapshot.generation != pending.generation)
@@ -162,6 +169,10 @@ impl Bank {
         if self.outputs.is_empty()
             || self.pending.is_some()
             || self.settled
+            || matches!(
+                self.error,
+                Some(ReadingQuality::Stale | ReadingQuality::Unavailable)
+            )
             || (self.fenced != 0 && !self.touched)
         {
             return None;
@@ -177,7 +188,8 @@ impl Bank {
                 initial_high_mask: high,
                 safe_high_mask: self.high(true) & mask,
             }))
-        } else if !serviced(snapshot, mask, high) {
+        } else {
+            // observe() already marks a fully serviced bank settled.
             Some(Operation::Publish(abi::UrpAstSiteRequest {
                 struct_size: size_of::<abi::UrpAstSiteRequest>() as u32,
                 abi_version: 1,
@@ -185,9 +197,20 @@ impl Bank {
                 output_mask: mask,
                 high_mask: high,
             }))
-        } else {
-            None
         }
+    }
+}
+/// The radio owner timestamps its successful input/output service cycle, while
+/// snapshot queries advance only snapshot_at_ms. Cached masks alone prove no
+/// current liveness. Keep old submissions as history when that heartbeat stops.
+fn service_quality(snapshot: &abi::UrpAstSiteSnapshot) -> Result<(), ReadingQuality> {
+    if snapshot.observed_at_valid != 1 {
+        return Err(ReadingQuality::Unavailable);
+    }
+    match snapshot.snapshot_at_ms.checked_sub(snapshot.observed_at_ms) {
+        Some(age) if age < 5000 => Ok(()),
+        Some(_) => Err(ReadingQuality::Stale),
+        None => Err(ReadingQuality::Unavailable),
     }
 }
 fn serviced(snapshot: &abi::UrpAstSiteSnapshot, mask: u32, high: u32) -> bool {

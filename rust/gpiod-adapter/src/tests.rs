@@ -234,6 +234,37 @@ fn site_gpiod_missing_device_never_selects_another_chip() {
 }
 
 #[test]
+fn site_gpiod_safe_metadata_changes_only_the_retirement_write() {
+    let api = descriptor();
+    for output in [0, 1] {
+        DRIVER.with(|driver| *driver.borrow_mut() = Driver::default());
+        let mut handle = ptr::null_mut();
+        let config = abi::rptadv_gpiod_endpoint_v1 {
+            output,
+            ..endpoint()
+        };
+        unsafe {
+            assert_eq!(api.open.unwrap()(&config, &mut handle), 0);
+            let calls = DRIVER.with(|driver| driver.borrow().calls.clone());
+            assert_eq!(api.set_safe.unwrap()(ptr::null_mut(), 1), -1);
+            assert_eq!(api.set_safe.unwrap()(handle, 2), -1);
+            assert_eq!(
+                api.set_safe.unwrap()(handle, 1),
+                if output == 1 { 0 } else { 2 }
+            );
+            DRIVER.with(|driver| assert_eq!(driver.borrow().calls, calls));
+            api.destroy.unwrap()(handle);
+        }
+        DRIVER.with(|driver| {
+            assert_eq!(
+                driver.borrow().writes,
+                if output == 1 { vec![1] } else { vec![] }
+            )
+        });
+    }
+}
+
+#[test]
 fn site_gpiod_stable_line_and_polarity() {
     let api = descriptor();
     for active_low in [0, 1] {

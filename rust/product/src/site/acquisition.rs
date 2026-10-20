@@ -86,7 +86,7 @@ fn transfer(previous: &[Binding], next: &mut [Binding]) {
             old.node == binding.node
                 && old.name == binding.name
                 && old.endpoint == binding.endpoint
-                && old.direction == binding.direction
+                && old.direction.same_io(binding.direction)
         }) {
             binding.value = old.value.clone();
             binding.observed = old.observed;
@@ -369,10 +369,7 @@ impl Acquisition {
         }
         for device in self.devices.iter_mut().filter(|device| device.paused) {
             if let Some(bindings) = replacement.bindings.get(&device.key) {
-                assert!(
-                    device.worker.stage(physical(bindings)),
-                    "acknowledged paused owner accepts its candidate"
-                );
+                assert!(device.worker.stage(physical(bindings)));
             }
         }
         replacement.prepared = true;
@@ -395,10 +392,7 @@ impl Acquisition {
             if let Some(mut bindings) = replacement.bindings.remove(&device.key) {
                 transfer(&device.bindings, &mut bindings);
                 if device.paused {
-                    assert!(
-                        device.worker.commit(),
-                        "prepared owner commits while paused"
-                    );
+                    assert!(device.worker.commit());
                 }
                 device.bindings = bindings;
                 retained.push(device);
@@ -509,7 +503,11 @@ impl Acquisition {
             .devices
             .iter_mut()
             .flat_map(|device| &mut device.bindings)
-            .find(|binding| binding.node == node && binding.name == name)
+            .find(|binding| {
+                binding.node == node
+                    && binding.name == name
+                    && matches!(binding.value, Value::Output { .. })
+            })
             .map(|binding| &mut binding.value)
         {
             status.requested = demand;

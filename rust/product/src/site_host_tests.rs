@@ -361,6 +361,91 @@ fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() 
     assert!(host.stop(18));
 }
 
+#[test]
+fn site_host_reload_keeps_unchanged_output_timers_and_alarm_protection_running() {
+    use rpt_advanced_core::site::{OutputRequest, SiteCommand};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host_with(
+        "pulse_ms=20\n\
+         [input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
+         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
+         trip_delay_ms=50\non_trip=inhibit:on\n",
+    );
+    host.advance_sites(RuntimeClock {
+        now_ms: 0,
+        ..clock()
+    });
+    for request in [OutputRequest::Off, OutputRequest::Pulse] {
+        host.site_command(
+            "1000",
+            SiteCommand::Output {
+                name: "relay".into(),
+                request,
+            },
+            RuntimeClock {
+                now_ms: 0,
+                ..clock()
+            },
+        )
+        .unwrap();
+    }
+    let backends =
+        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+    let mut candidate = Some(
+        Acquisition::prepare_reload(
+            &Default::default(),
+            backends,
+            host.epoch,
+            host.site_acquisition.keys(),
+        )
+        .unwrap(),
+    );
+    let mut radio = Some(
+        RadioSite::prepare(
+            &[(
+                "1000".into(),
+                ResolvedSiteSettings::resolve(
+                    host.runtime.document(),
+                    &NodeId::new("1000").unwrap(),
+                )
+                .unwrap()
+                .value,
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .unwrap(),
+    );
+    host.begin_site_reload(
+        host.runtime.revision(),
+        &mut candidate,
+        &mut radio,
+        &Default::default(),
+    )
+    .unwrap();
+    // Hold publication as though another physical owner has not acknowledged yet.
+    host.advance_sites(RuntimeClock {
+        now_ms: 100,
+        ..clock()
+    });
+    host.poll_sites(101);
+    let state = host.runtime.node("1000").unwrap().site().snapshot(101);
+    assert!(!state.outputs["relay"].requested_on);
+    assert_eq!(state.outputs["relay"].pulse_deadline_ms, None);
+    assert!(state.alarms["open"].active);
+    assert!(state.transmit_inhibited);
+    assert_eq!(BANK.lock().unwrap().high, 0);
+    drop(host.abort_sites());
+    for now in 102..110 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(110));
+}
+
 unsafe extern "C" fn observation(
     _: *mut c_void,
     handle: *mut c_void,

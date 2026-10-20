@@ -49,6 +49,10 @@ enum Device {
 }
 
 impl Direction {
+    /// Role/polarity identify the physical request; startup/safe values are policy.
+    pub fn same_io(self, other: Self) -> bool {
+        self.output() == other.output() && self.active_high() == other.active_high()
+    }
     fn output(self) -> bool {
         matches!(self, Self::Output { .. })
     }
@@ -263,6 +267,28 @@ impl Endpoint {
     /// Whether this acquired output provides hardware PWM.
     pub fn pwm(&self) -> bool {
         self.direction.output() && matches!(self.device, Device::Hwmon(..))
+    }
+    /// Commit compatible retirement metadata on the serial owner, without I/O.
+    /// Startup is only used at first acquisition, never reapplied during reload.
+    pub fn reconfigure(&mut self, direction: Direction) -> Result<(), ReadingQuality> {
+        if !self.direction.same_io(direction) {
+            return Err(ReadingQuality::Unavailable);
+        }
+        let safe = direction.levels().1;
+        let changed = self.direction.levels().1 != safe;
+        let code = match &self.device {
+            Device::Gpiod(context, table) if changed => unsafe {
+                table.set_safe.unwrap()(*context, u32::from(safe))
+            },
+            Device::Hwmon(context, table) if changed => unsafe {
+                table.set_safe.unwrap()(*context, direction.percent(f64::from(safe)))
+            },
+            // Inputs and startup-only edits have no retirement metadata change.
+            _ => 0,
+        };
+        status(code)?;
+        self.direction = direction;
+        Ok(())
     }
     /// Confirm safe output submission before allowing ownership to retire.
     pub fn safe(&mut self) -> Result<(), ReadingQuality> {

@@ -134,8 +134,10 @@ not permit a different chip to be selected. Output submission does not claim
 electrical readback or PWM support.
 
 The descriptor, device-boundary fixtures, dynamic-library linkage, package
-staging and selected-provider composition are verified locally. Runtime site
-acquisition remains in the site-monitoring plan; physical wiring has not been qualified.
+staging and selected-provider composition are verified locally. The shared
+product supplies bounded acquisition and station policy on its existing
+control owner. Physical wiring has not been qualified; the feature's full
+hosted gate remains outstanding.
 The adapter is not an unconditional dependency of either controller entrypoint.
 
 The shared product selects site providers from enabled endpoints on enabled
@@ -167,5 +169,25 @@ a successful explicit safe write; final destruction is best-effort.
 
 Hardware-free tests cover source units, library lifetime, alias/reuse handling,
 independent slow reads, PWM capability/safe-state behavior and selected-provider
-composition. Live site acquisition remains part of the site-monitoring plan;
-these fixtures do not qualify physical sensor or fan hardware.
+composition. Shared-product acquisition and policy use these adapters outside
+audio callbacks; these fixtures do not qualify physical sensor or fan hardware.
+
+### Site reload ownership (2026-10-20)
+
+The new, not-yet-released GPIO and hwmon tables also require `set_safe`, a
+serialized memory-only retirement-level update. Matching complete descriptor
+sizes are required; product and providers must be built together for this first
+release. Descriptor ABI and SONAME remain 1. No released table is replaced.
+
+A physical endpoint's role and polarity define its retained request. Startup
+levels apply only on first acquisition. Editing startup or safe policy retains
+the handle, current demand, acknowledgments and pulse deadline. The device
+owner updates retirement metadata only at committed handoff, before resuming;
+an aborted preparation retains the old safe level. An invalid provider response
+keeps that owner fenced and diagnosed, never silently reopened.
+
+Reload fences changed owners individually. Unrelated acquisition, output
+timers, cooling and alarm protection continue while they acknowledge. Cached
+radio output masks do not prove current service: the successful shared service
+cycle must remain fresh. Stale status retains historical submission values
+without claiming current availability or electrical readback.

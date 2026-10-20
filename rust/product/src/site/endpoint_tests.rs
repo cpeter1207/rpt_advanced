@@ -8,6 +8,8 @@ use std::{ffi::c_void, mem::size_of, ptr, sync::Mutex};
 struct Probe {
     opened: Vec<(u32, u32, f64, f64)>,
     written: Vec<f64>,
+    safety: Vec<f64>,
+    fail_metadata: bool,
     closed: usize,
     closed_on_control: bool,
     failure: bool,
@@ -18,6 +20,8 @@ static SERIAL: Mutex<()> = Mutex::new(());
 static PROBE: Mutex<Probe> = Mutex::new(Probe {
     opened: Vec::new(),
     written: Vec::new(),
+    safety: Vec::new(),
+    fail_metadata: false,
     closed: 0,
     closed_on_control: false,
     failure: false,
@@ -125,6 +129,17 @@ unsafe extern "C" fn hwmon_write(_: *mut c_void, o: *const abi::rptadv_hwmon_out
     p.written.push(o.percent);
     0
 }
+unsafe extern "C" fn gpio_set_safe(context: *mut c_void, active: u32) -> i32 {
+    unsafe { hwmon_set_safe(context, f64::from(active)) }
+}
+unsafe extern "C" fn hwmon_set_safe(_: *mut c_void, value: f64) -> i32 {
+    let mut p = PROBE.lock().unwrap();
+    if p.fail_metadata {
+        return -1;
+    }
+    p.safety.push(value);
+    0
+}
 unsafe extern "C" fn capabilities(_: *mut c_void, c: *mut u32) -> i32 {
     let p = PROBE.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
@@ -155,6 +170,7 @@ fn backends() -> Arc<SiteBackends> {
                 write: Some(gpio_write),
                 capabilities: Some(capabilities),
                 destroy: Some(destroy),
+                set_safe: Some(gpio_set_safe),
             },
             _library: libloading::os::unix::Library::this().into(),
         }),
@@ -168,6 +184,7 @@ fn backends() -> Arc<SiteBackends> {
                 write: Some(hwmon_write),
                 capabilities: Some(capabilities),
                 destroy: Some(destroy),
+                set_safe: Some(hwmon_set_safe),
             },
             _library: libloading::os::unix::Library::this().into(),
         }),
@@ -203,6 +220,45 @@ fn site_endpoint_reads_only_valid_source_values_and_normalizes_no_second_time() 
         assert_eq!(endpoint.write(1.0), Err(ReadingQuality::Unavailable));
         drop(endpoint);
         assert_eq!(PROBE.lock().unwrap().closed, 1);
+    }
+}
+
+#[test]
+fn site_endpoint_retirement_update_preserves_polarity_and_never_writes_demand() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    for (backend, expected) in [(SiteBackend::Gpiod, 1.0), (SiteBackend::Hwmon, 0.0)] {
+        *PROBE.lock().unwrap() = Probe::default();
+        let original = Direction::Output {
+            active_high: false,
+            startup_on: false,
+            safe_on: false,
+        };
+        let changed = Direction::Output {
+            active_high: false,
+            startup_on: true,
+            safe_on: true,
+        };
+        let mut endpoint = Endpoint::open(backends(), &settings(backend), original).unwrap();
+        assert_eq!(
+            endpoint.reconfigure(Direction::Input { active_high: false }),
+            Err(ReadingQuality::Unavailable)
+        );
+        assert_eq!(
+            endpoint.reconfigure(Direction::Output {
+                active_high: true,
+                startup_on: false,
+                safe_on: false,
+            }),
+            Err(ReadingQuality::Unavailable)
+        );
+        PROBE.lock().unwrap().fail_metadata = true;
+        assert_eq!(endpoint.reconfigure(changed), Err(ReadingQuality::Fault));
+        PROBE.lock().unwrap().fail_metadata = false;
+        assert_eq!(endpoint.reconfigure(changed), Ok(()));
+        assert_eq!(PROBE.lock().unwrap().safety, [expected]);
+        assert!(PROBE.lock().unwrap().written.is_empty());
+        endpoint.safe().unwrap();
+        assert_eq!(PROBE.lock().unwrap().written, [expected]);
     }
 }
 

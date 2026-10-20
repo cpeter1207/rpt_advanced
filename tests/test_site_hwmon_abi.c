@@ -17,7 +17,8 @@ int main(int argc, char **argv) {
     const rptadv_hwmon_descriptor_v1 *api = entry();
     assert(api && api->struct_size == sizeof(*api) && api->abi_version == 1);
     assert(memcmp(api->capability, "rptadv.hwmon", sizeof("rptadv.hwmon")) == 0);
-    assert(api->open && api->read && api->write && api->capabilities && api->destroy);
+    assert(api->open && api->read && api->write && api->capabilities && api->destroy &&
+           api->set_safe);
     const uint8_t path[] = "/dev/rptadv-no-such-hwmon-fixture";
     const uint8_t channel[] = "temp1_input";
     rptadv_hwmon_endpoint_v1 endpoint = {
@@ -38,6 +39,7 @@ int main(int argc, char **argv) {
     assert(api->open(&endpoint, NULL) == -1);
     assert(api->read(NULL, NULL) == -1);
     assert(api->write(NULL, NULL) == -1);
+    assert(api->set_safe(NULL, 0.0) == -1);
     assert(api->capabilities(NULL, NULL) == -1);
     api->destroy(NULL);
     assert(dlclose(library) == 0);

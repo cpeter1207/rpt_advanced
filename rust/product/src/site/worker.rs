@@ -259,6 +259,10 @@ fn same_device(settings: &[(SiteEndpoint, Direction)], identity: &SiteEndpoint) 
     })
 }
 
+fn same_binding(first: &(SiteEndpoint, Direction), second: &(SiteEndpoint, Direction)) -> bool {
+    first.0 == second.0 && first.1.same_io(second.1)
+}
+
 impl Drop for DeviceWorker {
     fn drop(&mut self) {
         // Last-resort process teardown, off control/audio. Normal retirement calls
@@ -283,6 +287,9 @@ fn acquire(
     let mut endpoints: Vec<Option<Endpoint>> = (0..settings.len()).map(|_| None).collect();
     let mut seen = RUN;
     let mut prepared: Option<Handoff> = None;
+    // An incompatible provider must not clear a failed committed metadata update
+    // with a later pause. Keep the physical owner fenced for explicit recovery.
+    let mut install_failed = false;
     loop {
         // Acquire intent first: a post-commit pause must observe the committed
         // queue exchange before it can discard an uncommitted preparation.
@@ -293,10 +300,14 @@ fn acquire(
                 .settings
                 .iter()
                 .map(|binding| {
-                    settings
+                    let mut retained = settings
                         .iter()
-                        .position(|old| old == binding)
-                        .and_then(|index| endpoints[index].take())
+                        .position(|old| same_binding(old, binding))
+                        .and_then(|index| endpoints[index].take());
+                    if let Some(endpoint) = &mut retained {
+                        install_failed |= endpoint.reconfigure(binding.1).is_err();
+                    }
+                    retained
                 })
                 .collect();
             endpoints = retained; // Only safely retired old contexts are dropped.
@@ -314,7 +325,7 @@ fn acquire(
                         epoch,
                     );
                 }
-                let mut failed = false;
+                let mut failed = install_failed;
                 let already_safe =
                     seen & KIND == SAFE && fence.quality.load(Ordering::Relaxed) == 0;
                 if request & KIND == SAFE || (request & KIND == CLOSE && !already_safe) {
@@ -326,7 +337,7 @@ fn acquire(
                     PREPARE => {
                         let next = changes.pop().expect("stage publishes before its fence");
                         for (binding, endpoint) in settings.iter().zip(&mut endpoints) {
-                            if !next.settings.contains(binding) {
+                            if !next.settings.iter().any(|next| same_binding(binding, next)) {
                                 if let Some(endpoint) = endpoint {
                                     failed |= endpoint.safe().is_err();
                                 }
@@ -406,7 +417,6 @@ fn respond(
                 completed_at_ms: u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX),
                 outcome,
             })
-            .is_ok(),
-        "each in-flight endpoint reserves a response slot"
+            .is_ok()
     );
 }

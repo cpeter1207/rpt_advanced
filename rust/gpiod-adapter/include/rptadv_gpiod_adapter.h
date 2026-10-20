@@ -69,6 +69,11 @@ typedef struct rptadv_gpiod_descriptor_v1 {
      * after device loss cannot be guaranteed by software.
      */
     void (*destroy)(void *context);
+    /** Replace only the retirement level, without writing/reopening the line.
+     * Serialized with all context calls. Returns 0 for a valid live output and
+     * logical level 0 or 1, -1 for invalid arguments, 2 for an input context.
+     */
+    int32_t (*set_safe)(void *context, uint32_t active);
 } rptadv_gpiod_descriptor_v1;
 
 /** Return the immutable descriptor, retained until this DSO unloads. */

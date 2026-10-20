@@ -290,8 +290,11 @@ compose the real radio and GPIO shared libraries with simulated hardware.
 The radio, GPIO, and controller PRs merged after their native Debian 13
 amd64/arm64 gates passed. Device integration and physical interlock qualification
 remain pending; those software gates are not a release or device rollout.
-Analog monitoring, sensors, fan control, general alarms/actions, and their
-configuration/API are not implemented by this change.
+Analog monitoring, sensors, fan control, general alarms/actions, configuration,
+read-only DTMF reports and typed shared-product controls now have implemented
+software and targeted tests. The full hosted gate and physical site-device
+qualification remain outstanding. New REST/WebSocket transports are not part
+of this implementation.
 
 **Requirements**
 
@@ -323,8 +326,8 @@ configuration/API are not implemented by this change.
 
 The [site/message design](docs/superpowers/specs/2026-10-17-site-monitoring-and-message-macros-design.md)
 records configuration, calibration/freshness, alarms, safe outputs, fan policy,
-read-only DTMF queries, and localized reports. Composed messages and release tails
-are implemented with targeted tests; site acquisition and actions are underway.
+read-only DTMF queries, and localized reports. Composed messages, release tails,
+bounded site acquisition and equipment actions are implemented with targeted tests.
 The full hosted gate and physical site-device qualification remain outstanding.
 
 ### Remote-base memories and scan lists

@@ -48,9 +48,30 @@ fn site_radio_bank_borrows_owner_and_requires_serviced_state_before_claiming_sub
     assert_eq!(binding.initial_high_mask, 0);
     assert_eq!(binding.safe_high_mask, 0x40);
     assert_eq!(site.output_status("2000", "relay").unwrap().submitted, None);
+    site.poll(2001, |_, _, operation| {
+        assert!(matches!(operation, Operation::Snapshot));
+        Ok(Some(physical))
+    }); // The binding has not advanced its generation yet.
+    assert_eq!(site.output_status("2000", "relay").unwrap().submitted, None);
     // The token is globally assigned, not necessarily previous + 1.
     physical.generation = 19;
     physical.claimed_mask = 0x40;
+    physical.serviced_generation = 19;
+    physical.submitted_generation = 7;
+    site.poll(2002, |_, _, operation| {
+        assert!(matches!(operation, Operation::Snapshot));
+        Ok(Some(physical))
+    });
+    assert_eq!(site.output_status("2000", "relay").unwrap().submitted, None);
+    physical.submitted_generation = 19;
+    physical.submitted_high_mask = 0x40;
+    site.poll(2003, |_, _, operation| {
+        assert!(matches!(operation, Operation::Snapshot));
+        Ok(Some(physical))
+    });
+    assert_eq!(site.output_status("2000", "relay").unwrap().submitted, None);
+    physical.submitted_high_mask = 0;
+    physical.serviced_generation = 7;
     physical.submitted_generation = 19;
     site.poll(2010, |_, _, op| {
         assert!(matches!(op, Operation::Snapshot));
@@ -101,6 +122,8 @@ fn site_radio_bank_borrows_owner_and_requires_serviced_state_before_claiming_sub
     );
     assert!(site.output("2000", "relay", 0.5).is_err());
     assert!(site.output("2000", "missing", 0.0).is_err());
+    assert!(site.output("missing", "relay", 0.0).is_err());
+    assert!(site.output_status("missing", "relay").is_none());
 }
 
 #[test]
@@ -124,4 +147,75 @@ fn site_radio_bank_rejects_alias_owners_and_reserved_bits_without_writes() {
         site.output_status("2000", "relay").unwrap().quality,
         ReadingQuality::Valid
     );
+}
+
+#[test]
+fn site_radio_bank_ignores_external_bindings_and_reports_rejected_writes() {
+    let mut definitions = settings();
+    let node = definitions.get_mut("2000").unwrap();
+    let mut input = node.inputs[0].clone();
+    input.name = "external-input".into();
+    input.endpoint.as_mut().unwrap().backend = rpt_advanced_core::config::SiteBackend::Gpiod;
+    node.inputs.push(input);
+    let mut output = node.outputs[0].clone();
+    output.name = "external-output".into();
+    output.endpoint.as_mut().unwrap().backend = rpt_advanced_core::config::SiteBackend::Gpiod;
+    node.outputs.push(output);
+    let mut site = RadioSite::prepare(&definitions).unwrap();
+    let observations = site.poll(0, |owner, _, operation| {
+        assert_eq!(owner, "1000");
+        match operation {
+            Operation::Snapshot => Ok(Some(snapshot())),
+            Operation::Bind(_) => Err(-1),
+            Operation::Publish(_) => panic!("no claimed binding"),
+        }
+    });
+    assert!(!observations["2000"].inputs.contains_key("external-input"));
+    assert!(!observations["2000"].outputs.contains_key("external-output"));
+    assert!(!observations["2000"].outputs["relay"].available);
+    let output = site.output_status("2000", "relay").unwrap();
+    assert_eq!(output.quality, ReadingQuality::Fault);
+    assert_eq!(output.submitted, None);
+}
+
+#[test]
+fn site_radio_bank_cached_submission_does_not_keep_stopped_service_available() {
+    for (observed_at_valid, observed_at_ms, snapshot_at_ms, quality) in [
+        (1, 950, 5950, ReadingQuality::Stale),
+        (0, 950, 1000, ReadingQuality::Unavailable),
+        (1, 1001, 1000, ReadingQuality::Unavailable),
+    ] {
+        let mut site = RadioSite::prepare(&settings()).unwrap();
+        let mut physical = snapshot();
+        site.poll(2000, |_, _, operation| {
+            Ok(matches!(operation, Operation::Snapshot).then_some(physical))
+        });
+        physical.generation = 19;
+        physical.claimed_mask = 0x40;
+        physical.submitted_generation = 19;
+        physical.serviced_generation = 19;
+        site.poll(2020, |_, _, operation| {
+            assert!(matches!(operation, Operation::Snapshot));
+            Ok(Some(physical))
+        });
+        let submitted = site.output_status("2000", "relay").unwrap().submitted;
+        assert_eq!(submitted, Some((1.0, 2020)));
+        physical.observed_at_valid = observed_at_valid;
+        physical.observed_at_ms = observed_at_ms;
+        physical.snapshot_at_ms = snapshot_at_ms;
+        let observations = site.poll(7000, |_, _, operation| {
+            Ok(matches!(operation, Operation::Snapshot).then_some(physical))
+        });
+        assert!(!observations["2000"].outputs["relay"].available);
+        let state = site.output_status("2000", "relay").unwrap();
+        assert_eq!(state.quality, quality);
+        assert_eq!(state.submitted, submitted);
+        physical.observed_at_valid = 1;
+        physical.observed_at_ms = 8000;
+        physical.snapshot_at_ms = 8000;
+        let recovered = site.poll(8000, |_, _, operation| {
+            Ok(matches!(operation, Operation::Snapshot).then_some(physical))
+        });
+        assert!(recovered["2000"].outputs["relay"].available);
+    }
 }

@@ -312,6 +312,63 @@ fn site_worker_pause_cannot_lose_an_already_committed_queue_handoff() {
 }
 
 #[test]
+fn site_worker_safe_metadata_install_precedes_pause_and_latches_provider_failure() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    for failure in [false, true] {
+        *PROBE.lock().unwrap() = Probe::default();
+        let mut host = NodeHost::new(generation(1));
+        let endpoint = settings(SiteBackend::Gpiod);
+        let mut worker = DeviceWorker::start(
+            backends(),
+            vec![(
+                endpoint.clone(),
+                Direction::Output {
+                    active_high: true,
+                    startup_on: false,
+                    safe_on: false,
+                },
+            )],
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(worker.submit(0, Some(1.0), permit(&mut host)));
+        assert!(read_result(&mut worker).outcome.is_ok());
+        worker.pause(false);
+        until(|| worker.barrier().is_some());
+        assert!(worker.stage(vec![(
+            endpoint,
+            Direction::Output {
+                active_high: true,
+                startup_on: false,
+                safe_on: true
+            },
+        )]));
+        until(|| worker.barrier().is_some());
+        assert_eq!(PROBE.lock().unwrap().written, [1.0]);
+        PROBE.lock().unwrap().fail_metadata = failure;
+        assert!(worker.commit());
+        worker.pause(true);
+        until(|| worker.barrier().is_some());
+        if failure {
+            assert_eq!(worker.barrier(), Some(Err(ReadingQuality::Fault)));
+            assert!(!worker.resume());
+            assert!(!worker.finish());
+            worker.pause(false);
+            until(|| worker.barrier().is_some());
+            assert_eq!(worker.barrier(), Some(Err(ReadingQuality::Fault)));
+            assert_eq!(PROBE.lock().unwrap().closed, 0);
+        } else {
+            assert_eq!(worker.barrier(), Some(Ok(())));
+            assert_eq!(PROBE.lock().unwrap().written, [1.0, 1.0]);
+            assert_eq!(PROBE.lock().unwrap().safety, [1.0]);
+            assert!(worker.finish());
+        }
+        drop(worker);
+        host_cleanup(&mut host, 1);
+    }
+}
+
+#[test]
 fn site_worker_stale_permit_cannot_apply_observation_or_dispatch_queued_write() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     *PROBE.lock().unwrap() = Probe::default();

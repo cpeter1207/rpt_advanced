@@ -22,6 +22,11 @@ impl Fixture {
     fn provider(&self, name: &str, variant: &str) {
         let header =
             Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../{name}-adapter/include"));
+        let safe_type = if name == "gpiod" {
+            "uint32_t"
+        } else {
+            "double"
+        };
         let source = format!(
             r#"
 #include "rptadv_{name}_adapter.h"
@@ -30,10 +35,11 @@ static int32_t read_endpoint(void *c, rptadv_{name}_observation_v1 *o) {{ (void)
 static int32_t write_endpoint(void *c, const rptadv_{name}_output_v1 *o) {{ (void)c; (void)o; return 1; }}
 static int32_t capabilities(void *c, uint32_t *o) {{ (void)c; (void)o; return 1; }}
 static void destroy(void *c) {{ (void)c; }}
+static int32_t set_safe(void *c, {safe_type} level) {{ (void)c; (void)level; return 0; }}
 static rptadv_{name}_descriptor_v1 table = {{
     .struct_size=sizeof(table), .abi_version=1, .capability="rptadv.{name}",
     .open=open_endpoint, .read=read_endpoint, .write=write_endpoint,
-    .capabilities=capabilities, .destroy=destroy
+    .capabilities=capabilities, .destroy=destroy, .set_safe=set_safe
 }};
 const rptadv_{name}_descriptor_v1 *rptadv_{name}_adapter_descriptor_v1(void) {{ {variant} return &table; }}
 "#
@@ -124,6 +130,7 @@ fn site_backends_reject_incomplete_or_incompatible_descriptor() {
             "table.write=0;",
             "table.capabilities=0;",
             "table.destroy=0;",
+            "table.set_safe=0;",
         ] {
             let fixture = Fixture::new();
             fixture.provider(name, variant);

@@ -99,6 +99,8 @@ fn site_cli_routes_typed_controls_without_using_dtmf_or_links() {
                 (7, "cooling", 0.0),
             ),
             (vec!["fan", "1000", "cooling", "0.75"], (8, "cooling", 0.75)),
+            (vec!["fan", "1000", "cooling", "0"], (8, "cooling", 0.0)),
+            (vec!["fan", "1000", "cooling", "1"], (8, "cooling", 1.0)),
             (vec!["inhibit", "1000", "on"], (9, "", 0.0)),
             (vec!["inhibit", "1000", "off"], (10, "", 0.0)),
         ] {
@@ -107,6 +109,12 @@ fn site_cli_routes_typed_controls_without_using_dtmf_or_links() {
                 crate::lifecycle::tests::SITE_REQUESTS.lock().unwrap().pop(),
                 Some(("1000".into(), expected.0, expected.1.into(), expected.2))
             );
+            OUTPUT.with(|messages| {
+                let messages = messages.borrow();
+                let response = messages.last().unwrap();
+                assert!(response.contains("request accepted"));
+                assert!(response.contains("hardware status is reported separately"));
+            });
         }
         for words in [
             vec!["output", "1000", "relay", "invalid"],

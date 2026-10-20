@@ -38,7 +38,10 @@ packaged language catalogs layer above it, with independent attribute fallback.
 Partial administrator files can add messages without copying built-in IDs.
 Invalid optional attributes warn and use a lower-precedence valid form. The
 127-byte limit applies independently to each rendered segment/form, not to the
-entire composition. Composition runtime integration remains planned.
+entire composition. Runtime integration supports message commands, IDs and
+release tails with coherent per-attempt site readings. Localized unavailable
+forms preserve the rest of the message when a reading is missing or stale.
+These extensions have targeted tests; their full hosted gate remains pending.
 
 Each built-in message maintains `.text`, `.tts`, and `.morse` entries in the
 catalog and is included in the installed product package. New built-in RF
@@ -56,3 +59,8 @@ playback uses the resolved per-node voice, speed, and level. The released
 DTMF pad test also uses typed catalog messages for its digit report, empty
 capture, and overflow notice. Catalog preparation and formatting remain
 outside audio callbacks.
+
+The site extension adds localized read-only meter/input reports and composed
+alarm messages. Shared snapshots carry measurement quality and age; reports
+never substitute zero for unavailable data. Configured IDs, tails and message
+commands reuse that composition path rather than a second formatter.

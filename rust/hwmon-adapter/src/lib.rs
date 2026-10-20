@@ -402,7 +402,22 @@ static DESCRIPTOR: abi::rptadv_hwmon_descriptor_v1 = abi::rptadv_hwmon_descripto
     write: Some(write),
     capabilities: Some(capabilities),
     destroy: Some(destroy),
+    set_safe: Some(set_safe),
 };
+unsafe extern "C" fn set_safe(context: *mut c_void, percent: f64) -> i32 {
+    boundary(|| {
+        // SAFETY: the caller serializes this live context. No file is accessed.
+        let context = unsafe { context.cast::<Context>().as_mut() }.ok_or(-1)?;
+        if !valid_percent(percent) {
+            return Err(-1);
+        }
+        let Context::Pwm(pwm) = context else {
+            return Err(2);
+        };
+        pwm.safe = percent;
+        Ok(())
+    })
+}
 /// Return the immutable sensor descriptor, retained until the DSO unloads.
 #[unsafe(no_mangle)]
 pub extern "C" fn rptadv_hwmon_adapter_descriptor_v1() -> *const abi::rptadv_hwmon_descriptor_v1 {

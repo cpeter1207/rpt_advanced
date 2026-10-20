@@ -144,7 +144,8 @@ connection and unkey/routing rules above. IDs and tails using the same composed
 content remain local-only. Message-macro requests are implemented with targeted
 command, routing, queue, and configuration tests. Local-only tail playback is
 implemented with release, deadline, interruption, and allocation tests. Site
-queries remain planned; the full hosted gate for this extension has not run.
+queries and typed site controls are implemented with targeted shared-product
+and adapter tests; the full hosted gate for this extension has not run.
 
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot

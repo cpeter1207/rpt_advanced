@@ -138,7 +138,13 @@ impl Host {
                 ..Default::default()
             };
         }
-        if self.site_transition.is_some() {
+        // Reload fences physical owners individually; unrelated protection and
+        // elapsed-time policy must continue while a changed owner acknowledges.
+        if self
+            .site_transition
+            .as_ref()
+            .is_some_and(|change| change.shutdown)
+        {
             return;
         }
         let mut observations = self.poll_sites(clock.now_ms);

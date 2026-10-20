@@ -52,6 +52,7 @@ macro_rules! complete {
             && table.write.is_some()
             && table.capabilities.is_some()
             && table.destroy.is_some()
+            && table.set_safe.is_some()
     }};
 }
 

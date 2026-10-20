@@ -251,7 +251,23 @@ static DESCRIPTOR: abi::rptadv_gpiod_descriptor_v1 = abi::rptadv_gpiod_descripto
     write: Some(write),
     capabilities: Some(capabilities),
     destroy: Some(destroy),
+    set_safe: Some(set_safe),
 };
+
+unsafe extern "C" fn set_safe(context: *mut c_void, active: u32) -> i32 {
+    boundary(|| {
+        // SAFETY: the caller serializes this live context. No kernel call occurs.
+        let line = unsafe { context.cast::<Line>().as_mut() }.ok_or(-1)?;
+        if active > 1 {
+            return Err(-1);
+        }
+        if !line.output {
+            return Err(2);
+        }
+        line.safe_active = active as i32;
+        Ok(())
+    })
+}
 
 /// Return the immutable Linux GPIO descriptor for this DSO's lifetime.
 #[unsafe(no_mangle)]

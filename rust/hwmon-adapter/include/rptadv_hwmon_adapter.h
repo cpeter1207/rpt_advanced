@@ -70,6 +70,11 @@ typedef struct rptadv_hwmon_descriptor_v1 {
      * after failure instead of permitting a second owner.
      */
     void (*destroy)(void *);
+    /** Replace only retirement duty; no file access, reopen, or live duty change.
+     * Serialized with context calls. Returns 0 for a live PWM context and finite
+     * duty 0 through 100, -1 for invalid arguments, 2 for a measurement context.
+     */
+    int32_t (*set_safe)(void *, double percent);
 } rptadv_hwmon_descriptor_v1;
 
 /** Return the immutable descriptor for this DSO's lifetime. */

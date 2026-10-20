@@ -375,6 +375,34 @@ fn site_pwm_requires_real_manual_capability_and_preserves_safe_duty() {
 }
 
 #[test]
+fn site_pwm_safe_metadata_changes_only_the_retirement_write() {
+    let _serial = serial();
+    let fixture = Fixture::new();
+    fixture.put("a/pwm1", "000\n");
+    fixture.put("a/pwm1_enable", "1\n");
+    fixture.put("a/temp1_input", "25");
+    let (result, handle) = fixture.open("a", "pwm1", 1, 50.0, 0.0);
+    assert_eq!(result, 0);
+    let before = fs::read(fixture.0.join("a/pwm1")).unwrap();
+    unsafe {
+        assert_eq!(DESCRIPTOR.set_safe.unwrap()(ptr::null_mut(), 100.0), -1);
+        for invalid in [-1.0, 101.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(DESCRIPTOR.set_safe.unwrap()(handle.0, invalid), -1);
+        }
+        assert_eq!(DESCRIPTOR.set_safe.unwrap()(handle.0, 100.0), 0);
+        let (result, input) = fixture.open("a", "temp1_input", 0, 0.0, 0.0);
+        assert_eq!(result, 0);
+        assert_eq!(DESCRIPTOR.set_safe.unwrap()(input.0, 0.0), 2);
+    }
+    assert_eq!(fs::read(fixture.0.join("a/pwm1")).unwrap(), before);
+    drop(handle);
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("a/pwm1")).unwrap(),
+        "255\n"
+    );
+}
+
+#[test]
 fn site_hwmon_slow_device_does_not_serialize_another_device() {
     let _serial = serial();
     let fixture = Fixture::new();

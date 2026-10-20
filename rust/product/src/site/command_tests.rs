@@ -67,6 +67,8 @@ fn site_command_descriptor_validates_arguments_and_applies_current_policy() {
         (2, "relay", 0.0),
         (3, "relay", 0.0),
         (6, "battery", 0.0),
+        (8, "cooling", 0.0),
+        (8, "cooling", 1.0),
         (8, "cooling", 0.75),
         (7, "cooling", 0.0),
         (9, "", 0.0),
@@ -83,7 +85,7 @@ fn site_command_descriptor_validates_arguments_and_applies_current_policy() {
         match operation {
             1 | 3 => assert!(state.outputs["relay"].requested_on),
             2 => assert!(!state.outputs["relay"].requested_on),
-            8 => assert_eq!(state.fans["cooling"].duty, 0.75),
+            8 => assert_eq!(state.fans["cooling"].duty, value),
             7 => assert_eq!(state.fans["cooling"].duty, 0.0),
             9 => assert!(state.transmit_inhibited),
             10 => assert!(!state.transmit_inhibited),
@@ -110,19 +112,34 @@ fn site_command_descriptor_validates_arguments_and_applies_current_policy() {
     ] {
         assert_eq!(invoke("1000", &request(operation, name, value)), -4);
     }
-    for field in 0..4 {
+    for field in 0..5 {
         let mut invalid = request(1, "relay", 0.0);
         match field {
             0 => invalid.struct_size -= 1,
             1 => invalid.abi_version += 1,
             2 => invalid.target = ptr::null(),
-            _ => invalid.target = c"\xff".as_ptr(),
+            3 => invalid.target = c"\xff".as_ptr(),
+            _ => invalid.struct_size += 1,
         }
         if field == 3 {
             invalid.target_length = 1;
         }
         assert_eq!(invoke("1000", &invalid), -4);
     }
+    let mut unnamed = request(9, "", 0.0);
+    unnamed.target = ptr::null();
+    assert_eq!(invoke("1000", &unnamed), 0);
+    assert!(
+        engine
+            .run(|host| Ok(host
+                .runtime
+                .node("1000")
+                .unwrap()
+                .site()
+                .snapshot(0)
+                .transmit_inhibited))
+            .unwrap()
+    );
     assert_eq!(
         unsafe { api.site_command.unwrap()(c"1000".as_ptr(), 4, ptr::null()) },
         -4

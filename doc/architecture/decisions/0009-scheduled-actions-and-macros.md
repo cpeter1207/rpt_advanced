@@ -88,8 +88,11 @@ deferral before first output requests fresh values, while receive interruption
 retains the admitted attempt. Catalog IDs, required bindings, and complete Morse
 fallbacks are validated before admission. Release-triggered tails are implemented
 with sample-clock timing tests: original traffic hang, per-tail post-unkey delay,
-deadline-first IDs, and success-only cooldown. Site acquisition and actions
-remain planned. Existing scheduled actions and periodic announcements are unchanged.
+deadline-first IDs, and success-only cooldown. Bounded site acquisition and
+equipment actions are implemented with targeted tests. Protective effects do
+not wait for message capacity or unrelated owner reloads. Full hosted feature
+validation and physical site-device qualification remain outstanding. Existing
+scheduled actions and periodic announcements are unchanged.
 
 ## Implementation status — 2026-10-03
 

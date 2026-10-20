@@ -71,6 +71,8 @@ fn site_radio_reload_preserves_retained_level_and_waits_for_safe_before_release(
     second.endpoint.as_mut().unwrap().channel = "8".into();
     definitions.get_mut("2000").unwrap().outputs.push(second);
     let mut site = RadioSite::prepare(&definitions).unwrap();
+    assert!(!site.stage());
+    assert!(!site.commit());
     let mut owner = Owner::new();
     owner.settle(&mut site, 0);
     assert_eq!(owner.state.serviced_high_mask, 0x80);
@@ -79,6 +81,7 @@ fn site_radio_reload_preserves_retained_level_and_waits_for_safe_before_release(
         RadioSite::prepare(&definitions).unwrap(),
         &Default::default()
     ));
+    assert!(!site.begin(RadioSite::default(), &Default::default()));
     owner.poll(&mut site, 10);
     assert_eq!(owner.state.submitted_high_mask, 0xc0);
     assert_eq!(owner.state.claimed_mask, 0xc0);
@@ -87,12 +90,14 @@ fn site_radio_reload_preserves_retained_level_and_waits_for_safe_before_release(
     owner.service();
     owner.poll(&mut site, 11);
     assert_eq!(site.barrier(), Some(Ok(())));
+    assert!(!site.commit());
     assert!(site.stage());
     owner.poll(&mut site, 12);
     assert_eq!(owner.state.claimed_mask, 0x80);
     assert!(!site.commit());
     owner.service();
     owner.poll(&mut site, 13);
+    assert!(!site.stage());
     assert!(site.commit());
     owner.settle(&mut site, 14);
     assert!(owner.levels.iter().all(|high| high & 0x80 != 0));
@@ -193,10 +198,80 @@ fn site_radio_unacquired_fault_does_not_require_release_or_open_on_shutdown() {
     });
     assert!(site.begin(RadioSite::default(), &Default::default()));
     assert_eq!(site.barrier(), Some(Ok(())));
+    site.poll(1, |_, _, op| {
+        assert!(matches!(op, Operation::Snapshot));
+        Ok(Some(snapshot()))
+    }); // Fencing an untouched output must not acquire it.
     assert!(site.stage());
     site.poll(1, |_, _, op| {
         assert!(matches!(op, Operation::Snapshot));
         Err(-7)
     });
     assert!(site.commit());
+}
+
+#[test]
+fn site_radio_pending_rejection_or_generation_loss_rebinds_without_faking_service() {
+    for rejected in [true, false] {
+        let mut site = RadioSite::prepare(&settings()).unwrap();
+        let mut owner = Owner::new();
+        owner.settle(&mut site, 0);
+        let submitted = site.output_status("2000", "relay").unwrap().submitted;
+        site.output("2000", "relay", 0.0).unwrap();
+        owner.poll(&mut site, 10);
+        if rejected {
+            owner.state.rejected_commands += 1;
+        } else {
+            owner.state.generation += 1;
+        }
+        owner.poll(&mut site, 11);
+        let output = site.output_status("2000", "relay").unwrap();
+        assert_eq!(output.quality, ReadingQuality::Fault);
+        assert_eq!(output.submitted, submitted);
+        owner.service();
+        owner.poll(&mut site, 12);
+        let output = site.output_status("2000", "relay").unwrap();
+        assert_eq!(output.quality, ReadingQuality::Valid);
+        assert_eq!(output.submitted, Some((0.0, 12)));
+    }
+}
+
+#[test]
+fn site_radio_reassigned_node_or_pin_does_not_inherit_another_outputs_state() {
+    for move_node in [true, false] {
+        let mut definitions = settings();
+        let mut site = RadioSite::prepare(&definitions).unwrap();
+        let mut owner = Owner::new();
+        owner.settle(&mut site, 0);
+        site.output("2000", "relay", 0.0).unwrap();
+        owner.settle(&mut site, 2);
+        let node = if move_node {
+            let moved = definitions.remove("2000").unwrap();
+            definitions.insert("3000".into(), moved);
+            "3000"
+        } else {
+            definitions.get_mut("2000").unwrap().outputs[0]
+                .endpoint
+                .as_mut()
+                .unwrap()
+                .channel = "8".into();
+            "2000"
+        };
+        assert!(site.begin(
+            RadioSite::prepare(&definitions).unwrap(),
+            &Default::default()
+        ));
+        owner.settle(&mut site, 10);
+        assert!(site.stage());
+        owner.settle(&mut site, 12);
+        assert!(site.commit());
+        let output = site.output_status(node, "relay").unwrap();
+        assert_eq!(output.requested, 1.0);
+        assert_eq!(output.submitted, None);
+        owner.settle(&mut site, 14);
+        assert_eq!(
+            site.output_status(node, "relay").unwrap().submitted,
+            Some((1.0, 15))
+        );
+    }
 }
