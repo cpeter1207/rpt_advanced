@@ -191,6 +191,7 @@ fn site_acquisition_keeps_startup_request_and_separates_submission_from_faults()
     assert!(service.output("1000", "relay", f64::NAN).is_err());
     assert!(service.output("1000", "relay", 2.0).is_err());
     assert!(service.output("1001", "relay", 0.0).is_err());
+    assert!(service.output("1000", "absent", 0.0).is_err());
     assert!(service.output_status("1001", "relay").is_none());
     assert!(service.output_status("1000", "absent").is_none());
     PROBE.lock().unwrap().failure = false;

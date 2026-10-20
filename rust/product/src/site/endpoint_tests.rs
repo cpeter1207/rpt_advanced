@@ -255,6 +255,7 @@ fn site_endpoint_retirement_update_preserves_polarity_and_never_writes_demand() 
         assert_eq!(endpoint.reconfigure(changed), Err(ReadingQuality::Fault));
         PROBE.lock().unwrap().fail_metadata = false;
         assert_eq!(endpoint.reconfigure(changed), Ok(()));
+        assert_eq!(endpoint.reconfigure(changed), Ok(()));
         assert_eq!(PROBE.lock().unwrap().safety, [expected]);
         assert!(PROBE.lock().unwrap().written.is_empty());
         endpoint.safe().unwrap();

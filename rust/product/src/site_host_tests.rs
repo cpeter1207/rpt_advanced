@@ -75,6 +75,17 @@ fn bank_host() -> Host {
     bank_host_with("")
 }
 fn bank_host_with(extra: &str) -> Host {
+    bank_host_with_publish(extra, bank_publish)
+}
+fn bank_host_with_publish(
+    extra: &str,
+    publish: unsafe extern "C" fn(
+        *mut c_void,
+        *mut c_void,
+        u32,
+        *const abi::UrpAstSiteRequest,
+    ) -> i32,
+) -> Host {
     *BANK.lock().unwrap() = BankFixture {
         generation: 7,
         mask: 0,
@@ -85,7 +96,7 @@ fn bank_host_with(extra: &str) -> Host {
     table.context = ptr::without_provenance_mut(1);
     table.radio_site_snapshot = Some(bank_snapshot);
     table.radio_site_bind = Some(bank_bind);
-    table.radio_site_publish = Some(bank_publish);
+    table.radio_site_publish = Some(publish);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let document = document(
         "usb",
@@ -331,8 +342,39 @@ fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() 
         Err(RuntimeError::Rejected)
     );
     assert!(candidate.is_some() && radio.is_some());
+    assert_eq!(
+        host.begin_site_reload(revision, &mut None, &mut radio, &Default::default()),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        host.begin_site_reload(revision, &mut candidate, &mut None, &Default::default()),
+        Err(RuntimeError::Rejected)
+    );
+    let busy = Acquisition::prepare_reload(
+        &Default::default(),
+        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap()),
+        host.epoch,
+        host.site_acquisition.keys(),
+    )
+    .unwrap();
+    assert!(
+        host.site_acquisition
+            .begin(busy, &Default::default())
+            .is_ok()
+    );
+    assert_eq!(
+        host.begin_site_reload(revision, &mut candidate, &mut radio, &Default::default()),
+        Err(RuntimeError::Busy)
+    );
+    assert!(candidate.is_some() && radio.is_some());
+    drop(host.site_acquisition.abort());
     host.begin_site_reload(revision, &mut candidate, &mut radio, &Default::default())
         .unwrap();
+    assert_eq!(
+        host.begin_site_reload(revision, &mut candidate, &mut radio, &Default::default()),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(host.site_shutdown(2), Err(RuntimeError::Busy));
     let mut ready = false;
     for now in 2..8 {
         ready = host.site_barrier(now).unwrap();
@@ -359,6 +401,185 @@ fn site_host_reload_release_then_abort_restores_live_demand_without_reopening() 
         }
     }
     assert!(host.stop(18));
+}
+
+#[test]
+fn site_host_fan_reports_delivery_failure_and_recovery_only_for_its_node() {
+    use rpt_advanced_core::site::SiteCommand;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host_with(
+        "[fan 1000 cooling]\nenabled=yes\noutput=relay\nmode=ptt\nrun_on_ms=0\n\
+         [2000]\nradio_channel=usb2\nduplex=full\n",
+    );
+    host.advance_sites(clock());
+    for (duty, expected, fault) in [
+        (Some(1.0), 0x40, false),
+        (None, 0, false),
+        (Some(0.5), 0, true),
+        (Some(1.0), 0x40, false),
+    ] {
+        host.site_command(
+            "1000",
+            SiteCommand::Fan {
+                name: "cooling".into(),
+                duty,
+            },
+            clock(),
+        )
+        .unwrap();
+        host.poll_sites(1);
+        host.poll_sites(2);
+        let text = host.status_text("1000").unwrap();
+        assert!(text.contains("fan cooling requested-duty="), "{text}");
+        assert_eq!(
+            text.contains("site-action cooling fault=Unavailable"),
+            fault,
+            "{text}"
+        );
+        assert!(
+            !host
+                .status_text("2000")
+                .unwrap()
+                .contains("site-action cooling")
+        );
+        assert_eq!(BANK.lock().unwrap().high, expected);
+    }
+    for now in 3..12 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(12));
+}
+
+#[test]
+fn site_host_reports_unavailable_actions_and_retired_notification_names() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host_with(
+        "[input 1000 door]\nenabled=yes\nbackend=cm119\ndevice=1000\nline=8\n\
+         [output 1000 external]\nenabled=yes\nbackend=gpiod\ndevice=fixture\nline=7\n\
+         [alarm 1000 open]\nenabled=yes\nsource=door\ncondition=inactive\n\
+         on_trip=output:external:on,macro:stop\ntrip_message=notice\n\
+         [macro stop]\naction=disconnect_all\n\
+         [message notice]\ncontent={media}\nmorse_text=E\n",
+    );
+    let mut settings =
+        ResolvedSiteSettings::resolve(host.runtime.document(), &NodeId::new("1000").unwrap())
+            .unwrap()
+            .value;
+    // Reproduce a queued notification whose catalog identity has been retired.
+    settings.alarms[0].trip_message = "missing".into();
+    host.runtime
+        .node("1000")
+        .unwrap()
+        .site()
+        .reconfigure(settings);
+    host.advance_sites(clock());
+    let text = host.status_text("1000").unwrap();
+    for expected in [
+        "alarm open active=true",
+        "site-action external fault=Unavailable",
+        "site-action alarm:open fault=Unavailable",
+        "site-action missing fault=Unavailable",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    assert!(!text.contains("site-action stop"), "{text}");
+    assert!(host.take_site_links().is_empty());
+    for now in 3..12 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(12));
+}
+
+#[test]
+fn site_host_basis_fences_only_removed_disabled_or_replaced_radios() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = bank_host();
+    for (next, replaced) in [
+        (document("usb", ""), false),
+        (ConfigDocument::parse("").unwrap(), true),
+        (document("usb", "node_enabled=no\n"), true),
+        (document("other", ""), true),
+        (
+            document("usb", "[radio 1000]\nradio_duplex_mode=full\n"),
+            true,
+        ),
+    ] {
+        let basis = host.site_basis(&next).unwrap();
+        assert_eq!(basis.revision, host.runtime.revision());
+        assert_eq!(basis.replaced.contains("1000"), replaced);
+        assert!(basis.known.is_empty());
+    }
+    assert_eq!(host.commit_sites(), Ok(()));
+    let _ = host.site_shutdown(2);
+    host.advance_sites(clock());
+    assert_eq!(host.commit_sites(), Ok(()));
+    for now in 3..12 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(12));
+}
+
+#[test]
+fn site_host_failed_safe_write_blocks_reload_and_preserves_the_live_owner() {
+    static FAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    unsafe extern "C" fn publish(
+        context: *mut c_void,
+        radio: *mut c_void,
+        bank: u32,
+        value: *const abi::UrpAstSiteRequest,
+    ) -> i32 {
+        if FAIL.load(std::sync::atomic::Ordering::Relaxed) {
+            -1
+        } else {
+            unsafe { bank_publish(context, radio, bank, value) }
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    FAIL.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut host = bank_host_with_publish("", publish);
+    let backends =
+        Arc::new(crate::site::backends::SiteBackends::load(host.runtime.document()).unwrap());
+    let mut candidate = Some(
+        Acquisition::prepare_reload(
+            &Default::default(),
+            backends,
+            host.epoch,
+            host.site_acquisition.keys(),
+        )
+        .unwrap(),
+    );
+    let mut radio = Some(RadioSite::default());
+    host.begin_site_reload(
+        host.runtime.revision(),
+        &mut candidate,
+        &mut radio,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(host.site_barrier(2), Err(RuntimeError::Device));
+    assert_eq!(BANK.lock().unwrap().high, 0x40);
+    drop(host.abort_sites());
+    FAIL.store(false, std::sync::atomic::Ordering::Relaxed);
+    for now in 3..12 {
+        if host.stop(now) {
+            break;
+        }
+    }
+    assert!(host.stop(12));
 }
 
 #[test]
