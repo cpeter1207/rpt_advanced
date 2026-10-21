@@ -1,3 +1,12 @@
+rpt-advanced (0.1.0~alpha15-1) unstable; urgency=medium
+
+  * Format scheduled link warnings with localized compound time units.
+  * Keep each warning consumed until its occurrence or inactivity period changes.
+  * Restore inactivity grace across midnight and publish scheduler health.
+  * Require matching host services for scheduler warnings in both hosts.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Wed, 21 Oct 2026 16:11:23 -0500
+
 rpt-advanced (0.1.0~alpha14-1) unstable; urgency=medium
 
   * Keep polite initial identifiers ahead of overdue lower-priority periodic IDs.
