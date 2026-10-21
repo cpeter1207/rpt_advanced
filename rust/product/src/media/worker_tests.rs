@@ -1963,28 +1963,35 @@ fn render_retires_a_consumer_from_an_older_generation() {
 
 #[test]
 fn render_keeps_a_completed_consumer_when_retirement_queue_is_full() {
-    let (_producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
-    let (mut retired, mut retired_rx) = RingBuffer::new(1);
-    let (_unused_producer, placeholder) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
-    retired.push((0, segment(placeholder, u64::MAX))).unwrap();
-    let control = Arc::new(JobControl::default());
-    control.completed.store(1, Ordering::Release);
-    let (_ready, ready) = RingBuffer::new(1);
-    let mut reader = StreamReader {
-        control,
-        ready,
-        retired,
-        generation: 1,
-        delay_remaining: 0,
-        consumer: Some((1, segment(consumer, 0))),
-        morse_available: false,
-        fallback_morse_pending: false,
-    };
+    for (budget, expected) in [(0, PcmRead::Pending), (1, PcmRead::Samples(1))] {
+        let (mut producer, consumer) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+        producer.write(&[0.25; 4096]).unwrap();
+        let (mut retired, mut retired_rx) = RingBuffer::new(1);
+        let (_unused_producer, placeholder) =
+            InboundRing::open(48000, InboundPolicy::Media).unwrap();
+        retired.push((0, segment(placeholder, u64::MAX))).unwrap();
+        let control = Arc::new(JobControl::default());
+        control.completed.store(1, Ordering::Release);
+        let (_ready, ready) = RingBuffer::new(1);
+        let mut reader = StreamReader {
+            control,
+            ready,
+            retired,
+            generation: 1,
+            delay_remaining: 0,
+            consumer: Some((1, segment(consumer, budget))),
+            morse_available: false,
+            fallback_morse_pending: false,
+        };
 
-    assert_eq!(reader.render(&mut [0.0; 1]), PcmRead::Pending);
-    assert!(reader.consumer.is_some());
-    drop(retired_rx.pop().unwrap().1);
-    assert_eq!(reader.render(&mut [0.0; 1]), PcmRead::Finished);
+        let mut output = [42.0; 2];
+        assert_eq!(reader.render(&mut output), expected);
+        assert_eq!(output[0] == 42.0, budget == 0);
+        assert_eq!(output[1], 42.0);
+        assert!(reader.consumer.is_some());
+        drop(retired_rx.pop().unwrap().1);
+        assert_eq!(reader.render(&mut output), PcmRead::Finished);
+    }
 }
 
 #[test]
