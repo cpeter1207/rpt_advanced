@@ -78,7 +78,7 @@ future version. Runtime acknowledgment rejects older mixed installations safely.
 ### Explicit peer link processing (2026-09-25)
 
 The ABI 3/4 references in this dated section record their introduction. The
-current host-services descriptor is ABI 6 and the product descriptor is ABI 5,
+current host-services descriptor is ABI 7 and the product descriptor is ABI 5,
 as declared in `rust/product/include/rptadv_product.h`.
 
 Before starting either an incoming or outgoing peer's media owner, the product
@@ -110,7 +110,7 @@ peer-binding operation and its version-1 option payload are unchanged.
 
 ### Shared directory policy (2026-10-09)
 
-Host-services ABI 6 (`rptadv.hst6`) provides directory access
+Host-services ABI 7 (`rptadv.hst7`) provides directory access
 with raw extnodes, selected SRV target/port, and numeric-address callbacks.
 The product owns static/DNS/external precedence, record validation, and source-IP
 authentication once. Asterisk owns config/DNS allocation and cleanup; standalone
@@ -134,7 +134,7 @@ packages continue requiring their matching builds.
 
 ### Existing-owner site I/O (2026-10-19)
 
-The complete ABI 6 table requires bind, publish, and snapshot operations for
+The complete ABI 7 table requires bind, publish, and snapshot operations for
 site I/O. These are control-only calls on the existing radio handle. Standalone
 forwards to the native product's site operations. The Asterisk adapter uses
 the public `ast_channel_setoption` site envelope and requires explicit ABI
@@ -147,6 +147,8 @@ its ABI and SONAME remain 1. The controller product uses descriptor ABI 5 for
 the typed site controls in ADR 0023; its SONAME remains 1.
 The full host table is mandatory; optional peer operations may be null but
 truncated older tables are not retained as compatibility paths.
+ABI 7 also requires the control-only scheduler-warning sink in ADR 0017. Each
+host owns native logging; scheduling policy and counters stay in the product.
 
 AllStarLink wire-protocol, directory, topology, and control interoperability
 remain required features. Matching ASL3 behavior on those interfaces is not a

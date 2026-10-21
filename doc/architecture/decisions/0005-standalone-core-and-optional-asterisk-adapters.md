@@ -151,7 +151,8 @@ hardware or overload the link-command API. Requested output is not proof of
 physical service. Manual inhibit release cannot clear alarm protection or a
 hardware interlock. Both hosts must reject an older or incomplete product table
 before using it. The ABI change requires rebuilding both hosts with the product;
-host-services ABI 6 and its device-ownership contract are unchanged.
+its device-ownership contract is unchanged. The current host-services ABI 7
+adds only the control-warning sink specified by ADR 0017.
 
 The native request preserves the current standalone radio-session settings,
 explicit processing graphs, gain scales, and one/two-channel physical routing.

@@ -1652,37 +1652,82 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
 
 #[test]
 fn aggregate_schedule_warning_queues_one_localized_status_message() {
-    let config = "[general]\nlanguage=fr-CA\n[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 weekday]\nremote_node=3000\nreplace_permanent=main\ndays=Monday-Friday\nstart_time=12:00\nend_time=13:00\nwarning_before_start_ms=60000\nwarning_message_id=scheduled-link-change\n";
-    let clock = RuntimeClock {
-        now_ms: 1_000,
-        wall_seconds: 0,
-        civil: Some((
-            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 11, 59).unwrap(),
+    let long_name = "N1".repeat(31) + "A";
+    let long_setting = format!("group_name={long_name}\n");
+    let long_speech = format!("Connecting to {}A in 1 minute", "N,1,".repeat(31));
+    for (group, lead, hour, minute, second, expected) in [
+        (
+            "",
+            "warning_before_start_ms=60000",
+            11,
+            59,
             0,
-        )),
-    };
-    let messages = Arc::new(Mutex::new(Vec::new()));
-    let devices = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime = Runtime::start(
-        ConfigDocument::parse(config).unwrap(),
-        &CapturingMedia(messages.clone()),
-        adapter,
-        |_, _| Ok(Box::new(Device(devices.clone())) as Box<dyn DeviceHandoff>),
-        clock,
-    )
-    .unwrap();
-    assert!(
-        runtime
-            .warnings()
-            .iter()
-            .any(|warning| warning.key == "language")
-    );
-    runtime.tick_links(clock);
-    assert_eq!(
-        *messages.lock().unwrap(),
-        ["This connection will change in 60 seconds"]
-    );
-    assert!(runtime.stop(clock.now_ms));
+            "Connecting to weekday in 1 minute",
+        ),
+        (
+            "group_name=Net 42\n",
+            "warning_before_start_ms=90000",
+            11,
+            58,
+            30,
+            "Connecting to Net 42 in 1 minute, and 30 seconds",
+        ),
+        (
+            "group_name=3000\n",
+            "warning_before_start_ms=60000",
+            11,
+            59,
+            0,
+            "Connecting to 3000 in 1 minute",
+        ),
+        (
+            "group_name=Evening Net\n",
+            "warning_before_end_ms=60000",
+            12,
+            59,
+            0,
+            "Disconnecting from Evening Net in 1 minute",
+        ),
+        (
+            long_setting.as_str(),
+            "warning_before_start_ms=60000",
+            11,
+            59,
+            0,
+            long_speech.as_str(),
+        ),
+    ] {
+        let config = format!(
+            "[general]\nlanguage=fr-CA\n[1000]\n[permanent 1000 main]\nremote_node=2000\n[schedule 1000 weekday]\nremote_node=3000\n{group}replace_permanent=main\ndays=Monday-Friday\nstart_time=12:00\nend_time=13:00\nend_inactivity_ms=0\n{lead}\nwarning_message_id=scheduled-link-change\n"
+        );
+        let clock = RuntimeClock {
+            now_ms: 1_000,
+            wall_seconds: 0,
+            civil: Some((
+                CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap(),
+                second,
+            )),
+        };
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let devices = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&config).unwrap(),
+            &CapturingMedia(messages.clone()),
+            adapter,
+            |_, _| Ok(Box::new(Device(devices.clone())) as Box<dyn DeviceHandoff>),
+            clock,
+        )
+        .unwrap();
+        assert!(
+            runtime
+                .warnings()
+                .iter()
+                .any(|warning| warning.key == "language")
+        );
+        runtime.tick_links(clock);
+        assert_eq!(*messages.lock().unwrap(), [expected], "{group}{lead}");
+        assert!(runtime.stop(clock.now_ms));
+    }
 }
 
 #[test]

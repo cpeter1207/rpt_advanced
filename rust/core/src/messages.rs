@@ -1,6 +1,6 @@
 //! Fluent-backed, bounded built-in RF messages, prepared only on the control plane.
 
-use crate::schedule::Weekday;
+use crate::schedule::{CivilTime, Weekday};
 use fluent_bundle::{FluentArgs, FluentResource, concurrent::FluentBundle};
 use std::{
     collections::BTreeMap,
@@ -38,7 +38,8 @@ const REQUIRED_IDS: &[&str] = &[
     "priority-group-selected",
     "priority-group-unavailable",
     "scheduled-link-change",
-    "duration-seconds",
+    "duration-unit",
+    "duration-join",
     "parrot-levels",
     "pad-test-empty",
     "pad-test-overflow",
@@ -137,13 +138,19 @@ pub enum Message<'a> {
     },
     /// Warn about a scheduled link change.
     ScheduledLinkChange {
+        /// Effective group name or exact remote node identity.
+        target: &'a str,
+        /// True before connection, false before disconnection.
+        connecting: bool,
         /// Localized remaining-time phrase.
         time_remaining: &'a str,
     },
-    /// Format a duration in seconds for another localized message.
-    DurationSeconds {
-        /// Rounded-up remaining seconds.
-        seconds: u64,
+    /// Format one nonzero duration component, or zero seconds.
+    DurationPart {
+        /// Whole number of the selected units.
+        count: u64,
+        /// Unit selected by the duration formatter.
+        unit: DurationUnit,
     },
     /// Report the retained receive burst's peak and RMS levels.
     ParrotLevels {
@@ -152,6 +159,37 @@ pub enum Message<'a> {
         /// RMS dBFS rounded to the nearest integer.
         rms_dbfs: i32,
     },
+}
+
+/// Ordered units used by localized compound durations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurationUnit {
+    /// The current local month's Gregorian day count.
+    Month,
+    /// Seven days.
+    Week,
+    /// Twenty-four hours.
+    Day,
+    /// Sixty minutes.
+    Hour,
+    /// Sixty seconds.
+    Minute,
+    /// One second.
+    Second,
+}
+
+impl DurationUnit {
+    /// Stable Fluent selection key, independent of translated unit wording.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Month => "month",
+            Self::Week => "week",
+            Self::Day => "day",
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+            Self::Second => "second",
+        }
+    }
 }
 
 /// Link mode used by the localized status message.
@@ -185,6 +223,17 @@ pub struct MessageForms {
     pub tts: String,
     /// Morse wording.
     pub morse: String,
+}
+
+impl MessageForms {
+    /// Read the matching audience form while composing localized fragments.
+    fn attribute(&self, attribute: &str) -> &str {
+        match attribute {
+            "text" => &self.text,
+            "tts" => &self.tts,
+            _ => &self.morse,
+        }
+    }
 }
 
 /// A configuration-selected argument, formatted independently for each audience.
@@ -345,6 +394,17 @@ impl MessageCatalog {
         id: &str,
         arguments: impl Fn(&str) -> FluentArgs<'a>,
     ) -> Result<MessageForms, CatalogError> {
+        self.format_bounded_attributes(id, arguments, |_| MAX_MESSAGE_BYTES)
+    }
+
+    /// Compose already-bounded fragments without applying the single-fragment limit twice.
+    /// Each audience's budget includes its inputs and at most one catalog-sized literal.
+    fn format_bounded_attributes<'a>(
+        &self,
+        id: &str,
+        arguments: impl Fn(&str) -> FluentArgs<'a>,
+        maximum: impl Fn(&str) -> usize,
+    ) -> Result<MessageForms, CatalogError> {
         let mut output = Vec::with_capacity(3);
         for attribute in ATTRIBUTES {
             let args = arguments(attribute);
@@ -356,7 +416,7 @@ impl MessageCatalog {
                 .chain(std::iter::once(&self.english))
                 .find_map(|bundle| {
                     let text = format_attribute(bundle, id, attribute, &args)?;
-                    if text.len() > MAX_MESSAGE_BYTES {
+                    if text.len() > maximum(attribute) {
                         too_long = true;
                         None
                     } else {
@@ -378,25 +438,102 @@ impl MessageCatalog {
         })
     }
 
-    /// Format a schedule warning with locale-specific duration forms for text, speech and Morse.
-    pub fn format_schedule_warning(&self, seconds: u64) -> Result<MessageForms, CatalogError> {
-        let duration = self.format(&Message::DurationSeconds { seconds })?;
-        let text = self
-            .format(&Message::ScheduledLinkChange {
-                time_remaining: &duration.text,
-            })?
-            .text;
-        let tts = self
-            .format(&Message::ScheduledLinkChange {
-                time_remaining: &duration.tts,
-            })?
-            .tts;
-        let morse = self
-            .format(&Message::ScheduledLinkChange {
-                time_remaining: &duration.morse,
-            })?
-            .morse;
-        Ok(MessageForms { text, tts, morse })
+    /// Format a compound duration from largest to smallest unit, omitting zero parts.
+    /// A month uses the current local month's length, not a fixed thirty-day approximation.
+    /// Zero is spoken as zero seconds. Fluent owns plurals and list punctuation for each form.
+    /// Each unit/literal keeps the catalog fragment bound; the composed total may be longer.
+    pub fn format_duration(
+        &self,
+        seconds: u64,
+        local: CivilTime,
+    ) -> Result<MessageForms, CatalogError> {
+        let (year, month, ..) = local.components();
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let month_days = match month {
+            2 if leap => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        let mut remaining = seconds;
+        let mut parts = Vec::with_capacity(6);
+        for (unit, size) in [
+            (DurationUnit::Month, month_days * 86400),
+            (DurationUnit::Week, 604800),
+            (DurationUnit::Day, 86400),
+            (DurationUnit::Hour, 3600),
+            (DurationUnit::Minute, 60),
+            (DurationUnit::Second, 1),
+        ] {
+            let count = remaining / size;
+            remaining %= size;
+            if count != 0 || (seconds == 0 && unit == DurationUnit::Second) {
+                parts.push(self.format(&Message::DurationPart { count, unit })?);
+            }
+        }
+        let mut forms = parts.remove(0);
+        for (index, part) in parts.iter().enumerate() {
+            forms = self.format_bounded_attributes(
+                "duration-join",
+                |attribute| {
+                    let mut args = FluentArgs::new();
+                    args.set("head", forms.attribute(attribute));
+                    args.set("tail", part.attribute(attribute));
+                    args.set(
+                        "position",
+                        if index + 1 == parts.len() {
+                            "last"
+                        } else {
+                            "more"
+                        },
+                    );
+                    args
+                },
+                |attribute| {
+                    MAX_MESSAGE_BYTES
+                        + forms.attribute(attribute).len()
+                        + part.attribute(attribute).len()
+                },
+            )?;
+        }
+        Ok(forms)
+    }
+
+    /// Format a named connect/disconnect warning with matching localized duration forms.
+    /// Bounded target and duration fragments feed the existing composed telemetry stream.
+    pub fn format_schedule_warning(
+        &self,
+        seconds: u64,
+        local: CivilTime,
+        target: &MessageForms,
+        connecting: bool,
+    ) -> Result<MessageForms, CatalogError> {
+        if ATTRIBUTES
+            .iter()
+            .any(|attribute| target.attribute(attribute).len() > MAX_MESSAGE_BYTES)
+        {
+            return Err(CatalogError::OutputTooLong);
+        }
+        let duration = self.format_duration(seconds, local)?;
+        let warning = Message::ScheduledLinkChange {
+            target: &target.text,
+            connecting,
+            time_remaining: &duration.text,
+        };
+        self.format_bounded_attributes(
+            "scheduled-link-change",
+            |attribute| {
+                let mut args = warning.args();
+                args.set("target", target.attribute(attribute));
+                args.set("time_remaining", duration.attribute(attribute));
+                args
+            },
+            |attribute| {
+                MAX_MESSAGE_BYTES
+                    + target.attribute(attribute).len()
+                    + duration.attribute(attribute).len()
+            },
+        )
     }
 
     /// Compose one local pad reply from at most 128 independently bounded fragments.
@@ -473,7 +610,7 @@ impl Message<'_> {
             Self::PriorityGroupSelected { .. } => "priority-group-selected",
             Self::PriorityGroupUnavailable { .. } => "priority-group-unavailable",
             Self::ScheduledLinkChange { .. } => "scheduled-link-change",
-            Self::DurationSeconds { .. } => "duration-seconds",
+            Self::DurationPart { .. } => "duration-unit",
             Self::ParrotLevels { .. } => "parrot-levels",
         }
     }
@@ -544,10 +681,22 @@ impl Message<'_> {
                 args.set("peer", *peer);
             }
             Self::PriorityGroupUnavailable { group } => args.set("group", *group),
-            Self::ScheduledLinkChange { time_remaining } => {
+            Self::ScheduledLinkChange {
+                target,
+                connecting,
+                time_remaining,
+            } => {
+                args.set("target", *target);
+                args.set(
+                    "direction",
+                    if *connecting { "connect" } else { "disconnect" },
+                );
                 args.set("time_remaining", *time_remaining);
             }
-            Self::DurationSeconds { seconds } => args.set("seconds", *seconds as i64),
+            Self::DurationPart { count, unit } => {
+                args.set("count", *count as i64);
+                args.set("unit", unit.key());
+            }
             Self::ParrotLevels {
                 peak_dbfs,
                 rms_dbfs,
@@ -643,8 +792,20 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
             args.set("peer", "2000");
         }
         "priority-group-unavailable" => args.set("group", "test group"),
-        "scheduled-link-change" => args.set("time_remaining", "60 seconds"),
-        "duration-seconds" => args.set("seconds", 60),
+        "scheduled-link-change" => {
+            args.set("target", "test group");
+            args.set("direction", "connect");
+            args.set("time_remaining", "1 minute");
+        }
+        "duration-unit" => {
+            args.set("unit", "second");
+            args.set("count", 60);
+        }
+        "duration-join" => {
+            args.set("head", "1 minute");
+            args.set("tail", "30 seconds");
+            args.set("position", "last");
+        }
         "parrot-levels" => {
             args.set("peak_dbfs", -3);
             args.set("rms_dbfs", -18);

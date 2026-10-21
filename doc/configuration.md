@@ -591,7 +591,16 @@ later reload.
 
 Warnings use the selected `warning_message_id` and include time remaining.
 Active local or linked receive skips a due warning. Warnings do not interrupt
-active audio.
+active audio. Each warning lead plays once for that event. New receive activity
+starts a new quiet period and allows its disconnect warnings to play again.
+Warnings at or past the deadline are skipped.
+
+The English message names the link or group: "Connecting to Handiham in
+1 hour, and 30 minutes" or "Disconnecting from Handiham in 5 minutes."
+Time remaining uses months, weeks, days, hours, minutes, and seconds as needed.
+Months use the current local month's length. Morse uses M, W, D, H, M, and S.
+Translate `scheduled-link-change`, `duration-unit`, and `duration-join` in your
+message bundle to change the wording and units.
 
 When a window becomes active, rpt_advanced detaches its named permanent peer
 before attaching the replacement. When the window ends, it detaches the
@@ -599,9 +608,10 @@ replacement before restoring the named permanent peer. With nonzero
 `end_inactivity_ms`, the schedule no longer requires the replacement at
 `end_time`, but it remains connected until the quiet interval expires.
 Local or linked receive activity can defer that handoff; IDs and other transmit
-audio cannot. On startup during a quiet interval after a window, only the
-remaining quiet time is kept. A quiet interval that crosses midnight is not
-restored after startup.
+audio cannot. On startup after a selected window, the controller keeps only the
+remaining quiet time. This also applies when that time crosses midnight or a
+day that is not selected. For example, a window ending at 11:59 PM with five
+minutes of quiet time has three minutes left at 12:01 AM.
 
 Startup and reload check the host's local time to choose active windows. Reload
 does not redial an unchanged link. `*806` pauses configured link attachment and
@@ -709,6 +719,13 @@ topology cache advertised by connected peers. This is not an authoritative
 network view: a peer may not advertise a list yet, and its cached list can be
 stale. An empty topology is reported as `none`; local-monitor peers do not
 appear in the route list.
+
+The `scheduler` line shows shared control health. `submission_failures` counts
+tasks the host could not accept. `cycle_failures` counts failed control cycles.
+`queue_delay_last_us` and `queue_delay_max_us` show the latest and longest waits
+before work started, in microseconds. `delayed_tasks` counts waits of at least
+one second. These totals reset when the controller starts, not when it reloads.
+Check the host log if the failure or delay counts keep rising.
 
 `rpt_advanced command <node> <DTMF>` injects an administrative DTMF sequence
 through the selected node's normal command collector. It uses the configured

@@ -39,13 +39,11 @@ impl Engine {
     ) -> Result<T, RuntimeError> {
         let engine = Arc::clone(self);
         let (send, receive) = mpsc::sync_channel(1);
-        self.executor
-            .submit(ControlTask::lifecycle(move || {
-                let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
-                let result = host.as_mut().map(operation).ok_or(RuntimeError::Rejected);
-                let _ = send.send(result);
-            }))
-            .map_err(|_| RuntimeError::Rejected)?;
+        self.enqueue(move || {
+            let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
+            let result = host.as_mut().map(operation).ok_or(RuntimeError::Rejected);
+            let _ = send.send(result);
+        })?;
         receive.recv().map_err(|_| RuntimeError::Rejected)?
     }
 

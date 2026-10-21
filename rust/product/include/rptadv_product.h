@@ -24,9 +24,9 @@ struct UrpAstSiteSnapshot;
 /** Product capability name stored in its fixed-width descriptor field. */
 #define RPTADV_PRODUCT_CAPABILITY "rptadv.prod5"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 6U
+#define RPTADV_HOST_ABI_VERSION 7U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst6"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst7"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -185,7 +185,7 @@ typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, si
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v6 {
+struct rptadv_host_services_v7 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -305,6 +305,11 @@ struct rptadv_host_services_v6 {
     void (*peer_step_wake)(void *context, void *registration);
     /** Owner-only deadline: relative nanoseconds, UINT64_MAX clears it. */
     int (*peer_set_deadline)(void *context, void *peer, uint64_t wake_after_ns);
+
+    /** Required control-only scheduler health warning through the host logger.
+     * Text is borrowed UTF-8 for this synchronous call only. Never retain it
+     * or unwind across the callback boundary. Never called by audio workers. */
+    void (*scheduler_notice)(void *context, const char *text, size_t length);
 };
 
 /** Exact revision of a typed site control request. */
@@ -358,7 +363,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v6 *host,
+    int (*start)(const struct rptadv_host_services_v7 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,

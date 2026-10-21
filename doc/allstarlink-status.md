@@ -102,6 +102,11 @@ nanoseconds, and dropped audio blocks. Check host load if `dropped-blocks`
 keeps rising: some outgoing audio is being lost. The `media` counters are not
 used on the Asterisk path.
 
+The `scheduler` line shows failed control tasks and queue delays. If its failure
+counts or `delayed_tasks` keep rising, check the host log. Queue waits of one
+second or more and control failures produce warnings, limited to one per minute
+for each warning type. Reload does not clear the totals.
+
 Standalone service checks use `systemctl status rpt-advanced` and
 `journalctl -u rpt-advanced`; see the [installation guide](install.md#set-up-standalone).
 The standalone program has no link-status or DTMF command-line option.

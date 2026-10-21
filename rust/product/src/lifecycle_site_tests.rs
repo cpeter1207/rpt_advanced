@@ -233,6 +233,26 @@ fn site_reload_publication_survives_concurrent_admission_close() {
 }
 
 #[test]
+fn site_cleanup_submission_failure_is_observable_without_changing_digit_policy() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let engine = start("[1000]\nradio_channel=usb\nduplex=full\n");
+    crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clear();
+    REJECT_AFTER.store(1, Ordering::Release);
+    let result = engine.site_control(|_| ());
+    let lost_digits = engine.lost_digits.load(Ordering::Acquire);
+    let mut status = String::new();
+    engine.health.status(&mut status);
+    let notices = crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clone();
+    assert_eq!(rptadv_product_stop(), 0);
+    assert_eq!(result, Err(RuntimeError::Rejected));
+    assert!(!lost_digits);
+    assert!(status.contains("submission_failures=1"), "{status}");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+}
+
+#[test]
 fn rejected_final_host_stop_retains_host_after_site_cleanup() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

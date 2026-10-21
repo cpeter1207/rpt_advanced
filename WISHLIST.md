@@ -19,6 +19,24 @@ completion is not a claim of physical hardware qualification or deployment.
 
 ## Entries
 
+### Local receiver S-meter and spoken query
+
+**Status: Planned.** Written design approved on 2026-10-20; the
+[written specification](docs/superpowers/specs/2026-10-20-local-receiver-s-meter-design.md)
+and [implementation plan](docs/superpowers/plans/2026-10-20-local-receiver-s-meter.md)
+record the work. Plan review is pending; no implementation or node changes have started.
+
+- Measure suitable flat FM discriminator noise independently of COR selection,
+  or reuse an external RSSI sensor acquired through the existing site adapters.
+- Support shared defaults, per-node selection, calibrated dBm/S-unit estimates,
+  relative quieting, measurable-range bounds and explicit observation validity.
+- Reuse public, remappable `*76<dtmf_id>#` for a localized spoken report with
+  the existing Morse fallback and source-only routing after unkey.
+- Retain a local query's actual receive-burst observation so delayed command
+  handling does not report post-unkey noise or a later station instead.
+- Keep raw measurement, sensor acquisition and telemetry with their current
+  owners; do not change audio processing, gains or squelch behavior.
+
 ### Verified shared-clock native audio
 
 **Status: Partially implemented.** Independent input/output callbacks, local
@@ -47,31 +65,6 @@ adapter path remains pending under ADRs 0003, 0025, and 0027.
 - The implemented `status_snapshot_interval_ms` has per-node overrides, a
   global fallback, and a 50 ms default. RF edge events publish immediately;
   periodic snapshots publish at the first callback ending at or after their deadline.
-
-**Material decisions needed before implementation**
-
-None.
-
-### Scheduler health, overnight inactivity grace, and civil-time validation
-
-**Status: Partially implemented.** Permanent and scheduled groups, fallback
-selection, warnings, macros, and route ownership are implemented. ADR 0017
-still has two implementation gaps and outstanding civil-time regression tests.
-
-**Requirements**
-
-- Expose scheduler control-task submission failures and control-queue delay
-  through health counters and rate-limited warnings.
-- At cold start, retain the preceding selected window's inactivity grace across
-  midnight even when its end time is earlier than `24:00`. Cover an end at
-  `23:59`, five minutes of grace, and startup at `00:01`.
-- Complete the required explicit daylight-saving and clock-step regression
-  fixtures; the existing backward-timestamp tests are not that full validation.
-
-**Decisions recorded**
-
-- Preserve current best-effort scheduling and activity-based inactivity timing.
-- Do not add overnight window syntax, catch-up execution, or durable events.
 
 **Material decisions needed before implementation**
 

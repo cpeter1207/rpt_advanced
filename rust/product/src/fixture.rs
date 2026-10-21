@@ -66,6 +66,7 @@ pub static CONTROL_REVISION: AtomicPtr<std::sync::atomic::AtomicU64> =
     AtomicPtr::new(ptr::null_mut());
 pub static LOCAL_TIME_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static NOTICE_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub static SCHEDULER_NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub static PEER_DIAL_RESULT: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DIAL_DELAY_MS: AtomicUsize = AtomicUsize::new(0);
 /// Fail only the next peer preparation handshake, never active control text.
@@ -101,6 +102,15 @@ unsafe extern "C" fn local_time(
 }
 unsafe extern "C" fn notice(_: *mut c_void, _: *const c_char, _: usize, _: u32) {
     NOTICE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+unsafe extern "C" fn scheduler_notice(_: *mut c_void, text: *const c_char, length: usize) {
+    let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) };
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        SCHEDULER_NOTICES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(text.to_owned());
+    }
 }
 unsafe extern "C" fn reaper() {}
 unsafe extern "C" fn directory_record(
@@ -343,10 +353,10 @@ unsafe extern "C" fn site_snapshot(
     -1
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v6 = crate::abi::rptadv_host_services_v6 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v6>() as u32,
-    abi_version: 6,
-    capability: *b"rptadv.hst6\0",
+static mut HOST: crate::abi::rptadv_host_services_v7 = crate::abi::rptadv_host_services_v7 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v7>() as u32,
+    abi_version: 7,
+    capability: *b"rptadv.hst7\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -380,9 +390,10 @@ static mut HOST: crate::abi::rptadv_host_services_v6 = crate::abi::rptadv_host_s
     peer_elapsed_ms: None,
     peer_step_wake: None,
     peer_set_deadline: None,
+    scheduler_notice: Some(scheduler_notice),
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v6 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v7 {
     &raw const HOST
 }
 

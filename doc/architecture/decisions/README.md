@@ -23,15 +23,15 @@ completion does not imply hardware qualification, release, or deployment.
 | [0006](0006-appliance-control-plane-ingress.md) | Planned; decision accepted | The appliance hosts its OIDC, proxy, and WAF ingress layer. |
 | [0007](0007-echolink-audio-peer-boundary.md) | Planned; decision accepted | EchoLink is an audio-only external-peer adapter. |
 | [0008](0008-transmitter-protection.md) | Implemented | Per-node watchdogs and source-specific kerchunk handling protect transmitters. |
-| [0009](0009-scheduled-actions-and-macros.md) | Implemented; scheduler hardening remains tracked by ADR 0017 | Scheduled actions and macros are validated control-plane work. |
-| [0010](0010-configured-permanent-links-and-replacement-windows.md) | Implemented; scheduler hardening remains tracked by ADR 0017 | Configuration owns permanent direct links and bounded local-time replacement windows. |
+| [0009](0009-scheduled-actions-and-macros.md) | Implemented | Scheduled actions and macros are validated control-plane work. |
+| [0010](0010-configured-permanent-links-and-replacement-windows.md) | Implemented | Configuration owns permanent direct links and bounded local-time replacement windows. |
 | [0011](0011-versioned-functional-components.md) | Implemented (initial existing-function extraction) | Stable radio and controller functions use narrow, independently versioned shared-library boundaries. |
 | [0012](0012-layered-runtime-boundaries.md) | Accepted; ongoing architecture policy | Runtime dependencies point inward through explicit layers. |
 | [0013](0013-rust-owned-implementation-and-asterisk-abi-shims.md) | Implemented; boundary scope partially superseded | Rust owns implementation; C is limited to Asterisk ABI shims. |
 | [0014](0014-object-oriented-rust-design.md) | Accepted; ongoing architecture policy | Rust implementation uses object-oriented composition. |
 | [0015](0015-idiomatic-high-level-rust.md) | Accepted; ongoing architecture policy | Rust uses high-level, idiomatic domain modeling behind narrow ABI boundaries. |
 | [0016](0016-code-derived-openapi-contract.md) | Planned; decision accepted | Control APIs are versioned and code-derived. |
-| [0017](0017-scheduler-route-lifecycle-and-civil-time.md) | Partially implemented; scheduler health, overnight cold-start grace, and civil-time validation pending | Scheduler recovery has continuous route ownership and explicit civil-time semantics. |
+| [0017](0017-scheduler-route-lifecycle-and-civil-time.md) | Implemented | Scheduler recovery has continuous route ownership, observable control health, and explicit civil-time semantics. |
 | [0018](0018-dynamic-linking-for-external-components.md) | Partially superseded | External and separately released project components are dynamically linked. |
 | [0019](0019-tolerant-configuration-resolution.md) | Implemented for current configuration parsing and resolution; ongoing policy | Unknown configuration resolves through warnings and sensible defaults. |
 | [0020](0020-rust-dylibs-and-external-c-shims.md) | Partially superseded | Rust `dylib`s separate private components. |

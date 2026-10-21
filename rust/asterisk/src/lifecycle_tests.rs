@@ -48,7 +48,7 @@ unsafe extern "C" fn site_command(
 }
 
 unsafe extern "C" fn start(
-    _: *const ffi::rptadv_host_services_v6,
+    _: *const ffi::rptadv_host_services_v7,
     _: *const ffi::rptadv_control_descriptor_v1,
     _: *const ffi::rptadv_file_descriptor,
     _: *const ffi::rptadv_speech_descriptor,

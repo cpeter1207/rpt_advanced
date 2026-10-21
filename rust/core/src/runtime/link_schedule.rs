@@ -43,6 +43,12 @@ pub struct ReplacementSpec {
 pub(crate) struct ScheduleWarning {
     /// Stable catalog message ID.
     pub message_id: String,
+    /// Whether the upcoming boundary connects rather than disconnects the target.
+    pub connecting: bool,
+    /// Effective configured group name or the exact standalone remote node.
+    pub target: String,
+    /// Whether speech must identify the target as a node and spell its digits.
+    pub target_is_node: bool,
     /// Expected time until the related boundary, rounded only during formatting.
     pub remaining_ms: u64,
     /// Deadline after which this warning must no longer be queued.
@@ -64,6 +70,23 @@ struct Route {
     paused: bool,
     pending: Option<u64>,
 }
+/// Stable calendar occurrence, independent of a captured monotonic deadline estimate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EndOccurrence {
+    /// Provider-owned date identity before or during the selected window.
+    Scheduled(u64),
+    /// Capture date after the selected end, including a preceding `24:00` end.
+    Elapsed(u16, u8, u8),
+}
+
+impl EndOccurrence {
+    /// Identify an elapsed end without arithmetic on opaque provider identities.
+    fn elapsed(local: CivilTime) -> Self {
+        let (year, month, day, _, _, _) = local.components();
+        Self::Elapsed(year, month, day)
+    }
+}
+
 struct Window {
     spec: ReplacementSpec,
     last_activity: Option<u64>,
@@ -73,7 +96,7 @@ struct Window {
     initial_deadline: Option<u64>,
     start_occurrence: Option<u64>,
     start_warned: Vec<u64>,
-    end_deadline: Option<(u64, u64)>,
+    end_warning_identity: Option<(EndOccurrence, Option<u64>)>,
     end_warned: Vec<u64>,
 }
 
@@ -277,7 +300,7 @@ impl LinkScheduler {
                     initial_deadline: old.and_then(|old| old.initial_deadline),
                     start_occurrence: old.and_then(|old| old.start_occurrence),
                     start_warned: old.map_or_else(Vec::new, |old| old.start_warned.clone()),
-                    end_deadline: old.and_then(|old| old.end_deadline),
+                    end_warning_identity: old.and_then(|old| old.end_warning_identity),
                     end_warned: old.map_or_else(Vec::new, |old| old.end_warned.clone()),
                 }
             })
@@ -386,10 +409,6 @@ impl LinkScheduler {
             {
                 window.last_activity = observed;
                 window.initial_deadline = None;
-                if window.waiting {
-                    window.end_deadline = None;
-                    window.end_warned.clear();
-                }
             }
             let window_active = window.spec.window.matches(&local);
             if !window.initialized {
@@ -414,6 +433,17 @@ impl LinkScheduler {
             } else if window.was_active {
                 window.was_active = false;
                 window.waiting = true;
+                // Crossing the end changes its representation, not its consumed warning leads.
+                if window
+                    .spec
+                    .window
+                    .elapsed_after_end(&local, second)
+                    .is_some()
+                {
+                    if let Some((occurrence, _)) = &mut window.end_warning_identity {
+                        *occurrence = EndOccurrence::elapsed(local);
+                    }
+                }
             }
             if window.waiting {
                 let quiet = window.initial_deadline.map_or_else(
@@ -440,12 +470,14 @@ impl LinkScheduler {
                 }
             }
             if due_warning.is_none() {
+                let route = &self.routes[window.spec.routes[0]].spec;
                 due_warning = next_warning(
                     window,
+                    route,
                     local,
                     second,
                     now_ms,
-                    (warning_gate.source_active)(&self.routes[window.spec.routes[0]].spec.local),
+                    (warning_gate.source_active)(&route.local),
                     warning_gate.capacity,
                 );
             }
@@ -548,6 +580,7 @@ impl LinkScheduler {
 
 fn next_warning(
     window: &mut Window,
+    route: &RouteSpec,
     local: CivilTime,
     second: u8,
     now_ms: u64,
@@ -578,6 +611,9 @@ fn next_warning(
             window.start_warned.push(lead);
             return Some(ScheduleWarning {
                 message_id: message_id.to_owned(),
+                connecting: true,
+                target: route.group_name.as_ref().unwrap_or(&route.remote).clone(),
+                target_is_node: route.group_name.is_none(),
                 remaining_ms,
                 deadline_ms: now_ms.saturating_add(remaining_ms),
             });
@@ -586,30 +622,52 @@ fn next_warning(
     if window.spec.warning_before_end_ms.is_empty() {
         return None;
     }
-    let (end_identity, end_ms) = if window.spec.window.matches(&local) {
-        let (identity, remaining) = window.spec.window.next_end(&local, second)?;
-        (identity, now_ms.saturating_add(remaining))
-    } else if let Some(elapsed) = window.spec.window.elapsed_after_end(&local, second) {
+    let (_, _, _, _, hour, minute) = local.components();
+    let since_midnight_ms =
+        (u64::from(hour) * 3600 + u64::from(minute) * 60 + u64::from(second)) * 1000;
+    // A historical end extends an existing grace period, not today's upcoming warning.
+    // Preserve same-day and preceding 24:00 ends when no grace period is active.
+    let elapsed = window
+        .spec
+        .window
+        .elapsed_after_end(&local, second)
+        .filter(|elapsed| window.waiting || *elapsed <= since_midnight_ms);
+    let (end_identity, end_ms) = if let Some(elapsed) = elapsed {
         (
-            now_ms.saturating_sub(elapsed),
+            window
+                .end_warning_identity
+                .filter(|_| window.waiting)
+                .map_or(EndOccurrence::elapsed(local), |(occurrence, _)| occurrence),
             now_ms.saturating_sub(elapsed),
         )
     } else {
         let (identity, remaining) = window.spec.window.next_end(&local, second)?;
-        (identity, now_ms.saturating_add(remaining))
+        (
+            EndOccurrence::Scheduled(identity),
+            now_ms.saturating_add(remaining),
+        )
     };
-    let deadline = if window.spec.end_inactivity_ms == 0 {
+    let deadline = if let Some(initial_deadline) = window.initial_deadline {
+        initial_deadline
+    } else if window.spec.end_inactivity_ms == 0 {
         end_ms
     } else if let Some(last) = window.last_activity {
         end_ms.max(last.saturating_add(window.spec.end_inactivity_ms))
     } else {
         end_ms.saturating_add(window.spec.end_inactivity_ms)
     };
-    let identity = (end_identity, deadline);
-    if window.end_deadline != Some(identity) {
-        window.end_deadline = Some(identity);
+    // Re-estimating a deadline is not a new occurrence or a new receive-activity period.
+    let previous = window.end_warning_identity;
+    let new_occurrence = previous.is_none_or(|(occurrence, _)| occurrence != end_identity);
+    let reset_inactivity = previous.is_some_and(|(_, last)| last != window.last_activity)
+        && window.spec.end_inactivity_ms != 0
+        && window
+            .last_activity
+            .is_some_and(|last| last.saturating_add(window.spec.end_inactivity_ms) > end_ms);
+    if new_occurrence || reset_inactivity {
         window.end_warned.clear();
     }
+    window.end_warning_identity = Some((end_identity, window.last_activity));
     let remaining_ms = deadline.saturating_sub(now_ms);
     if remaining_ms == 0 {
         return None;
@@ -627,6 +685,9 @@ fn next_warning(
     window.end_warned.push(lead);
     Some(ScheduleWarning {
         message_id: message_id.to_owned(),
+        connecting: false,
+        target: route.group_name.as_ref().unwrap_or(&route.remote).clone(),
+        target_is_node: route.group_name.is_none(),
         remaining_ms,
         deadline_ms: deadline,
     })

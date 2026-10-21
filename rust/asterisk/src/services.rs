@@ -17,7 +17,7 @@ use std::{
 };
 
 pub(crate) unsafe fn text<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
-    if pointer.is_null() && length != 0 {
+    if length > isize::MAX as usize || (pointer.is_null() && length != 0) {
         return None;
     }
     let bytes = if length == 0 {
@@ -92,6 +92,25 @@ unsafe extern "C" fn command_notice(
                     c"failed"
                 }
                 .as_ptr(),
+            );
+        }
+    });
+}
+unsafe extern "C" fn scheduler_notice(_: *mut c_void, pointer: *const c_char, length: usize) {
+    boundary((), || {
+        let Some(text) =
+            (unsafe { text(pointer, length) }).and_then(|value| CString::new(value).ok())
+        else {
+            return;
+        };
+        unsafe {
+            ffi::ast_log(
+                ffi::__LOG_WARNING as i32,
+                c"rust/asterisk/services.rs".as_ptr(),
+                0,
+                c"scheduler".as_ptr(),
+                c"rpt_advanced: %s\n".as_ptr(),
+                text.as_ptr(),
             );
         }
     });
@@ -410,14 +429,14 @@ unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     });
 }
 
-struct Services(ffi::rptadv_host_services_v6);
+struct Services(ffi::rptadv_host_services_v7);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v6 {
-    struct_size: size_of::<ffi::rptadv_host_services_v6>() as u32,
-    abi_version: 6,
-    capability: *b"rptadv.hst6\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v7 {
+    struct_size: size_of::<ffi::rptadv_host_services_v7>() as u32,
+    abi_version: 7,
+    capability: *b"rptadv.hst7\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -451,10 +470,11 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v6 {
     peer_elapsed_ms: None,
     peer_step_wake: None,
     peer_set_deadline: None,
+    scheduler_notice: Some(scheduler_notice),
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v6 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v7 {
     &SERVICES.0
 }
 
