@@ -622,23 +622,34 @@ fn next_warning(
     if window.spec.warning_before_end_ms.is_empty() {
         return None;
     }
-    let (end_identity, end_ms) =
-        if let Some(elapsed) = window.spec.window.elapsed_after_end(&local, second) {
-            (
-                window
-                    .end_warning_identity
-                    .filter(|_| window.waiting)
-                    .map_or(EndOccurrence::elapsed(local), |(occurrence, _)| occurrence),
-                now_ms.saturating_sub(elapsed),
-            )
-        } else {
-            let (identity, remaining) = window.spec.window.next_end(&local, second)?;
-            (
-                EndOccurrence::Scheduled(identity),
-                now_ms.saturating_add(remaining),
-            )
-        };
-    let deadline = if window.spec.end_inactivity_ms == 0 {
+    let (_, _, _, _, hour, minute) = local.components();
+    let since_midnight_ms =
+        (u64::from(hour) * 3600 + u64::from(minute) * 60 + u64::from(second)) * 1000;
+    // A historical end extends an existing grace period, not today's upcoming warning.
+    // Preserve same-day and preceding 24:00 ends when no grace period is active.
+    let elapsed = window
+        .spec
+        .window
+        .elapsed_after_end(&local, second)
+        .filter(|elapsed| window.waiting || *elapsed <= since_midnight_ms);
+    let (end_identity, end_ms) = if let Some(elapsed) = elapsed {
+        (
+            window
+                .end_warning_identity
+                .filter(|_| window.waiting)
+                .map_or(EndOccurrence::elapsed(local), |(occurrence, _)| occurrence),
+            now_ms.saturating_sub(elapsed),
+        )
+    } else {
+        let (identity, remaining) = window.spec.window.next_end(&local, second)?;
+        (
+            EndOccurrence::Scheduled(identity),
+            now_ms.saturating_add(remaining),
+        )
+    };
+    let deadline = if let Some(initial_deadline) = window.initial_deadline {
+        initial_deadline
+    } else if window.spec.end_inactivity_ms == 0 {
         end_ms
     } else if let Some(last) = window.last_activity {
         end_ms.max(last.saturating_add(window.spec.end_inactivity_ms))

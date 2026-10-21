@@ -32,6 +32,132 @@ fn active_configuration(extra: &str) -> String {
     format!("[1000]\nradio_channel=usb\nduplex=full\n{extra}")
 }
 
+fn scheduler_notices() -> Vec<String> {
+    crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clone()
+}
+
+fn clear_scheduler_notices() {
+    crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clear();
+}
+
+#[test]
+fn scheduler_health_status_counts_submission_failure_not_stale_work() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    clear_scheduler_notices();
+    let (engine, call) = selected().unwrap();
+    engine.reloading.store(true, Ordering::Release);
+    let stale = engine.run(|_| Ok(()));
+    engine.reloading.store(false, Ordering::Release);
+    crate::fixture::CONTROL_SUBMIT_MODE.store(1, Ordering::Release);
+    let failed = engine.run(|_| Ok(()));
+    let lost_digits = engine.lost_digits.load(Ordering::Acquire);
+    let notices = scheduler_notices();
+    engine
+        .reload_configuration(document(&active_configuration("")).unwrap())
+        .unwrap();
+    let mut status = Vec::<u8>::new();
+    unsafe extern "C" fn sink(context: *mut c_void, text: *const std::ffi::c_char, length: usize) {
+        let status = unsafe { &mut *context.cast::<Vec<u8>>() };
+        status.extend_from_slice(unsafe { std::slice::from_raw_parts(text.cast(), length) });
+    }
+    let result = unsafe {
+        descriptor().link_status.unwrap()(
+            c"1000".as_ptr(),
+            4,
+            Some(sink),
+            ptr::from_mut(&mut status).cast(),
+        )
+    };
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert_eq!(stale, Err(RuntimeError::Rejected));
+    assert_eq!(failed, Err(RuntimeError::Rejected));
+    assert!(lost_digits);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("task submission failed: Backend"));
+    assert_eq!(result, 0);
+    let status = String::from_utf8(status).unwrap();
+    assert!(
+        status.contains("scheduler submission_failures=1"),
+        "{status}"
+    );
+}
+
+#[test]
+fn scheduler_health_reports_live_cycle_failure_but_not_generation_retirement() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    clear_scheduler_notices();
+    let (engine, call) = selected().unwrap();
+    crate::fixture::CONTROL_REVISION.store(
+        ptr::from_ref(&engine.revision).cast_mut(),
+        Ordering::Release,
+    );
+    crate::fixture::CONTROL_SUBMIT_MODE.store(3, Ordering::Release);
+    engine.pump_observed(engine.clock(), false);
+    crate::fixture::CONTROL_REVISION.store(ptr::null_mut(), Ordering::Release);
+    let mut retired_status = String::new();
+    engine.health.status(&mut retired_status);
+    let retired_notices = scheduler_notices();
+    // An accepted cycle can fail independently of executor admission.
+    let host = engine.host.lock().unwrap().take();
+    engine.pump_observed(engine.clock(), false);
+    *engine.host.lock().unwrap() = host;
+    for _ in 0..2 {
+        crate::fixture::CONTROL_SUBMIT_MODE.store(1, Ordering::Release);
+        engine.pump_observed(engine.clock(), false);
+    }
+    let mut failed_status = String::new();
+    engine.health.status(&mut failed_status);
+    let failed_notices = scheduler_notices();
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert!(
+        retired_status.contains("submission_failures=0 cycle_failures=0"),
+        "{retired_status}"
+    );
+    assert!(retired_notices.is_empty(), "{retired_notices:?}");
+    assert!(
+        failed_status.contains("submission_failures=2 cycle_failures=3"),
+        "{failed_status}"
+    );
+    assert_eq!(failed_notices.len(), 1, "{failed_notices:?}");
+    assert!(failed_notices[0].contains("control cycle failed"));
+}
+
+#[test]
+fn scheduler_health_queue_latency_has_its_own_warning_budget() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    clear_scheduler_notices();
+    let (engine, call) = selected().unwrap();
+    // Inject enqueue times, not scheduling sleeps or performance assertions.
+    for _ in 0..2 {
+        engine.queue_started(Instant::now() - Duration::from_secs(2));
+    }
+    let mut status = String::new();
+    engine.health.status(&mut status);
+    let notices = scheduler_notices();
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert!(status.contains("delayed_tasks=2"), "{status}");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("control queue start delayed"));
+}
+
 #[test]
 fn site_lifecycle_installs_configured_acquisition_before_station_polling() {
     let _serial = crate::fixture::LIFECYCLE

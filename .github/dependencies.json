@@ -41,5 +41,10 @@
     "repository": "rate_adjusting_pcm_ring",
     "sha": "99c2d4f1e6b5927e562b7fcd09a6a2676f653e14",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
+  },
+  {
+    "repository": "librptadvschedule",
+    "sha": "8dae5c758118b5e4525562aedff9fe85ad82f150",
+    "packages": ["librptadvschedule1", "librptadvschedule-dev"]
   }
 ]

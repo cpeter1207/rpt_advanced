@@ -70,31 +70,6 @@ adapter path remains pending under ADRs 0003, 0025, and 0027.
 
 None.
 
-### Scheduler health, overnight inactivity grace, and civil-time validation
-
-**Status: Partially implemented.** Permanent and scheduled groups, fallback
-selection, warnings, macros, and route ownership are implemented. ADR 0017
-still has two implementation gaps and outstanding civil-time regression tests.
-
-**Requirements**
-
-- Expose scheduler control-task submission failures and control-queue delay
-  through health counters and rate-limited warnings.
-- At cold start, retain the preceding selected window's inactivity grace across
-  midnight even when its end time is earlier than `24:00`. Cover an end at
-  `23:59`, five minutes of grace, and startup at `00:01`.
-- Complete the required explicit daylight-saving and clock-step regression
-  fixtures; the existing backward-timestamp tests are not that full validation.
-
-**Decisions recorded**
-
-- Preserve current best-effort scheduling and activity-based inactivity timing.
-- Do not add overnight window syntax, catch-up execution, or durable events.
-
-**Material decisions needed before implementation**
-
-None.
-
 ### EchoLink audio interoperability
 
 **Status: Planned.** No EchoLink adapter is implemented.

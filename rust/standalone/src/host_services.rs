@@ -35,7 +35,7 @@ struct PeerIngress {
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
-    descriptor: Box<abi::rptadv_host_services_v6>,
+    descriptor: Box<abi::rptadv_host_services_v7>,
 }
 
 impl HostServicesOwner {
@@ -63,10 +63,10 @@ impl HostServicesOwner {
             secrets,
             ingress,
         });
-        let descriptor = Box::new(abi::rptadv_host_services_v6 {
-            struct_size: size_of::<abi::rptadv_host_services_v6>() as u32,
-            abi_version: 6,
-            capability: *b"rptadv.hst6\0",
+        let descriptor = Box::new(abi::rptadv_host_services_v7 {
+            struct_size: size_of::<abi::rptadv_host_services_v7>() as u32,
+            abi_version: 7,
+            capability: *b"rptadv.hst7\0",
             context: ptr::from_mut(context.as_mut()).cast(),
             local_time: Some(local_time),
             command_notice: Some(command_notice),
@@ -100,6 +100,7 @@ impl HostServicesOwner {
             peer_elapsed_ms: asynchronous.then_some(peer_elapsed_ms),
             peer_step_wake: asynchronous.then_some(peer_step_wake),
             peer_set_deadline: asynchronous.then_some(peer_set_deadline),
+            scheduler_notice: Some(scheduler_notice),
         });
         Ok(Self {
             context,
@@ -108,7 +109,7 @@ impl HostServicesOwner {
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
-    pub fn descriptor(&self) -> &abi::rptadv_host_services_v6 {
+    pub fn descriptor(&self) -> &abi::rptadv_host_services_v7 {
         let _keep_context_alive = &self.context;
         self.descriptor.as_ref()
     }
@@ -252,6 +253,13 @@ pub(crate) unsafe fn input<'a>(pointer: *const c_char, length: usize) -> Option<
 }
 
 unsafe extern "C" fn noop() {}
+unsafe extern "C" fn scheduler_notice(_: *mut c_void, text: *const c_char, length: usize) {
+    boundary((), || {
+        if let Some(text) = unsafe { input(text, length) } {
+            eprintln!("rpt-advanced: {text}");
+        }
+    });
+}
 
 unsafe extern "C" fn command_notice(
     _: *mut c_void,
@@ -789,16 +797,55 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_notice_writes_valid_borrowed_text_to_stderr() {
+        const CHILD: &str = "RPTADV_SCHEDULER_NOTICE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let notice = super::scheduler_notice;
+            let message = "scheduler queue 50% — Δ;ignored";
+            unsafe {
+                notice(ptr::null_mut(), message.as_ptr().cast(), 26);
+                for (text, length) in [
+                    (ptr::null(), 1),
+                    (c"\xff".as_ptr(), 1),
+                    (c"x".as_ptr(), usize::MAX),
+                ] {
+                    notice(ptr::null_mut(), text, length);
+                }
+            }
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_services::tests::scheduler_notice_writes_valid_borrowed_text_to_stderr",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "rpt-advanced: scheduler queue 50% — Δ\n"
+        );
+    }
+
+    #[test]
     fn host_services_table_is_complete_and_uses_its_owned_context() {
         let owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
-            size_of::<crate::abi::rptadv_host_services_v6>() as u32
+            size_of::<crate::abi::rptadv_host_services_v7>() as u32
         );
-        assert_eq!(api.abi_version, 6);
-        assert_eq!(api.capability, *b"rptadv.hst6\0");
+        assert_eq!(api.abi_version, 7);
+        assert_eq!(api.capability, *b"rptadv.hst7\0");
         assert!(!api.context.is_null());
         assert!(api.local_time.is_some());
         assert!(api.peer_dial.is_some());

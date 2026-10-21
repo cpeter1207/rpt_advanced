@@ -77,7 +77,63 @@ extern "C" fn ast_replace_sigchld() {}
 #[unsafe(no_mangle)]
 extern "C" fn ast_unreplace_sigchld() {}
 #[unsafe(no_mangle)]
-extern "C" fn ast_log(_: i32, _: *const c_char, _: i32, _: *const c_char, _: *const c_char) {}
+unsafe extern "C" fn ast_log(
+    level: i32,
+    _: *const c_char,
+    _: i32,
+    function: *const c_char,
+    format: *const c_char,
+    text: *const c_char,
+) {
+    if unsafe { std::ffi::CStr::from_ptr(function) } == c"scheduler" {
+        SCHEDULER_LOGS.with(|logs| {
+            logs.borrow_mut().push((
+                level,
+                unsafe { std::ffi::CStr::from_ptr(format) }
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                unsafe { std::ffi::CStr::from_ptr(text) }
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            ));
+        });
+    }
+}
+
+thread_local! {
+    static SCHEDULER_LOGS: std::cell::RefCell<Vec<(i32, String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[test]
+fn scheduler_notice_uses_warning_logger_with_text_as_data() {
+    SCHEDULER_LOGS.with(|logs| logs.borrow_mut().clear());
+    let notice = descriptor().scheduler_notice.unwrap();
+    let message = "scheduler queue 50% — Δ;ignored";
+    unsafe {
+        notice(ptr::null_mut(), message.as_ptr().cast(), 26);
+        for (text, length) in [
+            (ptr::null(), 1),
+            (c"\xff".as_ptr(), 1),
+            (c"x".as_ptr(), usize::MAX),
+            (c"x".as_ptr(), 2),
+        ] {
+            notice(ptr::null_mut(), text, length);
+        }
+    }
+    SCHEDULER_LOGS.with(|logs| {
+        assert_eq!(
+            *logs.borrow(),
+            [(
+                3,
+                "rpt_advanced: %s\n".into(),
+                "scheduler queue 50% — Δ".into()
+            )]
+        );
+    });
+}
 
 unsafe extern "C" fn current(_: *mut c_void) -> u32 {
     1
@@ -299,7 +355,7 @@ fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
         command_notice(null, c"100".as_ptr(), 3, 0);
     }
     assert_eq!(boundary(-1, || panic!("callback fault")), -1);
-    assert_eq!(descriptor().abi_version, 6);
+    assert_eq!(descriptor().abi_version, 7);
 }
 
 #[test]

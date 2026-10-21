@@ -564,7 +564,8 @@ impl ScheduledWindow {
         overlaps != 0
     }
 
-    /// Elapsed wall-clock milliseconds after this selected date's window end.
+    /// Civil milliseconds since the most recent selected exclusive end, across dates.
+    /// Active windows and times preceding every selected end have no elapsed value.
     pub fn elapsed_after_end(&self, local: &CivilTime, second: u8) -> Option<u64> {
         let mut present = 0;
         let mut elapsed = 0;

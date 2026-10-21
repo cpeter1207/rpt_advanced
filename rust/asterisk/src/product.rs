@@ -46,7 +46,7 @@ impl Product {
     /// remains loaded until a successful product stop.
     pub unsafe fn start(
         &self,
-        host: *const ffi::rptadv_host_services_v6,
+        host: *const ffi::rptadv_host_services_v7,
         control: *const ffi::rptadv_control_descriptor_v1,
         file: *const ffi::rptadv_file_descriptor,
         speech: *const ffi::rptadv_speech_descriptor,

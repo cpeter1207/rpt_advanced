@@ -1,6 +1,6 @@
 # ADR 0017: Scheduler route lifecycle and civil-time semantics
 
-Status: Partially implemented; scheduler health, overnight cold-start grace, and civil-time validation pending
+Status: Implemented
 
 ## Context
 
@@ -79,7 +79,11 @@ and represents it internally as minute 1440. `24:00` is never a start time.
 Cross-midnight windows remain unsupported until a single explicit overnight
 window semantic is approved; two same-route sections are not an emulation.
 At cold start, a post-window inactivity grace calculation must also examine the
-immediately preceding selected window so a quiet interval may cross midnight.
+most recent selected ended window so a quiet interval may cross midnight or
+unselected days. The remaining grace becomes a monotonic deadline; warning
+lead times use that same deadline, not a reconstructed pre-start process time.
+The shared schedule provider searches at most seven weekday offsets or the
+validated explicit-date list. Active windows do not yield a historical end.
 
 ### Scheduling pressure and overlaps
 
@@ -89,6 +93,25 @@ The scheduler must expose health counters and rate-limited warnings for failed
 task submission and control-queue delay. A bounded IAX dial may occupy the
 serialized control queue for its dial budget, delaying later control work but
 never audio; that delay must remain observable in status and logs.
+
+The product records actual executor submission failures, failed live scheduler
+cycles, last and maximum enqueue-to-start delay in microseconds, and tasks
+delayed by at least one second. This threshold is one calendar-check interval;
+shorter delays remain visible in last/maximum values. Retired-generation
+rejection during reload or shutdown is not a failed submission or live cycle.
+Counters belong to the shared executor, survive reload, and reset when the
+product starts again. Status samples each atomic field independently.
+
+Admission and cycle warnings share a monotonic one-minute rate limit; queue
+delay warnings have an independent one-minute limit. Counts are never
+rate-limited. Existing notice callbacks encode command completion or directory
+reason codes; neither can carry these warnings without changing its contract.
+The required host-services ABI 7 `scheduler_notice` callback
+forwards control-only borrowed UTF-8 to standalone stderr/journald or Asterisk's
+warning logger. Product ABI 5, control-executor ABI 1, and DSO SONAMEs are
+unchanged. Rebuild and install the product and both applicable hosts together;
+older or incomplete host tables are rejected before use. No alpha compatibility
+table, new configuration parameter, or audio-callback logging is added.
 
 Multiple matching replacement windows form a union. Every active or deferred
 replacement is requested and each named primary is suppressed. There is no
@@ -115,7 +138,7 @@ These rules deliberately favor predictable current-time behavior over replaying
 past RF or link operations. Persistent once-ever events, overnight windows, and
 durable telemetry delivery are separate requirements.
 
-## Implementation status — 2026-10-04
+## Implementation status — 2026-10-21
 
 The group-specific topology exception, final current-policy gate, continuous
 route ownership, topology-blocked retry, input-activity idle handoff, and
@@ -124,20 +147,20 @@ integration tests. Same-peer schedule reuse is allowed only across disjoint
 windows; overlapping duplicate scheduled peers are rejected by configuration
 validation, with boundary and integration coverage.
 
-### Remaining work — 2026-10-17
+The shared scheduler retains ordinary end-time grace across calendar boundaries,
+including a `23:59` end, five-minute grace, and `00:01` startup. Provider and ABI
+tests use independent expected elapsed values; controller tests verify route
+ownership, monotonic expiry, and warning deadlines. The provider's ABI 1 and
+SONAME are unchanged. Before an upcoming window, warnings still use its future
+end rather than the newly visible historical end.
 
-Scheduler health counters and rate-limited warnings for failed control-task
-submission and queue delay are not implemented. The product ticker currently
-discards the result of `engine.pump`; the required status/log reporting remains
-open.
+Product lifecycle tests cover real submission rejection, reload retirement,
+live-cycle failure, rate-limited host reporting, reload-persistent counters, and
+status output. Both host adapters validate and forward the required warning sink.
 
-Cold-start inactivity grace handles a preceding window ending at `24:00`, but
-not a preceding ordinary end time across midnight. For example, a window ending
-at `23:59` with five minutes of grace is not retained when starting at `00:01`.
-The schedule provider's `elapsed_after_end` only consults the previous date for
-`24:00` endings. Extend that boundary and its deterministic tests; do not add
-overnight window syntax or durable scheduling.
-
-The explicit DST-transition and clock-step regression scenarios required above
-also remain to be completed. Existing backward-timestamp tests do not establish
-the required daylight-saving transition behavior as verified.
+Isolated-process tests set an explicit POSIX timezone and check `tm_isdst` for
+both physical fall-back hours and the spring-forward gap. They exercise event
+deduplication, repeated window membership, skipped windows, forward/backward
+clock steps, monotonic inactivity, once-event lifetime, and reload identity.
+These checks do not add catch-up, overnight syntax, durable events, or a new
+scheduling policy.

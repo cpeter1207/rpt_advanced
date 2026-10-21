@@ -30,7 +30,7 @@ pub enum PeerInput<'a> {
 
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(abi::rptadv_host_services_v6);
+pub struct HostServices(abi::rptadv_host_services_v7);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
@@ -151,10 +151,11 @@ impl Backend for HostServices {
     }
 }
 
-fn complete(api: &abi::rptadv_host_services_v6) -> bool {
+fn complete(api: &abi::rptadv_host_services_v7) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
+        api.scheduler_notice.is_some(),
         api.reaper_acquire.is_some(),
         api.reaper_release.is_some(),
         api.directory_record.is_some(),
@@ -190,15 +191,15 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v6) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v7) -> Result<Self, Error> {
         if pointer.is_null() {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        if size < size_of::<abi::rptadv_host_services_v6>() {
+        if size < size_of::<abi::rptadv_host_services_v7>() {
             return Err(Error::Admission);
         }
-        // ABI 6 requires a complete table, including the site operations.
+        // ABI 7 requires the complete table, including scheduler warnings.
         let api = unsafe { pointer.read() };
         let async_count = [
             api.peer_step_attach.is_some(),
@@ -218,8 +219,8 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
-        if api.abi_version != 6
-            || api.capability != *b"rptadv.hst6\0"
+        if api.abi_version != 7
+            || api.capability != *b"rptadv.hst7\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 5)
@@ -335,6 +336,12 @@ impl HostServices {
                 local.len(),
                 u32::from(completed),
             );
+        }
+    }
+    /// Forward a borrowed scheduler warning on the non-audio control path.
+    pub fn scheduler_notice(&self, text: &str) {
+        unsafe {
+            self.0.scheduler_notice.unwrap()(self.0.context, text.as_ptr().cast(), text.len());
         }
     }
     /// Child-reaper acquisition callback for process-backed media providers.

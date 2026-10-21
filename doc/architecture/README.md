@@ -25,7 +25,7 @@ The native radio transmit callback returns PTT and CTCSS enable separately; its
 activity policy remains in the controller, as specified by
 [ADR 0042](decisions/0042-activity-scoped-ctcss-encode.md).
 Before either incoming or outgoing peer media starts, the product binds it to
-its node's existing radio lease. Host-services ABI 6 forwards this control-only
+its node's existing radio lease. Host-services ABI 7 forwards this control-only
 operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
 USBRadioPlus retains ownership of the configured per-peer graph and its reload
 lifetime. See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
@@ -523,11 +523,16 @@ defines the full reload, hardware-handoff, and failure policy.
 - Scheduled work is wall-clock control-plane work. A due event queues its
   optional message before its validated controller operation. It settles the
   dispatch before releasing the runtime lock and preserves same-time
-  configuration order. The ticker submits one FIFO control task each second,
-  while runtime calendar-minute de-duplicates event occurrences. This lets a
+  configuration order. The ticker repeats the control pump with a 10 ms sleep
+  and checks calendar scheduling once per captured wall second, while runtime
+  calendar-minute de-duplicates event occurrences. This lets a
   configured post-window quiet-time deadline expire promptly without entering a
   radio or audio callback. The detailed civil-time, reload, and no-catch-up
   policy is defined by [ADR 0017](decisions/0017-scheduler-route-lifecycle-and-civil-time.md).
+  Existing link-status output includes shared-executor submission/cycle failures
+  and queue-delay last/max/count. Host-services ABI 7 forwards rate-limited
+  control warnings to the native host logger; the control-executor ABI stays 1.
+  Historical cold-start grace and its warnings share one monotonic deadline.
 - Control-path execution is a replaceable adapter capability, not scheduling
   policy or a media queue. Its Asterisk taskprocessor backend preserves current
   FIFO execution and failure/reload behavior. Standalone async media under

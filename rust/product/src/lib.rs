@@ -15,6 +15,7 @@ pub mod lifecycle;
 pub mod link;
 pub mod media;
 mod radio_configuration;
+mod scheduler_health;
 pub mod services;
 pub mod site;
 #[cfg(test)]
@@ -25,6 +26,9 @@ pub mod worker;
 
 #[cfg(test)]
 mod fixture;
+
+#[cfg(all(test, unix))]
+mod civil_time_tests;
 
 /// Failure at a host-services boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

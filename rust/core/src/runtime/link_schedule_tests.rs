@@ -562,6 +562,75 @@ fn cold_start_grace_and_real_receive_activity_have_distinct_deadlines() {
 }
 
 #[test]
+fn cold_start_retains_the_last_selected_window_grace_across_midnight() {
+    for (days, startup, grace, remaining) in [
+        (
+            "Monday",
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 0, 1).unwrap(),
+            300_000,
+            180_000,
+        ),
+        (
+            "Friday",
+            CivilTime::new(2026, 9, 20, Weekday::Sunday, 0, 1).unwrap(),
+            172_800_000,
+            86_280_000,
+        ),
+    ] {
+        for enabled in [false, true] {
+            let mut schedule = scheduler();
+            schedule.windows[0].spec.window =
+                ScheduledWindow::parse(Some(days), None, "23:00", "23:59").unwrap();
+            schedule.windows[0].spec.end_inactivity_ms = if enabled { grace } else { 0 };
+            schedule.tick(startup, 0, 1_000, |_| None, |_| false);
+            let attach = schedule.next_operation().unwrap();
+            assert_eq!(attach.remote(), if enabled { "3000" } else { "2000" });
+            assert!(schedule.complete(&attach, true));
+            if enabled {
+                schedule.tick(startup, 1, 1_000 + remaining - 1, |_| None, |_| true);
+                assert!(schedule.next_operation().is_none());
+                schedule.tick(startup, 2, 1_000 + remaining, |_| None, |_| true);
+                let detach = schedule.next_operation().unwrap();
+                assert_eq!(detach.remote(), "3000");
+                assert_eq!(detach.action(), LinkTransition::Detach);
+            }
+        }
+    }
+}
+
+#[test]
+fn next_end_warning_before_today_window_ignores_a_historical_end() {
+    let mut schedule = warning_scheduler(&[], &[4_200_000]);
+    schedule.windows[0].spec.end_inactivity_ms = 0;
+    let warning = tick_warnings(
+        &mut schedule,
+        civil(11, 50),
+        0,
+        100_000,
+        |_| None,
+        |_| false,
+    )
+    .expect("the warning refers to today's upcoming 13:00 end");
+    assert_eq!(warning.remaining_ms, 4_200_000);
+    assert!(!warning.connecting);
+}
+
+#[test]
+fn cold_start_end_warning_uses_the_remaining_monotonic_grace() {
+    let mut schedule = warning_scheduler(&[], &[180_000]);
+    schedule.windows[0].spec.window =
+        ScheduledWindow::parse(Some("Monday"), None, "23:00", "23:59").unwrap();
+    schedule.windows[0].spec.end_inactivity_ms = 300_000;
+    let startup = CivilTime::new(2026, 9, 15, Weekday::Tuesday, 0, 1).unwrap();
+    let warning = tick_warnings(&mut schedule, startup, 0, 1_000, |_| None, |_| false)
+        .expect("two elapsed civil minutes leave exactly three minutes of grace");
+    assert_eq!(warning.remaining_ms, 180_000);
+    assert_eq!(warning.deadline_ms, 181_000);
+    assert!(!warning.connecting);
+    assert!(tick_warnings(&mut schedule, startup, 1, 2_000, |_| None, |_| true).is_none());
+}
+
+#[test]
 fn activity_at_monotonic_zero_is_observed_and_survives_reload() {
     let mut never_observed = scheduler();
     never_observed.tick(civil(12, 59), 0, 0, |_| None, |_| false);

@@ -4,6 +4,7 @@ use crate::{
     control::{ControlClient, Descriptor as ControlDescriptor},
     host::Host,
     media::{FileDescriptor, NativeMediaPreparer, SpeechDescriptor},
+    scheduler_health::SchedulerHealth,
     services::HostServices,
     site::backends::SiteBackends,
 };
@@ -62,6 +63,7 @@ pub(crate) struct Engine {
     host: Mutex<Option<Host>>,
     services: HostServices,
     origin: Instant,
+    health: SchedulerHealth,
     accepting: AtomicBool,
     reloading: AtomicBool,
     revision: AtomicU64,
@@ -393,26 +395,59 @@ impl Engine {
         let engine = Arc::clone(self);
         let revision = self.revision.load(Ordering::Acquire);
         let (send, receive) = mpsc::sync_channel(1);
+        self.enqueue(move || {
+            let result = if !engine.accepting.load(Ordering::Acquire)
+                || (!reload && engine.reloading.load(Ordering::Acquire))
+                || engine.revision.load(Ordering::Acquire) != revision
+            {
+                Err(RuntimeError::Rejected)
+            } else {
+                let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
+                host.as_mut()
+                    .ok_or(RuntimeError::Rejected)
+                    .and_then(operation)
+            };
+            let _ = send.send(result);
+        })
+        .inspect_err(|_| {
+            self.lost_digits.store(true, Ordering::Release);
+        })?;
+        receive.recv().map_err(|_| RuntimeError::Rejected)?
+    }
+    /// Observe the shared executor without adding work or changing captured policy time.
+    fn enqueue(
+        self: &Arc<Self>,
+        operation: impl FnOnce() + Send + 'static,
+    ) -> Result<(), RuntimeError> {
+        let engine = Arc::clone(self);
+        let enqueued = Instant::now();
         self.executor
             .submit(ControlTask::lifecycle(move || {
-                let result = if !engine.accepting.load(Ordering::Acquire)
-                    || (!reload && engine.reloading.load(Ordering::Acquire))
-                    || engine.revision.load(Ordering::Acquire) != revision
-                {
-                    Err(RuntimeError::Rejected)
-                } else {
-                    let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
-                    host.as_mut()
-                        .ok_or(RuntimeError::Rejected)
-                        .and_then(operation)
-                };
-                let _ = send.send(result);
+                engine.queue_started(enqueued);
+                operation();
             }))
-            .map_err(|_| {
-                self.lost_digits.store(true, Ordering::Release);
+            .map_err(|rejected| {
+                if self.health.submission_failed(self.elapsed_ms()) {
+                    self.services.scheduler_notice(&format!(
+                        "scheduler control task submission failed: {:?}",
+                        rejected.reason
+                    ));
+                }
                 RuntimeError::Rejected
-            })?;
-        receive.recv().map_err(|_| RuntimeError::Rejected)?
+            })
+    }
+    /// Publish latency only when its independent monotonic warning budget allows it.
+    fn queue_started(&self, enqueued: Instant) {
+        let delay_us = enqueued.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        if self.health.started(delay_us, self.elapsed_ms()) {
+            self.services.scheduler_notice(&format!(
+                "scheduler control queue start delayed {delay_us} us (warning threshold 1000000 us)"
+            ));
+        }
+    }
+    /// Use monotonic process time for diagnostics, independent of civil-clock steps.
+    fn elapsed_ms(&self) -> u64 {
+        self.origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
     }
     pub(crate) fn clock(&self) -> RuntimeClock {
         capture(self.origin, self.services)
@@ -559,7 +594,7 @@ impl Engine {
                         last_second = Some(clock.wall_seconds);
                     }
                     if !engine.reloading.load(Ordering::Acquire) {
-                        let _ = engine.pump(clock, schedule);
+                        engine.pump_observed(clock, schedule);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
@@ -567,6 +602,16 @@ impl Engine {
             .map_err(|_| RuntimeError::Preparation)?;
         *self.ticker.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
         Ok(())
+    }
+    /// Report live-cycle failures; expected reload/unload retirement is not a fault.
+    fn pump_observed(self: &Arc<Self>, clock: RuntimeClock, schedule: bool) {
+        let revision = self.revision.load(Ordering::Acquire);
+        if let Err(error) = self.pump(clock, schedule) {
+            if self.current(revision) && self.health.cycle_failed(self.elapsed_ms()) {
+                self.services
+                    .scheduler_notice(&format!("scheduler control cycle failed: {error:?}"));
+            }
+        }
     }
     fn stop(self: &Arc<Self>) -> bool {
         self.accepting.store(false, Ordering::Release);
@@ -597,8 +642,7 @@ impl Engine {
         let engine = Arc::clone(self);
         let (send, receive) = mpsc::sync_channel(1);
         if self
-            .executor
-            .submit(ControlTask::lifecycle(move || {
+            .enqueue(move || {
                 let mut host = engine.host.lock().unwrap_or_else(|e| e.into_inner());
                 #[cfg(test)]
                 let stop_mode = HOST_STOP_MODE.swap(0, Ordering::AcqRel);
@@ -624,7 +668,7 @@ impl Engine {
                     *host = None;
                 }
                 let _ = send.send((stopped, retired));
-            }))
+            })
             .is_err()
         {
             return false;
@@ -711,7 +755,7 @@ unsafe fn incoming_identity(
 /// # Safety
 /// The complete descriptor/code allocations must remain live through successful stop.
 unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v6,
+    host: *const abi::rptadv_host_services_v7,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
@@ -773,6 +817,7 @@ unsafe extern "C" fn rptadv_product_start(
             host: Mutex::new(None),
             services,
             origin,
+            health: SchedulerHealth::default(),
             accepting: AtomicBool::new(true),
             reloading: AtomicBool::new(false),
             revision: AtomicU64::new(1),
@@ -787,22 +832,19 @@ unsafe extern "C" fn rptadv_product_start(
         let target = Arc::clone(&engine);
         let candidate = Arc::clone(&sites);
         let (send, receive) = mpsc::sync_channel(1);
-        engine
-            .executor
-            .submit(ControlTask::lifecycle(move || {
-                let result = Host::start(document, media, services, origin, clock);
-                let result = result.map(|mut host| {
-                    let (acquisition, radio) = candidate
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take()
-                        .expect("one prepared initial site owner");
-                    host.install_sites(acquisition, radio);
-                    *target.host.lock().unwrap_or_else(|e| e.into_inner()) = Some(host)
-                });
-                let _ = send.send(result);
-            }))
-            .map_err(|_| RuntimeError::Rejected)?;
+        engine.enqueue(move || {
+            let result = Host::start(document, media, services, origin, clock);
+            let result = result.map(|mut host| {
+                let (acquisition, radio) = candidate
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                    .expect("one prepared initial site owner");
+                host.install_sites(acquisition, radio);
+                *target.host.lock().unwrap_or_else(|e| e.into_inner()) = Some(host)
+            });
+            let _ = send.send(result);
+        })?;
         if let Err(error) = receive.recv().unwrap_or(Err(RuntimeError::Rejected)) {
             if !engine.stop() {
                 *selected = Some(engine);
@@ -978,7 +1020,8 @@ unsafe extern "C" fn rptadv_product_link_status(
         let sink = sink.ok_or(RuntimeError::Rejected)?;
         let (engine, _call) = selected()?;
         let local = unsafe { input(local, local_length) }?.to_owned();
-        let text = engine.run(move |host| host.status_text(&local))?;
+        let mut text = engine.run(move |host| host.status_text(&local))?;
+        engine.health.status(&mut text);
         unsafe { sink(sink_context, text.as_ptr().cast(), text.len()) };
         Ok(())
     }))
