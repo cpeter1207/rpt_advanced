@@ -21,7 +21,7 @@ use crate::{
     },
     controller::{ActivitySnapshot, ControllerControl, NodeController, ParrotLevels},
     media::{PreparedAudio, StationMediaSession},
-    messages::{Message, MessageArgument, MessageCatalog},
+    messages::{Message, MessageArgument, MessageCatalog, MessageForms},
     schedule::{CivilTime, ScheduledWindow},
     template::MessageTemplate,
     time::{TimeAnnouncement, TimeFormat},
@@ -864,17 +864,27 @@ impl<A: Send, C: Send> Runtime<A, C> {
             );
             if let Some(warning) = warning.filter(|warning| clock.now_ms < warning.deadline_ms) {
                 let seconds = warning.remaining_ms.div_ceil(1000);
-                let forms = node.control.catalog.format_schedule_warning(seconds);
+                let target_node = warning.target_is_node.then_some(warning.target.as_str());
+                let target = MessageForms {
+                    text: warning.target.clone(),
+                    tts: render::telemetry_speech(&warning.target, target_node.as_slice()),
+                    morse: warning.target.clone(),
+                };
+                let forms = node.control.catalog.format_schedule_warning(
+                    seconds,
+                    civil,
+                    &target,
+                    warning.connecting,
+                );
                 let queued = forms
                     .map_err(|_| RuntimeError::Preparation)
                     .and_then(|forms| {
-                        let spoken = render::telemetry_speech(&forms.tts, &[]);
                         queue_status_media(
                             &mut node.control.telemetry,
                             &mut node.control.media_session,
                             &node.status,
                             &forms.morse,
-                            &spoken,
+                            &forms.tts,
                             None,
                         )
                     });

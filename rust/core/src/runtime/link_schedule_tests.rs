@@ -155,6 +155,155 @@ fn schedule_warning_end_uses_expected_inactivity_deadline() {
 }
 
 #[test]
+fn schedule_end_warning_is_not_rearmed_by_control_tick_jitter() {
+    for after_end in [false, true] {
+        for skip_active in [false, true] {
+            let mut schedule = warning_scheduler(&[], &[60_000]);
+            if !after_end {
+                schedule.windows[0].spec.end_inactivity_ms = 0;
+            }
+            let (hour, minute, start) = if after_end {
+                (13, 0, 61_000)
+            } else {
+                (12, 59, 1_000)
+            };
+            let first = tick_warnings(
+                &mut schedule,
+                civil(hour, minute),
+                0,
+                start,
+                |_| None,
+                |_| skip_active,
+            );
+            assert_eq!(first.is_some(), !skip_active);
+            for (second, offset) in [(1, 1003), (2, 2001), (3, 3008)] {
+                assert!(
+                    tick_warnings(
+                        &mut schedule,
+                        civil(hour, minute),
+                        second,
+                        start + offset,
+                        |_| None,
+                        |_| false,
+                    )
+                    .is_none(),
+                    "after_end={after_end} skip_active={skip_active} second={second}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn schedule_end_warning_stays_consumed_when_the_window_enters_grace() {
+    for midnight in [false, true] {
+        for capacity_at_end in [false, true] {
+            let mut schedule = warning_scheduler(&[], &[61_000]);
+            if midnight {
+                schedule.windows[0].spec.window =
+                    ScheduledWindow::parse(None, Some("2026-09-15"), "23:00", "24:00").unwrap();
+            }
+            let before = if midnight {
+                civil(23, 59)
+            } else {
+                civil(12, 59)
+            };
+            let after = if midnight {
+                CivilTime::new(2026, 9, 16, Weekday::Wednesday, 0, 0).unwrap()
+            } else {
+                civil(13, 0)
+            };
+            assert!(tick_warnings(&mut schedule, before, 59, 1_000, |_| None, |_| false).is_some());
+            assert!(
+                schedule
+                    .tick_with_warnings(
+                        after,
+                        0,
+                        2_003,
+                        |_| None,
+                        |_| false,
+                        WarningGate {
+                            source_active: |_: &str| false,
+                            capacity: capacity_at_end
+                        },
+                    )
+                    .is_none()
+            );
+            assert!(tick_warnings(&mut schedule, after, 1, 3_001, |_| None, |_| false).is_none());
+        }
+    }
+}
+
+#[test]
+fn schedule_end_warning_rearms_only_when_receive_activity_resets_inactivity() {
+    let mut schedule = warning_scheduler(&[], &[60_000]);
+    let time = civil(13, 0);
+    assert!(tick_warnings(&mut schedule, time, 0, 61_000, |_| Some(61_000), |_| false).is_some());
+    assert!(tick_warnings(&mut schedule, time, 1, 62_003, |_| Some(61_000), |_| false).is_none());
+    let reset = tick_warnings(&mut schedule, time, 2, 63_001, |_| Some(63_001), |_| false).unwrap();
+    assert_eq!(reset.remaining_ms, 60_000);
+    assert!(tick_warnings(&mut schedule, time, 3, 64_008, |_| Some(63_001), |_| false).is_none());
+}
+
+#[test]
+fn schedule_end_warning_stays_consumed_when_activity_does_not_extend_the_deadline() {
+    let mut schedule = warning_scheduler(&[], &[600_000]);
+    assert!(
+        tick_warnings(
+            &mut schedule,
+            civil(12, 50),
+            0,
+            1_000,
+            |_| Some(0),
+            |_| false,
+        )
+        .is_some()
+    );
+    assert!(
+        tick_warnings(
+            &mut schedule,
+            civil(12, 51),
+            0,
+            61_003,
+            |_| Some(61_003),
+            |_| false,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn schedule_warning_identifies_transition_and_exact_target() {
+    for (remote, group_name, target, target_is_node) in [
+        ("3000", None, "3000", true),
+        ("1", None, "1", true),
+        ("3000", Some("Net 42"), "Net 42", false),
+        ("3000", Some("3000"), "3000", false),
+    ] {
+        let mut schedule = warning_scheduler(&[60_000], &[60_000]);
+        schedule.routes[1].spec.remote = remote.into();
+        schedule.routes[1].spec.group_name = group_name.map(str::to_owned);
+        schedule.windows[0].spec.end_inactivity_ms = 0;
+        for (hour, minute, now_ms, connecting) in
+            [(11, 59, 1_000, true), (12, 59, 3_601_000, false)]
+        {
+            let warning = tick_warnings(
+                &mut schedule,
+                civil(hour, minute),
+                0,
+                now_ms,
+                |_| None,
+                |_| false,
+            )
+            .unwrap();
+            assert_eq!(warning.connecting, connecting);
+            assert_eq!(warning.target, target);
+            assert_eq!(warning.target_is_node, target_is_node);
+        }
+    }
+}
+
+#[test]
 fn schedule_warning_skips_active_input_and_reenables_after_inactivity_reset() {
     let mut schedule = warning_scheduler(&[], &[60_000]);
     schedule.tick(civil(12, 59), 0, 1_000, |_| None, |_| false);

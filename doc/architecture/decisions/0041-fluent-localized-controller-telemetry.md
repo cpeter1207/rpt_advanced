@@ -49,6 +49,21 @@ wording belongs in the English catalog and is covered by its completeness and
 formatting tests. Locale errors are reported as configuration warnings when an
 English fallback is possible.
 
+Scheduled-link warnings identify the scheduled group or node and distinguish
+connecting from disconnecting. A reusable control-plane duration formatter
+returns localized text, speech, and Morse forms. It retains all nonzero units
+from months through seconds; zero is expressed as zero seconds. Month length
+uses the current local Gregorian month, including leap years. Fluent owns unit
+plurals and list joining, including commas and the final conjunction. Morse
+uses M, W, D, H, M, and S for months, weeks, days, hours, minutes, and seconds.
+Only node identities are spelled as digits; duration quantities remain ordinary
+numbers. Warning eligibility, deadlines, input-idle policy, and telemetry
+serialization are unchanged.
+Unit and target fragments retain the catalog's 127-byte per-form bound. Their
+joined duration and warning may exceed one fragment; their budgets include the
+bounded inputs plus one catalog-sized literal for each join. The existing
+streamed telemetry producer handles that composition as one playback request.
+
 ## Implementation status — 2026-10-16
 
 The packaged `en-US` catalog, per-node/global locale selection, administrator

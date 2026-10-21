@@ -1,4 +1,4 @@
-use super::messages::{CatalogError, Message, MessageCatalog};
+use super::messages::{CatalogError, Message, MessageCatalog, MessageForms};
 
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
@@ -228,26 +228,210 @@ fn message_catalog_formats_status_rejection_groups_and_schedule_warnings() {
     assert_eq!(
         catalog
             .format(&Message::ScheduledLinkChange {
-                time_remaining: "60 seconds",
+                target: "Handiham Net",
+                connecting: true,
+                time_remaining: "1 minute",
             })
             .unwrap()
             .tts,
-        "This connection will change in 60 seconds"
+        "Connecting to Handiham Net in 1 minute"
     );
 }
 
 #[test]
-fn schedule_warning_uses_the_matching_localized_duration_form() {
-    let french = "duration-seconds =\n    .text = texte { $seconds }\n    .tts = voix { $seconds }\n    .morse = morse { $seconds }\nscheduled-link-change =\n    .text = texte changement { $time_remaining }\n    .tts = voix changement { $time_remaining }\n    .morse = morse changement { $time_remaining }\n";
-    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, Some(french)).unwrap();
+fn schedule_warning_preserves_remaining_minutes_and_seconds() {
+    use crate::schedule::{CivilTime, Weekday};
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let target = MessageForms {
+        text: "Handiham Net".into(),
+        tts: "Handiham Net".into(),
+        morse: "Handiham Net".into(),
+    };
     assert_eq!(
-        catalog.format_schedule_warning(60).unwrap(),
+        catalog
+            .format_schedule_warning(90, local, &target, true)
+            .unwrap()
+            .tts,
+        "Connecting to Handiham Net in 1 minute, and 30 seconds"
+    );
+}
+
+#[test]
+fn duration_preserves_all_nonzero_units_and_localizes_plurals() {
+    use crate::schedule::{CivilTime, Weekday};
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (seconds, expected, morse) in [
+        (0, "0 seconds", "0S"),
+        (1, "1 second", "1S"),
+        (2, "2 seconds", "2S"),
+        (59, "59 seconds", "59S"),
+        (60, "1 minute", "1M"),
+        (61, "1 minute, and 1 second", "1M 1S"),
+        (90, "1 minute, and 30 seconds", "1M 30S"),
+        (120, "2 minutes", "2M"),
+        (3599, "59 minutes, and 59 seconds", "59M 59S"),
+        (3600, "1 hour", "1H"),
+        (5400, "1 hour, and 30 minutes", "1H 30M"),
+        (7200, "2 hours", "2H"),
+        (86399, "23 hours, 59 minutes, and 59 seconds", "23H 59M 59S"),
+        (86400, "1 day", "1D"),
+        (91800, "1 day, 1 hour, and 30 minutes", "1D 1H 30M"),
+        (172800, "2 days", "2D"),
+        (518400, "6 days", "6D"),
+        (604800, "1 week", "1W"),
+        (1209600, "2 weeks", "2W"),
+        (2678400, "1 month", "1M"),
+        (5356800, "2 months", "2M"),
+        (
+            3373381,
+            "1 month, 1 week, 1 day, 1 hour, 3 minutes, and 1 second",
+            "1M 1W 1D 1H 3M 1S",
+        ),
+    ] {
+        let forms = catalog.format_duration(seconds, local).unwrap();
+        assert_eq!(forms.text, expected, "{seconds}");
+        assert_eq!(forms.tts, expected, "{seconds}");
+        assert_eq!(forms.morse, morse, "{seconds}");
+    }
+}
+
+#[test]
+fn duration_month_length_uses_the_current_local_month_and_gregorian_leap_year() {
+    use crate::schedule::{CivilTime, Weekday};
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (year, month, days) in [
+        (2026, 1, 31),
+        (2026, 2, 28),
+        (2024, 2, 29),
+        (2000, 2, 29),
+        (2100, 2, 28),
+        (2026, 4, 30),
+    ] {
+        let local = CivilTime::new(year, month, 1, Weekday::Monday, 0, 0).unwrap();
+        assert_eq!(
+            catalog.format_duration(days * 86400, local).unwrap().tts,
+            "1 month",
+            "{year}-{month}"
+        );
+        assert!(
+            !catalog
+                .format_duration(days * 86400 - 1, local)
+                .unwrap()
+                .tts
+                .contains("month"),
+            "{year}-{month}"
+        );
+        assert_eq!(
+            catalog
+                .format_duration(days * 86400 + 1, local)
+                .unwrap()
+                .tts,
+            "1 month, and 1 second",
+            "{year}-{month}"
+        );
+    }
+}
+
+#[test]
+fn schedule_warning_uses_the_matching_localized_duration_form() {
+    use crate::schedule::{CivilTime, Weekday};
+    let french = "duration-unit =\n    .text = texte { $count } { $unit }\n    .tts = voix { $count } { $unit }\n    .morse = morse { $count } { $unit }\nduration-join =\n    .text = { $head } et { $tail }\n    .tts = { $head } puis { $tail }\n    .morse = { $head } { $tail }\nscheduled-link-change =\n    .text = texte { $target } { $time_remaining }\n    .tts = voix { $target } { $time_remaining }\n    .morse = morse { $target } { $time_remaining }\n";
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, Some(french)).unwrap();
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let target = MessageForms {
+        text: "texte Net".into(),
+        tts: "voix Net".into(),
+        morse: "morse Net".into(),
+    };
+    assert_eq!(
+        catalog
+            .format_schedule_warning(90, local, &target, false)
+            .unwrap(),
         super::messages::MessageForms {
-            text: "texte changement texte 60".into(),
-            tts: "voix changement voix 60".into(),
-            morse: "morse changement morse 60".into(),
+            text: "texte texte Net texte 1 minute et texte 30 second".into(),
+            tts: "voix voix Net voix 1 minute puis voix 30 second".into(),
+            morse: "morse morse Net morse 1 minute morse 30 second".into(),
         }
     );
+}
+
+#[test]
+fn schedule_warning_formats_both_directions_and_preserves_message_bounds() {
+    use crate::schedule::{CivilTime, Weekday};
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let target = MessageForms {
+        text: "Net".into(),
+        tts: "node,1".into(),
+        morse: "Net".into(),
+    };
+    for (connecting, expected, morse) in [
+        (
+            true,
+            "Connecting to Net in 1 hour",
+            "CONNECTING TO Net IN 1H",
+        ),
+        (
+            false,
+            "Disconnecting from Net in 1 hour",
+            "DISCONNECTING FROM Net IN 1H",
+        ),
+    ] {
+        let forms = catalog
+            .format_schedule_warning(3600, local, &target, connecting)
+            .unwrap();
+        assert_eq!(forms.text, expected);
+        assert_eq!(forms.tts, expected.replace("Net", "node,1"));
+        assert_eq!(forms.morse, morse);
+    }
+    let long = MessageForms {
+        text: "x".repeat(128),
+        tts: "Net".into(),
+        morse: "Net".into(),
+    };
+    assert_eq!(
+        catalog.format_schedule_warning(60, local, &long, true),
+        Err(CatalogError::OutputTooLong)
+    );
+}
+
+#[test]
+fn schedule_warning_keeps_valid_long_names_and_compound_durations() {
+    use crate::schedule::{CivilTime, Weekday};
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let target = MessageForms {
+        text: "N1".repeat(31) + "A",
+        tts: "N,1,".repeat(31) + "A",
+        morse: "N1".repeat(31) + "A",
+    };
+    let forms = catalog
+        .format_schedule_warning(60, local, &target, true)
+        .unwrap();
+    assert_eq!(
+        forms.tts,
+        format!("Connecting to {} in 1 minute", target.tts)
+    );
+    assert!(forms.tts.len() > 127);
+
+    let target = MessageForms {
+        text: "R".repeat(63),
+        tts: "R".repeat(63),
+        morse: "R".repeat(63),
+    };
+    let forms = catalog
+        .format_schedule_warning(3373381, local, &target, false)
+        .unwrap();
+    assert_eq!(
+        forms.tts,
+        format!(
+            "Disconnecting from {} in 1 month, 1 week, 1 day, 1 hour, 3 minutes, and 1 second",
+            target.tts
+        )
+    );
+    assert!(forms.tts.len() > 127);
 }
 
 #[test]

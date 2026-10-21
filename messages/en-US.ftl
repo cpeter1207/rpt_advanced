@@ -226,14 +226,60 @@ priority-group-unavailable =
     .morse = { $group } UNAVAILABLE
 
 scheduled-link-change =
-    .text = CONNECTION CHANGES IN { $time_remaining }
-    .tts = This connection will change in { $time_remaining }
-    .morse = CONNECTION CHANGES IN { $time_remaining }
+    .text = { $direction ->
+        [connect] Connecting to { $target } in { $time_remaining }
+       *[disconnect] Disconnecting from { $target } in { $time_remaining }
+        }
+    .tts = { scheduled-link-change.text }
+    .morse = { $direction ->
+        [connect] CONNECTING TO { $target } IN { $time_remaining }
+       *[disconnect] DISCONNECTING FROM { $target } IN { $time_remaining }
+        }
 
-duration-seconds =
-    .text = { $seconds } seconds
-    .tts = { $seconds } seconds
-    .morse = { $seconds } SECONDS
+duration-unit =
+    .text = { $unit ->
+        [month] { $count ->
+            [one] { $count } month
+           *[other] { $count } months
+            }
+        [week] { $count ->
+            [one] { $count } week
+           *[other] { $count } weeks
+            }
+        [day] { $count ->
+            [one] { $count } day
+           *[other] { $count } days
+            }
+        [hour] { $count ->
+            [one] { $count } hour
+           *[other] { $count } hours
+            }
+        [minute] { $count ->
+            [one] { $count } minute
+           *[other] { $count } minutes
+            }
+       *[second] { $count ->
+            [one] { $count } second
+           *[other] { $count } seconds
+            }
+        }
+    .tts = { duration-unit.text }
+    .morse = { $count }{ $unit ->
+        [month] M
+        [week] W
+        [day] D
+        [hour] H
+        [minute] M
+       *[second] S
+        }
+
+duration-join =
+    .text = { $position ->
+        [last] { $head }, and { $tail }
+       *[more] { $head }, { $tail }
+        }
+    .tts = { duration-join.text }
+    .morse = { $head } { $tail }
 
 parrot-levels =
     .text = Peak level { $peak_dbfs } dBFS. RMS level { $rms_dbfs } dBFS.

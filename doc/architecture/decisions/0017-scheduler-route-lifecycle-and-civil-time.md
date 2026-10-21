@@ -95,6 +95,13 @@ replacement is requested and each named primary is suppressed. There is no
 exclusive winner-selection policy; normal direct-link topology admission is the
 only conflict gate.
 
+Warning leads are consumed once per calendar occurrence and qualifying
+receive-inactivity period. Recalculating a civil-time deadline in monotonic
+milliseconds must not reset that identity: normal control-tick scheduling jitter
+is not a new warning. Crossing the window end preserves consumed leads through
+its inactivity grace. Only a new calendar occurrence or actual receive activity
+that resets an enabled inactivity timer makes those leads eligible again.
+
 ## Consequences
 
 The implementation requires deterministic interleaving tests for ended-port to
