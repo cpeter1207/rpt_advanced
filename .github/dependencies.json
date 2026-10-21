@@ -44,7 +44,7 @@
   },
   {
     "repository": "librptadvschedule",
-    "sha": "8dae5c758118b5e4525562aedff9fe85ad82f150",
+    "sha": "9f4c39c2f1f0956c2c8ae3afbb34edf9dd30edc9",
     "packages": ["librptadvschedule1", "librptadvschedule-dev"]
   }
 ]
