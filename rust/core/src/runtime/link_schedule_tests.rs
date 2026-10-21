@@ -247,29 +247,32 @@ fn schedule_end_warning_rearms_only_when_receive_activity_resets_inactivity() {
 
 #[test]
 fn schedule_end_warning_stays_consumed_when_activity_does_not_extend_the_deadline() {
-    let mut schedule = warning_scheduler(&[], &[600_000]);
-    assert!(
-        tick_warnings(
-            &mut schedule,
-            civil(12, 50),
-            0,
-            1_000,
-            |_| Some(0),
-            |_| false,
-        )
-        .is_some()
-    );
-    assert!(
-        tick_warnings(
-            &mut schedule,
-            civil(12, 51),
-            0,
-            61_003,
-            |_| Some(61_003),
-            |_| false,
-        )
-        .is_none()
-    );
+    for inactivity in [0, 60_000] {
+        let mut schedule = warning_scheduler(&[], &[600_000]);
+        schedule.windows[0].spec.end_inactivity_ms = inactivity;
+        assert!(
+            tick_warnings(
+                &mut schedule,
+                civil(12, 50),
+                0,
+                1_000,
+                |_| Some(0),
+                |_| false,
+            )
+            .is_some()
+        );
+        assert!(
+            tick_warnings(
+                &mut schedule,
+                civil(12, 51),
+                0,
+                61_003,
+                |_| Some(61_003),
+                |_| false,
+            )
+            .is_none()
+        );
+    }
 }
 
 #[test]
@@ -449,6 +452,29 @@ fn quiet_window_exit_and_cold_start_after_grace_restore_primary_immediately() {
     let detach = active.next_operation().unwrap();
     assert_eq!(detach.remote(), "3000");
     assert_eq!(detach.action(), LinkTransition::Detach);
+}
+
+#[test]
+fn before_the_first_dated_window_has_no_historical_grace() {
+    for clock_step in [false, true] {
+        let mut schedule = scheduler();
+        schedule.windows[0].spec.window =
+            ScheduledWindow::parse(None, Some("2026-09-15"), "12:00", "13:00").unwrap();
+        if clock_step {
+            schedule.tick(civil(12, 59), 0, 1_000, |_| None, |_| false);
+            let attach = schedule.next_operation().unwrap();
+            assert_eq!(attach.remote(), "3000");
+            assert!(schedule.complete(&attach, true));
+        }
+        schedule.tick(civil(11, 0), 0, 2_000, |_| None, |_| clock_step);
+        let operation = schedule.next_operation().unwrap();
+        let expected = if clock_step {
+            ("3000", LinkTransition::Detach)
+        } else {
+            ("2000", LinkTransition::Attach)
+        };
+        assert_eq!((operation.remote(), operation.action()), expected);
+    }
 }
 
 #[test]
