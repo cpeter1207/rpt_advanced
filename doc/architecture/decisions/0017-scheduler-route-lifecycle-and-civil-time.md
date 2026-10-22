@@ -51,6 +51,12 @@ the hub under an unrelated lock.
 Post-window receive activity has an explicit observed/not-observed state. A
 valid monotonic timestamp of zero must never be interpreted as no activity.
 
+Group selection and availability telemetry use the scheduler's effective
+desired routes, including post-window inactivity grace and operator holds.
+Inactive schedule items do not announce a shared peer's failure. When disjoint
+schedules reuse a peer, its callback selection belongs to the currently desired
+group rather than the first configured occurrence of that peer.
+
 ### Civil time, elapsed time, and lifecycle
 
 The scheduler evaluates event triggers and window membership in the host's

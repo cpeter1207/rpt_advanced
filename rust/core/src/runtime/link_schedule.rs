@@ -334,6 +334,13 @@ impl LinkScheduler {
     pub fn route_specs(&self) -> Vec<RouteSpec> {
         self.routes.iter().map(|route| route.spec.clone()).collect()
     }
+    /// Effective automatic-link intent, including window grace and operator holds.
+    pub(super) fn desired_routes(&self) -> impl Iterator<Item = &RouteSpec> {
+        self.routes
+            .iter()
+            .filter(|route| route.desired && !route.paused)
+            .map(|route| &route.spec)
+    }
     /// Whether a direct peer is managed as a member of any permanent group.
     pub fn is_group_member(&self, remote: &str) -> bool {
         self.routes

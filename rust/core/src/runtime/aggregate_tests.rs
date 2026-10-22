@@ -2514,10 +2514,77 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     );
     runtime.queue_priority_group_events().unwrap();
     assert_eq!(
-        media.0.lock().unwrap().last().unwrap(),
-        "Blind Hams Network is unavailable"
+        *media.0.lock().unwrap(),
+        [
+            "Blind Hams Network. node,2,0,0,0 selected",
+            "Blind Hams Network is unavailable",
+        ]
     );
     assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_group_telemetry_uses_only_the_active_same_peer_schedule_once() {
+    use super::links::LinkEffect;
+
+    for (hour, answered, remote, expected) in [
+        (8, false, "2000", "Primary is unavailable"),
+        (10, false, "3000", "Morning Net is unavailable"),
+        (11, false, "3000", "Morning Net is unavailable"),
+        (20, false, "3000", "Evening Net is unavailable"),
+        (20, true, "3000", "Evening Net. node,3,0,0,0 selected"),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut now = clock();
+        now.civil = Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, 0).unwrap(),
+            0,
+        ));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(
+                "[1000]\n[permanent 1000 primary]\nremote_node=2000\ngroup_name=Primary\n\
+                 [schedule 1000 morning]\nremote_node=3000\ngroup_name=Morning Net\n\
+                 replace_permanent=primary\nstart_time=09:30\nend_time=11:00\nend_inactivity_ms=60000\n\
+                 [schedule 1000 evening]\nremote_node=3000\ngroup_name=Evening Net\n\
+                 replace_permanent=primary\nstart_time=20:00\nend_time=21:30\n",
+            )
+            .unwrap(),
+            &CapturingMedia(Arc::clone(&messages)),
+            adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            now,
+        )
+        .unwrap();
+        runtime.tick_links(now);
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("active group dial")
+        };
+        assert_eq!(attempt.remote(), remote);
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, answered, now),
+            Ok(answered)
+        );
+        if answered {
+            let group = runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .group_member(remote)
+                .unwrap();
+            assert_eq!(group.selection().callback_slot(true), 1);
+        }
+        runtime.queue_priority_group_events().unwrap();
+        runtime.queue_priority_group_events().unwrap();
+        assert_eq!(
+            *messages.lock().unwrap(),
+            [expected],
+            "hour={hour}, answered={answered}"
+        );
+        let node = runtime.node("1000").unwrap();
+        node.links().ended(remote);
+        node.links().reclaimed(remote, now.now_ms);
+        assert!(runtime.stop(now.now_ms));
+    }
 }
 
 #[test]
