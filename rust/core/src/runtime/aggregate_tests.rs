@@ -2504,19 +2504,47 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     for remote in ["2000", "3000"] {
         let node = runtime.node("1000").unwrap();
         node.links().ended(remote);
+        assert_ne!(
+            node.links().priority_groups()[0].selected.as_deref(),
+            Some(remote)
+        );
         node.links().reclaimed(remote, clock().now_ms);
     }
-    assert_eq!(group.selection().callback_slot(true), 0);
-    runtime.queue_priority_group_events().unwrap();
+    // The last peer's removed audio path cannot clear the old callback-active slot.
+    assert_eq!(group.selection().active().unwrap().get(), 2);
+    for now_ms in [1000, 2000, 4000] {
+        let node = runtime.node("1000").unwrap();
+        let work = node.work().unwrap();
+        let retry = node.links().take_retry(now_ms, work).unwrap();
+        assert_eq!(node.links().finish_retry(retry, false, now_ms), Ok(false));
+        runtime.queue_priority_group_events().unwrap();
+    }
     assert_eq!(
-        media.0.lock().unwrap().last().unwrap(),
-        "Blind Hams Network is unavailable"
+        *media.0.lock().unwrap(),
+        [
+            "Blind Hams Network. node,2,0,0,0 selected",
+            "Blind Hams Network is unavailable",
+        ]
     );
+    let node = runtime.node("1000").unwrap();
+    let work = node.work().unwrap();
+    let retry = node.links().take_retry(100_000, work).unwrap();
+    let recovered = retry.remote().to_owned();
+    assert_eq!(node.links().finish_retry(retry, true, 100_000), Ok(true));
+    assert_ne!(group.selection().callback_slot(true), 0);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(media.0.lock().unwrap().len(), 2);
+
+    let node = runtime.node("1000").unwrap();
+    node.links().ended(&recovered);
+    node.links().reclaimed(&recovered, 100_001);
+    runtime.queue_priority_group_events().unwrap();
     runtime.queue_priority_group_events().unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
         [
             "Blind Hams Network. node,2,0,0,0 selected",
+            "Blind Hams Network is unavailable",
             "Blind Hams Network is unavailable",
         ]
     );

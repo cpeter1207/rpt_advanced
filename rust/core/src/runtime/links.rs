@@ -255,12 +255,17 @@ impl NodeLinkControl {
             group.selection.clone(),
         ))
     }
-    /// Snapshot only currently desired groups for local telemetry on the control plane.
+    /// Snapshot desired groups; a latched audio slot is selected only while its peer is live.
     pub(crate) fn priority_groups(&self) -> Vec<PriorityGroupStatus> {
         let Some(schedule) = self.schedule.as_ref() else {
             return Vec::new();
         };
         let peers = self.manager.snapshot();
+        let reachable = |remote: &str| {
+            peers
+                .iter()
+                .any(|peer| peer.name == remote && !peer.ended && !peer.retrying)
+        };
         self.groups
             .iter()
             .filter(|group| {
@@ -273,14 +278,12 @@ impl NodeLinkControl {
                     group
                         .members
                         .iter()
-                        .find(|(priority, _)| priority.saturating_add(1) == slot.get())
+                        .find(|(priority, peer)| {
+                            priority.saturating_add(1) == slot.get() && reachable(peer)
+                        })
                         .map(|(_, peer)| peer.clone())
                 });
-                let any_reachable = group.members.iter().any(|(_, remote)| {
-                    peers
-                        .iter()
-                        .any(|peer| peer.name == *remote && !peer.ended && !peer.retrying)
-                });
+                let any_reachable = group.members.iter().any(|(_, remote)| reachable(remote));
                 let all_attempted = group
                     .members
                     .iter()

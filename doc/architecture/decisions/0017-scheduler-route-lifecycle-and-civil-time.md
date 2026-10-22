@@ -56,6 +56,9 @@ desired routes, including post-window inactivity grace and operator holds.
 Inactive schedule items do not announce a shared peer's failure. When disjoint
 schedules reuse a peer, its callback selection belongs to the currently desired
 group rather than the first configured occurrence of that peer.
+Availability also requires a connected, non-ended peer; a latched callback slot
+alone is not evidence of reachability. One complete outage produces one
+unavailable announcement. Failed retries do not rearm it; actual recovery does.
 
 ### Civil time, elapsed time, and lifecycle
 
