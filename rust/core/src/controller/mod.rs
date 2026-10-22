@@ -73,7 +73,7 @@ pub struct ControllerSettings {
     pub transmit_timeout_ms: u64,
     /// Post-timeout lockout; recovery additionally requires receive inactivity.
     pub timeout_lockout_ms: u64,
-    /// Suppress tail telemetry for local transmissions at most this long; zero disables.
+    /// Suppress hang and release telemetry for local bursts at most this long; zero disables.
     pub kerchunk_max_ms: u64,
     /// Per-source courtesy delay after unkey.
     pub courtesy_delay_ms: u64,
@@ -300,12 +300,20 @@ impl NodeController {
         }
     }
 
+    /// A kerchunk cannot retain traffic hang; normal releases clear prior suppression.
+    fn receive_unkeyed(&mut self, kerchunk: bool) {
+        self.timeout.unkey(self.now);
+        self.suppress_release = kerchunk;
+        if kerchunk {
+            self.duplex = DuplexPolicy::default();
+            self.release_hang = 0;
+        }
+    }
+
     /// Apply a direct-peer unkey on the audio owner, selecting advisory/direct/generic media.
     pub fn link_unkeyed(&mut self, direct: &str, selected: &str, kerchunk: bool) {
-        self.timeout.unkey(self.now);
-        if kerchunk {
-            self.suppress_release = true;
-        } else if !direct.is_empty() {
+        self.receive_unkeyed(kerchunk);
+        if !kerchunk && !direct.is_empty() {
             self.courtesy.schedule(
                 direct,
                 selected,
@@ -571,19 +579,25 @@ impl NodeController {
         }
         if !receiving && self.receiver {
             self.receiver_unkey = self.now;
-            self.timeout.unkey(self.now);
             let kerchunk = self.settings.kerchunk_max_ms != 0
                 && self.now.saturating_sub(self.receiver_key)
                     <= samples(self.settings.kerchunk_max_ms);
-            if kerchunk {
-                self.suppress_release = true;
-            } else {
+            self.receive_unkeyed(kerchunk);
+            if !kerchunk {
                 self.courtesy.schedule(
                     "",
                     "",
                     self.now
                         .saturating_add(samples(self.settings.courtesy_delay_ms)),
                 );
+            }
+        }
+        if self.suppress_release && !receive && (self.receiver || self.linked) {
+            // Clear only the final suppressed release, not other ongoing traffic's opportunity.
+            for announcement in &mut self.announcements {
+                if announcement.announcement.interval_ms == 0 {
+                    announcement.release_pending = false;
+                }
             }
         }
         self.tails.observe(

@@ -600,6 +600,7 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
         let (mut controller, _) = NodeController::new(
             ControllerSettings {
                 courtesy_delay_ms: 0,
+                hang_ms: 100,
                 ..ControllerSettings::default()
             },
             vec![],
@@ -619,7 +620,7 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
             .unwrap();
         signals.set_radio_keyed(false);
         let mut output = [0.0];
-        links
+        let keyed = links
             .process(
                 &mut controller,
                 false,
@@ -627,6 +628,7 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
                 crate::link::SourcePosition::default(),
             )
             .unwrap();
+        assert_eq!(keyed, expect_courtesy, "a link kerchunk has no hang");
         assert_eq!(outbound.read(&mut [0.0]), 1);
         assert_eq!(output[0] == 0.5, expect_courtesy);
     }

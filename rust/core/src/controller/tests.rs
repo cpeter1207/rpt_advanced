@@ -2233,6 +2233,93 @@ fn courtesy_selection_cancellation_latest_unkey_and_kerchunk() {
 }
 
 #[test]
+fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
+    for (limit, frames, expect_hang) in [(1, 1, false), (1, 48, false), (1, 49, true), (0, 1, true)]
+    {
+        for release_message in [false, true] {
+            let (mut node, _) = NodeController::new(
+                ControllerSettings {
+                    full_duplex: true,
+                    hang_ms: 10,
+                    kerchunk_max_ms: limit,
+                    ..ControllerSettings::default()
+                },
+                vec![],
+                if release_message {
+                    vec![Announcement {
+                        media: media(0.5, 1),
+                        interval_ms: 0,
+                    }]
+                } else {
+                    vec![]
+                },
+                CourtesySettings::default(),
+            )
+            .unwrap();
+            assert!(node.process_audio(true, false, &[], &mut vec![0.0; frames]));
+            assert_eq!(
+                node.process_event(false, false),
+                expect_hang,
+                "limit={limit} frames={frames} message={release_message}"
+            );
+            if !expect_hang {
+                let mut output = [0.0; 1000];
+                assert!(!node.process_audio(false, false, &[], &mut output));
+                assert_eq!(output, [0.0; 1000]);
+            }
+        }
+    }
+}
+
+#[test]
+fn kerchunk_does_not_interrupt_other_traffic_or_its_normal_release() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            hang_ms: 10,
+            kerchunk_max_ms: 1,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![Announcement {
+            media: media(0.25, 1),
+            interval_ms: 0,
+        }],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.set_tails(vec![Tail {
+        media: media(0.5, 1),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    node.process_audio(true, false, &[], &mut [0.0; 96]);
+    node.link_keyed("peer");
+    node.process_audio(true, true, &[], &mut [0.0]);
+    node.link_unkeyed("peer", "", true);
+    assert!(
+        node.process_event(true, false),
+        "local receiver still needs PTT"
+    );
+    assert!(
+        node.process_event(false, false),
+        "normal local release retains hang"
+    );
+    assert!(
+        node.tails.pending(),
+        "a prior peer kerchunk cannot suppress a normal local tail"
+    );
+    let mut output = [0.0; 1024];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(
+        output.iter().filter(|sample| **sample == 0.25).count(),
+        1,
+        "the normal local release must retain its announcement"
+    );
+}
+
+#[test]
 fn local_courtesy_delay_cancellation_and_short_receive_suppression() {
     let settings = ControllerSettings {
         full_duplex: true,
