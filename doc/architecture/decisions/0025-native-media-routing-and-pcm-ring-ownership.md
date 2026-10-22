@@ -90,7 +90,13 @@ The split preserves existing duplex, source qualification, mix-minus, and
 per-link routing; it must not reflect a peer's own audio back to that peer or
 send locally generated CTCSS/DCS onto network links.
 Telemetry routing follows ADR 0023. Identifiers and local courtesy tones stay
-on the local transmitter. A command response goes only to its command source:
+on the local transmitter. Only one courtesy may wait for receive inactivity:
+each eligible source unkey replaces the pending choice and starts its delay,
+so overlapping local and peer activity produces only the last source's tone.
+If that source has no configured courtesy, no earlier tone is substituted.
+Rekey cancellation remains source-specific; ADR 0008's kerchunk suppression
+is unchanged. Sources falling in one callback use the existing deterministic
+edge-processing order. A command response goes only to its command source:
 local receive replies use the local transmitter, linked-peer replies use only
 that peer's egress, and CLI/REST replies stay on the requesting interface.
 Response routing is carried explicitly with the prepared telemetry; it is not

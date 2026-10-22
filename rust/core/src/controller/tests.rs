@@ -1669,7 +1669,7 @@ fn test_audio_peer(
 }
 
 #[test]
-fn courtesy_queue_bounds_identity_and_retains_other_sources() {
+fn courtesy_latest_unkey_validates_identity_and_cancels_only_its_source() {
     let mut planner = courtesy::CourtesyPlanner::new(CourtesySettings {
         receiver: Some(media(0.1, 48)),
         link: Some(media(0.2, 48)),
@@ -1686,19 +1686,14 @@ fn courtesy_queue_bounds_identity_and_retains_other_sources() {
     planner.cancel(&invalid);
     planner.cancel("direct");
     assert!(!planner.ready(1));
-    assert!(planner.ready(2));
-    assert_eq!(planner.pop(), Some(0));
+    assert!(!planner.ready(2));
     assert!(!planner.ready(3));
     assert!(planner.ready(4));
     assert_eq!(planner.pop(), Some(1));
     assert_eq!(planner.pop(), None);
     let maximum = "x".repeat(63);
-    for _ in 0..17 {
-        planner.schedule(&maximum, "selected", 5);
-    }
-    for _ in 0..16 {
-        assert_eq!(planner.pop(), Some(2));
-    }
+    planner.schedule(&maximum, "selected", 5);
+    assert_eq!(planner.pop(), Some(2));
     assert_eq!(planner.pop(), None);
     planner.schedule(&maximum, "", 6);
     planner.cancel(&maximum);
@@ -2036,7 +2031,55 @@ fn timeout_requires_deadline_and_unkey() {
 }
 
 #[test]
-fn courtesy_selection_cancellation_fifo_and_kerchunk() {
+fn overlapping_sources_play_only_the_last_unkey_courtesy() {
+    for (local_last, last_has_tone) in [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let courtesy = CourtesySettings {
+            receiver: (!local_last || last_has_tone).then(|| media(0.1, 4)),
+            link: None,
+            peers: if local_last || last_has_tone {
+                vec![("north".into(), media(0.3, 4))]
+            } else {
+                vec![]
+            },
+        };
+        let (mut node, _) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                courtesy_delay_ms: 1,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            courtesy,
+        )
+        .unwrap();
+        node.link_keyed("north");
+        node.process_audio(true, true, &[], &mut [0.0; 96]);
+        if local_last {
+            node.link_unkeyed("north", "", false);
+        }
+        let mut still_receiving = [0.0; 96];
+        node.process_audio(local_last, !local_last, &[], &mut still_receiving);
+        assert_eq!(still_receiving, [0.0; 96]);
+        if !local_last {
+            node.link_unkeyed("north", "", false);
+        }
+        let mut output = [0.0; 96];
+        node.process_audio(false, false, &[], &mut output);
+        let mut expected = [0.0; 96];
+        if last_has_tone {
+            expected[48..52].fill(if local_last { 0.1 } else { 0.3 });
+        }
+        assert_eq!(
+            output, expected,
+            "local_last={local_last}, tone={last_has_tone}"
+        );
+    }
+}
+
+#[test]
+fn courtesy_selection_cancellation_latest_unkey_and_kerchunk() {
     let courtesy = CourtesySettings {
         receiver: Some(media(0.1, 1)),
         link: Some(media(0.2, 1)),
@@ -2058,13 +2101,13 @@ fn courtesy_selection_cancellation_fifo_and_kerchunk() {
     node.link_unkeyed("south", "", true);
     let mut output = [0.0; 3];
     node.process_audio(false, false, &[], &mut output);
-    assert_eq!(output, [0.4, 0.3, 0.0]);
+    assert_eq!(output, [0.3, 0.0, 0.0]);
     for _ in 0..17 {
         node.link_unkeyed("south", "", false);
     }
     let mut output = [0.0; 17];
     node.process_audio(false, false, &[], &mut output);
-    assert_eq!(output.iter().filter(|v| **v == 0.2).count(), 16);
+    assert_eq!(output.iter().filter(|v| **v == 0.2).count(), 1);
 }
 
 #[test]

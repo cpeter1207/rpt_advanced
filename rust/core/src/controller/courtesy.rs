@@ -1,4 +1,4 @@
-//! Source-specific delayed courtesy selection and cancellation.
+//! Last-unkey courtesy selection with source-specific rekey cancellation.
 use super::PreparedMedia;
 
 /// Control-prepared local, generic-link, and exact-peer courtesy media.
@@ -24,8 +24,7 @@ pub(super) struct CourtesyPlanner {
     peers: Vec<(String, usize)>,
     receiver: Option<usize>,
     link: Option<usize>,
-    queue: [Option<Pending>; 16],
-    len: usize,
+    pending: Option<Pending>,
 }
 
 impl CourtesyPlanner {
@@ -53,8 +52,7 @@ impl CourtesyPlanner {
             peers,
             receiver,
             link,
-            queue: [None; 16],
-            len: 0,
+            pending: None,
         }
     }
     fn identity(source: &str) -> Option<[u8; 64]> {
@@ -70,16 +68,11 @@ impl CourtesyPlanner {
         let Some(key) = Self::identity(source) else {
             return;
         };
-        let mut retained = 0;
-        // Copy the fixed-size active prefix so compaction cannot overwrite an unread item.
-        for item in self.queue.into_iter().take(self.len).flatten() {
-            if item.source != key {
-                self.queue[retained] = Some(item);
-                retained += 1;
-            }
+        if self.pending.is_some_and(|item| item.source == key) {
+            self.pending = None;
         }
-        self.len = retained;
     }
+    /// Replace any waiting courtesy with the latest unkey, including an unconfigured tone.
     pub fn schedule(&mut self, source: &str, selected: &str, due: u64) {
         let Some(key) = Self::identity(source) else {
             return;
@@ -97,34 +90,19 @@ impl CourtesyPlanner {
                 })
                 .or(self.link)
         };
-        if let (Some(media), Some(slot)) = (chosen, self.queue.get_mut(self.len)) {
-            *slot = Some(Pending {
-                source: key,
-                media,
-                due,
-            });
-            self.len += 1;
-        }
+        self.pending = chosen.map(|media| Pending {
+            source: key,
+            media,
+            due,
+        });
     }
     pub fn pending(&self) -> bool {
-        self.len != 0
+        self.pending.is_some()
     }
     pub fn ready(&self, now: u64) -> bool {
-        self.len != 0
-            && self
-                .queue
-                .first()
-                .copied()
-                .flatten()
-                .is_some_and(|p| now >= p.due)
+        self.pending.is_some_and(|p| now >= p.due)
     }
     pub fn pop(&mut self) -> Option<usize> {
-        if self.len == 0 {
-            return None;
-        }
-        let selected = self.queue.first().copied().flatten()?.media;
-        self.queue.copy_within(1..self.len, 0);
-        self.len -= 1;
-        Some(selected)
+        self.pending.take().map(|p| p.media)
     }
 }
