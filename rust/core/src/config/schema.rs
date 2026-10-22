@@ -219,6 +219,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                     | "output_device_channels"
                     | "input_extra_buffer_ms"
                     | "output_extra_buffer_ms"
+                    | "hardware_input_gain_db"
+                    | "hardware_output_a_gain_db"
+                    | "hardware_output_b_gain_db"
                     | "receive_input_gain_db"
                     | "receive_output_gain_db"
                     | "receive_graph"
@@ -486,6 +489,9 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         }
         "receive_input_gain_db" | "receive_output_gain_db" => {
             parse::signed(value, -30, 30).is_some()
+        }
+        "hardware_input_gain_db" | "hardware_output_a_gain_db" | "hardware_output_b_gain_db" => {
+            parse::hardware_gain(value).is_some()
         }
         "receive_graph" | "transmit_graph" => !value.is_empty() && value.len() <= 4096,
         "statpost_url" => {

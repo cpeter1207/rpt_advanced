@@ -128,7 +128,7 @@ fn native_configuration(
     let (outputs, initial) = settings.cm119_gpio_output_masks();
     Ok(abi::UrpNativeStationConfig {
         struct_size: size_of::<abi::UrpNativeStationConfig>() as u32,
-        abi_version: 1,
+        abi_version: abi::URP_NATIVE_CONFIG_ABI_VERSION,
         radio,
         device_selection: match settings.device_selection {
             RadioDeviceSelection::Exact => 0,
@@ -160,6 +160,15 @@ fn native_configuration(
             settings.signaling.receive_audio_source == RadioReceiveAudioSource::Flat,
         ),
         receive_output_gain_db: settings.receive_output_gain_db as i32,
+        hardware_gain_mask: (u32::from(settings.hardware_input_gain_db.is_some())
+            * abi::URP_NATIVE_HARDWARE_GAIN_INPUT)
+            | (u32::from(settings.hardware_output_a_gain_db.is_some())
+                * abi::URP_NATIVE_HARDWARE_GAIN_OUTPUT_A)
+            | (u32::from(settings.hardware_output_b_gain_db.is_some())
+                * abi::URP_NATIVE_HARDWARE_GAIN_OUTPUT_B),
+        hardware_input_gain_db: settings.hardware_input_gain_db.unwrap_or_default(),
+        hardware_output_a_gain_db: settings.hardware_output_a_gain_db.unwrap_or_default(),
+        hardware_output_b_gain_db: settings.hardware_output_b_gain_db.unwrap_or_default(),
     })
 }
 

@@ -38,7 +38,7 @@ impl NativeRadioConfiguration {
         }
         // SAFETY: the size prefix covers the complete native request.
         let mut config = unsafe { pointer.read_unaligned() };
-        if config.abi_version != 1 || config.radio.is_null() {
+        if config.abi_version != abi::URP_NATIVE_CONFIG_ABI_VERSION || config.radio.is_null() {
             return Err("incompatible native radio configuration".to_owned());
         }
         // SAFETY: a non-null radio template exposes its readable size prefix.
@@ -120,7 +120,7 @@ mod tests {
         // SAFETY: zero initializes nullable pointers and scalars, never an enum.
         let mut request: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
         request.struct_size = std::mem::size_of_val(&request) as u32;
-        request.abi_version = 1;
+        request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
         request.radio = &radio;
         request.device_identifier = device.as_ptr();
         request.device_identifier_length = device.len() as u32;
@@ -129,6 +129,10 @@ mod tests {
         request.transmit_graph = transmit.as_ptr();
         request.transmit_graph_length = transmit.len() as u32;
         request.receive_output_gain_db = -6;
+        request.hardware_gain_mask = 7;
+        request.hardware_input_gain_db = 0.0;
+        request.hardware_output_a_gain_db = 6.012;
+        request.hardware_output_b_gain_db = 3.0;
         // SAFETY: all request storage remains live for this synchronous copy.
         let owned = unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap();
         let cloned = owned.clone();
@@ -152,6 +156,10 @@ mod tests {
             );
         }
         assert_eq!(view.receive_output_gain_db, -6);
+        assert_eq!(view.hardware_gain_mask, 7);
+        assert_eq!(view.hardware_input_gain_db, 0.0);
+        assert_eq!(view.hardware_output_a_gain_db, 6.012);
+        assert_eq!(view.hardware_output_b_gain_db, 3.0);
     }
 
     #[test]
@@ -176,15 +184,15 @@ mod tests {
         radio.struct_size = std::mem::size_of_val(&radio) as u32;
         radio.abi_version = 4;
         request.struct_size = std::mem::size_of_val(&request) as u32;
-        request.abi_version = 1;
+        request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
         request.radio = &radio;
 
-        request.abi_version = 2;
+        request.abi_version = 1;
         assert_eq!(
             unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
             "incompatible native radio configuration"
         );
-        request.abi_version = 1;
+        request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
         request.radio = std::ptr::null();
         assert_eq!(
             unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),

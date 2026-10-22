@@ -53,6 +53,7 @@ fn main() {
         ))
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_SITE_.*")
+        .allowlist_var("URP_NATIVE_.*")
         .allowlist_type("Urp.*")
         .allowlist_function("rptadv_product_descriptor_v1")
         .layout_tests(false)

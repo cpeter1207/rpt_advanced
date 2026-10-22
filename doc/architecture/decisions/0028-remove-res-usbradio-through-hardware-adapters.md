@@ -67,6 +67,30 @@ I/O. The ASL channel adapter continues to resolve its own active channel
 configuration. Exclusive device ownership still prevents both compositions
 from opening one interface at the same time.
 
+### Configured hardware mixer startup (2026-10-22)
+
+Standalone resolves optional `hardware_input_gain_db`,
+`hardware_output_a_gain_db`, and `hardware_output_b_gain_db` from `[radio]`
+and `[radio <node>]`. Each finite value is between -30 and 30 dB relative
+to the established hardware midpoint. An omitted control is left unchanged;
+an invalid scoped value warns and falls back through the usual inheritance.
+The ASL3 composition continues to use its active USBRadioPlus hardware settings.
+
+Both compositions reuse the shared driver's mixer scaling and the released
+PortAudio/ALSA adapter. The native station applies configured levels on every
+stopped-to-started transition, before GPIO or audio callbacks start. Mixer
+access never occurs inside an audio callback. Preparation and omitted controls
+do not write mixer state; this does not add EEPROM reads, sidetone changes,
+or processing gain changes to standalone.
+
+The existing native configuration record uses ABI 2 with an explicit gain
+presence mask and three gain values. Native arguments and the enclosing
+USBRadioPlus product descriptor remain ABI 1. Current consumers reject the
+old native record, and package dependencies prevent an incompatible provider
+and controller from being installed together. The matching release cohort is
+USBRadioPlus alpha25 and RPT Advanced alpha16; no new shared-object boundary
+or external adapter operation is introduced.
+
 USBRadioPlus maintains one ASL3 compatibility adapter once these hardware
 boundaries replace `res_usbradio`. The old legacy/modern split follows the
 resource module's two hardware APIs, not two different radio behaviors. Do not

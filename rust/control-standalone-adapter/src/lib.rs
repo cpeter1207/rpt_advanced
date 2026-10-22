@@ -122,25 +122,25 @@ impl StandaloneExecutor {
         })
     }
 
+    /// Reserve within the pending bound, leaving contention retries to the atomic.
     fn reserve(&self) -> Result<(), RejectionReason> {
-        let mut state = self.shared.state.load(Ordering::Acquire);
-        loop {
-            if state & STOPPED != 0 {
-                return Err(RejectionReason::Stopped);
-            }
-            if state & PENDING >= self.shared.capacity {
-                return Err(RejectionReason::Full);
-            }
-            match self.shared.state.compare_exchange_weak(
-                state,
-                state + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Ok(()),
-                Err(actual) => state = actual,
-            }
-        }
+        self.shared
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                if state & STOPPED != 0 || state & PENDING >= self.shared.capacity {
+                    None
+                } else {
+                    Some(state + 1)
+                }
+            })
+            .map(|_| ())
+            .map_err(|state| {
+                if state & STOPPED != 0 {
+                    RejectionReason::Stopped
+                } else {
+                    RejectionReason::Full
+                }
+            })
     }
 
     fn submit(&self, task: Task) -> Result<(), (Task, RejectionReason)> {

@@ -161,6 +161,9 @@ graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 | `output_device_channels` | `1` | Physical playback channel count; accepted values are 1 or 2. |
 | `input_extra_buffer_ms` | `0` | Additional capture buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
 | `output_extra_buffer_ms` | `0` | Additional playback buffering requested beyond PortAudio's low-latency default; 0–500 ms. |
+| `hardware_input_gain_db` | unchanged | CM119 capture level applied when radio audio starts; -30 to +30 dB. |
+| `hardware_output_a_gain_db` | unchanged | CM119 output A level applied when radio audio starts; -30 to +30 dB. |
+| `hardware_output_b_gain_db` | unchanged | CM119 output B level applied when radio audio starts; -30 to +30 dB. |
 | `receive_input_gain_db` | `0` | Receiver input gain, from -30 to +30 dB. |
 | `receive_output_gain_db` | `0` | Receiver output gain, from -30 to +30 dB. |
 | `receive_graph` | `anull` | FFmpeg chain applied to mono 48 kHz receiver audio; 1–4096 bytes. |
@@ -169,6 +172,10 @@ graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 | `cm119_ptt_inverted` | `no` | Invert the CM119 PTT output polarity. |
 | `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
 | `cm119_clip_led_gpio` | `0` | GPIO number for the clipping indicator; 0 disables it, 1–8 selects a pin. |
+
+Hardware gains accept decimal values. Zero selects the hardware control's
+midpoint; it does not mean silence. Leave an option out to keep that control's
+current level. These controls set the hardware mixer, not the processing gain.
 
 Receive signaling options:
 

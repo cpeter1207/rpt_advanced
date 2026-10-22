@@ -1,3 +1,11 @@
+rpt-advanced (0.1.0~alpha16-1) unstable; urgency=medium
+
+  * Apply configured CM119 capture and playback gains before native audio starts.
+  * Support inherited per-node hardware gains using the shared mixer controls.
+  * Require the matching USBRadioPlus native configuration ABI.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Thu, 22 Oct 2026 09:25:00 -0500
+
 rpt-advanced (0.1.0~alpha15-1) unstable; urgency=medium
 
   * Format scheduled link warnings with localized compound time units.

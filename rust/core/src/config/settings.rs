@@ -47,7 +47,7 @@ impl Default for ResolvedDtmfRegenerationSettings {
 }
 
 /// Fully owned node settings after general and node-scoped inheritance.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedNodeSettings {
     /// Whether the node starts.
     pub enabled: bool,
@@ -391,7 +391,7 @@ impl Default for ResolvedRadioSignalingSettings {
 }
 
 /// Standalone audio-device and FFmpeg graph settings after inheritance.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedRadioSettings {
     /// Device selection policy.
     pub device_selection: RadioDeviceSelection,
@@ -407,6 +407,13 @@ pub struct ResolvedRadioSettings {
     pub input_extra_buffer_ms: u32,
     /// Additional playback buffering requested from PortAudio, 0 through 500 ms.
     pub output_extra_buffer_ms: u32,
+    /// Optional ADC gain relative to the hardware midpoint, -30 through 30 dB.
+    /// Omission preserves the existing mixer control rather than changing it.
+    pub hardware_input_gain_db: Option<f64>,
+    /// Optional output-A hardware gain, applied before native audio starts.
+    pub hardware_output_a_gain_db: Option<f64>,
+    /// Optional output-B hardware gain, applied before native audio starts.
+    pub hardware_output_b_gain_db: Option<f64>,
     /// Receive gain after deemphasis/gating and before receive filters, -30 through 30 dB.
     pub receive_input_gain_db: i64,
     /// Receive gain after filters/optional processing and before the controller receive ring.
@@ -438,6 +445,9 @@ impl Default for ResolvedRadioSettings {
             output_device_channels: 1,
             input_extra_buffer_ms: 0,
             output_extra_buffer_ms: 0,
+            hardware_input_gain_db: None,
+            hardware_output_a_gain_db: None,
+            hardware_output_b_gain_db: None,
             receive_input_gain_db: 0,
             receive_output_gain_db: 0,
             receive_graph: "anull".to_owned(),
@@ -552,6 +562,19 @@ impl ResolvedRadioSettings {
         number!(output_device_channels, "output_device_channels", 1, 2);
         number!(input_extra_buffer_ms, "input_extra_buffer_ms", 0, 500);
         number!(output_extra_buffer_ms, "output_extra_buffer_ms", 0, 500);
+        for (key, gain) in [
+            ("hardware_input_gain_db", &mut value.hardware_input_gain_db),
+            (
+                "hardware_output_a_gain_db",
+                &mut value.hardware_output_a_gain_db,
+            ),
+            (
+                "hardware_output_b_gain_db",
+                &mut value.hardware_output_b_gain_db,
+            ),
+        ] {
+            *gain = lookup_valid(document, key, &scopes, parse::hardware_gain);
+        }
         for (key, gain) in [
             ("receive_input_gain_db", &mut value.receive_input_gain_db),
             ("receive_output_gain_db", &mut value.receive_output_gain_db),

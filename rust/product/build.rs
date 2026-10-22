@@ -30,6 +30,7 @@ fn main() {
         .allowlist_function("rpcr3_descriptor")
         .allowlist_function("rptadv_samplerate_adapter_descriptor")
         .allowlist_var("RPCR3_.*")
+        .allowlist_var("URP_NATIVE_.*")
         .allowlist_var("RPTADV_MEDIA_.*")
         .allowlist_var("RPTADV_PEER_EVENT_.*")
         .allowlist_var("RPTADV_SITE_.*")
