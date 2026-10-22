@@ -267,6 +267,21 @@ fn radio_receive_gains_resolve_defaults_inheritance_and_node_overrides() {
 }
 
 #[test]
+fn radio_hardware_gains_accept_finite_decimals_in_both_scopes() {
+    for section in ["radio", "radio 1000"] {
+        let source = format!(
+            "[1000]\n[{section}]\nhardware_input_gain_db=0\nhardware_output_a_gain_db=6.012\nhardware_output_b_gain_db=3\n"
+        );
+        let resolved = ResolvedRadioSettings::resolve(
+            &ConfigDocument::parse(&source).unwrap(),
+            &NodeId::new("1000").unwrap(),
+        )
+        .unwrap();
+        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
+    }
+}
+
+#[test]
 fn radio_output_assignments_resolve_both_scopes_and_invalid_fallbacks() {
     use super::RadioOutputAssignment as Assignment;
 
