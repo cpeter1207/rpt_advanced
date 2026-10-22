@@ -61,6 +61,12 @@ pub(crate) fn signed(text: &str, min: i64, max: i64) -> Option<i64> {
     (min..=max).contains(&value).then_some(value)
 }
 
+/// Parse a finite hardware-mixer gain from -30 through 30 decibels.
+pub(crate) fn hardware_gain(text: &str) -> Option<f64> {
+    let value = text.parse::<f64>().ok()?;
+    (-30.0..=30.0).contains(&value).then_some(value)
+}
+
 /// Parse the explicit, locale-independent yes/no switches.
 pub(crate) fn boolean(text: &str) -> Option<bool> {
     match text.to_ascii_lowercase().as_str() {
