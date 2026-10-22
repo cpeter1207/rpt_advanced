@@ -233,6 +233,36 @@ fn native_requests_preserve_explicit_gains_graphs_hardware_and_signaling() {
 }
 
 #[test]
+fn native_requests_forward_only_configured_hardware_mixer_gains() {
+    for (options, expected_mask, expected_gains) in [
+        ("", 0, [0.0, 0.0, 0.0]),
+        ("hardware_input_gain_db=-2.5\n", 1, [-2.5, 0.0, 0.0]),
+        ("hardware_output_a_gain_db=6.012\n", 2, [0.0, 6.012, 0.0]),
+        ("hardware_output_b_gain_db=3\n", 4, [0.0, 0.0, 3.0]),
+        (
+            "hardware_input_gain_db=0\nhardware_output_a_gain_db=6.012\nhardware_output_b_gain_db=3\n",
+            7,
+            [0.0, 6.012, 3.0],
+        ),
+    ] {
+        let (result, output) = inspect(&format!("[1000]\n[radio 1000]\n{options}"), false);
+        assert_eq!(result, 0, "{output:?}");
+        assert!(output.diagnostics.is_empty());
+        let request = &output.radios[0].request;
+        assert_eq!(request.abi_version, 2);
+        assert_eq!(request.hardware_gain_mask, expected_mask);
+        assert_eq!(
+            [
+                request.hardware_input_gain_db,
+                request.hardware_output_a_gain_db,
+                request.hardware_output_b_gain_db,
+            ],
+            expected_gains,
+        );
+    }
+}
+
+#[test]
 fn check_only_uses_no_node_visitor_and_validates_the_shipped_example() {
     let table = unsafe { &*rptadv_product_descriptor_v1() };
     let source = include_str!("../../../examples/rpt_advanced.conf");
