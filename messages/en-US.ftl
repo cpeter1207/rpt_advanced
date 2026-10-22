@@ -216,9 +216,9 @@ loop-rejected =
     .morse = LINK TO NODE { $node } REJECTED WOULD CREATE LOOP
 
 priority-group-selected =
-    .text = { $group }: NODE { $peer } SELECTED
-    .tts = { $group }. { $peer } selected
-    .morse = { $group } NODE { $peer } SELECTED
+    .text = { $group }: NODE { $peer } CONNECTED
+    .tts = { $group }. { $peer } connected
+    .morse = { $group } NODE { $peer } CONNECTED
 
 priority-group-unavailable =
     .text = { $group } UNAVAILABLE
