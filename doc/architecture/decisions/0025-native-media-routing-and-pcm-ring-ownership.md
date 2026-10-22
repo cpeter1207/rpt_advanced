@@ -104,12 +104,21 @@ inferred from whichever peer happens to be active when playout begins.
 
 Status and link-event messages are polite: they wait until local and all
 connected-peer receive activity ends, including non-selected group members.
-There is no maximum wait. New receive activity stops an admitted status
-attempt and retains its message and destination for a complete restart after
-unkey, without forcing Morse. Holding it releases the serialized producer and
-playback slot so an identifier can still meet its existing deadline. Temporary
-holding retains the producer recipe; terminal completion or cancellation still
-reclaims it. Identifier deadlines and courtesy cancellation are unchanged.
+There is no maximum wait. Before the first PCM sample, new receive activity
+holds an admitted status attempt for readmission after unkey. Holding releases
+the serialized producer and playback slot so an identifier can still meet its
+existing deadline. Once audible, receive interruption selects the complete
+Morse form and latches it through completion. Temporary holding retains the
+producer recipe; terminal completion or cancellation still reclaims it.
+Identifier deadlines and courtesy cancellation are unchanged.
+
+Reconnection supersedes any queued or playing disconnect notice for that same
+unordered pair of node identities. Control cancels the old notice before
+preparing its connect notice. The callback stops obsolete playback and returns
+its ownership through the existing completed-media queue; reclamation remains
+off audio. All recipients of a link event share its cancellation state, while
+unrelated link pairs and command replies remain independent. The existing
+bounded status-admission limit is unchanged.
 
 Implemented ownership — 2026-10-16: ADR 0023's ASL-style
 DTMF regeneration is prompt local radio-control signaling, not deferred
@@ -271,7 +280,7 @@ advances cooldown, and generated transmitter releases never arm another tail.
 Receive-interruption contract — amended 2026-10-22: qualified local receive or
 any connected peer's receive activity selects the complete Morse form of an
 admitted identifier, announcement, or release tail. Status and command replies
-instead follow the unbounded polite holding and complete-restart rule above.
+wait before first PCM, then use this same Morse-interruption contract once audible.
 This includes peers not selected for local RF. Source-unkey admission,
 half-duplex and safety rules still apply; interruption never changes the
 destination. Courtesy-only cancellation and local DTMF regeneration are separate.

@@ -26,6 +26,10 @@ use crate::{
     template::MessageTemplate,
     time::{TimeAnnouncement, TimeFormat},
 };
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 
 fn queue_status_media(
     telemetry: &mut ControllerControl,
@@ -34,10 +38,14 @@ fn queue_status_media(
     morse: &str,
     speech: &str,
     reply: Option<crate::link::PeerReply>,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<(), RuntimeError> {
     let station = station.as_mut().ok_or(RuntimeError::Preparation)?;
-    let prepared =
+    let mut prepared =
         prepare::streamed_status(station.as_mut(), settings, morse, speech)?.reply_to(reply);
+    if let Some(cancellation) = cancellation {
+        prepared = prepared.cancel_when(cancellation);
+    }
     telemetry.reclaim().for_each(drop);
     if telemetry.queue_prepared_status(prepared) {
         Ok(())
@@ -291,6 +299,13 @@ struct Candidate<A: Send, C: Send> {
     device: Option<Box<dyn DeviceHandoff>>,
 }
 
+/// Disconnect copies share cancellation until every listener reclaims its media.
+struct DisconnectNotice {
+    first: String,
+    second: String,
+    cancellation: Weak<AtomicBool>,
+}
+
 /// Multi-node runtime owned exclusively by the serialized control executor.
 /// Failed preparation retains the document, nodes, schedule, device leases and current revision.
 pub struct Runtime<A: Send = (), C: Send = ()> {
@@ -304,6 +319,7 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     scheduler: Option<EventScheduler>,
     effects: Vec<(String, LinkEffect)>,
     detaching: Vec<(String, String)>,
+    disconnect_notices: Vec<DisconnectNotice>,
     stopping: bool,
 }
 impl<A: Send, C: Send> Runtime<A, C> {
@@ -326,6 +342,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             scheduler: None,
             effects: Vec::new(),
             detaching: Vec::new(),
+            disconnect_notices: Vec::new(),
             stopping: false,
         };
         runtime.reload(document, media, adapter, device, clock)?;
@@ -886,6 +903,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                             &forms.morse,
                             &forms.tts,
                             None,
+                            None,
                         )
                     });
                 let _ = queued;
@@ -1001,6 +1019,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &node.status,
             morse,
             dispatch.speech().unwrap_or(""),
+            None,
             None,
         )?;
         scheduler.message_queued(&dispatch.token);
@@ -1259,6 +1278,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &text,
             &spoken,
             reply,
+            None,
         )
     }
     /// Queue one bounded pad report on the local transmitter after receiver unkey.
@@ -1283,6 +1303,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &node.status,
             &forms.morse,
             &forms.tts,
+            None,
             None,
         )
     }
@@ -1311,18 +1332,45 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &forms.morse,
             &spoken,
             reply,
+            None,
         )
     }
     /// Queue one direct-link lifecycle event from every configured node's perspective.
     ///
     /// Each node is attempted independently so one unavailable speech provider or full
     /// telemetry queue cannot suppress the announcement on another node.
+    /// Reconnection cancels prior disconnect notices for the same unordered pair
+    /// before attempting preparation or bounded admission of the new connect notice.
     pub fn queue_link_event(
         &mut self,
         first: &str,
         second: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
+        let (lower, upper) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        self.disconnect_notices.retain(|notice| {
+            let Some(cancellation) = notice.cancellation.upgrade() else {
+                return false;
+            };
+            if connected && notice.first == lower && notice.second == upper {
+                cancellation.store(true, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        });
+        let cancellation = (!connected).then(|| Arc::new(AtomicBool::new(false)));
+        if let Some(cancellation) = &cancellation {
+            self.disconnect_notices.push(DisconnectNotice {
+                first: lower.to_owned(),
+                second: upper.to_owned(),
+                cancellation: Arc::downgrade(cancellation),
+            });
+        }
         let mut failure = None;
         for node in &mut self.nodes {
             if (node.name == first && node.links.is_group_member(second))
@@ -1361,6 +1409,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                         &forms.morse,
                         &spoken,
                         None,
+                        cancellation.clone(),
                     )
                 });
             if let Err(error) = queued {
@@ -1416,6 +1465,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                                 &node.status,
                                 &forms.morse,
                                 &spoken,
+                                None,
                                 None,
                             )
                         });

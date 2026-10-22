@@ -535,7 +535,14 @@ impl NodeController {
                 .telemetry
                 .peer_status()
                 .is_none_or(|peer| !peer.active());
-        if !status_idle && self.telemetry.active == Some(Source::Status) {
+        if !status_idle
+            && self.telemetry.active == Some(Source::Status)
+            && self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|media| !media.0.has_output())
+        {
             if let Some(media) = &mut self.telemetry.status {
                 // Retain the message, but release its producer and playback slot.
                 // A new attempt after unkey must not block an identifier deadline.
@@ -630,11 +637,13 @@ impl NodeController {
         }
         let pending_status =
             self.telemetry.status_pending() && self.telemetry.peer_status().is_none();
-        let peer_ready = status_idle && self.telemetry.peer_status().is_some();
-        let status_ready = peer_ready
-            || (status_idle
-                && self.now.saturating_sub(self.receiver_unkey) >= 12_000
-                && pending_status);
+        let peer_ready = self
+            .telemetry
+            .peer_status()
+            .is_some_and(|peer| !peer.active());
+        let status_ready = status_idle
+            && (peer_ready
+                || (self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status));
         let parrot_ready = !source_activity && self.telemetry.parrot_pending();
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
         if (may_transmit || peer_ready) && self.telemetry.active.is_none() {
@@ -807,7 +816,12 @@ impl NodeController {
             let interrupt = ((receive || source_activity)
                 && matches!(
                     rendered_source,
-                    Some(Source::Identifier(_) | Source::Announcement(_) | Source::Tail(_))
+                    Some(
+                        Source::Identifier(_)
+                            | Source::Announcement(_)
+                            | Source::Tail(_)
+                            | Source::Status
+                    )
                 ))
                 || (source_activity && rendered_source == Some(Source::Parrot));
             if (if peer_status {

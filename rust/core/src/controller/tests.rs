@@ -230,7 +230,7 @@ fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
                     0.0,
                     "source {source}, receive {local}/{linked}/{activity}, initial {before_first_sample}"
                 );
-                if source >= 2 {
+                if source >= 2 && before_first_sample {
                     node.process_event(false, false);
                     node.now += 12_000;
                     assert_eq!(render(&mut node, false, false, false), 0.75);
@@ -2007,7 +2007,7 @@ fn status_waits_for_every_receive_source_without_a_deadline() {
 }
 
 #[test]
-fn status_restarts_after_receive_instead_of_talking_over_it() {
+fn started_status_switches_to_morse_when_receive_begins() {
     for (local, linked, activity) in [
         (true, false, true),
         (false, true, true),
@@ -2032,15 +2032,15 @@ fn status_restarts_after_receive_instead_of_talking_over_it() {
         assert_eq!(first, [0.75]);
         let mut busy = [0.0; 96];
         let keyed = node.process_audio_outputs(local, linked, activity, &[], &mut busy, None);
-        assert_eq!(busy, [0.0; 96]);
-        assert_eq!(keyed, local || linked);
+        assert!(keyed);
+        assert!(busy.iter().any(|sample| *sample != 0.0));
+        assert!(busy.iter().all(|sample| sample.abs() <= 0.502));
         assert_eq!(control.reclaim().count(), 0);
         node.process_event(false, false);
-        node.now += 12_000;
-        let mut restarted = [0.0; 4];
-        node.process_audio(false, false, &[], &mut restarted);
-        assert_eq!(restarted, [0.75; 4], "restart the complete spoken message");
-        assert_eq!(control.reclaim().count(), 1);
+        let mut continued = [0.0; 4];
+        node.process_audio(false, false, &[], &mut continued);
+        assert!(continued.iter().all(|sample| sample.abs() < 0.75));
+        assert_eq!(control.reclaim().count(), 0, "Morse continues after unkey");
     }
 }
 
@@ -2065,7 +2065,9 @@ fn held_status_does_not_block_an_expired_identifier() {
     )
     .unwrap();
     node.now = 12_000;
-    assert!(control.queue_prepared_status(media(0.75, 100)));
+    assert!(
+        control.queue_prepared_status(PreparedMedia::new_stream(Box::new(PendingMedia)).unwrap())
+    );
     node.process_audio(false, false, &[], &mut [0.0]);
     node.now = samples(1002);
     let mut output = [0.0; 96];
@@ -2731,6 +2733,35 @@ fn half_duplex_periodic_announcement_waits_for_receiver_and_delayed_courtesy() {
     node.process_audio(false, false, &[], &mut output);
     assert_eq!(output, [0.0]);
     assert!(node.courtesy.pending());
+}
+
+#[test]
+fn cancelled_status_is_reclaimed_without_allocating_or_freeing_on_audio() {
+    for started in [false, true] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        assert!(control.queue_prepared_status(media(0.5, 4).cancel_when(Arc::clone(&cancelled))));
+        if started {
+            node.now = 12_000;
+            let mut first = [0.0];
+            node.process_audio(false, false, &[], &mut first);
+            assert_eq!(first, [0.5]);
+        }
+        cancelled.store(true, Ordering::Release);
+        let mut output = [0.0; 8];
+        AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+        node.process_audio(false, false, &[], &mut output);
+        let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+        assert_eq!(allocations, Some(0));
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(control.reclaim().count(), 1);
+    }
 }
 
 #[test]
