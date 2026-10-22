@@ -121,6 +121,20 @@ impl StreamReader {
         }
     }
 
+    fn retire_available(&mut self) {
+        if !self.retire_consumer() {
+            return;
+        }
+        while let Ok((generation, _, consumer)) = self.ready.pop() {
+            if let Err(rtrb::PushError::Full((generation, consumer))) =
+                self.retired.push((generation, consumer))
+            {
+                self.consumer = Some((generation, consumer));
+                return;
+            }
+        }
+    }
+
     fn acquire_consumer(&mut self) {
         if self.consumer.is_some() {
             return;
@@ -160,8 +174,7 @@ impl StreamReader {
 
 impl PcmStreamReader for StreamReader {
     fn start(&mut self) {
-        let prior = self.control.requested.load(Ordering::Relaxed);
-        let next = prior.wrapping_add(1).max(1);
+        let next = self.generation.wrapping_add(1).max(1);
         self.generation = next;
         self.delay_remaining = 0;
         self.control.fallback_morse.store(
@@ -170,6 +183,14 @@ impl PcmStreamReader for StreamReader {
         );
         self.fallback_morse_pending = false;
         self.control.requested.store(next, Ordering::Release);
+    }
+
+    fn defer_before_output(&mut self) -> bool {
+        // Zero suspends production without cancelling the restartable recipe.
+        // Playback must call start before it reads this deferred attempt again.
+        self.control.requested.store(0, Ordering::Release);
+        self.retire_available();
+        true
     }
 
     fn render(&mut self, output: &mut [f32]) -> PcmRead {
@@ -251,17 +272,13 @@ impl PcmStreamReader for StreamReader {
         self.control
             .cancelled
             .store(self.generation, Ordering::Release);
-        if !self.retire_consumer() {
-            return;
+        if self.control.requested.load(Ordering::Acquire) == 0 {
+            // Terminal cancellation of a held recipe must permit one-shot reclamation.
+            self.control
+                .requested
+                .store(self.generation, Ordering::Release);
         }
-        while let Ok((generation, _, consumer)) = self.ready.pop() {
-            if let Err(rtrb::PushError::Full((generation, consumer))) =
-                self.retired.push((generation, consumer))
-            {
-                self.consumer = Some((generation, consumer));
-                return;
-            }
-        }
+        self.retire_available();
     }
 
     fn select_morse_fallback(&mut self) -> MorseSwitch {

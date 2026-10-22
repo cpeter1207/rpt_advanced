@@ -26,8 +26,10 @@ remapping. Duplicate command strings make configuration invalid. Every DTMF
 source may request status. A status reply is prepared as speech with Morse
 fallback and is routed only to its command source: a local-receiver command
 reply goes to the local transmitter, while a linked-peer command reply goes
-only to that originating peer. It waits for the originating source to unkey
-when that source has an unkey state. Replies to CLI and REST commands remain
+only to that originating peer. It waits for the originating source and all
+other local or linked receive activity to end, without a maximum wait.
+If reception interrupts an admitted reply, the reply is held and restarts
+as a complete message after unkey. Replies to CLI and REST commands remain
 on the requesting control interface and are not injected into RF.
 
 Peer command collection and prepared replies retain the originating connection,
@@ -149,7 +151,7 @@ and adapter tests; the full hosted gate for this extension has not run.
 
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot
-interrupt their origin while it is keyed. DTMF changes require command-map,
+interrupt received traffic. DTMF changes require command-map,
 authorization, muting, local-only regeneration, addressed relay, and RF-response
 tests in addition to DSP detection tests.
 REST/WebSocket route and schema publication remains governed by ADR 0016.

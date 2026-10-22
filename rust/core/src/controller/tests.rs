@@ -152,7 +152,7 @@ fn composition_pre_sample_deferral_refreshes_attempt_without_audio_allocation() 
 }
 
 #[test]
-fn morse_global_receive_routes() {
+fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
     for source in 0..4 {
         for (local, linked, activity) in [
             (true, false, true),
@@ -214,7 +214,9 @@ fn morse_global_receive_routes() {
                     );
                     if source == 3 {
                         assert_eq!(radio, [0.0]);
-                        assert_eq!(replies[0].target, peer.reply_target().identity());
+                        if replies[0].sample != 0.0 {
+                            assert_eq!(replies[0].target, peer.reply_target().identity());
+                        }
                         replies[0].sample
                     } else {
                         radio[0]
@@ -228,6 +230,13 @@ fn morse_global_receive_routes() {
                     0.0,
                     "source {source}, receive {local}/{linked}/{activity}, initial {before_first_sample}"
                 );
+                if source >= 2 {
+                    node.process_event(false, false);
+                    node.now += 12_000;
+                    assert_eq!(render(&mut node, false, false, false), 0.75);
+                    assert_eq!(render(&mut node, local, linked, activity), 0.0);
+                    continue;
+                }
                 let second = render(&mut node, false, false, false);
                 assert!(
                     second > 0.0 && second < 0.5,
@@ -546,7 +555,7 @@ impl crate::audio::PcmStreamReader for PendingMedia {
 }
 
 #[test]
-fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
+fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
     let signal = crate::link::PeerSignals::new();
     let courtesy = CourtesySettings {
         link: Some(media(0.2, 1)),
@@ -581,7 +590,7 @@ fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
     };
     assert!(!process(&mut node, &mut replies));
     assert_eq!(replies[0].sample, 0.0);
-    assert!(node.telemetry.active == Some(telemetry::Source::Status));
+    assert!(node.telemetry.active.is_none());
     signal.end();
     assert!(!process(&mut node, &mut replies));
     assert!(node.telemetry.active.is_none());
@@ -1960,6 +1969,117 @@ fn duplex_hang_and_partition_invariance() {
         controller.process_audio(false, false, &[], &mut [0.0; 96]);
         assert!(!controller.process_event(false, false));
     }
+}
+
+#[test]
+fn status_waits_for_every_receive_source_without_a_deadline() {
+    for (local, linked, activity) in [
+        (true, false, true),
+        (false, true, true),
+        (false, false, true),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                telemetry_duck_db: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        for _ in 0..2 {
+            node.now += samples(3_600_000);
+            let mut output = [0.0; 4];
+            node.process_audio_outputs(local, linked, activity, &[], &mut output, None);
+            assert_eq!(output, [0.0; 4], "receive={local}/{linked}/{activity}");
+            assert_eq!(control.reclaim().count(), 0);
+        }
+        node.process_event(false, false);
+        node.now += 12_000;
+        let mut output = [0.0; 4];
+        node.process_audio(false, false, &[], &mut output);
+        assert_eq!(output, [0.75; 4], "deferred status must retain its speech");
+        assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
+#[test]
+fn status_restarts_after_receive_instead_of_talking_over_it() {
+    for (local, linked, activity) in [
+        (true, false, true),
+        (false, true, true),
+        (false, false, true),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                hang_ms: 0,
+                telemetry_duck_db: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        let mut first = [0.0];
+        node.process_audio(false, false, &[], &mut first);
+        assert_eq!(first, [0.75]);
+        let mut busy = [0.0; 96];
+        let keyed = node.process_audio_outputs(local, linked, activity, &[], &mut busy, None);
+        assert_eq!(busy, [0.0; 96]);
+        assert_eq!(keyed, local || linked);
+        assert_eq!(control.reclaim().count(), 0);
+        node.process_event(false, false);
+        node.now += 12_000;
+        let mut restarted = [0.0; 4];
+        node.process_audio(false, false, &[], &mut restarted);
+        assert_eq!(restarted, [0.75; 4], "restart the complete spoken message");
+        assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
+#[test]
+fn held_status_does_not_block_an_expired_identifier() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: 0,
+            ..ControllerSettings::default()
+        },
+        vec![Identifier {
+            media: media(0.25, 100),
+            interval_ms: 1000,
+            priority: 1,
+            first_key_only: false,
+            regardless_of_activity: true,
+            polite_maximum_wait_ms: Some(1),
+        }],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(control.queue_prepared_status(media(0.75, 100)));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    node.now = samples(1002);
+    let mut output = [0.0; 96];
+    node.process_audio(false, true, &[], &mut output);
+    assert!(node.telemetry.active == Some(telemetry::Source::Identifier(0)));
+    assert!(
+        output.iter().any(|sample| *sample != 0.0),
+        "the due ID must play"
+    );
+    assert_eq!(
+        control.reclaim().count(),
+        0,
+        "the held status is still pending"
+    );
 }
 
 #[test]

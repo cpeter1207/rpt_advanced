@@ -102,6 +102,15 @@ that peer's egress, and CLI/REST replies stay on the requesting interface.
 Response routing is carried explicitly with the prepared telemetry; it is not
 inferred from whichever peer happens to be active when playout begins.
 
+Status and link-event messages are polite: they wait until local and all
+connected-peer receive activity ends, including non-selected group members.
+There is no maximum wait. New receive activity stops an admitted status
+attempt and retains its message and destination for a complete restart after
+unkey, without forcing Morse. Holding it releases the serialized producer and
+playback slot so an identifier can still meet its existing deadline. Temporary
+holding retains the producer recipe; terminal completion or cancellation still
+reclaims it. Identifier deadlines and courtesy cancellation are unchanged.
+
 Implemented ownership — 2026-10-16: ADR 0023's ASL-style
 DTMF regeneration is prompt local radio-control signaling, not deferred
 telemetry. Its bounded digit queue is produced by station control and consumed
@@ -259,9 +268,10 @@ afterward it selects complete Morse. Timeout and half-duplex deferral cannot
 consume inaudible PCM or falsely advance cooldown. Only successful playback
 advances cooldown, and generated transmitter releases never arm another tail.
 
-Receive-interruption contract — 2026-10-18: qualified local receive or any
-connected peer's receive activity selects the complete Morse form of an
-admitted message, including an announcement or source-routed command reply.
+Receive-interruption contract — amended 2026-10-22: qualified local receive or
+any connected peer's receive activity selects the complete Morse form of an
+admitted identifier, announcement, or release tail. Status and command replies
+instead follow the unbounded polite holding and complete-restart rule above.
 This includes peers not selected for local RF. Source-unkey admission,
 half-duplex and safety rules still apply; interruption never changes the
 destination. Courtesy-only cancellation and local DTMF regeneration are separate.

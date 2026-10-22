@@ -304,7 +304,8 @@ impl ControllerControl {
         }
     }
 
-    /// Enqueue producer-backed status media prepared by the station owner.
+    /// Enqueue polite status media; all receive activity must end before playout.
+    /// Interrupted attempts retain their message and restart after unkey.
     pub fn queue_prepared_status(&mut self, media: PreparedMedia) -> bool {
         if self.outstanding == 4 {
             return false;
