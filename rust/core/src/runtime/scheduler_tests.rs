@@ -19,6 +19,35 @@ fn message(_: &EventSpec, _: &CivilTime) -> Result<DispatchContent, SchedulerErr
 }
 
 #[test]
+fn periodic_triggers_become_pending_on_clock_boundaries() {
+    for (at, hour, minute, due) in [
+        ("every 1 minute", 12, 7, true),
+        ("every 15 minutes", 12, 14, false),
+        ("every 15 minutes", 12, 15, true),
+        ("every 15 minutes", 12, 16, false),
+        ("every 60 minutes", 12, 0, true),
+        ("every 60 minutes", 12, 1, false),
+        ("every 2 hours", 12, 0, true),
+        ("every 2 hours", 13, 0, false),
+        ("every 24 hours", 0, 0, true),
+        ("every 24 hours", 1, 0, false),
+    ] {
+        let spec = EventSpec {
+            local: "524950".into(),
+            name: "clock_message".into(),
+            trigger: at.parse().expect("periodic clock trigger should be valid"),
+        };
+        let mut scheduler = EventScheduler::new(1, vec![spec], None).unwrap();
+        let local = CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap();
+        assert_eq!(
+            scheduler.next(100, local, message).unwrap().is_some(),
+            due,
+            "{at} at {hour:02}:{minute:02}"
+        );
+    }
+}
+
+#[test]
 fn same_revision_dispatch_from_another_scheduler_cannot_match_a_different_event() {
     let mut first = EventScheduler::new(1, vec![event("first", 0)], None).unwrap();
     let mut second = EventScheduler::new(1, vec![event("second", 0)], None).unwrap();
