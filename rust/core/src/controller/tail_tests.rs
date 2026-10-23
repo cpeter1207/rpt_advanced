@@ -33,6 +33,36 @@ fn at(node: &mut NodeController, ms: u64, receiving: bool) -> (bool, f32) {
 }
 
 #[test]
+fn tail_playback_outlasts_traffic_timeout_without_missing_pcm() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            transmit_timeout_ms: 1,
+            timeout_lockout_ms: 100,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.set_tails(vec![Tail {
+        media: pcm(0.5, 4800),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    node.process_audio(true, false, &[], &mut [0.25]);
+    let mut output = [0.0; 4800];
+    assert!(node.process_audio(false, false, &[], &mut output));
+    assert_eq!(
+        output.iter().filter(|sample| **sample == 0.5).count(),
+        4800,
+        "traffic timeout must not interrupt a tail's PCM or PTT"
+    );
+}
+
+#[test]
 fn tail_zero_and_positive_delay() {
     for delay in [0, 250] {
         let mut node = fixture(delay, 0, vec![]);
