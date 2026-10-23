@@ -113,7 +113,7 @@ pub struct PreparedMedia(
     pub(super) MediaKind,
     pub(super) Option<crate::link::PeerReply>,
     pub(super) Option<Arc<AtomicBool>>,
-    pub(super) Option<(u64, PoliteDelivery)>,
+    pub(super) Option<(u64, PoliteDelivery, bool)>,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -150,19 +150,31 @@ impl PreparedMedia {
 
     /// Retain the occurrence's original start deadline in this controller's sample epoch.
     pub fn with_delivery(mut self, deadline_sample: u64, policy: PoliteDelivery) -> Self {
-        self.5 = Some((deadline_sample, policy));
+        self.5 = Some((deadline_sample, policy, false));
         self
     }
 
-    /// Mark an expired unstarted skip-policy occurrence for control-side reclamation.
-    fn expire(&mut self, now: u64) {
-        if !self.0.has_output()
-            && self.5.is_some_and(|(deadline, policy)| {
-                now >= deadline && policy.expiry == PoliteExpiry::Skip
-            })
+    /// Select expiry once; opening streams and later deferrals never renew its budget.
+    fn expire(&mut self, now: u64, allowed: bool, busy: bool) {
+        let Some((deadline, policy, selected)) = &mut self.5 else {
+            return;
+        };
+        if self.0.has_output() || self.0.is_finished() || *selected || now < *deadline {
+            return;
+        }
+        if policy.expiry == PoliteExpiry::Skip
+            || !allowed
+            || (busy && policy.busy == PoliteBusy::Skip)
         {
             self.0.cancel();
+        } else {
+            *selected = true;
         }
+    }
+
+    /// Morse expiry remains selected even if a never-audible producer is restarted.
+    pub(super) fn force_morse(&self) -> bool {
+        self.5.is_some_and(|(_, _, selected)| selected)
     }
 
     /// Construct the spoken-report then recording sequence for local parrot playback.
@@ -622,10 +634,16 @@ impl TelemetryPlanner {
         self.status.is_some() || !self.pending.is_empty()
     }
     /// Observe every bounded pending deadline without removing or dropping queue ownership.
-    pub fn expire_status(&mut self, now: u64) {
+    pub fn expire_status(&mut self, now: u64, allowed: bool, occupied: bool) {
+        let occupied = occupied || self.active.is_some_and(|source| source != Source::Status);
         if let Some(media) = &mut self.status {
-            media.expire(now);
+            media.expire(now, allowed, occupied);
         }
+        let mut blocked = occupied
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|media| !media.0.is_finished());
         let count = self.pending.slots();
         let mut chunk = self
             .pending
@@ -633,9 +651,14 @@ impl TelemetryPlanner {
             .expect("sole consumer retains its readable slots");
         let (first, second) = chunk.as_mut_slices();
         for media in first.iter_mut().chain(second) {
-            media.expire(now);
+            media.expire(now, allowed, blocked);
+            blocked |= !media.0.is_finished();
         }
         // No commit: cancelled envelopes remain owned until normal control-side retirement.
+    }
+    /// Whether the head occurrence may start its expired Morse despite receive activity.
+    pub fn status_morse(&self) -> bool {
+        self.status.as_ref().is_some_and(PreparedMedia::force_morse)
     }
     /// Skip ended endpoints and superseded notices, returning their ownership to control.
     pub fn poll_status(&mut self) {

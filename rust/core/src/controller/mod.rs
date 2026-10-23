@@ -535,7 +535,6 @@ impl NodeController {
         link_sample: f32,
         parrot_output: Option<ProgramSample<'_>>,
     ) -> f32 {
-        self.telemetry.expire_status(self.now);
         self.telemetry.poll_status();
         let receive = receiving || linked;
         let status_idle = !receive
@@ -545,12 +544,9 @@ impl NodeController {
                 .peer_status()
                 .is_none_or(|peer| !peer.active());
         let active_status = self.telemetry.active == Some(Source::Status);
-        if let Some(media) = self
-            .telemetry
-            .status
-            .as_mut()
-            .filter(|media| !status_idle && active_status && !media.0.has_output())
-        {
+        if let Some(media) = self.telemetry.status.as_mut().filter(|media| {
+            !status_idle && active_status && !media.0.has_output() && !media.force_morse()
+        }) {
             // Retain the message, but release its producer and playback slot.
             // A new attempt after unkey must not block an identifier deadline.
             media.0.restart(false);
@@ -614,6 +610,10 @@ impl NodeController {
         self.linked = linked;
         let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
         let may_transmit = !inhibited && (self.settings.full_duplex || !receiving);
+        let courtesy_ready = !receive && self.courtesy.ready(self.now);
+        self.telemetry
+            .expire_status(self.now, may_transmit, courtesy_ready);
+        self.telemetry.poll_status();
         let active_before = self.telemetry.active;
         let peer_before =
             active_before == Some(Source::Status) && self.telemetry.peer_status().is_some();
@@ -654,11 +654,11 @@ impl NodeController {
             .telemetry
             .peer_status()
             .is_some_and(|peer| !peer.active());
-        let status_ready = status_idle
-            && (peer_ready
-                || (self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status));
+        let status_ready = self.telemetry.status_morse()
+            || (status_idle
+                && (peer_ready
+                    || (self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status)));
         let parrot_ready = !source_activity && self.telemetry.parrot_pending();
-        let courtesy_ready = !receive && self.courtesy.ready(self.now);
         if (may_transmit || peer_ready) && self.telemetry.active.is_none() {
             if courtesy_ready {
                 self.telemetry.active = self.courtesy.pop().and_then(|index| {
@@ -805,6 +805,7 @@ impl NodeController {
                 self.now,
                 samples(self.settings.transmit_timeout_ms),
             );
+        let force_morse = rendered_source == Some(Source::Status) && self.telemetry.status_morse();
         let playback = match rendered_source {
             Some(Source::Status) => self.telemetry.status.as_mut().map(|m| &mut m.0),
             Some(Source::Parrot) => self.telemetry.parrot.as_mut().map(|m| &mut m.0),
@@ -826,16 +827,17 @@ impl NodeController {
         let mut waiting_for_media = false;
         let mut continuing_media = false;
         if let Some(playback) = playback {
-            let interrupt = ((receive || source_activity)
-                && matches!(
-                    rendered_source,
-                    Some(
-                        Source::Identifier(_)
-                            | Source::Announcement(_)
-                            | Source::Tail(_)
-                            | Source::Status
-                    )
-                ))
+            let interrupt = force_morse
+                || ((receive || source_activity)
+                    && matches!(
+                        rendered_source,
+                        Some(
+                            Source::Identifier(_)
+                                | Source::Announcement(_)
+                                | Source::Tail(_)
+                                | Source::Status
+                        )
+                    ))
                 || (source_activity && rendered_source == Some(Source::Parrot));
             if (if peer_status {
                 peer_ready
