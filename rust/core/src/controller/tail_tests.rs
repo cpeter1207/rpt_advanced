@@ -186,14 +186,17 @@ fn tail_timeout_does_not_hold_a_completed_message() {
     node.settings.timeout_lockout_ms = 500;
     at(&mut node, 0, true);
     at(&mut node, 1, false);
-    at(&mut node, 1001, false);
+    assert_eq!(at(&mut node, 1001, false).1, 0.5);
     let mut out = [0.0; 6000];
     assert!(node.process_audio(false, false, &[], &mut out));
     assert!(
         node.telemetry.active.is_none(),
         "completed message releases its playback slot even across a traffic timeout"
     );
-    assert_eq!(out.iter().filter(|sample| **sample == 0.5).count(), 4800);
+    assert_eq!(
+        1 + out.iter().filter(|sample| **sample == 0.5).count(),
+        4800
+    );
 }
 
 #[test]

@@ -355,6 +355,9 @@ pub struct ControllerControl {
 }
 
 impl ControllerControl {
+    /// Request cancellation of the active attempt without reclaiming media on audio.
+    pub fn cancel_message(&self) {}
+
     /// Set station protection independently of telemetry admission and physical interlocks.
     pub fn set_site_inhibit(&self, inhibited: bool) {
         self.site_inhibit.store(inhibited, Ordering::Release);

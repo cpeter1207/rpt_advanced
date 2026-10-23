@@ -9,6 +9,23 @@ use super::{
 use std::collections::BTreeMap;
 
 #[test]
+fn cancel_message_prefix_inherits_remaps_and_rejects_conflicts() {
+    let document = ConfigDocument::parse("[general]\nlink_command_cancel_message=93\n[1000]\n[2000]\nlink_command_cancel_message=94\n").unwrap();
+    assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    for (node, prefix) in [("1000", "93"), ("2000", "94")] {
+        let settings = ResolvedNodeSettings::resolve(&document, &NodeId::new(node).unwrap())
+            .unwrap()
+            .value;
+        assert_eq!(
+            settings.link_commands["link_command_cancel_message"],
+            prefix
+        );
+    }
+    let conflict = ConfigDocument::parse("[1000]\nlink_command_cancel_message=77\n").unwrap();
+    assert!(ResolvedNodeSettings::resolve(&conflict, &NodeId::new("1000").unwrap()).is_err());
+}
+
+#[test]
 fn event_composition_conflicts_warn_and_choose_the_shared_composition() {
     let document = ConfigDocument::parse(
         "[1000]\n[event 1000 report]\nat=daily 12:00\nmessage=Legacy\ncontent=Current\n",

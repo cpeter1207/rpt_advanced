@@ -795,6 +795,7 @@ impl Host {
             LinkEffect::Message { selector, reply } => {
                 self.runtime.queue_message(local, &selector, reply)
             }
+            LinkEffect::CancelMessage => self.runtime.cancel_message(local),
             LinkEffect::SiteStatus { selector, reply } => {
                 self.runtime.queue_site_report(local, &selector, reply)
             }

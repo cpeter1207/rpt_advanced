@@ -304,6 +304,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_pad_test"
                 | "link_command_message"
                 | "link_command_site_status"
+                | "link_command_cancel_message"
                 | "parrot_enabled"
                 | "dtmf_admin_unlock_hash"
                 | "dtmf_admin_lock_hash"
@@ -846,6 +847,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_pad_test" => "82",
         "link_command_message" => "77",
         "link_command_site_status" => "76",
+        "link_command_cancel_message" => "78",
         _ => return None,
     })
 }

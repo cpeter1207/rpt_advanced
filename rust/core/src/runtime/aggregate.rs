@@ -1282,6 +1282,18 @@ impl<A: Send, C: Send> Runtime<A, C> {
         Ok(())
     }
 
+    /// Cancel only the active message on the current generation's audio owner.
+    pub fn cancel_message(&mut self, local: &str) -> Result<(), RuntimeError> {
+        self.nodes
+            .iter()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?
+            .control
+            .telemetry
+            .cancel_message();
+        Ok(())
+    }
+
     /// Queue existing time/direct/full/last-keyed telemetry, with speech failure falling back to Morse.
     pub fn queue_status(
         &mut self,

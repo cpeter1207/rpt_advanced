@@ -37,6 +37,86 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn current_message_cancel_stops_every_preparation_phase_and_restores_repeat() {
+    struct Stream {
+        phase: Arc<std::sync::atomic::AtomicU8>,
+        cancelled: Arc<AtomicBool>,
+    }
+    impl crate::audio::PcmStreamReader for Stream {
+        fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+            if self.phase.load(Ordering::Acquire) == 0 {
+                return crate::audio::PcmRead::Pending;
+            }
+            output.fill(0.75);
+            crate::audio::PcmRead::Samples(output.len())
+        }
+        fn select_morse_fallback(&mut self) -> crate::audio::MorseSwitch {
+            if self.phase.load(Ordering::Acquire) == 3 {
+                crate::audio::MorseSwitch::Pending
+            } else {
+                crate::audio::MorseSwitch::Selected
+            }
+        }
+        fn cancel(&mut self) {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+    for stage in 0..5 {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                telemetry_duck_db: 0,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        let phase = Arc::new(std::sync::atomic::AtomicU8::new(u8::from(stage != 0)));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stream = PreparedMedia::new_stream(Box::new(Stream {
+            phase: phase.clone(),
+            cancelled: cancelled.clone(),
+        }))
+        .unwrap();
+        assert!(
+            control.queue_prepared_status(stream.with_playback_policy(PlaybackPolicy {
+                repeat_during_playback: false,
+                ..Default::default()
+            }))
+        );
+        node.process_audio(false, false, &[], &mut [0.0]);
+        if stage == 2 {
+            phase.store(0, Ordering::Release);
+            node.process_audio(false, false, &[], &mut [0.0]);
+        } else if stage >= 3 {
+            phase.store(stage, Ordering::Release);
+            node.process_audio(true, false, &[], &mut [0.0]);
+        }
+        assert!(control.queue_prepared_status(media(0.5, 4)));
+        control.cancel_message();
+        let mut output = [0.2; 8];
+        AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+        node.process_audio(true, false, &[], &mut output);
+        let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+        assert_eq!(allocations, Some(0));
+        assert_eq!(
+            output, [0.2; 8],
+            "cancel must immediately restore repeat at stage {stage}"
+        );
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(control.reclaim().count(), 1);
+        phase.store(1, Ordering::Release); // Late producer readiness must not revive old PCM.
+        let mut after = [0.0; 12_010];
+        node.process_audio(false, false, &[], &mut after);
+        assert_eq!(after.iter().filter(|sample| **sample == 0.5).count(), 4);
+        assert!(!after.contains(&0.75));
+    }
+}
+
+#[test]
 fn configured_message_suppresses_repeat_but_still_switches_to_morse_on_receive() {
     for (local, linked, input, remote) in [
         (true, false, 0.2, 0.0),

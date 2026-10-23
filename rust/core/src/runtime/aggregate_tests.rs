@@ -650,7 +650,7 @@ fn composition_runtime_recurring_id_resolves_at_each_attempt() {
 }
 
 #[test]
-fn composition_runtime_command_waits_for_unkey_and_keeps_exact_peer() {
+fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audience() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
@@ -701,12 +701,8 @@ fn composition_runtime_command_waits_for_unkey_and_keeps_exact_peer() {
             regeneration: None,
         },
     );
-    assert!(audio.iter().all(|sample| *sample == 0.0));
-    assert!(
-        replies
-            .iter()
-            .any(|sample| sample.sample != 0.0 && sample.target == peer.reply_identity())
-    );
+    assert!(audio.iter().any(|sample| *sample == 0.25));
+    assert!(replies.iter().all(|sample| sample.sample == 0.0));
     let other = crate::link::PeerSignals::new();
     peer.end();
     assert_eq!(
