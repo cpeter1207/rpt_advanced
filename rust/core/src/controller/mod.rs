@@ -29,6 +29,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+pub(crate) use telemetry::MessageOccurrence;
 pub use telemetry::{
     ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PlaybackDestination,
     PlaybackPolicy, PoliteBusy, PoliteDelivery, PoliteExpiry, PreparedMedia, StatusRejected,
@@ -807,26 +808,44 @@ impl NodeController {
             );
         let force_morse = rendered_source == Some(Source::Status) && self.telemetry.status_morse();
         let playback = match rendered_source {
-            Some(Source::Status) => self.telemetry.status.as_mut().map(|m| &mut m.0),
-            Some(Source::Parrot) => self.telemetry.parrot.as_mut().map(|m| &mut m.0),
-            Some(Source::Courtesy(index)) => self.courtesy.media.get_mut(index).map(|m| &mut m.0),
-            Some(Source::Identifier(index)) => self.ids.get_mut(index).map(|id| &mut id.media.0),
-            Some(Source::Announcement(index)) => self
-                .announcements
+            Some(Source::Status) => self
+                .telemetry
+                .status
+                .as_mut()
+                .map(|m| (&mut m.0, m.6.as_deref())),
+            Some(Source::Parrot) => self
+                .telemetry
+                .parrot
+                .as_mut()
+                .map(|m| (&mut m.0, m.6.as_deref())),
+            Some(Source::Courtesy(index)) => self
+                .courtesy
+                .media
                 .get_mut(index)
-                .map(|a| &mut a.announcement.media.0),
+                .map(|m| (&mut m.0, m.6.as_deref())),
+            Some(Source::Identifier(index)) => self
+                .ids
+                .get_mut(index)
+                .map(|id| (&mut id.media.0, id.media.6.as_deref())),
+            Some(Source::Announcement(index)) => self.announcements.get_mut(index).map(|a| {
+                (
+                    &mut a.announcement.media.0,
+                    a.announcement.media.6.as_deref(),
+                )
+            }),
             Some(Source::Tail(index)) => self
                 .tails
                 .items
                 .get_mut(index)
-                .map(|item| &mut item.tail.media.0),
+                .map(|item| (&mut item.tail.media.0, item.tail.media.6.as_deref())),
             None => None,
         };
         let mut telemetry_sample = [0.0];
         let mut made = 0;
         let mut waiting_for_media = false;
         let mut continuing_media = false;
-        if let Some(playback) = playback {
+        if let Some((playback, occurrence)) = playback {
+            let first_output = !playback.has_output();
             let interrupt = force_morse
                 || ((receive || source_activity)
                     && matches!(
@@ -848,6 +867,12 @@ impl NodeController {
                 made = playback.render(interrupt, &mut telemetry_sample);
             } else {
                 playback.defer(interrupt);
+            }
+            if first_output && made != 0 && occurrence.is_some_and(|occurrence| !occurrence.begin())
+            {
+                playback.cancel();
+                telemetry_sample[0] = 0.0;
+                made = 0;
             }
             waiting_for_media = playback.waiting_for_stream();
             // Preparation alone does not key. Once audible, a composition owns

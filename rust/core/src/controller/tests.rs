@@ -37,6 +37,40 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn replaced_occurrence_cannot_publish_a_first_sample_when_control_wins_during_render() {
+    struct CancelOnRender(Arc<MessageOccurrence>);
+    impl crate::audio::PcmStreamReader for CancelOnRender {
+        fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+            self.0.cancel_pending();
+            output[0] = 0.75;
+            crate::audio::PcmRead::FinalSamples(1)
+        }
+    }
+    let occurrence = Arc::new(MessageOccurrence::default());
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(
+        control.queue_prepared_status(
+            PreparedMedia::new_stream(Box::new(CancelOnRender(occurrence.clone())))
+                .unwrap()
+                .with_occurrence(Some(occurrence))
+        )
+    );
+    let mut output = [0.0; 2];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.0; 2]);
+    let retired = control.reclaim().collect::<Vec<_>>();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].0.outcome(), PlaybackOutcome::Cancelled);
+}
+
+#[test]
 fn scheduled_morse_expiry_selects_the_complete_fallback_even_after_receive_deferral() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings {

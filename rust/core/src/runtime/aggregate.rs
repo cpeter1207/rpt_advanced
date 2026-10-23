@@ -1027,6 +1027,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
         if scheduler.is_message_queued(&dispatch.token) {
             return Ok(());
         }
+        let occurrence = dispatch.token.occurrence();
+        if occurrence
+            .as_ref()
+            .is_some_and(|occurrence| occurrence.cancelled())
+        {
+            scheduler.message_queued(&dispatch.token);
+            return Ok(());
+        }
         if dispatch.recipe.is_none() && dispatch.morse().is_none() {
             return Ok(());
         }
@@ -1061,9 +1069,11 @@ impl<A: Send, C: Send> Runtime<A, C> {
         .clamp(0, i128::from(u64::MAX / 48)) as u64
             * 48;
         assert!(
-            node.control
-                .telemetry
-                .queue_prepared_status(prepared.with_delivery(deadline, dispatch.delivery))
+            node.control.telemetry.queue_prepared_status(
+                prepared
+                    .with_delivery(deadline, dispatch.delivery)
+                    .with_occurrence(occurrence)
+            )
         );
         scheduler.message_queued(&dispatch.token);
         Ok(())
@@ -1768,6 +1778,7 @@ fn prepare_events(
                 name: label.into(),
                 trigger: crate::schedule::EventTrigger::parse(&event.at, event.days.as_deref())
                     .map_err(|_| RuntimeError::Preparation)?,
+                media: template.is_some() || recipes.events.contains_key(label),
             },
             template,
             operation,

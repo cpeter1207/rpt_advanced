@@ -107,6 +107,7 @@ fn event(name: &str, trigger: &str) -> EventSpec {
         local: "524950".into(),
         name: name.into(),
         trigger: trigger.parse().unwrap(),
+        media: false,
     }
 }
 

@@ -2,8 +2,10 @@
 
 use crate::{
     command::Command,
+    controller::MessageOccurrence,
     schedule::{CivilTime, EventTrigger},
 };
+use std::sync::Arc;
 
 /// A resolved event identity. Message/macro preparation remains on its control owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,6 +16,8 @@ pub struct EventSpec {
     pub name: String,
     /// Validated local-calendar trigger.
     pub trigger: EventTrigger,
+    /// Coalesce obsolete, never-audible media while preserving action reservations.
+    pub media: bool,
 }
 
 /// Scheduler preparation or bounded rendering failure.
@@ -34,11 +38,12 @@ pub struct DispatchContent {
     pub operation: Option<Command>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Occurrence {
     key: u64,
     civil: CivilTime,
     due_ms: i128,
+    media: Option<Arc<MessageOccurrence>>,
 }
 struct EventState {
     spec: EventSpec,
@@ -47,6 +52,7 @@ struct EventState {
     pending: Option<Occurrence>,
     message_queued: bool,
     message_required: bool,
+    admitted: Option<Arc<MessageOccurrence>>,
 }
 
 /// Copied reservation with private generation/occurrence identity for result validation.
@@ -59,6 +65,10 @@ pub struct ScheduledDispatch {
     pub content: DispatchContent,
 }
 impl ScheduledDispatch {
+    /// One control/audio identity, retained without allocating on the callback.
+    pub(crate) fn occurrence(&self) -> Option<Arc<MessageOccurrence>> {
+        self.occurrence.media.clone()
+    }
     /// Original scheduled minute in the host monotonic epoch, retained across retries.
     pub(crate) fn due_ms(&self) -> i128 {
         self.occurrence.due_ms
@@ -110,21 +120,22 @@ impl EventScheduler {
                 EventState {
                     completed: prior.and_then(|old| {
                         if old.message_queued {
-                            old.pending.map(|p| p.key).or(old.completed)
+                            old.pending.as_ref().map(|p| p.key).or(old.completed)
                         } else {
                             old.completed
                         }
                     }),
                     ready: prior.and_then(|old| {
-                        old.ready.or(if old.message_queued {
+                        old.ready.clone().or(if old.message_queued {
                             None
                         } else {
-                            old.pending
+                            old.pending.clone()
                         })
                     }),
                     pending: None,
                     message_queued: false,
                     message_required: false,
+                    admitted: prior.and_then(|old| old.admitted.clone()),
                     spec,
                 }
             })
@@ -148,15 +159,39 @@ impl EventScheduler {
         if self.last_tick.is_none_or(|last| captured_time >= last) {
             self.last_tick = Some(captured_time);
             for event in &mut self.events {
-                if event.pending.is_some() || event.ready.is_some() {
+                if !event.spec.media && (event.pending.is_some() || event.ready.is_some()) {
                     continue;
                 }
                 if let Some(key) = event.spec.trigger.occurrence(&local) {
-                    if event.completed != Some(key) {
+                    let newest = event
+                        .completed
+                        .into_iter()
+                        .chain(event.pending.as_ref().map(|pending| pending.key))
+                        .chain(event.ready.as_ref().map(|ready| ready.key))
+                        .max();
+                    if if event.spec.media {
+                        newest.is_none_or(|seen| key > seen)
+                    } else {
+                        event.completed != Some(key)
+                    } {
+                        if event.spec.media {
+                            for occurrence in event.pending.iter().chain(&event.ready) {
+                                if let Some(media) = &occurrence.media {
+                                    media.cancel_pending();
+                                }
+                            }
+                            if let Some(media) = &event.admitted {
+                                media.cancel_pending();
+                            }
+                        }
                         event.ready = Some(Occurrence {
                             key,
                             civil: local,
                             due_ms: scheduled_ms,
+                            media: event
+                                .spec
+                                .media
+                                .then(|| Arc::new(MessageOccurrence::default())),
                         });
                     }
                 }
@@ -169,8 +204,9 @@ impl EventScheduler {
             .filter_map(|(index, event)| {
                 event
                     .pending
-                    .or(event.ready)
-                    .map(|occurrence| (index, occurrence))
+                    .as_ref()
+                    .or(event.ready.as_ref())
+                    .map(|occurrence| (index, occurrence.clone()))
             })
             .min_by_key(|(_, occurrence)| occurrence.key);
         let Some((index, occurrence)) = selected else {
@@ -181,14 +217,20 @@ impl EventScheduler {
             Ok(content) => content,
             Err(error) => {
                 event.pending = None;
-                event.ready = None;
+                if event
+                    .ready
+                    .as_ref()
+                    .is_some_and(|ready| ready.key == occurrence.key)
+                {
+                    event.ready = None;
+                }
                 event.message_queued = false;
                 event.completed = Some(occurrence.key);
                 return Err(error);
             }
         };
         if event.pending.is_none() {
-            event.pending = Some(occurrence);
+            event.pending = Some(occurrence.clone());
             event.ready = None;
             event.message_queued = false;
         }
@@ -210,6 +252,7 @@ impl EventScheduler {
             event.spec == dispatch.spec
                 && event
                     .pending
+                    .as_ref()
                     .is_some_and(|pending| pending.key == dispatch.occurrence.key)
         })
     }
@@ -228,6 +271,7 @@ impl EventScheduler {
             return false;
         };
         event.message_queued = true;
+        event.admitted = dispatch.occurrence.media.clone();
         true
     }
     /// Confirm the message/operation completed; stale or unqueued-message results are ignored.

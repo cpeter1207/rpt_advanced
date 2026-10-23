@@ -9,7 +9,7 @@ use crate::audio::{PcmStreamReader, Playback};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 
 /// Settings shared by control-prepared Morse fallbacks.
@@ -114,7 +114,31 @@ pub struct PreparedMedia(
     pub(super) Option<crate::link::PeerReply>,
     pub(super) Option<Arc<AtomicBool>>,
     pub(super) Option<(u64, PoliteDelivery, bool)>,
+    pub(super) Option<Arc<MessageOccurrence>>,
 );
+
+/// One occurrence's race-free transition: pending (0), audible (1), or cancelled (2).
+#[derive(Default)]
+pub(crate) struct MessageOccurrence(AtomicU8);
+
+impl MessageOccurrence {
+    /// Obsolete pending audio may be cancelled; already audible playback is never replaced.
+    pub(crate) fn cancel_pending(&self) {
+        let _ = self
+            .0
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
+    }
+    /// Terminal cancellation is visible before and after a first-sample render.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 2
+    }
+    /// Claim the first audible sample, losing safely to a concurrent replacement.
+    pub(super) fn begin(&self) -> bool {
+        self.0
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 /// Output routing behavior attached to prepared playback.
@@ -130,6 +154,7 @@ impl PreparedMedia {
             Playback::new_stream(stream),
             true,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
@@ -151,6 +176,12 @@ impl PreparedMedia {
     /// Retain the occurrence's original start deadline in this controller's sample epoch.
     pub fn with_delivery(mut self, deadline_sample: u64, policy: PoliteDelivery) -> Self {
         self.5 = Some((deadline_sample, policy, false));
+        self
+    }
+
+    /// Retain the scheduler's single occurrence identity through queueing and reclamation.
+    pub(crate) fn with_occurrence(mut self, occurrence: Option<Arc<MessageOccurrence>>) -> Self {
+        self.6 = occurrence;
         self
     }
 
@@ -187,6 +218,7 @@ impl PreparedMedia {
             Playback::new_stream(Box::new(stream)),
             true,
             MediaKind::Parrot,
+            None,
             None,
             None,
             None,
@@ -234,6 +266,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
@@ -668,6 +701,10 @@ impl TelemetryPlanner {
             }
             let Some(media) = self.status.as_mut().filter(|media| {
                 media.0.is_finished()
+                    || media
+                        .6
+                        .as_ref()
+                        .is_some_and(|occurrence| occurrence.cancelled())
                     || media.3.as_ref().is_some_and(|peer| peer.ended())
                     || media
                         .4

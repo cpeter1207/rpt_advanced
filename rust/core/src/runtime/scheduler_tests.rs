@@ -9,6 +9,7 @@ fn event(name: &str, minute: u8) -> EventSpec {
         local: "524950".into(),
         name: name.into(),
         trigger: format!("daily 12:{minute:02}").parse().unwrap(),
+        media: false,
     }
 }
 fn message(_: &EventSpec, _: &CivilTime) -> Result<DispatchContent, SchedulerError> {
@@ -36,6 +37,7 @@ fn periodic_triggers_become_pending_on_clock_boundaries() {
             local: "524950".into(),
             name: "clock_message".into(),
             trigger: at.parse().expect("periodic clock trigger should be valid"),
+            media: false,
         };
         let mut scheduler = EventScheduler::new(1, vec![spec], None).unwrap();
         let local = CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap();
@@ -56,6 +58,7 @@ fn periodic_occurrences_keep_one_reservation_across_repeated_ticks_and_reload() 
         local: "524950".into(),
         name: "quarter_hour".into(),
         trigger: "every 15 minutes".parse().unwrap(),
+        media: false,
     };
     let mut scheduler = EventScheduler::new(1, vec![spec.clone()], None).unwrap();
     let first = scheduler
