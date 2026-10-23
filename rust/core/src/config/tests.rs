@@ -8,6 +8,34 @@ use super::{
 };
 use std::collections::BTreeMap;
 
+#[test]
+fn message_playback_controls_are_accepted_on_each_selectable_source() {
+    for (section, content) in [
+        ("message report", "content=Ready"),
+        ("identifier 1000 report", "morse_text=ID"),
+        ("tail 1000 report", "morse_text=TAIL"),
+        ("event 1000 report", "at=daily 12:00\nmessage=Ready"),
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[{section}]\n{content}\ndtmf_id=7\n\
+             repeat_during_playback=no\nplayback_destination=local_and_links\n"
+        ))
+        .unwrap();
+        let result = Schema::validate(&document).unwrap();
+        assert!(
+            result.warnings.is_empty(),
+            "{section}: {:?}",
+            result.warnings
+        );
+    }
+    let document = ConfigDocument::parse(
+        "[1000]\n[event 1000 hourly]\nat=daily 12:00\nmessage=Ready\n\
+         polite_maximum_wait_ms=0\npolite_expiry=morse\npolite_expiry_busy=wait\n",
+    )
+    .unwrap();
+    assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+}
+
 fn validate_command_map(
     commands: &BTreeMap<String, String>,
 ) -> Result<(), crate::command::CommandMapError> {
