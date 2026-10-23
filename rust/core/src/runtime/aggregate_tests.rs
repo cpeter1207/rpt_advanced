@@ -1454,6 +1454,32 @@ fn multi_node_failed_candidate_and_device_activation_restore_complete_old_runtim
 }
 
 #[test]
+fn scheduled_event_clock_bounds_do_not_consume_another_event() {
+    for (second, subsecond) in [(60, 0), (0, 1000)] {
+        let mut runtime = link_notice_runtime(
+            "[1000]\n[2000]\n[event 1000 other]\nat=daily 09:08\nmessage=OTHER\n[event 2000 later]\nat=daily 09:08\nmessage=LATER\n[event 2000 ready]\nat=daily 09:07\nmessage=READY\n",
+            Arc::new(AtomicBool::new(false)),
+        );
+        let invalid = RuntimeClock {
+            civil: clock().civil.map(|(civil, _)| (civil, second)),
+            wall_subsecond_ms: subsecond,
+            ..clock()
+        };
+        assert!(matches!(
+            runtime.next_event(invalid),
+            Err(RuntimeError::Clock)
+        ));
+        let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+        assert_eq!(dispatch.local(), "2000");
+        assert_eq!(dispatch.morse(), Some("READY"));
+        runtime.queue_event(&dispatch).unwrap();
+        assert!(runtime.complete_event(&dispatch));
+        assert!(runtime.next_event(clock()).unwrap().is_none());
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
 fn scheduled_event_composition_uses_the_shared_recipe_and_manual_selector() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
@@ -1601,6 +1627,108 @@ fn scheduled_event_replaces_an_older_unstarted_occurrence() {
         ["The time is 9:08 AM."],
         "stale unstarted occurrences must be discarded, not replayed"
     );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_cancelled_before_admission_skips_only_the_obsolete_media() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[event 1000 clock]\nat=every 1 minute\nmessage=Report ${time}\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let first = runtime.next_event(clock()).unwrap().unwrap();
+    assert_eq!(first.morse(), Some("Report 9:07 AM"));
+    let next = RuntimeClock {
+        now_ms: 61_000,
+        wall_seconds: 160,
+        civil: Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+            0,
+        )),
+        ..clock()
+    };
+    let obsolete = runtime.next_event(next).unwrap().unwrap();
+    assert_eq!(obsolete.morse(), Some("Report 9:07 AM"));
+    runtime.queue_event(&obsolete).unwrap();
+    assert!(messages.lock().unwrap().is_empty());
+    assert!(runtime.complete_event(&obsolete));
+    assert_eq!(runtime.queue_event(&first), Err(RuntimeError::Rejected));
+    let latest = runtime.next_event(next).unwrap().unwrap();
+    assert_eq!(latest.morse(), Some("Report 9:08 AM"));
+    runtime.queue_event(&latest).unwrap();
+    assert_eq!(*messages.lock().unwrap(), ["Report 9:08 AM"]);
+    assert!(runtime.complete_event(&latest));
+    assert!(runtime.next_event(next).unwrap().is_none());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_full_queue_retry_keeps_the_original_start_deadline() {
+    let mut runtime = link_notice_runtime(
+        "[1000]\n[event 1000 report]\nat=daily 09:07\nmessage=Report\npolite_maximum_wait_ms=10\n",
+        Arc::new(AtomicBool::new(false)),
+    );
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    for _ in 0..4 {
+        runtime
+            .queue_status("1000", LinkAction::Time, None, clock(), None)
+            .unwrap();
+    }
+    assert_eq!(runtime.queue_event(&dispatch), Err(RuntimeError::Rejected));
+    assert!(!runtime.complete_event(&dispatch));
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = tx.acquire().unwrap();
+    let controller = &mut generation.state().controller;
+    let mut queued = [0.0; 12_100];
+    controller.process_audio(false, false, &[], &mut queued);
+    assert_eq!(queued.iter().filter(|sample| **sample == 0.25).count(), 16);
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let mut expired = [0.0; 960];
+    controller.process_audio(false, false, &[], &mut expired);
+    assert_eq!(expired, [0.0; 960], "retry must not renew the start budget");
+    assert!(runtime.next_event(clock()).unwrap().is_none());
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_preparation_failure_keeps_the_reservation_retryable() {
+    let reject = Arc::new(AtomicBool::new(false));
+    let mut runtime = link_notice_runtime(
+        "[1000]\n[event 1000 report]\nat=daily 09:07\nmessage=Report\n",
+        Arc::clone(&reject),
+    );
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    reject.store(true, Ordering::Release);
+    assert_eq!(
+        runtime.queue_event(&dispatch),
+        Err(RuntimeError::Preparation)
+    );
+    assert!(!runtime.complete_event(&dispatch));
+    reject.store(false, Ordering::Release);
+    runtime.queue_event(&dispatch).unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = tx.acquire().unwrap();
+    let mut output = [0.0; 12_016];
+    generation
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    let heard: Vec<_> = output.into_iter().filter(|sample| *sample != 0.0).collect();
+    assert_eq!(heard, [0.25; 4], "only the successful retry may play");
+    assert!(runtime.next_event(clock()).unwrap().is_none());
     drop(generation);
     assert!(runtime.stop(0));
 }
@@ -2478,6 +2606,7 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
 fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
     for (action, target, message) in [
         ("connect", "3000", "message=TEST\n"),
+        ("connect", "3000", "content={media}\nspeech_text=Report\n"),
         ("disconnect", "2000", ""),
         ("disconnect_all", "", ""),
         ("reconnect_all", "", ""),
@@ -2498,6 +2627,7 @@ fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
         let event = runtime.next_event(clock()).unwrap().unwrap();
         assert_eq!(event.operation().unwrap().node, target);
         if !message.is_empty() {
+            assert!(!runtime.complete_event(&event));
             assert!(matches!(
                 runtime.event_command(&event, clock()),
                 Err(RuntimeError::Rejected)

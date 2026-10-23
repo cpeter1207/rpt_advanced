@@ -27,21 +27,33 @@ fn cancel_message_prefix_inherits_remaps_and_rejects_conflicts() {
 
 #[test]
 fn event_composition_conflicts_warn_and_choose_the_shared_composition() {
-    let document = ConfigDocument::parse(
-        "[1000]\n[event 1000 report]\nat=daily 12:00\nmessage=Legacy\ncontent=Current\n",
-    )
-    .unwrap();
-    let result = Schema::validate(&document).unwrap();
-    assert!(
-        result
-            .warnings
-            .iter()
-            .any(|warning| warning.section == "event 1000 report")
-    );
-    let event = ResolvedEventSettings::resolve(&document, &NodeId::new("1000").unwrap(), "report")
-        .unwrap()
-        .value;
-    assert_eq!(event.composed.unwrap().content, "Current");
+    for (legacy, composed, content, conflict) in [
+        ("message=Legacy", "content=Current", "Current", true),
+        ("template=clock", "content=Current", "Current", true),
+        ("message=", "content=Current", "Current", false),
+        ("template=", "content=Current", "Current", false),
+        ("message=Legacy", "morse_text=Current", "{media}", true),
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[event 1000 report]\nat=daily 12:00\ndays=Monday-Friday\n{legacy}\n{composed}\n"
+        ))
+        .unwrap();
+        let result = Schema::validate(&document).unwrap();
+        assert_eq!(
+            result.warnings.iter().any(|warning| {
+                warning.section == "event 1000 report"
+                    && warning.message == "legacy event text conflicts with composed content"
+            }),
+            conflict,
+            "{legacy}"
+        );
+        let event =
+            ResolvedEventSettings::resolve(&document, &NodeId::new("1000").unwrap(), "report")
+                .unwrap()
+                .value;
+        assert_eq!(event.days.as_deref(), Some("Monday-Friday"));
+        assert_eq!(event.composed.unwrap().content, content);
+    }
 }
 
 #[test]

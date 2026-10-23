@@ -208,7 +208,10 @@ fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
          [identifier 1000 broken]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_missing}\n\
          [tail 1000 empty]\n\
          [tail 1000 broken]\ncontent={message_macro_missing}\n\
-         [tail 1000 recorded]\nsound_file=tail.wav\nmorse_text=TAIL\n",
+         [tail 1000 recorded]\nsound_file=tail.wav\nmorse_text=TAIL\n\
+         [event 1000 broken]\nat=daily 12:00\ncontent={message_macro_missing}\ndtmf_id=7\n\
+         [event 1000 action]\nat=daily 12:00\nmacro=resume\ndtmf_id=8\n\
+         [macro resume]\naction=reconnect_all\n",
     )
     .unwrap();
     let node = NodeId::new("1000").unwrap();
@@ -229,7 +232,16 @@ fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
         .filter(|warning| warning.fallback == "definition disabled")
         .map(|warning| warning.section.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(disabled, ["identifier 1000 broken", "tail 1000 broken"]);
+    assert_eq!(
+        disabled,
+        [
+            "identifier 1000 broken",
+            "tail 1000 broken",
+            "event 1000 broken"
+        ]
+    );
+    assert!(recipes.events.is_empty());
+    assert!(recipes.selectors.is_empty());
     let mut requests = Vec::new();
     for receiving in [true, false, false] {
         controller.process_audio(receiving, false, &[], &mut [0.0; 48]);

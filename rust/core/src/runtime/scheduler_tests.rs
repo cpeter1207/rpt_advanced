@@ -321,25 +321,56 @@ fn reload_rejects_stale_dispatch_and_preserves_matching_occurrences() {
 
 #[test]
 fn impossible_render_consumes_only_failed_occurrence_and_macro_needs_no_message() {
-    let mut scheduler =
-        EventScheduler::new(1, vec![event("first", 0), event("second", 0)], None).unwrap();
-    assert!(
-        scheduler
-            .next(100, 100000, civil(0), |_, _| Err(SchedulerError::Render))
-            .is_err()
-    );
-    let second = scheduler
-        .next(100, 100000, civil(0), |_, _| {
-            Ok(DispatchContent {
-                message: None,
-                operation: None,
+    for (reserve, failed_minute) in [(false, 0), (true, 0), (true, 1)] {
+        let first = EventSpec {
+            trigger: "every 1 minute".parse().unwrap(),
+            media: true,
+            ..event("first", 0)
+        };
+        let mut scheduler = EventScheduler::new(1, vec![first, event("second", 0)], None).unwrap();
+        if reserve {
+            let first = scheduler
+                .next(100, 100000, civil(0), message)
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.name(), "first");
+        }
+        assert!(
+            scheduler
+                .next(160, 160000, civil(failed_minute), |_, _| {
+                    Err(SchedulerError::Render)
+                })
+                .is_err()
+        );
+        let second = scheduler
+            .next(160, 160000, civil(failed_minute), |_, _| {
+                Ok(DispatchContent {
+                    message: None,
+                    operation: None,
+                })
             })
-        })
-        .unwrap()
-        .unwrap();
-    assert_eq!(second.name(), "second");
-    assert!(scheduler.complete(&second));
-    assert!(!scheduler.complete(&second));
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.name(), "second");
+        assert!(scheduler.complete(&second));
+        assert!(!scheduler.complete(&second));
+        let successor = scheduler
+            .next(160, 160000, civil(failed_minute), message)
+            .unwrap();
+        assert_eq!(successor.is_some(), failed_minute == 1);
+        if let Some(successor) = successor {
+            assert_eq!(successor.name(), "first");
+            assert_eq!(successor.civil_time(), civil(1));
+            assert!(scheduler.message_queued(&successor));
+            assert!(scheduler.complete(&successor));
+        }
+        assert!(
+            scheduler
+                .next(160, 160000, civil(failed_minute), message)
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 #[test]

@@ -137,6 +137,10 @@ fn tail_receive_pending_vs_playing() {
     let (_, interrupted) = at(&mut node, 3501, true);
     assert_ne!(interrupted, 0.5, "primary must stop at receive boundary");
     assert!(node.telemetry.active == Some(Source::Tail(0)));
+    assert!(
+        node.tails.ready(node.now).is_none(),
+        "ongoing receive cannot admit the playing tail as a second attempt"
+    );
     at(&mut node, 3502, false);
     assert!(node.telemetry.active == Some(Source::Tail(0)));
 }

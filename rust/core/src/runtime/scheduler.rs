@@ -176,9 +176,11 @@ impl EventScheduler {
                     } {
                         if event.spec.media {
                             for occurrence in event.pending.iter().chain(&event.ready) {
-                                if let Some(media) = &occurrence.media {
-                                    media.cancel_pending();
-                                }
+                                occurrence
+                                    .media
+                                    .as_ref()
+                                    .expect("media event retains its occurrence")
+                                    .cancel_pending();
                             }
                             if let Some(media) = &event.admitted {
                                 media.cancel_pending();

@@ -254,11 +254,13 @@ fn replaced_occurrence_cannot_publish_a_first_sample_when_control_wins_during_re
 
 #[test]
 fn scheduled_zero_wait_allows_only_an_immediately_eligible_first_sample() {
-    for (local, linked, activity, count) in [
-        (false, false, false, 4),
-        (true, false, true, 0),
-        (false, true, true, 0),
-        (false, false, true, 0),
+    for (local, linked, activity, inhibited, busy, count) in [
+        (false, false, false, false, false, 4),
+        (true, false, true, false, false, 0),
+        (false, true, true, false, false, 0),
+        (false, false, true, false, false, 0),
+        (false, false, false, true, false, 0),
+        (false, false, false, false, true, 0),
     ] {
         let (mut node, mut control) = NodeController::new(
             ControllerSettings {
@@ -271,6 +273,10 @@ fn scheduled_zero_wait_allows_only_an_immediately_eligible_first_sample() {
         )
         .unwrap();
         node.now = 12_000;
+        control.set_site_inhibit(inhibited);
+        if busy {
+            assert!(control.queue_prepared_status(media(0.5, 4)));
+        }
         assert!(control.queue_prepared_status(media(0.75, 4).with_delivery(
             node.now,
             PoliteDelivery {
@@ -283,9 +289,9 @@ fn scheduled_zero_wait_allows_only_an_immediately_eligible_first_sample() {
         assert_eq!(
             output.iter().filter(|sample| **sample == 0.75).count(),
             count,
-            "source activity={local}/{linked}/{activity}"
+            "source activity={local}/{linked}/{activity}, inhibited={inhibited}, busy={busy}"
         );
-        assert_eq!(control.reclaim().count(), 1);
+        assert_eq!(control.reclaim().count(), 1 + usize::from(busy));
     }
 }
 
