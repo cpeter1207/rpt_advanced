@@ -113,12 +113,17 @@ fn event(name: &str, trigger: &str) -> EventSpec {
 fn fired(scheduler: &mut EventScheduler, time: Stamp) -> Vec<String> {
     let mut names = Vec::new();
     while let Some(dispatch) = scheduler
-        .next(time.wall, time.civil, |_, _| {
-            Ok(DispatchContent {
-                message: None,
-                operation: None,
-            })
-        })
+        .next(
+            time.wall,
+            i128::from(time.wall) * 1000,
+            time.civil,
+            |_, _| {
+                Ok(DispatchContent {
+                    message: None,
+                    operation: None,
+                })
+            },
+        )
         .unwrap()
     {
         assert!(names.len() < 16, "one captured minute must settle finitely");
@@ -391,15 +396,20 @@ fn reload_preserves_event_identity_but_new_identity_and_instance_are_eligible() 
                 let spec = event("identity", trigger);
                 let mut previous = EventScheduler::new(1, vec![spec.clone()], None).unwrap();
                 let original = previous
-                    .next(first.wall, first.civil, |_, _| {
-                        Ok(DispatchContent {
-                            message: Some("original text".into()),
-                            operation: Some(Command {
-                                action: LinkAction::DisconnectAll,
-                                node: String::new(),
-                            }),
-                        })
-                    })
+                    .next(
+                        first.wall,
+                        i128::from(first.wall) * 1000,
+                        first.civil,
+                        |_, _| {
+                            Ok(DispatchContent {
+                                message: Some("original text".into()),
+                                operation: Some(Command {
+                                    action: LinkAction::DisconnectAll,
+                                    node: String::new(),
+                                }),
+                            })
+                        },
+                    )
                     .unwrap()
                     .unwrap();
                 assert!(previous.message_queued(&original));
@@ -408,13 +418,18 @@ fn reload_preserves_event_identity_but_new_identity_and_instance_are_eligible() 
                 // Changing the renderer's message and macro does not create an occurrence.
                 assert!(
                     unchanged
-                        .next(repeated.wall, repeated.civil, |_, _| Ok(DispatchContent {
-                            message: Some("changed text".into()),
-                            operation: Some(Command {
-                                action: LinkAction::ReconnectAll,
-                                node: String::new()
-                            }),
-                        }))
+                        .next(
+                            repeated.wall,
+                            i128::from(repeated.wall) * 1000,
+                            repeated.civil,
+                            |_, _| Ok(DispatchContent {
+                                message: Some("changed text".into()),
+                                operation: Some(Command {
+                                    action: LinkAction::ReconnectAll,
+                                    node: String::new()
+                                }),
+                            })
+                        )
                         .unwrap()
                         .is_none()
                 );

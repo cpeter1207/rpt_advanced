@@ -27,6 +27,7 @@ pub(super) struct MessageRecipes {
     pub items: Vec<MessageRecipe>,
     pub selectors: BTreeMap<String, usize>,
     pub names: BTreeMap<String, usize>,
+    pub events: BTreeMap<String, usize>,
     pub site_selectors: BTreeMap<String, usize>,
     pub site_unavailable: usize,
     pub warnings: Vec<crate::config::ConfigWarning>,

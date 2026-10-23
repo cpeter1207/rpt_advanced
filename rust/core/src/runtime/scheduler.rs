@@ -38,6 +38,7 @@ pub struct DispatchContent {
 struct Occurrence {
     key: u64,
     civil: CivilTime,
+    due_ms: i128,
 }
 struct EventState {
     spec: EventSpec,
@@ -58,6 +59,10 @@ pub struct ScheduledDispatch {
     pub content: DispatchContent,
 }
 impl ScheduledDispatch {
+    /// Original scheduled minute in the host monotonic epoch, retained across retries.
+    pub(crate) fn due_ms(&self) -> i128 {
+        self.occurrence.due_ms
+    }
     /// Configured event name.
     pub fn name(&self) -> &str {
         &self.spec.name
@@ -136,6 +141,7 @@ impl EventScheduler {
     pub fn next(
         &mut self,
         captured_time: i64,
+        scheduled_ms: i128,
         local: CivilTime,
         mut render: impl FnMut(&EventSpec, &CivilTime) -> Result<DispatchContent, SchedulerError>,
     ) -> Result<Option<ScheduledDispatch>, SchedulerError> {
@@ -147,7 +153,11 @@ impl EventScheduler {
                 }
                 if let Some(key) = event.spec.trigger.occurrence(&local) {
                     if event.completed != Some(key) {
-                        event.ready = Some(Occurrence { key, civil: local });
+                        event.ready = Some(Occurrence {
+                            key,
+                            civil: local,
+                            due_ms: scheduled_ms,
+                        });
                     }
                 }
             }

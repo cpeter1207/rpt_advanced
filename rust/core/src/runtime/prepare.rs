@@ -346,6 +346,19 @@ pub(super) fn controller(
             }
         }
     }
+    for label in labels(document, "event", node.as_str()) {
+        let event = crate::config::ResolvedEventSettings::resolve(document, node, label)?.value;
+        if let Some(settings) = event.composed {
+            if let Some(index) = recipes.add(
+                settings,
+                &format!("event {} {label}", node.as_str()),
+                catalog,
+                MorseRequirement::Optional,
+            )? {
+                recipes.events.insert(label.into(), index);
+            }
+        }
+    }
     let (mut controller, mut control) = NodeController::new(
         ControllerSettings {
             parrot_enabled: settings.parrot_enabled,

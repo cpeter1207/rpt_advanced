@@ -953,7 +953,7 @@ pub struct ResolvedMacroSettings {
     pub target_node: String,
 }
 /// Resolved zero-time event declaration.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedEventSettings {
     /// Event label.
     pub name: String,
@@ -973,6 +973,8 @@ pub struct ResolvedEventSettings {
     pub playback: crate::controller::PlaybackPolicy,
     /// Original occurrence's polite start-deadline policy.
     pub delivery: crate::controller::PoliteDelivery,
+    /// Optional shared composition; when present it replaces legacy message/template media.
+    pub composed: Option<super::ResolvedMessageSettings>,
 }
 /// Resolved permanent direct-link declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1369,6 +1371,22 @@ impl ResolvedEventSettings {
             dtmf_id: super::messages::message_selector(document, std::slice::from_ref(&section)),
             playback: super::messages::playback_policy(document, std::slice::from_ref(&section)),
             delivery: super::messages::delivery_policy(document, std::slice::from_ref(&section), 0),
+            composed: if super::schema::event_composed(document, &section) {
+                let default_content =
+                    if document.lookup("message_id", &[section.as_str()]).is_some() {
+                        "{message}"
+                    } else {
+                        "{media}"
+                    };
+                Some(super::ResolvedMessageSettings::from_scopes(
+                    document,
+                    node,
+                    std::slice::from_ref(&section),
+                    default_content,
+                )?)
+            } else {
+                None
+            },
         };
         if value.at.is_empty() {
             return Err(ConfigError::structure(&section, "event at is required"));

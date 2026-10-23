@@ -402,7 +402,10 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 || super::messages::content_key(key)
                 || key_known(KnownScope::Announcement, key)
         }
-        KnownScope::Event => matches!(key, "at" | "template" | "message" | "macro" | "days"),
+        KnownScope::Event => {
+            matches!(key, "at" | "template" | "message" | "macro" | "days")
+                || key_known(KnownScope::Message, key)
+        }
         KnownScope::Permanent => matches!(key, "remote_node" | "group_name"),
         KnownScope::Schedule => matches!(
             key,
@@ -1020,6 +1023,18 @@ fn lookup_valid<'a>(
     })
 }
 
+/// Whether an event explicitly selects the shared composition/media path.
+pub(super) fn event_composed(document: &ConfigDocument, section: &str) -> bool {
+    document.entries().iter().any(|entry| {
+        entry.section == section
+            && (super::messages::content_key(&entry.key)
+                || matches!(
+                    entry.key.as_str(),
+                    "sound_file" | "speech_text" | "morse_text" | "tone_sequence"
+                ))
+    })
+}
+
 fn validate_events(document: &ConfigDocument) -> Result<(), ConfigError> {
     for section in unique_sections(document) {
         let parsed = scope::parse_scope(section).expect("section grammar checked");
@@ -1039,22 +1054,24 @@ fn validate_events(document: &ConfigDocument) -> Result<(), ConfigError> {
         let template = document.lookup("template", &[section]).unwrap_or_default();
         let message = document.lookup("message", &[section]).unwrap_or_default();
         let macro_name = document.lookup("macro", &[section]).unwrap_or_default();
-        if !message.is_empty() && !template.is_empty() {
+        let composed = event_composed(document, section);
+        if !composed && !message.is_empty() && !template.is_empty() {
             return Err(ConfigError::structure(
                 section,
                 "event message and template are mutually exclusive",
             ));
         }
-        if message.is_empty() && template.is_empty() && macro_name.is_empty() {
+        if !composed && message.is_empty() && template.is_empty() && macro_name.is_empty() {
             return Err(ConfigError::structure(
                 section,
                 "event message, template, or macro is required",
             ));
         }
-        if !message.is_empty() {
+        if !composed && !message.is_empty() {
             validate_template(section, message)?;
         }
-        if !template.is_empty()
+        if !composed
+            && !template.is_empty()
             && !named_visible(document, "template", parsed.node.unwrap(), template)
         {
             return Err(ConfigError::structure(

@@ -113,6 +113,7 @@ pub struct PreparedMedia(
     pub(super) MediaKind,
     pub(super) Option<crate::link::PeerReply>,
     pub(super) Option<Arc<AtomicBool>>,
+    pub(super) Option<(u64, PoliteDelivery)>,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,6 +132,7 @@ impl PreparedMedia {
             MediaKind::Status,
             None,
             None,
+            None,
         ))
     }
 
@@ -146,6 +148,23 @@ impl PreparedMedia {
         self
     }
 
+    /// Retain the occurrence's original start deadline in this controller's sample epoch.
+    pub fn with_delivery(mut self, deadline_sample: u64, policy: PoliteDelivery) -> Self {
+        self.5 = Some((deadline_sample, policy));
+        self
+    }
+
+    /// Mark an expired unstarted skip-policy occurrence for control-side reclamation.
+    fn expire(&mut self, now: u64) {
+        if !self.0.has_output()
+            && self.5.is_some_and(|(deadline, policy)| {
+                now >= deadline && policy.expiry == PoliteExpiry::Skip
+            })
+        {
+            self.0.cancel();
+        }
+    }
+
     /// Construct the spoken-report then recording sequence for local parrot playback.
     pub fn new_parrot_stream(
         report: Option<Box<dyn PcmStreamReader>>,
@@ -156,6 +175,7 @@ impl PreparedMedia {
             Playback::new_stream(Box::new(stream)),
             true,
             MediaKind::Parrot,
+            None,
             None,
             None,
         )
@@ -202,6 +222,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
             None,
             None,
         ))
@@ -600,6 +621,22 @@ impl TelemetryPlanner {
     pub fn status_pending(&self) -> bool {
         self.status.is_some() || !self.pending.is_empty()
     }
+    /// Observe every bounded pending deadline without removing or dropping queue ownership.
+    pub fn expire_status(&mut self, now: u64) {
+        if let Some(media) = &mut self.status {
+            media.expire(now);
+        }
+        let count = self.pending.slots();
+        let mut chunk = self
+            .pending
+            .read_chunk(count)
+            .expect("sole consumer retains its readable slots");
+        let (first, second) = chunk.as_mut_slices();
+        for media in first.iter_mut().chain(second) {
+            media.expire(now);
+        }
+        // No commit: cancelled envelopes remain owned until normal control-side retirement.
+    }
     /// Skip ended endpoints and superseded notices, returning their ownership to control.
     pub fn poll_status(&mut self) {
         loop {
@@ -607,7 +644,8 @@ impl TelemetryPlanner {
                 self.status = self.pending.pop().ok();
             }
             let Some(media) = self.status.as_mut().filter(|media| {
-                media.3.as_ref().is_some_and(|peer| peer.ended())
+                media.0.is_finished()
+                    || media.3.as_ref().is_some_and(|peer| peer.ended())
                     || media
                         .4
                         .as_ref()

@@ -535,6 +535,7 @@ impl NodeController {
         link_sample: f32,
         parrot_output: Option<ProgramSample<'_>>,
     ) -> f32 {
+        self.telemetry.expire_status(self.now);
         self.telemetry.poll_status();
         let receive = receiving || linked;
         let status_idle = !receive
