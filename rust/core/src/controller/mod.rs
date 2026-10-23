@@ -29,9 +29,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+pub(crate) use telemetry::MessageOccurrence;
 pub use telemetry::{
-    ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PreparedMedia,
-    StatusRejected,
+    ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PlaybackDestination,
+    PlaybackPolicy, PoliteBusy, PoliteDelivery, PoliteExpiry, PreparedMedia, StatusRejected,
 };
 use telemetry::{Source, TelemetryPlanner};
 use timeout::TimeoutPolicy;
@@ -97,6 +98,10 @@ pub(crate) struct ParrotOutput<'a> {
 pub(crate) struct PeerReplySample {
     pub target: usize,
     pub sample: f32,
+    /// Suppress ordinary traffic only after its input rings and detectors have advanced.
+    pub suppress_repeat: bool,
+    /// Configured message PCM, separate from addressed command replies and RF signaling.
+    pub broadcast: Option<f32>,
 }
 
 struct ProgramSample<'a> {
@@ -132,6 +137,8 @@ pub struct NodeController {
     last_activity: u64,
     key_idle: u64,
     keyed: bool,
+    traffic_keyed: bool,
+    exempt_release: bool,
     last_audio: u64,
     release_hang: u64,
     ctcss_hang_until: u64,
@@ -252,6 +259,8 @@ impl NodeController {
                 last_activity: 0,
                 key_idle: 0,
                 keyed: false,
+                traffic_keyed: false,
+                exempt_release: false,
                 last_audio: 0,
                 release_hang: 0,
                 ctcss_hang_until: 0,
@@ -441,6 +450,7 @@ impl NodeController {
             *sample = rf;
             self.now = self.now.saturating_add(1);
         }
+        self.activity.advance_clock(self.now);
         self.keyed
     }
 
@@ -526,6 +536,83 @@ impl NodeController {
             })
     }
 
+    /// Borrow the generation-owned envelope without moving or reclaiming it on audio.
+    fn media(&mut self, source: Option<Source>) -> Option<&mut PreparedMedia> {
+        match source? {
+            Source::Status => self.telemetry.status.as_mut(),
+            Source::Parrot => self.telemetry.parrot.as_mut(),
+            Source::Courtesy(index) => self.courtesy.media.get_mut(index),
+            Source::Identifier(index) => self.ids.get_mut(index).map(|id| &mut id.media),
+            Source::Announcement(index) => self
+                .announcements
+                .get_mut(index)
+                .map(|a| &mut a.announcement.media),
+            Source::Tail(index) => self
+                .tails
+                .items
+                .get_mut(index)
+                .map(|item| &mut item.tail.media),
+        }
+    }
+
+    /// Satisfy the selected ID and lower priorities through the existing timing policy.
+    fn satisfy_identifier(&mut self, index: usize) {
+        self.identifiers.complete(&self.rules, index, self.now);
+        let priority = self.ids[index].priority;
+        for (i, (id, satisfied)) in self.ids.iter().zip(&mut self.satisfied).enumerate() {
+            if i == index || id.priority < priority {
+                *satisfied = self.now;
+            }
+        }
+    }
+
+    /// Finish exactly one attempt; cancellation never advances successful cooldowns.
+    fn complete_playback(&mut self, source: Option<Source>, outcome: PlaybackOutcome) {
+        match source {
+            Some(Source::Identifier(index)) if outcome == PlaybackOutcome::Succeeded => {
+                self.satisfy_identifier(index);
+            }
+            Some(Source::Announcement(index)) if outcome == PlaybackOutcome::Succeeded => {
+                self.announcements[index].satisfied = self.now;
+            }
+            Some(Source::Identifier(index)) => {
+                self.identifiers.defer(&self.rules, index, self.now);
+            }
+            Some(Source::Announcement(index)) => {
+                let a = &mut self.announcements[index];
+                a.retry_after = self.now.saturating_add(samples(a.announcement.interval_ms));
+            }
+            Some(Source::Status) => {
+                if outcome == PlaybackOutcome::Succeeded {
+                    if let Some(recipe) = self.telemetry.status.as_ref().and_then(|media| media.8) {
+                        if let Some(index) =
+                            self.ids.iter().position(|id| id.media.8 == Some(recipe))
+                        {
+                            self.ids[index].media.0.cancel();
+                            self.satisfy_identifier(index);
+                        }
+                        if let Some(index) = self
+                            .tails
+                            .items
+                            .iter()
+                            .position(|tail| tail.tail.media.8 == Some(recipe))
+                        {
+                            self.tails.items[index].tail.media.0.cancel();
+                            self.tails.complete(index, self.now, true);
+                        }
+                    }
+                }
+                self.telemetry.finish_status();
+            }
+            Some(Source::Parrot) => self.telemetry.finish_parrot(),
+            Some(Source::Tail(index)) => {
+                self.tails
+                    .complete(index, self.now, outcome == PlaybackOutcome::Succeeded);
+            }
+            _ => {}
+        }
+    }
+
     fn step(
         &mut self,
         receiving: bool,
@@ -535,6 +622,17 @@ impl NodeController {
         link_sample: f32,
         parrot_output: Option<ProgramSample<'_>>,
     ) -> f32 {
+        if self.telemetry.cancel_message.swap(false, Ordering::AcqRel) {
+            let source = self
+                .telemetry
+                .active
+                .take()
+                .or(self.telemetry.held_status.then_some(Source::Status));
+            if let Some(media) = self.media(source) {
+                media.0.cancel();
+                self.complete_playback(source, PlaybackOutcome::Cancelled);
+            }
+        }
         self.telemetry.poll_status();
         let receive = receiving || linked;
         let status_idle = !receive
@@ -544,17 +642,15 @@ impl NodeController {
                 .peer_status()
                 .is_none_or(|peer| !peer.active());
         let active_status = self.telemetry.active == Some(Source::Status);
-        if let Some(media) = self
-            .telemetry
-            .status
-            .as_mut()
-            .filter(|media| !status_idle && active_status && !media.0.has_output())
-        {
+        if let Some(media) = self.telemetry.status.as_mut().filter(|media| {
+            !status_idle && active_status && !media.0.has_output() && !media.force_morse()
+        }) {
             // Retain the message, but release its producer and playback slot.
             // A new attempt after unkey must not block an identifier deadline.
             media.0.restart(false);
             media.0.defer(false);
             self.telemetry.active = None;
+            self.telemetry.held_status = true;
         }
         let idle = self.now.saturating_sub(self.last_activity);
         if receive {
@@ -613,9 +709,21 @@ impl NodeController {
         self.linked = linked;
         let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
         let may_transmit = !inhibited && (self.settings.full_duplex || !receiving);
+        let courtesy_ready = !receive && self.courtesy.ready(self.now);
+        self.telemetry.expire_status(
+            self.now,
+            may_transmit,
+            courtesy_ready,
+            status_idle && self.now.saturating_sub(self.receiver_unkey) >= 12_000,
+        );
+        self.telemetry.poll_status();
         let active_before = self.telemetry.active;
-        let peer_before =
-            active_before == Some(Source::Status) && self.telemetry.peer_status().is_some();
+        let peer_before = active_before == Some(Source::Status)
+            && self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|media| media.3.is_some() && media.7.is_none());
         if source_activity && self.telemetry.parrot_pending() {
             self.telemetry.discard_pending_parrot();
         }
@@ -653,11 +761,11 @@ impl NodeController {
             .telemetry
             .peer_status()
             .is_some_and(|peer| !peer.active());
-        let status_ready = status_idle
-            && (peer_ready
-                || (self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status));
+        let status_ready = self.telemetry.status_morse()
+            || (status_idle
+                && (peer_ready
+                    || (self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status)));
         let parrot_ready = !source_activity && self.telemetry.parrot_pending();
-        let courtesy_ready = !receive && self.courtesy.ready(self.now);
         if (may_transmit || peer_ready) && self.telemetry.active.is_none() {
             if courtesy_ready {
                 self.telemetry.active = self.courtesy.pop().and_then(|index| {
@@ -673,8 +781,12 @@ impl NodeController {
                 self.telemetry.active = self.telemetry.parrot.as_ref().map(|_| Source::Parrot);
             }
         }
-        let peer_status =
-            self.telemetry.active == Some(Source::Status) && self.telemetry.peer_status().is_some();
+        let peer_status = self.telemetry.active == Some(Source::Status)
+            && self
+                .telemetry
+                .status
+                .as_ref()
+                .is_some_and(|media| media.3.is_some() && media.7.is_none());
         let local_telemetry = self.telemetry.active.is_some() && !peer_status;
         let busy = receive
             || source_activity
@@ -688,37 +800,9 @@ impl NodeController {
             announcement_due.is_none() || !self.keyed || release_expired || self.release_pending;
         let mut selected = self.select_identifier(receiving, busy, after_hang);
         let mut ready = selected.is_some();
-        let active_stream = match active_before {
-            Some(Source::Status) => self
-                .telemetry
-                .status
-                .as_ref()
-                .is_some_and(|m| m.0.is_streaming()),
-            Some(Source::Parrot) => self
-                .telemetry
-                .parrot
-                .as_ref()
-                .is_some_and(|m| m.0.is_streaming()),
-            Some(Source::Courtesy(index)) => self
-                .courtesy
-                .media
-                .get(index)
-                .is_some_and(|m| m.0.is_streaming()),
-            Some(Source::Identifier(index)) => self
-                .ids
-                .get(index)
-                .is_some_and(|id| id.media.0.is_streaming()),
-            Some(Source::Announcement(index)) => self
-                .announcements
-                .get(index)
-                .is_some_and(|a| a.announcement.media.0.is_streaming()),
-            Some(Source::Tail(index)) => self
-                .tails
-                .items
-                .get(index)
-                .is_some_and(|item| item.tail.media.0.is_streaming()),
-            None => false,
-        };
+        let active_stream = self
+            .media(active_before)
+            .is_some_and(|media| media.0.is_streaming());
         let selected_stream = selected
             .and_then(|index| self.ids.get(index))
             .is_some_and(|id| id.media.0.is_streaming());
@@ -781,6 +865,9 @@ impl NodeController {
             }
         }
         let rendered_source = self.telemetry.active;
+        let policy = self.media(rendered_source).and_then(|media| media.7);
+        let exempt = matches!(rendered_source, Some(Source::Tail(_)))
+            || (rendered_source == Some(Source::Status) && policy.is_some());
         let reply_target = if peer_status {
             self.telemetry
                 .peer_status()
@@ -797,44 +884,34 @@ impl NodeController {
                 None => pending_status || receive || self.now < self.ctcss_hang_until,
             }
         };
-        let local_playback_allowed = may_transmit
-            && self.timeout.allows_playback(
-                self.keyed,
-                receive,
-                self.now,
-                samples(self.settings.transmit_timeout_ms),
-            );
-        let playback = match rendered_source {
-            Some(Source::Status) => self.telemetry.status.as_mut().map(|m| &mut m.0),
-            Some(Source::Parrot) => self.telemetry.parrot.as_mut().map(|m| &mut m.0),
-            Some(Source::Courtesy(index)) => self.courtesy.media.get_mut(index).map(|m| &mut m.0),
-            Some(Source::Identifier(index)) => self.ids.get_mut(index).map(|id| &mut id.media.0),
-            Some(Source::Announcement(index)) => self
-                .announcements
-                .get_mut(index)
-                .map(|a| &mut a.announcement.media.0),
-            Some(Source::Tail(index)) => self
-                .tails
-                .items
-                .get_mut(index)
-                .map(|item| &mut item.tail.media.0),
-            None => None,
-        };
+        let ordinary_playback_allowed = self.timeout.allows_playback(
+            self.traffic_keyed,
+            receive,
+            self.now,
+            samples(self.settings.transmit_timeout_ms),
+        );
+        let local_playback_allowed = may_transmit && (exempt || ordinary_playback_allowed);
+        let force_morse = rendered_source == Some(Source::Status) && self.telemetry.status_morse();
+        let playback = self
+            .media(rendered_source)
+            .map(|media| (&mut media.0, media.6.as_deref()));
         let mut telemetry_sample = [0.0];
         let mut made = 0;
         let mut waiting_for_media = false;
         let mut continuing_media = false;
-        if let Some(playback) = playback {
-            let interrupt = ((receive || source_activity)
-                && matches!(
-                    rendered_source,
-                    Some(
-                        Source::Identifier(_)
-                            | Source::Announcement(_)
-                            | Source::Tail(_)
-                            | Source::Status
-                    )
-                ))
+        if let Some((playback, occurrence)) = playback {
+            let first_output = !playback.has_output();
+            let interrupt = force_morse
+                || ((receive || source_activity)
+                    && matches!(
+                        rendered_source,
+                        Some(
+                            Source::Identifier(_)
+                                | Source::Announcement(_)
+                                | Source::Tail(_)
+                                | Source::Status
+                        )
+                    ))
                 || (source_activity && rendered_source == Some(Source::Parrot));
             if (if peer_status {
                 peer_ready
@@ -846,6 +923,12 @@ impl NodeController {
             } else {
                 playback.defer(interrupt);
             }
+            if first_output && made != 0 && occurrence.is_some_and(|occurrence| !occurrence.begin())
+            {
+                playback.cancel();
+                telemetry_sample[0] = 0.0;
+                made = 0;
+            }
             waiting_for_media = playback.waiting_for_stream();
             // Preparation alone does not key. Once audible, a composition owns
             // PTT through pending segment boundaries until completion or failure.
@@ -853,44 +936,7 @@ impl NodeController {
             if playback.is_finished() {
                 let outcome = playback.outcome();
                 self.telemetry.active = None;
-                match rendered_source {
-                    Some(Source::Identifier(index)) if outcome == PlaybackOutcome::Succeeded => {
-                        self.identifiers.complete(&self.rules, index, self.now);
-                        self.ids
-                            .get(index)
-                            .map(|id| id.priority)
-                            .into_iter()
-                            .for_each(|priority| {
-                                for (i, (id, satisfied)) in
-                                    self.ids.iter().zip(&mut self.satisfied).enumerate()
-                                {
-                                    if i == index || id.priority < priority {
-                                        *satisfied = self.now;
-                                    }
-                                }
-                            });
-                    }
-                    Some(Source::Announcement(index)) if outcome == PlaybackOutcome::Succeeded => {
-                        self.announcements.get_mut(index).into_iter().for_each(|a| {
-                            a.satisfied = self.now;
-                        });
-                    }
-                    Some(Source::Identifier(index)) => {
-                        self.identifiers.defer(&self.rules, index, self.now);
-                    }
-                    Some(Source::Announcement(index)) => {
-                        let a = &mut self.announcements[index];
-                        a.retry_after =
-                            self.now.saturating_add(samples(a.announcement.interval_ms));
-                    }
-                    Some(Source::Status) => self.telemetry.finish_status(),
-                    Some(Source::Parrot) => self.telemetry.finish_parrot(),
-                    Some(Source::Tail(index)) => {
-                        self.tails
-                            .complete(index, self.now, outcome == PlaybackOutcome::Succeeded)
-                    }
-                    _ => {}
-                }
+                self.complete_playback(rendered_source, outcome);
             }
         }
         if let Some(Source::Tail(index)) = self.telemetry.active {
@@ -902,6 +948,9 @@ impl NodeController {
             self.release_pending = false;
         }
         let telemetry_audio = made != 0 && !peer_status;
+        let message_audio = exempt && (telemetry_audio || (continuing_media && !peer_status));
+        let suppress_repeat = policy.is_some_and(|policy| !policy.repeat_during_playback)
+            && (made != 0 || continuing_media);
         let short_tail = matches!(
             rendered_source,
             Some(Source::Identifier(_) | Source::Announcement(_) | Source::Tail(_))
@@ -909,13 +958,14 @@ impl NodeController {
         let other = linked
             || (self.settings.full_duplex && receiving)
             || self.courtesy.pending()
-            || (status_ready && !peer_status);
+            || (status_ready && !peer_status && !exempt);
         let transmit = regeneration.is_some()
             || other
-            || telemetry_audio
-            || (continuing_media && !peer_status)
+            || (telemetry_audio && !exempt)
+            || (continuing_media && !peer_status && !exempt)
             || (self.telemetry.active.is_some()
                 && !peer_status
+                && !exempt
                 && !waiting_for_media
                 && !active_stream);
         let hang = if short_tail && !other {
@@ -930,7 +980,7 @@ impl NodeController {
             self.now,
             hang,
         );
-        if may_transmit && self.keyed && self.tails.hanging(self.now) {
+        if may_transmit && self.traffic_keyed && self.tails.hanging(self.now) {
             requested = true;
         }
         if !transmit
@@ -940,25 +990,38 @@ impl NodeController {
         {
             requested = false;
         }
-        if may_transmit && self.keyed && self.tails.ready(self.now).is_some() {
+        if may_transmit && self.traffic_keyed && self.tails.ready(self.now).is_some() && !exempt {
             requested = true;
         }
-        let was_keyed = self.keyed;
-        self.keyed = self.timeout.apply(
+        self.traffic_keyed = self.timeout.apply(
             requested && !inhibited,
-            was_keyed,
+            self.traffic_keyed,
             receive,
             self.now,
             samples(self.settings.transmit_timeout_ms),
             samples(self.settings.timeout_lockout_ms),
         );
-        if !self.keyed {
+        if !self.traffic_keyed {
             self.duplex = DuplexPolicy::default();
-            self.tails.unkeyed(self.now);
         }
-        if transmit && may_transmit {
+        if transmit && may_transmit && self.traffic_keyed {
             self.last_audio = self.now;
             self.release_hang = hang;
+            self.exempt_release = false;
+        }
+        if message_audio && may_transmit {
+            self.last_audio = self.now;
+            self.release_hang = 2400;
+            self.exempt_release = !self.traffic_keyed || !other;
+        }
+        self.keyed = self.traffic_keyed
+            || (may_transmit
+                && (message_audio
+                    || (self.exempt_release
+                        && self.now.saturating_sub(self.last_audio) < self.release_hang)));
+        if !self.keyed {
+            self.exempt_release = false;
+            self.tails.unkeyed(self.now);
         }
         if self.keyed
             && !self.suppress_release
@@ -980,12 +1043,13 @@ impl NodeController {
         } else {
             self.telemetry.gain
         };
-        let local = if self.settings.full_duplex && receiving {
-            input.unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        let link = if may_transmit && linked {
+        let local =
+            if self.settings.full_duplex && receiving && self.traffic_keyed && !suppress_repeat {
+                input.unwrap_or(0.0)
+            } else {
+                0.0
+            };
+        let link = if may_transmit && linked && self.traffic_keyed && !suppress_repeat {
             link_sample
         } else {
             0.0
@@ -1005,19 +1069,25 @@ impl NodeController {
                 0.0
             };
             if let Some(reply) = output.reply {
-                *reply = PeerReplySample::default();
+                *reply = PeerReplySample {
+                    suppress_repeat,
+                    broadcast: (made != 0
+                        && policy.is_some_and(|policy| {
+                            policy.destination == PlaybackDestination::LocalAndLinks
+                        }))
+                    .then_some(telemetry_sample[0] * gain),
+                    ..Default::default()
+                };
                 if let Some((target, false)) = reply_target {
                     if made != 0 {
-                        *reply = PeerReplySample {
-                            target,
-                            sample: telemetry_sample[0],
-                        };
+                        reply.target = target;
+                        reply.sample = telemetry_sample[0];
                     }
                 }
             }
         }
         if let Some(sample) = regeneration {
-            if may_transmit && self.keyed {
+            if may_transmit && self.traffic_keyed {
                 sample
             } else {
                 0.0

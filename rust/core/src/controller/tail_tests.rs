@@ -33,6 +33,36 @@ fn at(node: &mut NodeController, ms: u64, receiving: bool) -> (bool, f32) {
 }
 
 #[test]
+fn tail_playback_outlasts_traffic_timeout_without_missing_pcm() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            transmit_timeout_ms: 1,
+            timeout_lockout_ms: 100,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.set_tails(vec![Tail {
+        media: pcm(0.5, 4800),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    node.process_audio(true, false, &[], &mut [0.25]);
+    let mut output = [0.0; 4800];
+    assert!(node.process_audio(false, false, &[], &mut output));
+    assert_eq!(
+        output.iter().filter(|sample| **sample == 0.5).count(),
+        4800,
+        "traffic timeout must not interrupt a tail's PCM or PTT"
+    );
+}
+
+#[test]
 fn tail_zero_and_positive_delay() {
     for delay in [0, 250] {
         let mut node = fixture(delay, 0, vec![]);
@@ -107,6 +137,10 @@ fn tail_receive_pending_vs_playing() {
     let (_, interrupted) = at(&mut node, 3501, true);
     assert_ne!(interrupted, 0.5, "primary must stop at receive boundary");
     assert!(node.telemetry.active == Some(Source::Tail(0)));
+    assert!(
+        node.tails.ready(node.now).is_none(),
+        "ongoing receive cannot admit the playing tail as a second attempt"
+    );
     at(&mut node, 3502, false);
     assert!(node.telemetry.active == Some(Source::Tail(0)));
 }
@@ -150,18 +184,22 @@ fn tail_delay_preserves_identifier_release_safeguard() {
 }
 
 #[test]
-fn tail_timeout_holds_playback_without_false_completion() {
+fn tail_timeout_does_not_hold_a_completed_message() {
     let mut node = fixture(0, 10000, vec![]);
     node.settings.transmit_timeout_ms = 10;
     node.settings.timeout_lockout_ms = 500;
     at(&mut node, 0, true);
     at(&mut node, 1, false);
-    at(&mut node, 1001, false);
+    assert_eq!(at(&mut node, 1001, false).1, 0.5);
     let mut out = [0.0; 6000];
-    assert!(!node.process_audio(false, false, &[], &mut out));
+    assert!(node.process_audio(false, false, &[], &mut out));
     assert!(
-        node.telemetry.active == Some(Source::Tail(0)),
-        "inaudible samples cannot complete a tail"
+        node.telemetry.active.is_none(),
+        "completed message releases its playback slot even across a traffic timeout"
+    );
+    assert_eq!(
+        1 + out.iter().filter(|sample| **sample == 0.5).count(),
+        4800
     );
 }
 

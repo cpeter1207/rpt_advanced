@@ -57,6 +57,15 @@ enum Token {
     Reference(String),
 }
 
+/// Whether every content source must provide a complete receive-interruption substitute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MorseRequirement {
+    /// IDs and existing named messages require usable Morse throughout their references.
+    Required,
+    /// Tails and scheduled messages may stop instead when a complete substitute is absent.
+    Optional,
+}
+
 #[derive(Clone, Copy, Default)]
 struct Size {
     segments: usize,
@@ -71,9 +80,10 @@ impl Composition {
     pub fn compile(
         invoking: ResolvedMessageSettings,
         definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
+        morse: MorseRequirement,
     ) -> Result<Self, CompositionError> {
         let root = parse(&invoking.content, None)?;
-        validate_sources(&root, &invoking)?;
+        validate_sources(&root, &invoking, morse)?;
         let mut tokens: BTreeMap<String, Vec<Token>> = BTreeMap::new();
         let mut sizes = BTreeMap::new();
         let mut visiting = BTreeSet::new();
@@ -96,7 +106,7 @@ impl Composition {
                 .get(&name)
                 .ok_or(CompositionError::MissingDefinition)?;
             let parsed = parse(&definition.content, Some(&name))?;
-            validate_sources(&parsed, definition)?;
+            validate_sources(&parsed, definition, morse)?;
             work.push((name.clone(), true));
             work.extend(references(&parsed).map(|name| (name.to_owned(), false)));
             tokens.insert(name, parsed);
@@ -137,6 +147,7 @@ impl Composition {
 fn validate_sources(
     tokens: &[Token],
     definition: &ResolvedMessageSettings,
+    morse: MorseRequirement,
 ) -> Result<(), CompositionError> {
     for token in tokens {
         let valid = match token {
@@ -146,9 +157,14 @@ fn validate_sources(
                     crate::audio::ToneSequence::new(&tone.sequence, tone.level_db).is_ok()
                 })
             }
-            Token::Segment(Segment::Media(_)) => {
-                // A file or spoken segment cannot bypass receive-driven Morse.
-                definition.media.morse.as_ref().is_some_and(|morse| {
+            Token::Segment(Segment::Media(_)) => definition.media.morse.as_ref().map_or_else(
+                || {
+                    morse == MorseRequirement::Optional
+                        && (definition.media.file.is_some()
+                            || definition.media.speech.is_some()
+                            || definition.media.tone.is_some())
+                },
+                |morse| {
                     crate::audio::MorseRenderer::new(
                         &morse.text,
                         morse.speed_wpm,
@@ -157,8 +173,8 @@ fn validate_sources(
                     )
                     .is_ok()
                         && !morse.text.trim().is_empty()
-                })
-            }
+                },
+            ),
             _ => true,
         };
         if !valid {

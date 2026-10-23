@@ -89,8 +89,9 @@ window and original failure deadline.
 The split preserves existing duplex, source qualification, mix-minus, and
 per-link routing; it must not reflect a peer's own audio back to that peer or
 send locally generated CTCSS/DCS onto network links.
-Telemetry routing follows ADR 0023. Identifiers and local courtesy tones stay
-on the local transmitter. Only one courtesy may wait for receive inactivity:
+Telemetry routing follows ADR 0023. Identifiers default to local RF and may
+explicitly select the configured-message audience. Courtesy tones stay local.
+Only one courtesy may wait for receive inactivity:
 each eligible source unkey replaces the pending choice and starts its delay,
 so overlapping local and peer activity produces only the last source's tone.
 If that source has no configured courtesy, no earlier tone is substituted.
@@ -273,8 +274,9 @@ of telemetry. Positive delays begin at actual controller unkey and do not
 restart when an ID intervenes. Expired polite-ID deadlines preempt a tail;
 its existing producer restarts the same captured attempt from the beginning,
 preserving Morse selection. Before first PCM, new receive cancels the opportunity;
-afterward it selects complete Morse. Timeout and half-duplex deferral cannot
-consume inaudible PCM or falsely advance cooldown. Only successful playback
+afterward it selects complete Morse. Traffic timeout does not suppress tail PCM
+or PTT; half-duplex and safety deferral cannot consume inaudible PCM or falsely
+advance cooldown. Only successful playback
 advances cooldown, and generated transmitter releases never arm another tail.
 
 Receive-interruption contract — amended 2026-10-22: qualified local receive or
@@ -284,6 +286,16 @@ wait before first PCM, then use this same Morse-interruption contract once audib
 This includes peers not selected for local RF. Source-unkey admission,
 half-duplex and safety rules still apply; interruption never changes the
 destination. Courtesy-only cancellation and local DTMF regeneration are separate.
+
+Tail and scheduled compositions may omit Morse. If any spoken/file content
+lacks a configured substitute, the whole attempt stops on receive rather than
+playing a partial Morse version. IDs retain their required complete fallback.
+Configured message routing/repeat policy and original polite deadlines remain
+on the queued envelope through preparation and Morse replacement. Suppressing
+repeat gates only output contributions after capture, decode and ring drain.
+Cancellation ends the whole current attempt and uses the existing completed
+handoff; no late prepared stream may revive it. Successful manual ID/tail
+completion shares the existing automatic timing policy through recipe identity.
 
 The callback gates the primary stream before reading another sample. Its
 generation is cancelled, including buffered samples and converter history;

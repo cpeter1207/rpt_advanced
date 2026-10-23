@@ -47,6 +47,45 @@ pub(crate) struct State {
 }
 type Shared = Arc<Mutex<State>>;
 
+#[test]
+fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
+    for requested in [false, true] {
+        let (mut session, control, state, _) = make_session("1000");
+        crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+        if requested {
+            control.stop();
+        } else {
+            state.lock().unwrap().fail_ready = true;
+        }
+        assert!(session.step(20).is_err());
+        assert!(session.step(21).is_err());
+        drop(session);
+        let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+        assert_eq!(logs.len(), usize::from(!requested), "requested={requested}");
+        if !requested {
+            assert_eq!(logs[0].0, 3);
+            for detail in ["1000", "2000", "unexpected", "Hangup"] {
+                assert!(
+                    logs[0].1.contains(detail),
+                    "missing {detail}: {}",
+                    logs[0].1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unexpected_owner_release_is_not_silently_treated_as_a_requested_disconnect() {
+    let (session, _control, _, _) = make_session("1000");
+    crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+    drop(session);
+    let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].0, 3);
+    assert!(logs[0].1.contains("owner"));
+}
+
 unsafe extern "C" fn bind_radio(_: *mut c_void, peer: *mut c_void, radio: *mut c_void) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
     assert!(state.texts.is_empty() && state.writes.is_empty());
@@ -422,6 +461,8 @@ unsafe extern "C" fn destroy(_: *mut c_void, peer: *mut c_void) {
 struct AsyncRegistration {
     state: Shared,
     thread: Option<JoinHandle<i32>>,
+    step: abi::rptadv_peer_step_v1,
+    context: usize,
 }
 unsafe extern "C" fn async_attach(
     _: *mut c_void,
@@ -451,7 +492,13 @@ unsafe extern "C" fn async_attach(
         })
     });
     unsafe {
-        *registration = Box::into_raw(Box::new(AsyncRegistration { state, thread })).cast();
+        *registration = Box::into_raw(Box::new(AsyncRegistration {
+            state,
+            thread,
+            step,
+            context: address,
+        }))
+        .cast();
     }
     0
 }
@@ -1360,6 +1407,62 @@ fn egress_retained_step_reports_io_failure_and_ends_the_session() {
         -1
     );
     assert!(control.snapshot().unwrap().ended);
+}
+
+#[test]
+fn admitted_owner_panic_ends_ingress_and_logs_once_before_detach() {
+    let (session, control, state, _) = make_async_session("1000");
+    state.lock().unwrap().no_async_thread = true;
+    // Poison the existing test-only owner probe so Rust unwinds inside the
+    // registered callback, without unwinding through a host C function.
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _owner = session.owner_thread.lock().unwrap();
+            panic!("injected peer owner panic");
+        }))
+        .is_err()
+    );
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    assert!(worker.attach(session).is_ok());
+    let registration = unsafe {
+        &*worker.async_peers[0]
+            .registration
+            .as_ptr()
+            .cast::<AsyncRegistration>()
+    };
+    crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+    for _ in 0..2 {
+        assert_eq!(
+            unsafe { registration.step.unwrap()(registration.context as *mut c_void) },
+            -1
+        );
+    }
+    assert!(control.ended());
+    assert!(control.observer.signals().ended());
+    assert_eq!(state.lock().unwrap().drops, 0);
+    worker.reap();
+    assert!(worker.async_peers.is_empty());
+    worker.stop();
+    let state = state.lock().unwrap();
+    assert_eq!(
+        (
+            state.async_attaches,
+            state.async_stops,
+            state.async_detaches,
+            state.drops
+        ),
+        (1, 1, 1, 1)
+    );
+    let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].0, 3);
+    for detail in ["1000", "2000", "owner panic", "Thread"] {
+        assert!(
+            logs[0].1.contains(detail),
+            "missing {detail}: {}",
+            logs[0].1
+        );
+    }
 }
 
 #[test]

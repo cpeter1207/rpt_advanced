@@ -50,18 +50,35 @@ pub(super) fn message(
     links: &LinkManager,
     catalog: &MessageCatalog,
 ) -> Result<String, RuntimeError> {
+    let (status, _) = direct_status(links, catalog)?;
+    message_with_status(
+        template,
+        clock,
+        TimeFormat::try_from(format).map_err(|_| RuntimeError::Preparation)?,
+        node,
+        callsign,
+        &status.text,
+        catalog,
+    )
+}
+
+/// Expand the existing template language against an already captured link-status value.
+pub(super) fn message_with_status(
+    template: &MessageTemplate,
+    clock: CivilTime,
+    format: TimeFormat,
+    node: &str,
+    callsign: &str,
+    link_status: &str,
+    catalog: &MessageCatalog,
+) -> Result<String, RuntimeError> {
     let (year, month, day, weekday, hour, minute) = clock.components();
     let day_name = catalog
         .format(&Message::DayOfWeek { day: weekday })
         .map_err(|_| RuntimeError::Preparation)?;
     let date = format!("{year:04}-{month:02}-{day:02}");
-    let time = TimeAnnouncement::format(
-        hour.into(),
-        minute.into(),
-        TimeFormat::try_from(format).map_err(|_| RuntimeError::Preparation)?,
-        catalog,
-    )
-    .map_err(|_| RuntimeError::Preparation)?;
+    let time = TimeAnnouncement::format(hour.into(), minute.into(), format, catalog)
+        .map_err(|_| RuntimeError::Preparation)?;
     let daypart = match hour {
         0..=11 => Daypart::Morning,
         12..=16 => Daypart::Afternoon,
@@ -70,14 +87,13 @@ pub(super) fn message(
     let greeting = catalog
         .format(&Message::Greeting { daypart })
         .map_err(|_| RuntimeError::Preparation)?;
-    let (status, _) = direct_status(links, catalog)?;
     template
         .render(&TemplateValues {
             day_of_week: &day_name.text,
             date: &date,
             time: time.morse(),
             greeting: &greeting.text,
-            link_status: &status.text,
+            link_status,
             node,
             callsign,
         })
@@ -102,7 +118,7 @@ pub(super) fn morse(source: &str) -> Option<String> {
         .then_some(text)
 }
 
-/// Ordinary telemetry keeps numbers intact and spells known nodes and mixed letter/digit words.
+/// Spell raw identities once, preserving prepared comma-separated forms and ordinary numbers.
 pub fn telemetry_speech(source: &str, nodes: &[&str]) -> String {
     let mut output = String::new();
     for (index, word) in source.split(' ').enumerate() {
@@ -110,8 +126,16 @@ pub fn telemetry_speech(source: &str, nodes: &[&str]) -> String {
             output.push(' ');
         }
         let node = nodes.contains(&word) && !word.is_empty();
+        let body = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        let prepared = word.contains(',')
+            && body
+                .strip_prefix("node,")
+                .unwrap_or(body)
+                .split(',')
+                .all(|part| part.len() == 1);
         let callsign = word.bytes().any(|b| b.is_ascii_alphabetic())
-            && word.bytes().any(|b| b.is_ascii_digit());
+            && word.bytes().any(|b| b.is_ascii_digit())
+            && !prepared;
         if node {
             output.push_str("node,");
         }

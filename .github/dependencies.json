@@ -16,7 +16,7 @@
   },
   {
     "repository": "librptadviax2",
-    "sha": "3d8f8425969c1092ecada88dcdd23ac7f1d4de35",
+    "sha": "dd32f7e8a05f844b6dd86938878274a06db0fc04",
     "packages": ["librptadv-iax2-client1", "librptadv-iax2-client-dev"]
   },
   {

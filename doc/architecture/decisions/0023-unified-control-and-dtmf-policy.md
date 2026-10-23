@@ -44,8 +44,9 @@ and from every other peer's output. Prepared-media ownership is reclaimed on
 control, never by an audio callback.
 
 Identifiers are separate from command replies. Periodic, first-key, and other
-configured identifiers are sent only to the local transmitter; they are never
-forwarded to linked peers.
+configured identifiers default to the local transmitter. An explicit configured
+message audience may include eligible linked peers, as defined below; ordinary
+status replies remain source-scoped.
 
 When DTMF muting is enabled, muting remains active for the entire command,
 until the command ends because the source unkeys, a command terminator digit is
@@ -144,13 +145,18 @@ selector) and message-macro requests (`*77` plus selector) are public read-only
 operations. Selectors are canonical positive decimal strings, not link
 destinations; zero does not recall a prior destination. They cannot configure
 equipment or execute action macros. Prefixes inherit and may be remapped;
-conflicting selectors/prefixes are rejected. Replies preserve the originating
-connection and unkey/routing rules above. IDs and tails using the same composed
-content remain local-only. Message-macro requests are implemented with targeted
+conflicting selectors/prefixes are rejected. Site replies preserve the originating
+connection and unkey/routing rules above. Configured message requests retain
+their originating connection for unkey admission and use the configured audience.
+Message-macro requests are implemented with targeted
 command, routing, queue, and configuration tests. Local-only tail playback is
 implemented with release, deadline, interruption, and allocation tests. Site
 queries and typed site controls are implemented with targeted shared-product
-and adapter tests; the full hosted gate for this extension has not run.
+and adapter tests. The full hosted gate passed on native Debian 13 amd64 and
+arm64, including 100% production line and branch coverage on amd64
+([run40021040672](https://github.com/cpeter1207/rpt_advanced/actions/runs/40021040672)
+at `eb7fead05370a4a2e0b639d95515987add071a04`). Physical site-device qualification
+remains a separate step. Broader interface parity remains incomplete.
 
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot
@@ -168,3 +174,21 @@ executor checks the active generation and ownership handoff before policy runs.
 Read-only DTMF site queries do not gain access to it. The standalone composition
 validates the same product table; this addition does not create a new remote
 CLI, REST, or WebSocket transport.
+
+## Configured-message play and cancellation — 2026-10-23
+
+The shared `*77` selector namespace includes named messages, IDs, release tails
+and scheduled message content. Selectors cannot execute action macros. Each
+configured source selects local RF or local RF plus eligible outbound links,
+defaulting to local. Receive-only, inactive fallback and ended peers remain
+ineligible. Each source may suppress repeated traffic while it plays, without
+stopping capture, inbound-ring consumption, DTMF detection or command handling.
+
+The public local `*78` operation cancels the current attempt. Its inherited
+`link_command_cancel_message` mapping uses the existing conflict validation.
+An atomic control-to-audio prompt stops active primary/segment/Morse playback
+and restores that attempt's repeat gate; cancellation and reclamation stay on
+their existing owners. Idle cancellation does not consume a pending message or
+future schedule. Cancellation/failure never satisfies an ID or tail cooldown.
+Successful manual ID playback uses the normal selected/lower-priority
+satisfaction rules; successful manual tail playback advances its cooldown.

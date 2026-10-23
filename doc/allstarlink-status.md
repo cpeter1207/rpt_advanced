@@ -45,6 +45,8 @@ node's `link_command_*` settings can change or disable them.
 | `*72` | Hear the last keyed direct link. |
 | `*73` | Hear full direct-link status. |
 | `*722` | Hear the local time. |
+| `*77<selector>#` | Play the configured message, ID, tail, or event content with that `dtmf_id`. |
+| `*78` | Cancel the current message and restore repeat audio. No local admin unlock is needed. |
 | `*4<node>` | Select a destination for remote commands. Send `#` to exit. |
 | `*82` | Test the local radio keypad. Keep sending test keys, then unkey for the reply. |
 
@@ -58,7 +60,8 @@ node or through connected relays. Do not add `#` to select the node: it exits
 the mode and is not forwarded. Unkeying or pausing keeps the destination selected.
 Incoming commands still follow the receiving node's access and admin rules. See
 [link command mappings](configuration.md#link-command-mappings) before using
-custom DTMF codes. Forced ID, DTMF macros, and autopatch are not provided.
+custom DTMF codes. Assign an ID's `dtmf_id` to make it manually selectable.
+DTMF macros and autopatch are not provided.
 
 The `*82` keypad test needs no admin unlock. It captures all 16 symbols,
 including `*`, `#`, and `A` through `D`, until the local receiver unkeys. Captured
@@ -98,7 +101,10 @@ commands.
 inputs, alarms, outputs, and fans. Readings include age and quality. Output
 requests and submitted values are separate from electrical readback.
 With the default command map, `*76<selector>#` reads a configured meter or input
-and `*77<selector>#` plays a named message. Unkey to hear the reply.
+and `*77<selector>#` plays configured message content. Unkey for playback.
+Messages use their configured local or local-plus-links destination. `*78`
+stops the current attempt without removing future schedules or other waiting
+messages. Meter replies return only to the requester.
 See the [site settings and controls](configuration.md#site-meters-inputs-outputs-alarms-and-fans).
 
 The `fanout` line shows completed audio batches, the longest batch time in

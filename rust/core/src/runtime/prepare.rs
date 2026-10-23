@@ -1,10 +1,12 @@
 //! Configuration-to-controller preparation. All allocation and external media work is offline.
 
 use crate::{
+    composition::MorseRequirement,
     config::{
         ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings,
         ResolvedCourtesySettings, ResolvedIdentifierSettings, ResolvedMessageSettings,
         ResolvedMorseSettings, ResolvedNodeSettings, ResolvedSpeechSettings,
+        ResolvedTemplateSettings,
     },
     controller::{
         Announcement, ControllerControl, ControllerSettings, CourtesySettings, Identifier,
@@ -14,6 +16,7 @@ use crate::{
         FileRequest, MediaError, MediaSource, MorseSource, PreparedAudio, SpeechRequest,
         SpeechSource, StationMediaSession, ToneSource,
     },
+    template::MessageTemplate,
 };
 
 /// Decode a configured file for adapters that expose a non-streaming control API.
@@ -111,7 +114,20 @@ pub(super) fn streamed_status(
     morse_text: &str,
     speech_text: &str,
 ) -> Result<PreparedMedia, RuntimeError> {
-    let source = MediaSource {
+    let source = status_source(settings, morse_text, speech_text);
+    let stream = station
+        .register_once(source)
+        .map_err(|_| RuntimeError::Preparation)?;
+    PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
+}
+
+/// Preserve the existing status speech settings and complete Morse substitute in a recipe.
+pub(super) fn status_source(
+    settings: &ResolvedIdentifierSettings,
+    morse_text: &str,
+    speech_text: &str,
+) -> MediaSource {
+    MediaSource {
         file: None,
         speech: (!speech_text.is_empty()).then(|| SpeechSource {
             text: speech_text.to_owned(),
@@ -127,11 +143,7 @@ pub(super) fn streamed_status(
             frequency_hz: settings.morse_frequency_hz as f32,
             level_db: settings.morse_level_db as i8,
         }),
-    };
-    let stream = station
-        .register_once(source)
-        .map_err(|_| RuntimeError::Preparation)?;
-    PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
+    }
 }
 
 /// Prepare an optional streamed level report followed by native-rate retained receive PCM.
@@ -277,17 +289,21 @@ pub(super) fn controller(
                 speed_wpm: settings.morse_speed_wpm,
                 level_db: settings.morse_level_db,
             },
-            dtmf_id: None,
+            dtmf_id: settings.dtmf_id.clone(),
+            playback: settings.playback,
+            delivery: settings.delivery,
         };
         if let Some(index) = recipes.add(
             invoking,
             &format!("identifier {} {label}", node.as_str()),
             catalog,
-        ) {
+            MorseRequirement::Required,
+        )? {
             ids.push(Identifier {
                 media: messages
                     .register(index)
-                    .map_err(|_| RuntimeError::Preparation)?,
+                    .map_err(|_| RuntimeError::Preparation)?
+                    .with_playback_policy(settings.playback),
                 interval_ms: settings.interval_ms,
                 // The settings resolver bounds priority to i32::MAX.
                 priority: settings.priority as i32,
@@ -311,6 +327,7 @@ pub(super) fn controller(
     let mut tails = Vec::new();
     for label in labels(document, "tail", node.as_str()) {
         let settings = crate::config::ResolvedTailSettings::resolve(document, node, label)?.value;
+        let playback = settings.message.playback;
         if settings.message.content == "{media}" && settings.message.media == MediaSource::default()
         {
             continue;
@@ -319,11 +336,13 @@ pub(super) fn controller(
             settings.message,
             &format!("tail {} {label}", node.as_str()),
             catalog,
-        ) {
+            MorseRequirement::Optional,
+        )? {
             tails.push(crate::controller::Tail {
                 media: messages
                     .register(index)
-                    .map_err(|_| RuntimeError::Preparation)?,
+                    .map_err(|_| RuntimeError::Preparation)?
+                    .with_playback_policy(playback),
                 interval_ms: settings.interval_ms,
                 delay_ms: settings.delay_ms,
             });
@@ -339,6 +358,40 @@ pub(super) fn controller(
             } else {
                 courtesy.peers.push((settings.remote_node, prepared));
             }
+        }
+    }
+    for label in labels(document, "event", node.as_str()) {
+        let event = crate::config::ResolvedEventSettings::resolve(document, node, label)?.value;
+        if let Some(settings) = event.composed {
+            if let Some(index) = recipes.add(
+                settings,
+                &format!("event {} {label}", node.as_str()),
+                catalog,
+                MorseRequirement::Optional,
+            )? {
+                recipes.events.insert(label.into(), index);
+            }
+        } else if event.dtmf_id.is_some()
+            && (!event.message.is_empty() || !event.template.is_empty())
+        {
+            let text = if event.message.is_empty() {
+                ResolvedTemplateSettings::resolve(document, Some(node), &event.template)?
+                    .value
+                    .text
+            } else {
+                event.message
+            };
+            recipes.register(
+                super::composition::MessageRecipe::LegacyEvent {
+                    template: MessageTemplate::parse(&text)
+                        .map_err(|_| RuntimeError::Preparation)?,
+                    settings: Box::new(status.clone()),
+                    playback: event.playback,
+                    delivery: event.delivery,
+                },
+                event.dtmf_id,
+                &format!("event {} {label}", node.as_str()),
+            )?;
         }
     }
     let (mut controller, mut control) = NodeController::new(

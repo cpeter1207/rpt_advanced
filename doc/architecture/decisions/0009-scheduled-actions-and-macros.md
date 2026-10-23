@@ -11,8 +11,9 @@ lock-free audio processing.
 ## Decision
 
 Schedule actions and expand templates on a control-plane worker. Macros resolve
-only to validated controller operations. Initial triggers are scheduled
-zero-time events only. Events due at the same instant execute in configuration
+only to validated controller operations. Triggers are scheduled zero-time events
+at a local date/time, daily time, selected weekdays, or stepped minute/hour
+boundaries. Events due at the same instant execute in configuration
 order; their prepared messages use the existing serialized telemetry path.
 
 Templates accept exactly `day_of_week`, `date`, `time`, `greeting`,
@@ -65,6 +66,27 @@ audio callback. A bounded IAX dial may delay later serialized control work but
 cannot delay audio; scheduler health and control-queue delay remain observable.
 Additional triggers or substitutions require a new requirement and ADR update.
 
+## Clock-scheduled composed messages — 2026-10-23
+
+The existing event scheduler admits the same compiled recipes as release tails
+and message commands. Calendar precision is one minute. `every N minutes`
+selects minute fields 0, N, 2N and so on within an hour; `every N hours` selects
+hour fields within a day at minute zero. An optional weekday window uses the
+shared provider. There is one occurrence identity per configured entry, not
+per compiled provider record.
+
+Each scheduled message retains its original monotonic start deadline. Expiry
+either skips it or selects its complete Morse form; missing Morse means skip.
+If another message owns playback, expired Morse either skips or waits as
+configured, with skip as the default. Waiting never refreshes the deadline or
+restores primary speech/file output. Safety and half-duplex can still prevent
+playback. The deadline stops governing an attempt once its first sample plays.
+
+At most one unstarted occurrence per entry is retained. A newer occurrence
+replaces that pending attempt, never an audible one. Replacement races the
+first-sample claim atomically. Typed action macros keep their independent
+at-most-once dispatch; selecting an event by DTMF plays only its media.
+
 ## Approved extension — composed messages and site actions
 
 The 2026-10-17 message/site specification adds read-only `[message name]`
@@ -90,9 +112,13 @@ fallbacks are validated before admission. Release-triggered tails are implemente
 with sample-clock timing tests: original traffic hang, per-tail post-unkey delay,
 deadline-first IDs, and success-only cooldown. Bounded site acquisition and
 equipment actions are implemented with targeted tests. Protective effects do
-not wait for message capacity or unrelated owner reloads. Full hosted feature
-validation and physical site-device qualification remain outstanding. Existing
-scheduled actions and periodic announcements are unchanged.
+not wait for message capacity or unrelated owner reloads. The full hosted gate
+passed on native Debian 13 amd64 and arm64, including 100% production line and
+branch coverage on amd64
+([run40021040672](https://github.com/cpeter1207/rpt_advanced/actions/runs/40021040672)
+at `eb7fead05370a4a2e0b639d95515987add071a04`). Physical site-device qualification
+remains outstanding. Existing action ordering and periodic announcements retain
+their behavior.
 
 ## Implementation status — 2026-10-03
 

@@ -211,6 +211,7 @@ pub struct SourcePosition {
 #[derive(Clone, Copy, Debug, Default)]
 struct Destination {
     enabled: bool,
+    broadcast: bool,
     eligible: bool,
     target: usize,
     span: AudioSpan,
@@ -284,6 +285,9 @@ impl LinkDispatcher {
                     } else {
                         0.0
                     };
+                    if destination.broadcast {
+                        *sample += block.replies[frame].broadcast.unwrap_or(0.0);
+                    }
                     if block.replies[frame].target == destination.target {
                         *sample += block.replies[frame].sample;
                     }
@@ -561,8 +565,13 @@ impl<P: PeerInput> LinkAudio<P> {
                     || ((peer.mode.transmits() || peer.group.is_some())
                         && selected
                         && (receiving || forwarding_sources > own_source)));
+            route.broadcast = !ended && peer.mode.transmits() && selected;
             let eligible = route.target != 0
                 && (route.enabled
+                    || (route.broadcast
+                        && self.reply_output[..count]
+                            .iter()
+                            .any(|sample| sample.broadcast.is_some()))
                     || self.reply_output[..count]
                         .iter()
                         .any(|reply| reply.target == route.target));
@@ -584,8 +593,10 @@ impl<P: PeerInput> LinkAudio<P> {
         block.replies[..count].copy_from_slice(&self.reply_output[..count]);
         block.audio[..count].fill(0.0);
         if receiving {
-            for (output, local) in block.audio[..count].iter_mut().zip(&self.local) {
-                *output += local;
+            for (frame, output) in block.audio[..count].iter_mut().enumerate() {
+                if !self.reply_output[frame].suppress_repeat {
+                    *output += self.local[frame];
+                }
             }
         }
         for peer in &self.peers {
@@ -597,8 +608,10 @@ impl<P: PeerInput> LinkAudio<P> {
                         .is_some_and(|(_, slot)| self.selected_groups[group] == slot.get())
                 })
             {
-                for (output, input) in block.audio[..count].iter_mut().zip(&peer.audio) {
-                    *output += input;
+                for (frame, output) in block.audio[..count].iter_mut().enumerate() {
+                    if !self.reply_output[frame].suppress_repeat {
+                        *output += peer.audio[frame];
+                    }
                 }
             }
         }
@@ -618,7 +631,13 @@ impl<P: PeerInput> LinkAudio<P> {
             let own = &mut block.audio[offset..offset + count];
             // Ordinary mix-minus removes this peer's own forwarding contribution.
             if peer.active && peer.mode.forwards() && selected {
-                own.copy_from_slice(&peer.audio[..count]);
+                for (frame, sample) in own.iter_mut().enumerate() {
+                    *sample = if self.reply_output[frame].suppress_repeat {
+                        0.0
+                    } else {
+                        peer.audio[frame]
+                    };
+                }
             } else {
                 own.fill(0.0);
             }

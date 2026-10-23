@@ -37,6 +37,7 @@ fn clock() -> RuntimeClock {
     RuntimeClock {
         now_ms: 10,
         wall_seconds: 0,
+        wall_subsecond_ms: 0,
         civil: Some((
             rpt_advanced_core::schedule::CivilTime::new(
                 2030,
@@ -383,6 +384,104 @@ fn render_queued_telemetry(host: &mut Host, owners: &mut AudioOwners) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+#[test]
+fn scheduled_and_manual_messages_share_streaming_and_cancel_in_both_hosts() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for device in ["native-cm119", "RadioPlus/1000"] {
+        let mut host = Host::start(
+            document(device, "transmit_timeout_ms=1\nkerchunk_max_ms=0\n[event 1000 report]\nat=every 1 minute\ncontent={tone_sequence} {media}\ntone_sequence=600/5000\nmorse_text=E\ndtmf_id=9\n"),
+            media(), services(), Instant::now(), clock(),
+        ).unwrap();
+        let lease = Arc::clone(&host.leases[0].1);
+        assert!(lease.lock().unwrap().quiesce());
+        let mut owners = lease.lock().unwrap().owners.take().unwrap();
+        for manual in [false, true] {
+            if manual {
+                host.immediate(
+                    "1000",
+                    LinkEffect::Message {
+                        selector: "9".into(),
+                        reply: None,
+                    },
+                    clock(),
+                )
+                .unwrap();
+            } else {
+                let dispatch = host.runtime.next_event(clock()).unwrap().unwrap();
+                host.runtime.queue_event(&dispatch).unwrap();
+                assert!(host.runtime.complete_event(&dispatch));
+            }
+            let mut heard = false;
+            for _ in 0..1000 {
+                let mut output = [0.0; 48];
+                owners
+                    .1
+                    .acquire()
+                    .unwrap()
+                    .state()
+                    .controller
+                    .process_audio(false, false, &[], &mut output);
+                host.pump(clock()).unwrap();
+                if output.iter().any(|sample| *sample != 0.0) {
+                    heard = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                heard,
+                "real shared producer must render {device}, manual={manual}"
+            );
+            let effect = host
+                .runtime
+                .command(
+                    "1000",
+                    operation(LinkAction::CancelMessage, ""),
+                    clock(),
+                    false,
+                )
+                .unwrap();
+            host.immediate("1000", effect, clock()).unwrap();
+            let mut after = [0.0; 3000];
+            let keyed = owners
+                .1
+                .acquire()
+                .unwrap()
+                .state()
+                .controller
+                .process_audio(false, false, &[], &mut after);
+            assert!(
+                !keyed && after.iter().all(|sample| *sample == 0.0),
+                "cancel must remove unread producer PCM, {device}"
+            );
+            host.pump(clock()).unwrap();
+            assert!(host.runtime.next_event(clock()).unwrap().is_none());
+        }
+        let mut next = clock();
+        next.civil = Some((
+            rpt_advanced_core::schedule::CivilTime::new(
+                2030,
+                1,
+                1,
+                rpt_advanced_core::schedule::Weekday::Tuesday,
+                9,
+                8,
+            )
+            .unwrap(),
+            0,
+        ));
+        next.now_ms += 57_000;
+        assert!(
+            host.runtime.next_event(next).unwrap().is_some(),
+            "manual playback cannot consume the next clock occurrence"
+        );
+        lease.lock().unwrap().owners = Some(owners);
+        assert!(host.stop(30));
+    }
 }
 
 #[test]

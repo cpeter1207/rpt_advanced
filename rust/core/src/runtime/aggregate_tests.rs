@@ -68,6 +68,172 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros() {
+    for (media, expected, linked) in [
+        ("message=Report\n", "Report", false),
+        ("template=clock\n", "Report 9:07 AM", false),
+        (
+            "message=Report ${link_status}\n",
+            "Report Link node,2,0,0,0 transceive",
+            true,
+        ),
+        ("message=Report ${node}\n", "Report node,1,0,0,0", false),
+        ("message=Report ${callsign}\n", "Report A,B,1,C,D", false),
+        ("message=This is AB1CD\n", "This is A,B,1,C,D", false),
+    ] {
+        let source = format!(
+            "[1000]\ncallsign=AB1CD\n[template clock]\ntext=Report ${{time}}\n[macro attach]\naction=connect\ntarget_node=2000\n[event 1000 report]\nat=daily 09:07\n{media}macro=attach\ndtmf_id=7\n"
+        );
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&source).unwrap(),
+            &CapturingMedia(messages.clone()),
+            adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        if linked {
+            runtime.incoming("1000", "2000", true).unwrap();
+        }
+        let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = tx.acquire().unwrap();
+        let controller = &mut generation.state().controller;
+        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+        assert!(
+            runtime.queue_message("1000", "7", None).is_ok(),
+            "legacy event selector must be registered: {media}"
+        );
+        controller.process_audio(false, false, &[], &mut [0.0]);
+        runtime.prepare_messages(clock());
+        let mut output = [0.0; 20_000];
+        controller.process_audio(false, false, &[], &mut output);
+        assert!(output.iter().all(|sample| *sample == 0.25));
+        assert_eq!(*messages.lock().unwrap(), [expected]);
+        assert_eq!(
+            runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .manager()
+                .snapshot()
+                .len(),
+            usize::from(linked),
+            "manual media must not execute its action macro"
+        );
+        assert!(
+            runtime.next_event(clock()).unwrap().is_some(),
+            "manual media cannot consume the calendar occurrence"
+        );
+        drop(generation);
+        if linked {
+            runtime.node("1000").unwrap().links().ended("2000");
+            runtime.peer_detached("1000", "2000", 0);
+        }
+        assert!(runtime.stop(0));
+        let collision = format!("{source}[message other]\ncontent=Other\ndtmf_id=7\n");
+        assert!(
+            Runtime::start(
+                ConfigDocument::parse(&collision).unwrap(),
+                &Media,
+                adapter,
+                |_, _| Ok(
+                    Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>
+                ),
+                clock()
+            )
+            .is_err(),
+            "legacy selectors must share collision validation"
+        );
+    }
+}
+
+#[test]
+fn manually_selected_message_does_not_renew_its_polite_wait_after_source_unkey() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[message report]\ncontent={media}\nspeech_text=Report\nmorse_text=E\ndtmf_id=1\npolite_maximum_wait_ms=20\npolite_expiry=skip\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>), clock(),
+    ).unwrap();
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = tx.acquire().unwrap();
+    let controller = &mut generation.state().controller;
+    controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    runtime
+        .queue_message("1000", "1", Some(peer.reply_target()))
+        .unwrap();
+    controller.process_audio(false, false, &[], &mut [0.0; 1920]);
+    peer.set_radio_keyed(false);
+    controller.process_audio(false, false, &[], &mut [0.0]);
+    runtime.prepare_messages(clock());
+    let mut output = [0.0; 20_000];
+    controller.process_audio(false, false, &[], &mut output);
+    assert!(
+        output.iter().all(|sample| *sample == 0.0),
+        "expired manual content must not play after source unkey"
+    );
+    assert!(messages.lock().unwrap().is_empty());
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn manual_identifier_and_tail_success_satisfy_their_automatic_opportunity() {
+    for (family, timing) in [
+        ("identifier", "regardless_of_activity=yes\n"),
+        ("tail", "delay_ms=0\n"),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&format!(
+                "[1000]\nduplex=full\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[{family} 1000 report]\ninterval_ms=1000\n{timing}speech_text=Report\nmorse_text=E\ndtmf_id=1\n"
+            )).unwrap(),
+            &CapturingMedia(messages.clone()), adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        ).unwrap();
+        let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = tx.acquire().unwrap();
+        let controller = &mut generation.state().controller;
+        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+        runtime.queue_message("1000", "1", None).unwrap();
+        controller.process_audio(false, false, &[], &mut [0.0]);
+        runtime.prepare_messages(clock());
+        let mut played = [0.0; 20_000];
+        controller.process_audio(false, false, &[], &mut played);
+        assert_eq!(played, [0.25; 20_000]);
+        if family == "tail" {
+            controller.process_audio(true, false, &[], &mut [0.0]);
+            controller.process_audio(false, false, &[], &mut [0.0; 12_001]);
+        } else {
+            controller.process_audio(false, false, &[], &mut [0.0; 21_000]);
+        }
+        runtime.prepare_messages(clock());
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            1,
+            "manual {family} must not immediately play again automatically"
+        );
+        controller.process_audio(false, false, &[], &mut [0.0; 60_000]);
+        if family == "tail" {
+            controller.process_audio(true, false, &[], &mut [0.0]);
+            controller.process_audio(false, false, &[], &mut [0.0]);
+        }
+        runtime.prepare_messages(clock());
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            2,
+            "{family} becomes eligible after its normal interval"
+        );
+        drop(generation);
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
 fn site_manual_command_publishes_inhibit_without_waiting_for_poll() {
     let mut runtime = Runtime::start(
         ConfigDocument::parse("[1000]\nduplex=full\n").unwrap(),
@@ -608,7 +774,7 @@ fn composition_runtime_recurring_id_resolves_at_each_attempt() {
 }
 
 #[test]
-fn composition_runtime_command_waits_for_unkey_and_keeps_exact_peer() {
+fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audience() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
@@ -659,12 +825,8 @@ fn composition_runtime_command_waits_for_unkey_and_keeps_exact_peer() {
             regeneration: None,
         },
     );
-    assert!(audio.iter().all(|sample| *sample == 0.0));
-    assert!(
-        replies
-            .iter()
-            .any(|sample| sample.sample != 0.0 && sample.target == peer.reply_identity())
-    );
+    assert!(audio.iter().any(|sample| *sample == 0.25));
+    assert!(replies.iter().all(|sample| sample.sample == 0.0));
     let other = crate::link::PeerSignals::new();
     peer.end();
     assert_eq!(
@@ -850,6 +1012,7 @@ fn clock() -> RuntimeClock {
     RuntimeClock {
         now_ms: 1000,
         wall_seconds: 100,
+        wall_subsecond_ms: 0,
         civil: Some((
             CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 7).unwrap(),
             0,
@@ -1291,6 +1454,286 @@ fn multi_node_failed_candidate_and_device_activation_restore_complete_old_runtim
 }
 
 #[test]
+fn scheduled_event_clock_bounds_do_not_consume_another_event() {
+    for (second, subsecond) in [(60, 0), (0, 1000)] {
+        let mut runtime = link_notice_runtime(
+            "[1000]\n[2000]\n[event 1000 other]\nat=daily 09:08\nmessage=OTHER\n[event 2000 later]\nat=daily 09:08\nmessage=LATER\n[event 2000 ready]\nat=daily 09:07\nmessage=READY\n",
+            Arc::new(AtomicBool::new(false)),
+        );
+        let invalid = RuntimeClock {
+            civil: clock().civil.map(|(civil, _)| (civil, second)),
+            wall_subsecond_ms: subsecond,
+            ..clock()
+        };
+        assert!(matches!(
+            runtime.next_event(invalid),
+            Err(RuntimeError::Clock)
+        ));
+        let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+        assert_eq!(dispatch.local(), "2000");
+        assert_eq!(dispatch.morse(), Some("READY"));
+        runtime.queue_event(&dispatch).unwrap();
+        assert!(runtime.complete_event(&dispatch));
+        assert!(runtime.next_event(clock()).unwrap().is_none());
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
+fn scheduled_event_composition_uses_the_shared_recipe_and_manual_selector() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[event 1000 clock]\nat=daily 09:07\ncontent={message}\nmessage_id=site-time\narg_time=time\ndtmf_id=4\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .expect("a scheduled composition is a valid message source");
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(
+        messages.lock().unwrap().is_empty(),
+        "values resolve at playback, not admission"
+    );
+    assert!(runtime.complete_event(&dispatch));
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12_001]);
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
+    drop(generation);
+    assert!(runtime.queue_message("1000", "4", None).is_ok());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_expired_while_receiving_does_not_start_after_unkey() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\nduplex=full\n[event 1000 notice]\nat=daily 09:07\nmessage=TEST\npolite_maximum_wait_ms=10\n",
+        )
+        .unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(true, false, &[], &mut [0.0; 960]);
+    let mut output = [0.0; 24_000];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    assert!(
+        output.iter().all(|sample| *sample == 0.0),
+        "a skipped occurrence must never become audible later"
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_subsecond_lateness_does_not_renew_the_deadline() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[event 1000 notice]\nat=daily 09:07\nmessage=TEST\npolite_maximum_wait_ms=100\n").unwrap(),
+        &Media, adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    ).unwrap();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12_000]);
+    let late = RuntimeClock {
+        now_ms: 1250,
+        wall_subsecond_ms: 250,
+        ..clock()
+    };
+    let dispatch = runtime.next_event(late).unwrap().unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let mut output = [0.0; 960];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    assert_eq!(
+        output, [0.0; 960],
+        "the 100ms budget expired before the delayed control tick"
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_replaces_an_older_unstarted_occurrence() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nduplex=full\n[event 1000 clock]\nat=every 1 minute\ncontent={message}\nmessage_id=site-time\narg_time=time\npolite_maximum_wait_ms=300000\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    ).unwrap();
+    let first = runtime.next_event(clock()).unwrap().unwrap();
+    runtime.queue_event(&first).unwrap();
+    assert!(runtime.complete_event(&first));
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    for _ in 0..60 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(true, false, &[], &mut [0.0; 48_000]);
+    }
+    let mut next = RuntimeClock {
+        now_ms: 61_000,
+        wall_seconds: 160,
+        ..clock()
+    };
+    next.civil = Some((
+        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+        0,
+    ));
+    let latest = runtime.next_event(next).unwrap().unwrap();
+    runtime.queue_event(&latest).unwrap();
+    assert!(runtime.complete_event(&latest));
+    for _ in 0..80 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut [0.0; 960]);
+        runtime.prepare_messages(next);
+    }
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The time is 9:08 AM."],
+        "stale unstarted occurrences must be discarded, not replayed"
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_cancelled_before_admission_skips_only_the_obsolete_media() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[event 1000 clock]\nat=every 1 minute\nmessage=Report ${time}\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let first = runtime.next_event(clock()).unwrap().unwrap();
+    assert_eq!(first.morse(), Some("Report 9:07 AM"));
+    let next = RuntimeClock {
+        now_ms: 61_000,
+        wall_seconds: 160,
+        civil: Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+            0,
+        )),
+        ..clock()
+    };
+    let obsolete = runtime.next_event(next).unwrap().unwrap();
+    assert_eq!(obsolete.morse(), Some("Report 9:07 AM"));
+    runtime.queue_event(&obsolete).unwrap();
+    assert!(messages.lock().unwrap().is_empty());
+    assert!(runtime.complete_event(&obsolete));
+    assert_eq!(runtime.queue_event(&first), Err(RuntimeError::Rejected));
+    let latest = runtime.next_event(next).unwrap().unwrap();
+    assert_eq!(latest.morse(), Some("Report 9:08 AM"));
+    runtime.queue_event(&latest).unwrap();
+    assert_eq!(*messages.lock().unwrap(), ["Report 9:08 AM"]);
+    assert!(runtime.complete_event(&latest));
+    assert!(runtime.next_event(next).unwrap().is_none());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_full_queue_retry_keeps_the_original_start_deadline() {
+    let mut runtime = link_notice_runtime(
+        "[1000]\n[event 1000 report]\nat=daily 09:07\nmessage=Report\npolite_maximum_wait_ms=10\n",
+        Arc::new(AtomicBool::new(false)),
+    );
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    for _ in 0..4 {
+        runtime
+            .queue_status("1000", LinkAction::Time, None, clock(), None)
+            .unwrap();
+    }
+    assert_eq!(runtime.queue_event(&dispatch), Err(RuntimeError::Rejected));
+    assert!(!runtime.complete_event(&dispatch));
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = tx.acquire().unwrap();
+    let controller = &mut generation.state().controller;
+    let mut queued = [0.0; 12_100];
+    controller.process_audio(false, false, &[], &mut queued);
+    assert_eq!(queued.iter().filter(|sample| **sample == 0.25).count(), 16);
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let mut expired = [0.0; 960];
+    controller.process_audio(false, false, &[], &mut expired);
+    assert_eq!(expired, [0.0; 960], "retry must not renew the start budget");
+    assert!(runtime.next_event(clock()).unwrap().is_none());
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_preparation_failure_keeps_the_reservation_retryable() {
+    let reject = Arc::new(AtomicBool::new(false));
+    let mut runtime = link_notice_runtime(
+        "[1000]\n[event 1000 report]\nat=daily 09:07\nmessage=Report\n",
+        Arc::clone(&reject),
+    );
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    reject.store(true, Ordering::Release);
+    assert_eq!(
+        runtime.queue_event(&dispatch),
+        Err(RuntimeError::Preparation)
+    );
+    assert!(!runtime.complete_event(&dispatch));
+    reject.store(false, Ordering::Release);
+    runtime.queue_event(&dispatch).unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = tx.acquire().unwrap();
+    let mut output = [0.0; 12_016];
+    generation
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    let heard: Vec<_> = output.into_iter().filter(|sample| *sample != 0.0).collect();
+    assert_eq!(heard, [0.25; 4], "only the successful retry may play");
+    assert!(runtime.next_event(clock()).unwrap().is_none());
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn aggregate_scheduled_template_and_macro_use_trigger_clock_and_current_node() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let config = ConfigDocument::parse("[1000]\ncallsign=AB1CD\n[template hello]\ntext=${node}. ${time}\n[macro connect]\naction=connect\ntarget_node=2000\n[event 1000 morning]\nat=daily 09:07\ntemplate=hello\nmacro=connect\n").unwrap();
@@ -1604,6 +2047,7 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
     let at = |now_ms, hour, minute| RuntimeClock {
         now_ms,
         wall_seconds: 0,
+        wall_subsecond_ms: 0,
         civil: Some((
             CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap(),
             0,
@@ -1703,6 +2147,7 @@ fn aggregate_schedule_warning_queues_one_localized_status_message() {
         let clock = RuntimeClock {
             now_ms: 1_000,
             wall_seconds: 0,
+            wall_subsecond_ms: 0,
             civil: Some((
                 CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap(),
                 second,
@@ -2161,6 +2606,7 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
 fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
     for (action, target, message) in [
         ("connect", "3000", "message=TEST\n"),
+        ("connect", "3000", "content={media}\nspeech_text=Report\n"),
         ("disconnect", "2000", ""),
         ("disconnect_all", "", ""),
         ("reconnect_all", "", ""),
@@ -2181,6 +2627,7 @@ fn event_macros_wait_for_message_admission_and_execute_each_existing_action() {
         let event = runtime.next_event(clock()).unwrap().unwrap();
         assert_eq!(event.operation().unwrap().node, target);
         if !message.is_empty() {
+            assert!(!runtime.complete_event(&event));
             assert!(matches!(
                 runtime.event_command(&event, clock()),
                 Err(RuntimeError::Rejected)

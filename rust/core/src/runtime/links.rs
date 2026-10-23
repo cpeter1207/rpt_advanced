@@ -95,6 +95,8 @@ pub enum LinkEffect {
     },
     /// Change the live node's parrot state; apply buffer lifecycle work on control.
     ParrotEnabled(bool),
+    /// Cancel only the currently admitted message attempt on the audio owner.
+    CancelMessage,
     /// No physical operation is needed (for example resumed retry intent).
     None,
 }
@@ -514,6 +516,7 @@ impl NodeLinkControl {
         }
         let remote = operation.command.node;
         let effect = match operation.command.action {
+            LinkAction::CancelMessage => LinkEffect::CancelMessage,
             action @ (LinkAction::Message | LinkAction::SiteStatus) => {
                 if remote.is_empty() || !crate::config::message_selector_valid(&remote) {
                     return Err(AdmissionError::Invalid);

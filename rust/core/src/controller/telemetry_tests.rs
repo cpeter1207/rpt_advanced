@@ -1,5 +1,20 @@
 use super::*;
 
+#[test]
+fn occurrence_replacement_cancels_only_audio_that_has_not_begun() {
+    let pending = MessageOccurrence::default();
+    pending.cancel_pending();
+    assert!(pending.cancelled());
+    assert!(!pending.begin());
+    let playing = MessageOccurrence::default();
+    assert!(playing.begin());
+    playing.cancel_pending();
+    assert!(
+        !playing.cancelled(),
+        "new occurrences cannot cut off audible playback"
+    );
+}
+
 struct SequenceTestReader {
     samples: Vec<f32>,
     offset: usize,

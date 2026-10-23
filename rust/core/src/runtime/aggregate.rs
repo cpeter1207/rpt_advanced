@@ -61,6 +61,8 @@ pub struct RuntimeClock {
     pub now_ms: u64,
     /// Original ticker wall-clock seconds, preserved through queue delay.
     pub wall_seconds: i64,
+    /// Fraction of that captured wall-clock second, from zero through 999 milliseconds.
+    pub wall_subsecond_ms: u16,
     /// Validated local calendar and second; unavailable clocks cannot select replacement windows.
     pub civil: Option<(CivilTime, u8)>,
 }
@@ -260,12 +262,18 @@ struct Event {
     spec: EventSpec,
     template: Option<MessageTemplate>,
     operation: Option<Command>,
+    recipe: Option<usize>,
+    delivery: crate::controller::PoliteDelivery,
+    playback: crate::controller::PlaybackPolicy,
 }
 /// Fully copied prepared event text and its private scheduler reservation.
 pub struct RuntimeDispatch {
     token: ScheduledDispatch,
     morse: Option<String>,
     speech: Option<String>,
+    recipe: Option<usize>,
+    delivery: crate::controller::PoliteDelivery,
+    playback: crate::controller::PlaybackPolicy,
 }
 impl RuntimeDispatch {
     /// Owning local node.
@@ -602,7 +610,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             } else {
                 None
             };
-            events.extend(prepare_events(&document, &id)?);
+            events.extend(prepare_events(&document, &id, &messages)?);
             let control = ControlState {
                 generation: generation_id,
                 adapter: prepared.control,
@@ -935,9 +943,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
         &mut self,
         clock: RuntimeClock,
     ) -> Result<Option<RuntimeDispatch>, RuntimeError> {
-        let (civil, _) = clock
+        let (civil, second) = clock
             .civil
-            .filter(|(_, second)| *second < 60)
+            .filter(|(_, second)| *second < 60 && clock.wall_subsecond_ms < 1000)
             .ok_or(RuntimeError::Clock)?;
         let events = &self.events;
         let nodes = &self.nodes;
@@ -945,36 +953,43 @@ impl<A: Send, C: Send> Runtime<A, C> {
             return Ok(None);
         };
         let token = scheduler
-            .next(clock.wall_seconds, civil, |spec, civil| {
-                let event = events
-                    .iter()
-                    .find(|event| event.spec == *spec)
-                    .ok_or(SchedulerError::Render)?;
-                let node = nodes
-                    .iter()
-                    .find(|node| node.name == spec.local)
-                    .ok_or(SchedulerError::Render)?;
-                let message = event
-                    .template
-                    .as_ref()
-                    .map(|template| {
-                        render::message(
-                            template,
-                            *civil,
-                            node.time_format,
-                            &node.name,
-                            &node.settings.callsign,
-                            node.links.manager(),
-                            &node.control.catalog,
-                        )
+            .next(
+                clock.wall_seconds,
+                i128::from(clock.now_ms)
+                    - i128::from(second) * 1000
+                    - i128::from(clock.wall_subsecond_ms),
+                civil,
+                |spec, civil| {
+                    let event = events
+                        .iter()
+                        .find(|event| event.spec == *spec)
+                        .ok_or(SchedulerError::Render)?;
+                    let node = nodes
+                        .iter()
+                        .find(|node| node.name == spec.local)
+                        .ok_or(SchedulerError::Render)?;
+                    let message = event
+                        .template
+                        .as_ref()
+                        .map(|template| {
+                            render::message(
+                                template,
+                                *civil,
+                                node.time_format,
+                                &node.name,
+                                &node.settings.callsign,
+                                node.links.manager(),
+                                &node.control.catalog,
+                            )
+                        })
+                        .transpose()
+                        .map_err(|_| SchedulerError::Render)?;
+                    Ok(DispatchContent {
+                        message: message.and_then(|text| render::morse(&text).map(|_| text)),
+                        operation: event.operation.clone(),
                     })
-                    .transpose()
-                    .map_err(|_| SchedulerError::Render)?;
-                Ok(DispatchContent {
-                    message: message.and_then(|text| render::morse(&text).map(|_| text)),
-                    operation: event.operation.clone(),
-                })
-            })
+                },
+            )
             .map_err(|_| RuntimeError::Preparation)?;
         let Some(token) = token else {
             return Ok(None);
@@ -990,10 +1005,21 @@ impl<A: Send, C: Send> Runtime<A, C> {
             token.content.message.as_deref().map(|text| {
                 render::scheduled_speech(text, &node.name, &node.settings.callsign, &peer)
             });
+        let event = self
+            .events
+            .iter()
+            .find(|event| event.spec.local == token.local() && event.spec.name == token.name())
+            .ok_or(RuntimeError::Preparation)?;
+        let recipe = event.recipe;
+        let delivery = event.delivery;
+        let playback = event.playback;
         Ok(Some(RuntimeDispatch {
             token,
             morse,
             speech,
+            recipe,
+            delivery,
+            playback,
         }))
     }
     /// Queue a reserved event once. Stale reservations cannot synthesize or enqueue into a new node.
@@ -1005,31 +1031,64 @@ impl<A: Send, C: Send> Runtime<A, C> {
         if scheduler.is_message_queued(&dispatch.token) {
             return Ok(());
         }
-        let Some(morse) = dispatch.morse() else {
+        let occurrence = dispatch.token.occurrence();
+        if occurrence
+            .as_ref()
+            .is_some_and(|occurrence| occurrence.cancelled())
+        {
+            scheduler.message_queued(&dispatch.token);
             return Ok(());
-        };
+        }
+        if dispatch.recipe.is_none() && dispatch.morse().is_none() {
+            return Ok(());
+        }
         let node = self
             .nodes
             .iter_mut()
             .find(|node| node.name == dispatch.local())
             .ok_or(RuntimeError::MissingNode)?;
-        queue_status_media(
-            &mut node.control.telemetry,
-            &mut node.control.media_session,
-            &node.status,
-            morse,
-            dispatch.speech().unwrap_or(""),
-            None,
-            None,
-        )?;
+        node.control.telemetry.reclaim().for_each(drop);
+        if !node.control.telemetry.can_queue_status() {
+            return Err(RuntimeError::Rejected);
+        }
+        let prepared = if let Some(index) = dispatch.recipe {
+            node.control
+                .telemetry
+                .prepare_message(index)
+                .map_err(|_| RuntimeError::Preparation)?
+        } else {
+            prepare::streamed_status(
+                node.control
+                    .media_session
+                    .as_mut()
+                    .ok_or(RuntimeError::Preparation)?
+                    .as_mut(),
+                &node.status,
+                dispatch.morse().expect("event has legacy media"),
+                dispatch.speech().unwrap_or(""),
+            )?
+        };
+        let deadline = (dispatch.token.due_ms() + i128::from(dispatch.delivery.maximum_wait_ms)
+            - i128::from(node.control.started_ms))
+        .clamp(0, i128::from(u64::MAX / 48)) as u64
+            * 48;
+        assert!(
+            node.control.telemetry.queue_prepared_status(
+                prepared
+                    .with_delivery(deadline, dispatch.delivery)
+                    .with_playback_policy(dispatch.playback)
+                    .with_occurrence(occurrence)
+            )
+        );
         scheduler.message_queued(&dispatch.token);
         Ok(())
     }
     /// Settle a reservation only after its message and optional linking operation complete.
     pub fn complete_event(&mut self, dispatch: &RuntimeDispatch) -> bool {
-        self.scheduler
-            .as_mut()
-            .is_some_and(|scheduler| scheduler.complete(&dispatch.token))
+        self.scheduler.as_mut().is_some_and(|scheduler| {
+            (dispatch.recipe.is_none() || scheduler.is_message_queued(&dispatch.token))
+                && scheduler.complete(&dispatch.token)
+        })
     }
     /// Resolve newly admitted recurring messages on the frequent control pump, never on audio.
     pub fn prepare_messages(&mut self, clock: RuntimeClock) {
@@ -1209,14 +1268,36 @@ impl<A: Send, C: Send> Runtime<A, C> {
         {
             return Err(RuntimeError::Rejected);
         }
-        let prepared = node
+        let mut prepared = node
             .control
             .telemetry
             .prepare_message(index)
             .map_err(|_| RuntimeError::Preparation)?
             .reply_to(reply);
+        if let Some((policy, delivery)) = node.control.messages.items[index].playback() {
+            let deadline = node
+                .control
+                .activity
+                .current_sample()
+                .saturating_add(delivery.maximum_wait_ms.saturating_mul(48));
+            prepared = prepared
+                .with_playback_policy(policy)
+                .with_delivery(deadline, delivery);
+        }
         // Only this serialized producer can consume the capacity admitted above.
         assert!(node.control.telemetry.queue_prepared_status(prepared));
+        Ok(())
+    }
+
+    /// Cancel only the active message on the current generation's audio owner.
+    pub fn cancel_message(&mut self, local: &str) -> Result<(), RuntimeError> {
+        self.nodes
+            .iter()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?
+            .control
+            .telemetry
+            .cancel_message();
         Ok(())
     }
 
@@ -1588,7 +1669,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
     ) -> Result<LinkEffect, RuntimeError> {
         let scheduler = self.scheduler.as_mut().ok_or(RuntimeError::Rejected)?;
         if !scheduler.current(&dispatch.token)
-            || (dispatch.morse.is_some() && !scheduler.is_message_queued(&dispatch.token))
+            || ((dispatch.morse.is_some() || dispatch.recipe.is_some())
+                && !scheduler.is_message_queued(&dispatch.token))
         {
             return Err(RuntimeError::Rejected);
         }
@@ -1688,11 +1770,17 @@ fn stop_node<A: Send, C: Send>(
     }
 }
 
-fn prepare_events(document: &ConfigDocument, node: &NodeId) -> Result<Vec<Event>, RuntimeError> {
+fn prepare_events(
+    document: &ConfigDocument,
+    node: &NodeId,
+    recipes: &super::composition::MessageRecipes,
+) -> Result<Vec<Event>, RuntimeError> {
     let mut events = Vec::new();
     for label in prepare::labels(document, "event", node.as_str()) {
         let event = ResolvedEventSettings::resolve(document, node, label)?.value;
-        let text = if !event.message.is_empty() {
+        let text = if event.composed.is_some() {
+            None
+        } else if !event.message.is_empty() {
             Some(event.message)
         } else if !event.template.is_empty() {
             Some(
@@ -1715,10 +1803,15 @@ fn prepare_events(document: &ConfigDocument, node: &NodeId) -> Result<Vec<Event>
             spec: EventSpec {
                 local: node.as_str().into(),
                 name: label.into(),
-                trigger: event.at.parse().map_err(|_| RuntimeError::Preparation)?,
+                trigger: crate::schedule::EventTrigger::parse(&event.at, event.days.as_deref())
+                    .map_err(|_| RuntimeError::Preparation)?,
+                media: template.is_some() || recipes.events.contains_key(label),
             },
             template,
             operation,
+            recipe: recipes.events.get(label).copied(),
+            delivery: event.delivery,
+            playback: event.playback,
         });
     }
     Ok(events)

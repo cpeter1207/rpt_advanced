@@ -68,6 +68,122 @@ fn regeneration_replaces_rf_not_peer_program_or_parrot_capture() {
 }
 
 #[test]
+fn configured_message_broadcast_obeys_destination_and_peer_mode() {
+    use crate::controller::{MorseSettings, PlaybackDestination, PlaybackPolicy, PreparedMedia};
+    for (destination, mode, expected) in [
+        (PlaybackDestination::Local, Mode::TRANSCEIVE, false),
+        (PlaybackDestination::LocalAndLinks, Mode::TRANSCEIVE, true),
+        (PlaybackDestination::LocalAndLinks, Mode::MONITOR, false),
+    ] {
+        let (mut peer, _, mut output) = peer_with_kerchunk("200", 4, 0);
+        peer.mode = mode;
+        let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+        let (mut controller, mut control) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+        assert!(
+            control.queue_prepared_status(
+                PreparedMedia::new(Some(vec![0.25; 4]), "E", MorseSettings::default())
+                    .unwrap()
+                    .with_playback_policy(PlaybackPolicy {
+                        destination,
+                        ..Default::default()
+                    })
+            )
+        );
+        let mut rf = [0.0; 4];
+        links
+            .process(&mut controller, false, &mut rf, SourcePosition::default())
+            .unwrap();
+        assert_eq!(rf, [0.25; 4]);
+        dispatcher.dispatch(1);
+        let mut remote = [0.0; 4];
+        assert_eq!(output.read_span(&mut remote).is_some(), expected);
+        assert_eq!(remote, if expected { [0.25; 4] } else { [0.0; 4] });
+    }
+}
+
+#[test]
+fn configured_message_suppression_drains_peers_without_negative_mix_minus() {
+    use crate::controller::{MorseSettings, PlaybackPolicy, PreparedMedia};
+    let mut peers = Vec::new();
+    let mut readers = Vec::new();
+    for (name, sample) in [("200", 0.1), ("300", 0.2)] {
+        let signals = PeerSignals::new();
+        signals.publish_pcm();
+        signals.set_radio_keyed(true);
+        let (writer, reader) = LinkAudioQueue::new(4, 64).unwrap().into_endpoints();
+        peers.push(
+            AudioPeer::new(
+                name,
+                Mode::TRANSCEIVE,
+                FiniteInput {
+                    signals,
+                    samples: std::iter::repeat_n(sample, 12_480).collect(),
+                },
+                writer,
+                4,
+                0,
+            )
+            .unwrap(),
+        );
+        readers.push(reader);
+    }
+    let (mut links, mut dispatcher) = LinkAudio::new(peers, 4).unwrap();
+    let (mut controller, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: 0,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+    assert!(
+        control.queue_prepared_status(
+            PreparedMedia::new(Some(vec![0.75; 48]), "E", MorseSettings::default())
+                .unwrap()
+                .with_playback_policy(PlaybackPolicy {
+                    repeat_during_playback: false,
+                    ..Default::default()
+                })
+        )
+    );
+    controller.process_audio(false, false, &[], &mut [0.0]);
+    links
+        .process(
+            &mut controller,
+            true,
+            &mut [0.3; 4],
+            SourcePosition::default(),
+        )
+        .unwrap();
+    dispatcher.dispatch(1);
+    for reader in &mut readers {
+        let mut remote = [0.0; 4];
+        assert!(reader.read_span(&mut remote).is_some());
+        assert_eq!(
+            remote, [0.0; 4],
+            "suppressed own contribution must not be subtracted"
+        );
+    }
+    assert!(
+        links
+            .peers
+            .iter()
+            .all(|peer| peer.input.samples.len() == 12_476 && peer.active)
+    );
+}
+
+#[test]
 fn egress_dispatch_notifies_receive_only_activity_without_echoing_pcm() {
     let (mut peer, signals, mut output) = peer_with_kerchunk("200", 960, 0);
     peer.mode = Mode::MONITOR;

@@ -208,7 +208,10 @@ fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
          [identifier 1000 broken]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_missing}\n\
          [tail 1000 empty]\n\
          [tail 1000 broken]\ncontent={message_macro_missing}\n\
-         [tail 1000 recorded]\nsound_file=tail.wav\nmorse_text=TAIL\n",
+         [tail 1000 recorded]\nsound_file=tail.wav\nmorse_text=TAIL\n\
+         [event 1000 broken]\nat=daily 12:00\ncontent={message_macro_missing}\ndtmf_id=7\n\
+         [event 1000 action]\nat=daily 12:00\nmacro=resume\ndtmf_id=8\n\
+         [macro resume]\naction=reconnect_all\n",
     )
     .unwrap();
     let node = NodeId::new("1000").unwrap();
@@ -229,7 +232,16 @@ fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
         .filter(|warning| warning.fallback == "definition disabled")
         .map(|warning| warning.section.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(disabled, ["identifier 1000 broken", "tail 1000 broken"]);
+    assert_eq!(
+        disabled,
+        [
+            "identifier 1000 broken",
+            "tail 1000 broken",
+            "event 1000 broken"
+        ]
+    );
+    assert!(recipes.events.is_empty());
+    assert!(recipes.selectors.is_empty());
     let mut requests = Vec::new();
     for receiving in [true, false, false] {
         controller.process_audio(receiving, false, &[], &mut [0.0; 48]);
@@ -248,6 +260,102 @@ fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
         Some(std::path::Path::new("tail.wav"))
     );
     assert!(media.sources.lock().unwrap().is_empty());
+}
+
+#[test]
+fn tails_allow_file_or_speech_without_relaxing_identifier_morse_requirements() {
+    for source in ["sound_file=tail.wav", "speech_text=Tail message"] {
+        let config = ConfigDocument::parse(&format!(
+            "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n\
+             [identifier 1000 recorded]\n{source}\n\
+             [tail 1000 recorded]\n{source}\n"
+        ))
+        .unwrap();
+        let node = NodeId::new("1000").unwrap();
+        let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+        let media = media(false, false);
+        let (mut controller, mut control, _, _station, recipes) = controller(
+            &config,
+            &node,
+            &resolved,
+            &media,
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        )
+        .unwrap();
+        let disabled: Vec<_> = recipes
+            .warnings
+            .iter()
+            .filter(|warning| warning.fallback == "definition disabled")
+            .map(|warning| warning.section.as_str())
+            .collect();
+        assert_eq!(disabled, ["identifier 1000 recorded"], "{source}");
+        controller.process_audio(true, false, &[], &mut [0.0; 48]);
+        controller.process_audio(false, false, &[], &mut [0.0; 48]);
+        controller.process_audio(false, false, &[], &mut [0.0; 48]);
+        assert!(control.take_message_request().is_some(), "{source}");
+    }
+}
+
+#[test]
+fn manual_message_selectors_share_the_identifier_and_tail_namespace() {
+    for (id_selector, tail_selector, valid) in
+        [(2, 3, true), (1, 3, false), (2, 1, false), (2, 2, false)]
+    {
+        let config = ConfigDocument::parse(&format!(
+            "[1000]\n[message report]\ncontent=Ready\ndtmf_id=1\n\
+             [identifier 1000 id]\nmorse_text=ID\ndtmf_id={id_selector}\n\
+             [tail 1000 tail]\nmorse_text=TAIL\ndtmf_id={tail_selector}\n"
+        ))
+        .unwrap();
+        let node = NodeId::new("1000").unwrap();
+        let settings = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+        let media = media(false, false);
+        let result = controller(
+            &config,
+            &node,
+            &settings,
+            &media,
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        );
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "ID={id_selector}, tail={tail_selector}"
+        );
+        if let Ok((_, _, _, _, recipes)) = result {
+            assert_eq!(
+                recipes
+                    .selectors
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["1", "2", "3"]
+            );
+        }
+    }
+}
+
+#[test]
+fn event_selectors_share_the_existing_message_namespace() {
+    for selector in [1, 2] {
+        let config = ConfigDocument::parse(&format!("[1000]\n[message notice]\ncontent=Ready\ndtmf_id=1\n[event 1000 clock]\nat=every 1 hour\ncontent=Clock\ndtmf_id={selector}\n")).unwrap();
+        let node = NodeId::new("1000").unwrap();
+        let settings = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+        let result = controller(
+            &config,
+            &node,
+            &settings,
+            &media(false, false),
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        );
+        assert_eq!(result.is_ok(), selector == 2);
+        if let Ok((_, _, _, _, recipes)) = result {
+            assert_eq!(recipes.selectors["2"], recipes.events["clock"]);
+        }
+    }
 }
 
 #[test]

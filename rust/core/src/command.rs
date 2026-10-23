@@ -55,10 +55,12 @@ pub enum LinkAction {
     Message,
     /// Query one configured sensor or digital input by its decimal selector.
     SiteStatus,
+    /// Cancel the current configured message without changing future triggers.
+    CancelMessage,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 23;
+pub const ACTION_COUNT: usize = 24;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,7 +218,7 @@ impl DtmfCommandMap {
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805", "82", "77", "76",
+            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78",
         ];
         let mappings = prefixes
             .into_iter()
@@ -323,6 +325,7 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::PadTest,
         LinkAction::Message,
         LinkAction::SiteStatus,
+        LinkAction::CancelMessage,
     ]
 }
 
@@ -341,6 +344,7 @@ fn takes_node(action: LinkAction) -> bool {
             | LinkAction::ParrotEnable
             | LinkAction::ParrotDisable
             | LinkAction::PadTest
+            | LinkAction::CancelMessage
     )
 }
 

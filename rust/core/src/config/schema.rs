@@ -5,7 +5,7 @@ use super::{ConfigDocument, ConfigError, ConfigWarning, Resolution, parse};
 use crate::access::AccessPolicy;
 use crate::command::{CommandMapping, DtmfCommandMap, LinkAction};
 use crate::schedule::{
-    ScheduledAction, ScheduledEvent, ScheduledWindow, date_selector_valid, end_time_valid,
+    EventTrigger, ScheduledAction, ScheduledWindow, date_selector_valid, end_time_valid,
     start_time_valid, weekday_selector_valid,
 };
 use crate::template::{MessageTemplate, TemplateError};
@@ -122,6 +122,20 @@ impl Schema {
                 continue;
             };
             for entry in document.section_entries(section) {
+                if parsed.kind == ScopeKind::EventNode
+                    && matches!(entry.key.as_str(), "message" | "template")
+                    && !entry.value.trim().is_empty()
+                    && event_composed(document, section)
+                {
+                    warnings.push(ConfigWarning::new(
+                        entry.line,
+                        section,
+                        &entry.key,
+                        &entry.value,
+                        "legacy event text conflicts with composed content",
+                        "composed content selected",
+                    ));
+                }
                 if !key_known(known, &entry.key) {
                     warnings.push(ConfigWarning::new(
                         entry.line,
@@ -207,6 +221,20 @@ impl Schema {
 }
 
 fn key_known(kind: KnownScope, key: &str) -> bool {
+    if matches!(
+        kind,
+        KnownScope::Identifier | KnownScope::Message | KnownScope::Tail | KnownScope::Event
+    ) && matches!(
+        key,
+        "dtmf_id"
+            | "repeat_during_playback"
+            | "playback_destination"
+            | "polite_maximum_wait_ms"
+            | "polite_expiry"
+            | "polite_expiry_busy"
+    ) {
+        return true;
+    }
     match kind {
         KnownScope::Site { kind, named } => super::site::key_known(kind, named, key),
         KnownScope::Radio => {
@@ -276,6 +304,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_pad_test"
                 | "link_command_message"
                 | "link_command_site_status"
+                | "link_command_cancel_message"
                 | "parrot_enabled"
                 | "dtmf_admin_unlock_hash"
                 | "dtmf_admin_lock_hash"
@@ -331,7 +360,6 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                         | "first_key_only"
                         | "regardless_of_activity"
                         | "polite"
-                        | "polite_maximum_wait_ms"
                         | "sound_file"
                         | "speech_text"
                         | "speech_model"
@@ -379,7 +407,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         KnownScope::Time => key == "format",
         KnownScope::Template => key == "text",
         KnownScope::Message => {
-            matches!(key, "dtmf_id" | "tone_sequence" | "level_db")
+            matches!(key, "tone_sequence" | "level_db")
                 || super::messages::content_key(key)
                 || key_known(KnownScope::Announcement, key) && key != "interval_ms"
         }
@@ -389,7 +417,10 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 || super::messages::content_key(key)
                 || key_known(KnownScope::Announcement, key)
         }
-        KnownScope::Event => matches!(key, "at" | "template" | "message" | "macro"),
+        KnownScope::Event => {
+            matches!(key, "at" | "template" | "message" | "macro" | "days")
+                || key_known(KnownScope::Message, key)
+        }
         KnownScope::Permanent => matches!(key, "remote_node" | "group_name"),
         KnownScope::Schedule => matches!(
             key,
@@ -424,6 +455,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             | ScopeKind::TailDefault
             | ScopeKind::TailNode
             | ScopeKind::TailSet
+            | ScopeKind::EventNode
     ) {
         match key {
             "message_id" => return value.is_empty() || super::messages::identifier_valid(value),
@@ -536,7 +568,11 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "transmit_dcs_turnoff_enabled"
         | "first_key_only"
         | "regardless_of_activity"
+        | "repeat_during_playback"
         | "polite" => parse::boolean(value).is_some(),
+        "playback_destination" => matches!(value, "local" | "local_and_links"),
+        "polite_expiry" => matches!(value, "skip" | "morse"),
+        "polite_expiry_busy" => matches!(value, "skip" | "wait"),
         "transmit_hang_ms"
         | "transmit_timeout_ms"
         | "timeout_lockout_ms"
@@ -566,7 +602,15 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "dtmf_regeneration_level_dbfs" => parse::signed(value, -60, 0).is_some(),
         "dtmf_admin_timeout_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
         "status_snapshot_interval_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
-        "polite_maximum_wait_ms" => parse::unsigned(value, 1, u64::MAX).is_some(),
+        "polite_maximum_wait_ms" => parse::unsigned(
+            value,
+            u64::from(matches!(
+                kind,
+                ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet
+            )),
+            u64::MAX,
+        )
+        .is_some(),
         "interval_ms" => parse::unsigned(
             value,
             if matches!(
@@ -597,7 +641,7 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "input" => matches!(value, "receiver" | "link"),
         "remote_node" | "target_node" => node_value_valid(value),
         "action" => ScheduledAction::from_str(value).is_ok(),
-        "at" => ScheduledEvent::from_str(value).is_ok(),
+        "at" => EventTrigger::from_str(value).is_ok(),
         "start_time" => start_time_valid(value),
         "end_time" => end_time_valid(value),
         "days" => weekday_selector_valid(value),
@@ -803,6 +847,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_pad_test" => "82",
         "link_command_message" => "77",
         "link_command_site_status" => "76",
+        "link_command_cancel_message" => "78",
         _ => return None,
     })
 }
@@ -994,6 +1039,18 @@ fn lookup_valid<'a>(
     })
 }
 
+/// Whether an event explicitly selects the shared composition/media path.
+pub(super) fn event_composed(document: &ConfigDocument, section: &str) -> bool {
+    document.entries().iter().any(|entry| {
+        entry.section == section
+            && (super::messages::content_key(&entry.key)
+                || matches!(
+                    entry.key.as_str(),
+                    "sound_file" | "speech_text" | "morse_text" | "tone_sequence"
+                ))
+    })
+}
+
 fn validate_events(document: &ConfigDocument) -> Result<(), ConfigError> {
     for section in unique_sections(document) {
         let parsed = scope::parse_scope(section).expect("section grammar checked");
@@ -1004,28 +1061,33 @@ fn validate_events(document: &ConfigDocument) -> Result<(), ConfigError> {
         if raw_at.is_empty() {
             return Err(ConfigError::structure(section, "event at is required"));
         }
-        if ScheduledEvent::from_str(raw_at).is_err() {
+        let days = document
+            .lookup("days", &[section])
+            .filter(|value| weekday_selector_valid(value));
+        if EventTrigger::parse(raw_at, days).is_err() {
             return Err(ConfigError::structure(section, "invalid event time"));
         }
         let template = document.lookup("template", &[section]).unwrap_or_default();
         let message = document.lookup("message", &[section]).unwrap_or_default();
         let macro_name = document.lookup("macro", &[section]).unwrap_or_default();
-        if !message.is_empty() && !template.is_empty() {
+        let composed = event_composed(document, section);
+        if !composed && !message.is_empty() && !template.is_empty() {
             return Err(ConfigError::structure(
                 section,
                 "event message and template are mutually exclusive",
             ));
         }
-        if message.is_empty() && template.is_empty() && macro_name.is_empty() {
+        if !composed && message.is_empty() && template.is_empty() && macro_name.is_empty() {
             return Err(ConfigError::structure(
                 section,
                 "event message, template, or macro is required",
             ));
         }
-        if !message.is_empty() {
+        if !composed && !message.is_empty() {
             validate_template(section, message)?;
         }
-        if !template.is_empty()
+        if !composed
+            && !template.is_empty()
             && !named_visible(document, "template", parsed.node.unwrap(), template)
         {
             return Err(ConfigError::structure(

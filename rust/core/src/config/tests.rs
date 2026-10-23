@@ -8,6 +8,167 @@ use super::{
 };
 use std::collections::BTreeMap;
 
+#[test]
+fn cancel_message_prefix_inherits_remaps_and_rejects_conflicts() {
+    let document = ConfigDocument::parse("[general]\nlink_command_cancel_message=93\n[1000]\n[2000]\nlink_command_cancel_message=94\n").unwrap();
+    assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    for (node, prefix) in [("1000", "93"), ("2000", "94")] {
+        let settings = ResolvedNodeSettings::resolve(&document, &NodeId::new(node).unwrap())
+            .unwrap()
+            .value;
+        assert_eq!(
+            settings.link_commands["link_command_cancel_message"],
+            prefix
+        );
+    }
+    let conflict = ConfigDocument::parse("[1000]\nlink_command_cancel_message=77\n").unwrap();
+    assert!(ResolvedNodeSettings::resolve(&conflict, &NodeId::new("1000").unwrap()).is_err());
+}
+
+#[test]
+fn event_composition_conflicts_warn_and_choose_the_shared_composition() {
+    for (legacy, composed, content, conflict) in [
+        ("message=Legacy", "content=Current", "Current", true),
+        ("template=clock", "content=Current", "Current", true),
+        ("message=", "content=Current", "Current", false),
+        ("template=", "content=Current", "Current", false),
+        ("message=Legacy", "morse_text=Current", "{media}", true),
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[event 1000 report]\nat=daily 12:00\ndays=Monday-Friday\n{legacy}\n{composed}\n"
+        ))
+        .unwrap();
+        let result = Schema::validate(&document).unwrap();
+        assert_eq!(
+            result.warnings.iter().any(|warning| {
+                warning.section == "event 1000 report"
+                    && warning.message == "legacy event text conflicts with composed content"
+            }),
+            conflict,
+            "{legacy}"
+        );
+        let event =
+            ResolvedEventSettings::resolve(&document, &NodeId::new("1000").unwrap(), "report")
+                .unwrap()
+                .value;
+        assert_eq!(event.days.as_deref(), Some("Monday-Friday"));
+        assert_eq!(event.composed.unwrap().content, content);
+    }
+}
+
+#[test]
+fn message_playback_controls_are_accepted_on_each_selectable_source() {
+    for (section, content) in [
+        ("message report", "content=Ready"),
+        ("identifier 1000 report", "morse_text=ID"),
+        ("tail 1000 report", "morse_text=TAIL"),
+        ("event 1000 report", "at=daily 12:00\nmessage=Ready"),
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[{section}]\n{content}\ndtmf_id=7\n\
+             repeat_during_playback=no\nplayback_destination=local_and_links\n"
+        ))
+        .unwrap();
+        let result = Schema::validate(&document).unwrap();
+        assert!(
+            result.warnings.is_empty(),
+            "{section}: {:?}",
+            result.warnings
+        );
+        let node = NodeId::new("1000").unwrap();
+        let (selector, playback) = match section.split_whitespace().next().unwrap() {
+            "message" => {
+                let value = super::ResolvedMessageSettings::resolve(&document, &node, "report")
+                    .unwrap()
+                    .value;
+                (value.dtmf_id, value.playback)
+            }
+            "identifier" => {
+                let value = ResolvedIdentifierSettings::resolve(&document, &node, Some("report"))
+                    .unwrap()
+                    .value;
+                (value.dtmf_id, value.playback)
+            }
+            "tail" => {
+                let value = super::ResolvedTailSettings::resolve(&document, &node, "report")
+                    .unwrap()
+                    .value
+                    .message;
+                (value.dtmf_id, value.playback)
+            }
+            _ => {
+                let value = ResolvedEventSettings::resolve(&document, &node, "report")
+                    .unwrap()
+                    .value;
+                (value.dtmf_id, value.playback)
+            }
+        };
+        assert_eq!(selector.as_deref(), Some("7"));
+        assert!(!playback.repeat_during_playback);
+        assert_eq!(
+            playback.destination,
+            crate::controller::PlaybackDestination::LocalAndLinks
+        );
+    }
+    let document = ConfigDocument::parse(
+        "[1000]\n[event 1000 hourly]\nat=daily 12:00\nmessage=Ready\n\
+         polite_maximum_wait_ms=0\npolite_expiry=morse\npolite_expiry_busy=wait\n",
+    )
+    .unwrap();
+    assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    let value = ResolvedEventSettings::resolve(&document, &NodeId::new("1000").unwrap(), "hourly")
+        .unwrap()
+        .value;
+    assert_eq!(value.delivery.maximum_wait_ms, 0);
+    assert_eq!(
+        value.delivery.expiry,
+        crate::controller::PoliteExpiry::Morse
+    );
+    assert_eq!(value.delivery.busy, crate::controller::PoliteBusy::Wait);
+}
+
+#[test]
+fn message_playback_options_inherit_and_invalid_overrides_fall_back() {
+    for (override_fields, selector, repeat, warning) in [
+        ("", Some("7"), false, false),
+        ("dtmf_id=\nrepeat_during_playback=yes\n", None, true, false),
+        (
+            "dtmf_id=0\nrepeat_during_playback=bad\nplayback_destination=bad\npolite_maximum_wait_ms=bad\npolite_expiry=bad\npolite_expiry_busy=bad\n",
+            Some("7"),
+            false,
+            true,
+        ),
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[message report]\ncontent=Ready\ndtmf_id=7\n\
+             repeat_during_playback=no\nplayback_destination=local_and_links\n\
+             polite_maximum_wait_ms=1500\npolite_expiry=morse\npolite_expiry_busy=wait\n\
+             [message 1000 report]\n{override_fields}"
+        ))
+        .unwrap();
+        let resolved = super::ResolvedMessageSettings::resolve(
+            &document,
+            &NodeId::new("1000").unwrap(),
+            "report",
+        )
+        .unwrap();
+        assert_eq!(!resolved.warnings.is_empty(), warning);
+        let value = resolved.value;
+        assert_eq!(value.dtmf_id.as_deref(), selector);
+        assert_eq!(value.playback.repeat_during_playback, repeat);
+        assert_eq!(
+            value.playback.destination,
+            crate::controller::PlaybackDestination::LocalAndLinks
+        );
+        assert_eq!(value.delivery.maximum_wait_ms, 1500);
+        assert_eq!(
+            value.delivery.expiry,
+            crate::controller::PoliteExpiry::Morse
+        );
+        assert_eq!(value.delivery.busy, crate::controller::PoliteBusy::Wait);
+    }
+}
+
 fn validate_command_map(
     commands: &BTreeMap<String, String>,
 ) -> Result<(), crate::command::CommandMapError> {
@@ -1237,7 +1398,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
     }
     let overridden = ResolvedNodeSettings::resolve(
         &ConfigDocument::parse(&format!(
-            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=78\n"
+            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=79\n"
         ))
         .unwrap(),
         &node,
@@ -1251,7 +1412,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
             .unwrap()
             .mappings()
             .iter()
-            .any(|mapping| mapping.digits == "78")
+            .any(|mapping| mapping.digits == "79")
     );
 }
 

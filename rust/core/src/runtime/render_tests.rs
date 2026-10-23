@@ -96,3 +96,19 @@ fn scheduled_day_of_week_substitution_uses_the_node_catalog() {
         Ok("Vendredi".into())
     );
 }
+
+#[test]
+fn speech_pronunciation_preserves_preformatted_identities() {
+    for (source, expected) in [
+        ("node,2,0,0,0", "node,2,0,0,0"),
+        ("AB1CD", "A,B,1,C,D"),
+        ("A,B,1,C,D.", "A,B,1,C,D."),
+        ("Temperature 75 degrees", "Temperature 75 degrees"),
+        (
+            "AB1CD linked node,2,0,0,0.",
+            "A,B,1,C,D linked node,2,0,0,0.",
+        ),
+    ] {
+        assert_eq!(scheduled_speech(source, "1000", "AB1CD", ""), expected);
+    }
+}

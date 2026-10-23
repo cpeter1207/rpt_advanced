@@ -1,11 +1,127 @@
 use super::{
-    CivilTime, ScheduledAction, ScheduledEvent, ScheduledWindow, Weekday, date_selector_valid,
-    end_time_valid, start_time_valid, weekday_selector_valid,
+    CivilTime, EventTrigger, ScheduledAction, ScheduledEvent, ScheduledWindow, Weekday,
+    date_selector_valid, end_time_valid, start_time_valid, weekday_selector_valid,
 };
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static DESTROYS: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn event_trigger_selects_existing_and_stepped_clocks_with_optional_weekdays() {
+    for (at, days, date, weekday, hour, minute, due) in [
+        ("daily 12:15", None, 20, Weekday::Tuesday, 12, 15, true),
+        (
+            "weekly Tuesday 12:15",
+            None,
+            20,
+            Weekday::Tuesday,
+            12,
+            15,
+            true,
+        ),
+        (
+            "weekly Monday 12:15",
+            None,
+            20,
+            Weekday::Tuesday,
+            12,
+            15,
+            false,
+        ),
+        (
+            "once 2026-10-20 12:15",
+            None,
+            20,
+            Weekday::Tuesday,
+            12,
+            15,
+            true,
+        ),
+        (
+            "once 2026-10-19 12:15",
+            None,
+            20,
+            Weekday::Tuesday,
+            12,
+            15,
+            false,
+        ),
+        (
+            "every 1 minute",
+            Some("Monday-Friday"),
+            20,
+            Weekday::Tuesday,
+            12,
+            7,
+            true,
+        ),
+        (
+            "every 1 minute",
+            Some("Monday-Friday"),
+            24,
+            Weekday::Saturday,
+            12,
+            7,
+            false,
+        ),
+        (
+            "daily 12:15",
+            Some("Monday,Wednesday"),
+            20,
+            Weekday::Tuesday,
+            12,
+            15,
+            false,
+        ),
+        (
+            "daily 12:15",
+            Some("Monday,Wednesday"),
+            21,
+            Weekday::Wednesday,
+            12,
+            15,
+            true,
+        ),
+        ("every 15 minute", None, 20, Weekday::Tuesday, 12, 15, true),
+        ("every 1 hours", None, 20, Weekday::Tuesday, 12, 0, true),
+        ("daily 12:15", Some(""), 20, Weekday::Tuesday, 12, 15, true),
+        ("every 24 hour", None, 20, Weekday::Tuesday, 0, 0, true),
+        ("every 7 minutes", None, 20, Weekday::Tuesday, 12, 56, true),
+        ("every 7 minutes", None, 20, Weekday::Tuesday, 13, 0, true),
+    ] {
+        let trigger = EventTrigger::parse(at, days).unwrap();
+        let local = CivilTime::new(2026, 10, date, weekday, hour, minute).unwrap();
+        assert_eq!(trigger.occurrence(&local).is_some(), due, "{at}, {days:?}");
+        assert_eq!(trigger, trigger.clone());
+    }
+}
+
+#[test]
+fn event_trigger_rejects_unsupported_steps_and_day_selectors() {
+    for at in [
+        "",
+        "every",
+        "every 0 minutes",
+        "every 61 minutes",
+        "every 0 hours",
+        "every 25 hours",
+        "every -1 minute",
+        "every 1.5 hours",
+        "every 256 minutes",
+        "every 1 day",
+        "every 1 minutes extra",
+        "daily 24:00",
+    ] {
+        assert!(EventTrigger::parse(at, None).is_err(), "{at}");
+    }
+    for days in ["Funday", "Monday\0Tuesday"] {
+        assert!(
+            EventTrigger::parse("daily 12:00", Some(days)).is_err(),
+            "{days}"
+        );
+    }
+}
 
 unsafe extern "C" fn destroy_fault_handle(_: *mut std::ffi::c_void) {
     DESTROYS.fetch_add(1, Ordering::SeqCst);

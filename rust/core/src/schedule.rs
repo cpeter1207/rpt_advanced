@@ -423,6 +423,70 @@ impl FromStr for ScheduledEvent {
     }
 }
 
+/// One configured event compiled into released civil triggers and optional weekdays.
+/// All matching primitives share the configured event's reservation and reload identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventTrigger {
+    events: Vec<ScheduledEvent>,
+    days: Option<ScheduledWindow>,
+}
+
+impl EventTrigger {
+    /// Parse existing triggers or clock-aligned minute/hour steps, filtered by weekdays.
+    /// Steps restart at each hour or day; no elapsed-time or catch-up timer is created.
+    pub fn parse(at: &str, days: Option<&str>) -> Result<Self, ScheduleError> {
+        let fields: Vec<_> = at.split_whitespace().collect();
+        let events = if let ["every", raw_step, unit] = fields.as_slice() {
+            let (limit, minutes) = match *unit {
+                "minute" | "minutes" => (60, true),
+                "hour" | "hours" => (24, false),
+                _ => return Err(ScheduleError::Invalid),
+            };
+            let step: u8 = raw_step.parse().map_err(|_| ScheduleError::Invalid)?;
+            if !(1..=limit).contains(&step) {
+                return Err(ScheduleError::Invalid);
+            }
+            if minutes {
+                (0..24)
+                    .flat_map(|hour| {
+                        (0..60)
+                            .step_by(usize::from(step))
+                            .map(move |minute| ScheduledEvent::Daily { hour, minute })
+                    })
+                    .collect()
+            } else {
+                (0..24)
+                    .step_by(usize::from(step))
+                    .map(|hour| ScheduledEvent::Daily { hour, minute: 0 })
+                    .collect()
+            }
+        } else {
+            vec![at.parse()?]
+        };
+        let days = days
+            .map(|days| ScheduledWindow::parse(Some(days), None, "00:00", "24:00"))
+            .transpose()?;
+        Ok(Self { events, days })
+    }
+
+    /// Return the provider's stable civil-minute identity when any primitive is due.
+    pub fn occurrence(&self, local: &CivilTime) -> Option<u64> {
+        if self.days.as_ref().is_some_and(|days| !days.matches(local)) {
+            return None;
+        }
+        self.events.iter().find_map(|event| event.occurrence(local))
+    }
+}
+
+impl FromStr for EventTrigger {
+    type Err = ScheduleError;
+
+    /// Parse one event without an additional weekday filter.
+    fn from_str(at: &str) -> Result<Self, Self::Err> {
+        Self::parse(at, None)
+    }
+}
+
 /// A bounded same-date local civil-time window owned by the schedule provider.
 pub struct ScheduledWindow {
     api: &'static ScheduleDescriptor,

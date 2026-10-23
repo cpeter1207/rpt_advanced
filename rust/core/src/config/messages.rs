@@ -1,6 +1,9 @@
 //! Read-only message definitions resolved on control, before composition admission.
 
 use super::{ConfigDocument, ConfigError, NodeId, Resolution, Schema, parse, settings};
+use crate::controller::{
+    PlaybackDestination, PlaybackPolicy, PoliteBusy, PoliteDelivery, PoliteExpiry,
+};
 use crate::media::{MediaSource, MorseSource, SpeechSource, ToneSource};
 use std::{collections::BTreeMap, str::FromStr};
 
@@ -84,6 +87,10 @@ pub struct ResolvedMessageSettings {
     pub morse_defaults: super::ResolvedMorseSettings,
     /// Optional canonical positive decimal command selector.
     pub dtmf_id: Option<String>,
+    /// Repeat and destination settings shared by all composed-message callers.
+    pub playback: PlaybackPolicy,
+    /// Polite start deadline used by scheduled or manually selected playback.
+    pub delivery: PoliteDelivery,
 }
 
 pub(super) fn identifier_valid(value: &str) -> bool {
@@ -124,11 +131,7 @@ impl ResolvedMessageSettings {
                 "unknown message definition",
             ));
         }
-        let mut value = Self::from_scopes(document, node, &scopes, "{message}")?;
-        value.dtmf_id = settings::lookup_valid_scopes(document, "dtmf_id", &scopes, |value| {
-            selector_valid(value).then(|| value.to_owned())
-        })
-        .filter(|value| !value.is_empty());
+        let value = Self::from_scopes(document, node, &scopes, "{message}")?;
         Ok(Resolution { value, warnings })
     }
 
@@ -170,7 +173,9 @@ impl ResolvedMessageSettings {
         Ok(Self {
             content,
             message_id,
-            dtmf_id: None,
+            dtmf_id: message_selector(document, scopes),
+            playback: playback_policy(document, scopes),
+            delivery: delivery_policy(document, scopes, 0),
             bindings,
             media: MediaSource {
                 file: optional("sound_file", |_| true).map(Into::into),
@@ -195,6 +200,74 @@ impl ResolvedMessageSettings {
             speech_defaults: speech,
             morse_defaults: morse,
         })
+    }
+}
+
+/// Resolve a shared positive decimal selector, with explicit empty values clearing inheritance.
+pub(crate) fn message_selector(document: &ConfigDocument, scopes: &[String]) -> Option<String> {
+    settings::lookup_valid_scopes(document, "dtmf_id", scopes, |value| {
+        selector_valid(value).then(|| value.to_owned())
+    })
+    .filter(|value| !value.is_empty())
+}
+
+/// Resolve audience and repeat fields with the same invalid-value fallback as other settings.
+pub(crate) fn playback_policy(document: &ConfigDocument, scopes: &[String]) -> PlaybackPolicy {
+    PlaybackPolicy {
+        repeat_during_playback: settings::lookup_valid_scopes(
+            document,
+            "repeat_during_playback",
+            scopes,
+            parse::boolean,
+        )
+        .unwrap_or(true),
+        destination: settings::lookup_valid_scopes(
+            document,
+            "playback_destination",
+            scopes,
+            |value| match value {
+                "local" => Some(PlaybackDestination::Local),
+                "local_and_links" => Some(PlaybackDestination::LocalAndLinks),
+                _ => None,
+            },
+        )
+        .unwrap_or_default(),
+    }
+}
+
+/// Resolve start-deadline options, retaining the invoking family's documented minimum wait.
+pub(crate) fn delivery_policy(
+    document: &ConfigDocument,
+    scopes: &[String],
+    minimum_wait_ms: u64,
+) -> PoliteDelivery {
+    PoliteDelivery {
+        maximum_wait_ms: settings::lookup_valid_scopes(
+            document,
+            "polite_maximum_wait_ms",
+            scopes,
+            |value| parse::unsigned(value, minimum_wait_ms, u64::MAX),
+        )
+        .unwrap_or(60_000),
+        expiry: settings::lookup_valid_scopes(
+            document,
+            "polite_expiry",
+            scopes,
+            |value| match value {
+                "skip" => Some(PoliteExpiry::Skip),
+                "morse" => Some(PoliteExpiry::Morse),
+                _ => None,
+            },
+        )
+        .unwrap_or_default(),
+        busy: settings::lookup_valid_scopes(document, "polite_expiry_busy", scopes, |value| {
+            match value {
+                "skip" => Some(PoliteBusy::Skip),
+                "wait" => Some(PoliteBusy::Wait),
+                _ => None,
+            }
+        })
+        .unwrap_or_default(),
     }
 }
 

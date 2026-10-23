@@ -37,6 +37,426 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn current_message_cancel_stops_every_preparation_phase_and_restores_repeat() {
+    struct Stream {
+        phase: Arc<std::sync::atomic::AtomicU8>,
+        cancelled: Arc<AtomicBool>,
+    }
+    impl crate::audio::PcmStreamReader for Stream {
+        fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+            if self.phase.load(Ordering::Acquire) == 0 {
+                return crate::audio::PcmRead::Pending;
+            }
+            output.fill(0.75);
+            crate::audio::PcmRead::Samples(output.len())
+        }
+        fn select_morse_fallback(&mut self) -> crate::audio::MorseSwitch {
+            if self.phase.load(Ordering::Acquire) == 3 {
+                crate::audio::MorseSwitch::Pending
+            } else {
+                crate::audio::MorseSwitch::Selected
+            }
+        }
+        fn cancel(&mut self) {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+    for stage in 0..5 {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                telemetry_duck_db: 0,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        let phase = Arc::new(std::sync::atomic::AtomicU8::new(u8::from(stage != 0)));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stream = PreparedMedia::new_stream(Box::new(Stream {
+            phase: phase.clone(),
+            cancelled: cancelled.clone(),
+        }))
+        .unwrap();
+        assert!(
+            control.queue_prepared_status(stream.with_playback_policy(PlaybackPolicy {
+                repeat_during_playback: false,
+                ..Default::default()
+            }))
+        );
+        node.process_audio(false, false, &[], &mut [0.0]);
+        if stage == 2 {
+            phase.store(0, Ordering::Release);
+            node.process_audio(false, false, &[], &mut [0.0]);
+        } else if stage >= 3 {
+            phase.store(stage, Ordering::Release);
+            node.process_audio(true, false, &[], &mut [0.0]);
+        }
+        assert!(control.queue_prepared_status(media(0.5, 4)));
+        if stage == 0 {
+            // RF must key before its decoded cancel command reaches control.
+            node.process_audio(true, false, &[], &mut [0.2]);
+        }
+        control.cancel_message();
+        let mut output = [0.2; 8];
+        AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+        node.process_audio(true, false, &[], &mut output);
+        let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+        assert_eq!(allocations, Some(0));
+        assert_eq!(
+            output, [0.2; 8],
+            "cancel must immediately restore repeat at stage {stage}"
+        );
+        assert!(cancelled.load(Ordering::Acquire));
+        assert_eq!(control.reclaim().count(), 1);
+        phase.store(1, Ordering::Release); // Late producer readiness must not revive old PCM.
+        let mut after = [0.0; 12_010];
+        node.process_audio(false, false, &[], &mut after);
+        assert_eq!(after.iter().filter(|sample| **sample == 0.5).count(), 4);
+        assert!(!after.contains(&0.75));
+    }
+}
+
+#[test]
+fn current_message_cancel_leaves_never_admitted_messages_pending() {
+    for polled in [false, true] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        control.cancel_message();
+        node.process_audio(true, false, &[], &mut [0.0]);
+        assert!(control.queue_prepared_status(media(0.5, 4)));
+        if polled {
+            node.process_audio(true, false, &[], &mut [0.0]);
+        }
+        control.cancel_message();
+        node.process_audio(true, false, &[], &mut [0.0]);
+        assert_eq!(control.reclaim().count(), 0);
+        let mut output = [0.0; 12_010];
+        node.process_audio(false, false, &[], &mut output);
+        assert_eq!(output.iter().filter(|sample| **sample == 0.5).count(), 4);
+        assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
+#[test]
+fn configured_message_suppresses_repeat_but_still_switches_to_morse_on_receive() {
+    for (local, linked, input, remote) in [
+        (true, false, 0.2, 0.0),
+        (false, true, 0.0, 0.3),
+        (true, true, 0.2, 0.3),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                telemetry_duck_db: 0,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        assert!(
+            control.queue_prepared_status(media(0.75, 48).with_playback_policy(PlaybackPolicy {
+                repeat_during_playback: false,
+                ..Default::default()
+            }))
+        );
+        let mut first = [0.0];
+        node.process_audio(false, false, &[], &mut first);
+        assert_eq!(first, [0.75]);
+        let mut output = [input; 96];
+        node.process_audio(local, linked, &[remote; 96], &mut output);
+        assert_eq!(output[0], 0.0, "repeat must stop at the Morse transition");
+        assert!(output.iter().any(|sample| *sample != 0.0));
+        assert!(output.iter().all(|sample| sample.abs() <= 0.502));
+    }
+}
+
+#[test]
+fn configured_message_survives_traffic_lockout_without_leaking_timed_out_receive() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: 0,
+            transmit_timeout_ms: 1,
+            timeout_lockout_ms: 100,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(
+        control
+            .queue_prepared_status(media(0.75, 8).with_playback_policy(PlaybackPolicy::default()))
+    );
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let mut output = [0.25; 4800];
+    assert!(node.process_audio(true, false, &[0.25; 4800], &mut output));
+    assert!(
+        output[96..].iter().any(|sample| *sample != 0.0),
+        "Morse remains audible after traffic timeout"
+    );
+    assert!(
+        output[96..].iter().all(|sample| sample.abs() <= 0.502),
+        "timed-out receiver must not ride message PTT"
+    );
+}
+
+#[test]
+fn replaced_occurrence_cannot_publish_a_first_sample_when_control_wins_during_render() {
+    struct CancelOnRender(Arc<MessageOccurrence>);
+    impl crate::audio::PcmStreamReader for CancelOnRender {
+        fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+            self.0.cancel_pending();
+            output[0] = 0.75;
+            crate::audio::PcmRead::FinalSamples(1)
+        }
+    }
+    let occurrence = Arc::new(MessageOccurrence::default());
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(
+        control.queue_prepared_status(
+            PreparedMedia::new_stream(Box::new(CancelOnRender(occurrence.clone())))
+                .unwrap()
+                .with_occurrence(Some(occurrence))
+        )
+    );
+    let mut output = [0.0; 2];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.0; 2]);
+    let retired = control.reclaim().collect::<Vec<_>>();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].0.outcome(), PlaybackOutcome::Cancelled);
+}
+
+#[test]
+fn scheduled_zero_wait_allows_only_an_immediately_eligible_first_sample() {
+    for (local, linked, activity, inhibited, busy, count) in [
+        (false, false, false, false, false, 4),
+        (true, false, true, false, false, 0),
+        (false, true, true, false, false, 0),
+        (false, false, true, false, false, 0),
+        (false, false, false, true, false, 0),
+        (false, false, false, false, true, 0),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        control.set_site_inhibit(inhibited);
+        if busy {
+            assert!(control.queue_prepared_status(media(0.5, 4)));
+        }
+        assert!(control.queue_prepared_status(media(0.75, 4).with_delivery(
+            node.now,
+            PoliteDelivery {
+                maximum_wait_ms: 0,
+                ..Default::default()
+            }
+        )));
+        let mut output = [0.0; 8];
+        node.process_audio_outputs(local, linked, activity, &[], &mut output, None);
+        assert_eq!(
+            output.iter().filter(|sample| **sample == 0.75).count(),
+            count,
+            "source activity={local}/{linked}/{activity}, inhibited={inhibited}, busy={busy}"
+        );
+        assert_eq!(control.reclaim().count(), 1 + usize::from(busy));
+    }
+}
+
+#[test]
+fn scheduled_zero_wait_does_not_extend_through_async_preparation() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    let mut preparations = MessagePreparation::new(1);
+    let prepared = preparations.register(0).unwrap().with_delivery(
+        node.now,
+        PoliteDelivery {
+            maximum_wait_ms: 0,
+            ..Default::default()
+        },
+    );
+    control.set_message_preparation(preparations);
+    assert!(control.queue_prepared_status(prepared));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let request = control
+        .take_message_request()
+        .expect("the immediate slot permits one preparation attempt");
+    assert!(
+        control
+            .complete_message(request.attempt, Ok(media(0.75, 4)))
+            .is_ok()
+    );
+    let mut output = [0.0; 4];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.0; 4], "late ready PCM cannot renew a zero wait");
+    assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
+fn scheduled_morse_expiry_selects_the_complete_fallback_even_after_receive_deferral() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: 0,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(control.queue_prepared_status(media(0.75, 4).with_delivery(
+        12_000,
+        PoliteDelivery {
+            expiry: PoliteExpiry::Morse,
+            ..Default::default()
+        }
+    )));
+    node.process_audio(true, false, &[], &mut [0.0; 48]);
+    let mut output = [0.0; 96];
+    node.process_audio(false, false, &[], &mut output);
+    assert!(output.iter().any(|sample| *sample != 0.0));
+    assert!(
+        output.iter().all(|sample| sample.abs() <= 0.502),
+        "expiry must never return to primary speech"
+    );
+}
+
+#[test]
+fn scheduled_morse_expiry_respects_skip_or_wait_behind_another_message() {
+    for busy in [PoliteBusy::Skip, PoliteBusy::Wait] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        node.process_audio(false, false, &[], &mut [0.0]);
+        assert!(control.queue_prepared_status(media(0.9, 4).with_delivery(
+            node.now,
+            PoliteDelivery {
+                expiry: PoliteExpiry::Morse,
+                busy,
+                ..Default::default()
+            }
+        )));
+        let mut output = [0.0; 100];
+        node.process_audio(false, false, &[], &mut output);
+        assert_eq!(
+            &output[..3],
+            &[0.75; 3],
+            "playing media must not be interrupted by expiry"
+        );
+        assert!(output[3..].iter().all(|sample| sample.abs() <= 0.502));
+        assert_eq!(
+            output[3..].iter().any(|sample| *sample != 0.0),
+            busy == PoliteBusy::Wait
+        );
+    }
+}
+
+#[test]
+fn scheduled_morse_expiry_without_a_complete_substitute_is_skipped() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    let message = PreparedMedia::new(Some(vec![0.75; 4]), "", MorseSettings::default()).unwrap();
+    assert!(control.queue_prepared_status(message.with_delivery(
+        node.now,
+        PoliteDelivery {
+            expiry: PoliteExpiry::Morse,
+            ..Default::default()
+        }
+    )));
+    let mut output = [0.0; 96];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.0; 96]);
+    assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
+fn scheduled_morse_expiry_cannot_wait_through_half_duplex_or_site_inhibition() {
+    for inhibit in [false, true] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: inhibit,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        control.set_site_inhibit(inhibit);
+        assert!(control.queue_prepared_status(media(0.75, 4).with_delivery(
+            node.now,
+            PoliteDelivery {
+                expiry: PoliteExpiry::Morse,
+                busy: PoliteBusy::Wait,
+                ..Default::default()
+            }
+        )));
+        node.process_audio(!inhibit, false, &[], &mut [0.0]);
+        assert_eq!(
+            control.reclaim().count(),
+            1,
+            "RF safety blocks expiry instead of deferring it"
+        );
+    }
+}
+
+#[test]
 fn composition_completion_without_preparation_returns_the_callers_media() {
     let (_, mut control) = NodeController::new(
         ControllerSettings::default(),
