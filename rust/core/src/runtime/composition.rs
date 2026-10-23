@@ -260,6 +260,14 @@ pub(super) struct SiteReport {
 }
 
 impl MessageRecipe {
+    /// Only configured compositions select their own audience; site replies retain their origin.
+    pub fn playback(&self) -> Option<crate::controller::PlaybackPolicy> {
+        match self {
+            Self::Composition(recipe) => Some(recipe.settings_for(None).playback),
+            Self::Site(_) => None,
+        }
+    }
+
     pub fn prepare(
         &self,
         catalog: &MessageCatalog,

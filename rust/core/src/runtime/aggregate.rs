@@ -264,6 +264,7 @@ struct Event {
     operation: Option<Command>,
     recipe: Option<usize>,
     delivery: crate::controller::PoliteDelivery,
+    playback: crate::controller::PlaybackPolicy,
 }
 /// Fully copied prepared event text and its private scheduler reservation.
 pub struct RuntimeDispatch {
@@ -272,6 +273,7 @@ pub struct RuntimeDispatch {
     speech: Option<String>,
     recipe: Option<usize>,
     delivery: crate::controller::PoliteDelivery,
+    playback: crate::controller::PlaybackPolicy,
 }
 impl RuntimeDispatch {
     /// Owning local node.
@@ -1010,12 +1012,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .ok_or(RuntimeError::Preparation)?;
         let recipe = event.recipe;
         let delivery = event.delivery;
+        let playback = event.playback;
         Ok(Some(RuntimeDispatch {
             token,
             morse,
             speech,
             recipe,
             delivery,
+            playback,
         }))
     }
     /// Queue a reserved event once. Stale reservations cannot synthesize or enqueue into a new node.
@@ -1072,6 +1076,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             node.control.telemetry.queue_prepared_status(
                 prepared
                     .with_delivery(deadline, dispatch.delivery)
+                    .with_playback_policy(dispatch.playback)
                     .with_occurrence(occurrence)
             )
         );
@@ -1263,12 +1268,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
         {
             return Err(RuntimeError::Rejected);
         }
-        let prepared = node
+        let mut prepared = node
             .control
             .telemetry
             .prepare_message(index)
             .map_err(|_| RuntimeError::Preparation)?
             .reply_to(reply);
+        if let Some(policy) = node.control.messages.items[index].playback() {
+            prepared = prepared.with_playback_policy(policy);
+        }
         // Only this serialized producer can consume the capacity admitted above.
         assert!(node.control.telemetry.queue_prepared_status(prepared));
         Ok(())
@@ -1784,6 +1792,7 @@ fn prepare_events(
             operation,
             recipe: recipes.events.get(label).copied(),
             delivery: event.delivery,
+            playback: event.playback,
         });
     }
     Ok(events)

@@ -2,9 +2,9 @@
 
 use super::{ControllerError, PreparedMedia, samples};
 
-/// One configured, local-only release message prepared on control.
+/// One configured release message prepared on control, with an explicit audience.
 pub struct Tail {
-    /// Ordered content and its complete Morse fallback.
+    /// Ordered content and its optional complete Morse fallback.
     pub media: PreparedMedia,
     /// Minimum time since successful completion; zero permits every traffic release.
     pub interval_ms: u64,

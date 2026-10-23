@@ -291,7 +291,8 @@ pub(super) fn controller(
             ids.push(Identifier {
                 media: messages
                     .register(index)
-                    .map_err(|_| RuntimeError::Preparation)?,
+                    .map_err(|_| RuntimeError::Preparation)?
+                    .with_playback_policy(settings.playback),
                 interval_ms: settings.interval_ms,
                 // The settings resolver bounds priority to i32::MAX.
                 priority: settings.priority as i32,
@@ -315,6 +316,7 @@ pub(super) fn controller(
     let mut tails = Vec::new();
     for label in labels(document, "tail", node.as_str()) {
         let settings = crate::config::ResolvedTailSettings::resolve(document, node, label)?.value;
+        let playback = settings.message.playback;
         if settings.message.content == "{media}" && settings.message.media == MediaSource::default()
         {
             continue;
@@ -328,7 +330,8 @@ pub(super) fn controller(
             tails.push(crate::controller::Tail {
                 media: messages
                     .register(index)
-                    .map_err(|_| RuntimeError::Preparation)?,
+                    .map_err(|_| RuntimeError::Preparation)?
+                    .with_playback_policy(playback),
                 interval_ms: settings.interval_ms,
                 delay_ms: settings.delay_ms,
             });

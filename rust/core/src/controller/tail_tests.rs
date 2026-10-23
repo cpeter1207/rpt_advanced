@@ -180,7 +180,7 @@ fn tail_delay_preserves_identifier_release_safeguard() {
 }
 
 #[test]
-fn tail_timeout_holds_playback_without_false_completion() {
+fn tail_timeout_does_not_hold_a_completed_message() {
     let mut node = fixture(0, 10000, vec![]);
     node.settings.transmit_timeout_ms = 10;
     node.settings.timeout_lockout_ms = 500;
@@ -188,11 +188,12 @@ fn tail_timeout_holds_playback_without_false_completion() {
     at(&mut node, 1, false);
     at(&mut node, 1001, false);
     let mut out = [0.0; 6000];
-    assert!(!node.process_audio(false, false, &[], &mut out));
+    assert!(node.process_audio(false, false, &[], &mut out));
     assert!(
-        node.telemetry.active == Some(Source::Tail(0)),
-        "inaudible samples cannot complete a tail"
+        node.telemetry.active.is_none(),
+        "completed message releases its playback slot even across a traffic timeout"
     );
+    assert_eq!(out.iter().filter(|sample| **sample == 0.5).count(), 4800);
 }
 
 #[test]

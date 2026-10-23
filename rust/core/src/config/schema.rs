@@ -122,6 +122,20 @@ impl Schema {
                 continue;
             };
             for entry in document.section_entries(section) {
+                if parsed.kind == ScopeKind::EventNode
+                    && matches!(entry.key.as_str(), "message" | "template")
+                    && !entry.value.trim().is_empty()
+                    && event_composed(document, section)
+                {
+                    warnings.push(ConfigWarning::new(
+                        entry.line,
+                        section,
+                        &entry.key,
+                        &entry.value,
+                        "legacy event text conflicts with composed content",
+                        "composed content selected",
+                    ));
+                }
                 if !key_known(known, &entry.key) {
                     warnings.push(ConfigWarning::new(
                         entry.line,
