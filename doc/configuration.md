@@ -92,10 +92,11 @@ clears an inherited value.
 | `iax_registration_interval_s` | 60 | Seconds between IAX registration requests; 30–600. |
 | `iax_local_port` | 4569 | Local IAX UDP port; 1–65535. |
 
-Identifiers, announcements, and courtesy tones play on local RF. A command or
-status reply goes to the station that sent the command: local RF for a local
-command, or the linked peer for a peer command. Linked peers also receive
-eligible program audio. Transmit hang time sends no extra peer audio.
+Identifiers and configured messages play on local RF unless their
+`playback_destination` also selects links. Courtesy tones stay local. A status
+reply goes to the station that sent the command: local RF for a local command,
+or the linked peer for a peer command. Linked peers also receive eligible
+program audio. Transmit hang time sends no extra peer audio.
 
 Link access and directory settings are validated and inherit from `[general]` to each node. They
 apply to incoming calls and to selecting a destination for remote-command mode; explicit denial
@@ -347,6 +348,7 @@ up to 63 DTMF digits from `0` through `9` and uppercase `A` through `D`.
 | `link_command_local_monitor` | `75` | Connect in local-monitor mode: receive locally without forwarding the peer to other links. |
 | `link_command_site_status` | `76` | Read the meter or input selected by its `dtmf_id`. |
 | `link_command_message` | `77` | Play the message selected by its `dtmf_id`. |
+| `link_command_cancel_message` | `78` | Cancel the current message and restore normal repeat audio. No local admin unlock is needed. |
 | `link_command_disconnect_permanent` | `811` | Disconnect a manually created permanent link and stop its retries. Configured links follow their schedule; use `*806` to pause them. |
 | `link_command_permanent_monitor` | `812` | Make a permanent monitor link. |
 | `link_command_permanent_transceive` | `813` | Make a permanent transceive link. |
@@ -508,12 +510,13 @@ target_node = 123456
 action = disconnect_all
 ```
 
-Zero-time scheduled events use `[event node label]`; there is no global event
-section. Each event has one required local-time `at` trigger and must define a
-direct `message`, a named `template`, a named `macro`, or a message/template
-plus a macro. `message` and `template` are mutually exclusive. A message uses
-the same strict substitution syntax as a named template. The named template or
-macro is resolved global-first, then by a same-label node override.
+Scheduled events use `[event node label]`; there is no global event section.
+Each event needs a local-time `at` trigger and message content, an action
+`macro`, or both. For message content, choose a direct `message`, a named
+`template`, or the [composed-message settings](#composed-messages). Do not
+combine these forms in one event. Direct `message` text uses the template
+substitutions above. The named template or macro uses its node-specific
+definition when one exists, otherwise its shared definition.
 Events for a disabled node are skipped while that node is disabled. Missed
 occurrences are not retained or played later when the node is re-enabled.
 
@@ -530,7 +533,25 @@ message = ${greeting}. This is ${callsign}.
 [event 524950 special]
 at = once 2026-12-31 23:55
 macro = clear_links
+
+[event 524950 hourly_time]
+at = every 1 hour
+content = {message_macro_clock}
+polite_maximum_wait_ms = 60000
+polite_expiry = skip
+
+[event 524950 weekday_weather]
+at = daily 08:00
+days = Monday-Friday
+sound_file = /var/lib/rpt-advanced/messages/weather.wav
+speech_text = The weather report is unavailable.
+polite_maximum_wait_ms = 120000
+polite_expiry = skip
 ```
+
+Define the `clock` message as shown in [composed messages](#composed-messages).
+Supply the weather file before using that event. It has no Morse substitute;
+new receive activity stops it.
 
 `at` accepts exactly these local-time forms:
 
@@ -539,15 +560,38 @@ macro = clear_links
 | `daily HH:MM` | Run once each local day at a 24-hour hour and minute. |
 | `weekly weekday HH:MM` | Run on the named full weekday (`Sunday` through `Saturday`) at that local time. Weekday spelling is case-insensitive. |
 | `once YYYY-MM-DD HH:MM` | Run once on one valid local Gregorian calendar date and time. |
+| `every N minutes` | Run at minute 0, N, 2N, and so on within each hour; N is 1–60. |
+| `every N hours` | Run at hour 0, N, 2N, and so on within each day, at minute zero; N is 1–24. |
 
-Use the host's local time. Seconds, time zones, ranges, aliases, and cron
-expressions are invalid. A repeated minute at a daylight-saving change runs
+Singular `minute` and `hour` are also accepted. Add `days` to limit an event to
+named weekdays, lists, or ranges such as `Monday,Wednesday` or `Monday-Friday`.
+Steps use the clock, not the time since startup: `every 15 minutes` selects
+`:00`, `:15`, `:30`, and `:45`. `every 60 minutes` selects each hour at `:00`.
+
+Use the host's local time. Seconds, time zones, and raw cron expressions are
+not accepted in `at`. A repeated minute at a daylight-saving change runs
 once; a skipped minute does not run. Missed events are not replayed. A `once`
 event can run again if the controller restarts during its scheduled minute.
 
+Scheduled messages wait until local and linked inputs are quiet. Only one
+message plays at a time. Set these options on each event:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `polite_maximum_wait_ms` | `60000` | Time allowed to start, measured from the scheduled time. Zero allows an immediate start only. It does not limit the length of a message already playing. |
+| `polite_expiry` | `skip` | At the start deadline, skip the message or select its complete Morse form with `morse`. Without a complete Morse form, skip it. |
+| `polite_expiry_busy` | `skip` | If Morse is selected at expiry but another message is playing, `skip` discards it; `wait` holds the Morse form until playback is free. |
+
+Safety inhibits and half-duplex restrictions still apply. A newer occurrence
+replaces an older one that has not started; missed reports do not pile up.
+Substitutions use values read for the playback attempt, not the old scheduled
+time. New receive during playback selects the complete Morse form, or stops
+the message when none is configured. The traffic time-out timer does not cut
+off scheduled messages or release tails; it still blocks timed-out traffic.
+
 When an event has both a message and a macro, it queues the message first, then
 runs the macro without waiting for playback. Reload may cancel a queued or
-playing scheduled message. An event with the same node, label, and `at` time
+playing scheduled message. An event with the same node, label, and timing
 keeps its completed state across reload; renaming it makes a new event.
 
 ## Configuration-owned permanent links and replacement windows
@@ -778,20 +822,29 @@ the initial ID also satisfies the lower-priority ID sets.
 | `speech_text` | empty | Speech text; empty disables speech. |
 | `morse_text` | empty | Morse text; empty disables the terminal fallback. |
 
-IDs also accept the message `content`, `message_id`, and `arg_*` settings below.
+IDs also accept the message `content`, `message_id`, `arg_*`, `dtmf_id`,
+`repeat_during_playback`, and `playback_destination` settings below. Each ID
+needs a complete Morse fallback. Selecting an ID by DTMF does not bypass the
+message's polite wait or radio safety rules.
 
 ## Composed messages
 
 Use `[message name]` to define a reusable message and `[message node name]`
 to override it for one node. A message can contain words, a recording, tones,
-and other messages in any order. IDs and release tails can use the same content.
+and other messages in any order. IDs, release tails, and scheduled events can
+use the same content.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `content` | `{message}` | Ordered text and references. IDs and tails default to `{media}`. |
 | `message_id` | empty | Message name from the selected Fluent language file. |
 | `arg_name` | absent | Source for the Fluent argument called `name`. |
-| `dtmf_id` | absent | Positive decimal selector for this named message; no leading zero. |
+| `dtmf_id` | absent | Positive decimal selector, with no leading zero. Named messages, IDs, tails, and events share one selector list per node; duplicates are rejected. |
+| `repeat_during_playback` | `yes` | With `no`, suppress local and linked receive audio during playback. Receivers, input buffers, and DTMF commands keep working. New receive still selects Morse or stops the message. |
+| `playback_destination` | `local` | Play on local RF only, or use `local_and_links` to also send to eligible transceive links. Monitor and inactive fallback links do not receive it. |
+| `polite_maximum_wait_ms` | `60000` | For a manual selection, maximum time allowed to start after the request. Zero allows an immediate start only; IDs require a positive value. IDs also use this setting for their configured polite-ID wait. |
+| `polite_expiry` | `skip` | For a manual selection, skip at the start deadline or select complete Morse with `morse`. |
+| `polite_expiry_busy` | `skip` | With Morse selected at expiry, skip if another message is playing, or set `wait` to hold it until playback is free. |
 
 Content accepts these references:
 
@@ -807,10 +860,13 @@ but cannot refer back to themselves in a loop. Keep each text, speech, or Morse
 part within 127 bytes. A composition may contain several such parts.
 
 Each message uses the normal `sound_file`, `speech_*`, and `morse_*` settings.
-A recording or spoken part needs a usable Morse fallback. During local or
-linked receive, playback changes to the complete Morse version. Attention
-tones may appear before, between, or after words. Separate media settings in a
-referenced message apply to that message's part.
+Within one `{media}` part, an unusable file falls back to speech, then Morse.
+Use separate ordered parts to play several sources in sequence. IDs and named
+messages need complete Morse fallbacks. Tails and scheduled events may omit
+Morse. During local or linked receive, playback changes to the complete Morse
+version; if any spoken or recorded part lacks a substitute, the whole message
+stops. Attention tones may appear before, between, or after words. Separate
+media settings in a referenced message apply to that message's part.
 
 An `arg_*` value may be `callsign`, `node`, `date`, `time`, `day_of_week`,
 `greeting`, `link_status`, `sensor:name`, or `input:name`. Do not use
@@ -837,8 +893,18 @@ content = This is the KG0BP repeater. {message_macro_clock} {message_macro_tempe
 
 Send `*771#`, then unkey, to hear message 1 with the default command map.
 Message and site selectors do not recall a linked node when `0` is entered.
-These read-only commands need no administrative unlock. A local RF request
-replies on the local transmitter. A linked request replies only to its sender.
+These read-only commands need no administrative unlock. Configured messages
+use their `playback_destination`; meter replies return only to the requester.
+Manual selection of an event plays its content, not its action macro, and
+leaves its next scheduled occurrence unchanged. A completed manual ID
+satisfies the normal ID priority rules. A completed manual tail starts its
+normal interval timer; a cancelled or failed play does neither.
+
+Send `*78` to cancel the current message, including its remaining parts or
+Morse substitute. Normal repeat audio returns promptly;
+audio already sent to the device may finish first. This command needs no local
+admin unlock. It does not cancel other waiting messages or future schedules.
+Set `link_command_cancel_message` to change the command.
 
 ## Release tails
 
@@ -860,8 +926,11 @@ release; it does not key the transmitter just because its interval elapsed.
 Tails play in configured order. A pending polite ID follows the tails unless
 its maximum wait has expired, in which case the ID plays first. New receive
 before a tail starts cancels that release opportunity. New receive during
-playback changes it to Morse. Failed or cancelled playback does not start the
-interval timer. IDs and other telemetry do not trigger another tail.
+playback changes it to complete Morse, or stops it if that form is unavailable.
+Failed or cancelled playback does not start the interval timer. IDs and other
+telemetry do not trigger another tail. Tails also accept the shared playback
+and DTMF selector settings above. Traffic time-out does not cut off their
+playback.
 
 ## Site meters, inputs, outputs, alarms, and fans
 

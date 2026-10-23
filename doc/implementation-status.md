@@ -24,6 +24,13 @@ these under [identifier settings](configuration.md#identifier-settings),
 [composed messages](configuration.md#composed-messages), and
 [release tails](configuration.md#release-tails).
 
+Messages can run once at a local date and time, daily, on selected weekdays,
+or at stepped minute/hour boundaries. Each scheduled message waits for quiet
+inputs up to its configured start deadline, then skips or selects Morse.
+Messages never overlap. Assign `dtmf_id` to a message, ID, tail, or event to
+play it with `*77<selector>#`; use `*78` to cancel the current message.
+See [scheduled messages](configuration.md#scheduled-messages-and-macros).
+
 The standalone service uses local audio devices and CM119 signaling through the
 separately packaged USBRadioPlus radio runtime. Configure `[radio]` or
 `[radio <node>]` and enable the node before starting it. The Asterisk adapter
