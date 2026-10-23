@@ -844,7 +844,9 @@ impl PeerSession {
             #[cfg(test)]
             crate::fixture::error_log(3, &message);
             #[cfg(not(test))]
-            if let Ok(message) = CString::new(message) {
+            {
+                // Preparation rejects NUL identities; causes and Error names are literals.
+                let message = CString::new(message).expect("peer failure text contains no NUL");
                 unsafe extern "C" {
                     fn syslog(priority: std::ffi::c_int, format: *const std::ffi::c_char, ...);
                 }
