@@ -7,7 +7,7 @@ use crate::{
 };
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 struct Media;
@@ -2336,6 +2336,197 @@ fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
     assert!(runtime.stop(0));
 }
 
+struct LinkNoticeMedia(Arc<AtomicBool>);
+struct LinkNoticeStation(Arc<AtomicBool>);
+struct LinkNoticeStream {
+    value: f32,
+    remaining: usize,
+}
+
+impl crate::audio::PcmStreamReader for LinkNoticeStream {
+    fn render(&mut self, output: &mut [f32]) -> crate::audio::PcmRead {
+        let count = output.len().min(self.remaining);
+        output[..count].fill(self.value);
+        self.remaining -= count;
+        if self.remaining == 0 {
+            crate::audio::PcmRead::FinalSamples(count)
+        } else {
+            crate::audio::PcmRead::Samples(count)
+        }
+    }
+}
+
+impl StationMediaSession for LinkNoticeStation {
+    fn register_program(
+        &mut self,
+        program: crate::media::MediaProgram,
+        _: bool,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
+        let disconnected = program.primary.iter().any(|source| {
+            source
+                .speech
+                .as_ref()
+                .is_some_and(|speech| speech.text.contains("disconnected"))
+        });
+        if !disconnected && self.0.load(Ordering::Acquire) {
+            return Err(MediaError::Unavailable);
+        }
+        Ok(Box::new(LinkNoticeStream {
+            value: if disconnected { 0.5 } else { 0.25 },
+            remaining: 4,
+        }))
+    }
+
+    fn start(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+}
+
+impl NativeFilePreparer for LinkNoticeMedia {
+    fn file(&self, _: &FileRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+
+impl NativeSpeechPreparer for LinkNoticeMedia {
+    fn speech(&self, _: &SpeechRequest<'_>) -> Result<PreparedAudio, MediaError> {
+        Err(MediaError::Unavailable)
+    }
+}
+
+impl NativeMediaPreparer for LinkNoticeMedia {
+    fn station(&self, _: &str, _: u64) -> Result<Box<dyn StationMediaSession>, MediaError> {
+        Ok(Box::new(LinkNoticeStation(Arc::clone(&self.0))))
+    }
+}
+
+fn link_notice_runtime(document: &str, reject_connect: Arc<AtomicBool>) -> Runtime {
+    Runtime::start(
+        ConfigDocument::parse(document).unwrap(),
+        &LinkNoticeMedia(reject_connect),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn link_reconnect_skips_queued_disconnect_for_every_listener_and_reverse_pair() {
+    let mut runtime = link_notice_runtime(
+        "[1000]\nradio_channel=first\n[2000]\nradio_channel=second\n[3000]\nradio_channel=third\n",
+        Arc::new(AtomicBool::new(false)),
+    );
+    runtime.queue_link_event("1000", "2000", false).unwrap();
+    runtime.queue_link_event("2000", "1000", true).unwrap();
+
+    for local in ["1000", "2000", "3000"] {
+        let (_, mut tx) = runtime.node(local).unwrap().register_audio().unwrap();
+        let mut audio = vec![0.0; 12_016];
+        tx.acquire()
+            .unwrap()
+            .state()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        let heard: Vec<_> = audio.into_iter().filter(|sample| *sample != 0.0).collect();
+        assert_eq!(
+            heard, [0.25; 4],
+            "listener {local} heard a stale disconnect"
+        );
+    }
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn link_reconnect_truncates_a_disconnect_that_already_started() {
+    let mut runtime = link_notice_runtime("[1000]\n", Arc::new(AtomicBool::new(false)));
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    runtime.queue_link_event("1000", "2000", false).unwrap();
+    let mut prefix = vec![0.0; 12_002];
+    tx.acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut prefix);
+    assert_eq!(prefix.iter().filter(|sample| **sample == 0.5).count(), 2);
+
+    runtime.queue_link_event("1000", "2000", true).unwrap();
+    let mut audio = [0.0; 8];
+    tx.acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    assert_eq!(audio, [0.25, 0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0]);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn link_reconnect_cancels_only_the_same_actual_link_pair() {
+    let mut runtime = link_notice_runtime("[4000]\n", Arc::new(AtomicBool::new(false)));
+    runtime.queue_link_event("1000", "2000", false).unwrap();
+    runtime.queue_link_event("3000", "2000", false).unwrap();
+    runtime.queue_link_event("2000", "1000", true).unwrap();
+    let (_, mut tx) = runtime.node("4000").unwrap().register_audio().unwrap();
+    let mut audio = vec![0.0; 12_016];
+    tx.acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    let heard: Vec<_> = audio.into_iter().filter(|sample| *sample != 0.0).collect();
+    assert_eq!(heard, [0.5, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25]);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn link_reconnect_cancels_disconnects_before_connect_preparation_fails() {
+    let reject_connect = Arc::new(AtomicBool::new(false));
+    let mut runtime = link_notice_runtime("[1000]\n", Arc::clone(&reject_connect));
+    runtime.queue_link_event("1000", "2000", false).unwrap();
+    reject_connect.store(true, Ordering::Release);
+    assert_eq!(
+        runtime.queue_link_event("1000", "2000", true),
+        Err(RuntimeError::Preparation)
+    );
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut audio = vec![0.0; 12_016];
+    tx.acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    assert!(audio.into_iter().all(|sample| sample == 0.0));
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn link_reconnect_keeps_bounded_admission_and_reclaims_cancelled_credit() {
+    let mut runtime = link_notice_runtime("[1000]\n", Arc::new(AtomicBool::new(false)));
+    for connected in [false, true, false, true] {
+        runtime.queue_link_event("1000", "2000", connected).unwrap();
+    }
+    for connected in [false, true] {
+        assert_eq!(
+            runtime.queue_link_event("1000", "2000", connected),
+            Err(RuntimeError::Rejected),
+            "cancellation does not bypass the four-item ownership limit"
+        );
+    }
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut audio = vec![0.0; 12_032];
+    tx.acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    let heard: Vec<_> = audio.into_iter().filter(|sample| *sample != 0.0).collect();
+    assert_eq!(heard, [0.25; 8], "both disconnect attempts were superseded");
+    // Public event admission reclaims completed/cancelled media on control first.
+    runtime.queue_link_event("1000", "2000", true).unwrap();
+    assert!(runtime.stop(0));
+}
+
 #[test]
 fn link_lifecycle_events_register_speech_for_every_node() {
     struct Speech(Arc<Mutex<Vec<String>>>);
@@ -2492,7 +2683,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     runtime.queue_priority_group_events().unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
-        ["Blind Hams Network. node,2,0,0,0 selected"]
+        ["Blind Hams Network. node,2,0,0,0 connected"]
     );
     group
         .selection()
@@ -2504,20 +2695,115 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     for remote in ["2000", "3000"] {
         let node = runtime.node("1000").unwrap();
         node.links().ended(remote);
+        assert_ne!(
+            node.links().priority_groups()[0].selected.as_deref(),
+            Some(remote)
+        );
         node.links().reclaimed(remote, clock().now_ms);
     }
-    assert_eq!(group.selection().callback_slot(true), 0);
-    runtime.queue_priority_group_events().unwrap();
+    // The last peer's removed audio path cannot clear the old callback-active slot.
+    assert_eq!(group.selection().active().unwrap().get(), 2);
+    for now_ms in [1000, 2000, 4000] {
+        let node = runtime.node("1000").unwrap();
+        let work = node.work().unwrap();
+        let retry = node.links().take_retry(now_ms, work).unwrap();
+        assert_eq!(node.links().finish_retry(retry, false, now_ms), Ok(false));
+        runtime.queue_priority_group_events().unwrap();
+    }
     assert_eq!(
-        media.0.lock().unwrap().last().unwrap(),
-        "Blind Hams Network is unavailable"
+        *media.0.lock().unwrap(),
+        [
+            "Blind Hams Network. node,2,0,0,0 connected",
+            "Blind Hams Network is unavailable",
+        ]
     );
+    let node = runtime.node("1000").unwrap();
+    let work = node.work().unwrap();
+    let retry = node.links().take_retry(100_000, work).unwrap();
+    let recovered = retry.remote().to_owned();
+    assert_eq!(node.links().finish_retry(retry, true, 100_000), Ok(true));
+    assert_ne!(group.selection().callback_slot(true), 0);
+    runtime.queue_priority_group_events().unwrap();
+    assert_eq!(media.0.lock().unwrap().len(), 2);
+
+    let node = runtime.node("1000").unwrap();
+    node.links().ended(&recovered);
+    node.links().reclaimed(&recovered, 100_001);
+    runtime.queue_priority_group_events().unwrap();
     runtime.queue_priority_group_events().unwrap();
     assert_eq!(
-        media.0.lock().unwrap().last().unwrap(),
-        "Blind Hams Network is unavailable"
+        *media.0.lock().unwrap(),
+        [
+            "Blind Hams Network. node,2,0,0,0 connected",
+            "Blind Hams Network is unavailable",
+            "Blind Hams Network is unavailable",
+        ]
     );
     assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_group_telemetry_uses_only_the_active_same_peer_schedule_once() {
+    use super::links::LinkEffect;
+
+    for (hour, answered, remote, expected) in [
+        (8, false, "2000", "Primary is unavailable"),
+        (10, false, "3000", "Morning Net is unavailable"),
+        (11, false, "3000", "Morning Net is unavailable"),
+        (20, false, "3000", "Evening Net is unavailable"),
+        (20, true, "3000", "Evening Net. node,3,0,0,0 connected"),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut now = clock();
+        now.civil = Some((
+            CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, 0).unwrap(),
+            0,
+        ));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(
+                "[1000]\n[permanent 1000 primary]\nremote_node=2000\ngroup_name=Primary\n\
+                 [schedule 1000 morning]\nremote_node=3000\ngroup_name=Morning Net\n\
+                 replace_permanent=primary\nstart_time=09:30\nend_time=11:00\nend_inactivity_ms=60000\n\
+                 [schedule 1000 evening]\nremote_node=3000\ngroup_name=Evening Net\n\
+                 replace_permanent=primary\nstart_time=20:00\nend_time=21:30\n",
+            )
+            .unwrap(),
+            &CapturingMedia(Arc::clone(&messages)),
+            adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            now,
+        )
+        .unwrap();
+        runtime.tick_links(now);
+        let (local, LinkEffect::Connect(attempt)) = runtime.next_link().unwrap() else {
+            panic!("active group dial")
+        };
+        assert_eq!(attempt.remote(), remote);
+        assert_eq!(
+            runtime.finish_connect(&local, attempt, answered, now),
+            Ok(answered)
+        );
+        if answered {
+            let group = runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .group_member(remote)
+                .unwrap();
+            assert_eq!(group.selection().callback_slot(true), 1);
+        }
+        runtime.queue_priority_group_events().unwrap();
+        runtime.queue_priority_group_events().unwrap();
+        assert_eq!(
+            *messages.lock().unwrap(),
+            [expected],
+            "hour={hour}, answered={answered}"
+        );
+        let node = runtime.node("1000").unwrap();
+        node.links().ended(remote);
+        node.links().reclaimed(remote, now.now_ms);
+        assert!(runtime.stop(now.now_ms));
+    }
 }
 
 #[test]

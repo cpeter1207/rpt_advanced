@@ -90,11 +90,35 @@ The split preserves existing duplex, source qualification, mix-minus, and
 per-link routing; it must not reflect a peer's own audio back to that peer or
 send locally generated CTCSS/DCS onto network links.
 Telemetry routing follows ADR 0023. Identifiers and local courtesy tones stay
-on the local transmitter. A command response goes only to its command source:
+on the local transmitter. Only one courtesy may wait for receive inactivity:
+each eligible source unkey replaces the pending choice and starts its delay,
+so overlapping local and peer activity produces only the last source's tone.
+If that source has no configured courtesy, no earlier tone is substituted.
+Rekey cancellation remains source-specific; ADR 0008's kerchunk suppression
+is unchanged. Sources falling in one callback use the existing deterministic
+edge-processing order. A command response goes only to its command source:
 local receive replies use the local transmitter, linked-peer replies use only
 that peer's egress, and CLI/REST replies stay on the requesting interface.
 Response routing is carried explicitly with the prepared telemetry; it is not
 inferred from whichever peer happens to be active when playout begins.
+
+Status and link-event messages are polite: they wait until local and all
+connected-peer receive activity ends, including non-selected group members.
+There is no maximum wait. Before the first PCM sample, new receive activity
+holds an admitted status attempt for readmission after unkey. Holding releases
+the serialized producer and playback slot so an identifier can still meet its
+existing deadline. Once audible, receive interruption selects the complete
+Morse form and latches it through completion. Temporary holding retains the
+producer recipe; terminal completion or cancellation still reclaims it.
+Identifier deadlines and courtesy cancellation are unchanged.
+
+Reconnection supersedes any queued or playing disconnect notice for that same
+unordered pair of node identities. Control cancels the old notice before
+preparing its connect notice. The callback stops obsolete playback and returns
+its ownership through the existing completed-media queue; reclamation remains
+off audio. All recipients of a link event share its cancellation state, while
+unrelated link pairs and command replies remain independent. The existing
+bounded status-admission limit is unchanged.
 
 Implemented ownership — 2026-10-16: ADR 0023's ASL-style
 DTMF regeneration is prompt local radio-control signaling, not deferred
@@ -253,9 +277,10 @@ afterward it selects complete Morse. Timeout and half-duplex deferral cannot
 consume inaudible PCM or falsely advance cooldown. Only successful playback
 advances cooldown, and generated transmitter releases never arm another tail.
 
-Receive-interruption contract — 2026-10-18: qualified local receive or any
-connected peer's receive activity selects the complete Morse form of an
-admitted message, including an announcement or source-routed command reply.
+Receive-interruption contract — amended 2026-10-22: qualified local receive or
+any connected peer's receive activity selects the complete Morse form of an
+admitted identifier, announcement, or release tail. Status and command replies
+wait before first PCM, then use this same Morse-interruption contract once audible.
 This includes peers not selected for local RF. Source-unkey admission,
 half-duplex and safety rules still apply; interruption never changes the
 destination. Courtesy-only cancellation and local DTMF regeneration are separate.

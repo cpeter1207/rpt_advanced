@@ -58,6 +58,7 @@ pub trait PcmStreamReader: Send {
 
     /// Invalidate values prepared before any PCM was played, if this reader resolves them.
     /// Returns true when playback must start a fresh attempt after the deferral.
+    /// A deferred reader is not read again until that fresh start.
     /// Static media keeps its prepared source and needs no new value snapshot.
     fn defer_before_output(&mut self) -> bool {
         false

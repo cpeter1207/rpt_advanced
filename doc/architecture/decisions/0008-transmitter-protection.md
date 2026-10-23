@@ -18,9 +18,14 @@ even when hang time, telemetry, or another source keeps PTT asserted. It
 therefore protects against a source that never unkeys rather than ending a
 normal conversation with pauses. The watchdog immediately drops PTT on expiry.
 Recovery still requires both lockout expiry and the active source to clear. A
-kerchunk suppresses only that source's courtesy tone and every-release
-announcement, but its unkey also resets the watchdog. Local receiver and each
-link peer retain their own rising-edge timestamp.
+kerchunk has zero transmitter hang time and suppresses its courtesy tone and
+every-release announcement. When it is the last active input, its unkey clears
+the latched traffic hang and release-message opportunity. Every source unkey
+resets the watchdog. Other active traffic,
+playing telemetry, and due identifiers retain their independent transmit
+demand. A later normal source release retains its configured hang and release
+messages. Local receiver and each link peer retain their own rising-edge
+timestamp.
 
 ## Consequences
 

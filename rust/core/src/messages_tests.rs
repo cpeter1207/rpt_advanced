@@ -212,9 +212,12 @@ fn message_catalog_formats_status_rejection_groups_and_schedule_warnings() {
                 group: "Blind Hams Network",
                 peer: "506315",
             })
-            .unwrap()
-            .tts,
-        "Blind Hams Network. 506315 selected"
+            .unwrap(),
+        MessageForms {
+            text: "Blind Hams Network: NODE 506315 CONNECTED".into(),
+            tts: "Blind Hams Network. 506315 connected".into(),
+            morse: "Blind Hams Network NODE 506315 CONNECTED".into(),
+        }
     );
     assert_eq!(
         catalog

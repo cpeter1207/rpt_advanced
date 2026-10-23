@@ -112,6 +112,11 @@ or service monitor to observe transmitted audio and transmitter release.
    peer uses the generic link tone. Rekey each source before its delay expires and verify
    that only its own pending courtesy tone is cancelled; rekey during a started
    tone should duck, not interrupt, that playback.
+   Overlap local and link receive, then unkey in each order. Only the last
+   source's tone should play, after its own delay. Repeat with no tone assigned
+   to that source: no earlier tone should play instead. Make the final source
+   a kerchunk: PTT should drop without hang or a waiting tone, unless other
+   playing telemetry or a due ID still needs the transmitter.
    With three rpt_advanced nodes—origin, direct relay, and keyed downstream—
    verify the relay replies with its current key state on the ingress peer,
    forwards a canonical `K?` only to other direct peers, and relays a valid
@@ -128,6 +133,13 @@ or service monitor to observe transmitted audio and transmitter release.
    locally originated query and rejects a late reply. Treat a delayed valid
    reply as advisory because `K` has no serial. Repeat the downstream discovery
    check with an app_rpt-compatible relay when available.
+   Request status during an active link transmission: it should wait for all
+   receive activity to end. Start a new transmission during a spoken reply:
+   it should switch to Morse. Disconnect and reconnect before the disconnect
+   message starts, then while it is playing: no stale disconnect should remain.
+   For a scheduled group, keep every member unreachable through several retries:
+   hear one unavailable message for the active schedule, not one per retry.
+   Restore one member, then lose it again: hear one notice for the new outage.
 8. Repeat IAX-peer transport checks with an explicitly supported converted rate
    and codec. The local RadioPlusAdvanced exchange remains fixed at 48 kHz
    signed-linear PCM. Compare receive and transmitted audio for continuity. Run

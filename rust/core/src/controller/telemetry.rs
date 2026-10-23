@@ -43,6 +43,7 @@ pub struct PreparedMedia(
     pub(super) bool,
     pub(super) MediaKind,
     pub(super) Option<crate::link::PeerReply>,
+    pub(super) Option<Arc<AtomicBool>>,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,12 +61,19 @@ impl PreparedMedia {
             true,
             MediaKind::Status,
             None,
+            None,
         ))
     }
 
     /// Retain the originating endpoint through playback and control-side reclamation.
     pub fn reply_to(mut self, peer: Option<crate::link::PeerReply>) -> Self {
         self.3 = peer;
+        self
+    }
+
+    /// Stop a superseded notice at the next sample without reclaiming it on audio.
+    pub fn cancel_when(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.4 = Some(cancelled);
         self
     }
 
@@ -79,6 +87,7 @@ impl PreparedMedia {
             Playback::new_stream(Box::new(stream)),
             true,
             MediaKind::Parrot,
+            None,
             None,
         )
     }
@@ -124,6 +133,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
             None,
         ))
     }
@@ -304,7 +314,8 @@ impl ControllerControl {
         }
     }
 
-    /// Enqueue producer-backed status media prepared by the station owner.
+    /// Enqueue polite status media; all receive activity must end before playout.
+    /// Once audible, receive interruption selects the complete Morse fallback.
     pub fn queue_prepared_status(&mut self, media: PreparedMedia) -> bool {
         if self.outstanding == 4 {
             return false;
@@ -520,20 +531,22 @@ impl TelemetryPlanner {
     pub fn status_pending(&self) -> bool {
         self.status.is_some() || !self.pending.is_empty()
     }
-    /// Move the next status into the audio owner; ended endpoints return to control untouched.
+    /// Skip ended endpoints and superseded notices, returning their ownership to control.
     pub fn poll_status(&mut self) {
         loop {
             if self.status.is_none() {
                 self.status = self.pending.pop().ok();
             }
-            if !self
-                .status
-                .as_ref()
-                .and_then(|media| media.3.as_ref())
-                .is_some_and(|peer| peer.ended())
-            {
+            let Some(media) = self.status.as_mut().filter(|media| {
+                media.3.as_ref().is_some_and(|peer| peer.ended())
+                    || media
+                        .4
+                        .as_ref()
+                        .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+            }) else {
                 break;
-            }
+            };
+            media.0.cancel();
             if self.active == Some(Source::Status) {
                 self.active = None;
             }

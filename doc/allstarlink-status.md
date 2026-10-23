@@ -81,6 +81,10 @@ Status and time replies from local DTMF play on the local RF transmitter after
 the receiver unkeys. A command sent by a linked peer replies only to that peer
 after it unkeys; it does not key the local transmitter. Replies use speech when
 available and Morse as a fallback.
+Status and link messages wait until all local and linked inputs are quiet.
+They have no maximum wait. A new transmission during a spoken message changes
+it to Morse. If a peer reconnects, its waiting or playing disconnect message
+is cancelled so only the current connection is announced.
 
 On the Asterisk path, run `rpt_advanced link status <local-node>` in the
 Asterisk CLI. `rpt link status <local-node>` is also accepted. The output shows

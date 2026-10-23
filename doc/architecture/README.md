@@ -495,6 +495,12 @@ defines the full reload, hardware-handoff, and failure policy.
   Standalone selects a non-Asterisk control backend.
 - Telemetry is serialized. Speech is preferred and falls back to Morse when
   speech cannot be prepared.
+- Status and connection messages wait without a maximum until all local and
+  linked receive activity ends. Before first PCM, new activity releases the
+  producer for readmission after unkey. Once audible, new activity selects
+  the complete Morse form; identifier deadlines remain independent.
+  Reconnection cancels any queued or playing disconnect notice for that same
+  link pair, without canceling the new connect notice or unrelated links.
 - Configured identifiers are sent only to the local transmitter. Telemetry in
   response to a command is source-scoped: a local-receiver command is sent to
   the local transmitter, a linked-peer command is sent only to that peer, and

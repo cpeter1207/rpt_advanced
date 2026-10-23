@@ -152,7 +152,7 @@ fn composition_pre_sample_deferral_refreshes_attempt_without_audio_allocation() 
 }
 
 #[test]
-fn morse_global_receive_routes() {
+fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
     for source in 0..4 {
         for (local, linked, activity) in [
             (true, false, true),
@@ -214,7 +214,9 @@ fn morse_global_receive_routes() {
                     );
                     if source == 3 {
                         assert_eq!(radio, [0.0]);
-                        assert_eq!(replies[0].target, peer.reply_target().identity());
+                        if replies[0].sample != 0.0 {
+                            assert_eq!(replies[0].target, peer.reply_target().identity());
+                        }
                         replies[0].sample
                     } else {
                         radio[0]
@@ -228,6 +230,13 @@ fn morse_global_receive_routes() {
                     0.0,
                     "source {source}, receive {local}/{linked}/{activity}, initial {before_first_sample}"
                 );
+                if source >= 2 && before_first_sample {
+                    node.process_event(false, false);
+                    node.now += 12_000;
+                    assert_eq!(render(&mut node, false, false, false), 0.75);
+                    assert_eq!(render(&mut node, local, linked, activity), 0.0);
+                    continue;
+                }
                 let second = render(&mut node, false, false, false);
                 assert!(
                     second > 0.0 && second < 0.5,
@@ -546,7 +555,7 @@ impl crate::audio::PcmStreamReader for PendingMedia {
 }
 
 #[test]
-fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
+fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
     let signal = crate::link::PeerSignals::new();
     let courtesy = CourtesySettings {
         link: Some(media(0.2, 1)),
@@ -564,9 +573,9 @@ fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
     let mut parrot = [0.0];
     let mut active = false;
     let mut replies = [PeerReplySample::default()];
-    let mut process = |node: &mut NodeController, replies: &mut [PeerReplySample; 1]| {
+    let mut process = |node: &mut NodeController, receiving, replies: &mut [PeerReplySample; 1]| {
         node.process_audio_with_parrot(
-            true,
+            receiving,
             false,
             false,
             &[],
@@ -579,11 +588,17 @@ fn pending_peer_reply_stays_silent_and_ended_active_reply_is_reclaimed() {
             },
         )
     };
-    assert!(!process(&mut node, &mut replies));
+    assert!(!process(&mut node, true, &mut replies));
+    assert_eq!(replies[0].sample, 0.0);
+    assert!(node.telemetry.active.is_none());
+    // An idle source admits its reply, but pending PCM must not address silence.
+    replies[0].target = signal.reply_identity();
+    assert!(!process(&mut node, false, &mut replies));
+    assert_eq!(replies[0].target, 0);
     assert_eq!(replies[0].sample, 0.0);
     assert!(node.telemetry.active == Some(telemetry::Source::Status));
     signal.end();
-    assert!(!process(&mut node, &mut replies));
+    assert!(!process(&mut node, false, &mut replies));
     assert!(node.telemetry.active.is_none());
     assert_eq!(control.reclaim().count(), 1);
 }
@@ -1669,7 +1684,7 @@ fn test_audio_peer(
 }
 
 #[test]
-fn courtesy_queue_bounds_identity_and_retains_other_sources() {
+fn courtesy_latest_unkey_validates_identity_and_cancels_only_its_source() {
     let mut planner = courtesy::CourtesyPlanner::new(CourtesySettings {
         receiver: Some(media(0.1, 48)),
         link: Some(media(0.2, 48)),
@@ -1686,19 +1701,14 @@ fn courtesy_queue_bounds_identity_and_retains_other_sources() {
     planner.cancel(&invalid);
     planner.cancel("direct");
     assert!(!planner.ready(1));
-    assert!(planner.ready(2));
-    assert_eq!(planner.pop(), Some(0));
+    assert!(!planner.ready(2));
     assert!(!planner.ready(3));
     assert!(planner.ready(4));
     assert_eq!(planner.pop(), Some(1));
     assert_eq!(planner.pop(), None);
     let maximum = "x".repeat(63);
-    for _ in 0..17 {
-        planner.schedule(&maximum, "selected", 5);
-    }
-    for _ in 0..16 {
-        assert_eq!(planner.pop(), Some(2));
-    }
+    planner.schedule(&maximum, "selected", 5);
+    assert_eq!(planner.pop(), Some(2));
     assert_eq!(planner.pop(), None);
     planner.schedule(&maximum, "", 6);
     planner.cancel(&maximum);
@@ -1968,6 +1978,119 @@ fn duplex_hang_and_partition_invariance() {
 }
 
 #[test]
+fn status_waits_for_every_receive_source_without_a_deadline() {
+    for (local, linked, activity) in [
+        (true, false, true),
+        (false, true, true),
+        (false, false, true),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                telemetry_duck_db: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        for _ in 0..2 {
+            node.now += samples(3_600_000);
+            let mut output = [0.0; 4];
+            node.process_audio_outputs(local, linked, activity, &[], &mut output, None);
+            assert_eq!(output, [0.0; 4], "receive={local}/{linked}/{activity}");
+            assert_eq!(control.reclaim().count(), 0);
+        }
+        node.process_event(false, false);
+        node.now += 12_000;
+        let mut output = [0.0; 4];
+        node.process_audio(false, false, &[], &mut output);
+        assert_eq!(output, [0.75; 4], "deferred status must retain its speech");
+        assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
+#[test]
+fn started_status_switches_to_morse_when_receive_begins() {
+    for (local, linked, activity) in [
+        (true, false, true),
+        (false, true, true),
+        (false, false, true),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                hang_ms: 0,
+                telemetry_duck_db: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        let mut first = [0.0];
+        node.process_audio(false, false, &[], &mut first);
+        assert_eq!(first, [0.75]);
+        let mut busy = [0.0; 96];
+        let keyed = node.process_audio_outputs(local, linked, activity, &[], &mut busy, None);
+        assert!(keyed);
+        assert!(busy.iter().any(|sample| *sample != 0.0));
+        assert!(busy.iter().all(|sample| sample.abs() <= 0.502));
+        assert_eq!(control.reclaim().count(), 0);
+        node.process_event(false, false);
+        let mut continued = [0.0; 4];
+        node.process_audio(false, false, &[], &mut continued);
+        assert!(continued.iter().all(|sample| sample.abs() < 0.75));
+        assert_eq!(control.reclaim().count(), 0, "Morse continues after unkey");
+    }
+}
+
+#[test]
+fn held_status_does_not_block_an_expired_identifier() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: 0,
+            ..ControllerSettings::default()
+        },
+        vec![Identifier {
+            media: media(0.25, 100),
+            interval_ms: 1000,
+            priority: 1,
+            first_key_only: false,
+            regardless_of_activity: true,
+            polite_maximum_wait_ms: Some(1),
+        }],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(
+        control.queue_prepared_status(PreparedMedia::new_stream(Box::new(PendingMedia)).unwrap())
+    );
+    node.process_audio(false, false, &[], &mut [0.0]);
+    node.now = samples(1002);
+    let mut output = [0.0; 96];
+    node.process_audio(false, true, &[], &mut output);
+    assert!(node.telemetry.active == Some(telemetry::Source::Identifier(0)));
+    assert!(
+        output.iter().any(|sample| *sample != 0.0),
+        "the due ID must play"
+    );
+    assert_eq!(
+        control.reclaim().count(),
+        0,
+        "the held status is still pending"
+    );
+}
+
+#[test]
 fn status_delays_and_returns_ownership_on_full_queue() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings::default(),
@@ -2036,7 +2159,55 @@ fn timeout_requires_deadline_and_unkey() {
 }
 
 #[test]
-fn courtesy_selection_cancellation_fifo_and_kerchunk() {
+fn overlapping_sources_play_only_the_last_unkey_courtesy() {
+    for (local_last, last_has_tone) in [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let courtesy = CourtesySettings {
+            receiver: (!local_last || last_has_tone).then(|| media(0.1, 4)),
+            link: None,
+            peers: if local_last || last_has_tone {
+                vec![("north".into(), media(0.3, 4))]
+            } else {
+                vec![]
+            },
+        };
+        let (mut node, _) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                courtesy_delay_ms: 1,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            courtesy,
+        )
+        .unwrap();
+        node.link_keyed("north");
+        node.process_audio(true, true, &[], &mut [0.0; 96]);
+        if local_last {
+            node.link_unkeyed("north", "", false);
+        }
+        let mut still_receiving = [0.0; 96];
+        node.process_audio(local_last, !local_last, &[], &mut still_receiving);
+        assert_eq!(still_receiving, [0.0; 96]);
+        if !local_last {
+            node.link_unkeyed("north", "", false);
+        }
+        let mut output = [0.0; 96];
+        node.process_audio(false, false, &[], &mut output);
+        let mut expected = [0.0; 96];
+        if last_has_tone {
+            expected[48..52].fill(if local_last { 0.1 } else { 0.3 });
+        }
+        assert_eq!(
+            output, expected,
+            "local_last={local_last}, tone={last_has_tone}"
+        );
+    }
+}
+
+#[test]
+fn courtesy_selection_cancellation_latest_unkey_and_kerchunk() {
     let courtesy = CourtesySettings {
         receiver: Some(media(0.1, 1)),
         link: Some(media(0.2, 1)),
@@ -2058,13 +2229,147 @@ fn courtesy_selection_cancellation_fifo_and_kerchunk() {
     node.link_unkeyed("south", "", true);
     let mut output = [0.0; 3];
     node.process_audio(false, false, &[], &mut output);
-    assert_eq!(output, [0.4, 0.3, 0.0]);
+    assert_eq!(output, [0.3, 0.0, 0.0]);
     for _ in 0..17 {
         node.link_unkeyed("south", "", false);
     }
     let mut output = [0.0; 17];
     node.process_audio(false, false, &[], &mut output);
-    assert_eq!(output.iter().filter(|v| **v == 0.2).count(), 16);
+    assert_eq!(output.iter().filter(|v| **v == 0.2).count(), 1);
+}
+
+#[test]
+fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
+    for (limit, frames, expect_hang) in [(1, 1, false), (1, 48, false), (1, 49, true), (0, 1, true)]
+    {
+        for release_message in [false, true] {
+            let (mut node, _) = NodeController::new(
+                ControllerSettings {
+                    full_duplex: true,
+                    hang_ms: 10,
+                    kerchunk_max_ms: limit,
+                    ..ControllerSettings::default()
+                },
+                vec![],
+                if release_message {
+                    vec![Announcement {
+                        media: media(0.5, 1),
+                        interval_ms: 0,
+                    }]
+                } else {
+                    vec![]
+                },
+                CourtesySettings::default(),
+            )
+            .unwrap();
+            assert!(node.process_audio(true, false, &[], &mut vec![0.0; frames]));
+            assert_eq!(
+                node.process_event(false, false),
+                expect_hang,
+                "limit={limit} frames={frames} message={release_message}"
+            );
+            if !expect_hang {
+                let mut output = [0.0; 1000];
+                assert!(!node.process_audio(false, false, &[], &mut output));
+                assert_eq!(output, [0.0; 1000]);
+            }
+        }
+    }
+}
+
+#[test]
+fn final_kerchunk_discards_an_overlapping_sources_waiting_courtesy() {
+    for local_last in [false, true] {
+        let (mut node, _) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                hang_ms: 10,
+                kerchunk_max_ms: 1,
+                courtesy_delay_ms: 1,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings {
+                receiver: Some(media(0.1, 4)),
+                link: Some(media(0.2, 4)),
+                ..CourtesySettings::default()
+            },
+        )
+        .unwrap();
+        if local_last {
+            node.link_keyed("peer");
+            node.process_audio(false, true, &[], &mut [0.0; 96]);
+            node.process_audio(true, true, &[], &mut [0.0]);
+            node.link_unkeyed("peer", "", false);
+            node.process_audio(true, false, &[], &mut [0.0]);
+        } else {
+            node.process_audio(true, false, &[], &mut [0.0; 96]);
+            node.link_keyed("peer");
+            node.process_audio(true, true, &[], &mut [0.0]);
+            node.process_audio(false, true, &[], &mut [0.0]);
+            node.link_unkeyed("peer", "", true);
+        }
+        assert!(
+            node.courtesy.pending(),
+            "earlier release has a waiting tone"
+        );
+        assert!(
+            !node.process_event(false, false),
+            "final kerchunk must release PTT: local_last={local_last}"
+        );
+        let mut output = [0.0; 960];
+        assert!(!node.process_audio(false, false, &[], &mut output));
+        assert_eq!(output, [0.0; 960]);
+    }
+}
+
+#[test]
+fn kerchunk_does_not_interrupt_other_traffic_or_its_normal_release() {
+    let (mut node, _) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            hang_ms: 10,
+            kerchunk_max_ms: 1,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![Announcement {
+            media: media(0.25, 1),
+            interval_ms: 0,
+        }],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.set_tails(vec![Tail {
+        media: media(0.5, 1),
+        interval_ms: 0,
+        delay_ms: 0,
+    }])
+    .unwrap();
+    node.process_audio(true, false, &[], &mut [0.0; 96]);
+    node.link_keyed("peer");
+    node.process_audio(true, true, &[], &mut [0.0]);
+    node.link_unkeyed("peer", "", true);
+    assert!(
+        node.process_event(true, false),
+        "local receiver still needs PTT"
+    );
+    assert!(
+        node.process_event(false, false),
+        "normal local release retains hang"
+    );
+    assert!(
+        node.tails.pending(),
+        "a prior peer kerchunk cannot suppress a normal local tail"
+    );
+    let mut output = [0.0; 1024];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(
+        output.iter().filter(|sample| **sample == 0.25).count(),
+        1,
+        "the normal local release must retain its announcement"
+    );
 }
 
 #[test]
@@ -2256,6 +2561,42 @@ fn every_release_announcements_follow_hang_once_and_ids_satisfy_lower_priority()
     // The polite ID now waits through the traffic-release hang deadline; the
     // existing announcement remains due from the last transmitted sample.
     assert_eq!(&output[47..49], &[0.2, 0.1]);
+}
+
+#[test]
+fn release_announcement_does_not_key_from_idle_after_site_inhibit() {
+    let (mut node, control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![Announcement {
+            media: media(0.2, 1),
+            interval_ms: 0,
+        }],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(node.process_audio(true, false, &[], &mut [0.0]));
+    control.set_site_inhibit(true);
+    assert!(!node.process_audio(true, false, &[], &mut [0.0]));
+    let mut output = [0.0; 2];
+    assert!(!node.process_audio(false, false, &[], &mut output));
+    assert_eq!(output, [0.0; 2]);
+    assert!(node.announcements[0].release_pending);
+    assert!(
+        !node.release_pending,
+        "an inhibited release cannot key from idle"
+    );
+    control.set_site_inhibit(false);
+    let mut output = [0.0; 4];
+    assert!(!node.process_audio(false, false, &[], &mut output));
+    assert_eq!(output, [0.0; 4]);
+    assert!(node.process_audio(true, false, &[], &mut [0.0]));
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.2, 0.0, 0.0, 0.0]);
+    assert!(!node.announcements[0].release_pending);
 }
 
 #[test]
@@ -2568,6 +2909,35 @@ fn half_duplex_periodic_announcement_waits_for_receiver_and_delayed_courtesy() {
     node.process_audio(false, false, &[], &mut output);
     assert_eq!(output, [0.0]);
     assert!(node.courtesy.pending());
+}
+
+#[test]
+fn cancelled_status_is_reclaimed_without_allocating_or_freeing_on_audio() {
+    for started in [false, true] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        assert!(control.queue_prepared_status(media(0.5, 4).cancel_when(Arc::clone(&cancelled))));
+        if started {
+            node.now = 12_000;
+            let mut first = [0.0];
+            node.process_audio(false, false, &[], &mut first);
+            assert_eq!(first, [0.5]);
+        }
+        cancelled.store(true, Ordering::Release);
+        let mut output = [0.0; 8];
+        AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+        node.process_audio(false, false, &[], &mut output);
+        let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+        assert_eq!(allocations, Some(0));
+        assert_eq!(output, [0.0; 8]);
+        assert_eq!(control.reclaim().count(), 1);
+    }
 }
 
 #[test]

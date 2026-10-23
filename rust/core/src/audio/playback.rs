@@ -128,7 +128,7 @@ impl Playback {
         self.outcome = outcome;
     }
 
-    /// Retire an unstarted opportunity without claiming successful completion.
+    /// Stop an opportunity or obsolete playback without claiming successful completion.
     pub(crate) fn cancel(&mut self) {
         self.finish(PlaybackOutcome::Cancelled);
     }

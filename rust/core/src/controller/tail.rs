@@ -67,7 +67,7 @@ impl TailPlanner {
                 }
             }
         } else if self.traffic {
-            self.hang_until = Some(now.saturating_add(hang));
+            self.hang_until = (!suppressed).then(|| now.saturating_add(hang));
             for item in &mut self.items {
                 if !suppressed
                     && !item.pending

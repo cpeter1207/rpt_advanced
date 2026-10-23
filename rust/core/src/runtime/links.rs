@@ -239,41 +239,51 @@ impl NodeLinkControl {
             .as_ref()
             .is_some_and(|schedule| schedule.is_group_member(remote))
     }
-    /// Resolve a configured peer's stable group slot and lock-free callback selection.
+    /// Resolve the peer's currently desired group, not an inactive same-peer schedule.
     pub fn group_member(&self, remote: &str) -> Option<GroupMemberSelection> {
         let route = self
             .schedule
             .as_ref()?
-            .route_specs()
-            .into_iter()
+            .desired_routes()
             .find(|route| route.remote == remote && route.group_label.is_some())?;
-        let label = route.group_label?;
+        let label = route.group_label.as_deref()?;
         let group = self.groups.iter().find(|group| group.label == label)?;
         let slot = std::num::NonZeroUsize::new(route.group_priority?.saturating_add(1))?;
         Some(GroupMemberSelection::new(
-            &label,
+            label,
             slot,
             group.selection.clone(),
         ))
     }
-    /// Snapshot callback-active group selection for local telemetry on the control plane.
+    /// Snapshot desired groups; a latched audio slot is selected only while its peer is live.
     pub(crate) fn priority_groups(&self) -> Vec<PriorityGroupStatus> {
+        let Some(schedule) = self.schedule.as_ref() else {
+            return Vec::new();
+        };
         let peers = self.manager.snapshot();
+        let reachable = |remote: &str| {
+            peers
+                .iter()
+                .any(|peer| peer.name == remote && !peer.ended && !peer.retrying)
+        };
         self.groups
             .iter()
+            .filter(|group| {
+                schedule
+                    .desired_routes()
+                    .any(|route| route.group_label.as_deref() == Some(group.label.as_str()))
+            })
             .map(|group| {
                 let selected = group.selection.active().and_then(|slot| {
                     group
                         .members
                         .iter()
-                        .find(|(priority, _)| priority.saturating_add(1) == slot.get())
+                        .find(|(priority, peer)| {
+                            priority.saturating_add(1) == slot.get() && reachable(peer)
+                        })
                         .map(|(_, peer)| peer.clone())
                 });
-                let any_reachable = group.members.iter().any(|(_, remote)| {
-                    peers
-                        .iter()
-                        .any(|peer| peer.name == *remote && !peer.ended && !peer.retrying)
-                });
+                let any_reachable = group.members.iter().any(|(_, remote)| reachable(remote));
                 let all_attempted = group
                     .members
                     .iter()

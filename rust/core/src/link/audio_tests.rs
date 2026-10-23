@@ -402,7 +402,7 @@ fn ended_peer_reply_never_reaches_same_number_replacement() {
 }
 
 #[test]
-fn addressed_morse_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback() {
+fn addressed_reply_waits_for_local_receive_and_keeps_monitor_routes_scoped() {
     use crate::controller::{MorseSettings, PreparedMedia};
     for fallback in [false, true] {
         let (mut peer, signal, mut output) = peer_with_kerchunk("200", 4, 0);
@@ -442,16 +442,25 @@ fn addressed_morse_reply_does_not_enable_ordinary_audio_for_monitor_or_fallback(
         );
         dispatcher.dispatch(1);
         let mut sent = [0.0; 4];
-        assert_eq!(output.read(&mut sent), 0);
-        let mut expected = [0.0; 4];
-        let mut morse = crate::audio::MorseRenderer::new("E", 20, 800.0, -6).unwrap();
-        assert_eq!(
-            crate::audio::AudioSource::render(&mut morse, &mut expected),
-            4
-        );
-        assert_eq!(sent, expected);
+        assert_eq!(output.read(&mut sent), 4);
+        assert_eq!(sent, [0.0; 4]);
         assert_eq!(radio, [0.0; 4]);
-        assert_eq!(control.reclaim().count(), 0, "Morse reply is still playing");
+        assert_eq!(control.reclaim().count(), 0, "the reply waits for unkey");
+        assert!(
+            !links
+                .process(
+                    &mut controller,
+                    false,
+                    &mut radio,
+                    crate::link::SourcePosition::default()
+                )
+                .unwrap()
+        );
+        dispatcher.dispatch(1);
+        assert_eq!(output.read(&mut sent), 0);
+        assert_eq!(sent, [0.4, 0.4, 0.0, 0.0]);
+        assert_eq!(radio, [0.0; 4]);
+        assert_eq!(control.reclaim().count(), 1);
     }
 }
 
@@ -591,6 +600,7 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
         let (mut controller, _) = NodeController::new(
             ControllerSettings {
                 courtesy_delay_ms: 0,
+                hang_ms: 100,
                 ..ControllerSettings::default()
             },
             vec![],
@@ -610,7 +620,7 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
             .unwrap();
         signals.set_radio_keyed(false);
         let mut output = [0.0];
-        links
+        let keyed = links
             .process(
                 &mut controller,
                 false,
@@ -618,6 +628,7 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
                 crate::link::SourcePosition::default(),
             )
             .unwrap();
+        assert_eq!(keyed, expect_courtesy, "a link kerchunk has no hang");
         assert_eq!(outbound.read(&mut [0.0]), 1);
         assert_eq!(output[0] == 0.5, expect_courtesy);
     }

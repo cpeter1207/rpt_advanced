@@ -391,6 +391,90 @@ fn composition_one_shot_rewind_keeps_its_producer_until_completion() {
 }
 
 #[test]
+fn held_status_releases_the_producer_and_restarts_from_the_beginning() {
+    let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
+    let mut reader = session
+        .register_program(MediaProgram::single(composition_tone(500)), true)
+        .unwrap();
+    let job = session.requests.as_mut().unwrap().pop().unwrap();
+    let control = Arc::clone(&job.control);
+    session.jobs.push(job);
+    let mut identifier = session
+        .register_program(MediaProgram::single(composition_tone(1_000)), false)
+        .unwrap();
+    session.start().unwrap();
+    reader.start();
+    let mut prefix = [0.0; 17];
+    let mut heard = false;
+    for _ in 0..1_000 {
+        match reader.render(&mut prefix) {
+            PcmRead::Samples(17) => {
+                heard = true;
+                break;
+            }
+            PcmRead::Pending => thread::sleep(Duration::from_millis(1)),
+            other => panic!("status ended before its first partial output: {other:?}"),
+        }
+    }
+    assert!(heard, "status did not begin playback");
+    assert_eq!(control.requested.load(Ordering::Acquire), 1);
+
+    assert!(reader.defer_before_output());
+    assert_eq!(control.requested.load(Ordering::Acquire), 0);
+
+    identifier.start();
+    let id_audio = collect_samples(identifier.as_mut(), &mut [0.0; 97]);
+    assert_eq!(id_audio.len(), 480);
+    assert!(id_audio.iter().any(|sample| sample.abs() > 0.1));
+    identifier.cancel();
+
+    reader.start();
+    assert_eq!(control.requested.load(Ordering::Acquire), 2);
+    let restarted = collect_samples(reader.as_mut(), &mut [0.0; 97]);
+    assert_eq!(restarted.len(), 480);
+    assert_eq!(&restarted[..prefix.len()], &prefix);
+    reader.cancel();
+}
+
+#[test]
+fn held_status_terminal_cancel_and_drop_reclaim_one_shot_jobs() {
+    for drop_reader in [false, true] {
+        let (mut session, mut job, mut reader) = registered_file_job(fixture(48_000, 64, 0.25));
+        job.one_shot = true;
+        let control = Arc::clone(&job.control);
+        session.jobs.push(job);
+        session.start().unwrap();
+        reader.start();
+        assert!(matches!(
+            render_until_terminal(reader.as_mut()),
+            PcmRead::Samples(64) | PcmRead::FinalSamples(64)
+        ));
+        assert!(reader.defer_before_output());
+        assert_eq!(control.requested.load(Ordering::Acquire), 0);
+
+        let retained = if drop_reader {
+            drop(reader);
+            1
+        } else {
+            reader.cancel();
+            2
+        };
+        for _ in 0..1_000 {
+            if Arc::strong_count(&control) == retained {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            Arc::strong_count(&control),
+            retained,
+            "held one-shot recipe was not reclaimed after drop={drop_reader}"
+        );
+        assert_eq!(control.consumer_outstanding.load(Ordering::Acquire), 0);
+    }
+}
+
+#[test]
 fn composition_pending_successor_keeps_playback_active() {
     let (mut producer, consumer) = InboundRing::open(48_000, InboundPolicy::Media).unwrap();
     producer.write(&[0.25; 8]).unwrap();

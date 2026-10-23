@@ -73,7 +73,7 @@ pub struct ControllerSettings {
     pub transmit_timeout_ms: u64,
     /// Post-timeout lockout; recovery additionally requires receive inactivity.
     pub timeout_lockout_ms: u64,
-    /// Suppress tail telemetry for local transmissions at most this long; zero disables.
+    /// Suppress hang and release telemetry for local bursts at most this long; zero disables.
     pub kerchunk_max_ms: u64,
     /// Per-source courtesy delay after unkey.
     pub courtesy_delay_ms: u64,
@@ -300,12 +300,20 @@ impl NodeController {
         }
     }
 
+    /// A kerchunk cannot retain traffic hang; normal releases clear prior suppression.
+    fn receive_unkeyed(&mut self, kerchunk: bool) {
+        self.timeout.unkey(self.now);
+        self.suppress_release = kerchunk;
+        if kerchunk {
+            self.duplex = DuplexPolicy::default();
+            self.release_hang = 0;
+        }
+    }
+
     /// Apply a direct-peer unkey on the audio owner, selecting advisory/direct/generic media.
     pub fn link_unkeyed(&mut self, direct: &str, selected: &str, kerchunk: bool) {
-        self.timeout.unkey(self.now);
-        if kerchunk {
-            self.suppress_release = true;
-        } else if !direct.is_empty() {
+        self.receive_unkeyed(kerchunk);
+        if !kerchunk && !direct.is_empty() {
             self.courtesy.schedule(
                 direct,
                 selected,
@@ -529,6 +537,25 @@ impl NodeController {
     ) -> f32 {
         self.telemetry.poll_status();
         let receive = receiving || linked;
+        let status_idle = !receive
+            && !source_activity
+            && self
+                .telemetry
+                .peer_status()
+                .is_none_or(|peer| !peer.active());
+        let active_status = self.telemetry.active == Some(Source::Status);
+        if let Some(media) = self
+            .telemetry
+            .status
+            .as_mut()
+            .filter(|media| !status_idle && active_status && !media.0.has_output())
+        {
+            // Retain the message, but release its producer and playback slot.
+            // A new attempt after unkey must not block an identifier deadline.
+            media.0.restart(false);
+            media.0.defer(false);
+            self.telemetry.active = None;
+        }
         let idle = self.now.saturating_sub(self.last_activity);
         if receive {
             self.ctcss_hang_until = self
@@ -549,19 +576,26 @@ impl NodeController {
         }
         if !receiving && self.receiver {
             self.receiver_unkey = self.now;
-            self.timeout.unkey(self.now);
             let kerchunk = self.settings.kerchunk_max_ms != 0
                 && self.now.saturating_sub(self.receiver_key)
                     <= samples(self.settings.kerchunk_max_ms);
-            if kerchunk {
-                self.suppress_release = true;
-            } else {
+            self.receive_unkeyed(kerchunk);
+            if !kerchunk {
                 self.courtesy.schedule(
                     "",
                     "",
                     self.now
                         .saturating_add(samples(self.settings.courtesy_delay_ms)),
                 );
+            }
+        }
+        if self.suppress_release && !receive && (self.receiver || self.linked) {
+            // Clear only the final suppressed release, not other ongoing traffic's opportunity.
+            let _ = self.courtesy.pop();
+            for announcement in &mut self.announcements {
+                if announcement.announcement.interval_ms == 0 {
+                    announcement.release_pending = false;
+                }
             }
         }
         self.tails.observe(
@@ -619,10 +653,9 @@ impl NodeController {
             .telemetry
             .peer_status()
             .is_some_and(|peer| !peer.active());
-        let status_ready = peer_ready
-            || (!receive
-                && self.now.saturating_sub(self.receiver_unkey) >= 12_000
-                && pending_status);
+        let status_ready = status_idle
+            && (peer_ready
+                || (self.now.saturating_sub(self.receiver_unkey) >= 12_000 && pending_status));
         let parrot_ready = !source_activity && self.telemetry.parrot_pending();
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
         if (may_transmit || peer_ready) && self.telemetry.active.is_none() {

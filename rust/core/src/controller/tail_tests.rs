@@ -332,7 +332,7 @@ fn tail_kerchunk_suppression_does_not_arm_a_later_idle_playback() {
     let mut node = fixture(0, 0, vec![]);
     node.settings.kerchunk_max_ms = 100;
     at(&mut node, 0, true);
-    at(&mut node, 50, false);
+    assert_eq!(at(&mut node, 50, false), (false, 0.0));
     assert_eq!(at(&mut node, 2000, false), (false, 0.0));
     assert!(!node.tails.pending());
 }
