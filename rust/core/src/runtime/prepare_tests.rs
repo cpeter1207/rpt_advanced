@@ -326,6 +326,27 @@ fn manual_message_selectors_share_the_identifier_and_tail_namespace() {
 }
 
 #[test]
+fn event_selectors_share_the_existing_message_namespace() {
+    for selector in [1, 2] {
+        let config = ConfigDocument::parse(&format!("[1000]\n[message notice]\ncontent=Ready\ndtmf_id=1\n[event 1000 clock]\nat=every 1 hour\ncontent=Clock\ndtmf_id={selector}\n")).unwrap();
+        let node = NodeId::new("1000").unwrap();
+        let settings = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+        let result = controller(
+            &config,
+            &node,
+            &settings,
+            &media(false, false),
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        );
+        assert_eq!(result.is_ok(), selector == 2);
+        if let Ok((_, _, _, _, recipes)) = result {
+            assert_eq!(recipes.selectors["2"], recipes.events["clock"]);
+        }
+    }
+}
+
+#[test]
 fn status_speech_and_morse_are_registered_as_one_producer_owned_chain() {
     let media = media(false, false);
     streamed_status(

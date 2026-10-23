@@ -20,6 +20,88 @@ fn message(_: &EventSpec, _: &CivilTime) -> Result<DispatchContent, SchedulerErr
 }
 
 #[test]
+fn media_occurrences_keep_original_deadlines_through_replacement_and_reload() {
+    let spec = EventSpec {
+        trigger: "every 1 minute".parse().unwrap(),
+        media: true,
+        ..event("clock", 0)
+    };
+    let mut scheduler = EventScheduler::new(1, vec![spec.clone()], None).unwrap();
+    let first = scheduler
+        .next(100, -50, civil(0), message)
+        .unwrap()
+        .unwrap();
+    let obsolete = scheduler
+        .next(160, 59_950, civil(1), message)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        obsolete.civil_time(),
+        civil(0),
+        "the older action reservation must settle first"
+    );
+    assert!(obsolete.occurrence().unwrap().cancelled());
+    assert_eq!(obsolete.due_ms(), -50);
+    assert!(scheduler.message_queued(&obsolete));
+    assert!(scheduler.complete(&obsolete));
+    assert!(!scheduler.current(&first));
+    let latest = scheduler
+        .next(161, 60_950, civil(1), message)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.civil_time(), civil(1));
+    assert_eq!(latest.due_ms(), 59_950, "retry cannot grant another budget");
+    let mut reloaded = EventScheduler::new(2, vec![spec], Some(&scheduler)).unwrap();
+    assert!(!reloaded.current(&latest));
+    let retained = reloaded
+        .next(162, 61_950, civil(1), message)
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.due_ms(), 59_950);
+    assert!(reloaded.message_queued(&retained));
+    assert!(reloaded.complete(&retained));
+    assert!(
+        reloaded
+            .next(163, 62_950, civil(1), message)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn media_clock_steps_do_not_repeat_already_consumed_civil_minutes() {
+    let spec = EventSpec {
+        trigger: "every 1 minute".parse().unwrap(),
+        media: true,
+        ..event("clock", 0)
+    };
+    let mut scheduler = EventScheduler::new(1, vec![spec], None).unwrap();
+    for (wall, minute, due) in [
+        (100, 58, true),
+        (160, 59, true),
+        (220, 0, false),
+        (280, 58, false),
+        (340, 59, false),
+    ] {
+        let next = scheduler
+            .next(wall, i128::from(wall) * 1000, civil(minute), message)
+            .unwrap();
+        assert_eq!(next.is_some(), due, "repeated civil minute12:{minute:02}");
+        if let Some(dispatch) = next {
+            assert!(scheduler.message_queued(&dispatch));
+            assert!(scheduler.complete(&dispatch));
+        }
+    }
+    let tomorrow = CivilTime::new(2026, 9, 16, Weekday::Wednesday, 12, 0).unwrap();
+    assert!(
+        scheduler
+            .next(86_500, 86_500_000, tomorrow, message)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn periodic_triggers_become_pending_on_clock_boundaries() {
     for (at, hour, minute, due) in [
         ("every 1 minute", 12, 7, true),
