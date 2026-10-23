@@ -47,6 +47,45 @@ pub(crate) struct State {
 }
 type Shared = Arc<Mutex<State>>;
 
+#[test]
+fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
+    for requested in [false, true] {
+        let (mut session, control, state, _) = make_session("1000");
+        crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+        if requested {
+            control.stop();
+        } else {
+            state.lock().unwrap().fail_ready = true;
+        }
+        assert!(session.step(20).is_err());
+        assert!(session.step(21).is_err());
+        drop(session);
+        let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+        assert_eq!(logs.len(), usize::from(!requested), "requested={requested}");
+        if !requested {
+            assert_eq!(logs[0].0, 3);
+            for detail in ["1000", "2000", "unexpected", "Hangup"] {
+                assert!(
+                    logs[0].1.contains(detail),
+                    "missing {detail}: {}",
+                    logs[0].1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unexpected_owner_release_is_not_silently_treated_as_a_requested_disconnect() {
+    let (session, _control, _, _) = make_session("1000");
+    crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+    drop(session);
+    let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].0, 3);
+    assert!(logs[0].1.contains("owner"));
+}
+
 unsafe extern "C" fn bind_radio(_: *mut c_void, peer: *mut c_void, radio: *mut c_void) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
     assert!(state.texts.is_empty() && state.writes.is_empty());

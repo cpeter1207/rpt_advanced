@@ -14,6 +14,9 @@ use std::{
 };
 
 thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
+thread_local! {
+    pub(crate) static ERROR_LOGS: std::cell::RefCell<Vec<(i32, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 struct Allocator;
 
 fn reject(bytes: usize) -> bool {
