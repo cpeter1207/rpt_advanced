@@ -3,13 +3,16 @@
 use super::render;
 use crate::{
     composition::{Composition, CompositionError, MorseRequirement, Segment},
-    config::{BindingSource, ResolvedMessageSettings, ResolvedSiteSettings},
+    config::{
+        BindingSource, ResolvedIdentifierSettings, ResolvedMessageSettings, ResolvedSiteSettings,
+    },
     media::{MediaProgram, MediaSource, MorseSource, SpeechSource},
     messages::{
         Daypart, MAX_MESSAGE_BYTES, Message, MessageArgument, MessageCatalog, MessageForms,
     },
     schedule::CivilTime,
     site::{Observation, ReadingQuality},
+    template::MessageTemplate,
     time::TimeFormat,
 };
 use std::{
@@ -203,34 +206,48 @@ impl MessageRecipes {
                         }
                     }
                 }
-                let index = self.items.len();
-                if let Some(selector) = selector {
-                    if self.prefix_length + selector.len() > 127 {
-                        self.warnings.push(crate::config::ConfigWarning::new(
-                            0,
-                            section,
-                            "dtmf_id",
-                            &selector,
-                            "selector and effective prefix exceed the command length",
-                            "not DTMF addressable",
-                        ));
-                    } else if self.selectors.insert(selector, index).is_some() {
-                        return Err(crate::config::ConfigError::structure(
-                            section,
-                            "duplicate effective message DTMF selector",
-                        )
-                        .into());
-                    }
-                }
-                self.items
-                    .push(MessageRecipe::Composition(Box::new(recipe)));
-                Ok(Some(index))
+                self.register(
+                    MessageRecipe::Composition(Box::new(recipe)),
+                    selector,
+                    section,
+                )
+                .map(Some)
             }
             Err(error) => {
                 self.disable(section, &format!("invalid composition: {error:?}"));
                 Ok(None)
             }
         }
+    }
+
+    /// Admit every configured recipe through the same selector bounds and collision checks.
+    pub fn register(
+        &mut self,
+        recipe: MessageRecipe,
+        selector: Option<String>,
+        section: &str,
+    ) -> Result<usize, super::RuntimeError> {
+        let index = self.items.len();
+        if let Some(selector) = selector {
+            if self.prefix_length + selector.len() > 127 {
+                self.warnings.push(crate::config::ConfigWarning::new(
+                    0,
+                    section,
+                    "dtmf_id",
+                    &selector,
+                    "selector and effective prefix exceed the command length",
+                    "not DTMF addressable",
+                ));
+            } else if self.selectors.insert(selector, index).is_some() {
+                return Err(crate::config::ConfigError::structure(
+                    section,
+                    "duplicate effective message DTMF selector",
+                )
+                .into());
+            }
+        }
+        self.items.push(recipe);
+        Ok(index)
     }
 
     fn disable(&mut self, section: &str, reason: &str) {
@@ -249,6 +266,12 @@ impl MessageRecipes {
 pub(super) enum MessageRecipe {
     Composition(Box<Composition>),
     Site(Box<SiteReport>),
+    LegacyEvent {
+        template: MessageTemplate,
+        settings: Box<ResolvedIdentifierSettings>,
+        playback: crate::controller::PlaybackPolicy,
+        delivery: crate::controller::PoliteDelivery,
+    },
 }
 
 pub(super) struct SiteReport {
@@ -260,7 +283,7 @@ pub(super) struct SiteReport {
 }
 
 impl MessageRecipe {
-    /// Only configured compositions select their own audience; site replies retain their origin.
+    /// Configured media select their own audience; site replies retain their origin.
     pub fn playback(
         &self,
     ) -> Option<(
@@ -273,6 +296,9 @@ impl MessageRecipe {
                 Some((settings.playback, settings.delivery))
             }
             Self::Site(_) => None,
+            Self::LegacyEvent {
+                playback, delivery, ..
+            } => Some((*playback, *delivery)),
         }
     }
 
@@ -283,6 +309,32 @@ impl MessageRecipe {
     ) -> Result<MediaProgram, CompositionError> {
         match self {
             Self::Composition(recipe) => recipe.prepare(catalog, values),
+            Self::LegacyEvent {
+                template, settings, ..
+            } => {
+                let expand = |node: &str, callsign: &str, status: &str| {
+                    render::message_with_status(
+                        template,
+                        values.civil,
+                        values.time_format,
+                        node,
+                        callsign,
+                        status,
+                        catalog,
+                    )
+                    .map_err(|_| CompositionError::Preparation)
+                };
+                let text = expand(&values.node, &values.callsign, &values.links.text)?;
+                let morse = render::morse(&text).ok_or(CompositionError::Preparation)?;
+                let speech = expand(
+                    &render::scheduled_speech(&values.node, &values.node, "", ""),
+                    &render::scheduled_speech(&values.callsign, "", &values.callsign, ""),
+                    &values.links.tts,
+                )?;
+                Ok(MediaProgram::single(super::prepare::status_source(
+                    settings, &morse, &speech,
+                )))
+            }
             Self::Site(report) => {
                 let mut arguments = BTreeMap::from([(
                     "label".into(),

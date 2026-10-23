@@ -6,6 +6,7 @@ use crate::{
         ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings,
         ResolvedCourtesySettings, ResolvedIdentifierSettings, ResolvedMessageSettings,
         ResolvedMorseSettings, ResolvedNodeSettings, ResolvedSpeechSettings,
+        ResolvedTemplateSettings,
     },
     controller::{
         Announcement, ControllerControl, ControllerSettings, CourtesySettings, Identifier,
@@ -15,6 +16,7 @@ use crate::{
         FileRequest, MediaError, MediaSource, MorseSource, PreparedAudio, SpeechRequest,
         SpeechSource, StationMediaSession, ToneSource,
     },
+    template::MessageTemplate,
 };
 
 /// Decode a configured file for adapters that expose a non-streaming control API.
@@ -112,7 +114,20 @@ pub(super) fn streamed_status(
     morse_text: &str,
     speech_text: &str,
 ) -> Result<PreparedMedia, RuntimeError> {
-    let source = MediaSource {
+    let source = status_source(settings, morse_text, speech_text);
+    let stream = station
+        .register_once(source)
+        .map_err(|_| RuntimeError::Preparation)?;
+    PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
+}
+
+/// Preserve the existing status speech settings and complete Morse substitute in a recipe.
+pub(super) fn status_source(
+    settings: &ResolvedIdentifierSettings,
+    morse_text: &str,
+    speech_text: &str,
+) -> MediaSource {
+    MediaSource {
         file: None,
         speech: (!speech_text.is_empty()).then(|| SpeechSource {
             text: speech_text.to_owned(),
@@ -128,11 +143,7 @@ pub(super) fn streamed_status(
             frequency_hz: settings.morse_frequency_hz as f32,
             level_db: settings.morse_level_db as i8,
         }),
-    };
-    let stream = station
-        .register_once(source)
-        .map_err(|_| RuntimeError::Preparation)?;
-    PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
+    }
 }
 
 /// Prepare an optional streamed level report followed by native-rate retained receive PCM.
@@ -360,6 +371,27 @@ pub(super) fn controller(
             )? {
                 recipes.events.insert(label.into(), index);
             }
+        } else if event.dtmf_id.is_some()
+            && (!event.message.is_empty() || !event.template.is_empty())
+        {
+            let text = if event.message.is_empty() {
+                ResolvedTemplateSettings::resolve(document, Some(node), &event.template)?
+                    .value
+                    .text
+            } else {
+                event.message
+            };
+            recipes.register(
+                super::composition::MessageRecipe::LegacyEvent {
+                    template: MessageTemplate::parse(&text)
+                        .map_err(|_| RuntimeError::Preparation)?,
+                    settings: Box::new(status.clone()),
+                    playback: event.playback,
+                    delivery: event.delivery,
+                },
+                event.dtmf_id,
+                &format!("event {} {label}", node.as_str()),
+            )?;
         }
     }
     let (mut controller, mut control) = NodeController::new(

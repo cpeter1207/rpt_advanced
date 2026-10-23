@@ -122,26 +122,31 @@ fn current_message_cancel_stops_every_preparation_phase_and_restores_repeat() {
 
 #[test]
 fn current_message_cancel_leaves_never_admitted_messages_pending() {
-    let (mut node, mut control) = NodeController::new(
-        ControllerSettings {
-            full_duplex: true,
-            ..Default::default()
-        },
-        vec![],
-        vec![],
-        CourtesySettings::default(),
-    )
-    .unwrap();
-    control.cancel_message();
-    node.process_audio(true, false, &[], &mut [0.0]);
-    assert!(control.queue_prepared_status(media(0.5, 4)));
-    control.cancel_message();
-    node.process_audio(true, false, &[], &mut [0.0]);
-    assert_eq!(control.reclaim().count(), 0);
-    let mut output = [0.0; 12_010];
-    node.process_audio(false, false, &[], &mut output);
-    assert_eq!(output.iter().filter(|sample| **sample == 0.5).count(), 4);
-    assert_eq!(control.reclaim().count(), 1);
+    for polled in [false, true] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        control.cancel_message();
+        node.process_audio(true, false, &[], &mut [0.0]);
+        assert!(control.queue_prepared_status(media(0.5, 4)));
+        if polled {
+            node.process_audio(true, false, &[], &mut [0.0]);
+        }
+        control.cancel_message();
+        node.process_audio(true, false, &[], &mut [0.0]);
+        assert_eq!(control.reclaim().count(), 0);
+        let mut output = [0.0; 12_010];
+        node.process_audio(false, false, &[], &mut output);
+        assert_eq!(output.iter().filter(|sample| **sample == 0.5).count(), 4);
+        assert_eq!(control.reclaim().count(), 1);
+    }
 }
 
 #[test]

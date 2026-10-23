@@ -69,12 +69,19 @@ struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
 fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros() {
-    for (media, expected) in [
-        ("message=Report\n", "Report"),
-        ("template=clock\n", "Report 9:07 AM"),
+    for (media, expected, linked) in [
+        ("message=Report\n", "Report", false),
+        ("template=clock\n", "Report 9:07 AM", false),
+        (
+            "message=Report ${link_status}\n",
+            "Report Link node,2,0,0,0 transceive",
+            true,
+        ),
+        ("message=Report ${node}\n", "Report node,1,0,0,0", false),
+        ("message=Report ${callsign}\n", "Report A,B,1,C,D", false),
     ] {
         let source = format!(
-            "[1000]\n[template clock]\ntext=Report ${{time}}\n[macro attach]\naction=connect\ntarget_node=2000\n[event 1000 report]\nat=daily 09:07\n{media}macro=attach\ndtmf_id=7\n"
+            "[1000]\ncallsign=AB1CD\n[template clock]\ntext=Report ${{time}}\n[macro attach]\naction=connect\ntarget_node=2000\n[event 1000 report]\nat=daily 09:07\n{media}macro=attach\ndtmf_id=7\n"
         );
         let messages = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::start(
@@ -85,6 +92,9 @@ fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros(
             clock(),
         )
         .unwrap();
+        if linked {
+            runtime.incoming("1000", "2000", true).unwrap();
+        }
         let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
         let mut generation = tx.acquire().unwrap();
         let controller = &mut generation.state().controller;
@@ -99,14 +109,15 @@ fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros(
         controller.process_audio(false, false, &[], &mut output);
         assert!(output.iter().all(|sample| *sample == 0.25));
         assert_eq!(*messages.lock().unwrap(), [expected]);
-        assert!(
+        assert_eq!(
             runtime
                 .node("1000")
                 .unwrap()
                 .links()
                 .manager()
                 .snapshot()
-                .is_empty(),
+                .len(),
+            usize::from(linked),
             "manual media must not execute its action macro"
         );
         assert!(
@@ -114,6 +125,10 @@ fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros(
             "manual media cannot consume the calendar occurrence"
         );
         drop(generation);
+        if linked {
+            runtime.node("1000").unwrap().links().ended("2000");
+            runtime.peer_detached("1000", "2000", 0);
+        }
         assert!(runtime.stop(0));
         let collision = format!("{source}[message other]\ncontent=Other\ndtmf_id=7\n");
         assert!(
