@@ -124,7 +124,7 @@ fn configured_message_suppression_drains_peers_without_negative_mix_minus() {
                 Mode::TRANSCEIVE,
                 FiniteInput {
                     signals,
-                    samples: [sample; 4].into_iter().collect(),
+                    samples: std::iter::repeat_n(sample, 12_480).collect(),
                 },
                 writer,
                 4,
@@ -179,7 +179,7 @@ fn configured_message_suppression_drains_peers_without_negative_mix_minus() {
         links
             .peers
             .iter()
-            .all(|peer| peer.input.samples.is_empty() && peer.active)
+            .all(|peer| peer.input.samples.len() == 12_476 && peer.active)
     );
 }
 
