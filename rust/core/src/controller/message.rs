@@ -79,7 +79,7 @@ impl MessagePreparation {
             retired: reclaimer,
             waiting: None,
         });
-        PreparedMedia::new_stream(Box::new(MessageReader {
+        let mut media = PreparedMedia::new_stream(Box::new(MessageReader {
             alive,
             generation: self.generation,
             sequence: self.sequence.clone(),
@@ -91,7 +91,10 @@ impl MessagePreparation {
             requests,
             ready: consumer,
             retired,
-        }))
+        }))?;
+        // Manual and recurring readers retain the same immutable recipe identity.
+        media.8 = Some(content_index);
+        Ok(media)
     }
 
     pub fn take_request(&mut self) -> Option<MessageRequest> {

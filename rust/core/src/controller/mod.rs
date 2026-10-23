@@ -554,6 +554,64 @@ impl NodeController {
         }
     }
 
+    /// Satisfy the selected ID and lower priorities through the existing timing policy.
+    fn satisfy_identifier(&mut self, index: usize) {
+        self.identifiers.complete(&self.rules, index, self.now);
+        let priority = self.ids[index].priority;
+        for (i, (id, satisfied)) in self.ids.iter().zip(&mut self.satisfied).enumerate() {
+            if i == index || id.priority < priority {
+                *satisfied = self.now;
+            }
+        }
+    }
+
+    /// Finish exactly one attempt; cancellation never advances successful cooldowns.
+    fn complete_playback(&mut self, source: Option<Source>, outcome: PlaybackOutcome) {
+        match source {
+            Some(Source::Identifier(index)) if outcome == PlaybackOutcome::Succeeded => {
+                self.satisfy_identifier(index);
+            }
+            Some(Source::Announcement(index)) if outcome == PlaybackOutcome::Succeeded => {
+                self.announcements[index].satisfied = self.now;
+            }
+            Some(Source::Identifier(index)) => {
+                self.identifiers.defer(&self.rules, index, self.now);
+            }
+            Some(Source::Announcement(index)) => {
+                let a = &mut self.announcements[index];
+                a.retry_after = self.now.saturating_add(samples(a.announcement.interval_ms));
+            }
+            Some(Source::Status) => {
+                if outcome == PlaybackOutcome::Succeeded {
+                    if let Some(recipe) = self.telemetry.status.as_ref().and_then(|media| media.8) {
+                        if let Some(index) =
+                            self.ids.iter().position(|id| id.media.8 == Some(recipe))
+                        {
+                            self.ids[index].media.0.cancel();
+                            self.satisfy_identifier(index);
+                        }
+                        if let Some(index) = self
+                            .tails
+                            .items
+                            .iter()
+                            .position(|tail| tail.tail.media.8 == Some(recipe))
+                        {
+                            self.tails.items[index].tail.media.0.cancel();
+                            self.tails.complete(index, self.now, true);
+                        }
+                    }
+                }
+                self.telemetry.finish_status();
+            }
+            Some(Source::Parrot) => self.telemetry.finish_parrot(),
+            Some(Source::Tail(index)) => {
+                self.tails
+                    .complete(index, self.now, outcome == PlaybackOutcome::Succeeded);
+            }
+            _ => {}
+        }
+    }
+
     fn step(
         &mut self,
         receiving: bool,
@@ -865,44 +923,7 @@ impl NodeController {
             if playback.is_finished() {
                 let outcome = playback.outcome();
                 self.telemetry.active = None;
-                match rendered_source {
-                    Some(Source::Identifier(index)) if outcome == PlaybackOutcome::Succeeded => {
-                        self.identifiers.complete(&self.rules, index, self.now);
-                        self.ids
-                            .get(index)
-                            .map(|id| id.priority)
-                            .into_iter()
-                            .for_each(|priority| {
-                                for (i, (id, satisfied)) in
-                                    self.ids.iter().zip(&mut self.satisfied).enumerate()
-                                {
-                                    if i == index || id.priority < priority {
-                                        *satisfied = self.now;
-                                    }
-                                }
-                            });
-                    }
-                    Some(Source::Announcement(index)) if outcome == PlaybackOutcome::Succeeded => {
-                        self.announcements.get_mut(index).into_iter().for_each(|a| {
-                            a.satisfied = self.now;
-                        });
-                    }
-                    Some(Source::Identifier(index)) => {
-                        self.identifiers.defer(&self.rules, index, self.now);
-                    }
-                    Some(Source::Announcement(index)) => {
-                        let a = &mut self.announcements[index];
-                        a.retry_after =
-                            self.now.saturating_add(samples(a.announcement.interval_ms));
-                    }
-                    Some(Source::Status) => self.telemetry.finish_status(),
-                    Some(Source::Parrot) => self.telemetry.finish_parrot(),
-                    Some(Source::Tail(index)) => {
-                        self.tails
-                            .complete(index, self.now, outcome == PlaybackOutcome::Succeeded)
-                    }
-                    _ => {}
-                }
+                self.complete_playback(rendered_source, outcome);
             }
         }
         if let Some(Source::Tail(index)) = self.telemetry.active {

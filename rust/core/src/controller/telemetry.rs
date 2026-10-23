@@ -116,6 +116,7 @@ pub struct PreparedMedia(
     pub(super) Option<(u64, PoliteDelivery, bool)>,
     pub(super) Option<Arc<MessageOccurrence>>,
     pub(super) Option<PlaybackPolicy>,
+    pub(super) Option<usize>,
 );
 
 /// One occurrence's race-free transition: pending (0), audible (1), or cancelled (2).
@@ -155,6 +156,7 @@ impl PreparedMedia {
             Playback::new_stream(stream),
             true,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
@@ -240,6 +242,7 @@ impl PreparedMedia {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -284,6 +287,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
