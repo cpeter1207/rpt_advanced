@@ -1311,27 +1311,16 @@ fn scheduled_event_composition_uses_the_shared_recipe_and_manual_selector() {
         "values resolve at playback, not admission"
     );
     assert!(runtime.complete_event(&dispatch));
-    assert_eq!(
-        runtime
-            .node("1000")
-            .unwrap()
-            .control
-            .messages
-            .selectors
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["4"]
-    );
     let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
     let mut generation = rx.acquire_pair(&mut tx).unwrap();
     generation
         .transmit()
         .controller
-        .process_audio(false, false, &[], &mut [0.0]);
+        .process_audio(false, false, &[], &mut [0.0; 12_001]);
     runtime.prepare_messages(clock());
     assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
     drop(generation);
+    assert!(runtime.queue_message("1000", "4", None).is_ok());
     assert!(runtime.stop(0));
 }
 
