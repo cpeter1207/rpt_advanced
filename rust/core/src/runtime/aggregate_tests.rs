@@ -850,6 +850,7 @@ fn clock() -> RuntimeClock {
     RuntimeClock {
         now_ms: 1000,
         wall_seconds: 100,
+        wall_subsecond_ms: 0,
         civil: Some((
             CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 7).unwrap(),
             0,
@@ -1360,6 +1361,89 @@ fn scheduled_event_expired_while_receiving_does_not_start_after_unkey() {
 }
 
 #[test]
+fn scheduled_event_subsecond_lateness_does_not_renew_the_deadline() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[event 1000 notice]\nat=daily 09:07\nmessage=TEST\npolite_maximum_wait_ms=100\n").unwrap(),
+        &Media, adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    ).unwrap();
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0; 12_000]);
+    let late = RuntimeClock {
+        now_ms: 1250,
+        wall_subsecond_ms: 250,
+        ..clock()
+    };
+    let dispatch = runtime.next_event(late).unwrap().unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let mut output = [0.0; 960];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    assert_eq!(
+        output, [0.0; 960],
+        "the 100ms budget expired before the delayed control tick"
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_replaces_an_older_unstarted_occurrence() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nduplex=full\n[event 1000 clock]\nat=every 1 minute\ncontent={message}\nmessage_id=site-time\narg_time=time\npolite_maximum_wait_ms=300000\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    ).unwrap();
+    let first = runtime.next_event(clock()).unwrap().unwrap();
+    runtime.queue_event(&first).unwrap();
+    assert!(runtime.complete_event(&first));
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    for _ in 0..60 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(true, false, &[], &mut [0.0; 48_000]);
+    }
+    let mut next = RuntimeClock {
+        now_ms: 61_000,
+        wall_seconds: 160,
+        ..clock()
+    };
+    next.civil = Some((
+        CivilTime::new(2026, 9, 15, Weekday::Tuesday, 9, 8).unwrap(),
+        0,
+    ));
+    let latest = runtime.next_event(next).unwrap().unwrap();
+    runtime.queue_event(&latest).unwrap();
+    assert!(runtime.complete_event(&latest));
+    for _ in 0..80 {
+        generation
+            .transmit()
+            .controller
+            .process_audio(false, false, &[], &mut [0.0; 960]);
+        runtime.prepare_messages(next);
+    }
+    assert_eq!(
+        *messages.lock().unwrap(),
+        ["The time is 9:08 AM."],
+        "stale unstarted occurrences must be discarded, not replayed"
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn aggregate_scheduled_template_and_macro_use_trigger_clock_and_current_node() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let config = ConfigDocument::parse("[1000]\ncallsign=AB1CD\n[template hello]\ntext=${node}. ${time}\n[macro connect]\naction=connect\ntarget_node=2000\n[event 1000 morning]\nat=daily 09:07\ntemplate=hello\nmacro=connect\n").unwrap();
@@ -1673,6 +1757,7 @@ fn receive_at_runtime_origin_starts_the_link_quiet_interval() {
     let at = |now_ms, hour, minute| RuntimeClock {
         now_ms,
         wall_seconds: 0,
+        wall_subsecond_ms: 0,
         civil: Some((
             CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap(),
             0,
@@ -1772,6 +1857,7 @@ fn aggregate_schedule_warning_queues_one_localized_status_message() {
         let clock = RuntimeClock {
             now_ms: 1_000,
             wall_seconds: 0,
+            wall_subsecond_ms: 0,
             civil: Some((
                 CivilTime::new(2026, 9, 15, Weekday::Tuesday, hour, minute).unwrap(),
                 second,

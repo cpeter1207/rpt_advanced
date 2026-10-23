@@ -82,6 +82,7 @@ fn audio_owners_with_config(maximum: usize, configuration: &str) -> (Runtime<Aud
         RuntimeClock {
             now_ms: 0,
             wall_seconds: 0,
+            wall_subsecond_ms: 0,
             civil: None,
         },
     )
@@ -108,6 +109,7 @@ fn reload_audio(runtime: &mut Runtime<Audio>, extra: &str) -> u64 {
             RuntimeClock {
                 now_ms: 1,
                 wall_seconds: 0,
+                wall_subsecond_ms: 0,
                 civil: None,
             },
         )

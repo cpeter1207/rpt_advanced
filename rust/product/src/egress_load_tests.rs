@@ -156,6 +156,7 @@ fn load_clock(epoch: Instant) -> RuntimeClock {
     RuntimeClock {
         now_ms: epoch.elapsed().as_millis() as u64,
         wall_seconds: 0,
+        wall_subsecond_ms: 0,
         civil: None,
     }
 }

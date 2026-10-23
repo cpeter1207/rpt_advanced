@@ -61,6 +61,8 @@ pub struct RuntimeClock {
     pub now_ms: u64,
     /// Original ticker wall-clock seconds, preserved through queue delay.
     pub wall_seconds: i64,
+    /// Fraction of that captured wall-clock second, from zero through 999 milliseconds.
+    pub wall_subsecond_ms: u16,
     /// Validated local calendar and second; unavailable clocks cannot select replacement windows.
     pub civil: Option<(CivilTime, u8)>,
 }

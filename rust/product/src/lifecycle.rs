@@ -700,16 +700,18 @@ fn capture(origin: Instant, services: HostServices) -> RuntimeClock {
     capture_at(origin, SystemTime::now(), services)
 }
 fn capture_at(origin: Instant, wall: SystemTime, services: HostServices) -> RuntimeClock {
-    let wall_seconds = wall
-        .duration_since(UNIX_EPOCH)
+    let now_ms = origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let elapsed = wall.duration_since(UNIX_EPOCH).ok();
+    let wall_seconds = elapsed
         .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
         .unwrap_or(-1);
     let civil = (wall_seconds >= 0)
         .then(|| services.local_time(wall_seconds))
         .flatten();
     RuntimeClock {
-        now_ms: origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        now_ms,
         wall_seconds,
+        wall_subsecond_ms: elapsed.map_or(0, |duration| duration.subsec_millis() as u16),
         civil,
     }
 }

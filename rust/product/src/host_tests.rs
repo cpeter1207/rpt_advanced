@@ -37,6 +37,7 @@ fn clock() -> RuntimeClock {
     RuntimeClock {
         now_ms: 10,
         wall_seconds: 0,
+        wall_subsecond_ms: 0,
         civil: Some((
             rpt_advanced_core::schedule::CivilTime::new(
                 2030,
