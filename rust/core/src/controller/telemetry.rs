@@ -537,19 +537,16 @@ impl TelemetryPlanner {
             if self.status.is_none() {
                 self.status = self.pending.pop().ok();
             }
-            let obsolete = self.status.as_ref().is_some_and(|media| {
+            let Some(media) = self.status.as_mut().filter(|media| {
                 media.3.as_ref().is_some_and(|peer| peer.ended())
                     || media
                         .4
                         .as_ref()
                         .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
-            });
-            if !obsolete {
+            }) else {
                 break;
-            }
-            if let Some(media) = &mut self.status {
-                media.0.cancel();
-            }
+            };
+            media.0.cancel();
             if self.active == Some(Source::Status) {
                 self.active = None;
             }

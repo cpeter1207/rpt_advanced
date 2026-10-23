@@ -2506,11 +2506,13 @@ fn link_reconnect_keeps_bounded_admission_and_reclaims_cancelled_credit() {
     for connected in [false, true, false, true] {
         runtime.queue_link_event("1000", "2000", connected).unwrap();
     }
-    assert_eq!(
-        runtime.queue_link_event("1000", "2000", true),
-        Err(RuntimeError::Rejected),
-        "cancellation does not bypass the four-item ownership limit"
-    );
+    for connected in [false, true] {
+        assert_eq!(
+            runtime.queue_link_event("1000", "2000", connected),
+            Err(RuntimeError::Rejected),
+            "cancellation does not bypass the four-item ownership limit"
+        );
+    }
     let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
     let mut audio = vec![0.0; 12_032];
     tx.acquire()

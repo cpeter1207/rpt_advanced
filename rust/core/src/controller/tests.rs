@@ -573,9 +573,9 @@ fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
     let mut parrot = [0.0];
     let mut active = false;
     let mut replies = [PeerReplySample::default()];
-    let mut process = |node: &mut NodeController, replies: &mut [PeerReplySample; 1]| {
+    let mut process = |node: &mut NodeController, receiving, replies: &mut [PeerReplySample; 1]| {
         node.process_audio_with_parrot(
-            true,
+            receiving,
             false,
             false,
             &[],
@@ -588,11 +588,17 @@ fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
             },
         )
     };
-    assert!(!process(&mut node, &mut replies));
+    assert!(!process(&mut node, true, &mut replies));
     assert_eq!(replies[0].sample, 0.0);
     assert!(node.telemetry.active.is_none());
+    // An idle source admits its reply, but pending PCM must not address silence.
+    replies[0].target = signal.reply_identity();
+    assert!(!process(&mut node, false, &mut replies));
+    assert_eq!(replies[0].target, 0);
+    assert_eq!(replies[0].sample, 0.0);
+    assert!(node.telemetry.active == Some(telemetry::Source::Status));
     signal.end();
-    assert!(!process(&mut node, &mut replies));
+    assert!(!process(&mut node, false, &mut replies));
     assert!(node.telemetry.active.is_none());
     assert_eq!(control.reclaim().count(), 1);
 }
@@ -2555,6 +2561,42 @@ fn every_release_announcements_follow_hang_once_and_ids_satisfy_lower_priority()
     // The polite ID now waits through the traffic-release hang deadline; the
     // existing announcement remains due from the last transmitted sample.
     assert_eq!(&output[47..49], &[0.2, 0.1]);
+}
+
+#[test]
+fn release_announcement_does_not_key_from_idle_after_site_inhibit() {
+    let (mut node, control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![Announcement {
+            media: media(0.2, 1),
+            interval_ms: 0,
+        }],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(node.process_audio(true, false, &[], &mut [0.0]));
+    control.set_site_inhibit(true);
+    assert!(!node.process_audio(true, false, &[], &mut [0.0]));
+    let mut output = [0.0; 2];
+    assert!(!node.process_audio(false, false, &[], &mut output));
+    assert_eq!(output, [0.0; 2]);
+    assert!(node.announcements[0].release_pending);
+    assert!(
+        !node.release_pending,
+        "an inhibited release cannot key from idle"
+    );
+    control.set_site_inhibit(false);
+    let mut output = [0.0; 4];
+    assert!(!node.process_audio(false, false, &[], &mut output));
+    assert_eq!(output, [0.0; 4]);
+    assert!(node.process_audio(true, false, &[], &mut [0.0]));
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.2, 0.0, 0.0, 0.0]);
+    assert!(!node.announcements[0].release_pending);
 }
 
 #[test]

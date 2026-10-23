@@ -543,20 +543,17 @@ impl NodeController {
                 .telemetry
                 .peer_status()
                 .is_none_or(|peer| !peer.active());
-        if !status_idle
-            && self.telemetry.active == Some(Source::Status)
-            && self
-                .telemetry
-                .status
-                .as_ref()
-                .is_some_and(|media| !media.0.has_output())
+        let active_status = self.telemetry.active == Some(Source::Status);
+        if let Some(media) = self
+            .telemetry
+            .status
+            .as_mut()
+            .filter(|media| !status_idle && active_status && !media.0.has_output())
         {
-            if let Some(media) = &mut self.telemetry.status {
-                // Retain the message, but release its producer and playback slot.
-                // A new attempt after unkey must not block an identifier deadline.
-                media.0.restart(false);
-                media.0.defer(false);
-            }
+            // Retain the message, but release its producer and playback slot.
+            // A new attempt after unkey must not block an identifier deadline.
+            media.0.restart(false);
+            media.0.defer(false);
             self.telemetry.active = None;
         }
         let idle = self.now.saturating_sub(self.last_activity);

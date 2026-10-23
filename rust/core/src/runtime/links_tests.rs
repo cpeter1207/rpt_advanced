@@ -36,6 +36,13 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn ordinary_links_without_a_schedule_have_no_priority_group_status() {
+    let mut links = links();
+    links.accept("2000", true).unwrap();
+    assert!(links.priority_groups().is_empty());
+}
+
+#[test]
 fn read_only_selectors_reject_invalid_arguments_and_keep_the_exact_reply() {
     let mut host = NodeHost::new(generation(1));
     let mut links = links();
