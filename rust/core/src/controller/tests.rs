@@ -96,6 +96,10 @@ fn current_message_cancel_stops_every_preparation_phase_and_restores_repeat() {
             node.process_audio(true, false, &[], &mut [0.0]);
         }
         assert!(control.queue_prepared_status(media(0.5, 4)));
+        if stage == 0 {
+            // RF must key before its decoded cancel command reaches control.
+            node.process_audio(true, false, &[], &mut [0.2]);
+        }
         control.cancel_message();
         let mut output = [0.2; 8];
         AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));

@@ -68,6 +68,71 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros() {
+    for (media, expected) in [
+        ("message=Report\n", "Report"),
+        ("template=clock\n", "Report 9:07 AM"),
+    ] {
+        let source = format!(
+            "[1000]\n[template clock]\ntext=Report ${{time}}\n[macro attach]\naction=connect\ntarget_node=2000\n[event 1000 report]\nat=daily 09:07\n{media}macro=attach\ndtmf_id=7\n"
+        );
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&source).unwrap(),
+            &CapturingMedia(messages.clone()),
+            adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = tx.acquire().unwrap();
+        let controller = &mut generation.state().controller;
+        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+        assert!(
+            runtime.queue_message("1000", "7", None).is_ok(),
+            "legacy event selector must be registered: {media}"
+        );
+        controller.process_audio(false, false, &[], &mut [0.0]);
+        runtime.prepare_messages(clock());
+        let mut output = [0.0; 20_000];
+        controller.process_audio(false, false, &[], &mut output);
+        assert!(output.iter().all(|sample| *sample == 0.25));
+        assert_eq!(*messages.lock().unwrap(), [expected]);
+        assert!(
+            runtime
+                .node("1000")
+                .unwrap()
+                .links()
+                .manager()
+                .snapshot()
+                .is_empty(),
+            "manual media must not execute its action macro"
+        );
+        assert!(
+            runtime.next_event(clock()).unwrap().is_some(),
+            "manual media cannot consume the calendar occurrence"
+        );
+        drop(generation);
+        assert!(runtime.stop(0));
+        let collision = format!("{source}[message other]\ncontent=Other\ndtmf_id=7\n");
+        assert!(
+            Runtime::start(
+                ConfigDocument::parse(&collision).unwrap(),
+                &Media,
+                adapter,
+                |_, _| Ok(
+                    Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>
+                ),
+                clock()
+            )
+            .is_err(),
+            "legacy selectors must share collision validation"
+        );
+    }
+}
+
+#[test]
 fn manually_selected_message_does_not_renew_its_polite_wait_after_source_unkey() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
