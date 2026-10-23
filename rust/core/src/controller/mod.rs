@@ -450,6 +450,7 @@ impl NodeController {
             *sample = rf;
             self.now = self.now.saturating_add(1);
         }
+        self.activity.advance_clock(self.now);
         self.keyed
     }
 

@@ -309,6 +309,7 @@ pub struct StatusRejected {
 pub struct ActivitySnapshot {
     last_sample: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
+    current_sample: Arc<AtomicU64>,
 }
 
 impl ActivitySnapshot {
@@ -316,6 +317,7 @@ impl ActivitySnapshot {
         Self {
             last_sample: Arc::new(AtomicU64::new(0)),
             active: Arc::new(AtomicBool::new(false)),
+            current_sample: Arc::new(AtomicU64::new(0)),
         }
     }
     pub(super) fn publish(&self, sample: u64) {
@@ -324,6 +326,14 @@ impl ActivitySnapshot {
     }
     pub(super) fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Release);
+    }
+    /// Publish once per completed callback, independently of receive activity.
+    pub(super) fn advance_clock(&self, sample: u64) {
+        self.current_sample.store(sample, Ordering::Release);
+    }
+    /// Conservative command-admission time at the last completed native callback.
+    pub(crate) fn current_sample(&self) -> u64 {
+        self.current_sample.load(Ordering::Acquire)
     }
     /// Last local or linked receive sample since startup; telemetry never updates it.
     #[must_use]

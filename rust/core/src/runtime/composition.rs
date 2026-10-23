@@ -261,9 +261,17 @@ pub(super) struct SiteReport {
 
 impl MessageRecipe {
     /// Only configured compositions select their own audience; site replies retain their origin.
-    pub fn playback(&self) -> Option<crate::controller::PlaybackPolicy> {
+    pub fn playback(
+        &self,
+    ) -> Option<(
+        crate::controller::PlaybackPolicy,
+        crate::controller::PoliteDelivery,
+    )> {
         match self {
-            Self::Composition(recipe) => Some(recipe.settings_for(None).playback),
+            Self::Composition(recipe) => {
+                let settings = recipe.settings_for(None);
+                Some((settings.playback, settings.delivery))
+            }
             Self::Site(_) => None,
         }
     }

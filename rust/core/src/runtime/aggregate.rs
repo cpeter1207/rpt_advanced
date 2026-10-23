@@ -1274,8 +1274,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .prepare_message(index)
             .map_err(|_| RuntimeError::Preparation)?
             .reply_to(reply);
-        if let Some(policy) = node.control.messages.items[index].playback() {
-            prepared = prepared.with_playback_policy(policy);
+        if let Some((policy, delivery)) = node.control.messages.items[index].playback() {
+            let deadline = node
+                .control
+                .activity
+                .current_sample()
+                .saturating_add(delivery.maximum_wait_ms.saturating_mul(48));
+            prepared = prepared
+                .with_playback_policy(policy)
+                .with_delivery(deadline, delivery);
         }
         // Only this serialized producer can consume the capacity admitted above.
         assert!(node.control.telemetry.queue_prepared_status(prepared));

@@ -90,8 +90,8 @@ fn manually_selected_message_does_not_renew_its_polite_wait_after_source_unkey()
     runtime.prepare_messages(clock());
     let mut output = [0.0; 20_000];
     controller.process_audio(false, false, &[], &mut output);
-    assert_eq!(
-        output, [0.0; 20_000],
+    assert!(
+        output.iter().all(|sample| *sample == 0.0),
         "expired manual content must not play after source unkey"
     );
     assert!(messages.lock().unwrap().is_empty());
