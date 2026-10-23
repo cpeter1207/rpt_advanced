@@ -1386,7 +1386,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
     }
     let overridden = ResolvedNodeSettings::resolve(
         &ConfigDocument::parse(&format!(
-            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=78\n"
+            "[general]\ndtmf_admin_unlock_hash={hash}\ndtmf_admin_lock_hash={hash}\n[1000]\ndtmf_admin_timeout_ms=1234\nlink_command_parrot_enable=79\n"
         ))
         .unwrap(),
         &node,
@@ -1400,7 +1400,7 @@ fn parrot_dtmf_commands_and_admin_credentials_inherit_per_node() {
             .unwrap()
             .mappings()
             .iter()
-            .any(|mapping| mapping.digits == "78")
+            .any(|mapping| mapping.digits == "79")
     );
 }
 

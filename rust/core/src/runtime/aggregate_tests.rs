@@ -71,7 +71,7 @@ struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 fn manually_selected_message_does_not_renew_its_polite_wait_after_source_unkey() {
     let messages = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = Runtime::start(
-        ConfigDocument::parse("[1000]\n[message report]\nspeech_text=Report\nmorse_text=E\ndtmf_id=1\npolite_maximum_wait_ms=20\npolite_expiry=skip\n").unwrap(),
+        ConfigDocument::parse("[1000]\n[message report]\ncontent={media}\nspeech_text=Report\nmorse_text=E\ndtmf_id=1\npolite_maximum_wait_ms=20\npolite_expiry=skip\n").unwrap(),
         &CapturingMedia(messages.clone()), adapter,
         |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>), clock(),
     ).unwrap();
