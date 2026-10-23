@@ -68,6 +68,48 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn manual_identifier_and_tail_success_satisfy_their_automatic_opportunity() {
+    for (family, timing) in [
+        ("identifier", "regardless_of_activity=yes\n"),
+        ("tail", "delay_ms=0\n"),
+    ] {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&format!(
+                "[1000]\nduplex=full\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n[{family} 1000 report]\ninterval_ms=1000\n{timing}speech_text=Report\nmorse_text=E\ndtmf_id=1\n"
+            )).unwrap(),
+            &CapturingMedia(messages.clone()), adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        ).unwrap();
+        let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        let mut generation = tx.acquire().unwrap();
+        let controller = &mut generation.state().controller;
+        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+        runtime.queue_message("1000", "1", None).unwrap();
+        controller.process_audio(false, false, &[], &mut [0.0]);
+        runtime.prepare_messages(clock());
+        let mut played = [0.0; 20_000];
+        controller.process_audio(false, false, &[], &mut played);
+        assert_eq!(played, [0.25; 20_000]);
+        if family == "tail" {
+            controller.process_audio(true, false, &[], &mut [0.0]);
+            controller.process_audio(false, false, &[], &mut [0.0; 12_001]);
+        } else {
+            controller.process_audio(false, false, &[], &mut [0.0; 21_000]);
+        }
+        runtime.prepare_messages(clock());
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            1,
+            "manual {family} must not immediately play again automatically"
+        );
+        drop(generation);
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
 fn site_manual_command_publishes_inhibit_without_waiting_for_poll() {
     let mut runtime = Runtime::start(
         ConfigDocument::parse("[1000]\nduplex=full\n").unwrap(),
