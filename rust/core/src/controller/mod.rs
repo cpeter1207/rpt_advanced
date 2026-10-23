@@ -623,7 +623,11 @@ impl NodeController {
         parrot_output: Option<ProgramSample<'_>>,
     ) -> f32 {
         if self.telemetry.cancel_message.swap(false, Ordering::AcqRel) {
-            let source = self.telemetry.active.take();
+            let source = self
+                .telemetry
+                .active
+                .take()
+                .or(self.telemetry.held_status.then_some(Source::Status));
             if let Some(media) = self.media(source) {
                 media.0.cancel();
                 self.complete_playback(source, PlaybackOutcome::Cancelled);
@@ -646,6 +650,7 @@ impl NodeController {
             media.0.restart(false);
             media.0.defer(false);
             self.telemetry.active = None;
+            self.telemetry.held_status = true;
         }
         let idle = self.now.saturating_sub(self.last_activity);
         if receive {

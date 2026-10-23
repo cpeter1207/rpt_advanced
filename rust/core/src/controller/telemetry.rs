@@ -650,6 +650,8 @@ pub(super) struct TelemetryPlanner {
     pub cancel_message: Arc<AtomicBool>,
     pub active: Option<Source>,
     pub status: Option<PreparedMedia>,
+    /// An admitted opening attempt temporarily released its slot for receive activity.
+    pub held_status: bool,
     pending: Consumer<PreparedMedia>,
     completed: Producer<PreparedMedia>,
     parrot_pending: Consumer<PreparedMedia>,
@@ -676,6 +678,7 @@ impl TelemetryPlanner {
                 cancel_message: cancel_message.clone(),
                 active: None,
                 status: None,
+                held_status: false,
                 pending,
                 completed,
                 parrot_pending: parrot_consumer,
@@ -796,8 +799,10 @@ impl TelemetryPlanner {
     pub fn start_status(&mut self) {
         self.poll_status();
         self.active = self.status.as_ref().map(|_| Source::Status);
+        self.held_status = false;
     }
     pub fn finish_status(&mut self) {
+        self.held_status = false;
         self.status.take().into_iter().for_each(|media| {
             // Admission permits at most four statuses across pending, active and completed.
             // Owning this status proves the four-slot completed queue has room.
