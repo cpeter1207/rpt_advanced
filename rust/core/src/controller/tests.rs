@@ -71,6 +71,78 @@ fn replaced_occurrence_cannot_publish_a_first_sample_when_control_wins_during_re
 }
 
 #[test]
+fn scheduled_zero_wait_allows_only_an_immediately_eligible_first_sample() {
+    for (local, linked, activity, count) in [
+        (false, false, false, 4),
+        (true, false, true, 0),
+        (false, true, true, 0),
+        (false, false, true, 0),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        assert!(control.queue_prepared_status(media(0.75, 4).with_delivery(
+            node.now,
+            PoliteDelivery {
+                maximum_wait_ms: 0,
+                ..Default::default()
+            }
+        )));
+        let mut output = [0.0; 8];
+        node.process_audio_outputs(local, linked, activity, &[], &mut output, None);
+        assert_eq!(
+            output.iter().filter(|sample| **sample == 0.75).count(),
+            count,
+            "source activity={local}/{linked}/{activity}"
+        );
+        assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
+#[test]
+fn scheduled_zero_wait_does_not_extend_through_async_preparation() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    let mut preparations = MessagePreparation::new(1);
+    let prepared = preparations.register(0).unwrap().with_delivery(
+        node.now,
+        PoliteDelivery {
+            maximum_wait_ms: 0,
+            ..Default::default()
+        },
+    );
+    control.set_message_preparation(preparations);
+    assert!(control.queue_prepared_status(prepared));
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let request = control
+        .take_message_request()
+        .expect("the immediate slot permits one preparation attempt");
+    assert!(
+        control
+            .complete_message(request.attempt, Ok(media(0.75, 4)))
+            .is_ok()
+    );
+    let mut output = [0.0; 4];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.0; 4], "late ready PCM cannot renew a zero wait");
+    assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
 fn scheduled_morse_expiry_selects_the_complete_fallback_even_after_receive_deferral() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings {
