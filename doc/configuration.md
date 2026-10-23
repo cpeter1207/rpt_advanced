@@ -76,7 +76,7 @@ clears an inherited value.
 | `ctcss_hang_ms` | 0 | Keep transmit CTCSS on this many milliseconds after qualifying activity ends. It cannot exceed `transmit_hang_ms`. |
 | `transmit_timeout_ms` | 180000 | Maximum time PTT may stay keyed without a local receiver or direct link unkey, in milliseconds. Each unkey restarts the timer. On timeout, PTT releases until that source unkeys and the lockout ends. Zero disables the timeout. |
 | `timeout_lockout_ms` | 30000 | Post-watchdog lockout in milliseconds. Zero permits recovery as soon as the timed-out source unkeys. |
-| `kerchunk_max_ms` | 500 | Maximum local-receiver or individual-link transmission duration treated as a kerchunk. A kerchunk does not queue its courtesy tone or every-release announcement. Zero disables kerchunk control. |
+| `kerchunk_max_ms` | 500 | Maximum local-receiver or individual-link transmission duration treated as a kerchunk. A kerchunk has no hang time, courtesy tone, or every-release announcement. If it is the last input to unkey, any waiting courtesy tone is cancelled. Other active audio, playing telemetry, and due IDs may still keep PTT keyed. Zero disables kerchunk control. |
 | `telemetry_duck_db` | -20 | Lower ID, announcement, courtesy, and RF message audio during local or linked receive; -60 to 0 dB. Zero leaves the level unchanged. |
 | `courtesy_delay_ms` | 250 | Wait this many milliseconds after unkey before a courtesy tone. A source that rekeys during its wait cancels its tone. PTT stays keyed until the tone ends. |
 | `radio_channel` | node section name | USBRadioPlus channel identifier without `RadioPlus/`. |
@@ -270,8 +270,11 @@ silent. `remote_node` cannot be used with `input = receiver`.
 When a source rekeys before its courtesy delay expires, only that source's
 pending courtesy tone is cancelled: a local-receiver rekey does not cancel a
 link tone, and a rekey from one peer does not cancel a pending tone from
-another peer. A tone that has already begun uses the normal receive-active
-telemetry ducking behavior.
+another peer. When sources overlap, only the last source to unkey selects the
+waiting tone. The delay starts at that unkey. If that source has no tone, no
+earlier tone plays instead. A final kerchunk cancels any waiting tone.
+A tone that has already begun uses the normal receive-active telemetry
+ducking behavior.
 
 | Option | Applies to | Default | Meaning |
 | --- | --- | --- | --- |
@@ -566,10 +569,12 @@ connected independently. Only the highest-priority reachable member is
 transceive; all other group members are receive-only and their audio is not
 forwarded. A recovered higher-priority member takes over once local and linked
 inputs are idle; the former winner then becomes receive-only. Retries continue
-silently. The group is announced only when a member is first selected or when
-all members become unavailable—not for retries, standby connections, or later
-winner changes. A one-member list is valid and behaves as an ordinary permanent
-link.
+silently. The first active member is announced as connected. If all members
+become unavailable, one notice plays for that outage. Retries do not repeat it.
+Once a member is reachable again, a later outage can produce a new notice.
+Only the current scheduled route produces these messages; inactive schedules
+for the same node stay silent. Standby connections and later winner changes
+are silent. A one-member list is valid and behaves as an ordinary permanent link.
 
 `[schedule node label]` temporarily replaces one same-node configured
 permanent peer with another direct peer during a bounded local-time window. It
@@ -709,12 +714,19 @@ that become due during local reception wait until reception ends.
 
 Status, last-keyed, and full-status replies use the node's speech settings and
 Morse fallback. A local command replies on local RF. A command from a linked
-peer replies only to that peer. Local replies wait 250 ms after receiver unkey
-and wait longer if half duplex prevents transmission.
+peer replies only to that peer. Replies wait until all local and linked
+receive activity ends. Local RF replies also wait at least 250 ms after local
+receiver unkey.
+There is no maximum wait for status or link messages. If a new transmission
+starts after a spoken or file message begins, the message switches to Morse.
+Timed IDs keep their own wait rules.
 
 Link lifecycle telemetry names only the remote endpoint when this node is a
 link endpoint, such as `123 CONNECTED`. For an event between two other nodes,
 it says `node 1 CONNECTED TO node 2` or `node 1 DISCONNECTED FROM node 2`.
+If a peer reconnects before its disconnect message starts, that message is
+skipped and the connect message remains. A reconnect also stops a disconnect
+message already playing.
 
 When its status reply is queued, full status writes a best-effort
 app_rpt-style route list to the Asterisk operator log. The administrative
