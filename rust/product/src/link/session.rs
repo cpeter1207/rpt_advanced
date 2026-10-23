@@ -257,6 +257,7 @@ pub struct PeerSession {
     pending_pcm: [f32; MAX_PEER_INPUT_SAMPLES],
     peer: Peer,
     local: String,
+    remote: String,
     commands: Consumer<Command>,
     events: Producer<Event>,
     stop: Arc<AtomicBool>,
@@ -328,14 +329,15 @@ unsafe extern "C" fn retained_step(context: *mut c_void) -> i32 {
         return -1;
     };
     let Some(epoch) = session.async_epoch else {
-        session.stop();
+        session.fail("owner without a registered epoch", Error::Thread);
         return -1;
     };
     let now_ms = epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     match catch_unwind(AssertUnwindSafe(|| session.step(now_ms))) {
         Ok(Ok(())) => 0,
-        _ => {
-            session.stop();
+        Ok(Err(_)) => -1,
+        Err(_) => {
+            session.fail("owner panic", Error::Thread);
             -1
         }
     }
@@ -377,7 +379,7 @@ impl PeerIoWorker {
                             sessions.push(session);
                         } else {
                             // Only this new admission ends; existing owners keep running.
-                            session.stop();
+                            session.fail("owner admission allocation", Error::Allocation);
                         }
                     }
                     if worker_stop.load(Ordering::Acquire) {
@@ -545,6 +547,7 @@ impl PeerSession {
                 pending_pcm: [0.0; MAX_PEER_INPUT_SAMPLES],
                 peer,
                 local: local.into(),
+                remote: remote.into(),
                 commands: incoming,
                 events,
                 stop,
@@ -653,7 +656,7 @@ impl PeerSession {
         }
         Ok(())
     }
-    /// Execute one bounded peer iteration; any fatal error publishes EOF immediately.
+    /// Execute one bounded iteration; report its first unexpected failure and publish EOF.
     pub fn step(&mut self, now_ms: u64) -> Result<(), Error> {
         #[cfg(test)]
         {
@@ -668,9 +671,8 @@ impl PeerSession {
                 self.peer_observation.store(observation);
             }
         }
-        if result.is_err() {
-            self.inbound.signals().end();
-            self.stop.store(true, Ordering::Release);
+        if let Err(error) = result {
+            self.fail("peer I/O", error);
         }
         result
     }
@@ -828,6 +830,37 @@ impl PeerSession {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
         self.inbound.signals().end();
+    }
+
+    /// Record only the first unexpected termination; requested stops already own the flag.
+    fn fail(&self, cause: &str, error: Error) {
+        let first = !self.stop.swap(true, Ordering::AcqRel);
+        self.inbound.signals().end();
+        if first {
+            let message = format!(
+                "rpt_advanced {} peer {}: unexpected termination during {cause}: {error:?}",
+                self.local, self.remote
+            );
+            #[cfg(test)]
+            crate::fixture::error_log(3, &message);
+            #[cfg(not(test))]
+            if let Ok(message) = CString::new(message) {
+                unsafe extern "C" {
+                    fn syslog(priority: std::ffi::c_int, format: *const std::ffi::c_char, ...);
+                }
+                // SAFETY: the constant format receives one live NUL-terminated string.
+                // Priority 3 is LOG_ERR, matching existing product syslog reporting.
+                unsafe {
+                    syslog(3, c"%s".as_ptr(), message.as_ptr());
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PeerSession {
+    fn drop(&mut self) {
+        self.fail("owner release without a stop request", Error::Thread);
     }
 }
 

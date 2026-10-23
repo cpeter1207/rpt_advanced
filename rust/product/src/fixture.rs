@@ -17,6 +17,12 @@ thread_local! { static FAIL_BYTES: Cell<usize> = const { Cell::new(0) }; }
 thread_local! {
     pub(crate) static ERROR_LOGS: std::cell::RefCell<Vec<(i32, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+
+/// Capture product error reporting on its caller thread without invoking system logging.
+pub(crate) fn error_log(priority: i32, message: &str) {
+    ERROR_LOGS.with_borrow_mut(|logs| logs.push((priority, message.to_owned())));
+}
+
 struct Allocator;
 
 fn reject(bytes: usize) -> bool {
