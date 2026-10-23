@@ -246,3 +246,17 @@ fn disabled_remote_command_does_not_claim_an_unrelated_destination() {
     }
     assert_eq!(collector.feed('#', 2).as_deref(), Some("32000"));
 }
+#[test]
+fn standard_map_accepts_argument_free_current_message_cancellation() {
+    let map = DtmfCommandMap::standard();
+    let command = map
+        .parse("78")
+        .expect("public local cancellation is recognized");
+    assert!(command.node.is_empty());
+    let mut collector = map.collector();
+    let mut complete = None;
+    for digit in "*78".chars() {
+        complete = collector.feed(digit, 0).or(complete);
+    }
+    assert_eq!(complete.as_deref(), Some("78"));
+}

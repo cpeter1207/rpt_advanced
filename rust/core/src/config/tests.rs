@@ -9,6 +9,25 @@ use super::{
 use std::collections::BTreeMap;
 
 #[test]
+fn event_composition_conflicts_warn_and_choose_the_shared_composition() {
+    let document = ConfigDocument::parse(
+        "[1000]\n[event 1000 report]\nat=daily 12:00\nmessage=Legacy\ncontent=Current\n",
+    )
+    .unwrap();
+    let result = Schema::validate(&document).unwrap();
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.section == "event 1000 report")
+    );
+    let event = ResolvedEventSettings::resolve(&document, &NodeId::new("1000").unwrap(), "report")
+        .unwrap()
+        .value;
+    assert_eq!(event.composed.unwrap().content, "Current");
+}
+
+#[test]
 fn message_playback_controls_are_accepted_on_each_selectable_source() {
     for (section, content) in [
         ("message report", "content=Ready"),
