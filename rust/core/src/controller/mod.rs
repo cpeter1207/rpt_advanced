@@ -621,6 +621,13 @@ impl NodeController {
         link_sample: f32,
         parrot_output: Option<ProgramSample<'_>>,
     ) -> f32 {
+        if self.telemetry.cancel_message.swap(false, Ordering::AcqRel) {
+            let source = self.telemetry.active.take();
+            if let Some(media) = self.media(source) {
+                media.0.cancel();
+                self.complete_playback(source, PlaybackOutcome::Cancelled);
+            }
+        }
         self.telemetry.poll_status();
         let receive = receiving || linked;
         let status_idle = !receive

@@ -340,6 +340,7 @@ impl ActivitySnapshot {
 /// Sole status producer and completed-media reclaimer; retain until audio stops.
 pub struct ControllerControl {
     site_inhibit: Arc<AtomicBool>,
+    cancel_message: Arc<AtomicBool>,
     messages: Option<super::MessagePreparation>,
     pending: Producer<PreparedMedia>,
     completed: Consumer<PreparedMedia>,
@@ -360,7 +361,9 @@ pub struct ControllerControl {
 
 impl ControllerControl {
     /// Request cancellation of the active attempt without reclaiming media on audio.
-    pub fn cancel_message(&self) {}
+    pub fn cancel_message(&self) {
+        self.cancel_message.store(true, Ordering::Release);
+    }
 
     /// Set station protection independently of telemetry admission and physical interlocks.
     pub fn set_site_inhibit(&self, inhibited: bool) {
@@ -634,6 +637,7 @@ pub(super) enum Source {
 
 pub(super) struct TelemetryPlanner {
     pub site_inhibit: Arc<AtomicBool>,
+    pub cancel_message: Arc<AtomicBool>,
     pub active: Option<Source>,
     pub status: Option<PreparedMedia>,
     pending: Consumer<PreparedMedia>,
@@ -655,9 +659,11 @@ impl TelemetryPlanner {
         let (parrot_completed, parrot_reclaimer) = RingBuffer::new(1);
         let parrot_busy = Arc::new(AtomicBool::new(false));
         let site_inhibit = Arc::new(AtomicBool::new(false));
+        let cancel_message = Arc::new(AtomicBool::new(false));
         (
             Self {
                 site_inhibit: site_inhibit.clone(),
+                cancel_message: cancel_message.clone(),
                 active: None,
                 status: None,
                 pending,
@@ -670,6 +676,7 @@ impl TelemetryPlanner {
             },
             ControllerControl {
                 site_inhibit,
+                cancel_message,
                 messages: None,
                 pending: producer,
                 completed: consumer,
