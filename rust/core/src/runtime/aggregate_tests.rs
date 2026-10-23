@@ -136,6 +136,17 @@ fn manual_identifier_and_tail_success_satisfy_their_automatic_opportunity() {
             1,
             "manual {family} must not immediately play again automatically"
         );
+        controller.process_audio(false, false, &[], &mut [0.0; 60_000]);
+        if family == "tail" {
+            controller.process_audio(true, false, &[], &mut [0.0]);
+            controller.process_audio(false, false, &[], &mut [0.0]);
+        }
+        runtime.prepare_messages(clock());
+        assert_eq!(
+            messages.lock().unwrap().len(),
+            2,
+            "{family} becomes eligible after its normal interval"
+        );
         drop(generation);
         assert!(runtime.stop(0));
     }
