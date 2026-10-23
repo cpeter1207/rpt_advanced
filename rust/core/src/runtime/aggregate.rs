@@ -943,7 +943,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
     ) -> Result<Option<RuntimeDispatch>, RuntimeError> {
         let (civil, second) = clock
             .civil
-            .filter(|(_, second)| *second < 60)
+            .filter(|(_, second)| *second < 60 && clock.wall_subsecond_ms < 1000)
             .ok_or(RuntimeError::Clock)?;
         let events = &self.events;
         let nodes = &self.nodes;
@@ -953,7 +953,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let token = scheduler
             .next(
                 clock.wall_seconds,
-                i128::from(clock.now_ms) - i128::from(second) * 1000,
+                i128::from(clock.now_ms)
+                    - i128::from(second) * 1000
+                    - i128::from(clock.wall_subsecond_ms),
                 civil,
                 |spec, civil| {
                     let event = events
