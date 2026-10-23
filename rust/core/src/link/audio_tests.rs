@@ -68,6 +68,47 @@ fn regeneration_replaces_rf_not_peer_program_or_parrot_capture() {
 }
 
 #[test]
+fn configured_message_broadcast_obeys_destination_and_peer_mode() {
+    use crate::controller::{MorseSettings, PlaybackDestination, PlaybackPolicy, PreparedMedia};
+    for (destination, mode, expected) in [
+        (PlaybackDestination::Local, Mode::TRANSCEIVE, false),
+        (PlaybackDestination::LocalAndLinks, Mode::TRANSCEIVE, true),
+        (PlaybackDestination::LocalAndLinks, Mode::MONITOR, false),
+    ] {
+        let (mut peer, _, mut output) = peer_with_kerchunk("200", 4, 0);
+        peer.mode = mode;
+        let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+        let (mut controller, mut control) = NodeController::new(
+            ControllerSettings::default(),
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+        assert!(
+            control.queue_prepared_status(
+                PreparedMedia::new(Some(vec![0.25; 4]), "E", MorseSettings::default())
+                    .unwrap()
+                    .with_playback_policy(PlaybackPolicy {
+                        destination,
+                        ..Default::default()
+                    })
+            )
+        );
+        let mut rf = [0.0; 4];
+        links
+            .process(&mut controller, false, &mut rf, SourcePosition::default())
+            .unwrap();
+        assert_eq!(rf, [0.25; 4]);
+        dispatcher.dispatch(1);
+        let mut remote = [0.0; 4];
+        assert_eq!(output.read_span(&mut remote).is_some(), expected);
+        assert_eq!(remote, if expected { [0.25; 4] } else { [0.0; 4] });
+    }
+}
+
+#[test]
 fn egress_dispatch_notifies_receive_only_activity_without_echoing_pcm() {
     let (mut peer, signals, mut output) = peer_with_kerchunk("200", 960, 0);
     peer.mode = Mode::MONITOR;

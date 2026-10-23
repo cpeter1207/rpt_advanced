@@ -37,6 +37,75 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn configured_message_suppresses_repeat_but_still_switches_to_morse_on_receive() {
+    for (local, linked, input, remote) in [
+        (true, false, 0.2, 0.0),
+        (false, true, 0.0, 0.3),
+        (true, true, 0.2, 0.3),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                telemetry_duck_db: 0,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        assert!(
+            control.queue_prepared_status(media(0.75, 48).with_playback_policy(PlaybackPolicy {
+                repeat_during_playback: false,
+                ..Default::default()
+            }))
+        );
+        let mut first = [0.0];
+        node.process_audio(false, false, &[], &mut first);
+        assert_eq!(first, [0.75]);
+        let mut output = [input; 96];
+        node.process_audio(local, linked, &[remote; 96], &mut output);
+        assert_eq!(output[0], 0.0, "repeat must stop at the Morse transition");
+        assert!(output.iter().any(|sample| *sample != 0.0));
+        assert!(output.iter().all(|sample| sample.abs() <= 0.502));
+    }
+}
+
+#[test]
+fn configured_message_survives_traffic_lockout_without_leaking_timed_out_receive() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: 0,
+            transmit_timeout_ms: 1,
+            timeout_lockout_ms: 100,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(
+        control
+            .queue_prepared_status(media(0.75, 8).with_playback_policy(PlaybackPolicy::default()))
+    );
+    node.process_audio(false, false, &[], &mut [0.0]);
+    let mut output = [0.25; 4800];
+    assert!(node.process_audio(true, false, &[0.25; 4800], &mut output));
+    assert!(
+        output[96..].iter().any(|sample| *sample != 0.0),
+        "Morse remains audible after traffic timeout"
+    );
+    assert!(
+        output[96..].iter().all(|sample| sample.abs() <= 0.502),
+        "timed-out receiver must not ride message PTT"
+    );
+}
+
+#[test]
 fn replaced_occurrence_cannot_publish_a_first_sample_when_control_wins_during_render() {
     struct CancelOnRender(Arc<MessageOccurrence>);
     impl crate::audio::PcmStreamReader for CancelOnRender {

@@ -115,6 +115,7 @@ pub struct PreparedMedia(
     pub(super) Option<Arc<AtomicBool>>,
     pub(super) Option<(u64, PoliteDelivery, bool)>,
     pub(super) Option<Arc<MessageOccurrence>>,
+    pub(super) Option<PlaybackPolicy>,
 );
 
 /// One occurrence's race-free transition: pending (0), audible (1), or cancelled (2).
@@ -158,6 +159,7 @@ impl PreparedMedia {
             None,
             None,
             None,
+            None,
         ))
     }
 
@@ -176,6 +178,12 @@ impl PreparedMedia {
     /// Retain the occurrence's original start deadline in this controller's sample epoch.
     pub fn with_delivery(mut self, deadline_sample: u64, policy: PoliteDelivery) -> Self {
         self.5 = Some((deadline_sample, policy, false));
+        self
+    }
+
+    /// Retain a configured message's audience and repeat policy for its entire attempt.
+    pub fn with_playback_policy(mut self, policy: PlaybackPolicy) -> Self {
+        self.7 = Some(policy);
         self
     }
 
@@ -231,6 +239,7 @@ impl PreparedMedia {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -275,6 +284,7 @@ impl PreparedMedia {
             })),
             available,
             MediaKind::Status,
+            None,
             None,
             None,
             None,
