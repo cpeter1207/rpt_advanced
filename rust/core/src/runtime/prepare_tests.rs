@@ -251,6 +251,41 @@ fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
 }
 
 #[test]
+fn tails_allow_file_or_speech_without_relaxing_identifier_morse_requirements() {
+    for source in ["sound_file=tail.wav", "speech_text=Tail message"] {
+        let config = ConfigDocument::parse(&format!(
+            "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n\
+             [identifier 1000 recorded]\n{source}\n\
+             [tail 1000 recorded]\n{source}\n"
+        ))
+        .unwrap();
+        let node = NodeId::new("1000").unwrap();
+        let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+        let media = media(false, false);
+        let (mut controller, mut control, _, _station, recipes) = controller(
+            &config,
+            &node,
+            &resolved,
+            &media,
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        )
+        .unwrap();
+        let disabled: Vec<_> = recipes
+            .warnings
+            .iter()
+            .filter(|warning| warning.fallback == "definition disabled")
+            .map(|warning| warning.section.as_str())
+            .collect();
+        assert_eq!(disabled, ["identifier 1000 recorded"], "{source}");
+        controller.process_audio(true, false, &[], &mut [0.0; 48]);
+        controller.process_audio(false, false, &[], &mut [0.0; 48]);
+        controller.process_audio(false, false, &[], &mut [0.0; 48]);
+        assert!(control.take_message_request().is_some(), "{source}");
+    }
+}
+
+#[test]
 fn status_speech_and_morse_are_registered_as_one_producer_owned_chain() {
     let media = media(false, false);
     streamed_status(
