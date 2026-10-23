@@ -68,6 +68,38 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn manually_selected_message_does_not_renew_its_polite_wait_after_source_unkey() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[message report]\nspeech_text=Report\nmorse_text=E\ndtmf_id=1\npolite_maximum_wait_ms=20\npolite_expiry=skip\n").unwrap(),
+        &CapturingMedia(messages.clone()), adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>), clock(),
+    ).unwrap();
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = tx.acquire().unwrap();
+    let controller = &mut generation.state().controller;
+    controller.process_audio(false, false, &[], &mut [0.0; 12_000]);
+    let peer = crate::link::PeerSignals::new();
+    peer.set_radio_keyed(true);
+    runtime
+        .queue_message("1000", "1", Some(peer.reply_target()))
+        .unwrap();
+    controller.process_audio(false, false, &[], &mut [0.0; 1920]);
+    peer.set_radio_keyed(false);
+    controller.process_audio(false, false, &[], &mut [0.0]);
+    runtime.prepare_messages(clock());
+    let mut output = [0.0; 20_000];
+    controller.process_audio(false, false, &[], &mut output);
+    assert_eq!(
+        output, [0.0; 20_000],
+        "expired manual content must not play after source unkey"
+    );
+    assert!(messages.lock().unwrap().is_empty());
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn manual_identifier_and_tail_success_satisfy_their_automatic_opportunity() {
     for (family, timing) in [
         ("identifier", "regardless_of_activity=yes\n"),
