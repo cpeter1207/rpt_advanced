@@ -594,6 +594,7 @@ impl NodeController {
         }
         if self.suppress_release && !receive && (self.receiver || self.linked) {
             // Clear only the final suppressed release, not other ongoing traffic's opportunity.
+            let _ = self.courtesy.pop();
             for announcement in &mut self.announcements {
                 if announcement.announcement.interval_ms == 0 {
                     announcement.release_pending = false;

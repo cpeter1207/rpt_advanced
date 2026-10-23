@@ -2272,6 +2272,53 @@ fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
 }
 
 #[test]
+fn final_kerchunk_discards_an_overlapping_sources_waiting_courtesy() {
+    for local_last in [false, true] {
+        let (mut node, _) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                hang_ms: 10,
+                kerchunk_max_ms: 1,
+                courtesy_delay_ms: 1,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings {
+                receiver: Some(media(0.1, 4)),
+                link: Some(media(0.2, 4)),
+                ..CourtesySettings::default()
+            },
+        )
+        .unwrap();
+        if local_last {
+            node.link_keyed("peer");
+            node.process_audio(false, true, &[], &mut [0.0; 96]);
+            node.process_audio(true, true, &[], &mut [0.0]);
+            node.link_unkeyed("peer", "", false);
+            node.process_audio(true, false, &[], &mut [0.0]);
+        } else {
+            node.process_audio(true, false, &[], &mut [0.0; 96]);
+            node.link_keyed("peer");
+            node.process_audio(true, true, &[], &mut [0.0]);
+            node.process_audio(false, true, &[], &mut [0.0]);
+            node.link_unkeyed("peer", "", true);
+        }
+        assert!(
+            node.courtesy.pending(),
+            "earlier release has a waiting tone"
+        );
+        assert!(
+            !node.process_event(false, false),
+            "final kerchunk must release PTT: local_last={local_last}"
+        );
+        let mut output = [0.0; 960];
+        assert!(!node.process_audio(false, false, &[], &mut output));
+        assert_eq!(output, [0.0; 960]);
+    }
+}
+
+#[test]
 fn kerchunk_does_not_interrupt_other_traffic_or_its_normal_release() {
     let (mut node, _) = NodeController::new(
         ControllerSettings {
