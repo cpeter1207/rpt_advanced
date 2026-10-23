@@ -186,11 +186,20 @@ impl PreparedMedia {
     }
 
     /// Select expiry once; opening streams and later deferrals never renew its budget.
-    fn expire(&mut self, now: u64, allowed: bool, busy: bool) {
+    fn expire(&mut self, now: u64, allowed: bool, busy: bool, primary_ready: bool) {
         let Some((deadline, policy, selected)) = &mut self.5 else {
             return;
         };
-        if self.0.has_output() || self.0.is_finished() || *selected || now < *deadline {
+        if self.0.has_output()
+            || self.0.is_finished()
+            || *selected
+            || now < *deadline
+            || (policy.maximum_wait_ms == 0
+                && now == *deadline
+                && allowed
+                && !busy
+                && primary_ready)
+        {
             return;
         }
         if policy.expiry == PoliteExpiry::Skip
@@ -667,10 +676,10 @@ impl TelemetryPlanner {
         self.status.is_some() || !self.pending.is_empty()
     }
     /// Observe every bounded pending deadline without removing or dropping queue ownership.
-    pub fn expire_status(&mut self, now: u64, allowed: bool, occupied: bool) {
+    pub fn expire_status(&mut self, now: u64, allowed: bool, occupied: bool, primary_ready: bool) {
         let occupied = occupied || self.active.is_some_and(|source| source != Source::Status);
         if let Some(media) = &mut self.status {
-            media.expire(now, allowed, occupied);
+            media.expire(now, allowed, occupied, primary_ready);
         }
         let mut blocked = occupied
             || self
@@ -684,7 +693,7 @@ impl TelemetryPlanner {
             .expect("sole consumer retains its readable slots");
         let (first, second) = chunk.as_mut_slices();
         for media in first.iter_mut().chain(second) {
-            media.expire(now, allowed, blocked);
+            media.expire(now, allowed, blocked, primary_ready);
             blocked |= !media.0.is_finished();
         }
         // No commit: cancelled envelopes remain owned until normal control-side retirement.

@@ -612,8 +612,12 @@ impl NodeController {
         let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
         let may_transmit = !inhibited && (self.settings.full_duplex || !receiving);
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
-        self.telemetry
-            .expire_status(self.now, may_transmit, courtesy_ready);
+        self.telemetry.expire_status(
+            self.now,
+            may_transmit,
+            courtesy_ready,
+            status_idle && self.now.saturating_sub(self.receiver_unkey) >= 12_000,
+        );
         self.telemetry.poll_status();
         let active_before = self.telemetry.active;
         let peer_before =
