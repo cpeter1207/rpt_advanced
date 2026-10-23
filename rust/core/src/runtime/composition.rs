@@ -21,6 +21,7 @@ use std::{
 #[derive(Default)]
 pub(super) struct MessageRecipes {
     definitions: Arc<BTreeMap<String, ResolvedMessageSettings>>,
+    prefix_length: usize,
     // Configuration identity is independent of enablement or current read quality.
     site_sources: Vec<BindingSource>,
     pub items: Vec<MessageRecipe>,
@@ -57,6 +58,7 @@ impl MessageRecipes {
         let site = ResolvedSiteSettings::resolve(document, node)?.value;
         let mut result = Self {
             definitions: Arc::new(definitions),
+            prefix_length,
             site_sources: site
                 .sensors
                 .iter()
@@ -77,28 +79,8 @@ impl MessageRecipes {
                 &section,
                 catalog,
                 MorseRequirement::Required,
-            ) {
+            )? {
                 result.names.insert(name.clone(), index);
-                if let Some(selector) = &settings.dtmf_id {
-                    if prefix_length + selector.len() > 127 {
-                        result.warnings.push(crate::config::ConfigWarning::new(
-                            0,
-                            &section,
-                            "dtmf_id",
-                            selector,
-                            "selector and effective prefix exceed the command length",
-                            "not DTMF addressable",
-                        ));
-                        continue;
-                    }
-                    if result.selectors.insert(selector.clone(), index).is_some() {
-                        return Err(crate::config::ConfigError::structure(
-                            &section,
-                            "duplicate effective message DTMF selector",
-                        )
-                        .into());
-                    }
-                }
             }
         }
         let defaults = ResolvedMessageSettings::from_scopes(document, node, &[], "")?;
@@ -176,13 +158,15 @@ impl MessageRecipes {
         Ok(result)
     }
 
+    /// Compile one usable source and register its selector in the shared node namespace.
     pub fn add(
         &mut self,
         settings: ResolvedMessageSettings,
         section: &str,
         catalog: &MessageCatalog,
         morse: MorseRequirement,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>, super::RuntimeError> {
+        let selector = settings.dtmf_id.clone();
         let recipe =
             Composition::compile(settings, self.definitions.clone(), morse).and_then(|recipe| {
                 recipe.validate_catalog(catalog)?;
@@ -198,7 +182,7 @@ impl MessageRecipes {
                             .any(|source| !source.available_in_context(false))
                         {
                             self.disable(section, "time_remaining requires a deadline");
-                            return None;
+                            return Ok(None);
                         }
                         for source in bindings.values() {
                             if self.site_sources.contains(source) {
@@ -219,13 +203,31 @@ impl MessageRecipes {
                     }
                 }
                 let index = self.items.len();
+                if let Some(selector) = selector {
+                    if self.prefix_length + selector.len() > 127 {
+                        self.warnings.push(crate::config::ConfigWarning::new(
+                            0,
+                            section,
+                            "dtmf_id",
+                            &selector,
+                            "selector and effective prefix exceed the command length",
+                            "not DTMF addressable",
+                        ));
+                    } else if self.selectors.insert(selector, index).is_some() {
+                        return Err(crate::config::ConfigError::structure(
+                            section,
+                            "duplicate effective message DTMF selector",
+                        )
+                        .into());
+                    }
+                }
                 self.items
                     .push(MessageRecipe::Composition(Box::new(recipe)));
-                Some(index)
+                Ok(Some(index))
             }
             Err(error) => {
                 self.disable(section, &format!("invalid composition: {error:?}"));
-                None
+                Ok(None)
             }
         }
     }

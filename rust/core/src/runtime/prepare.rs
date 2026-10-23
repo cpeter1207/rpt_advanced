@@ -287,7 +287,7 @@ pub(super) fn controller(
             &format!("identifier {} {label}", node.as_str()),
             catalog,
             MorseRequirement::Required,
-        ) {
+        )? {
             ids.push(Identifier {
                 media: messages
                     .register(index)
@@ -324,7 +324,7 @@ pub(super) fn controller(
             &format!("tail {} {label}", node.as_str()),
             catalog,
             MorseRequirement::Optional,
-        ) {
+        )? {
             tails.push(crate::controller::Tail {
                 media: messages
                     .register(index)
