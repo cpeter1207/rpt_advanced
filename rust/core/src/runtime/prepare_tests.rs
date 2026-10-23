@@ -286,6 +286,46 @@ fn tails_allow_file_or_speech_without_relaxing_identifier_morse_requirements() {
 }
 
 #[test]
+fn manual_message_selectors_share_the_identifier_and_tail_namespace() {
+    for (id_selector, tail_selector, valid) in
+        [(2, 3, true), (1, 3, false), (2, 1, false), (2, 2, false)]
+    {
+        let config = ConfigDocument::parse(&format!(
+            "[1000]\n[message report]\ncontent=Ready\ndtmf_id=1\n\
+             [identifier 1000 id]\nmorse_text=ID\ndtmf_id={id_selector}\n\
+             [tail 1000 tail]\nmorse_text=TAIL\ndtmf_id={tail_selector}\n"
+        ))
+        .unwrap();
+        let node = NodeId::new("1000").unwrap();
+        let settings = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+        let media = media(false, false);
+        let result = controller(
+            &config,
+            &node,
+            &settings,
+            &media,
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        );
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "ID={id_selector}, tail={tail_selector}"
+        );
+        if let Ok((_, _, _, _, recipes)) = result {
+            assert_eq!(
+                recipes
+                    .selectors
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["1", "2", "3"]
+            );
+        }
+    }
+}
+
+#[test]
 fn status_speech_and_morse_are_registered_as_one_producer_owned_chain() {
     let media = media(false, false);
     streamed_status(
