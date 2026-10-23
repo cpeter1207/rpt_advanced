@@ -326,11 +326,14 @@ impl MessageRecipe {
                 };
                 let text = expand(&values.node, &values.callsign, &values.links.text)?;
                 let morse = render::morse(&text).ok_or(CompositionError::Preparation)?;
-                let speech = expand(
-                    &render::scheduled_speech(&values.node, &values.node, "", ""),
-                    &render::scheduled_speech(&values.callsign, "", &values.callsign, ""),
-                    &values.links.tts,
-                )?;
+                let speech = render::telemetry_speech(
+                    &expand(
+                        &render::scheduled_speech(&values.node, &values.node, "", ""),
+                        &render::scheduled_speech(&values.callsign, "", &values.callsign, ""),
+                        &values.links.tts,
+                    )?,
+                    &[],
+                );
                 Ok(MediaProgram::single(super::prepare::status_source(
                     settings, &morse, &speech,
                 )))

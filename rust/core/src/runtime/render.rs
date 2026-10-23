@@ -118,7 +118,7 @@ pub(super) fn morse(source: &str) -> Option<String> {
         .then_some(text)
 }
 
-/// Ordinary telemetry keeps numbers intact and spells known nodes and mixed letter/digit words.
+/// Spell raw identities once, preserving prepared comma-separated forms and ordinary numbers.
 pub fn telemetry_speech(source: &str, nodes: &[&str]) -> String {
     let mut output = String::new();
     for (index, word) in source.split(' ').enumerate() {
@@ -126,8 +126,16 @@ pub fn telemetry_speech(source: &str, nodes: &[&str]) -> String {
             output.push(' ');
         }
         let node = nodes.contains(&word) && !word.is_empty();
+        let body = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        let prepared = word.contains(',')
+            && body
+                .strip_prefix("node,")
+                .unwrap_or(body)
+                .split(',')
+                .all(|part| part.len() == 1);
         let callsign = word.bytes().any(|b| b.is_ascii_alphabetic())
-            && word.bytes().any(|b| b.is_ascii_digit());
+            && word.bytes().any(|b| b.is_ascii_digit())
+            && !prepared;
         if node {
             output.push_str("node,");
         }
