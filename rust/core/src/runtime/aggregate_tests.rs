@@ -2681,7 +2681,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     runtime.queue_priority_group_events().unwrap();
     assert_eq!(
         *media.0.lock().unwrap(),
-        ["Blind Hams Network. node,2,0,0,0 selected"]
+        ["Blind Hams Network. node,2,0,0,0 connected"]
     );
     group
         .selection()
@@ -2711,7 +2711,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     assert_eq!(
         *media.0.lock().unwrap(),
         [
-            "Blind Hams Network. node,2,0,0,0 selected",
+            "Blind Hams Network. node,2,0,0,0 connected",
             "Blind Hams Network is unavailable",
         ]
     );
@@ -2732,7 +2732,7 @@ fn priority_group_announces_initial_selection_and_total_outage_only() {
     assert_eq!(
         *media.0.lock().unwrap(),
         [
-            "Blind Hams Network. node,2,0,0,0 selected",
+            "Blind Hams Network. node,2,0,0,0 connected",
             "Blind Hams Network is unavailable",
             "Blind Hams Network is unavailable",
         ]
@@ -2749,7 +2749,7 @@ fn scheduled_group_telemetry_uses_only_the_active_same_peer_schedule_once() {
         (10, false, "3000", "Morning Net is unavailable"),
         (11, false, "3000", "Morning Net is unavailable"),
         (20, false, "3000", "Evening Net is unavailable"),
-        (20, true, "3000", "Evening Net. node,3,0,0,0 selected"),
+        (20, true, "3000", "Evening Net. node,3,0,0,0 connected"),
     ] {
         let messages = Arc::new(Mutex::new(Vec::new()));
         let mut now = clock();
