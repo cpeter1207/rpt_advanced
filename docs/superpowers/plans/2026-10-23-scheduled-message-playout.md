@@ -109,8 +109,8 @@ verified against the maintained quality workflow. In the container, run focused 
 
 ```sh
 cargo test --locked -p rpt-advanced-core schedule::tests
-cargo test --locked -p rpt-advanced-core runtime::scheduler_tests
-cargo test --locked -p rpt-advanced-core runtime::composition_tests
+cargo test --locked -p rpt-advanced-core runtime::scheduler::tests
+cargo test --locked -p rpt-advanced-core runtime::composition::tests
 cargo test --locked -p rpt-advanced-core controller::tail_tests
 cargo test --locked -p rpt-advanced-core command_tests
 cargo fmt --all -- --check

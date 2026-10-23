@@ -48,6 +48,31 @@ fn periodic_triggers_become_pending_on_clock_boundaries() {
 }
 
 #[test]
+fn periodic_occurrences_keep_one_reservation_across_repeated_ticks_and_reload() {
+    let spec = EventSpec {
+        local: "524950".into(),
+        name: "quarter_hour".into(),
+        trigger: "every 15 minutes".parse().unwrap(),
+    };
+    let mut scheduler = EventScheduler::new(1, vec![spec.clone()], None).unwrap();
+    let first = scheduler.next(100, civil(0), message).unwrap().unwrap();
+    assert!(scheduler.message_queued(&first));
+    assert!(scheduler.complete(&first));
+    assert!(scheduler.next(101, civil(0), message).unwrap().is_none());
+    assert!(scheduler.next(99, civil(0), message).unwrap().is_none());
+    assert!(scheduler.next(102, civil(14), message).unwrap().is_none());
+    let next = scheduler.next(103, civil(15), message).unwrap().unwrap();
+    assert_eq!(next.name(), "quarter_hour");
+    assert!(scheduler.message_queued(&next));
+    assert!(scheduler.complete(&next));
+
+    let mut reloaded = EventScheduler::new(2, vec![spec], Some(&scheduler)).unwrap();
+    assert!(reloaded.next(104, civil(15), message).unwrap().is_none());
+    assert!(reloaded.next(105, civil(29), message).unwrap().is_none());
+    assert!(reloaded.next(106, civil(30), message).unwrap().is_some());
+}
+
+#[test]
 fn same_revision_dispatch_from_another_scheduler_cannot_match_a_different_event() {
     let mut first = EventScheduler::new(1, vec![event("first", 0)], None).unwrap();
     let mut second = EventScheduler::new(1, vec![event("second", 0)], None).unwrap();

@@ -2,7 +2,7 @@
 
 use crate::{
     command::Command,
-    schedule::{CivilTime, ScheduledEvent},
+    schedule::{CivilTime, EventTrigger},
 };
 
 /// A resolved event identity. Message/macro preparation remains on its control owner.
@@ -13,7 +13,7 @@ pub struct EventSpec {
     /// Configured event label.
     pub name: String,
     /// Validated local-calendar trigger.
-    pub trigger: ScheduledEvent,
+    pub trigger: EventTrigger,
 }
 
 /// Scheduler preparation or bounded rendering failure.
