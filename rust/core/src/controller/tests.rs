@@ -37,6 +37,132 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn scheduled_morse_expiry_selects_the_complete_fallback_even_after_receive_deferral() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            telemetry_duck_db: 0,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    assert!(control.queue_prepared_status(media(0.75, 4).with_delivery(
+        12_000,
+        PoliteDelivery {
+            expiry: PoliteExpiry::Morse,
+            ..Default::default()
+        }
+    )));
+    node.process_audio(true, false, &[], &mut [0.0; 48]);
+    let mut output = [0.0; 96];
+    node.process_audio(false, false, &[], &mut output);
+    assert!(output.iter().any(|sample| *sample != 0.0));
+    assert!(
+        output.iter().all(|sample| sample.abs() <= 0.502),
+        "expiry must never return to primary speech"
+    );
+}
+
+#[test]
+fn scheduled_morse_expiry_respects_skip_or_wait_behind_another_message() {
+    for busy in [PoliteBusy::Skip, PoliteBusy::Wait] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        node.process_audio(false, false, &[], &mut [0.0]);
+        assert!(control.queue_prepared_status(media(0.9, 4).with_delivery(
+            node.now,
+            PoliteDelivery {
+                expiry: PoliteExpiry::Morse,
+                busy,
+                ..Default::default()
+            }
+        )));
+        let mut output = [0.0; 100];
+        node.process_audio(false, false, &[], &mut output);
+        assert_eq!(
+            &output[..3],
+            &[0.75; 3],
+            "playing media must not be interrupted by expiry"
+        );
+        assert!(output[3..].iter().all(|sample| sample.abs() <= 0.502));
+        assert_eq!(
+            output[3..].iter().any(|sample| *sample != 0.0),
+            busy == PoliteBusy::Wait
+        );
+    }
+}
+
+#[test]
+fn scheduled_morse_expiry_without_a_complete_substitute_is_skipped() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.now = 12_000;
+    let message = PreparedMedia::new(Some(vec![0.75; 4]), "", MorseSettings::default()).unwrap();
+    assert!(control.queue_prepared_status(message.with_delivery(
+        node.now,
+        PoliteDelivery {
+            expiry: PoliteExpiry::Morse,
+            ..Default::default()
+        }
+    )));
+    let mut output = [0.0; 96];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.0; 96]);
+    assert_eq!(control.reclaim().count(), 1);
+}
+
+#[test]
+fn scheduled_morse_expiry_cannot_wait_through_half_duplex_or_site_inhibition() {
+    for inhibit in [false, true] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: inhibit,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = 12_000;
+        control.set_site_inhibit(inhibit);
+        assert!(control.queue_prepared_status(media(0.75, 4).with_delivery(
+            node.now,
+            PoliteDelivery {
+                expiry: PoliteExpiry::Morse,
+                busy: PoliteBusy::Wait,
+                ..Default::default()
+            }
+        )));
+        node.process_audio(!inhibit, false, &[], &mut [0.0]);
+        assert_eq!(
+            control.reclaim().count(),
+            1,
+            "RF safety blocks expiry instead of deferring it"
+        );
+    }
+}
+
+#[test]
 fn composition_completion_without_preparation_returns_the_callers_media() {
     let (_, mut control) = NodeController::new(
         ControllerSettings::default(),
