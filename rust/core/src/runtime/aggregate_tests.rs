@@ -79,6 +79,7 @@ fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros(
         ),
         ("message=Report ${node}\n", "Report node,1,0,0,0", false),
         ("message=Report ${callsign}\n", "Report A,B,1,C,D", false),
+        ("message=This is AB1CD\n", "This is A,B,1,C,D", false),
     ] {
         let source = format!(
             "[1000]\ncallsign=AB1CD\n[template clock]\ntext=Report ${{time}}\n[macro attach]\naction=connect\ntarget_node=2000\n[event 1000 report]\nat=daily 09:07\n{media}macro=attach\ndtmf_id=7\n"
