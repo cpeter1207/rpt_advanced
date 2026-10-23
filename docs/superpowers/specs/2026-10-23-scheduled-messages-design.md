@@ -1,6 +1,10 @@
 # Clock-scheduled messages and optional Morse fallback
 
-Status: Approved by the user on 2026-10-23, including the added playback and cancel controls.
+Status: Implemented and validated on 2026-10-23, including the approved playback
+and cancel controls. The [full hosted gate](https://github.com/cpeter1207/rpt_advanced/actions/runs/40021040672)
+passed at `eb7fead05370a4a2e0b639d95515987add071a04` on native Debian 13 amd64
+and arm64, with 100% production line and branch coverage on amd64. Live node
+acceptance is a separate deployment step; this feature is not installed.
 
 ## Intent
 
@@ -222,4 +226,4 @@ changes with implementation; operating docs are updated before a PR.
 
 No node installation, restart, link/configuration change, release, REST API,
 over-air recording, or network audio-stream support is included by this design.
-The authorized passive disconnect monitor continues independently until 12:30.
+The independent authorized passive disconnect monitor completed at 12:30.

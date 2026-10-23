@@ -285,9 +285,10 @@ amd64/arm64 gates passed. Device integration and physical interlock qualificatio
 remain pending; those software gates are not a release or device rollout.
 Analog monitoring, sensors, fan control, general alarms/actions, configuration,
 read-only DTMF reports and typed shared-product controls now have implemented
-software and targeted tests. The full hosted gate and physical site-device
-qualification remain outstanding. New REST/WebSocket transports are not part
-of this implementation.
+software and targeted tests. The full hosted gate passed on native Debian 13
+amd64 and arm64, including 100% production line and branch coverage on amd64.
+Physical site-device qualification remains outstanding. New REST/WebSocket
+transports are not part of this implementation.
 
 **Requirements**
 
@@ -325,7 +326,9 @@ Clock-aligned composed-message events, optional complete Morse for tails/events,
 configured playback audiences/repeat policy, manual selectors and current-message
 cancellation are implemented on the shared message path; validation is tracked
 in the scheduled-message plan. They do not add a second scheduler or renderer.
-The full hosted gate and physical site-device qualification remain outstanding.
+The full hosted gate passed at `eb7fead05370a4a2e0b639d95515987add071a04`
+([run40021040672](https://github.com/cpeter1207/rpt_advanced/actions/runs/40021040672)).
+Physical site-device qualification remains outstanding.
 
 ### Remote-base memories and scan lists
 
@@ -377,7 +380,8 @@ validation commands, historical rollback, and audit workflows remain planned.
 ### Local audio sources, voting, and recorded messages
 
 **Status: Partially implemented.** Multiple configured nodes, local-file
-telemetry decoding/playback, announcements, and temporary parrot replay exist.
+telemetry decoding/playback, clock-scheduled file/speech/Morse messages,
+announcements, and temporary parrot replay exist.
 Network audio sources, voter interoperability/native voting and simulcast,
 persistent over-air message storage/playback management, and REST uploads
 remain planned. Local-file decoding does not imply network stream support.

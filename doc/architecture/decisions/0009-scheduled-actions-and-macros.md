@@ -112,9 +112,13 @@ fallbacks are validated before admission. Release-triggered tails are implemente
 with sample-clock timing tests: original traffic hang, per-tail post-unkey delay,
 deadline-first IDs, and success-only cooldown. Bounded site acquisition and
 equipment actions are implemented with targeted tests. Protective effects do
-not wait for message capacity or unrelated owner reloads. Full hosted feature
-validation and physical site-device qualification remain outstanding. Existing
-scheduled actions and periodic announcements are unchanged.
+not wait for message capacity or unrelated owner reloads. The full hosted gate
+passed on native Debian 13 amd64 and arm64, including 100% production line and
+branch coverage on amd64
+([run40021040672](https://github.com/cpeter1207/rpt_advanced/actions/runs/40021040672)
+at `eb7fead05370a4a2e0b639d95515987add071a04`). Physical site-device qualification
+remains outstanding. Existing action ordering and periodic announcements retain
+their behavior.
 
 ## Implementation status — 2026-10-03
 

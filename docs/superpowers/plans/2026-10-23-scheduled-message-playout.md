@@ -10,18 +10,21 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-23-scheduled-messages-design.md`
 
-**Execution status — 2026-10-23:** Tasks 1–5 implemented. Hosted core run
-40016478749 passed all 671 tests; product run40011556542 passed393 tests with
-one pre-existing ignored test. Real shared producer/ring integration through
-both hosts passed40013156461. Warning-denied Rustdoc and push preflight passed.
-The final review's opening-cancellation and legacy-selector findings are fixed
-with RED/GREEN regressions. Final production coverage/platform verification
-is pending; no scheduled-message code has been installed on the node.
+**Execution status — 2026-10-23: Complete.** All six tasks are implemented and
+verified. The [full hosted gate](https://github.com/cpeter1207/rpt_advanced/actions/runs/40021040672)
+passed at `eb7fead05370a4a2e0b639d95515987add071a04`: platform-independent
+checks, native Debian 13 amd64/arm64 builds, tests, packaging and staged installs,
+and 100% production line and branch coverage on amd64. Focused core checks
+passed 675 tests; product checks passed 395, with one pre-existing ignored test.
+Real shared producer/ring integration through both hosts passed run40013156461.
+Final review findings have RED/GREEN regressions. No scheduled-message code has
+been installed on the node. Operator documentation and live acceptance remain
+separate PR/deployment steps, not unfinished implementation tasks.
 
 ## Global Constraints
 
 - Preserve unrelated user edit in `docs/superpowers/specs/2026-10-16-appliance-signaling-interlock-design.md`.
-- No node installation/restart/link/config changes or release. The passive disconnect capture continues independently through 12:30 America/Chicago.
+- No scheduled-message node installation/restart/link/config changes or release. The independent passive disconnect capture completed at 12:30 America/Chicago; the separately approved IAX repair is not a deployment of this feature.
 - Reuse installed/released dynamic dependencies; do not vendor or statically duplicate scheduler/media code. Do not change a public ABI without proving it necessary.
 - Native internal PCM remains normalized f32 at 48 kHz. Producers and cancellation/reclamation stay off audio.
 - Clock alignment is civil-minute based; retain ADR 0017 DST/no-catch-up/reload identity semantics.
@@ -103,10 +106,10 @@ is pending; no scheduled-message code has been installed on the node.
 **Files:** affected Rustdoc, `doc/architecture/README.md`, ADRs 0008/0009/0017/0023/0025, `WISHLIST.md`, this plan, ignored `.work/quality-progress.md`. Operating docs/examples are deferred until a PR is authorized.
 
 - [x] Compose real shared dependencies in focused hardware-free product tests: scheduled and manual file/TTS/Morse, clock boundary, input interruption, timeout and cancel. Verify standalone and Asterisk adapters share the same product policy without new Asterisk dependencies.
-- [ ] Run focused tests for each changed source part and targeted Rustdoc; close measured production line/branch gaps incrementally using existing ignored checklist conventions. Do not rerun a complete report after every fix.
+- [x] Run focused tests for each changed source part and targeted Rustdoc; close measured production line/branch gaps incrementally using existing ignored checklist conventions. Do not rerun a complete report after every fix.
 - [x] Update ADRs and wishlist to match only implemented behavior, explicitly preserving remaining unrelated planned work. Review architecture traceability and source ownership.
 - [x] Run fresh whole-diff correctness and simplification review, formatting, lint and static analysis. Do not claim the full platform gate passed locally.
-- [ ] Commit scoped implementation/docs; report exact checks and remaining hosted-gate/node acceptance work. No PR merge, release or node change is authorized by this plan alone.
+- [x] Commit scoped implementation/docs; report exact checks and remaining node acceptance work. The full hosted gate passed. No PR merge, release or node change is authorized by this plan alone.
 
 ## Deterministic verification commands
 

@@ -152,7 +152,11 @@ Message-macro requests are implemented with targeted
 command, routing, queue, and configuration tests. Local-only tail playback is
 implemented with release, deadline, interruption, and allocation tests. Site
 queries and typed site controls are implemented with targeted shared-product
-and adapter tests; the full hosted gate for this extension has not run.
+and adapter tests. The full hosted gate passed on native Debian 13 amd64 and
+arm64, including 100% production line and branch coverage on amd64
+([run40021040672](https://github.com/cpeter1207/rpt_advanced/actions/runs/40021040672)
+at `eb7fead05370a4a2e0b639d95515987add071a04`). Physical site-device qualification
+remains a separate step. Broader interface parity remains incomplete.
 
 All operational interfaces submit typed controller requests rather than
 reimplementing node policy. RF replies remain serialized telemetry and cannot
