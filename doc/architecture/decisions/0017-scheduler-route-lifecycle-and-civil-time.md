@@ -147,6 +147,17 @@ These rules deliberately favor predictable current-time behavior over replaying
 past RF or link operations. Persistent once-ever events, overnight windows, and
 durable telemetry delivery are separate requirements.
 
+## Clock-message occurrence ownership — 2026-10-23
+
+Clock-aligned message recurrences follow the same civil-minute, weekday, DST,
+reload-identity and no-catch-up rules. Their start budgets are anchored to the
+original occurrence, including a late control tick's seconds and milliseconds.
+Full admission queues, slow preparation, same-identity reload and wall-clock
+steps cannot renew that budget. Only the newest unstarted occurrence of an
+entry is retained; a playing occurrence remains independent of its successor.
+Manually selected event content neither dispatches its action macro nor
+consumes a future automatic calendar occurrence.
+
 ## Implementation status — 2026-10-21
 
 The group-specific topology exception, final current-policy gate, continuous

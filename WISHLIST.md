@@ -321,6 +321,10 @@ The [site/message design](docs/superpowers/specs/2026-10-17-site-monitoring-and-
 records configuration, calibration/freshness, alarms, safe outputs, fan policy,
 read-only DTMF queries, and localized reports. Composed messages, release tails,
 bounded site acquisition and equipment actions are implemented with targeted tests.
+Clock-aligned composed-message events, optional complete Morse for tails/events,
+configured playback audiences/repeat policy, manual selectors and current-message
+cancellation are implemented on the shared message path; validation is tracked
+in the scheduled-message plan. They do not add a second scheduler or renderer.
 The full hosted gate and physical site-device qualification remain outstanding.
 
 ### Remote-base memories and scan lists

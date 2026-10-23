@@ -42,12 +42,12 @@ Do not add a second scheduler, audio engine, or network-media source.
   command family and its remappable per-node prefix rather than a second parser.
   Selectors share one per-node namespace and conflicting assignments are rejected.
 - Manual invocation requests that configured content independently of its
-  automatic calendar/traffic trigger. Proposed admission: use the same bounded
+  automatic calendar/traffic trigger. Admission: use the same bounded
   message queue and per-message polite/expiry policy, not immediate preemption;
   it never permits overlapping playback or bypasses safety. A rejected full
   queue does not mark the source played. Selecting an event plays its media only,
   never its action macro or link operations.
-- Proposed completion policy: successful manual ID playback satisfies that
+- Completion policy: successful manual ID playback satisfies that
   configured ID through the existing ID-priority rules; successful manual tail
   playback advances that tail's normal cooldown. Manually playing scheduled
   content does not consume a future calendar occurrence. Cancellation/failure
@@ -59,7 +59,7 @@ Do not add a second scheduler, audio engine, or network-media source.
 - A per-message destination selects local RF only or local RF plus connected
   links. Default remains local only. This explicitly extends the earlier
   local-only ID/tail rule, without changing ordinary source-scoped status replies.
-- Proposed names and defaults for the common message fields: optional
+- Names and defaults for the common message fields: optional
   `dtmf_id` (the existing decimal selector), `repeat_during_playback = yes`,
   and `playback_destination = local | local_and_links` (default `local`).
   Expose these on configured message, ID, tail, and scheduled-media entries.
@@ -70,18 +70,18 @@ Do not add a second scheduler, audio engine, or network-media source.
 - Add a remappable DTMF operation to cancel the currently playing message and
   restore normal repeat operation. This is an explicit abuse-recovery control:
   a very long uploaded bulletin cannot require waiting for its natural end.
-  Proposed default: `*78`, available to local RF without an administrative unlock.
+  Default: `*78`, available to local RF without an administrative unlock.
 - Cancellation ends the entire active message attempt: all segments, pending
   Morse replacement and unread producer/ring PCM. It must not resume or restart
   that cancelled attempt. It restores this message's repeat gate at the next
   output callback; device-submitted PCM and ordinary hardware latency remain.
   Producer cancellation/reclamation stays off audio. Existing receive/DTMF
   qualification, site inhibition, interlocks, and traffic timeout stay effective.
-- Proposed cancellation scope: the current attempt only, not unrelated future
+- Cancellation scope: the current attempt only, not unrelated future
   schedules or configuration. Do not advance successful ID/tail completion for
   a cancelled message. Other pending messages retain their normal serialized
   admission policy; none may overlap the cancelled stream.
-- Proposed routing detail: local-plus-links uses the normal eligible outbound
+- Routing detail: local-plus-links uses the normal eligible outbound
   peers, never overriding receive-only or inactive fallback link modes.
 
 ## Approaches
@@ -116,9 +116,9 @@ not elapsed-time repetition. Accept singular and plural units, with N from
 Per-entry settings, inheriting event defaults where applicable:
 
 - `polite_maximum_wait_ms`: nonnegative start-wait budget from the occurrence's
-  scheduled time. Proposed default: 60000 ms. Zero permits immediate playback
+  scheduled time. Default: 60000 ms. Zero permits immediate playback
   only if eligible; otherwise apply the expiry action immediately.
-- `polite_expiry = skip | morse`: proposed default `skip`.
+- `polite_expiry = skip | morse`: default `skip`.
 - `polite_expiry_busy = skip | wait`: default `skip`, selected by the user.
   This applies when `polite_expiry = morse` has expired but another telemetry
   item owns playback. `wait` retains the selected Morse form until the slot is
@@ -167,7 +167,7 @@ configured speech/Morse and message settings; no hardcoded level is added.
   newer occurrence becomes due, replace the older pending occurrence rather
   than accumulate stale time/weather reports. Do not overlap an already playing
   occurrence with its successor; retain at most the latest pending successor.
-- Proposed value policy: substitutions use actual playback-attempt time, not
+- Value policy: substitutions use actual playback-attempt time, not
   the old scheduled minute. Resolve one coherent snapshot for the whole
   attempt; an interruption retains that snapshot. A pre-output deferral refreshes
   values on readmission, as the current message pipeline does.

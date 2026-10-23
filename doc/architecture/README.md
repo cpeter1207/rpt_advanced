@@ -253,6 +253,17 @@ sources, including file, speech, Morse, and tone, and streams bounded PCM chunks
 into that ring. `Playback::Render` only consumes ready samples; the transmit
 worker never synthesizes telemetry.
 
+Clock-scheduled, release-tail and manually selected messages share compiled
+recipes, one serialized producer and the telemetry ring. Scheduled occurrences
+retain bounded polite-start deadlines and at most one latest unstarted successor.
+Configured messages can select eligible link broadcast or suppress traffic
+repeat without disabling input/DTMF processing. Their PCM/PTT is independent of
+the traffic watchdog, while all hardware and duplex safety remains effective.
+The remappable cancel operation stops only the current attempt with an atomic
+audio-owner prompt; retirement stays off audio. ADRs 0008, 0009, 0017, 0023 and
+0025 define the timing, routing and ownership rules. No additional scheduler,
+renderer, PCM ring, or host ABI is introduced.
+
 When enabled, the native-rate parrot captures the processed local and active
 peer mix in fixed buffers, then hands completed audio to station control for
 level measurement and speech preparation. Its tagged playback bus is routed to
