@@ -1291,6 +1291,86 @@ fn multi_node_failed_candidate_and_device_activation_restore_complete_old_runtim
 }
 
 #[test]
+fn scheduled_event_composition_uses_the_shared_recipe_and_manual_selector() {
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\n[event 1000 clock]\nat=daily 09:07\ncontent={message}\nmessage_id=site-time\narg_time=time\ndtmf_id=4\n",
+        )
+        .unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .expect("a scheduled composition is a valid message source");
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(
+        messages.lock().unwrap().is_empty(),
+        "values resolve at playback, not admission"
+    );
+    assert!(runtime.complete_event(&dispatch));
+    assert_eq!(
+        runtime
+            .node("1000")
+            .unwrap()
+            .control
+            .messages
+            .selectors
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["4"]
+    );
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut [0.0]);
+    runtime.prepare_messages(clock());
+    assert_eq!(*messages.lock().unwrap(), ["The time is 9:07 AM."]);
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn scheduled_event_expired_while_receiving_does_not_start_after_unkey() {
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse(
+            "[1000]\nduplex=full\n[event 1000 notice]\nat=daily 09:07\nmessage=TEST\npolite_maximum_wait_ms=10\n",
+        )
+        .unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let dispatch = runtime.next_event(clock()).unwrap().unwrap();
+    runtime.queue_event(&dispatch).unwrap();
+    assert!(runtime.complete_event(&dispatch));
+    let (mut rx, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    let mut generation = rx.acquire_pair(&mut tx).unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(true, false, &[], &mut [0.0; 960]);
+    let mut output = [0.0; 24_000];
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    assert!(
+        output.iter().all(|sample| *sample == 0.0),
+        "a skipped occurrence must never become audible later"
+    );
+    drop(generation);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn aggregate_scheduled_template_and_macro_use_trigger_clock_and_current_node() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let config = ConfigDocument::parse("[1000]\ncallsign=AB1CD\n[template hello]\ntext=${node}. ${time}\n[macro connect]\naction=connect\ntarget_node=2000\n[event 1000 morning]\nat=daily 09:07\ntemplate=hello\nmacro=connect\n").unwrap();
