@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    composition::Composition,
+    composition::{Composition, MorseRequirement},
     config::{ConfigDocument, NodeId, ResolvedMessageSettings},
     messages::{MessageArgument, MessageForms},
     schedule::Weekday,
@@ -171,6 +171,10 @@ fn composition_value_forms_and_invalid_observations() {
 }
 
 fn recipe(text: &str) -> Composition {
+    recipe_with_morse(text, MorseRequirement::Required)
+}
+
+fn recipe_with_morse(text: &str, requirement: MorseRequirement) -> Composition {
     let document = ConfigDocument::parse(&format!("[524950]\n{text}")).unwrap();
     let node = NodeId::new("524950").unwrap();
     let definitions = document
@@ -186,7 +190,48 @@ fn recipe(text: &str) -> Composition {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    Composition::compile(definitions["root"].clone(), Arc::new(definitions)).unwrap()
+    Composition::compile(
+        definitions["root"].clone(),
+        Arc::new(definitions),
+        requirement,
+    )
+    .unwrap()
+}
+
+#[test]
+fn optional_compositions_never_emit_a_partial_morse_substitute() {
+    let catalog = MessageCatalog::load("en-US").unwrap();
+    for content in [
+        "Before. {media} After.",
+        "Before. {message_macro_recorded} After.",
+        "{message_macro_recorded} Before.",
+    ] {
+        let recipe = recipe_with_morse(
+            &format!(
+                "[message root]\ncontent={content}\nsound_file=message.wav\n\
+             [message recorded]\ncontent={{media}}\nsound_file=recorded.wav\n"
+            ),
+            MorseRequirement::Optional,
+        );
+        let program = recipe.prepare(&catalog, &snapshot()).unwrap();
+        assert!(program.primary.len() >= 2);
+        assert!(program.primary.iter().any(|source| source.file.is_some()));
+        assert!(program.morse.is_empty(), "{content}");
+    }
+    let recipe = recipe_with_morse(
+        "[message root]\ncontent=Before. {tone_sequence} After.\ntone_sequence=500/10\n",
+        MorseRequirement::Optional,
+    );
+    let program = recipe.prepare(&catalog, &snapshot()).unwrap();
+    assert_eq!(program.primary.len(), 3);
+    assert_eq!(
+        program
+            .morse
+            .iter()
+            .map(|source| source.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Before.", "After."]
+    );
 }
 
 fn snapshot() -> MessageValueSnapshot {

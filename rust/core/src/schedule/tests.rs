@@ -85,6 +85,7 @@ fn event_trigger_selects_existing_and_stepped_clocks_with_optional_weekdays() {
         ),
         ("every 15 minute", None, 20, Weekday::Tuesday, 12, 15, true),
         ("every 1 hours", None, 20, Weekday::Tuesday, 12, 0, true),
+        ("daily 12:15", Some(""), 20, Weekday::Tuesday, 12, 15, true),
         ("every 24 hour", None, 20, Weekday::Tuesday, 0, 0, true),
         ("every 7 minutes", None, 20, Weekday::Tuesday, 12, 56, true),
         ("every 7 minutes", None, 20, Weekday::Tuesday, 13, 0, true),
@@ -114,7 +115,7 @@ fn event_trigger_rejects_unsupported_steps_and_day_selectors() {
     ] {
         assert!(EventTrigger::parse(at, None).is_err(), "{at}");
     }
-    for days in ["", "Funday", "Monday\0Tuesday"] {
+    for days in ["Funday", "Monday\0Tuesday"] {
         assert!(
             EventTrigger::parse("daily 12:00", Some(days)).is_err(),
             "{days}"

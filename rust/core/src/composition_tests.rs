@@ -1,4 +1,4 @@
-use crate::composition::{Composition, CompositionError, Segment};
+use crate::composition::{Composition, CompositionError, MorseRequirement, Segment};
 use crate::config::{BindingSource, ConfigDocument, NodeId, ResolvedMessageSettings};
 use std::collections::BTreeMap;
 
@@ -46,7 +46,41 @@ fn compile(
             .unwrap()
             .value;
     root.content = content.into();
-    Composition::compile(root, std::sync::Arc::new(definitions.clone()))
+    Composition::compile(
+        root,
+        std::sync::Arc::new(definitions.clone()),
+        MorseRequirement::Required,
+    )
+}
+
+#[test]
+fn optional_morse_admits_real_media_and_is_inherited_by_nested_macros() {
+    for (source, usable) in [
+        ("", false),
+        ("sound_file=message.wav", true),
+        ("speech_text=Message", true),
+        ("sound_file=message.wav\nspeech_text=Message", true),
+        ("morse_text=MSG", true),
+    ] {
+        let defs = definitions(
+            &format!(
+                "[message root]\ncontent={{message_macro_media}}\n[message media]\ncontent={{media}}\n{source}\n"
+            ),
+            &["root", "media"],
+        );
+        let optional = Composition::compile(
+            defs["root"].clone(),
+            std::sync::Arc::new(defs.clone()),
+            MorseRequirement::Optional,
+        );
+        assert_eq!(optional.is_ok(), usable, "{source}");
+        let required = Composition::compile(
+            defs["root"].clone(),
+            std::sync::Arc::new(defs),
+            MorseRequirement::Required,
+        );
+        assert_eq!(required.is_ok(), source == "morse_text=MSG", "{source}");
+    }
 }
 
 #[test]

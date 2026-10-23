@@ -1,6 +1,7 @@
 //! Configuration-to-controller preparation. All allocation and external media work is offline.
 
 use crate::{
+    composition::MorseRequirement,
     config::{
         ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings,
         ResolvedCourtesySettings, ResolvedIdentifierSettings, ResolvedMessageSettings,
@@ -283,6 +284,7 @@ pub(super) fn controller(
             invoking,
             &format!("identifier {} {label}", node.as_str()),
             catalog,
+            MorseRequirement::Required,
         ) {
             ids.push(Identifier {
                 media: messages
@@ -319,6 +321,7 @@ pub(super) fn controller(
             settings.message,
             &format!("tail {} {label}", node.as_str()),
             catalog,
+            MorseRequirement::Optional,
         ) {
             tails.push(crate::controller::Tail {
                 media: messages

@@ -2,7 +2,7 @@
 
 use super::render;
 use crate::{
-    composition::{Composition, CompositionError, Segment},
+    composition::{Composition, CompositionError, MorseRequirement, Segment},
     config::{BindingSource, ResolvedMessageSettings, ResolvedSiteSettings},
     media::{MediaProgram, MediaSource, MorseSource, SpeechSource},
     messages::{
@@ -72,7 +72,12 @@ impl MessageRecipes {
         let definitions = result.definitions.clone();
         for (name, settings) in definitions.iter() {
             let section = format!("message {} {name}", node.as_str());
-            if let Some(index) = result.add(settings.clone(), &section, catalog) {
+            if let Some(index) = result.add(
+                settings.clone(),
+                &section,
+                catalog,
+                MorseRequirement::Required,
+            ) {
                 result.names.insert(name.clone(), index);
                 if let Some(selector) = &settings.dtmf_id {
                     if prefix_length + selector.len() > 127 {
@@ -176,11 +181,13 @@ impl MessageRecipes {
         settings: ResolvedMessageSettings,
         section: &str,
         catalog: &MessageCatalog,
+        morse: MorseRequirement,
     ) -> Option<usize> {
-        let recipe = Composition::compile(settings, self.definitions.clone()).and_then(|recipe| {
-            recipe.validate_catalog(catalog)?;
-            Ok(recipe)
-        });
+        let recipe =
+            Composition::compile(settings, self.definitions.clone(), morse).and_then(|recipe| {
+                recipe.validate_catalog(catalog)?;
+                Ok(recipe)
+            });
         match recipe {
             Ok(recipe) => {
                 for segment in recipe.segments() {
@@ -554,6 +561,7 @@ impl Composition {
         values: &MessageValueSnapshot,
     ) -> Result<MediaProgram, CompositionError> {
         let mut program = MediaProgram::default();
+        let mut complete_morse = true;
         for segment in self.segments() {
             let source = match segment {
                 Segment::Literal { text, owner } => spoken_source(
@@ -576,8 +584,13 @@ impl Composition {
             };
             if let Some(morse) = &source.morse {
                 program.morse.push(morse.clone());
+            } else if source.file.is_some() || source.speech.is_some() {
+                complete_morse = false;
             }
             program.primary.push(source);
+        }
+        if !complete_morse {
+            program.morse.clear();
         }
         Ok(program)
     }
