@@ -30,8 +30,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 pub use telemetry::{
-    ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PreparedMedia,
-    StatusRejected,
+    ActivitySnapshot, ControllerControl, ControllerError, MorseSettings, PlaybackDestination,
+    PlaybackPolicy, PoliteBusy, PoliteDelivery, PoliteExpiry, PreparedMedia, StatusRejected,
 };
 use telemetry::{Source, TelemetryPlanner};
 use timeout::TimeoutPolicy;

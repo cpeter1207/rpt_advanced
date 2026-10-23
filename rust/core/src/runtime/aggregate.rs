@@ -1715,7 +1715,8 @@ fn prepare_events(document: &ConfigDocument, node: &NodeId) -> Result<Vec<Event>
             spec: EventSpec {
                 local: node.as_str().into(),
                 name: label.into(),
-                trigger: event.at.parse().map_err(|_| RuntimeError::Preparation)?,
+                trigger: crate::schedule::EventTrigger::parse(&event.at, event.days.as_deref())
+                    .map_err(|_| RuntimeError::Preparation)?,
             },
             template,
             operation,

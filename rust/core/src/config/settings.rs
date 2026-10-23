@@ -810,6 +810,12 @@ fn parse_dcs_code(raw: &str) -> Option<DcsCode> {
 /// Owned identifier media and scheduling defaults after scope resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedIdentifierSettings {
+    /// Optional manual message selector after ID-scope inheritance.
+    pub dtmf_id: Option<String>,
+    /// Audience and traffic policy for this configured ID.
+    pub playback: crate::controller::PlaybackPolicy,
+    /// Start deadline for a manually selected attempt; automatic ID timing is unchanged.
+    pub delivery: crate::controller::PoliteDelivery,
     /// Ordered content, retaining the existing media chain when absent.
     pub content: String,
     /// Optional localized message embedded by this identifier.
@@ -959,6 +965,14 @@ pub struct ResolvedEventSettings {
     pub message: String,
     /// Optional macro.
     pub macro_name: String,
+    /// Optional weekday selector filtering this event's clock trigger.
+    pub days: Option<String>,
+    /// Optional manual media selector; manual selection never invokes the action macro.
+    pub dtmf_id: Option<String>,
+    /// Audience and traffic policy for the message only.
+    pub playback: crate::controller::PlaybackPolicy,
+    /// Original occurrence's polite start-deadline policy.
+    pub delivery: crate::controller::PoliteDelivery,
 }
 /// Resolved permanent direct-link declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1349,6 +1363,12 @@ impl ResolvedEventSettings {
             template: get("template"),
             message: get("message"),
             macro_name: get("macro"),
+            days: lookup_valid_scopes(document, "days", std::slice::from_ref(&section), |value| {
+                weekday_selector_valid(value).then(|| value.to_owned())
+            }),
+            dtmf_id: super::messages::message_selector(document, std::slice::from_ref(&section)),
+            playback: super::messages::playback_policy(document, std::slice::from_ref(&section)),
+            delivery: super::messages::delivery_policy(document, std::slice::from_ref(&section), 0),
         };
         if value.at.is_empty() {
             return Err(ConfigError::structure(&section, "event at is required"));
@@ -1656,6 +1676,9 @@ impl ResolvedIdentifierSettings {
                 content,
                 message_id,
                 bindings,
+                dtmf_id: super::messages::message_selector(document, &identifier_scopes),
+                playback: super::messages::playback_policy(document, &identifier_scopes),
+                delivery: super::messages::delivery_policy(document, &identifier_scopes, 1),
                 interval_ms: number("interval_ms", 600_000, 1),
                 priority: lookup_valid_scopes(document, "priority", &identifier_scopes, |raw| {
                     parse::unsigned(raw, 0, i32::MAX as u64)

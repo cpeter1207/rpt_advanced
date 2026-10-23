@@ -27,6 +27,40 @@ fn message_playback_controls_are_accepted_on_each_selectable_source() {
             "{section}: {:?}",
             result.warnings
         );
+        let node = NodeId::new("1000").unwrap();
+        let (selector, playback) = match section.split_whitespace().next().unwrap() {
+            "message" => {
+                let value = super::ResolvedMessageSettings::resolve(&document, &node, "report")
+                    .unwrap()
+                    .value;
+                (value.dtmf_id, value.playback)
+            }
+            "identifier" => {
+                let value = ResolvedIdentifierSettings::resolve(&document, &node, Some("report"))
+                    .unwrap()
+                    .value;
+                (value.dtmf_id, value.playback)
+            }
+            "tail" => {
+                let value = super::ResolvedTailSettings::resolve(&document, &node, "report")
+                    .unwrap()
+                    .value
+                    .message;
+                (value.dtmf_id, value.playback)
+            }
+            _ => {
+                let value = ResolvedEventSettings::resolve(&document, &node, "report")
+                    .unwrap()
+                    .value;
+                (value.dtmf_id, value.playback)
+            }
+        };
+        assert_eq!(selector.as_deref(), Some("7"));
+        assert!(!playback.repeat_during_playback);
+        assert_eq!(
+            playback.destination,
+            crate::controller::PlaybackDestination::LocalAndLinks
+        );
     }
     let document = ConfigDocument::parse(
         "[1000]\n[event 1000 hourly]\nat=daily 12:00\nmessage=Ready\n\
@@ -34,6 +68,57 @@ fn message_playback_controls_are_accepted_on_each_selectable_source() {
     )
     .unwrap();
     assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    let value = ResolvedEventSettings::resolve(&document, &NodeId::new("1000").unwrap(), "hourly")
+        .unwrap()
+        .value;
+    assert_eq!(value.delivery.maximum_wait_ms, 0);
+    assert_eq!(
+        value.delivery.expiry,
+        crate::controller::PoliteExpiry::Morse
+    );
+    assert_eq!(value.delivery.busy, crate::controller::PoliteBusy::Wait);
+}
+
+#[test]
+fn message_playback_options_inherit_and_invalid_overrides_fall_back() {
+    for (override_fields, selector, repeat, warning) in [
+        ("", Some("7"), false, false),
+        ("dtmf_id=\nrepeat_during_playback=yes\n", None, true, false),
+        (
+            "dtmf_id=0\nrepeat_during_playback=bad\nplayback_destination=bad\npolite_maximum_wait_ms=bad\npolite_expiry=bad\npolite_expiry_busy=bad\n",
+            Some("7"),
+            false,
+            true,
+        ),
+    ] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[message report]\ncontent=Ready\ndtmf_id=7\n\
+             repeat_during_playback=no\nplayback_destination=local_and_links\n\
+             polite_maximum_wait_ms=1500\npolite_expiry=morse\npolite_expiry_busy=wait\n\
+             [message 1000 report]\n{override_fields}"
+        ))
+        .unwrap();
+        let resolved = super::ResolvedMessageSettings::resolve(
+            &document,
+            &NodeId::new("1000").unwrap(),
+            "report",
+        )
+        .unwrap();
+        assert_eq!(!resolved.warnings.is_empty(), warning);
+        let value = resolved.value;
+        assert_eq!(value.dtmf_id.as_deref(), selector);
+        assert_eq!(value.playback.repeat_during_playback, repeat);
+        assert_eq!(
+            value.playback.destination,
+            crate::controller::PlaybackDestination::LocalAndLinks
+        );
+        assert_eq!(value.delivery.maximum_wait_ms, 1500);
+        assert_eq!(
+            value.delivery.expiry,
+            crate::controller::PoliteExpiry::Morse
+        );
+        assert_eq!(value.delivery.busy, crate::controller::PoliteBusy::Wait);
+    }
 }
 
 fn validate_command_map(

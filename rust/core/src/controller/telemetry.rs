@@ -37,6 +37,75 @@ impl Default for MorseSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControllerError;
 
+/// Eligible outputs for one configured message, never overriding peer link modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlaybackDestination {
+    /// Local transmitter only.
+    #[default]
+    Local,
+    /// Local transmitter and eligible connected peers.
+    LocalAndLinks,
+}
+
+/// Traffic and routing policy retained for an entire message attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlaybackPolicy {
+    /// Continue repeating received traffic; command detection always continues.
+    pub repeat_during_playback: bool,
+    /// Configured message audience.
+    pub destination: PlaybackDestination,
+}
+
+impl Default for PlaybackPolicy {
+    fn default() -> Self {
+        Self {
+            repeat_during_playback: true,
+            destination: PlaybackDestination::Local,
+        }
+    }
+}
+
+/// Action when a message cannot start within its polite wait.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PoliteExpiry {
+    /// Consume this occurrence without playback.
+    #[default]
+    Skip,
+    /// Select the complete configured Morse substitute, or skip if unavailable.
+    Morse,
+}
+
+/// Action when expired Morse is eligible but another message owns playback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PoliteBusy {
+    /// Consume this occurrence without overlapping the current message.
+    #[default]
+    Skip,
+    /// Keep the original deadline and Morse selection until the slot becomes free.
+    Wait,
+}
+
+/// Start-deadline policy; it does not limit playback length once a message begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoliteDelivery {
+    /// Milliseconds from the original occurrence; zero permits only immediate admission.
+    pub maximum_wait_ms: u64,
+    /// Behavior when the start deadline expires.
+    pub expiry: PoliteExpiry,
+    /// Behavior when expired Morse meets occupied playback.
+    pub busy: PoliteBusy,
+}
+
+impl Default for PoliteDelivery {
+    fn default() -> Self {
+        Self {
+            maximum_wait_ms: 60_000,
+            expiry: PoliteExpiry::Skip,
+            busy: PoliteBusy::Skip,
+        }
+    }
+}
+
 /// Media validated and allocated exclusively by the control owner.
 pub struct PreparedMedia(
     pub(super) Playback,

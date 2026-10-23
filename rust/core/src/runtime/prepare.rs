@@ -278,7 +278,9 @@ pub(super) fn controller(
                 speed_wpm: settings.morse_speed_wpm,
                 level_db: settings.morse_level_db,
             },
-            dtmf_id: None,
+            dtmf_id: settings.dtmf_id.clone(),
+            playback: settings.playback,
+            delivery: settings.delivery,
         };
         if let Some(index) = recipes.add(
             invoking,
