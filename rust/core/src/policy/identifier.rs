@@ -39,6 +39,8 @@ impl IdentifierRule {
 pub struct IdentifierPolicy {
     states: Vec<IdentifierState>,
     next_first_key: usize,
+    first_key_completed: bool,
+    first_key_completed_ms: u64,
 }
 
 impl IdentifierPolicy {
@@ -48,11 +50,14 @@ impl IdentifierPolicy {
         Self {
             states: vec![IdentifierState::default(); rules.len()],
             next_first_key: 0,
+            first_key_completed: false,
+            first_key_completed_ms: 0,
         }
     }
 
     /// Record conversation activity for every rule.
     pub fn activity(&mut self) {
+        self.first_key_completed = false;
         for state in &mut self.states {
             state.activity = true;
         }
@@ -60,13 +65,25 @@ impl IdentifierPolicy {
 
     /// Arm one idle-eligible initial ID in round-robin order and return its index.
     /// An already pending initial keeps its deadline and retry until completion.
-    pub fn first_key(&mut self, rules: &[IdentifierRule], idle_ms: u64) -> Option<usize> {
-        if self.states.iter().any(|state| state.first_key_pending) {
+    /// Successful identification consumes that opportunity until fresh receive activity.
+    /// A new receive edge cannot reuse its preceding idle time for a recent sibling ID.
+    pub fn first_key(
+        &mut self,
+        rules: &[IdentifierRule],
+        idle_ms: u64,
+        now_ms: u64,
+    ) -> Option<usize> {
+        if self.first_key_completed || self.states.iter().any(|state| state.first_key_pending) {
             return None;
         }
         let selected = (self.next_first_key..rules.len())
             .chain(0..self.next_first_key)
-            .find(|&index| rules[index].first_key_only && idle_ms >= rules[index].interval_ms)?;
+            .find(|&index| {
+                rules[index].first_key_only
+                    && idle_ms >= rules[index].interval_ms
+                    && now_ms.saturating_sub(self.first_key_completed_ms)
+                        >= rules[index].interval_ms
+            })?;
         self.states[selected].first_key_pending = true;
         self.next_first_key = (selected + 1) % rules.len();
         Some(selected)
@@ -129,6 +146,10 @@ impl IdentifierPolicy {
         };
         for (index, (rule, state)) in rules.iter().zip(&mut self.states).enumerate() {
             if index == selected || rule.priority < selected_rule.priority {
+                if state.first_key_pending || selected_rule.first_key_only {
+                    self.first_key_completed = true;
+                    self.first_key_completed_ms = now_ms;
+                }
                 *state = IdentifierState {
                     satisfied_ms: now_ms,
                     ..IdentifierState::default()

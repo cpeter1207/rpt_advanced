@@ -3247,6 +3247,63 @@ fn first_key_controller_plays_one_initial_id_and_rotates_on_later_keyups() {
 }
 
 #[test]
+fn telemetry_rekeys_do_not_repeat_initial_ids_in_one_receive_idle_period() {
+    for (full_duplex, receiving, linked) in [
+        (false, true, false),
+        (false, false, true),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        let ids = [0.25, 0.5]
+            .into_iter()
+            .map(|value| Identifier {
+                media: media(value, 10),
+                interval_ms: 940_000,
+                priority: 10,
+                first_key_only: true,
+                regardless_of_activity: false,
+                polite_maximum_wait_ms: Some(60_000),
+            })
+            .collect();
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex,
+                telemetry_duck_db: 0,
+                ..Default::default()
+            },
+            ids,
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.now = samples(1_000_000);
+        for (elapsed, expected) in [(0, vec![0.25; 10]), (60_000, vec![])] {
+            node.now += samples(elapsed);
+            assert!(control.queue_prepared_status(media(0.75, 4)));
+            let mut output = [0.0; 9600];
+            assert!(!node.process_audio(false, false, &[], &mut output));
+            assert_eq!(output.iter().filter(|sample| **sample == 0.75).count(), 4);
+            let identifiers: Vec<_> = output
+                .into_iter()
+                .filter(|sample| [0.25, 0.5].contains(sample))
+                .collect();
+            assert_eq!(identifiers, expected);
+        }
+        // A new receive edge must not reuse the already identified preceding silence.
+        node.process_audio(receiving, linked, &[], &mut [0.0; 48]);
+        let mut output = [0.0; 9600];
+        assert!(!node.process_audio(false, false, &[], &mut output));
+        assert!(!output.contains(&0.25) && !output.contains(&0.5));
+        // Another full idle interval permits the next round-robin initial.
+        node.now += samples(940_000);
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        assert!(!node.process_audio(false, false, &[], &mut output));
+        assert_eq!(output.iter().filter(|sample| **sample == 0.5).count(), 10);
+        assert!(!output.contains(&0.25));
+    }
+}
+
+#[test]
 fn first_key_does_not_play_an_expired_periodic_id_before_its_initial_id() {
     let ids = [(0.25, 10, true), (0.5, 10, true), (0.75, 0, false)]
         .into_iter()
