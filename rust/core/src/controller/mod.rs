@@ -819,7 +819,7 @@ impl NodeController {
             || (self.release_pending && announcement_due.is_some());
         if may_transmit && demand && !self.keyed {
             let key_idle = self.key_idle.max(idle);
-            if let Some(index) = self.identifiers.first_key(&self.rules, key_idle) {
+            if let Some(index) = self.identifiers.first_key(&self.rules, key_idle, self.now) {
                 self.first_due[index] = self.now;
             }
             self.key_idle = 0;

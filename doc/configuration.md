@@ -809,6 +809,10 @@ its turn while waiting to play, unless a higher-priority ID satisfies it.
 Periodic IDs still use their configured priority.
 A lower-priority periodic ID waits for a pending polite initial ID. Playing
 the initial ID also satisfies the lower-priority ID sets.
+Only one initial ID plays during a period without receiver or link activity.
+Other announcements do not start another initial ID. Another initial ID needs
+new receiver or link activity and must meet the configured inactivity rule.
+Initial IDs are also at least one configured interval apart.
 
 | Option | Default | Meaning |
 | --- | --- | --- |

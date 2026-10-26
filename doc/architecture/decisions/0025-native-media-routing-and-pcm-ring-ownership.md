@@ -335,6 +335,18 @@ receive-driven Morse fallback, and failed-attempt retry remain unchanged.
 The cursor belongs to the existing controller and survives device-only handoff;
 a replacement controller starts a new rotation.
 
+Amended 2026-10-26: successful initial identification consumes the current
+receive-idle opportunity. Later telemetry-only transmitter key-ups cannot arm
+another initial during that same idle period. Fresh local or linked receive
+activity permits a new opportunity only when the existing receive-idle rule
+and the configured interval since the last successful initial identification
+are both met. A recent receive edge cannot reuse pre-receive silence to bypass
+that minimum successful-completion spacing.
+Completing a higher-priority ID that satisfies a pending initial consumes that
+opportunity too. Activity while an initial is pending does not undo its later
+successful completion. Failed attempts retain the existing pending selection
+and retry policy; unrelated periodic IDs retain their normal timing.
+
 Each audio worker has an **RF-signaling edge publisher** for its owned state:
 receive qualification/decoder status in local receive, and physical PTT and
 transmit signaling in transmit. Publishers perform only immediate prepared
