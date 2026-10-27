@@ -847,24 +847,52 @@ pub(crate) mod tests {
         1234
     }
 
+    /// Constrain a loopback listener to one real provider without changing live policy.
+    pub(crate) fn selected_client(library: &Path, profile: u32) -> IaxClient {
+        let mut client = IaxClient::load(library).unwrap();
+        let owner = Arc::get_mut(&mut client.0).unwrap();
+        let backend = CODEC_PROVIDERS
+            .iter()
+            .find(|(id, _)| *id == profile)
+            .unwrap()
+            .1;
+        let path = CString::new(format!("librptadv_codec_{backend}.so.1")).unwrap();
+        let selection = abi::rptadv_iax2_codec_selection_v2 {
+            struct_size: size_of::<abi::rptadv_iax2_codec_selection_v2>() as u32,
+            profile_id: profile,
+            provider_path: path.as_ptr(),
+        };
+        let mut catalog = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                owner.api.open_catalog.unwrap()(&selection, 1, &mut catalog),
+                0
+            );
+            owner.api.close_catalog.unwrap()(owner.catalog.as_ptr());
+        }
+        owner.catalog = NonNull::new(catalog).unwrap();
+        client
+    }
+
     /// Feed a loopback peer through the same stateful preparation contract as production.
     pub(crate) fn send_pcm(peer: &mut IaxPeer, samples: &[f32]) {
         let mut output = vec![0_u8; 65507];
         let mut position = 0;
         let mut frames = 0_u64;
         loop {
+            let flushing = position == samples.len();
             let mut result: abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
             result.struct_size = size_of::<abi::rptadv_codec_encode_result_v1>() as u32;
             assert!(
                 peer.prepare_audio(
                     &samples[position..],
                     &mut output,
-                    u32::from(position == samples.len()),
+                    u32::from(flushing),
                     &mut result
                 ) >= 0
             );
             position += result.consumed_frames;
-            if result.encoded_bytes == 0 && position == samples.len() {
+            if result.encoded_bytes == 0 && flushing && result.status == 0 {
                 break;
             }
             if result.encoded_bytes != 0 {

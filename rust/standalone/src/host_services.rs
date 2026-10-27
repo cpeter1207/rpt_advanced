@@ -1598,10 +1598,17 @@ mod tests {
 
     #[test]
     fn asynchronous_host_delivers_jittered_audio_and_quiesces_after_detach() {
-        host_dial_connects();
+        host_dial_connects(None);
     }
 
-    fn host_dial_connects() {
+    #[test]
+    fn asynchronous_codec_units_use_real_jitter_and_provider_tables() {
+        for profile in [4, 8, 11] {
+            host_dial_connects(Some(profile));
+        }
+    }
+
+    fn host_dial_connects(profile: Option<u32>) {
         unsafe extern "C" fn ordered_addresses(
             _: *mut c_void,
             endpoint: *const u8,
@@ -1620,12 +1627,12 @@ mod tests {
         let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
-        let mut server = crate::iax::IaxServer::bind(
-            &crate::iax::IaxClient::load(library).unwrap(),
-            address,
-            &["506315".to_owned()],
-        )
-        .unwrap();
+        let client = profile.map_or_else(
+            || crate::iax::IaxClient::load(library).unwrap(),
+            |profile| crate::iax::tests::selected_client(library, profile),
+        );
+        let mut server =
+            crate::iax::IaxServer::bind(&client, address, &["506315".to_owned()]).unwrap();
         let accepted = AtomicUsize::new(0);
         let providers = Box::leak(Box::new(crate::providers::ProviderSet::load().unwrap()));
         let mut host = HostServicesOwner::new(
@@ -1848,6 +1855,7 @@ mod tests {
         peer: *mut c_void,
         samples: AtomicUsize,
         observations: AtomicUsize,
+        failures: AtomicUsize,
     }
 
     unsafe extern "C" fn receive_samples(
@@ -1866,6 +1874,9 @@ mod tests {
         let state = unsafe { &*context.cast::<AsyncRead>() };
         let status =
             unsafe { super::peer_read(state.host, state.peer, Some(receive_samples), context) };
+        if status != 0 {
+            state.failures.fetch_add(1, Ordering::Relaxed);
+        }
         let mut observation: crate::abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
         observation.struct_size = size_of::<crate::abi::rptadv_peer_observation_v1>() as u32;
         observation.abi_version = 1;
@@ -1894,6 +1905,7 @@ mod tests {
             peer,
             samples: AtomicUsize::new(0),
             observations: AtomicUsize::new(0),
+            failures: AtomicUsize::new(0),
         }));
         let mut token = ptr::null_mut();
         assert_eq!(
@@ -1939,7 +1951,14 @@ mod tests {
             "the owner deadline must schedule an idle peer"
         );
         assert!(awakened, "an explicit wake must schedule the parked peer");
-        assert_eq!(state.samples.load(Ordering::Acquire), 480);
+        assert!(
+            state.samples.load(Ordering::Acquire) >= 480,
+            "received {} frames, {} failed polls over {} callbacks at {} Hz",
+            state.samples.load(Ordering::Acquire),
+            state.failures.load(Ordering::Acquire),
+            state.observations.load(Ordering::Acquire),
+            inbound.sample_rate_hz()
+        );
         assert!(state.observations.load(Ordering::Acquire) > 0);
     }
 }

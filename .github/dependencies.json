@@ -16,7 +16,7 @@
   },
   {
     "repository": "rptadv-codec-adapters",
-    "sha": "cb9116f80d67746792dbe7cd01e19f0699d48d9c",
+    "sha": "72a069e5aa47c24e69811b82802128788c862475",
     "packages": [
       "librptadv-codec-dev", "librptadv-codec-g7111", "librptadv-codec-pcm1",
       "librptadv-codec-gsm1", "librptadv-codec-speex1", "librptadv-codec-opus1",
@@ -27,7 +27,7 @@
   },
   {
     "repository": "librptadviax2",
-    "sha": "6b755d269b86236462e68b9fd60a80529befa1ef",
+    "sha": "3d4d3cadcfc3c3545c4bddbe08b76a400657d078",
     "packages": ["librptadv-iax2-client2", "librptadv-iax2-client-dev"]
   },
   {
