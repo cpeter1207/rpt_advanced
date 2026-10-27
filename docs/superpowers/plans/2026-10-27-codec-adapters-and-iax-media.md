@@ -141,6 +141,11 @@ packet is produced per call. Flush with empty real input does not invent voice.
 
 ### Task C5: Negotiate verified 64-bit formats for incoming and outgoing IAX calls
 
+Owner decision 2026-10-27: IAX iLBC uses fixed 30 ms mode. Keep 20 ms
+interoperability pending; do not add per-peer mode configuration or infer a
+mode from arbitrary aggregation lengths. The neutral provider may retain both
+explicit modes for its independent contract tests.
+
 **Files:** Modify `iax/src/{codec.rs,information_elements.rs,media.rs,session.rs,client.rs,server.rs,ffi.rs,async_ffi.rs}`, `include/rptadv_iax2_client.h`, `src/{session_unit_tests.rs,session_setup_tests.rs,client_unit_tests.rs,server_tests.rs}`; create `src/formats.rs`, `src/formats/tests.rs`. Keep the existing subclass compressor in `src/protocol.rs`.
 
 **Interfaces:** `IaxFormat(u64)` and `FormatCatalog` map protocol bits to C2 profile IDs. `FormatCatalog::select(local: &[ProfileId], offered: u64) -> Result<ProfileId, NegotiationError>` accepts only validated bidirectional profiles. Client2 adds `open_catalog(const rptadv_iax2_codec_selection_v2 *selections, size_t count, void **catalog)` and `close_catalog(void *catalog)`. Each sized selection contains `provider_path: const char *` and neutral `profile_id: uint32_t`; the open call copies borrowed strings and calls C2's loader. Client2 `dial` and server2 `open` receive the same borrowed opaque catalog in their sized options. Standalone builds it from the selected provider manifest and retains it through all peer/server destruction. Other protocols can directly load the common provider descriptor without using this IAX-specific catalog lifecycle. Async ABI1 remains unchanged.

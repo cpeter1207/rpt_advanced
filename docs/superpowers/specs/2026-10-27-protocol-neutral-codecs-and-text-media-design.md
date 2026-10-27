@@ -107,7 +107,7 @@ into a 20 ms frame. Receive must handle valid peer aggregation and durations.
 | `lpc10` | 8 kHz | 180 samples/7 bytes, 22.5 ms; retain rational timing | Compatible released LPC10 library |
 | `g729` | 8 kHz | G.729A, 80 samples/10 bytes; accept validated SID framing | Reviewed GPLv2-compatible bcg729 release |
 | `speex` | 8 kHz | Raw narrowband Speex frames; no Ogg wrapper | libspeex |
-| `ilbc` | 8 kHz | Both 20 ms/38 bytes and 30 ms/50 bytes; explicit mode | Reviewed GPLv2-compatible libilbc release |
+| `ilbc` | 8 kHz | Fixed 30 ms/50 bytes on IAX; 20 ms interoperability pending | Reviewed GPLv2-compatible libilbc release |
 | `g726` | 8 kHz | 32 kb/s, RFC packing; verify low-nibble-first Asterisk payload | Same released G.726 backend, distinct packing profile |
 | `g722` | 16 kHz | G.722 at 64 kb/s; PCM rate is not RTP's historical 8 kHz clock | Compatible released G.722 implementation |
 | `slin16` | 16 kHz | PCM16; pinned Asterisk IAX copies host-endian data | Trivial serialization using the verified IAX profile |
@@ -134,7 +134,9 @@ Specific qualifications:
 - Do not infer iLBC's IAX mode from an arbitrary packet size or inconsistent
   default metadata. Verify actual peer behavior: Asterisk's inspected
   translator defaults to 30 ms, while HamVoIP documents 20 ms. Preserve both
-  profiles without inventing an unsupported mode-negotiation extension.
+  provider modes without inventing an unsupported mode-negotiation extension.
+  Owner decision on 2026-10-27: use fixed 30 ms on IAX; leave 20 ms peer
+  interoperability pending. Do not guess or switch modes during a connection.
 - SLIN byte order, LPC10 timing and G.726 packing require independent fixtures
   from the pinned implementation. The RFC's old codec table alone is not an
   exact Asterisk 20 behavior contract. Do not silently make SLIN16 match SLIN8.

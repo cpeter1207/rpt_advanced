@@ -63,6 +63,8 @@ pending; the running node has not been upgraded for this feature.
   implementations remain explicitly pending rather than being advertised.
 - Advertise only codecs with functioning encode/decode providers. A missing
   provider must not be presented as implemented coverage of that format.
+- IAX iLBC uses fixed 30 ms mode. Owner deferred 20 ms peer interoperability;
+  do not infer a mode from aggregation length or switch it during a call.
 - Leave `siren7`, `siren14`, and `g719` unimplemented and unadvertised until
   their provider work is separately resumed. Do not write replacement codec
   implementations or acquire additional licenses for these deferred formats.
