@@ -133,7 +133,15 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
     let (io, other_station) = peer(48000);
     host.attach_peer("1001", "5000", Mode::TRANSCEIVE, io, clock())
         .unwrap();
-    let origin = host.peers[0].control.text_origin();
+    // A different station may be earlier in both ingress and forwarding scans.
+    host.peers.rotate_right(1);
+    let origin = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .text_origin();
     host.human_text(
         "1000",
         rpt_advanced_core::link::HumanMessage {
@@ -166,6 +174,32 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         );
         assert_eq!(host.text.observation().admitted, expected_admitted);
     }
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin: origin.clone(),
+            source: "4000".into(),
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("B for this station and its peers"),
+        },
+    );
+    assert_eq!(host.text.observation().admitted, 2);
+    host.peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .stop();
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin,
+            source: "4000".into(),
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("B from an ended connection"),
+        },
+    );
+    assert_eq!(host.text.observation().admitted, 2);
     assert!(host.stop(20));
 }
 
