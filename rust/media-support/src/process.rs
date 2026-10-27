@@ -139,10 +139,13 @@ impl ChildStream {
         stream.stdout = stream.child.0.stdout.take();
         let stdout = stream.stdout.as_ref().ok_or(MediaError::Io)?;
         set_nonblocking(stdout).map_err(io_error)?;
-        stream.stdin = stream.child.0.stdin.take();
-        if stream.pending_input.is_empty() {
-            stream.stdin.take();
-        } else if let Some(stdin) = &stream.stdin {
+        stream.stdin = stream
+            .child
+            .0
+            .stdin
+            .take()
+            .filter(|_| !stream.pending_input.is_empty());
+        if let Some(stdin) = &stream.stdin {
             set_nonblocking(stdin).map_err(io_error)?;
         }
         Ok(stream)
@@ -191,7 +194,7 @@ impl ChildStream {
         };
         let end = (self.input_position + 8192).min(self.pending_input.len());
         match stdin.write(&self.pending_input[self.input_position..end]) {
-            Ok(0) => return Err(MediaError::Io),
+            // A nonempty write to this owned nonblocking pipe makes progress or errors.
             Ok(count) => self.input_position += count,
             Err(error)
                 if matches!(

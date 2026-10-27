@@ -41,7 +41,11 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
         unsafe {
             *stream = ffi::rptadv_media_stream {
                 handle: Box::into_raw(Box::new(0usize)).cast(),
-                sample_rate_hz: 22050,
+                sample_rate_hz: if CStr::from_ptr(request.model) == c"invalid.onnx" {
+                    0
+                } else {
+                    22050
+                },
             };
         }
         0
@@ -84,6 +88,26 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
         open_file: None,
         open_speech: Some(open),
     });
+    let token = Cancellation::default();
+    assert_eq!(
+        finite::read_stream(
+            &preparer.speech,
+            ptr::null_mut(),
+            &mut [],
+            &raw_cancellation(&token)
+        ),
+        Err(MediaError::InvalidRequest)
+    );
+    assert!(matches!(
+        preparer.open_speech_stream(&SpeechRequest {
+            text: "literal ${time}; $(not a command)",
+            model: Path::new("invalid.onnx"),
+            speed_percent: 100,
+            level_db: -6,
+            cancellation: &token
+        }),
+        Err(MediaError::InvalidOutput)
+    ));
     let mut stream = preparer
         .open_speech_stream(&SpeechRequest {
             text: "literal ${time}; $(not a command)",
@@ -105,7 +129,7 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
         Err(MediaError::Cancelled)
     );
     drop(stream);
-    assert_eq!(CLOSED.load(Ordering::Relaxed), 1);
+    assert_eq!(CLOSED.load(Ordering::Relaxed), 2);
     assert_eq!(DESTROYED.load(Ordering::Relaxed), 1);
 }
 

@@ -268,10 +268,6 @@ impl Outbound {
                 {
                     return Ok(Some(now));
                 }
-                // A final packet's duration must elapse before publishing unkey.
-                if self.unkey_ns.is_some_and(|deadline| deadline > now) {
-                    return Ok(self.unkey_ns);
-                }
             }
             // An idle marker is uncommitted media too: keep its source timestamp
             // while waiting for writable, but never retain it indefinitely.
@@ -359,7 +355,8 @@ impl Outbound {
                 input_frames: 0,
                 drained: false,
             });
-        } else if let Some(encoder) = self.encoder.as_mut() {
+        } else {
+            let encoder = self.encoder.as_mut().expect("existing encoder origin");
             // Only unbuffered codec input may adopt a newer clock mapping.
             // `born` still names the FIR's first retained sample, not this call.
             if encoder.source_end == encoder.input_frames {
@@ -373,9 +370,7 @@ impl Outbound {
             io.reset_encoder()?;
             self.reset_encoder = false;
         }
-        let Some(encoder) = self.encoder.as_ref() else {
-            return Ok(());
-        };
+        let encoder = self.encoder.as_ref().expect("prepared encoder origin");
         if now >= encoder.born_ns.saturating_add(AGE_NS) || !self.current(encoder.stream) {
             self.statistics.expired.fetch_add(
                 ((self.pcm_used - self.pcm_position) as u64
@@ -507,5 +502,41 @@ impl Outbound {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::link::session::tests::peer_with_egress;
+    use rpt_advanced_core::audio::LinkAudioQueue;
+
+    #[test]
+    fn finite_drain_can_need_more_than_one_bounded_converter_turn() {
+        let (mut io, _state) = peer_with_egress(8000, true, true);
+        let (mut input, output) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, output).unwrap();
+        outbound.converter = Egress::new(8000, 1).unwrap();
+        input.write(
+            AudioSpan {
+                born_ns: Some(0),
+                ..AudioSpan::default()
+            },
+            &[0.25],
+        );
+        outbound.step(&mut io, 0).unwrap();
+        assert_eq!(outbound.step(&mut io, 20).unwrap(), Some(BLOCK_NS));
+        assert!(!outbound.conversion.as_ref().unwrap().drained);
+
+        // A previously keyed PCM host can retain its idle marker across a
+        // discontinuity while a new short source is still priming the FIR.
+        let (mut io, _state) = peer_with_egress(8000, false, false);
+        let (_, output) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+        let mut outbound = Outbound::new(8000, output).unwrap();
+        outbound.converter = Egress::new(8000, 1).unwrap();
+        assert!(outbound.converter.process(&[0.25]).unwrap().is_empty());
+        outbound.sent = true;
+        outbound.pcm_step(&mut io, 20).unwrap();
+        assert!(outbound.sent, "unfinished drain must not publish unkey");
     }
 }

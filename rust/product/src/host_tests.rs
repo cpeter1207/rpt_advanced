@@ -129,18 +129,22 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
     .unwrap();
     let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    host.runtime.incoming("1001", "5000", true).unwrap();
+    let (io, other_station) = peer(48000);
+    host.attach_peer("1001", "5000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
     let origin = host.peers[0].control.text_origin();
     host.human_text(
         "1000",
         rpt_advanced_core::link::HumanMessage {
-            origin,
+            origin: origin.clone(),
             source: "4000".into(),
             audience: rpt_advanced_core::link::TextAudience::Node("1001".into()),
             body: Arc::from("B for the other station"),
         },
     );
     assert_eq!(host.text.observation().admitted, 0);
-    for peer in [ingress, egress] {
+    for peer in [&ingress, &egress, &other_station] {
         assert!(
             !peer
                 .lock()
@@ -150,6 +154,170 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
                 .any(|text| text.starts_with(b"M "))
         );
     }
+    for (destination, expected_admitted) in [("9000", 0), ("1000", 1)] {
+        host.human_text(
+            "1000",
+            rpt_advanced_core::link::HumanMessage {
+                origin: origin.clone(),
+                source: "4000".into(),
+                audience: rpt_advanced_core::link::TextAudience::Node(destination.into()),
+                body: Arc::from("B directed speech"),
+            },
+        );
+        assert_eq!(host.text.observation().admitted, expected_admitted);
+    }
+    assert!(host.stop(20));
+}
+
+#[test]
+fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    attach(&mut host, "4000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let old = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    // Logical removal and physical detach run as separate executor operations.
+    // An incoming replacement may be admitted between those operations.
+    let effect = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::Disconnect, "2000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    assert!(matches!(effect, LinkEffect::Detach(_)));
+    host.runtime.incoming("1000", "2000", true).unwrap();
+    let (io, replacement) = peer(48000);
+    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
+    let origins = host
+        .peers
+        .iter()
+        .filter(|peer| peer.remote == "2000")
+        .map(|peer| peer.control.text_origin().connection_generation)
+        .collect::<Vec<_>>();
+    assert_eq!(origins.len(), 2);
+    assert_ne!(origins[0], origins[1]);
+    let origin = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "4000")
+        .unwrap()
+        .control
+        .text_origin();
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin,
+            source: "4000".into(),
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("one copy per connection"),
+        },
+    );
+    pump_until(&mut host, |_| {
+        [&old, &replacement].iter().all(|state| {
+            state
+                .lock()
+                .unwrap()
+                .texts
+                .iter()
+                .any(|text| text == b"M 4000 0 one copy per connection")
+        })
+    });
+    for state in [old, replacement] {
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .texts
+                .iter()
+                .filter(|text| text.starts_with(b"M "))
+                .count(),
+            1
+        );
+    }
+    assert!(host.stop(20));
+}
+
+#[test]
+fn text_forwarding_backpressure_does_not_block_local_speech() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let origin = host.peers[0].control.text_origin();
+    let blocked = egress.lock().unwrap();
+    let control = &mut host.peers[1].control;
+    while control
+        .send(PeerCommand::Text {
+            text: CString::new("queue pressure").unwrap(),
+            advisory: false,
+        })
+        .is_ok()
+    {}
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin,
+            source: "2000".into(),
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("B still local"),
+        },
+    );
+    assert_eq!(host.text.observation().forwarding_rejected, 1);
+    assert_eq!(host.text.observation().admitted, 1);
+    drop(blocked);
+    assert!(host.stop(20));
+}
+
+#[test]
+fn local_radio_digits_reach_the_same_control_dispatch_as_peer_digits() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    for (row, column) in [
+        (941.0, 1209.0),
+        (852.0, 1209.0),
+        (941.0, 1336.0),
+        (941.0, 1477.0),
+    ] {
+        for block in 0..5 {
+            let mut pcm = (0..612)
+                .map(|offset| {
+                    let time = (block * 612 + offset) as f32 / 48000.0;
+                    if block < 2 {
+                        0.031
+                            * ((std::f32::consts::TAU * row * time).sin()
+                                + (std::f32::consts::TAU * column * time).sin())
+                    } else {
+                        0.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            owners
+                .0
+                .acquire()
+                .unwrap()
+                .state()
+                .process(true, &mut pcm, 1000);
+        }
+    }
+    host.pump(clock()).unwrap();
+    let commands = host.take_operations();
+    assert_eq!(commands.len(), 1);
+    assert!(
+        matches!(&commands[0].1, DigitOutcome::Operation(operation) if operation.command.action == LinkAction::Status)
+    );
+    lease.lock().unwrap().owners = Some(owners);
     assert!(host.stop(20));
 }
 
@@ -271,6 +439,25 @@ fn text_lifecycle_speech_failure_keeps_forwarding_and_logs_no_human_body() {
     assert!(logs[0].1.contains("ProcessFailed"));
     assert!(!logs[0].1.contains("sensitive human body"));
     assert!(!logs[0].1.contains("voice.onnx"));
+    let origin = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .text_origin();
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin,
+            source: "4000".into(),
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("F failure second body"),
+        },
+    );
+    pump_until(&mut host, |host| host.text.observation().failures == 2);
+    host.report_text_failures(clock().now_ms);
+    assert_eq!(crate::fixture::ERROR_LOGS.with_borrow(Vec::len), 1);
     assert!(host.peers.iter().all(|peer| !peer.control.ended()));
     assert!(host.stop(20));
 }
@@ -1633,6 +1820,11 @@ fn saturated_media_publication_keeps_the_running_generation() {
     }
     assert!(matches!(
         host.refresh("1000", clock()),
+        Err(RuntimeError::Busy)
+    ));
+    assert_eq!(host.runtime.status(10)[0].1.active, active);
+    assert!(matches!(
+        host.reload(document("usb", "transmit_hang_ms=10\n"), clock()),
         Err(RuntimeError::Busy)
     ));
     assert_eq!(host.runtime.status(10)[0].1.active, active);

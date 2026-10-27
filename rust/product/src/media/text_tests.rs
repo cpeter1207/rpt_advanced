@@ -75,7 +75,9 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
             }
             thread::park_timeout(Duration::from_millis(1));
         }
-        let frames = if stream.text.starts_with("large") {
+        let frames = if stream.text.starts_with("empty") {
+            0
+        } else if stream.text.starts_with("large") {
             if stream.read < 20 { capacity } else { 0 }
         } else {
             usize::from(stream.read == 0)
@@ -136,6 +138,7 @@ fn speech() -> SpeechSource {
 #[test]
 fn text_admission_counts_utf8_bytes_and_reserves_origin_and_node_quotas() {
     let mut executor = TextExecutor::new(1, preparer(Arc::default())).unwrap();
+    executor.start().unwrap();
     // Keep consumers alive without rendering: admitted includes queued/active PCM.
     let mut readers = Vec::new();
     for peer in 0..17 {
@@ -145,6 +148,16 @@ fn text_admission_counts_utf8_bytes_and_reserves_origin_and_node_quotas() {
                 .unwrap(),
         );
     }
+    assert!(
+        executor
+            .register("1000", message(0, String::new()).origin)
+            .is_err()
+    );
+    assert!(
+        executor
+            .register("2000", message(99, String::new()).origin)
+            .is_err()
+    );
     assert_eq!(
         executor.admit(message(0, "é".repeat(2048)), speech()),
         Admission::Accepted
@@ -177,6 +190,11 @@ fn text_admission_counts_utf8_bytes_and_reserves_origin_and_node_quotas() {
     );
     executor.cancel(&message(0, String::new()).origin);
     executor.stop();
+    assert_eq!(executor.start(), Err(MediaError::Cancelled));
+    assert!(matches!(
+        executor.register("1000", message(99, String::new()).origin),
+        Err(MediaError::Cancelled)
+    ));
     assert_eq!(
         executor.admit(message(16, "stopped".into()), speech()),
         Admission::Stopping
@@ -342,5 +360,129 @@ fn text_generation_fences_reject_wrong_origin_and_observe_only_metadata() {
     assert_eq!(observation.admitted, 2);
     assert_eq!(observation.rejected[3], 1);
     assert_eq!(observation.cancelled_origins, 1);
+    executor.stop();
+}
+
+#[test]
+fn text_reader_fences_stale_cancelled_delayed_empty_and_failed_segments() {
+    for case in 0..5 {
+        let mut executor = TextExecutor::new(1, preparer(Arc::default())).unwrap();
+        let mut reader = executor
+            .register("1000", message(1, String::new()).origin)
+            .unwrap();
+        assert_eq!(
+            executor.admit(message(1, "B ready".into()), speech()),
+            Admission::Accepted
+        );
+        until(|| {
+            if reader.current.is_none() {
+                reader.current = reader.ready.pop().ok();
+            }
+            reader.current.is_some()
+        });
+        let mut held_producer = None;
+        let item = reader.current.as_mut().unwrap();
+        let ticket = Arc::clone(&item.ticket);
+        match case {
+            0 => reader.completed_sequence = item.sequence,
+            1 => reader.origin.cancel(),
+            2 => item.delay += 1,
+            3 => {
+                let (producer, ring) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+                held_producer = Some(producer);
+                item.reader.ring = ring;
+                item.reader.progress.budget.store(1, Ordering::Release);
+            }
+            _ => item.reader.ring = crate::link::ring::tests::failed_sample_consumer(),
+        }
+        let mut output = [0.0; 16];
+        assert!(!reader.render(&mut output), "case={case}");
+        assert_eq!(output, [0.0; 16]);
+        if case == 3 {
+            assert!(reader.current.is_some());
+        }
+        if case == 4 {
+            assert!(ticket.failed.load(Ordering::Acquire));
+        }
+        drop(held_producer);
+        executor.stop();
+    }
+}
+
+#[test]
+fn text_producer_cancellation_and_empty_speech_do_not_publish_pcm() {
+    for case in 0..3 {
+        let mut executor = TextExecutor::prepare(1, preparer(Arc::default())).unwrap();
+        let reader = executor
+            .register("1000", message(1, String::new()).origin)
+            .unwrap();
+        let body = if case == 2 { "empty" } else { "A waiting" };
+        assert_eq!(
+            executor.admit(message(1, body.into()), speech()),
+            Admission::Accepted
+        );
+        let job = executor.state.jobs.pop().unwrap();
+        match case {
+            0 => job.origin.cancel(),
+            1 => job.ticket.failed.store(true, Ordering::Release),
+            _ => {}
+        }
+        assert_eq!(
+            produce(&executor.state, &job),
+            Err(if case == 2 {
+                MediaError::InvalidOutput
+            } else {
+                MediaError::Cancelled
+            })
+        );
+        assert!(reader.ready.is_empty());
+        drop(job);
+        executor.stop();
+    }
+}
+
+#[test]
+fn text_cancelled_jobs_release_admission_without_failure_reports() {
+    for started in [false, true] {
+        let state = Arc::new(SpeechFixture::default());
+        let mut executor = TextExecutor::prepare(1, preparer(Arc::clone(&state))).unwrap();
+        let reader = executor
+            .register("1000", message(1, String::new()).origin)
+            .unwrap();
+        assert_eq!(
+            executor.admit(message(1, "A waiting".into()), speech()),
+            Admission::Accepted
+        );
+        if started {
+            executor.start().unwrap();
+            until(|| !state.opened.lock().unwrap().is_empty());
+        }
+        executor.cancel(reader.origin());
+        executor.start().unwrap();
+        until(|| reader.origin.pending.load(Ordering::Acquire) == 0);
+        assert_eq!(executor.observation().failures, 0);
+        assert!(executor.take_failure().is_none());
+        if !started {
+            assert!(state.opened.lock().unwrap().is_empty());
+        }
+        executor.stop();
+    }
+}
+
+#[test]
+fn text_job_claim_waits_for_both_sequence_and_previous_worker_release() {
+    let mut executor = TextExecutor::prepare(1, preparer(Arc::default())).unwrap();
+    let reader = executor
+        .register("1000", message(1, String::new()).origin)
+        .unwrap();
+    assert!(!reader.origin.claim(2));
+    assert!(reader.origin.claim(1));
+    reader.origin.next.store(2, Ordering::Release);
+    assert!(
+        !reader.origin.claim(2),
+        "previous producer has not released its claim"
+    );
+    reader.origin.running.store(false, Ordering::Release);
+    assert!(reader.origin.claim(2));
     executor.stop();
 }

@@ -53,6 +53,13 @@ struct Origin {
     observer: Mutex<Option<InboundObserver>>,
 }
 impl Origin {
+    fn claim(&self, sequence: u64) -> bool {
+        sequence == self.next.load(Ordering::Acquire)
+            && self
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
     fn cancel(&self) {
         if !self.cancelled.swap(true, Ordering::AcqRel) {
             self.statistics
@@ -274,16 +281,17 @@ impl TextExecutor {
         });
         // Total admitted jobs includes running and ready PCM, so the global
         // queue always has space for every reserved job, even during requeue.
-        if let Err(job) = self.state.jobs.push(Job {
-            origin,
-            ticket,
-            sequence,
-            message,
-            speech,
-        }) {
-            job.origin.cancel();
-            return self.record(Admission::Stopping);
-        }
+        self.state
+            .jobs
+            .push(Job {
+                origin,
+                ticket,
+                sequence,
+                message,
+                speech,
+            })
+            .ok()
+            .expect("reserved station text job slot");
         for worker in &self.workers {
             worker.thread().unpark();
         }
@@ -397,17 +405,12 @@ impl TextReader {
     pub fn origin(&self) -> &TextOrigin {
         &self.origin.identity
     }
-    fn retire(&mut self) -> bool {
-        let Some(item) = self.current.take() else {
-            return true;
-        };
-        match self.retired.push(item) {
-            Ok(()) => true,
-            Err(rtrb::PushError::Full(item)) => {
-                self.current = Some(item);
-                false
-            }
-        }
+    fn retire(&mut self) {
+        let item = self.current.take().expect("current text item");
+        // Retired items retain quota: four retired slots cannot coexist with a fifth item.
+        self.retired
+            .push(item)
+            .expect("reserved text retirement slot");
     }
     /// Add available speech to this local-only bus; pending synthesis is not activity.
     pub fn render(&mut self, output: &mut [f32]) -> bool {
@@ -429,9 +432,7 @@ impl TextReader {
                     if Arc::ptr_eq(&item.origin, &self.origin.identity) {
                         self.completed_sequence = self.completed_sequence.max(item.sequence);
                     }
-                    if !self.retire() {
-                        return active;
-                    }
+                    self.retire();
                     continue;
                 }
                 match item.reader.render_sample() {
@@ -489,15 +490,13 @@ fn worker(state: &State) {
         if origin.cancelled.load(Ordering::Acquire) {
             continue;
         }
-        if job.sequence != origin.next.load(Ordering::Acquire)
-            || origin
-                .running
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            if let Err(job) = state.jobs.push(job) {
-                job.origin.cancel();
-            }
+        if !origin.claim(job.sequence) {
+            // This popped job still owns its admission, so its queue slot remains reserved.
+            state
+                .jobs
+                .push(job)
+                .ok()
+                .expect("reserved text requeue slot");
             thread::park_timeout(Duration::from_millis(1));
             continue;
         }

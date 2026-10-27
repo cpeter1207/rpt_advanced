@@ -511,6 +511,9 @@ fn child_stream_handles_pre_cancelled_spawn_stdin_failure_and_cached_exit() {
         ChildStream::spawn(&config, &mut command, None, &|| true),
         Err(MediaError::Cancelled)
     ));
+    let mut command = Command::new("cat");
+    let mut empty = ChildStream::spawn(&config, &mut command, Some(&[]), &|| false).unwrap();
+    assert_eq!(empty.read(&mut [0; 8], &|| false), Ok(0));
 
     let mut command = Command::new("sh");
     command.args(["-c", "exec 0<&-; exec sleep 1"]);

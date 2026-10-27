@@ -660,7 +660,7 @@ static DESCRIPTOR: abi::rptadv_jitter_descriptor_v1 = abi::rptadv_jitter_descrip
 };
 
 /// Return the immutable jitter ABI 1 descriptor while this shared object is loaded.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(test), unsafe(no_mangle))]
 pub extern "C" fn rptadv_jitter_adapter_descriptor_v1() -> *const abi::rptadv_jitter_descriptor_v1 {
     &DESCRIPTOR
 }

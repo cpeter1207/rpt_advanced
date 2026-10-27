@@ -949,8 +949,8 @@ impl Host {
             );
             #[cfg(test)]
             crate::fixture::error_log(3, &message);
-            #[cfg(not(test))]
-            if let Ok(message) = CString::new(message) {
+            {
+                let message = CString::new(message).expect("validated peer identity in text error");
                 unsafe extern "C" {
                     fn syslog(priority: std::ffi::c_int, format: *const std::ffi::c_char, ...);
                 }
@@ -996,14 +996,13 @@ impl Host {
                         && peer.control.text_origin().connection_generation
                             == destination.connection_generation
                 })
-                .is_some_and(|peer| {
-                    peer.control
-                        .send(PeerCommand::Text {
-                            text: text.to_owned(),
-                            advisory: false,
-                        })
-                        .is_ok()
+                .expect("current text route snapshot")
+                .control
+                .send(PeerCommand::Text {
+                    text: text.to_owned(),
+                    advisory: false,
                 })
+                .is_ok()
         });
         self.text.record_forwarding(
             disposition.destinations_admitted,
@@ -1014,22 +1013,20 @@ impl Host {
         if disposition.locally_eligible
             && !matches!(&message.audience, TextAudience::Node(node) if node != local)
         {
-            if let Ok(node) = NodeId::new(local) {
-                if let Ok(settings) =
-                    ResolvedSpeechSettings::resolve(self.runtime.document(), &node)
-                {
-                    let settings = settings.value;
-                    let _ = self.text.admit(
-                        message,
-                        SpeechSource {
-                            text: String::new(),
-                            model: settings.voice.into(),
-                            speed_percent: settings.speed_percent as u32,
-                            level_db: settings.level_db as i32,
-                        },
-                    );
-                }
-            }
+            // The local identity and immutable document were validated at station admission.
+            let node = NodeId::new(local).expect("admitted local station");
+            let settings = ResolvedSpeechSettings::resolve(self.runtime.document(), &node)
+                .expect("validated station speech settings")
+                .value;
+            let _ = self.text.admit(
+                message,
+                SpeechSource {
+                    text: String::new(),
+                    model: settings.voice.into(),
+                    speed_percent: settings.speed_percent as u32,
+                    level_db: settings.level_db as i32,
+                },
+            );
         }
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.

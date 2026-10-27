@@ -43,6 +43,7 @@ pub(crate) struct State {
     encoded_bytes: Option<usize>,
     encode_position: u64,
     encode_unit: Option<usize>,
+    encode_full: bool,
     encode_pending: Vec<f32>,
     encode_tail: usize,
     tail_remaining: usize,
@@ -643,6 +644,21 @@ unsafe extern "C" fn prepare_audio(
 ) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
     state.encoded_calls += usize::from(count != 0);
+    if state.encode_full {
+        unsafe {
+            *result = abi::rptadv_codec_encode_result_v1 {
+                struct_size: std::mem::size_of_val(&*result) as u32,
+                status: 2,
+                consumed_frames: 0,
+                encoded_bytes: 0,
+                source_start_frames: 0,
+                source_frames: 0,
+                packet_frames: 0,
+                required_capacity: 1,
+            };
+        }
+        return 2;
+    }
     let unit = state.encode_unit.unwrap_or(count);
     let consumed = count.min(unit.saturating_sub(state.encode_pending.len()));
     state
@@ -760,6 +776,64 @@ fn outbound_codec_tail_retry_keeps_packets_and_timestamp_before_unkey() {
         [2000, 2020, 2020, 2020, 2040, 2060]
     );
     assert!(state.prepared.last().unwrap().0.is_empty());
+}
+
+#[test]
+fn outbound_rejects_full_or_nonprogressing_encoder() {
+    for full in [false, true] {
+        let (mut session, _control, state, mut output) = timed_session();
+        {
+            let mut state = state.lock().unwrap();
+            state.encode_full = full;
+            state.encode_unit = Some(0);
+        }
+        output.write(timed_span(0, 0), &[0.25; 960]);
+        assert!(matches!(session.step(0), Err(Error::Translation)));
+    }
+}
+
+#[test]
+fn outbound_discards_partial_pcm_after_stream_restart() {
+    let (mut session, control, state, mut output) = timed_session();
+    let clock = Arc::new(SourceClock::default());
+    clock.restart();
+    session.bind_clock(clock.clone());
+    state.lock().unwrap().encode_unit = Some(1440);
+    for block in 0..2 {
+        output.write(timed_span(block * 960, block * 20), &[0.25; 960]);
+        session.step(block * 20).unwrap();
+    }
+    let calls = state.lock().unwrap().encoded_calls;
+    clock.restart();
+    session.step(21).unwrap();
+    assert_eq!(state.lock().unwrap().encoded_calls, calls);
+    assert_eq!(
+        control.snapshot().unwrap().egress.expired_native_samples,
+        480
+    );
+}
+
+#[test]
+fn outbound_lower_rate_pcm_and_prepared_paths_drain_before_unkey() {
+    for prepared in [false, true] {
+        let (io, state) = peer_with_egress(8000, prepared, prepared);
+        let (mut output, inbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, _control) = PeerSession::prepare(io, inbound, "1000", "2000").unwrap();
+        output.write(timed_span(0, 0), &[0.25; 960]);
+        for now in 0..180 {
+            session.step(now).unwrap();
+        }
+        let state = state.lock().unwrap();
+        if prepared {
+            assert_eq!(state.prepared_frames.iter().sum::<u32>(), 160);
+            assert!(state.prepared.last().unwrap().0.is_empty());
+        } else {
+            assert_eq!(state.audio.len(), 160);
+            assert_eq!(state.writes.last(), Some(&0));
+        }
+    }
 }
 
 #[test]

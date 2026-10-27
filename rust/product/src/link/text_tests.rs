@@ -83,4 +83,16 @@ fn text_forwarding_large_body_is_not_limited_by_local_synthesis_quota_or_failure
     });
     assert!(result.locally_eligible);
     assert_eq!(forwarded, 2);
+    message.body = Arc::from("invalid\0wire");
+    let result = router.route(&message, &destinations(), |_, _| {
+        panic!("NUL cannot cross the C text boundary")
+    });
+    assert_eq!(result.destinations_rejected, 2);
+    message.body = Arc::from("normal text");
+    let mut other = destinations().remove(1);
+    other.protocol = 2;
+    let result = router.route(&message, &[other], |_, _| {
+        panic!("no serializer for this protocol")
+    });
+    assert_eq!(result.destinations_rejected, 1);
 }

@@ -1144,6 +1144,23 @@ mod tests {
             },
             -1
         );
+        let valid = c"radio@127.0.0.1:4569/506315";
+        assert_eq!(
+            unsafe {
+                peer_dial(
+                    descriptor.context,
+                    valid.as_ptr(),
+                    valid.to_bytes().len(),
+                    local.as_ptr(),
+                    local.to_bytes().len(),
+                    0,
+                    Some(current_yes),
+                    ptr::null_mut(),
+                    &mut output,
+                )
+            },
+            -1
+        );
         assert!(output.is_null());
     }
 
@@ -1361,6 +1378,7 @@ mod tests {
         for (handle, samples, count, encoded, capacity) in [
             (ptr::null_mut(), pcm.as_ptr(), 1, output_ptr, 1),
             (peer, pcm.as_ptr(), oversized, output_ptr, oversized),
+            (peer, pcm.as_ptr(), 1, output_ptr, usize::MAX),
             (peer, ptr::null(), 1, output_ptr, 1),
             (peer, pcm.as_ptr(), 1, ptr::null_mut(), 1),
         ] {
@@ -1381,6 +1399,41 @@ mod tests {
             );
             assert_eq!(output, [0xa5]);
         }
+        result.struct_size = 0;
+        for invalid in [ptr::null_mut(), ptr::from_mut(&mut result)] {
+            assert_eq!(
+                unsafe {
+                    super::peer_prepare_audio(
+                        ptr::null_mut(),
+                        peer,
+                        pcm.as_ptr(),
+                        1,
+                        output_ptr,
+                        1,
+                        0,
+                        invalid,
+                    )
+                },
+                -1
+            );
+            assert_eq!(output, [0xa5]);
+        }
+        result.struct_size = size_of::<crate::abi::rptadv_codec_encode_result_v1>() as u32;
+        assert_eq!(
+            unsafe {
+                super::peer_prepare_audio(
+                    ptr::null_mut(),
+                    peer,
+                    ptr::null(),
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    1,
+                    &mut result,
+                )
+            },
+            0
+        );
         for (handle, bytes, count, expected) in [
             (ptr::null_mut(), output.as_ptr(), 1, -1),
             (peer, output.as_ptr(), isize::MAX as usize + 1, -1),
@@ -1417,7 +1470,11 @@ mod tests {
         }
         let owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
-        for (input, expected, length) in [(1, 3, 6000), (2, 1, 4096)] {
+        for (input, expected, length) in [
+            (1, 3, 6000),
+            (2, 1, 4096),
+            (1, 0, isize::MAX as usize / size_of::<f32>()),
+        ] {
             let peer = owner.peer_handle(crate::iax::tests::peer_for_capacity(input, length));
             let mut observed = (0, 0);
             assert_eq!(
@@ -1429,9 +1486,9 @@ mod tests {
                         ptr::from_mut(&mut observed).cast(),
                     )
                 },
-                0
+                if expected == 0 { -1 } else { 0 }
             );
-            assert_eq!(observed, (expected, length));
+            assert_eq!(observed, (expected, if expected == 0 { 0 } else { length }));
             owner.destroy_peer(peer);
         }
     }

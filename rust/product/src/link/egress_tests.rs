@@ -41,6 +41,7 @@ fn finite_egress_finishes_exact_source_budget_without_losing_fir_tail() {
                 .iter()
                 .any(|x| x.abs() > 0.01)
         );
+        assert!(whole.process(&[]).unwrap().is_empty());
         // Reset retains fractional phase, but must discard previous-burst PCM.
         assert!(
             whole
@@ -186,6 +187,12 @@ fn native_rate_is_copied_without_conversion_and_oversize_input_is_rejected() {
 
 #[test]
 fn failed_creation_releases_a_converter_returned_alongside_an_error() {
+    unsafe extern "C" fn failed_delay(
+        _: *mut ffi::rptadv_samplerate_converter,
+        _: *mut u32,
+    ) -> i32 {
+        -1
+    }
     // SAFETY: descriptor callback storage remains live until validation returns.
     unsafe {
         let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
@@ -197,5 +204,8 @@ fn failed_creation_releases_a_converter_returned_alongside_an_error() {
             DESTROYED_FAILED_CONVERTER.load(std::sync::atomic::Ordering::Relaxed),
             before + 1
         );
+        let mut api = *ffi::rptadv_samplerate_adapter_descriptor();
+        api.converter_output_delay = Some(failed_delay);
+        assert!(Egress::from_descriptor(8000, 16, Box::leak(Box::new(api))).is_err());
     }
 }

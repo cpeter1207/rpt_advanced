@@ -985,6 +985,16 @@ pub(crate) mod tests {
 
     #[test]
     fn descriptor_requires_exact_version_capability_and_all_functions() {
+        unsafe extern "C" fn failed_catalog(
+            _: *const abi::rptadv_iax2_codec_selection_v2,
+            _: usize,
+            _: *mut *mut c_void,
+        ) -> i32 {
+            -1
+        }
+        let mut invalid = descriptor();
+        invalid.open_catalog = Some(failed_catalog);
+        assert_eq!(open_catalog(&invalid), Err(IaxError::Codec));
         let header = DescriptorHeader {
             struct_size: size_of::<DescriptorHeader>() as u32,
             abi_version: ABI_VERSION,
@@ -1327,6 +1337,34 @@ pub(crate) mod tests {
             peer.poll(&mut [0.0; 4096], &mut []),
             Ok(IaxEvent::NeedCapacity(6000))
         );
+        unsafe extern "C" fn invalid_capacity(
+            _: *mut c_void,
+            _: *mut f32,
+            _: usize,
+            _: *mut u8,
+            _: usize,
+            kind: *mut u32,
+            length: *mut usize,
+        ) -> i32 {
+            unsafe {
+                kind.write(EVENT.get());
+                length.write(EVENT_LENGTH.get());
+            }
+            1
+        }
+        peer.api.poll = Some(invalid_capacity);
+        for (kind, length) in [
+            (1, 6000),
+            (0, 4096),
+            (0, isize::MAX as usize / size_of::<f32>() + 1),
+        ] {
+            EVENT.set(kind);
+            EVENT_LENGTH.set(length);
+            assert_eq!(
+                peer.poll(&mut [0.0; 4096], &mut []),
+                Err(IaxError::Operation)
+            );
+        }
     }
 
     /// Exercise the host's output-capacity retry without actual UDP or codec state.

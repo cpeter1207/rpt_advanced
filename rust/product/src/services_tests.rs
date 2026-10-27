@@ -573,6 +573,50 @@ fn prepared_peer_send_reports_transport_failure() {
 }
 
 #[test]
+fn prepared_codec_results_reject_each_invalid_provider_field() {
+    thread_local! { static CASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+    unsafe extern "C" fn encode(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: *const f32,
+        _: usize,
+        _: *mut u8,
+        _: usize,
+        _: u32,
+        result: *mut abi::rptadv_codec_encode_result_v1,
+    ) -> i32 {
+        let result = unsafe { &mut *result };
+        result.status = 0;
+        result.consumed_frames = 1;
+        result.encoded_bytes = 1;
+        result.source_frames = 1;
+        result.packet_frames = 1;
+        match CASE.get() {
+            0 => return -1,
+            1 => result.status = 1,
+            2 => result.struct_size = 0,
+            3 => result.consumed_frames = 2,
+            4 => result.encoded_bytes = 2,
+            5 => result.source_frames = 2,
+            _ => {
+                result.source_frames = 0;
+                result.packet_frames = 0;
+            }
+        }
+        0
+    }
+    let (mut peer, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    peer.services.0.peer_prepare_audio = Some(encode);
+    for case in 0..7 {
+        CASE.set(case);
+        assert!(matches!(
+            peer.prepare_audio(&[0.25], &mut [0], false),
+            Err(Error::Translation)
+        ));
+    }
+}
+
+#[test]
 fn host_table_validation_and_value_conversions_fail_closed() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -625,7 +669,7 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 7;
+    table.abi_version = 8;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -633,6 +677,12 @@ fn host_table_validation_and_value_conversions_fail_closed() {
     ));
     table.capability = *b"rptadv.hst8\0";
     table.local_time = None;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+    table = unsafe { crate::fixture::host_descriptor().read() };
+    table.peer_write = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)

@@ -657,7 +657,12 @@ fn abi_rejects_null_short_and_oversized_arguments_without_mutating_valid_context
         },
         -1
     );
-    for (now, tail) in [(59_000_000, 0), (60_000_000, 4001), (60_000_000, 161)] {
+    for (now, tail) in [
+        (59_000_000, 0),
+        (60_000_000, 4001),
+        (60_000_000, 161),
+        (60_000_000, i32::MAX as u32 + 1),
+    ] {
         assert_eq!(unsafe { api.advance.unwrap()(jitter.0, now, tail) }, -1);
     }
     jitter.advance(60);
