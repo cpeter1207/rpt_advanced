@@ -7,3 +7,4 @@ mod regeneration;
 pub mod ring;
 pub mod session;
 pub(crate) mod source_clock;
+pub mod text;

@@ -11,7 +11,7 @@ use crate::{
 };
 use rpt_advanced_core::{
     audio::LinkAudioConsumer,
-    link::{Peer, Protocol},
+    link::{ClassifiedText, HumanMessage, Peer, Protocol, TextOrigin, classify_asl},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
@@ -47,6 +47,8 @@ pub enum Command {
 pub enum Event {
     /// Strictly parsed protocol text requiring topology/relay policy.
     Text(Vec<u8>),
+    /// Validated human text, distinct from controller signaling and commands.
+    HumanText(HumanMessage),
     /// Completed digit, including the existing three-second synthesized terminator.
     Digit(char),
     /// Replacement ingress is installed; control may acknowledge old-generation detachment.
@@ -164,6 +166,7 @@ impl PeerObservationCache {
 }
 /// Single control producer/event consumer; never borrowed by audio callbacks.
 pub struct PeerControl {
+    text_identity: Arc<TextIdentity>,
     egress: Arc<EgressStatistics>,
     commands: Producer<Command>,
     events: Consumer<Event>,
@@ -175,6 +178,17 @@ pub struct PeerControl {
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
 }
 impl PeerControl {
+    /// Publish a station-generation fence before attaching/publishing its reader.
+    pub fn bind_text_generation(&self, generation: u64) -> TextOrigin {
+        self.text_identity
+            .station
+            .store(generation, Ordering::Release);
+        self.text_origin()
+    }
+    /// Snapshot this authenticated connection's current local-media generation.
+    pub fn text_origin(&self) -> TextOrigin {
+        self.text_identity.snapshot()
+    }
     /// Capture this exact inbound endpoint for source-addressed command replies.
     pub fn reply_target(&self) -> rpt_advanced_core::link::PeerReply {
         self.observer.signals().reply_target()
@@ -250,6 +264,7 @@ impl Drop for PeerControl {
 
 /// One prepared peer session, stepped by exactly one synchronous or retained owner.
 pub struct PeerSession {
+    text_identity: Arc<TextIdentity>,
     io: PeerIo,
     inbound: InboundProducer,
     peer_observation: Arc<PeerObservationCache>,
@@ -270,6 +285,23 @@ pub struct PeerSession {
     async_epoch: Option<Instant>,
     #[cfg(test)]
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
+}
+
+static NEXT_TEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+struct TextIdentity {
+    station: AtomicU64,
+    connection: u64,
+    peer: String,
+}
+impl TextIdentity {
+    fn snapshot(&self) -> TextOrigin {
+        TextOrigin {
+            station_generation: self.station.load(Ordering::Acquire),
+            connection_generation: self.connection,
+            peer: self.peer.clone(),
+            protocol: 1,
+        }
+    }
 }
 
 const MAX_PEER_INPUT_SAMPLES: usize = 4096;
@@ -525,9 +557,15 @@ impl PeerSession {
         let stop = Arc::new(AtomicBool::new(false));
         let wake = PeerWake::default();
         let peer_observation = Arc::new(PeerObservationCache::new());
+        let text_identity = Arc::new(TextIdentity {
+            station: AtomicU64::new(0),
+            connection: NEXT_TEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
+            peer: remote.into(),
+        });
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
         let control = PeerControl {
+            text_identity: Arc::clone(&text_identity),
             egress: outbound.statistics.clone(),
             commands,
             events: outgoing,
@@ -540,6 +578,7 @@ impl PeerSession {
         };
         Ok((
             Self {
+                text_identity,
                 io,
                 inbound,
                 peer_observation,
@@ -573,6 +612,13 @@ impl PeerSession {
     }
     fn text(&mut self, bytes: Vec<u8>, _now_ms: u64) -> Result<(), Error> {
         let Some(protocol) = Protocol::parse(&bytes) else {
+            if let ClassifiedText::Human(message) =
+                classify_asl(self.text_identity.snapshot(), &bytes)
+            {
+                // A full local event queue rejects only the newest human message,
+                // never a healthy peer connection or its unrelated audio/control.
+                let _ = self.events.push(Event::HumanText(message));
+            }
             return Ok(());
         };
         match protocol {

@@ -53,6 +53,29 @@ pub(crate) struct State {
 type Shared = Arc<Mutex<State>>;
 
 #[test]
+fn text_forwarding_classification_binds_authenticated_origin_and_drops_overflow_without_hangup() {
+    let (mut session, mut control, _, _) = make_session("1000");
+    let origin = control.bind_text_generation(42);
+    session.text(b"M 4000 0 hello world".to_vec(), 0).unwrap();
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("missing human event");
+    };
+    assert_eq!(message.origin, origin);
+    assert_eq!(message.origin.peer, "2000");
+    assert_eq!(message.source, "4000");
+    assert_eq!(&*message.body, "hello world");
+    for _ in 0..128 {
+        session.text(b"M 4000 0 human message".to_vec(), 0).unwrap();
+    }
+    assert!(!control.ended());
+    let (_, second, _, _) = make_session("1000");
+    assert_ne!(
+        second.bind_text_generation(42).connection_generation,
+        origin.connection_generation
+    );
+}
+
+#[test]
 fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
     for requested in [false, true] {
         let (mut session, control, state, _) = make_session("1000");

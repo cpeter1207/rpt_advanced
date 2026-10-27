@@ -70,6 +70,48 @@ fn host() -> Host {
 }
 
 #[test]
+fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    ingress
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"M 4000 0 literal human text"));
+    pump_until(&mut host, |_| {
+        egress
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"M 4000 0 literal human text")
+    });
+    assert!(
+        !ingress
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text.starts_with(b"M "))
+    );
+    assert_eq!(
+        egress
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .filter(|text| text.starts_with(b"M "))
+            .count(),
+        1
+    );
+    assert!(host.stop(20));
+}
+
+#[test]
 fn remote_selection_precedes_the_next_digit_in_one_host_batch() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

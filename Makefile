@@ -267,7 +267,7 @@ install-check: artifacts
 	python3 tests/test_package_combinations.py
 
 build/chan_rpt_fixture.so: tests/radio_fixture.c rust/product/include/rptadv_product.h | build
-	$(CC) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@
 
 integration: install-check build/chan_rpt_fixture.so site-gpio-check site-hwmon-check
 	install -m 0755 build/chan_rpt_fixture.so build/stage$(asteriskmoddir)/

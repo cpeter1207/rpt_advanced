@@ -4,6 +4,7 @@ use crate::{
         dispatcher::{MediaWorker, PreparedDispatch},
         ring::{InboundPolicy, InboundRing},
         session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
+        text::{TextDestination, TextRouter},
     },
     media::NativeMediaPreparer,
     services::{HostServices, PeerIo},
@@ -13,7 +14,7 @@ use crate::{
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
     config::{ConfigDocument, LinkLookupMethod, ResolvedNodeSettings},
-    link::{AudioPeer, GroupMemberSelection, LinkAudio, LinkAudioStatus, Mode},
+    link::{AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, Mode},
     runtime::{
         DeviceHandoff, GenerationSettings, PreparedAdapter, Runtime, RuntimeClock, RuntimeError,
         dtmf::DigitOutcome, links::LinkEffect,
@@ -821,6 +822,51 @@ impl Host {
             })
             .map_err(|_| RuntimeError::Rejected)
     }
+    fn human_text(&mut self, local: &str, message: HumanMessage) {
+        if !self.peers.iter().any(|peer| {
+            peer.local == local
+                && !peer.control.ended()
+                && peer.control.text_origin() == message.origin
+        }) {
+            return;
+        }
+        let router = TextRouter::new(
+            self.runtime
+                .node_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        let destinations = self
+            .peers
+            .iter()
+            .filter(|peer| peer.local == local)
+            .map(|peer| TextDestination {
+                connection_generation: peer.control.text_origin().connection_generation,
+                protocol: 1,
+                node: peer.remote.clone(),
+                can_forward_text: !peer.control.ended(),
+            })
+            .collect::<Vec<_>>();
+        let _disposition = router.route(&message, &destinations, |destination, text| {
+            self.peers
+                .iter_mut()
+                .find(|peer| {
+                    peer.local == local
+                        && peer.remote == destination.node
+                        && peer.control.text_origin().connection_generation
+                            == destination.connection_generation
+                })
+                .is_some_and(|peer| {
+                    peer.control
+                        .send(PeerCommand::Text {
+                            text: text.to_owned(),
+                            advisory: false,
+                        })
+                        .is_ok()
+                })
+        });
+    }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
         self.advance_sites(clock);
@@ -866,6 +912,9 @@ impl Host {
                 continue;
             };
             match event {
+                Event::HumanText(message) => {
+                    self.human_text(&local, message);
+                }
                 Event::Redirected(observer) => {
                     if let Some(generation) = node.status(clock.now_ms).active {
                         // This serialized owner has not changed the just-read generation.
