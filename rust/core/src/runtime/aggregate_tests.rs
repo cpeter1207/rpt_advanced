@@ -31,10 +31,10 @@ impl StationMediaSession for TestStation {
     fn register_program(
         &mut self,
         program: crate::media::MediaProgram,
-        _: bool,
+        one_shot: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
         for source in program.primary {
-            if let (Some(messages), Some(speech)) = (&self.0, source.speech) {
+            if let (true, Some(messages), Some(speech)) = (one_shot, &self.0, source.speech) {
                 messages.lock().unwrap().push(speech.text);
             }
         }
@@ -3264,9 +3264,13 @@ fn priority_group_media_failure_is_reported_after_recording_the_transition() {
         fn register_program(
             &mut self,
             _: crate::media::MediaProgram,
-            _: bool,
+            one_shot: bool,
         ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
-            Err(MediaError::Io)
+            if one_shot {
+                Err(MediaError::Io)
+            } else {
+                Ok(Box::new(TestPcm(0)))
+            }
         }
         fn start(&mut self) -> Result<(), MediaError> {
             Ok(())

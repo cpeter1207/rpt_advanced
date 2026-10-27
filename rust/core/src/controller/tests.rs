@@ -3,6 +3,9 @@ use super::*;
 #[path = "site_tests.rs"]
 mod site;
 
+#[path = "timeout_tests.rs"]
+mod timeout;
+
 thread_local! {
     static AUDIO_ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
@@ -227,13 +230,12 @@ fn configured_message_suppresses_repeat_but_still_switches_to_morse_on_receive()
 }
 
 #[test]
-fn configured_message_survives_traffic_lockout_without_leaking_timed_out_receive() {
+fn configured_message_waits_out_traffic_timeout_without_leaking_receive() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings {
             full_duplex: true,
             telemetry_duck_db: 0,
             transmit_timeout_ms: 1,
-            timeout_lockout_ms: 100,
             ..Default::default()
         },
         vec![],
@@ -248,15 +250,11 @@ fn configured_message_survives_traffic_lockout_without_leaking_timed_out_receive
     );
     node.process_audio(false, false, &[], &mut [0.0]);
     let mut output = [0.25; 4800];
-    assert!(node.process_audio(true, false, &[0.25; 4800], &mut output));
-    assert!(
-        output[96..].iter().any(|sample| *sample != 0.0),
-        "Morse remains audible after traffic timeout"
-    );
-    assert!(
-        output[96..].iter().all(|sample| sample.abs() <= 0.502),
-        "timed-out receiver must not ride message PTT"
-    );
+    assert!(!node.process_audio(true, false, &[0.25; 4800], &mut output));
+    assert!(output[96..].iter().all(|sample| *sample == 0.0));
+    let mut restored = [0.0; 12096];
+    assert!(!node.process_audio(false, false, &[], &mut restored));
+    assert!(restored.iter().any(|sample| *sample != 0.0));
 }
 
 #[test]
@@ -2619,7 +2617,6 @@ fn timeout_requires_deadline_and_unkey() {
     let config = ControllerSettings {
         full_duplex: true,
         transmit_timeout_ms: 1,
-        timeout_lockout_ms: 2,
         ..ControllerSettings::default()
     };
     let (mut node, _) =

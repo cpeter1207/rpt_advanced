@@ -236,6 +236,16 @@ scheduled-link-change =
        *[disconnect] DISCONNECTING FROM { $target } IN { $time_remaining }
         }
 
+repeater-timed-out =
+    .text = Repeater timed out after { $duration }.
+    .tts = Repeater timed out after { $duration }.
+    .morse = REPEATER TIMED OUT AFTER { $duration }
+
+repeater-timeout-cleared =
+    .text = Repeater timeout cleared.
+    .tts = Repeater timeout cleared.
+    .morse = REPEATER TIMEOUT CLEARED
+
 duration-unit =
     .text = { $unit ->
         [month] { $count ->

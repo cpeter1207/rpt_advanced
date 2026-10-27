@@ -579,8 +579,15 @@ impl<A: Send, C: Send> Runtime<A, C> {
             if links.requires_civil_time() && clock.civil.is_none_or(|(_, second)| second >= 60) {
                 return Err(RuntimeError::Clock);
             }
-            let (controller, telemetry, status, media_session, mut messages) =
-                prepare::controller(&document, &id, &settings, media, generation_id, &catalog)?;
+            let (controller, telemetry, status, media_session, mut messages) = prepare::controller(
+                &document,
+                &id,
+                &settings,
+                media,
+                generation_id,
+                &catalog,
+                clock.civil.map(|(civil, _)| civil),
+            )?;
             warnings.append(&mut messages.warnings);
             let activity = controller.activity();
             let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)

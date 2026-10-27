@@ -68,7 +68,7 @@ fn text_local_mix_isolation_preserves_both_peer_planes_and_parrot_capture() {
 #[test]
 fn text_local_mix_obeys_duplex_inhibit_timeout_and_playable_output() {
     for (full_duplex, receive, inhibit, playable, expected) in [
-        (true, false, false, true, true),
+        (true, true, false, true, true),
         (false, true, false, true, false),
         (true, false, true, true, false),
         (true, false, false, false, false),
@@ -79,7 +79,6 @@ fn text_local_mix_obeys_duplex_inhibit_timeout_and_playable_output() {
             ControllerSettings {
                 full_duplex,
                 transmit_timeout_ms: 1,
-                timeout_lockout_ms: 1000,
                 ..Default::default()
             },
             vec![],

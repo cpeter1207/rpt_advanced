@@ -591,6 +591,14 @@ impl ParrotSequence {
 }
 
 impl PcmStreamReader for ParrotSequence {
+    fn defer_before_output(&mut self) -> bool {
+        if let Some(report) = &mut self.report {
+            report.defer_before_output();
+        }
+        self.recording.defer_before_output();
+        true
+    }
+
     fn start(&mut self) {
         self.report_started = false;
         if let Some(report) = &mut self.report {

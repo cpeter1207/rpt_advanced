@@ -315,7 +315,6 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "ctcss_encode_on_input"
                 | "ctcss_hang_ms"
                 | "transmit_timeout_ms"
-                | "timeout_lockout_ms"
                 | "kerchunk_max_ms"
                 | "telemetry_duck_db"
                 | "courtesy_delay_ms"
@@ -575,7 +574,6 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         "polite_expiry_busy" => matches!(value, "skip" | "wait"),
         "transmit_hang_ms"
         | "transmit_timeout_ms"
-        | "timeout_lockout_ms"
         | "kerchunk_max_ms"
         | "courtesy_delay_ms"
         | "squelch_delay_ms"
@@ -769,7 +767,6 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "ctcss_encode_on_input") => "no",
         (ScopeKind::General | ScopeKind::Node, "ctcss_hang_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "transmit_timeout_ms") => "180000",
-        (ScopeKind::General | ScopeKind::Node, "timeout_lockout_ms") => "30000",
         (ScopeKind::General | ScopeKind::Node, "kerchunk_max_ms") => "500",
         (ScopeKind::General | ScopeKind::Node, "telemetry_duck_db") => "-20",
         (ScopeKind::General | ScopeKind::Node, "courtesy_delay_ms") => "250",

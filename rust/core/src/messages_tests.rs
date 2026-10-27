@@ -3,6 +3,115 @@ use super::messages::{CatalogError, Message, MessageCatalog, MessageForms};
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
 #[test]
+fn timeout_notice_formats_the_configured_duration() {
+    use super::messages::MessageArgument;
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    let args = std::collections::BTreeMap::from([(
+        "duration".into(),
+        MessageArgument::Forms(MessageForms {
+            text: "3 minutes".into(),
+            tts: "3 minutes".into(),
+            morse: "3M".into(),
+        }),
+    )]);
+    let forms = catalog.format_named("repeater-timed-out", &args).unwrap();
+    assert_eq!(forms.text, "Repeater timed out after 3 minutes.");
+    assert_eq!(forms.tts, "Repeater timed out after 3 minutes.");
+    assert_eq!(forms.morse, "REPEATER TIMED OUT AFTER 3M");
+}
+
+#[test]
+fn timeout_notices_use_typed_catalog_messages() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    assert_eq!(
+        catalog
+            .format(&Message::RepeaterTimedOut {
+                duration: "1 second",
+            })
+            .unwrap(),
+        MessageForms {
+            text: "Repeater timed out after 1 second.".into(),
+            tts: "Repeater timed out after 1 second.".into(),
+            morse: "REPEATER TIMED OUT AFTER 1 second".into(),
+        }
+    );
+    assert_eq!(
+        catalog.format(&Message::RepeaterTimeoutCleared).unwrap(),
+        MessageForms {
+            text: "Repeater timeout cleared.".into(),
+            tts: "Repeater timeout cleared.".into(),
+            morse: "REPEATER TIMEOUT CLEARED".into(),
+        }
+    );
+}
+
+#[test]
+fn timeout_notice_preserves_duration_units_and_plurals() {
+    use crate::schedule::{CivilTime, Weekday};
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (seconds, expected, morse) in [
+        (0, "0 seconds", "0S"),
+        (1, "1 second", "1S"),
+        (2, "2 seconds", "2S"),
+        (60, "1 minute", "1M"),
+        (90, "1 minute, and 30 seconds", "1M 30S"),
+        (180, "3 minutes", "3M"),
+        (3600, "1 hour", "1H"),
+        (
+            3373381,
+            "1 month, 1 week, 1 day, 1 hour, 3 minutes, and 1 second",
+            "1M 1W 1D 1H 3M 1S",
+        ),
+    ] {
+        let forms = catalog.format_timeout(seconds, local).unwrap();
+        assert_eq!(forms.text, format!("Repeater timed out after {expected}."));
+        assert_eq!(forms.tts, format!("Repeater timed out after {expected}."));
+        assert_eq!(forms.morse, format!("REPEATER TIMED OUT AFTER {morse}"));
+    }
+}
+
+#[test]
+fn timeout_notice_uses_independent_localized_duration_forms_and_fallback() {
+    use crate::schedule::{CivilTime, Weekday};
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let translation = "duration-unit =\n    .text = display { $count } { $unit }\n    .tts = voice { $count } { $unit }\n    .morse = cw { $count } { $unit }\nduration-join =\n    .text = { $head } et { $tail }\n    .tts = { $head } puis { $tail }\n    .morse = { $head } { $tail }\nrepeater-timed-out =\n    .text = display { $duration }\n    .tts = voice { $duration }\n    .morse = cw { $duration }\nrepeater-timeout-cleared =\n    .text = Termine\n    .tts = { $missing }\n";
+    let catalog = MessageCatalog::from_sources("fr-CA", ENGLISH, Some(translation)).unwrap();
+    assert_eq!(
+        catalog.format_timeout(90, local).unwrap(),
+        MessageForms {
+            text: "display display 1 minute et display 30 second".into(),
+            tts: "voice voice 1 minute puis voice 30 second".into(),
+            morse: "cw cw 1 minute cw 30 second".into(),
+        }
+    );
+    assert_eq!(
+        catalog.format(&Message::RepeaterTimeoutCleared).unwrap(),
+        MessageForms {
+            text: "Termine".into(),
+            tts: "Repeater timeout cleared.".into(),
+            morse: "REPEATER TIMEOUT CLEARED".into(),
+        }
+    );
+}
+
+#[test]
+fn timeout_notice_accepts_a_bounded_duration_beyond_the_fragment_limit() {
+    use crate::schedule::{CivilTime, Weekday};
+    let local = CivilTime::new(2026, 10, 21, Weekday::Wednesday, 12, 0).unwrap();
+    let fragment = "x".repeat(127);
+    let translation = format!(
+        "duration-unit =\n    .text = {fragment}\n    .tts = {fragment}\n    .morse = {fragment}\n"
+    );
+    let catalog = MessageCatalog::from_sources("de", ENGLISH, Some(&translation)).unwrap();
+    let forms = catalog.format_timeout(1, local).unwrap();
+    assert_eq!(forms.text, format!("Repeater timed out after {fragment}."));
+    assert_eq!(forms.tts, format!("Repeater timed out after {fragment}."));
+    assert_eq!(forms.morse, format!("REPEATER TIMED OUT AFTER {fragment}"));
+    assert!(forms.tts.len() > 127);
+}
+
+#[test]
 fn composition_shipped_site_messages_keep_independent_forms() {
     use super::messages::{MessageArgument, MessageForms};
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();

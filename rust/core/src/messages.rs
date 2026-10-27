@@ -38,6 +38,8 @@ const REQUIRED_IDS: &[&str] = &[
     "priority-group-selected",
     "priority-group-unavailable",
     "scheduled-link-change",
+    "repeater-timed-out",
+    "repeater-timeout-cleared",
     "duration-unit",
     "duration-join",
     "parrot-levels",
@@ -145,6 +147,13 @@ pub enum Message<'a> {
         /// Localized remaining-time phrase.
         time_remaining: &'a str,
     },
+    /// Report the elapsed transmitter watchdog duration.
+    RepeaterTimedOut {
+        /// Localized elapsed-duration phrase for this output form.
+        duration: &'a str,
+    },
+    /// Announce that every receive input has cleared after a transmitter timeout.
+    RepeaterTimeoutCleared,
     /// Format one nonzero duration component, or zero seconds.
     DurationPart {
         /// Whole number of the selected units.
@@ -499,6 +508,25 @@ impl MessageCatalog {
         Ok(forms)
     }
 
+    /// Format a watchdog notice with matching localized duration forms.
+    /// Each duration fragment keeps its existing bound within the composed notice.
+    pub fn format_timeout(
+        &self,
+        seconds: u64,
+        local: CivilTime,
+    ) -> Result<MessageForms, CatalogError> {
+        let duration = self.format_duration(seconds, local)?;
+        self.format_bounded_attributes(
+            "repeater-timed-out",
+            |attribute| {
+                let mut args = FluentArgs::new();
+                args.set("duration", duration.attribute(attribute));
+                args
+            },
+            |attribute| MAX_MESSAGE_BYTES + duration.attribute(attribute).len(),
+        )
+    }
+
     /// Format a named connect/disconnect warning with matching localized duration forms.
     /// Bounded target and duration fragments feed the existing composed telemetry stream.
     pub fn format_schedule_warning(
@@ -610,6 +638,8 @@ impl Message<'_> {
             Self::PriorityGroupSelected { .. } => "priority-group-selected",
             Self::PriorityGroupUnavailable { .. } => "priority-group-unavailable",
             Self::ScheduledLinkChange { .. } => "scheduled-link-change",
+            Self::RepeaterTimedOut { .. } => "repeater-timed-out",
+            Self::RepeaterTimeoutCleared => "repeater-timeout-cleared",
             Self::DurationPart { .. } => "duration-unit",
             Self::ParrotLevels { .. } => "parrot-levels",
         }
@@ -621,6 +651,7 @@ impl Message<'_> {
             Self::NoLinks
             | Self::LastKeyedNone
             | Self::Greeting { .. }
+            | Self::RepeaterTimeoutCleared
             | Self::PadTestEmpty
             | Self::PadTestOverflow => {}
             Self::DtmfSymbol { symbol } => {
@@ -697,6 +728,7 @@ impl Message<'_> {
                 args.set("count", *count as i64);
                 args.set("unit", unit.key());
             }
+            Self::RepeaterTimedOut { duration } => args.set("duration", *duration),
             Self::ParrotLevels {
                 peak_dbfs,
                 rms_dbfs,
@@ -797,6 +829,7 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
             args.set("direction", "connect");
             args.set("time_remaining", "1 minute");
         }
+        "repeater-timed-out" => args.set("duration", "3 minutes"),
         "duration-unit" => {
             args.set("unit", "second");
             args.set("count", 60);

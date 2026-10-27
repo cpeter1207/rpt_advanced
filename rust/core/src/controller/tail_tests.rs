@@ -38,7 +38,6 @@ fn tail_playback_outlasts_traffic_timeout_without_missing_pcm() {
         ControllerSettings {
             full_duplex: true,
             transmit_timeout_ms: 1,
-            timeout_lockout_ms: 100,
             ..Default::default()
         },
         vec![],
@@ -187,7 +186,6 @@ fn tail_delay_preserves_identifier_release_safeguard() {
 fn tail_timeout_does_not_hold_a_completed_message() {
     let mut node = fixture(0, 10000, vec![]);
     node.settings.transmit_timeout_ms = 10;
-    node.settings.timeout_lockout_ms = 500;
     at(&mut node, 0, true);
     at(&mut node, 1, false);
     assert_eq!(at(&mut node, 1001, false).1, 0.5);

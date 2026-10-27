@@ -391,9 +391,9 @@ fn composition_one_shot_rewind_keeps_its_producer_until_completion() {
 }
 
 #[test]
-fn held_status_releases_the_producer_and_restarts_from_the_beginning() {
+fn playback_timeout_hold_preserves_one_shot_source_through_priority_playback() {
     let mut session = StationSession::new("1000".into(), 1, context(None), context(None)).unwrap();
-    let mut reader = session
+    let reader = session
         .register_program(MediaProgram::single(composition_tone(500)), true)
         .unwrap();
     let job = session.requests.as_mut().unwrap().pop().unwrap();
@@ -403,23 +403,25 @@ fn held_status_releases_the_producer_and_restarts_from_the_beginning() {
         .register_program(MediaProgram::single(composition_tone(1_000)), false)
         .unwrap();
     session.start().unwrap();
-    reader.start();
+    let mut playback = rpt_advanced_core::audio::Playback::new_stream(reader);
     let mut prefix = [0.0; 17];
     let mut heard = false;
     for _ in 0..1_000 {
-        match reader.render(&mut prefix) {
-            PcmRead::Samples(17) => {
-                heard = true;
-                break;
-            }
-            PcmRead::Pending => thread::sleep(Duration::from_millis(1)),
-            other => panic!("status ended before its first partial output: {other:?}"),
+        if playback.render(false, &mut prefix) == prefix.len() {
+            heard = true;
+            break;
         }
+        assert!(
+            !playback.is_finished(),
+            "status ended before its first partial output"
+        );
+        thread::sleep(Duration::from_millis(1));
     }
     assert!(heard, "status did not begin playback");
     assert_eq!(control.requested.load(Ordering::Acquire), 1);
 
-    assert!(reader.defer_before_output());
+    playback.restart(false);
+    playback.defer(false);
     assert_eq!(control.requested.load(Ordering::Acquire), 0);
 
     identifier.start();
@@ -428,12 +430,25 @@ fn held_status_releases_the_producer_and_restarts_from_the_beginning() {
     assert!(id_audio.iter().any(|sample| sample.abs() > 0.1));
     identifier.cancel();
 
-    reader.start();
-    assert_eq!(control.requested.load(Ordering::Acquire), 2);
-    let restarted = collect_samples(reader.as_mut(), &mut [0.0; 97]);
+    let mut restarted = Vec::new();
+    let mut output = [0.0; 97];
+    for _ in 0..1_000 {
+        let made = playback.render(false, &mut output);
+        restarted.extend_from_slice(&output[..made]);
+        if playback.is_finished() {
+            break;
+        }
+        if made == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(
+        playback.outcome(),
+        rpt_advanced_core::audio::PlaybackOutcome::Succeeded,
+        "held one-shot source did not resume to completion"
+    );
     assert_eq!(restarted.len(), 480);
     assert_eq!(&restarted[..prefix.len()], &prefix);
-    reader.cancel();
 }
 
 #[test]

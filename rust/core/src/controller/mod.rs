@@ -72,8 +72,6 @@ pub struct ControllerSettings {
     pub ctcss_hang_ms: u64,
     /// Maximum continuous keyed interval without any source unkey; zero disables.
     pub transmit_timeout_ms: u64,
-    /// Post-timeout lockout; recovery additionally requires receive inactivity.
-    pub timeout_lockout_ms: u64,
     /// Suppress hang and release telemetry for local bursts at most this long; zero disables.
     pub kerchunk_max_ms: u64,
     /// Per-source courtesy delay after unkey.
@@ -131,6 +129,7 @@ pub struct NodeController {
     announcements: Vec<AnnouncementState>,
     tails: TailPlanner,
     timeout: TimeoutPolicy,
+    timeout_media: Option<[PreparedMedia; 2]>,
     activity: ActivitySnapshot,
     now: u64,
     receiver: bool,
@@ -172,7 +171,6 @@ impl NodeController {
             settings.hang_ms,
             settings.ctcss_hang_ms,
             settings.transmit_timeout_ms,
-            settings.timeout_lockout_ms,
             settings.kerchunk_max_ms,
             settings.courtesy_delay_ms,
         ];
@@ -252,6 +250,7 @@ impl NodeController {
                     })
                     .collect(),
                 timeout: TimeoutPolicy::default(),
+                timeout_media: None,
                 tails: TailPlanner::default(),
                 activity: ActivitySnapshot::new(),
                 now: 0,
@@ -653,7 +652,8 @@ impl NodeController {
                 .telemetry
                 .peer_status()
                 .is_none_or(|peer| !peer.active());
-        let active_status = self.telemetry.active == Some(Source::Status);
+        let active_status =
+            !self.timeout.blocked() && self.telemetry.active == Some(Source::Status);
         if let Some(media) = self.telemetry.status.as_mut().filter(|media| {
             !status_idle && active_status && !media.0.has_output() && !media.force_morse()
         }) {
@@ -711,6 +711,7 @@ impl NodeController {
             self.now,
             samples(self.settings.hang_ms),
             self.suppress_release,
+            !self.timeout.blocked(),
         );
         if let Some(Source::Tail(index)) = self.telemetry.active {
             if !self.tails.items[index].started && !self.tails.pending() {
@@ -719,7 +720,18 @@ impl NodeController {
         }
         self.receiver = receiving;
         self.linked = linked;
+        if source_activity && self.telemetry.parrot_pending() {
+            self.telemetry.discard_pending_parrot();
+        }
         let inhibited = self.telemetry.site_inhibit.load(Ordering::Acquire);
+        if self.timeout.blocked() {
+            return self.timeout_sample(
+                receive || source_activity,
+                inhibited,
+                input,
+                parrot_output,
+            );
+        }
         let may_transmit = !inhibited && (self.settings.full_duplex || !receiving);
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
         self.telemetry.expire_status(
@@ -736,9 +748,6 @@ impl NodeController {
                 .status
                 .as_ref()
                 .is_some_and(|media| media.3.is_some() && media.7.is_none());
-        if source_activity && self.telemetry.parrot_pending() {
-            self.telemetry.discard_pending_parrot();
-        }
         if receive
             || (!peer_before && matches!(active_before, Some(Source::Status | Source::Courtesy(_))))
         {
@@ -898,7 +907,6 @@ impl NodeController {
         };
         let ordinary_playback_allowed = self.timeout.allows_playback(
             self.traffic_keyed,
-            receive,
             self.now,
             samples(self.settings.transmit_timeout_ms),
         );
@@ -1009,11 +1017,18 @@ impl NodeController {
         self.traffic_keyed = self.timeout.apply(
             requested && !inhibited,
             self.traffic_keyed,
-            receive,
             self.now,
             samples(self.settings.transmit_timeout_ms),
-            samples(self.settings.timeout_lockout_ms),
         );
+        if self.timeout.blocked() {
+            self.begin_timeout();
+            return self.timeout_sample(
+                receive || source_activity,
+                inhibited,
+                input,
+                parrot_output,
+            );
+        }
         if !self.traffic_keyed {
             self.duplex = DuplexPolicy::default();
         }

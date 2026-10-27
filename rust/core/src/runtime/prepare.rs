@@ -16,6 +16,8 @@ use crate::{
         FileRequest, MediaError, MediaSource, MorseSource, PreparedAudio, SpeechRequest,
         SpeechSource, StationMediaSession, ToneSource,
     },
+    messages::{Message, MessageForms},
+    schedule::{CivilTime, Weekday},
     template::MessageTemplate,
 };
 
@@ -260,6 +262,7 @@ pub(super) fn controller(
     media: &dyn NativeMediaPreparer,
     generation: u64,
     catalog: &crate::messages::MessageCatalog,
+    civil: Option<CivilTime>,
 ) -> Result<PreparedController, RuntimeError> {
     let status = ResolvedIdentifierSettings::resolve(document, node, None)?.value;
     let mut station = media
@@ -402,7 +405,6 @@ pub(super) fn controller(
             ctcss_encode_on_input: settings.ctcss_encode_on_input,
             ctcss_hang_ms: settings.ctcss_hang_ms,
             transmit_timeout_ms: settings.transmit_timeout_ms,
-            timeout_lockout_ms: settings.timeout_lockout_ms,
             kerchunk_max_ms: settings.kerchunk_max_ms,
             courtesy_delay_ms: settings.courtesy_delay_ms,
             telemetry_duck_db: settings.telemetry_duck_db as i8,
@@ -417,6 +419,28 @@ pub(super) fn controller(
     controller
         .set_tails(tails)
         .map_err(|_| RuntimeError::Preparation)?;
+    if settings.transmit_timeout_ms != 0 {
+        // Duration month lengths use the captured date when available. Ordinary runtimes
+        // without calendar scheduling retain a deterministic date instead of requiring a clock.
+        let local = match civil {
+            Some(local) => local,
+            None => CivilTime::new(2000, 1, 1, Weekday::Saturday, 0, 0)
+                .expect("fixed fallback calendar date is valid"),
+        };
+        let timed_out = catalog
+            .format_timeout(settings.transmit_timeout_ms.div_ceil(1000), local)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let cleared = catalog
+            .format(&Message::RepeaterTimeoutCleared)
+            .map_err(|_| RuntimeError::Preparation)?;
+        let mut register = |forms: MessageForms| {
+            let stream = station
+                .register(status_source(&status, &forms.morse, &forms.tts))
+                .map_err(|_| RuntimeError::Preparation)?;
+            PreparedMedia::new_stream(stream).map_err(|_| RuntimeError::Preparation)
+        };
+        controller.set_timeout_media([register(timed_out)?, register(cleared)?]);
+    }
     station.start().map_err(|_| RuntimeError::Preparation)?;
     Ok((controller, control, status, station, recipes))
 }
