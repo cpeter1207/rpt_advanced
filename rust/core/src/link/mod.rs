@@ -4,6 +4,10 @@ mod hub;
 mod peer;
 mod protocol;
 mod signals;
+mod text;
+#[cfg(test)]
+#[path = "text_tests.rs"]
+mod text_tests;
 mod topology;
 
 pub use audio::{
@@ -14,6 +18,7 @@ pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use peer::{Peer, ReceiveState};
 pub use protocol::{Protocol, Route};
 pub use signals::{PeerReply, PeerSignals};
+pub use text::{ClassifiedText, HumanMessage, TextAudience, TextOrigin, classify_asl};
 pub use topology::TopologyManager;
 
 fn identity(name: &str) -> bool {

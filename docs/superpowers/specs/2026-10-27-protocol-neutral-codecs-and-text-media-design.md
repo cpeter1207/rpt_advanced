@@ -42,7 +42,10 @@ Apply ADRs 0002/0003, 0005, 0007, 0018/0020/0021/0022, 0025/0026/0027,
 
 - Controller/radio PCM stays normalized mono `f32`; native radio processing
   stays 48 kHz. Decoders return their actual source rate, not resampled PCM.
-- The released inbound ring owns conversion, clock recovery and selected PLC.
+- The released inbound ring owns conversion, clock recovery and fallback PLC.
+  Codec-native concealment remains enabled and is used first where supported.
+  Never disable or bypass native concealment; never conceal the same missing
+  span twice. The ring conceals only spans the codec cannot supply.
   Egress uses the existing shared conversion adapter before encoding. Do not
   add codec-owned resamplers, a new PLC, or a transmit-mix ring.
 - Audio callbacks remain bounded, lock-free and allocation-free. No packet
@@ -140,7 +143,8 @@ Specific qualifications:
   packet durations must not be mistaken for loss or malformed voice.
 - Disable optional encoder DTX initially where supported to preserve existing
   activity semantics; receive valid silence/SID frames according to the codec
-  profile, without creating a second PLC or treating them as a hangup.
+  profile. Preserve native codec concealment, including decoder recovery of
+  damaged frames; do not treat it as a hangup or conceal its output again.
 
 ## 5. Replaceable provider contract
 
@@ -160,6 +164,11 @@ Audio provider operations cover:
    sample span. `need more input`, `output full`, `malformed`, `unsupported`
    and `complete` are distinct; success with no output is not a voice packet.
 6. Explicit finite flush/reset behavior, including delayed codec samples.
+7. Bounded native concealment of a requested missing source span. Unsupported
+   spans return no samples without modifying history or output, so the caller
+   can publish a gap for shared-ring fallback. Preserve the released decoder's
+   own damaged-packet recovery; do not replace it with stricter validation solely
+   to prevent concealment.
 
 Keep codec frame accumulation with its encoder owner. Do not leak native
 library types, IAX format bits, socket handles or controller policy through
@@ -202,7 +211,12 @@ complete packets before trimming overlapped PCM. Never slice a compressed
 payload with a sample offset. Jitter timestamp units and gap counts must use
 the selected codec's source sample clock; keep 160/180/500 ms delay policy
 unchanged and convert it to samples with checked arithmetic. The shared PCM
-ring receives ordered real PCM and explicit missing spans, and alone owns PLC.
+ring receives ordered decoded PCM, including codec-concealed samples, and
+explicit missing spans only where native concealment cannot supply samples.
+Native PLC runs on the per-peer codec owner, not an audio callback. Providers
+expose a bounded lost-span operation; unsupported durations return no samples
+and use shared-ring PLC. Codecs without a native PLC implementation use that
+fallback. Do not add a second custom codec concealment algorithm.
 
 On egress, retain the existing native-to-codec converter and bounded per-peer
 owner. Accumulate actual converter output until complete codec units exist.
@@ -371,8 +385,9 @@ self-round-trip test. Test:
    both iLBC modes, supported G.723 modes and real Opus packet duration.
 3. Legacy/extended IAX offers, preference, fallback to mu-law, high-bit formats,
    incompatible offers and the absence of deferred formats.
-4. Jitter reordering/overlap/gaps at each source rate. PLC occurs in order only
-   in the shared ring, with no encoded-byte trimming or duplicated concealment.
+4. Jitter reordering/overlap/gaps at each source rate. Codec-native PLC remains
+   enabled and takes priority; ring PLC covers only unresolved missing spans.
+   There is no encoded-byte trimming or duplicated concealment.
 5. Encoder assembly across arbitrary native callback partitions; no empty voice
    on no-output conversion, timestamp drift, duplicate re-encoding on retry,
    or loss of buffered tails on unkey.

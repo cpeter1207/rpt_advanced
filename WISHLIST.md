@@ -19,6 +19,109 @@ completion is not a claim of physical hardware qualification or deployment.
 
 ## Entries
 
+### Complete Asterisk 20 IAX audio-format interoperability
+
+**Status: Approved scope; implementation pending (2026-10-26).** The full
+target remains all 19 audio formats mapped by Asterisk 20's IAX compatibility
+layer. The user deferred `siren7`, `siren14`, and `g719`; the remaining 16
+formats are the active implementation scope. Format recognition alone is not
+complete codec support.
+
+The [codec and text-media design](docs/superpowers/specs/2026-10-27-protocol-neutral-codecs-and-text-media-design.md)
+was approved on 2026-10-27. Its [implementation plan](docs/superpowers/plans/2026-10-27-protocol-neutral-codecs-and-text-media.md)
+is approved and implementation is in progress. Codec-provider framing, native
+concealment, negotiation foundations, and finite speech-stream helpers have
+focused test coverage. End-to-end integration and the full quality gate remain
+pending; the running node has not been upgraded for this feature.
+
+**Requirements and decisions recorded**
+
+- Support `g723`, `gsm`, `ulaw`, `alaw`, `g726aal2`, `adpcm`, `slin`,
+  `lpc10`, `g729`, `speex`, `ilbc`, `g726`, `g722`, `siren7`, `siren14`,
+  `slin16`, `g719`, `speex16`, and `opus` for negotiated receive and transmit.
+- Follow Asterisk 20's wire-format IDs, extended capability negotiation,
+  packet layouts and codec framing. Preserve Asterisk's exact `adpcm`
+  payload format, distinct from G.726, and the RFC/AAL2 G.726 packing variants.
+- Reuse released codec implementations through independently replaceable
+  dynamic adapters. Keep codecs separate from IAX protocol and network I/O.
+  Retain canonical 48 kHz internal PCM and the existing shared conversion,
+  jitter-buffer and PCM-ring boundaries. Codec-native concealment must always
+  remain enabled and take priority; shared-ring PLC is fallback only and must
+  not conceal codec-recovered samples again.
+- Give codec adapters versioned, implementation-neutral contracts so replacing
+  a codec implementation does not require changing protocol or controller
+  code. Keep external-library types and calls inside the selected adapter.
+- Codec adapters are shared, protocol-neutral components, not part of IAX2.
+  Other protocol adapters may reuse them without depending on IAX2. Protocol
+  adapters own their wire-format identifiers, negotiation and packet framing;
+  codec adapters own codec bitstreams and encode/decode state. This does not
+  add another protocol implementation to the current scope.
+- Prefer released GPLv2-compatible implementations wherever they exist.
+  Write an original implementation only when no suitable compatible released
+  implementation exists and the required implementation is trivial. Do not
+  replace an available library with custom codec code. Nontrivial missing
+  implementations remain explicitly pending rather than being advertised.
+- Advertise only codecs with functioning encode/decode providers. A missing
+  provider must not be presented as implemented coverage of that format.
+- Leave `siren7`, `siren14`, and `g719` unimplemented and unadvertised until
+  their provider work is separately resumed. Do not write replacement codec
+  implementations or acquire additional licenses for these deferred formats.
+- Validate codec payloads against independent Asterisk-compatible fixtures
+  and test negotiation, framing, rate conversion and isolated peer routing.
+
+**Material decisions needed before implementation**
+
+None for the deferral decision. The provider design for the active 16 formats
+must retain the project's GPL-2.0-only policy; relicensing and commercial codec
+purchases are not authorized. The trivial-implementation allowance does not
+resume the three explicitly deferred formats.
+
+### Incoming text-message speech codec
+
+**Status: Approved scope; implementation pending (2026-10-26).** Treat human text
+messages from text-capable protocols as a protocol-neutral codec input that
+produces local-only spoken incoming media, not controller telemetry. This is
+separate from the 19 Asterisk IAX audio-format identifiers above.
+
+The approved [design](docs/superpowers/specs/2026-10-27-protocol-neutral-codecs-and-text-media-design.md)
+describes local speech and independent text forwarding. Its
+[implementation plan](docs/superpowers/plans/2026-10-27-protocol-neutral-codecs-and-text-media.md)
+is prepared for review; implementation remains pending.
+
+**Requirements and decisions recorded**
+
+- Include incoming EchoLink human text and messages from every other
+  text-capable protocol supported now or added later. This supersedes the
+  prior EchoLink incoming-text exclusion, not the planned status of EchoLink
+  or any other unimplemented protocol adapter.
+- Convert incoming human messages to speech through a replaceable codec
+  adapter, reusing the existing speech-synthesis capability outside audio
+  callbacks. Keep protocol parsing and message identification in the protocol
+  adapter.
+- Mix the resulting speech with active incoming audio rather than waiting
+  for other transmissions to end. This includes concurrent audio from the
+  same peer that sent the text, not just audio from other peers.
+- Send text-derived speech only to the local transmitter, mixed with incoming
+  audio there. Never include that speech in peer audio egress. Retain the
+  originating peer identity. Do not put it through the polite controller-
+  telemetry queue or switch it to Morse because incoming audio is active.
+- Forward eligible messages to other connected peers only as text, when the
+  protocols support that forwarding. Each receiving peer decides whether and
+  how to render the text. Preserve normal no-echo rules; do not reflect a
+  message to its sender. Text forwarding does not depend on local speech
+  synthesis succeeding or completing.
+- Do not speak protocol-control text: topology, keying, authentication,
+  disconnect, command-forwarding and other signaling remain protocol data.
+- Preserve lock-free audio and single-writer PCM-ring ownership. Speech
+  synthesis must not block audio or another peer's packet handling.
+- If speech synthesis fails, skip its local spoken rendition and log an error.
+  Do not fall back to Morse or interrupt other incoming audio; supported text
+  forwarding remains independent.
+
+**Material decisions needed before implementation**
+
+None.
+
 ### Local receiver S-meter and spoken query
 
 **Status: Planned.** Written design approved on 2026-10-20; the
@@ -95,15 +198,21 @@ None.
 - Support ASL3's reserved EchoLink dialling form: pad the four- through
   six-digit EchoLink node number to six digits and prefix it with `3`, so it is
   usable through the normal configurable link-connect command.
-- Do not implement EchoLink chat, text messages, text-command control, or text
-  recording/playback features.
+- Convert incoming EchoLink human text messages to speech using the shared
+  text-message codec. Mix that speech with live audio, including audio from
+  the text sender, only at the local transmitter, not in peer audio egress.
+  Forward messages to eligible peers as text only where the protocols support
+  forwarding; the receiving peers choose their own rendering.
+- Outgoing text composition, text-command control, chat interfaces and text
+  recording remain out of scope.
 
 **Decisions recorded**
 
-- Scope is audio interoperability only. EchoLink text-chat and all other text
-  features are intentionally out of scope.
-- ASL3's current EchoLink behavior is the compatibility reference, except for
-  the explicit exclusion of text features.
+- Scope includes audio interoperability, incoming human text converted to local
+  speech, and supported text forwarding without synthesized peer audio. The
+  incoming-text addition was explicitly approved on 2026-10-26.
+- ASL3's current EchoLink behavior remains the audio compatibility reference;
+  the shared text-message codec defines incoming-text speech behavior.
 - Each rpt_advanced node has a separate EchoLink station account and identity.
 - Configuration exposes every ASL3 EchoLink station and directory field:
   callsign, EchoLink node number, password/secret source, name, location,

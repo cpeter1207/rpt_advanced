@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Inherit every global constraint and artifact revision from the integration plan. No deployment or release is authorized.
-- Use GPL-2.0-only-compatible released implementations. No complex original codec, embedded Asterisk runtime, new resampler or codec PLC.
+- Use GPL-2.0-only-compatible released implementations. No complex original codec, embedded Asterisk runtime, new resampler or custom codec PLC. Preserve all backend-native concealment; prefer it over shared-ring fallback.
 - Native PCM is 48 kHz mono normalized `f32`; codec PCM uses 8, 16 or 48 kHz as specified. Keep mu-law first and retain existing host codec policy.
 - G.723 encode 6300/decode 5300 and 6300 if the reviewed FFmpeg backend is selected; do not claim 5300 encoding. LPC10 uses 180 samples/22.5 ms, not 20 ms.
 - Packet-jitter policy stays 160/180/500 ms. Egress expiry remains 200 ms, with one pending encoded packet and no retry re-encoding.
@@ -123,7 +123,7 @@ packet is produced per call. Flush with empty real input does not invent voice.
 
 - [ ] **Red:** Extend parameterized `profile_vectors` / `profile_state_and_bounds` using independent fixtures. Assertions include `assert_eq!(pcm_be([0x12,0x34]), sample_0x1234()); assert_eq!(pcm_le([0x34,0x12]), sample_0x1234()); assert_eq!(gsm_160().bytes,33); assert_eq!(opus_60ms().frames,2880); assert!(odd_pcm_bytes().is_err()); assert!(gsm_wav49().is_err());`. For every profile test directions, exact duration, independent contexts, reset, bounded capacity, malformed input and finite flush. Compressed lossy PCM compares against independent decoder output with a recorded tolerance, not bit-exact input PCM.
 - [ ] **Run red:** `cargo test --locked --workspace profile_`; expected new profiles absent.
-- [ ] **Implement:** Only backend DSOs call their external C libraries. S16 conversion happens at that backend's API boundary, preserving normalized `f32`. Use released duration/validation APIs where available; disable codec PLC and preserve valid SID/silence semantics without creating wire key activity from empty output.
+- [ ] **Implement:** Only backend DSOs call their external C libraries. S16 conversion happens at that backend's API boundary, preserving normalized `f32`. Use released duration/validation APIs where available; keep codec-native PLC enabled and expose its bounded lost-span operation. Preserve valid SID/silence semantics without creating wire key activity from empty output. Unsupported loss durations fall back to ring PLC without concealing native output twice.
 - [ ] **Green:** Repeat the profile tests, then `make abi-check install-check`. Inspect actual DT_NEEDED entries and dependency license inputs. Confirm replacing one backend fixture does not change another profile/context.
 - [ ] **Commit:** Each independently passing backend with its fixtures/docs/package inputs: `feat: provide <backend> codec profiles` (substitute the actual backend in the message).
 
@@ -183,7 +183,7 @@ packet is produced per call. Flush with empty real input does not invent voice.
   Include full legal datagram boundaries, truncated datagram detection, malformed compressed units, supported aggregation, sample-count overflow, decoder failure and output-capacity retry. Verify empty/SID/unknown media preserve the established cause/error policy rather than generic teardown. Missing spans reach ring PLC once, between the correct real samples.
 - [ ] **Run red:** `cargo test --locked -p rptadviax2 playout_`; `cargo test --locked -p rptadviax2 ingress_`; expected fixed-8k/byte-trimming failures.
 - [ ] **Implement:** Inspect valid packets before jitter admission, use checked source-clock timestamp/sample arithmetic, decode complete compressed packets, then trim PCM overlaps. Preserve the accepted 160/180/500 ms policy at each source rate. Bound work per peer-owner turn using existing mailboxes; do not let a large packet or decoder affect another peer. Retain ACK/late-drop/empty-voice and buffered-tail fixes. Do not add a second concealment stage.
-- [ ] **Green:** Repeat the focused matrix, existing ordered-gap/jitter-ring integration and tail/late-packet regression cases. Confirm explicit packet/sample diagnostics and first-cause logging without payloads or credentials.
+- [ ] **Green:** Repeat the focused matrix, existing ordered-gap/jitter-ring integration and tail/late-packet regression cases. Verify native PLC supplies supported missing spans and the ring handles only the remainder, never double concealment. Confirm explicit packet/sample diagnostics and first-cause logging without payloads or credentials.
 - [ ] **Commit:** `fix: preserve codec sample timing through IAX ingress`.
 
 ### Task C7: Assemble stateful egress packets and retain timing under backpressure

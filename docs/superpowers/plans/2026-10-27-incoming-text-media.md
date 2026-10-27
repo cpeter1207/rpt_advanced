@@ -60,8 +60,8 @@ events. Bind the origin to the current authenticated session before publication.
 - [ ] **Red:** Add `text_classification` assertions:
 
   ```rust
-  assert_eq!(human_body(b"M 0 2000 hello world"),Some("hello world"));
-  assert_eq!(human_destination(b"M 1000 2000 hello"),Some("1000"));
+  assert_eq!(human_body(b"M 2000 0 hello world"),Some("hello world"));
+  assert_eq!(human_destination(b"M 2000 1000 hello"),Some("1000"));
   assert!(!is_human(b"L T2000"));
   assert!(!is_human(b"!!DISCONNECT!!"));
   assert!(!is_human(b"T 2000 STATUS,2000,0"));
@@ -71,7 +71,7 @@ events. Bind the origin to the current authenticated session before publication.
 
   Also cover all existing key/DTMF/auth forms, optional single trailing NUL versus embedded NUL, empty body, malformed identities and Unicode body preservation. Assertions use test-local classifier readers, not a new public convenience API.
 - [ ] **Run red:** `cargo test --locked -p rpt-advanced-core text_classification`; expected missing classifier/human variants.
-- [ ] **Implement:** Preserve strict control parsing. Add only the documented `M <TO> <FROM> <BODY>` human form, with `TO=0` broadcast and node-addressed delivery, after verifying its details against pinned ASL source/fixtures. The [ASL manual](https://allstarlink.github.io/developers/iaxtext/#m-message) warns this page is incomplete; use the spec's pinned source to settle forwarding/termination details and record provenance. No copied `app_rpt` implementation, invented wire form or catch-all unknown-as-chat. Future protocols enter through `HumanMessage`, not an IAX-dependent speech API.
+- [ ] **Implement:** Preserve strict control parsing. Add only the source-verified `M <FROM> <TO> <BODY>` human form, with `TO=0` broadcast and node-addressed delivery. Pinned ASL `app_rpt.c:1948–1978` and `rpt_cli.c:903,1030` agree on FROM/TO; the [obsolete-wiki manual page](https://allstarlink.github.io/developers/iaxtext/#m-message) reverses them and warns it may be incorrect. Use the pinned implementation as the contract. No copied `app_rpt` implementation, invented wire form or catch-all unknown-as-chat. Future protocols enter through `HumanMessage`, not an IAX-dependent speech API.
 - [ ] **Green:** Repeat the filter plus existing `link::protocol` tests and product session classification tests. Current signaling behavior is unchanged; malformed human input is counted/ignored without a generic hangup.
 - [ ] **Commit:** Only classifier/events/fixtures/Rustdoc files: `feat: classify supported incoming human text separately from control`.
 

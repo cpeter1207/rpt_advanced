@@ -12,10 +12,13 @@ use std::{
     sync::Arc,
 };
 
+#[path = "media/finite.rs"]
+mod finite;
 #[path = "media/worker.rs"]
 mod worker;
 
 /// Independent file and speech owners, composed with the released native-rate converter.
+#[derive(Clone)]
 pub struct NativeMediaPreparer {
     file_api: FileDescriptor,
     speech_api: SpeechDescriptor,
@@ -65,6 +68,45 @@ unsafe impl Send for NativeMediaPreparer {}
 unsafe impl Sync for NativeMediaPreparer {}
 
 impl NativeMediaPreparer {
+    /// Open literal speech incrementally at the provider's source rate.
+    /// The returned owner retains the prepared speech context until close.
+    pub fn open_speech_stream(
+        &self,
+        request: &SpeechRequest<'_>,
+    ) -> Result<SpeechStream, MediaError> {
+        let text = CString::new(request.text).map_err(|_| MediaError::InvalidRequest)?;
+        let model = path_string(request.model)?;
+        let raw = ffi::rptadv_media_speech_request {
+            text: text.as_ptr(),
+            model: model.as_ptr(),
+            speed_percent: request.speed_percent,
+            level_db: request.level_db,
+        };
+        let cancellation = raw_cancellation(request.cancellation);
+        let mut opened = ffi::rptadv_media_stream {
+            handle: ptr::null_mut(),
+            sample_rate_hz: 0,
+        };
+        let code = unsafe {
+            self.speech.open_speech.unwrap()(
+                self.speech.handle.as_ptr(),
+                &raw,
+                &cancellation,
+                &mut opened,
+            )
+        };
+        let stream = SpeechStream {
+            context: Arc::clone(&self.speech),
+            handle: opened.handle,
+            rate: opened.sample_rate_hz,
+        };
+        status(code)?;
+        if !finite::valid_stream(stream.handle, stream.rate) {
+            return Err(MediaError::InvalidOutput);
+        }
+        Ok(stream)
+    }
+
     /// Compose independent file/speech capabilities and the host's paired child-reaper guard.
     /// Executable paths are literal local paths; timeout applies to each child.
     ///
@@ -151,6 +193,50 @@ impl NativeMediaPreparer {
             file: Arc::new(file),
             speech: Arc::new(speech),
         })
+    }
+}
+
+/// Exclusive source-rate speech stream. No collection, conversion or audio-thread work.
+pub struct SpeechStream {
+    context: Arc<Context>,
+    handle: *mut c_void,
+    rate: u32,
+}
+// Independent streams allow owner-thread migration, but not concurrent reads.
+unsafe impl Send for SpeechStream {}
+impl SpeechStream {
+    /// Provider PCM clock; conversion belongs solely to the consuming shared ring.
+    pub fn sample_rate_hz(&self) -> u32 {
+        self.rate
+    }
+    /// Read available PCM with the original process budget and current cancellation.
+    pub fn read(
+        &mut self,
+        output: &mut [f32],
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<usize, MediaError> {
+        unsafe extern "C" fn callback<F: Fn() -> bool>(context: *const c_void) -> u32 {
+            u32::from(unsafe { (*context.cast::<F>())() })
+        }
+        fn token<F: Fn() -> bool>(cancelled: &F) -> ffi::rptadv_media_cancellation {
+            ffi::rptadv_media_cancellation {
+                context: ptr::from_ref(cancelled).cast(),
+                is_cancelled: Some(callback::<F>),
+            }
+        }
+        if cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        finite::read_stream(&self.context, self.handle, output, &token(cancelled))
+    }
+}
+impl Drop for SpeechStream {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe {
+                (self.context.close_stream)(self.handle);
+            }
+        }
     }
 }
 impl Context {

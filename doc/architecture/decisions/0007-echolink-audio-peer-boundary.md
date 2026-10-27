@@ -5,8 +5,9 @@ Status: Planned; decision accepted
 ## Context
 
 rpt_advanced must interoperate with EchoLink at audio level with parity to the
-current ASL3 EchoLink behavior, while deliberately excluding text chat and all
-other text features. EchoLink supplies an external audio/control transport; it
+current ASL3 EchoLink behavior. Incoming human text messages also become spoken
+incoming media under the approved 2026-10-26 codec requirement. EchoLink supplies
+an external audio/control transport; it
 does not supply the AllStarLink topology advertisements used by native peers.
 
 ## Decision
@@ -23,6 +24,21 @@ corrects drift into the native transmit mix; outbound codec conversion remains
 at egress. EchoLink's transport representation converts only at its external
 boundary. The two-worker media path is implemented; the EchoLink adapter
 described here remains planned.
+
+The adapter identifies incoming human text and submits it to the shared,
+protocol-neutral text-message codec under ADR 0022. Speech synthesis stays
+outside audio callbacks. Controller policy mixes its PCM with concurrent
+receive audio, including audio from the text sender, only at the local
+transmitter, without waiting for silence or entering the polite telemetry
+queue. Never send synthesized text as peer audio. Forward eligible messages
+only as text when the protocols support forwarding; each peer determines its
+own rendering. Preserve source identity and normal no-echo rules.
+Protocol-control text is never a speech input.
+This incoming-text requirement supersedes the prior text exclusion; outgoing
+text composition, text commands, chat interfaces and text recording remain
+outside scope. A synthesis failure skips only the local spoken rendition and
+logs an error; it does not select Morse, interrupt other incoming audio, or
+prevent supported text forwarding.
 
 Each configured rpt_advanced node owns one EchoLink identity. Its default UDP
 audio/control pair is 5198/5199, but the pair and optional bind address are
@@ -54,9 +70,9 @@ both, and configurable EchoLink telemetry output behavior.
 
 ## Consequences
 
-No EchoLink protocol, directory, socket, or control work occurs in an audio
-callback. EchoLink text messages, chat, remote text commands, and text
-recording are not implemented. Its absence of topology advertisements means
+No EchoLink protocol, directory, socket, control work or speech synthesis occurs
+in an audio callback. Both the EchoLink adapter and incoming-text speech remain
+planned. Its absence of topology advertisements means
 the existing advertised-topology loop prevention cannot infer EchoLink-only
 transitive paths. A generic HTTP proxy is not a valid EchoLink transport
 proxy; the selected proxy contract must carry audio and control UDP traffic.

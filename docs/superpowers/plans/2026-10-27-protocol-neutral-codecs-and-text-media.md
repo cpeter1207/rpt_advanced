@@ -15,7 +15,7 @@
 - Native radio PCM remains normalized mono `f32` at 48 kHz; codec PCM retains its source rate. Audio callbacks remain bounded, lock-free and allocation-free.
 - Active formats: `g723`, `gsm`, `ulaw`, `alaw`, `g726aal2`, `adpcm`, `slin`, `lpc10`, `g729`, `speex`, `ilbc`, `g726`, `g722`, `slin16`, `speex16`, `opus`. `siren7`, `siren14`, `g719` remain pending and unadvertised.
 - No complex original codecs, relicensing, commercial license purchases, full EchoLink implementation, SIP, REST, new DSP/gains or other wishlist work.
-- Only the released inbound ring converts/recovers clocks/conceals incoming audio. Egress uses the existing released conversion adapter.
+- Only the released inbound ring converts and recovers incoming audio clocks. Preserve and prefer codec-native concealment; the ring conceals only unresolved loss. Egress uses the existing released conversion adapter.
 - Text-derived PCM reaches only local RF, never peer audio, parrot or program loopback. Valid text forwarding is independent of synthesis.
 - Preserve 160/180/500 ms minimum/initial/maximum packet-jitter settings and existing media age, tail-drain and late-packet behavior.
 - Fast formatting/lint/static checks before push; full PR gate on native Debian 13 amd64/arm64, 100% production line/branch coverage on amd64 only. No automatic Debian 12 jobs.

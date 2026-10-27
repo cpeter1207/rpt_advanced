@@ -3,6 +3,76 @@ use super::*;
 use std::{fs, path::PathBuf};
 use std::{path::Path, sync::atomic::Ordering};
 
+#[test]
+#[cfg(speech_adapter)]
+fn speech_stdin_budget_covers_a_child_that_never_reads() {
+    let config = Config {
+        piper: "unused".into(),
+        process_timeout: Duration::ZERO,
+        child_reaper: None,
+    };
+    // The finite child bounds the old blocking-write failure too: no orphan or hung test.
+    let mut command = Command::new("sleep");
+    command.arg("0.2");
+    let mut stream = ChildStream::spawn(
+        &config,
+        &mut command,
+        Some(&vec![b'x'; 2 * 1024 * 1024]),
+        &|| false,
+    )
+    .expect("spawn does not wait for child stdin capacity");
+    assert!(matches!(
+        stream.read(&mut [0; 8], &|| false),
+        Err(MediaError::TimedOut)
+    ));
+}
+
+#[test]
+#[cfg(speech_adapter)]
+fn speech_stdin_cancellation_does_not_wait_for_input_drain() {
+    let config = Config {
+        piper: "unused".into(),
+        process_timeout: Duration::from_secs(5),
+        child_reaper: None,
+    };
+    let mut command = Command::new("sleep");
+    command.arg("0.2");
+    let mut stream = ChildStream::spawn(
+        &config,
+        &mut command,
+        Some(&vec![b'x'; 2 * 1024 * 1024]),
+        &|| false,
+    )
+    .unwrap();
+    assert!(matches!(
+        stream.read(&mut [0; 8], &|| true),
+        Err(MediaError::Cancelled)
+    ));
+}
+
+#[test]
+#[cfg(speech_adapter)]
+fn speech_stdin_and_stdout_make_interleaved_bounded_progress() {
+    let config = Config {
+        piper: "unused".into(),
+        process_timeout: Duration::from_secs(5),
+        child_reaper: None,
+    };
+    let input = vec![b'x'; 2 * 1024 * 1024];
+    let mut command = Command::new("cat");
+    let mut stream = ChildStream::spawn(&config, &mut command, Some(&input), &|| false).unwrap();
+    let mut received = Vec::new();
+    let mut block = [0; 4096];
+    loop {
+        let count = stream.read(&mut block, &|| false).unwrap();
+        if count == 0 {
+            break;
+        }
+        received.extend_from_slice(&block[..count]);
+    }
+    assert_eq!(received, input);
+}
+
 #[cfg(file_adapter)]
 fn test_directory(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("rptadv-{name}-{}", std::process::id()));
@@ -443,11 +513,14 @@ fn child_stream_handles_pre_cancelled_spawn_stdin_failure_and_cached_exit() {
     ));
 
     let mut command = Command::new("sh");
-    command.args(["-c", "exec 0<&-; sleep 1"]);
+    command.args(["-c", "exec 0<&-; exec sleep 1"]);
+    let mut stream =
+        ChildStream::spawn(&config, &mut command, Some(&vec![0; 1_000_000]), &|| false).unwrap();
     assert!(matches!(
-        ChildStream::spawn(&config, &mut command, Some(&vec![0; 1_000_000]), &|| false),
+        stream.read(&mut [0; 8], &|| false),
         Err(MediaError::Io)
     ));
+    drop(stream);
 
     let mut command = Command::new("true");
     let mut stream = ChildStream::spawn(&config, &mut command, None, &|| false).unwrap();
@@ -521,6 +594,9 @@ fn read_reports_a_child_without_a_stdout_pipe() {
     let mut stream = ChildStream {
         child: OwnedChild(child),
         stdout: None,
+        stdin: None,
+        pending_input: Vec::new(),
+        input_position: 0,
         _reaper: ReaperGuard(config.child_reaper),
         started: Instant::now(),
         timeout: config.process_timeout,

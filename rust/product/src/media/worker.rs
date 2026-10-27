@@ -1,13 +1,16 @@
 //! One serialized, non-audio media producer per station generation.
 
-use super::{Context, status};
+use super::{
+    Context,
+    finite::{SegmentConsumer, SegmentProgress, valid_stream},
+    status,
+};
 use crate::{
     abi as ffi,
     link::ring::{InboundConsumer, InboundPolicy, InboundProducer, InboundRing},
 };
 use rpt_advanced_core::{
     audio::{MorseRenderer, MorseSwitch, PcmRead, PcmStreamReader, ToneSequence},
-    link::PeerInput,
     media::{MediaError, MediaProgram, MediaSource, PreparedAudio, StationMediaSession},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -56,43 +59,6 @@ struct WorkerJob {
 enum WorkerSource {
     Program(MediaProgram),
     Prepared(PreparedAudio),
-}
-
-/// A finite segment's sample budget excludes resampler flush padding. The producer
-/// publishes accepted source duration; the audio owner never guesses EOF from an
-/// empty FIFO, which may still hide converter input or output.
-struct SegmentConsumer {
-    ring: InboundConsumer,
-    progress: Arc<SegmentProgress>,
-    consumed: u64,
-}
-
-/// Count only real source duration; failed flushes cannot hold playback forever.
-#[derive(Default)]
-struct SegmentProgress {
-    budget: AtomicU64,
-    undrainable: AtomicBool,
-}
-
-impl SegmentConsumer {
-    fn finished(&self, completed: bool) -> bool {
-        // Observe end before duration: final writes cannot appear after this fence.
-        let ended = self.ring.signals().ended() || completed;
-        ended && self.consumed >= self.progress.budget.load(Ordering::Acquire)
-    }
-
-    fn render_sample(&mut self) -> Result<Option<f32>, crate::link::ring::RingError> {
-        if self.consumed >= self.progress.budget.load(Ordering::Acquire) {
-            return Ok(None);
-        }
-        let sample = self.ring.render_sample()?;
-        self.consumed += u64::from(sample.is_some());
-        if sample.is_none() && self.progress.undrainable.load(Ordering::Acquire) {
-            Err(crate::link::ring::RingError)
-        } else {
-            Ok(sample)
-        }
-    }
 }
 
 /// Callback-side handle; endpoint transfer prevents ring destruction on audio.
@@ -589,25 +555,7 @@ impl OpenStream<'_> {
         cancellation: &Cancellation<'_>,
     ) -> Result<usize, MediaError> {
         let raw = raw_cancellation(cancellation);
-        let mut count = 0;
-        // SAFETY: the worker owns this stream; output and cancellation outlive the call.
-        status(unsafe {
-            (self.context.read_stream)(
-                self.handle,
-                &raw,
-                output.as_mut_ptr(),
-                output.len(),
-                &mut count,
-            )
-        })?;
-        if count > output.len()
-            || output[..count]
-                .iter()
-                .any(|sample| !sample.is_finite() || sample.abs() > 1.0)
-        {
-            return Err(MediaError::InvalidOutput);
-        }
-        Ok(count)
+        super::finite::read_stream(self.context, self.handle, output, &raw)
     }
 }
 
@@ -711,11 +659,6 @@ fn open_speech<'a>(
         return Err(MediaError::InvalidOutput);
     }
     Ok(opened)
-}
-
-/// Enforce the shared handle and source-rate contract for file and speech streams.
-fn valid_stream(handle: *mut c_void, rate: u32) -> bool {
-    !handle.is_null() && (8000..=192000).contains(&rate)
 }
 
 /// Check every alternative on control, before audio can request the program.

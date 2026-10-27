@@ -22,6 +22,93 @@ fn finite_source_count_preserves_the_shared_ring_api_limit() {
     );
 }
 
+#[test]
+fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
+    static CLOSED: AtomicUsize = AtomicUsize::new(0);
+    static DESTROYED: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn open(
+        _: *const c_void,
+        request: *const ffi::rptadv_media_speech_request,
+        _: *const ffi::rptadv_media_cancellation,
+        stream: *mut ffi::rptadv_media_stream,
+    ) -> i32 {
+        let request = unsafe { &*request };
+        assert_eq!(
+            unsafe { CStr::from_ptr(request.text) },
+            c"literal ${time}; $(not a command)"
+        );
+        assert_eq!((request.speed_percent, request.level_db), (100, -6));
+        unsafe {
+            *stream = ffi::rptadv_media_stream {
+                handle: Box::into_raw(Box::new(0usize)).cast(),
+                sample_rate_hz: 22050,
+            };
+        }
+        0
+    }
+    unsafe extern "C" fn read(
+        handle: *mut c_void,
+        cancel: *const ffi::rptadv_media_cancellation,
+        out: *mut f32,
+        _: usize,
+        count: *mut usize,
+    ) -> i32 {
+        let cancel = unsafe { &*cancel };
+        if unsafe { cancel.is_cancelled.unwrap()(cancel.context) } != 0 {
+            return -6;
+        }
+        let position = unsafe { &mut *handle.cast::<usize>() };
+        unsafe {
+            *count = usize::from(*position == 0);
+            if *position == 0 {
+                *out = 0.25;
+            }
+        }
+        *position += 1;
+        0
+    }
+    unsafe extern "C" fn close(handle: *mut c_void) {
+        drop(unsafe { Box::from_raw(handle.cast::<usize>()) });
+        CLOSED.fetch_add(1, Ordering::Relaxed);
+    }
+    unsafe extern "C" fn destroy(_: *mut c_void) {
+        DESTROYED.fetch_add(1, Ordering::Relaxed);
+    }
+    let mut preparer =
+        NativeMediaPreparer::new(Path::new("unused"), Path::new("unused"), 30000).unwrap();
+    preparer.speech = Arc::new(Context {
+        handle: NonNull::new(1usize as *mut c_void).unwrap(),
+        destroy,
+        read_stream: read,
+        close_stream: close,
+        open_file: None,
+        open_speech: Some(open),
+    });
+    let mut stream = preparer
+        .open_speech_stream(&SpeechRequest {
+            text: "literal ${time}; $(not a command)",
+            model: Path::new("voice.onnx"),
+            speed_percent: 100,
+            level_db: -6,
+            cancellation: &Cancellation::default(),
+        })
+        .unwrap();
+    drop(preparer);
+    assert_eq!(DESTROYED.load(Ordering::Relaxed), 0);
+    assert_eq!(stream.sample_rate_hz(), 22050);
+    let mut block = [0.0; 8];
+    assert_eq!(stream.read(&mut block, &|| false), Ok(1));
+    assert_eq!(block[0], 0.25);
+    assert_eq!(stream.read(&mut block, &|| false), Ok(0));
+    assert_eq!(
+        stream.read(&mut block, &|| true),
+        Err(MediaError::Cancelled)
+    );
+    drop(stream);
+    assert_eq!(CLOSED.load(Ordering::Relaxed), 1);
+    assert_eq!(DESTROYED.load(Ordering::Relaxed), 1);
+}
+
 impl NativeMediaPreparer {
     fn new(ffmpeg: &Path, piper: &Path, timeout_ms: u32) -> Result<Self, MediaError> {
         // SAFETY: the linked descriptor has a process-lifetime readable ABI prefix.
