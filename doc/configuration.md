@@ -74,8 +74,7 @@ clears an inherited value.
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
 | `ctcss_encode_on_input` | no | Send transmit CTCSS only during local or linked receive activity and command replies, plus `ctcss_hang_ms`. Other IDs and telemetry do not turn it on. |
 | `ctcss_hang_ms` | 0 | Keep transmit CTCSS on this many milliseconds after qualifying activity ends. It cannot exceed `transmit_hang_ms`. |
-| `transmit_timeout_ms` | 180000 | Maximum time PTT may stay keyed without a local receiver or direct link unkey, in milliseconds. Each unkey restarts the timer. On timeout, PTT releases until that source unkeys and the lockout ends. Zero disables the timeout. |
-| `timeout_lockout_ms` | 30000 | Post-watchdog lockout in milliseconds. Zero permits recovery as soon as the timed-out source unkeys. |
+| `transmit_timeout_ms` | 180000 | Maximum repeated local or linked activity in milliseconds. On timeout, receive audio is muted, the timeout notice plays, and PTT releases. When all sources unkey, the cleared notice plays before repeating resumes. Zero disables the limit. |
 | `kerchunk_max_ms` | 500 | Maximum local-receiver or individual-link transmission duration treated as a kerchunk. A kerchunk has no hang time, courtesy tone, or every-release announcement. If it is the last input to unkey, any waiting courtesy tone is cancelled. Other active audio, playing telemetry, and due IDs may still keep PTT keyed. Zero disables kerchunk control. |
 | `telemetry_duck_db` | -20 | Lower ID, announcement, courtesy, and RF message audio during local or linked receive; -60 to 0 dB. Zero leaves the level unchanged. |
 | `courtesy_delay_ms` | 250 | Wait this many milliseconds after unkey before a courtesy tone. A source that rekeys during its wait cancels its tone. PTT stays keyed until the tone ends. |
