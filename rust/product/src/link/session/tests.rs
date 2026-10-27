@@ -44,6 +44,9 @@ pub(crate) struct State {
     encode_position: u64,
     encode_unit: Option<usize>,
     encode_pending: Vec<f32>,
+    encode_tail: usize,
+    tail_remaining: usize,
+    tail_calls: usize,
     pub(crate) prepared: Vec<(Vec<u8>, u32)>,
     prepared_frames: Vec<u32>,
     pub(crate) prepared_result: i32,
@@ -645,8 +648,9 @@ unsafe extern "C" fn prepare_audio(
     state
         .encode_pending
         .extend_from_slice(unsafe { std::slice::from_raw_parts(input, consumed) });
-    let ready =
-        !state.encode_pending.is_empty() && (state.encode_pending.len() == unit || flush != 0);
+    let tail = flush != 0 && state.encode_pending.is_empty() && state.tail_remaining != 0;
+    let ready = tail
+        || !state.encode_pending.is_empty() && (state.encode_pending.len() == unit || flush != 0);
     let real = if ready { state.encode_pending.len() } else { 0 };
     let bytes = if ready {
         state.encoded_bytes.unwrap_or(real)
@@ -677,12 +681,17 @@ unsafe extern "C" fn prepare_audio(
     if ready {
         state.encode_pending.clear();
     }
+    if tail {
+        state.tail_remaining -= 1;
+        state.tail_calls += 1;
+    }
     i32::from(!ready && flush == 0)
 }
 unsafe extern "C" fn reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
     state.encode_position = 0;
     state.encode_pending.clear();
+    state.tail_remaining = state.encode_tail;
     0
 }
 unsafe extern "C" fn send_prepared(
@@ -717,6 +726,40 @@ fn timed_session() -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
         .into_endpoints();
     let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
     (session, control, state, output)
+}
+
+#[test]
+fn outbound_codec_tail_retry_keeps_packets_and_timestamp_before_unkey() {
+    let (mut session, _control, state, mut output) = timed_session();
+    {
+        let mut state = state.lock().unwrap();
+        state.encode_unit = Some(960);
+        state.encoded_bytes = Some(7);
+        state.encode_tail = 2;
+    }
+    output.write(timed_span(0, 0), &[0.25; 960]);
+    session.step(0).unwrap();
+    state.lock().unwrap().prepared_result = 1;
+    session.step(20).unwrap();
+    session.step(21).unwrap();
+    assert_eq!(state.lock().unwrap().tail_calls, 1);
+    state.lock().unwrap().prepared_result = 0;
+    session.step(22).unwrap();
+    session.step(42).unwrap();
+    session.step(62).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.tail_calls, 2);
+    assert_eq!(state.encoded_calls, 1);
+    assert_eq!(state.prepared_frames, [960, 960, 960, 960, 960, 0]);
+    assert_eq!(
+        state
+            .prepared
+            .iter()
+            .map(|(_, time)| *time)
+            .collect::<Vec<_>>(),
+        [2000, 2020, 2020, 2020, 2040, 2060]
+    );
+    assert!(state.prepared.last().unwrap().0.is_empty());
 }
 
 #[test]

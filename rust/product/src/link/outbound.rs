@@ -71,6 +71,7 @@ struct Conversion {
     next: u64,
     output_samples: u64,
     born_ns: u64,
+    drained: bool,
 }
 impl Conversion {
     fn source_ns(&self, rate: u32) -> u128 {
@@ -239,6 +240,20 @@ impl Outbound {
         }
         if let Some(deadline) = self.unkey_ns.filter(|deadline| now >= *deadline) {
             if self
+                .conversion
+                .as_ref()
+                .is_some_and(|conversion| !conversion.drained)
+            {
+                let (audio, finished) = self.converter.finish().map_err(|_| Error::Translation)?;
+                let count = audio.len();
+                self.conversion.as_mut().expect("converter origin").drained = finished;
+                self.converted(io, count, now, None)?;
+                self.send(io, now)?;
+                if count != 0 || !finished {
+                    return Ok(Some(now));
+                }
+            }
+            if self
                 .encoder
                 .as_ref()
                 .is_some_and(|encoder| !encoder.drained)
@@ -277,7 +292,8 @@ impl Outbound {
         now: u64,
     ) -> Result<(), Error> {
         let continuous = self.conversion.as_ref().is_some_and(|previous| {
-            previous.span.stream == span.stream
+            !previous.drained
+                && previous.span.stream == span.stream
                 && previous.span.generation == span.generation
                 && previous.span.burst == span.burst
                 && previous.next == span.source_start
@@ -290,32 +306,47 @@ impl Outbound {
                 next: span.source_start,
                 output_samples: 0,
                 born_ns: span.born_ns.expect("validated birth"),
+                drained: false,
             });
         }
+        self.conversion.as_mut().expect("conversion origin").next =
+            span.source_start.wrapping_add(count as u64);
+        self.unkey_ns = Some(now.saturating_add(BLOCK_NS));
+        let count = self
+            .converter
+            .process(&self.native[..count])
+            .map_err(|_| Error::Translation)?
+            .len();
+        self.converted(io, count, now, Some(span))
+    }
+    fn converted(
+        &mut self,
+        io: &mut PeerIo,
+        count: usize,
+        now: u64,
+        input: Option<AudioSpan>,
+    ) -> Result<(), Error> {
         let conversion = self.conversion.as_mut().expect("conversion origin");
+        let span = conversion.span;
         // Output count, not input partitions, locates samples retained by the FIR.
         let origin = conversion.source_ns(self.rate);
         let born = conversion.born_ns;
-        conversion.next = span.source_start.wrapping_add(count as u64);
-        let audio = self
-            .converter
-            .process(&self.native[..count])
-            .map_err(|_| Error::Translation)?;
-        conversion.output_samples = conversion.output_samples.saturating_add(audio.len() as u64);
+        conversion.output_samples = conversion.output_samples.saturating_add(count as u64);
         let next_origin = conversion.source_ns(self.rate);
         // Retained FIR output keeps its prior birth. Only output reaching this
         // input span may adopt this span's new clock mapping.
-        conversion.born_ns = if next_origin >= source_ns(span.source_start) {
-            span.born_ns
-                .expect("validated birth")
-                .saturating_add((next_origin - source_ns(span.source_start)) as u64)
-        } else {
-            born.saturating_add((next_origin - origin) as u64)
-        };
-        if audio.is_empty() {
+        conversion.born_ns =
+            if let Some(span) = input.filter(|span| next_origin >= source_ns(span.source_start)) {
+                span.born_ns
+                    .expect("validated birth")
+                    .saturating_add((next_origin - source_ns(span.source_start)) as u64)
+            } else {
+                born.saturating_add((next_origin - origin) as u64)
+            };
+        if count == 0 {
             return Ok(());
         }
-        self.pcm_used = audio.len();
+        self.pcm_used = count;
         self.pcm_position = 0;
         self.unkey_ns = Some(now.saturating_add(BLOCK_NS));
         if self.encoder.is_none() {
@@ -467,8 +498,13 @@ impl Outbound {
                 self.sent = true;
             }
         } else if self.sent {
-            io.write(&[])?;
-            self.sent = false;
+            let (tail, finished) = self.converter.finish().map_err(|_| Error::Translation)?;
+            if !tail.is_empty() {
+                io.write(tail)?;
+            } else if finished {
+                io.write(&[])?;
+                self.sent = false;
+            }
         }
         Ok(())
     }

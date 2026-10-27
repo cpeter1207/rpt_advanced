@@ -5,6 +5,54 @@ static DESTROYED_FAILED_CONVERTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[test]
+fn finite_egress_finishes_exact_source_budget_without_losing_fir_tail() {
+    let input: Vec<_> = (0..4097).map(|i| (i as f32 * 0.07).sin() * 0.5).collect();
+    for rate in [8000, 16000, 48000] {
+        let mut whole = Egress::new(rate, 4097).unwrap();
+        let mut split = Egress::new(rate, 4097).unwrap();
+        let mut expected = whole.process(&input).unwrap().to_vec();
+        let mut actual = Vec::new();
+        for part in input.chunks(17) {
+            actual.extend_from_slice(split.process(part).unwrap());
+        }
+        for (converter, output) in [(&mut whole, &mut expected), (&mut split, &mut actual)] {
+            for _ in 0..16 {
+                let (tail, finished) = converter.finish().unwrap();
+                output.extend_from_slice(tail);
+                if finished {
+                    break;
+                }
+            }
+            assert_eq!(
+                output.len(),
+                (input.len() as u64 * u64::from(rate)).div_ceil(48000) as usize
+            );
+            assert!(converter.finish().unwrap().0.is_empty());
+        }
+        assert_eq!(actual.len(), expected.len());
+        assert!(
+            actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| (a - b).abs() < 0.00001)
+        );
+        assert!(
+            expected[expected.len() - 4..]
+                .iter()
+                .any(|x| x.abs() > 0.01)
+        );
+        // Reset retains fractional phase, but must discard previous-burst PCM.
+        assert!(
+            whole
+                .process(&[0.0; 4097])
+                .unwrap()
+                .iter()
+                .all(|x| x.abs() < 0.00001)
+        );
+    }
+}
+
+#[test]
 fn old_unbounded_samplerate_descriptor_is_rejected() {
     // SAFETY: the installed descriptor is copied into process-lifetime storage.
     unsafe {

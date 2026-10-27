@@ -224,3 +224,25 @@ timers, cooling and alarm protection continue while they acknowledge. Cached
 radio output masks do not prove current service: the successful shared service
 cycle must remain fresh. Stale status retains historical submission values
 without claiming current availability or electrical readback.
+
+### Finite codec source coverage (2026-10-27)
+
+The provider's existing ABI-1 encode result separates consumed input, covered
+real source frames and decoded wire duration. A finite flush emits at most one
+legal packet per call until delayed source content is drained. Priming packets
+may cover no real source; tail packets may consume no new input. Neither is
+discarded when it contains encoded bytes. Capacity failures do not advance the
+codec or its clocks. Reset abandons a segment's pending PCM and delayed tail.
+
+Only providers know their released codec's drain budget. Speex and Opus query
+their encoder API; Opus's documented total preskip is not labeled encoder-only
+buffering. Fixed released G.729, G.723.1 and LPC10 pipelines retain their tail
+padding without disabling decoder enhancement or native concealment. Causal
+filter delay is not silently folded into a forward-lookahead claim.
+
+The product's shared resampler owner trims setup history, drains the real
+source-duration budget and excludes zero padding before codec flush. Egress
+preserves original packet age and advances wire timestamps by decoded packet
+frames, including finite padding. A blocked send retries the same prepared
+bytes without another encode. Both hosts use the same conversion owner; the
+Asterisk PCM path retains its existing 20 ms pacing.
