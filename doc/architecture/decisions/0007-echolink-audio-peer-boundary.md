@@ -71,8 +71,14 @@ both, and configurable EchoLink telemetry output behavior.
 ## Consequences
 
 No EchoLink protocol, directory, socket, control work or speech synthesis occurs
-in an audio callback. Both the EchoLink adapter and incoming-text speech remain
-planned. Its absence of topology advertisements means
+in an audio callback. The shared incoming-text path uses two bounded ordinary
+workers, finite-media rings and generation-tagged SPSC endpoints. The transmit
+callback mixes ready speech only into local RF; independent protocol text
+forwarding never depends on speech admission or synthesis success. Disconnect,
+reload and unload cancel the exact source generation and join workers before
+releasing speech contexts. Metadata-only counters and rate-limited failures use
+the shared product's existing status/logging ports in both hosts. The EchoLink
+transport itself remains planned. Its absence of topology advertisements means
 the existing advertised-topology loop prevention cannot infer EchoLink-only
 transitive paths. A generic HTTP proxy is not a valid EchoLink transport
 proxy; the selected proxy contract must carry audio and control UDP traffic.

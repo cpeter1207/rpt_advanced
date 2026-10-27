@@ -11,7 +11,7 @@ use std::{
 };
 
 #[derive(Default)]
-struct SpeechFixture {
+pub(crate) struct SpeechFixture {
     release: AtomicBool,
     opened: Mutex<Vec<String>>,
     active: AtomicUsize,
@@ -23,7 +23,7 @@ struct StreamFixture {
     read: usize,
 }
 
-fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
+pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
     unsafe extern "C" fn open(
         context: *const c_void,
         request: *const super::super::ffi::rptadv_media_speech_request,
@@ -62,6 +62,9 @@ fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
         count: *mut usize,
     ) -> i32 {
         let stream = unsafe { &mut *handle.cast::<StreamFixture>() };
+        if stream.text.starts_with("F failure") {
+            return -4;
+        }
         let cancel = unsafe { &*cancel };
         // Deterministic external-source stall, released by the test or cancellation.
         while (stream.text.starts_with('A') || stream.text.starts_with('é'))
@@ -138,7 +141,7 @@ fn text_admission_counts_utf8_bytes_and_reserves_origin_and_node_quotas() {
     for peer in 0..17 {
         readers.push(
             executor
-                .register(message(peer, String::new()).origin)
+                .register("1000", message(peer, String::new()).origin)
                 .unwrap(),
         );
     }
@@ -196,8 +199,12 @@ fn until(mut ready: impl FnMut() -> bool) {
 fn text_admission_fairness_keeps_same_origin_order_while_another_stalls() {
     let state = Arc::new(SpeechFixture::default());
     let mut executor = TextExecutor::new(1, preparer(Arc::clone(&state))).unwrap();
-    let mut first = executor.register(message(1, String::new()).origin).unwrap();
-    let mut second = executor.register(message(2, String::new()).origin).unwrap();
+    let mut first = executor
+        .register("1000", message(1, String::new()).origin)
+        .unwrap();
+    let mut second = executor
+        .register("1000", message(2, String::new()).origin)
+        .unwrap();
     for body in ["A first", "A second", "A third"] {
         assert_eq!(
             executor.admit(message(1, body.into()), speech()),
@@ -247,7 +254,9 @@ fn text_admission_full_ring_obeys_process_budget_and_releases_quota_after_retire
     let mut preparer = preparer(Arc::default());
     preparer.timeout_ms = 20;
     let mut executor = TextExecutor::new(1, preparer).unwrap();
-    let mut reader = executor.register(message(1, String::new()).origin).unwrap();
+    let mut reader = executor
+        .register("1000", message(1, String::new()).origin)
+        .unwrap();
     assert_eq!(
         executor.admit(message(1, "large stream".into()), speech()),
         Admission::Accepted
@@ -283,7 +292,9 @@ fn text_admission_full_ring_obeys_process_budget_and_releases_quota_after_retire
 #[test]
 fn text_lifecycle_ready_endpoint_does_not_retain_its_own_origin() {
     let mut executor = TextExecutor::new(1, preparer(Arc::default())).unwrap();
-    let reader = executor.register(message(1, String::new()).origin).unwrap();
+    let reader = executor
+        .register("1000", message(1, String::new()).origin)
+        .unwrap();
     let weak = Arc::downgrade(&reader.origin);
     assert_eq!(
         executor.admit(message(1, "B ready".into()), speech()),
@@ -297,4 +308,39 @@ fn text_lifecycle_ready_endpoint_does_not_retain_its_own_origin() {
         weak.upgrade().is_none(),
         "ready PCM must not form an endpoint-owner cycle"
     );
+}
+
+#[test]
+fn text_generation_fences_reject_wrong_origin_and_observe_only_metadata() {
+    let mut executor = TextExecutor::new(1, preparer(Arc::default())).unwrap();
+    let mut reader = executor
+        .register("1000", message(1, String::new()).origin)
+        .unwrap();
+    assert_eq!(
+        executor.admit(message(1, "B secret body never logged".into()), speech()),
+        Admission::Accepted
+    );
+    until(|| {
+        if reader.current.is_none() {
+            reader.current = reader.ready.pop().ok();
+        }
+        reader.current.is_some()
+    });
+    reader.current.as_mut().unwrap().origin = Arc::new(message(2, String::new()).origin);
+    assert!(!reader.render(&mut [0.0; 16]));
+    assert_eq!(
+        executor.admit(message(1, "B current generation".into()), speech()),
+        Admission::Accepted
+    );
+    until(|| reader.render(&mut [0.0; 16]));
+    executor.cancel(reader.origin());
+    assert_eq!(
+        executor.admit(message(1, "B retired".into()), speech()),
+        Admission::Stopping
+    );
+    let observation = executor.observation();
+    assert_eq!(observation.admitted, 2);
+    assert_eq!(observation.rejected[3], 1);
+    assert_eq!(observation.cancelled_origins, 1);
+    executor.stop();
 }

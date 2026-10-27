@@ -112,6 +112,227 @@ fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() 
 }
 
 #[test]
+fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = Host::start(
+        document(
+            "usb",
+            "[1001]\nradio_channel=usb2\nduplex=full\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n",
+        ),
+        crate::media::text::tests::preparer(Arc::default()),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let origin = host.peers[0].control.text_origin();
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin,
+            source: "4000".into(),
+            audience: rpt_advanced_core::link::TextAudience::Node("1001".into()),
+            body: Arc::from("B for the other station"),
+        },
+    );
+    assert_eq!(host.text.observation().admitted, 0);
+    for peer in [ingress, egress] {
+        assert!(
+            !peer
+                .lock()
+                .unwrap()
+                .texts
+                .iter()
+                .any(|text| text.starts_with(b"M "))
+        );
+    }
+    assert!(host.stop(20));
+}
+
+#[test]
+fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let config = document("usb", "[speech]\nvoice=voice.onnx\nlevel_db=-6\n");
+    let mut host = Host::start(
+        config.clone(),
+        crate::media::text::tests::preparer(Arc::default()),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let old = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .text_origin();
+    ingress
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"M 4000 0 B literal speech"));
+    pump_until(&mut host, |host| {
+        host.text.observation().admitted == 1
+            && egress
+                .lock()
+                .unwrap()
+                .texts
+                .iter()
+                .any(|text| text == b"M 4000 0 B literal speech")
+    });
+    ingress
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"M 4000 0 A stalled producer"));
+    pump_until(&mut host, |host| {
+        let observation = host.text.observation();
+        observation.admitted == 2 && observation.active == 1 && observation.queued == 0
+    });
+    host.reload(config, clock()).unwrap();
+    pump_until(&mut host, |host| {
+        host.runtime.status(10)[0].1.retiring.is_none()
+    });
+    let current = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .text_origin();
+    assert_ne!(old.station_generation, current.station_generation);
+    assert_eq!(old.connection_generation, current.connection_generation);
+    // A delayed event from the retired audio generation is inert on both paths.
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin: old,
+            source: "4000".into(),
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("B stale speech"),
+        },
+    );
+    assert_eq!(host.text.observation().admitted, 0);
+    assert!(
+        !egress
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"M 4000 0 B stale speech")
+    );
+    assert!(host.stop(20));
+}
+
+#[test]
+fn text_lifecycle_speech_failure_keeps_forwarding_and_logs_no_human_body() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = Host::start(
+        document("usb", "[speech]\nvoice=voice.onnx\nlevel_db=-6\n"),
+        crate::media::text::tests::preparer(Arc::default()),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+    ingress
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"M 4000 0 F failure sensitive human body"));
+    pump_until(&mut host, |host| {
+        host.text.observation().failures == 1
+            && egress
+                .lock()
+                .unwrap()
+                .texts
+                .iter()
+                .any(|text| text == b"M 4000 0 F failure sensitive human body")
+    });
+    host.pump(clock()).unwrap();
+    let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+    assert_eq!(logs.len(), 1);
+    assert!(logs[0].1.contains("peer=2000"));
+    assert!(logs[0].1.contains("ProcessFailed"));
+    assert!(!logs[0].1.contains("sensitive human body"));
+    assert!(!logs[0].1.contains("voice.onnx"));
+    assert!(host.peers.iter().all(|peer| !peer.control.ended()));
+    assert!(host.stop(20));
+}
+
+#[test]
+fn text_lifecycle_host_stream_reaches_local_callback_before_telemetry_is_ready() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = Host::start(
+        document("usb", "[speech]\nvoice=voice.onnx\nlevel_db=-6\n"),
+        crate::media::text::tests::preparer(Arc::default()),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    ingress
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"M 4000 0 B immediate incoming speech"));
+    pump_until(&mut host, |host| host.text.observation().admitted == 1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut heard = false;
+    while !heard && Instant::now() < deadline {
+        let mut pcm = [0.0; 16];
+        let mut generation = owners.1.acquire().unwrap();
+        let transmit = generation.state();
+        transmit
+            .adapter
+            .process(
+                &mut transmit.controller,
+                false,
+                &mut pcm,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
+            .unwrap();
+        heard = pcm.contains(&0.5);
+        std::thread::yield_now();
+    }
+    assert!(
+        heard,
+        "incoming text must use the callback's local bus, not polite telemetry"
+    );
+    assert!(
+        !ingress
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text.starts_with(b"M "))
+    );
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn remote_selection_precedes_the_next_digit_in_one_host_batch() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -1121,6 +1342,7 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
         host.runtime.settings("1000").unwrap(),
         &host.peers,
         media_worker(&mut host.media_workers, "1000").unwrap(),
+        &mut host.text,
     )
     .unwrap();
     host.runtime.replace_adapter("1000", candidate, 11).unwrap();
@@ -1206,6 +1428,7 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
         host.runtime.settings("1000").unwrap(),
         &host.peers,
         media_worker(&mut host.media_workers, "1000").unwrap(),
+        &mut host.text,
     )
     .unwrap();
     assert!(candidate.control.redirects.is_empty());
@@ -1396,6 +1619,7 @@ fn saturated_media_publication_keeps_the_running_generation() {
                 host.runtime.settings("1000").unwrap(),
                 &host.peers,
                 media_worker(&mut host.media_workers, "1000").unwrap(),
+                &mut host.text,
             ) {
                 Ok(candidate) => {
                     held.push(candidate);
