@@ -59,6 +59,7 @@ type Shared = Arc<Mutex<State>>;
 #[test]
 fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
     let (mut session, mut control, _, _) = make_session("1000");
+    assert!(control.event().is_none());
     session
         .text(b"M 4000 1000 first message".to_vec(), 0)
         .unwrap();

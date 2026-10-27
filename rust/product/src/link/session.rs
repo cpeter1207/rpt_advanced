@@ -213,11 +213,11 @@ impl PeerControl {
     pub fn event(&mut self) -> Option<Event> {
         // ACCEPT can reach the caller before this station's first audio
         // generation is published. Keep that first human message queued.
-        if self.events.peek().is_ok_and(|event| {
-            matches!(event, Event::HumanText(message)
+        let queued = self.events.peek().ok()?;
+        if matches!(queued, Event::HumanText(message)
                 if message.origin.station_generation == 0
                     && self.text_identity.station.load(Ordering::Acquire) == 0)
-        }) {
+        {
             return None;
         }
         let mut event = self.events.pop().ok()?;
