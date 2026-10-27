@@ -8,6 +8,10 @@ only through a separately versioned adapter. The ingress and egress implementati
 has passed the hosted native-platform gate, shipped in Debian packages, and
 been validated on node 524950.
 
+Amended 2026-10-27: codec-native concealment must remain enabled and take
+priority over shared-ring fallback. The codec-provider cutover implementing
+this amendment is in progress; it has not been installed on node 524950.
+
 ## Context
 
 The standalone controller must remain responsive with hundreds or
@@ -90,11 +94,17 @@ The approved packet-buffer policy is 160 ms minimum, 180 ms initial delay and 50
 maximum, with SpeexDSP's automatic lateness trade-off. These are packet-jitter
 limits, not the shared PCM ring's reserve, target or capacity.
 
-The existing shared PCM ring remains the sole source-rate converter, drift
-corrector and selected PLC owner. Missing/insertion spans must preserve their
-position among earlier and later PCM; omitting a write or appending zeros is
-not a loss-span contract. Do not duplicate PLC or silently compress the media
-timeline. The owner approved an ABI-3 descriptor-tail `ring_producer_gap`
+The existing shared PCM ring remains the sole source-rate converter and drift
+corrector. Codec-native concealment always remains enabled. The peer's decoder
+first handles damaged frames and supported explicit loss requests using its
+retained history. Recovered samples enter the ring as PCM; they are not also
+published as missing spans. Only unresolved loss uses ring PLC. Adaptive delay
+insertions do not advance the codec's source history.
+
+Missing/insertion spans must preserve their position among earlier and later
+PCM; omitting a write or appending zeros is not a loss-span contract. Do not
+conceal the same span twice or silently compress the media timeline. The owner
+approved an ABI-3 descriptor-tail `ring_producer_gap`
 operation to append counted missing source samples in order, without breaking
 existing callers. New consumers require its presence; prove placement through
 converter lookahead and pending buffers. The approved samplerate ABI-2 tail
