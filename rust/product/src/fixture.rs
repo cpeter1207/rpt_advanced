@@ -362,10 +362,10 @@ unsafe extern "C" fn site_snapshot(
     -1
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v7 = crate::abi::rptadv_host_services_v7 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v7>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.hst7\0",
+static mut HOST: crate::abi::rptadv_host_services_v8 = crate::abi::rptadv_host_services_v8 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v8>() as u32,
+    abi_version: 8,
+    capability: *b"rptadv.hst8\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -395,6 +395,7 @@ static mut HOST: crate::abi::rptadv_host_services_v7 = crate::abi::rptadv_host_s
     peer_step_detach: None,
     peer_observe: None,
     peer_prepare_audio: None,
+    peer_reset_encoder: None,
     peer_send_prepared: None,
     peer_elapsed_ms: None,
     peer_step_wake: None,
@@ -402,7 +403,7 @@ static mut HOST: crate::abi::rptadv_host_services_v7 = crate::abi::rptadv_host_s
     scheduler_notice: Some(scheduler_notice),
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v7 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v8 {
     &raw const HOST
 }
 

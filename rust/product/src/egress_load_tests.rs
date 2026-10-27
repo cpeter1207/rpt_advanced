@@ -33,7 +33,8 @@ impl Default for CallbackCounters {
     }
 }
 static CALLBACKS: OnceLock<Arc<CallbackCounters>> = OnceLock::new();
-type SendPrepared = unsafe extern "C" fn(*mut c_void, *mut c_void, *const u8, usize, u32) -> i32;
+type SendPrepared =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *const u8, usize, u32, u32) -> i32;
 static SEND: OnceLock<SendPrepared> = OnceLock::new();
 static BLOCK: AtomicBool = AtomicBool::new(false);
 static BLOCKED_PEER: AtomicUsize = AtomicUsize::new(0);
@@ -42,13 +43,14 @@ unsafe extern "C" fn send_prepared(
     peer: *mut c_void,
     bytes: *const u8,
     count: usize,
+    frames: u32,
     timestamp: u32,
 ) -> i32 {
     let _ = BLOCKED_PEER.compare_exchange(0, peer as usize, Ordering::Relaxed, Ordering::Relaxed);
     if BLOCK.load(Ordering::Relaxed) && BLOCKED_PEER.load(Ordering::Relaxed) == peer as usize {
         return 1;
     }
-    unsafe { SEND.get().unwrap()(context, peer, bytes, count, timestamp) }
+    unsafe { SEND.get().unwrap()(context, peer, bytes, count, frames, timestamp) }
 }
 struct Radio {
     stop: Arc<AtomicBool>,
@@ -256,7 +258,7 @@ fn egress_full_path_load() {
         HostServicesOwner::new(vec![], Some(retained), SecretsFile::parse("").unwrap()).unwrap();
     let mut table = Box::new(unsafe {
         ptr::from_ref(owner.descriptor())
-            .cast::<abi::rptadv_host_services_v7>()
+            .cast::<abi::rptadv_host_services_v8>()
             .read()
     });
     table.radio_open = Some(radio_open);

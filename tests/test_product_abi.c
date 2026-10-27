@@ -5,8 +5,8 @@
 #include <rptadv_product.h>
 #include <string.h>
 
-_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 5, "update product ABI probe deliberately");
-_Static_assert(RPTADV_HOST_ABI_VERSION == 7, "update host ABI probe deliberately");
+_Static_assert(RPTADV_PRODUCT_ABI_VERSION == 6, "update product ABI probe deliberately");
+_Static_assert(RPTADV_HOST_ABI_VERSION == 8, "update host ABI probe deliberately");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {
     assert(record);
@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
     assert(product->abi_version == RPTADV_PRODUCT_ABI_VERSION);
     const unsigned char capability[16] = RPTADV_PRODUCT_CAPABILITY;
     assert(memcmp(product->capability, capability, sizeof(capability)) == 0);
-    assert(strcmp(RPTADV_HOST_CAPABILITY, "rptadv.hst7") == 0);
+    assert(strcmp(RPTADV_HOST_CAPABILITY, "rptadv.hst8") == 0);
     assert(product->start && product->reload && product->stop && product->authorize_incoming);
     assert(product->incoming && product->link_command && product->link_status && product->digit);
     assert(product->inspect_configuration && product->inspect_secrets);

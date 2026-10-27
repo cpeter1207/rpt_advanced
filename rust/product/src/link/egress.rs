@@ -120,6 +120,11 @@ impl Egress {
         self.used -= consumed as usize;
         Ok(&self.output[..generated as usize])
     }
+    /// Borrow the previous process result until its encoder has consumed it.
+    /// `frames` is exactly the length returned by that process call.
+    pub(super) fn retained_output(&self, frames: usize) -> &[f32] {
+        &self.output[..frames]
+    }
     /// Discard hidden FIR history after a discontinuity; never splice old PCM into a new span.
     pub(crate) fn reset(&mut self) -> Result<(), EgressError> {
         self.used = 0;

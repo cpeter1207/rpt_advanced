@@ -74,6 +74,16 @@ The independent control-path adapter in ADR 0038 does not schedule media work.
 
 ### Adaptive jitter adapter
 
+Codec integration accepts full legal UDP payloads and codec coding units that
+are not multiples of the 10 ms adjustment quantum. Packet duration is distinct
+from the jitter-delay ceiling: an aggregated packet may span more than that
+ceiling while its retained decoded tail keeps the source timeline intact.
+Opaque payload storage is allocated only for occupied slots on the peer owner,
+not at the maximum payload size for every slot. Reclaim native retirement
+notifications before slot reuse; retrieval copies bytes before releasing them.
+These changes retain jitter ABI 1 and the 160/180/500 ms policy. Integration
+validation is in progress with the codec host cutover.
+
 Use SpeexDSP's generic adaptive jitter buffer through a neutral packet-jitter
 capability under ADR 0022. Only the separate Rust `cdylib` adapter dynamically
 links SpeexDSP, owns its FFI/context and translates errors. Its versioned C

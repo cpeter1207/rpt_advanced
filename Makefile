@@ -16,6 +16,7 @@ CFLAGS ?= -O2 -g
 MODULE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DAST_MODULE=\"app_rpt_advanced\" -DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self -Wall -Wextra -Werror
 HEADERS := rust/jitter-adapter/include/rptadv_jitter_adapter.h rust/resolver-adapter/include/rptadv_resolver_adapter.h rust/asterisk/include/rptadv_asterisk_adapter.h rust/product/include/rptadv_product.h rust/control-abi/include/rptadv_control_adapter.h rust/control-asterisk-adapter/include/rptadv_control_asterisk_adapter.h rust/control-standalone-adapter/include/rptadv_control_standalone_adapter.h rust/file-adapter/include/rptadv_file_adapter.h rust/speech-adapter/include/rptadv_speech_adapter.h rust/media-support/include/rptadv_media_types.h
 CPPFLAGS += $(addprefix -I,$(dir $(HEADERS)))
+CPPFLAGS += -I$(or $(RPTADV_CODEC_INCLUDE),/usr/include/rptadv-codec)
 HEADERS += rust/gpiod-adapter/include/rptadv_gpiod_adapter.h
 HEADERS += rust/hwmon-adapter/include/rptadv_hwmon_adapter.h
 LOADER := module/app_rpt_advanced_loader.c

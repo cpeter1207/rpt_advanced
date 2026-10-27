@@ -6,14 +6,15 @@ use std::{
     marker::PhantomData,
     path::Path,
     ptr::NonNull,
+    sync::OnceLock,
 };
 
 const PROVIDERS: [ProviderSpec; 12] = [
     inline(
         "librptadv_product.so.1",
         "rptadv_product_descriptor_v1",
-        5,
-        b"rptadv.prod5",
+        6,
+        b"rptadv.prod6",
     ),
     private(pointer(
         "librptadv_control_standalone_adapter.so.1",
@@ -47,10 +48,10 @@ const PROVIDERS: [ProviderSpec; 12] = [
         b"rptadv.jitter",
     ),
     system(inline(
-        "librptadviax2.so.1",
-        "rptadv_iax2_client_descriptor_v1",
-        1,
-        b"rptadv.iax2.v1",
+        "librptadviax2.so.2",
+        "rptadv_iax2_client_descriptor_v2",
+        2,
+        b"rptadv.iax2.v2",
     )),
     pointer(
         "libusbradioplus_product.so.1",
@@ -256,6 +257,7 @@ impl std::error::Error for ProviderError {}
 pub struct ProviderSet {
     _libraries: Vec<Library>,
     descriptors: Vec<LoadedProvider>,
+    iax: OnceLock<Result<crate::iax::IaxClient, crate::iax::IaxError>>,
 }
 
 /// Native provider descriptors needed to activate one standalone radio.
@@ -344,7 +346,16 @@ impl ProviderSet {
         Ok(Self {
             _libraries: libraries,
             descriptors,
+            iax: OnceLock::new(),
         })
+    }
+
+    /// Open the selected codec composition once, retaining it across node reloads.
+    pub(crate) fn iax_client(&self) -> Result<crate::iax::IaxClient, ProviderError> {
+        self.iax
+            .get_or_init(|| crate::iax::IaxClient::load(Path::new("librptadviax2.so.2")))
+            .clone()
+            .map_err(|_| ProviderError::IncompleteDescriptor("librptadviax2.so.2"))
     }
 
     /// Return a validated descriptor whose access is bounded by this provider set.
@@ -422,13 +433,16 @@ impl ProviderSet {
         self.jitter_descriptor()?;
         self.native_product_descriptor()?;
         let iax = self
-            .descriptor("librptadviax2.so.1")
-            .ok_or(ProviderError::MissingDescriptor("librptadviax2.so.1"))?;
+            .descriptor("librptadviax2.so.2")
+            .ok_or(ProviderError::MissingDescriptor("librptadviax2.so.2"))?;
         if !unsafe { crate::iax::valid_client_descriptor(iax.pointer.as_ptr()) }
             || !unsafe { crate::iax::executor::valid_descriptor(self.iax_async_descriptor()?) }
         {
-            return Err(ProviderError::IncompleteDescriptor("librptadviax2.so.1"));
+            return Err(ProviderError::IncompleteDescriptor("librptadviax2.so.2"));
         }
+        // Startup prepares the immutable selection; reload reuses that catalog,
+        // never loading provider code from newly replaced files.
+        self.iax_client()?;
         Ok(())
     }
 
@@ -482,14 +496,14 @@ impl ProviderSet {
         unsafe { crate::iax::executor::Executor::new(self.iax_async_descriptor()?) }.map_err(
             |error| match error {
                 crate::iax::executor::Error::Descriptor => {
-                    ProviderError::IncompatibleDescriptor("librptadviax2.so.1")
+                    ProviderError::IncompatibleDescriptor("librptadviax2.so.2")
                 }
-                _ => ProviderError::Initialize("librptadviax2.so.1"),
+                _ => ProviderError::Initialize("librptadviax2.so.2"),
             },
         )
     }
     fn iax_async_descriptor(&self) -> Result<*const c_void, ProviderError> {
-        const NAME: &str = "librptadviax2.so.1";
+        const NAME: &str = "librptadviax2.so.2";
         let index = self
             .descriptors
             .iter()
@@ -760,6 +774,7 @@ pub(crate) mod tests {
         super::ProviderSet {
             _libraries: Vec::new(),
             descriptors: Vec::new(),
+            iax: std::sync::OnceLock::new(),
         }
     }
 
@@ -860,13 +875,13 @@ pub(crate) mod tests {
 
     #[test]
     fn executor_requires_the_retained_protocol_capability() {
-        const NAME: &str = "librptadviax2.so.1";
+        const NAME: &str = "librptadviax2.so.2";
         let empty = Box::leak(Box::new(empty_provider_set()));
         assert_eq!(
             empty.iax_executor().err(),
             Some(ProviderError::MissingDescriptor(NAME))
         );
-        let directory = ProviderFixture::new(5, false, false);
+        let directory = ProviderFixture::new(6, false, false);
         let providers = Box::leak(Box::new(
             super::ProviderSet::load_from_directory(directory.path()).unwrap(),
         ));
@@ -878,12 +893,12 @@ pub(crate) mod tests {
 
     #[test]
     fn executor_preserves_descriptor_and_initialization_errors() {
-        const NAME: &str = "librptadviax2.so.1";
+        const NAME: &str = "librptadviax2.so.2";
         for (version, expected) in [
             (2, ProviderError::IncompatibleDescriptor(NAME)),
             (1, ProviderError::Initialize(NAME)),
         ] {
-            let fixture = ProviderFixture::new(5, false, false);
+            let fixture = ProviderFixture::new(6, false, false);
             let source = fixture.path().join("iax-async.c");
             std::fs::write(
                 &source,
@@ -1006,7 +1021,7 @@ pub(crate) mod tests {
                 ProviderError::IncompatibleDescriptor(NAME),
             ),
         ] {
-            let fixture = ProviderFixture::new(5, false, false);
+            let fixture = ProviderFixture::new(6, false, false);
             let library = fixture.path().join(NAME);
             std::fs::remove_file(&library).unwrap();
             if let Some(source) = source {
@@ -1104,6 +1119,7 @@ pub(crate) mod tests {
         incomplete.native_start = None;
         let providers = Box::leak(Box::new(super::ProviderSet {
             _libraries: Vec::new(),
+            iax: std::sync::OnceLock::new(),
             descriptors: vec![loaded_provider(
                 "libusbradioplus_product.so.1",
                 Box::leak(Box::new(incomplete)),
@@ -1249,17 +1265,17 @@ pub(crate) mod tests {
 
     #[test]
     fn descriptor_contract_checks_abi_and_capability() {
-        let capability = b"rptadv.prod5\0\0\0\0";
+        let capability = b"rptadv.prod6\0\0\0\0";
         let descriptor = InlineDescriptor {
             struct_size: std::mem::size_of::<InlineDescriptor>() as u32,
-            abi_version: 5,
+            abi_version: 6,
             capability: *capability,
         };
         let provider = ProviderSpec {
             library: "test",
             symbol: "test",
-            abi_version: 5,
-            capability: b"rptadv.prod5",
+            abi_version: 6,
+            capability: b"rptadv.prod6",
             layout: DescriptorLayout::Inline,
             location: super::LibraryLocation::Private,
         };
@@ -1269,7 +1285,7 @@ pub(crate) mod tests {
             provider
         ));
         let mut incompatible = descriptor;
-        incompatible.abi_version = 6;
+        incompatible.abi_version = 7;
         assert!(!valid_descriptor(
             (&incompatible as *const InlineDescriptor).cast(),
             provider
@@ -1399,7 +1415,7 @@ pub(crate) mod tests {
     #[test]
     fn provider_descriptor_exposes_only_the_validated_pointer() {
         let providers = super::ProviderSet::load().unwrap();
-        let descriptor = providers.descriptor("librptadviax2.so.1").unwrap();
+        let descriptor = providers.descriptor("librptadviax2.so.2").unwrap();
         // SAFETY: `descriptor` is borrowed from the live set and the fixture exposes its own ABI.
         assert!(!unsafe { descriptor.as_ptr() }.is_null());
         assert!(providers.descriptor("not-installed.so").is_none());
@@ -1410,8 +1426,8 @@ pub(crate) mod tests {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 5;
-        descriptor.capability = *b"rptadv.prod5\0\0\0\0";
+        descriptor.abi_version = 6;
+        descriptor.capability = *b"rptadv.prod6\0\0\0\0";
         assert!(!super::product_functions_complete(&descriptor));
     }
 
@@ -1422,8 +1438,8 @@ pub(crate) mod tests {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 5;
-        descriptor.capability = *b"rptadv.prod5\0\0\0\0";
+        descriptor.abi_version = 6;
+        descriptor.capability = *b"rptadv.prod6\0\0\0\0";
         let pointer = (&descriptor as *const crate::abi::rptadv_product_descriptor_v1).cast();
         assert_eq!(
             super::inspection_api(pointer, spec).err(),
@@ -1434,7 +1450,7 @@ pub(crate) mod tests {
             super::inspection_api(pointer, spec).err(),
             Some(ProviderError::IncompleteDescriptor(spec.library))
         );
-        descriptor.abi_version = 6;
+        descriptor.abi_version = 7;
         assert_eq!(
             super::inspection_api(pointer, spec).err(),
             Some(ProviderError::IncompatibleDescriptor(spec.library))
@@ -1444,7 +1460,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[test]
     fn product_runtime_descriptors_reject_incomplete_product_tables() {
-        let directory = ProviderFixture::new(5, false, false);
+        let directory = ProviderFixture::new(6, false, false);
         let providers = Box::leak(Box::new(
             super::ProviderSet::load_from_directory(directory.path()).unwrap(),
         ));
@@ -1463,8 +1479,8 @@ pub(crate) mod tests {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 5;
-        descriptor.capability = *b"rptadv.prod5\0\0\0\0";
+        descriptor.abi_version = 6;
+        descriptor.capability = *b"rptadv.prod6\0\0\0\0";
         replace_descriptor(&mut providers, "librptadv_product.so.1", descriptor);
         let providers = Box::leak(Box::new(providers));
 
@@ -1479,10 +1495,10 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[test]
     fn provider_set_loads_only_matching_native_descriptors() {
-        let directory = ProviderFixture::new(5, false, false);
+        let directory = ProviderFixture::new(6, false, false);
         let providers = super::ProviderSet::load_from_directory(directory.path()).unwrap();
         assert!(providers.descriptor("librptadv_product.so.1").is_some());
-        assert!(providers.descriptor("librptadviax2.so.1").is_some());
+        assert!(providers.descriptor("librptadviax2.so.2").is_some());
         assert!(
             providers
                 .descriptor("libusbradioplus_product.so.1")
@@ -1496,13 +1512,13 @@ pub(crate) mod tests {
             ))
         );
 
-        let missing = ProviderFixture::new(5, true, false);
+        let missing = ProviderFixture::new(6, true, false);
         assert_eq!(
             super::ProviderSet::load_from_directory(missing.path()).err(),
             Some(ProviderError::MissingDescriptor("librptadv_product.so.1"))
         );
 
-        let incompatible = ProviderFixture::new(6, false, false);
+        let incompatible = ProviderFixture::new(7, false, false);
         assert_eq!(
             super::ProviderSet::load_from_directory(incompatible.path()).err(),
             Some(ProviderError::IncompatibleDescriptor(
@@ -1510,7 +1526,7 @@ pub(crate) mod tests {
             ))
         );
 
-        let null = ProviderFixture::new(5, false, true);
+        let null = ProviderFixture::new(6, false, true);
         assert_eq!(
             super::ProviderSet::load_from_directory(null.path()).err(),
             Some(ProviderError::MissingDescriptor("librptadv_product.so.1"))
@@ -1639,11 +1655,11 @@ pub(crate) mod tests {
         );
         replace_descriptor(&mut providers, "libusbradioplus_product.so.1", valid_native);
 
-        let iax_library = "librptadviax2.so.1";
+        let iax_library = "librptadviax2.so.2";
         let truncated = super::InlineDescriptorHeader {
             struct_size: std::mem::size_of::<super::InlineDescriptorHeader>() as u32,
-            abi_version: 1,
-            capability: *b"rptadv.iax2.v1\0\0",
+            abi_version: 2,
+            capability: *b"rptadv.iax2.v2\0\0",
         };
         replace_descriptor(&mut providers, iax_library, truncated);
         assert_eq!(
@@ -1734,7 +1750,7 @@ pub(crate) mod tests {
             #include <stddef.h>
             #include <stdint.h>
             #ifndef PRODUCT_VERSION
-            #define PRODUCT_VERSION 5
+            #define PRODUCT_VERSION 6
             #endif
             typedef struct { uint32_t size, version; char capability[16]; } Inline;
             typedef struct { uint32_t size, version; const char *capability; } Named;
@@ -1748,7 +1764,7 @@ pub(crate) mod tests {
             #ifdef NULL_PRODUCT
             void *rptadv_product_descriptor_v1(void) { return NULL; }
             #elif !defined(OMIT_PRODUCT)
-            INLINE(product, rptadv_product_descriptor_v1, PRODUCT_VERSION, "rptadv.prod5")
+            INLINE(product, rptadv_product_descriptor_v1, PRODUCT_VERSION, "rptadv.prod6")
             #endif
             static Control control = { 1, sizeof(Control), "rptadv.control" };
             void *rptadv_control_standalone_descriptor_v1(void) { return &control; }
@@ -1756,7 +1772,7 @@ pub(crate) mod tests {
             INLINE(speech, rptadv_speech_adapter_descriptor, 2, "rptadv.speech")
             INLINE(resolver, rptadv_resolver_adapter_descriptor_v1, 1, "rptadv.resolver")
             INLINE(jitter, rptadv_jitter_adapter_descriptor_v1, 1, "rptadv.jitter")
-            INLINE(iax2, rptadv_iax2_client_descriptor_v1, 1, "rptadv.iax2.v1")
+            INLINE(iax2, rptadv_iax2_client_descriptor_v2, 2, "rptadv.iax2.v2")
             NAMED(native, usbradioplus_product_descriptor_v1, 1, "usbradioplus.product1")
             NAMED(radio, rptadv_radio_descriptor, 4, "rptadv.radio-core")
             NAMED(audio, rptadv_portaudio_alsa_adapter_descriptor, 2, "rptadv.portaudio-alsa-audio")

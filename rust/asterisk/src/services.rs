@@ -429,14 +429,14 @@ unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     });
 }
 
-struct Services(ffi::rptadv_host_services_v7);
+struct Services(ffi::rptadv_host_services_v8);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v7 {
-    struct_size: size_of::<ffi::rptadv_host_services_v7>() as u32,
-    abi_version: 7,
-    capability: *b"rptadv.hst7\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v8 {
+    struct_size: size_of::<ffi::rptadv_host_services_v8>() as u32,
+    abi_version: 8,
+    capability: *b"rptadv.hst8\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -466,6 +466,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v7 {
     peer_step_detach: None,
     peer_observe: None,
     peer_prepare_audio: None,
+    peer_reset_encoder: None,
     peer_send_prepared: None,
     peer_elapsed_ms: None,
     peer_step_wake: None,
@@ -474,7 +475,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v7 {
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v7 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v8 {
     &SERVICES.0
 }
 

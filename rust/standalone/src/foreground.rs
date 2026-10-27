@@ -72,7 +72,8 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let registrations = crate::registration::targets(&text, &secrets)
             .map_err(|error| ForegroundError::Configuration(error.to_string()))?;
         let providers = crate::providers::ProviderSet::load().map_err(ForegroundError::Provider)?;
-        let mut iax_listeners = bind_iax_listeners(&radios)?;
+        let client = providers.iax_client().map_err(ForegroundError::Provider)?;
+        let mut iax_listeners = bind_iax_listeners(&client, &radios)?;
         let mut runtime =
             crate::runtime::ProductRuntime::start_with_providers(&text, radios, secrets, providers)
                 .map_err(ForegroundError::Runtime)?;
@@ -82,7 +83,7 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         install_signal_handlers()?;
         eprintln!("rpt-advanced standalone runtime started");
         while !STOP.load(Ordering::Acquire) {
-            poll_iax_listeners(&mut iax_listeners, &runtime);
+            poll_iax_listeners(&mut iax_listeners, &runtime, &client);
             if RELOAD.swap(false, Ordering::AcqRel) {
                 match read_configuration(configuration).and_then(|updated| {
                     validate_configuration(&updated)?;
@@ -90,7 +91,7 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
                 }) {
                     Ok(updated) => match resolve_radios(&updated).and_then(|radios| {
                         let nodes = resolve_listener_nodes(&radios);
-                        update_iax_listeners(&mut iax_listeners, nodes, |candidates| {
+                        update_iax_listeners(&mut iax_listeners, nodes, &client, |candidates| {
                             // Prepare readiness tasks before changing the active generation.
                             enable_iax_listeners(candidates, &runtime)?;
                             runtime
@@ -136,25 +137,28 @@ fn resolve_listener_nodes(radios: &[crate::ResolvedRadioNode]) -> BTreeMap<u16, 
 }
 
 fn bind_iax_listeners(
+    client: &crate::iax::IaxClient,
     radios: &[crate::ResolvedRadioNode],
 ) -> Result<BTreeMap<u16, crate::iax::IaxServer>, ForegroundError> {
     resolve_listener_nodes(radios)
         .into_iter()
-        .map(|(port, nodes)| Ok((port, bind_iax_listener(port, &nodes)?)))
+        .map(|(port, nodes)| Ok((port, bind_iax_listener(client, port, &nodes)?)))
         .collect()
 }
 
 fn bind_iax_listener(
+    client: &crate::iax::IaxClient,
     port: u16,
     nodes: &[String],
 ) -> Result<crate::iax::IaxServer, ForegroundError> {
     let address = SocketAddr::from(([0, 0, 0, 0], port));
-    crate::iax::IaxServer::bind(&iax_library_path(), address, nodes).map_err(ForegroundError::Iax)
+    crate::iax::IaxServer::bind(client, address, nodes).map_err(ForegroundError::Iax)
 }
 
 fn update_iax_listeners(
     listeners: &mut BTreeMap<u16, crate::iax::IaxServer>,
     nodes: BTreeMap<u16, Vec<String>>,
+    client: &crate::iax::IaxClient,
     reload_product: impl FnOnce(
         &mut BTreeMap<u16, crate::iax::IaxServer>,
     ) -> Result<(), ForegroundError>,
@@ -162,7 +166,7 @@ fn update_iax_listeners(
     let mut added = BTreeMap::new();
     for (port, local_nodes) in &nodes {
         if !listeners.contains_key(port) {
-            added.insert(*port, bind_iax_listener(*port, local_nodes)?);
+            added.insert(*port, bind_iax_listener(client, *port, local_nodes)?);
         }
     }
     reload_product(&mut added)?;
@@ -176,10 +180,6 @@ fn update_iax_listeners(
     listeners.retain(|port, _| nodes.contains_key(port));
     listeners.extend(added);
     Ok(())
-}
-
-fn iax_library_path() -> PathBuf {
-    PathBuf::from("librptadviax2.so.1")
 }
 
 /// Start prepared listeners before exposing their generation to control polling.
@@ -197,10 +197,11 @@ fn enable_iax_listeners(
 fn poll_iax_listeners(
     listeners: &mut BTreeMap<u16, crate::iax::IaxServer>,
     runtime: &crate::runtime::ProductRuntime,
+    client: &crate::iax::IaxClient,
 ) {
     let mut context = InboundContext {
         runtime,
-        library: iax_library_path(),
+        client: client.clone(),
     };
     let pointer = ptr::from_mut(&mut context).cast::<c_void>();
     let now = std::time::SystemTime::now()
@@ -208,7 +209,7 @@ fn poll_iax_listeners(
         .map_or(0, |duration| duration.as_secs() as u32);
     for listener in listeners.values_mut() {
         report_iax_poll(drain_iax_datagrams(|| unsafe {
-            listener.poll(now, authorize_inbound, accept_inbound, pointer)
+            listener.poll(now, Some(authorize_inbound), Some(accept_inbound), pointer)
         }));
     }
 }
@@ -232,7 +233,7 @@ fn drain_iax_datagrams(
 
 struct InboundContext<'a> {
     runtime: &'a crate::runtime::ProductRuntime,
-    library: PathBuf,
+    client: crate::iax::IaxClient,
 }
 
 unsafe fn callback_text<'a>(pointer: *const u8, length: usize) -> Option<&'a str> {
@@ -289,11 +290,8 @@ unsafe extern "C" fn accept_inbound(
     ) else {
         return -1;
     };
-    let Ok(client) = crate::iax::IaxClient::load(&context.library) else {
-        return -1;
-    };
     // SAFETY: the matching library server transfers this unique inbound IaxPeer handle here.
-    let Ok(peer) = (unsafe { client.adopt_inbound(peer) }) else {
+    let Ok(peer) = (unsafe { context.client.clone().adopt_inbound(peer) }) else {
         return -1;
     };
     let _ = context.runtime.incoming(local, remote, source, peer);
@@ -382,6 +380,9 @@ fn install_signal_handlers_with(
 
 #[cfg(test)]
 mod tests {
+    fn test_client() -> crate::iax::IaxClient {
+        crate::iax::IaxClient::load(std::path::Path::new("librptadviax2.so.2")).unwrap()
+    }
     use super::ForegroundError;
     use std::{
         fs,
@@ -480,7 +481,7 @@ mod tests {
     fn standalone_listener_binds_and_reports_port_conflicts() {
         let occupied = UdpSocket::bind(std::net::SocketAddr::from(([0, 0, 0, 0], 0))).unwrap();
         let port = occupied.local_addr().unwrap().port();
-        let error = match super::bind_iax_listener(port, &["506315".to_owned()]) {
+        let error = match super::bind_iax_listener(&test_client(), port, &["506315".to_owned()]) {
             Err(error) => error,
             Ok(_) => panic!("binding an occupied IAX port must fail"),
         };
@@ -490,7 +491,7 @@ mod tests {
         ));
 
         drop(occupied);
-        let listener = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
+        let listener = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
         drop(listener);
     }
 
@@ -499,8 +500,9 @@ mod tests {
         let reservation = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
         let current_port = reservation.local_addr().unwrap().port();
         drop(reservation);
-        let stale = super::bind_iax_listener(0, &["506310".to_owned()]).unwrap();
-        let current = super::bind_iax_listener(current_port, &["506315".to_owned()]).unwrap();
+        let stale = super::bind_iax_listener(&test_client(), 0, &["506310".to_owned()]).unwrap();
+        let current =
+            super::bind_iax_listener(&test_client(), current_port, &["506315".to_owned()]).unwrap();
         let mut listeners =
             std::collections::BTreeMap::from([(current_port, current), (65000, stale)]);
         let nodes = std::collections::BTreeMap::from([
@@ -509,7 +511,7 @@ mod tests {
         ]);
         let mut reloaded = false;
 
-        super::update_iax_listeners(&mut listeners, nodes, |_| {
+        super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| {
             reloaded = true;
             Ok(())
         })
@@ -524,11 +526,11 @@ mod tests {
 
     #[test]
     fn listener_reload_keeps_current_set_when_product_reload_fails() {
-        let current = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
+        let current = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
         let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
 
-        let error = super::update_iax_listeners(&mut listeners, nodes, |_| {
+        let error = super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| {
             Err(ForegroundError::Runtime(
                 crate::runtime::RuntimeError::Reload,
             ))
@@ -544,24 +546,26 @@ mod tests {
 
     #[test]
     fn listener_reload_prepares_async_candidates_before_committing() {
-        let current = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
+        let current = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
         let nodes = std::collections::BTreeMap::from([(0, vec!["55553".to_owned()])]);
-        let result = super::update_iax_listeners(&mut listeners, nodes, |candidates| {
-            assert_eq!(candidates.keys().copied().collect::<Vec<_>>(), [0]);
-            Err(ForegroundError::Iax(crate::iax::IaxError::Operation))
-        });
+        let result =
+            super::update_iax_listeners(&mut listeners, nodes, &test_client(), |candidates| {
+                assert_eq!(candidates.keys().copied().collect::<Vec<_>>(), [0]);
+                Err(ForegroundError::Iax(crate::iax::IaxError::Operation))
+            });
         assert!(matches!(result, Err(ForegroundError::Iax(_))));
         assert_eq!(listeners.keys().copied().collect::<Vec<_>>(), [4569]);
     }
 
     #[test]
     fn listener_reload_rejects_invalid_existing_node_assignment() {
-        let current = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
+        let current = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(4569, current)]);
         let nodes = std::collections::BTreeMap::from([(4569, Vec::new())]);
 
-        let error = super::update_iax_listeners(&mut listeners, nodes, |_| Ok(())).unwrap_err();
+        let error = super::update_iax_listeners(&mut listeners, nodes, &test_client(), |_| Ok(()))
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -576,11 +580,10 @@ mod tests {
         use std::{
             ffi::{c_char, c_void},
             mem::size_of,
-            path::PathBuf,
         };
 
         unsafe extern "C" fn start(
-            _: *const crate::abi::rptadv_host_services_v7,
+            _: *const crate::abi::rptadv_host_services_v8,
             _: *const crate::abi::rptadv_control_descriptor_v1,
             _: *const crate::abi::rptadv_file_descriptor,
             _: *const crate::abi::rptadv_speech_descriptor,
@@ -620,8 +623,8 @@ mod tests {
 
         let descriptor = Box::leak(Box::new(crate::abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<crate::abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 5,
-            capability: *b"rptadv.prod5\0\0\0\0",
+            abi_version: 6,
+            capability: *b"rptadv.prod6\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
@@ -653,13 +656,13 @@ mod tests {
         .unwrap();
         let mut context = super::InboundContext {
             runtime: &runtime,
-            library: PathBuf::from("missing-librptadviax2.so"),
+            client: test_client(),
         };
         let context = std::ptr::from_mut(&mut context).cast::<c_void>();
-        let listener = super::bind_iax_listener(0, &["506315".to_owned()]).unwrap();
+        let listener = super::bind_iax_listener(&test_client(), 0, &["506315".to_owned()]).unwrap();
         let mut listeners = std::collections::BTreeMap::from([(0, listener)]);
         super::enable_iax_listeners(&mut listeners, &runtime).unwrap();
-        super::poll_iax_listeners(&mut listeners, &runtime);
+        super::poll_iax_listeners(&mut listeners, &runtime, &test_client());
         let local = c"524950";
         let allowed_remote = c"506315";
         let denied_remote = c"506316";
@@ -769,9 +772,6 @@ mod tests {
             -1
         );
 
-        unsafe { context.cast::<super::InboundContext<'_>>().as_mut() }
-            .unwrap()
-            .library = PathBuf::from("librptadviax2.so.1");
         assert_eq!(
             unsafe {
                 super::accept_inbound(
@@ -788,7 +788,7 @@ mod tests {
             -1
         );
 
-        let library = Path::new("librptadviax2.so.1");
+        let library = Path::new("librptadviax2.so.2");
         // Keep the port unavailable to the suite's loopback and wildcard allocators.
         // The IAX listener uses a separate loopback address without releasing this guard.
         let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -801,8 +801,12 @@ mod tests {
                 "the fixture port must remain reserved against {host} binds"
             );
         }
-        let mut server =
-            crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
+        let mut server = crate::iax::IaxServer::bind(
+            &crate::iax::IaxClient::load(library).unwrap(),
+            address,
+            &["506315".to_owned()],
+        )
+        .unwrap();
         let mut accepted_peer = 0_usize;
         let server_context = std::ptr::from_mut(&mut accepted_peer).cast::<c_void>();
         let dial = std::thread::spawn(move || {
@@ -822,8 +826,8 @@ mod tests {
                 server
                     .poll(
                         now,
-                        allow_inbound_for_test,
-                        capture_inbound_for_test,
+                        Some(allow_inbound_for_test),
+                        Some(capture_inbound_for_test),
                         server_context,
                     )
                     .unwrap();

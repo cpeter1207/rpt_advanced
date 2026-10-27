@@ -7,7 +7,7 @@ use crate::{
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
-    mem::size_of,
+    mem::{size_of, size_of_val},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
 };
@@ -30,7 +30,7 @@ pub enum PeerInput<'a> {
 
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(abi::rptadv_host_services_v7);
+pub struct HostServices(abi::rptadv_host_services_v8);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
@@ -151,7 +151,7 @@ impl Backend for HostServices {
     }
 }
 
-fn complete(api: &abi::rptadv_host_services_v7) -> bool {
+fn complete(api: &abi::rptadv_host_services_v8) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -175,7 +175,6 @@ fn complete(api: &abi::rptadv_host_services_v7) -> bool {
         api.peer_read.is_some(),
         api.peer_send_text.is_some(),
         api.peer_send_digit.is_some(),
-        api.peer_write.is_some(),
         api.peer_destroy.is_some(),
     ]
     .into_iter()
@@ -191,15 +190,15 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v7) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v8) -> Result<Self, Error> {
         if pointer.is_null() {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        if size < size_of::<abi::rptadv_host_services_v7>() {
+        if size < size_of::<abi::rptadv_host_services_v8>() {
             return Err(Error::Admission);
         }
-        // ABI 7 requires the complete table, including scheduler warnings.
+        // ABI 8 requires the complete table, including stateful codec preparation.
         let api = unsafe { pointer.read() };
         let async_count = [
             api.peer_step_attach.is_some(),
@@ -211,6 +210,7 @@ impl HostServices {
         .count();
         let egress_count = [
             api.peer_prepare_audio.is_some(),
+            api.peer_reset_encoder.is_some(),
             api.peer_send_prepared.is_some(),
             api.peer_elapsed_ms.is_some(),
             api.peer_step_wake.is_some(),
@@ -219,12 +219,13 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
-        if api.abi_version != 7
-            || api.capability != *b"rptadv.hst7\0"
+        if api.abi_version != 8
+            || api.capability != *b"rptadv.hst8\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
-            || !matches!(egress_count, 0 | 5)
-            || (egress_count == 5 && async_count != 3)
+            || !matches!(egress_count, 0 | 6)
+            || (egress_count == 6 && async_count != 3)
+            || (egress_count == 0 && api.peer_write.is_none())
         {
             return Err(Error::Admission);
         }
@@ -696,12 +697,15 @@ impl PeerIo {
     pub(crate) fn prepared_media(&self) -> bool {
         self.services.0.peer_prepare_audio.is_some()
     }
-    /// Encode one codec-rate block into caller-owned storage, without sending it.
+    /// Feed one retained encoder, reporting consumption and output independently.
     pub(crate) fn prepare_audio(
         &mut self,
         samples: &[f32],
         output: &mut [u8],
-    ) -> Result<(), Error> {
+        flush: bool,
+    ) -> Result<abi::rptadv_codec_encode_result_v1, Error> {
+        let mut result: abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of_val(&result) as u32;
         let code = unsafe {
             self.services.0.peer_prepare_audio.unwrap()(
                 self.services.0.context,
@@ -710,19 +714,48 @@ impl PeerIo {
                 samples.len(),
                 output.as_mut_ptr(),
                 output.len(),
+                u32::from(flush),
+                &mut result,
             )
         };
-        (code == 0).then_some(()).ok_or(Error::Translation)
+        if !(0..=2).contains(&code)
+            || result.status != code as u32
+            || result.struct_size < size_of_val(&result) as u32
+            || result.consumed_frames > samples.len()
+            || result.encoded_bytes > output.len()
+            || result.source_frames > result.packet_frames
+            || (result.encoded_bytes != 0 && result.packet_frames == 0)
+        {
+            return Err(Error::Translation);
+        }
+        Ok(result)
+    }
+    /// Reset discarded/expired PCM before accepting another source span.
+    pub(crate) fn reset_encoder(&mut self) -> Result<(), Error> {
+        (unsafe {
+            self.services.0.peer_reset_encoder.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+            )
+        } == 0)
+            .then_some(())
+            .ok_or(Error::Translation)
     }
     /// Submit retained bytes; false is socket congestion, not a failed connection.
     /// Empty bytes submit the timestamped end-of-burst marker with the same contract.
-    pub(crate) fn send_prepared(&mut self, bytes: &[u8], timestamp: u32) -> Result<bool, Error> {
+    pub(crate) fn send_prepared(
+        &mut self,
+        bytes: &[u8],
+        frames: u32,
+        timestamp: u32,
+    ) -> Result<bool, Error> {
         match unsafe {
             self.services.0.peer_send_prepared.unwrap()(
                 self.services.0.context,
                 self.handle.as_ptr(),
                 bytes.as_ptr(),
                 bytes.len(),
+                frames,
                 timestamp,
             )
         } {

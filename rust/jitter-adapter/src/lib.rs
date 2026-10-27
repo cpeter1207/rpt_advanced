@@ -31,7 +31,6 @@ struct Slot {
     retired: bool,
     timestamp: u64,
     span: u32,
-    length: usize,
     payload: Box<[u8]>,
 }
 
@@ -85,9 +84,8 @@ impl Context {
             || config.adjustment_step > config.maximum_delay
             || config.concealment_span == 0
             || config.concealment_span > config.maximum_delay
-            || config.adjustment_step % config.concealment_span != 0
             || !(1..=200).contains(&config.maximum_packets)
-            || !(1..=1500).contains(&config.maximum_payload_bytes)
+            || !(1..=65527).contains(&config.maximum_payload_bytes)
         {
             return None;
         }
@@ -101,8 +99,7 @@ impl Context {
                     retired: false,
                     timestamp: 0,
                     span: 0,
-                    length: 0,
-                    payload: vec![0; config.maximum_payload_bytes as usize].into_boxed_slice(),
+                    payload: Box::default(),
                 })
                 .collect(),
             timeline: None,
@@ -161,7 +158,9 @@ impl Context {
         let old = std::mem::replace(&mut self.native, native);
         unsafe { abi::jitter_buffer_destroy(old.as_ptr()) };
         for slot in &mut self.slots {
+            slot.active = false;
             slot.retired = false;
+            slot.payload = Box::default();
         }
         self.timeline = None;
         self.pending = None;
@@ -211,6 +210,7 @@ impl Context {
     fn collect_retired(&mut self) {
         for slot in &mut self.slots {
             if std::mem::take(&mut slot.retired) {
+                slot.payload = Box::default();
                 self.observation.late_drops = self.observation.late_drops.saturating_add(1);
             }
         }
@@ -219,7 +219,7 @@ impl Context {
     fn put(&mut self, packet: &abi::rptadv_jitter_packet_v1, payload: &[u8]) -> i32 {
         if self.pending.is_some()
             || packet.span == 0
-            || packet.span > self.config.maximum_delay
+            || packet.span > i32::MAX as u32 - self.config.maximum_delay
             || payload.is_empty()
             || payload.len() > self.config.maximum_payload_bytes as usize
             || packet
@@ -298,6 +298,9 @@ impl Context {
                 )
             };
         }
+        // Native get/update may retire a slot between admissions. Reclaim it
+        // before reuse so an old retirement cannot clear the new payload.
+        self.collect_retired();
         let slot = self
             .slots
             .iter_mut()
@@ -305,8 +308,7 @@ impl Context {
             .expect("one spare native insertion slot");
         slot.timestamp = packet.timestamp;
         slot.span = packet.span;
-        slot.length = payload.len();
-        slot.payload[..payload.len()].copy_from_slice(payload);
+        slot.payload = Box::from(payload);
         slot.active = useful;
         let raw = abi::JitterBufferPacket {
             data: ptr::from_mut(slot).cast(),
@@ -421,8 +423,9 @@ impl Context {
             let slot = unsafe { &mut *native.data.cast::<Slot>() };
             result.timestamp = slot.timestamp;
             result.start_offset = (i128::from(slot.timestamp) - i128::from(cursor)) as i32;
-            result.length = slot.length;
-            payload[..slot.length].copy_from_slice(&slot.payload[..slot.length]);
+            result.length = slot.payload.len();
+            payload[..result.length].copy_from_slice(&slot.payload);
+            slot.payload = Box::default();
             slot.active = false;
             self.unsuccessful_gets = 0;
             (
@@ -456,7 +459,7 @@ impl Context {
 
     fn advance(&mut self, now: u64, downstream_span: u32) -> i32 {
         if now < self.last_now
-            || downstream_span > self.config.maximum_delay
+            || downstream_span > i32::MAX as u32
             || self
                 .pending
                 .as_ref()

@@ -4,11 +4,13 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
+    println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
     println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_asterisk_adapter.so.1");
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg("-I../media-support/include")
         .clang_arg("-I../control-abi/include")
+        .clang_arg(format!("-I{}", env::var("RPTADV_CODEC_INCLUDE").unwrap_or_else(|_| "/usr/include/rptadv-codec".to_owned())))
         .clang_arg("-DAST_MODULE_SELF_SYM=__internal_app_rpt_advanced_self")
         .clang_arg("-fblocks")
         .allowlist_function("ast_(get_channel_tech|format_cap_get_format|format_cache_get_slin_by_rate|format_get_sample_rate|format_cmp|request|hangup|set_read_format|set_write_format|read|write|indicate|frame_free|codec_get_max|codec_get_by_id|format_cache_get_by_codec|translate_path_steps|translator_build_path|translator_free_path|translate)")

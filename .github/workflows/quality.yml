@@ -8,7 +8,7 @@ permissions:
 jobs:
   push-preflight:
     if: github.event_name == 'push'
-    uses: cpeter1207/rpt_advanced-workflows/.github/workflows/preflight.yml@main
+    uses: cpeter1207/rpt_advanced-workflows/.github/workflows/preflight.yml@ci/focused-checkout-ownership
   quality:
     if: github.event_name != 'push'
     uses: cpeter1207/rpt_advanced-workflows/.github/workflows/quality.yml@main

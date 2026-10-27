@@ -16,6 +16,73 @@ fn config() -> abi::rptadv_jitter_config_v1 {
     }
 }
 
+#[test]
+fn codec_packet_units_and_full_udp_payloads_retain_exact_opaque_data() {
+    for unit in [80, 160, 180, 240] {
+        let mut options = config();
+        options.concealment_span = unit;
+        options.maximum_payload_bytes = 65527;
+        let mut jitter = Jitter::new(options);
+        let context = unsafe { &*jitter.0.cast::<Context>() };
+        assert!(context.slots.iter().all(|slot| slot.payload.is_empty()));
+        let payload = vec![0x5a; 65527];
+        assert_eq!(jitter.put(0, unit, 0, &payload), 0);
+        let context = unsafe { &*jitter.0.cast::<Context>() };
+        assert_eq!(
+            context
+                .slots
+                .iter()
+                .map(|slot| slot.payload.len())
+                .sum::<usize>(),
+            payload.len()
+        );
+        let mut output = vec![0; 65527];
+        let mut result: abi::rptadv_jitter_result_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of::<abi::rptadv_jitter_result_v1>() as u32;
+        assert_eq!(
+            unsafe {
+                descriptor().get.unwrap()(
+                    jitter.0,
+                    60_000_000,
+                    unit,
+                    output.as_mut_ptr(),
+                    output.len(),
+                    &mut result,
+                )
+            },
+            0
+        );
+        assert_eq!(result.kind, abi::RPTADV_JITTER_PACKET);
+        assert_eq!(&output[..result.length], payload.as_slice());
+        jitter.advance(60);
+    }
+}
+
+#[test]
+fn retired_payload_slot_reuse_preserves_new_packet_storage() {
+    let mut jitter = Jitter::new(config());
+    let context = unsafe { &mut *jitter.0.cast::<Context>() };
+    context.slots[0].retired = true;
+    context.slots[0].payload = Box::from([0x11]);
+    assert_eq!(jitter.put(0, 160, 0, &[0x22]), 0);
+    let (_, payload) = jitter.get(60, 160);
+    assert_eq!(payload, [0x22]);
+}
+
+#[test]
+fn large_packet_duration_is_not_a_jitter_delay_limit() {
+    let mut jitter = Jitter::new(config());
+    assert_eq!(jitter.put(0, 8000, 0, &[0x33]), 0);
+    let (decision, payload) = jitter.get(60, 160);
+    assert_eq!(decision.span, 8000);
+    assert_eq!(payload, [0x33]);
+    assert_eq!(
+        unsafe { descriptor().advance.unwrap()(jitter.0, 60_000_000, 7840) },
+        0
+    );
+    assert!(jitter.observe().delay <= config().maximum_delay);
+}
+
 fn descriptor() -> &'static abi::rptadv_jitter_descriptor_v1 {
     let pointer = rptadv_jitter_adapter_descriptor_v1();
     assert!(
@@ -421,11 +488,10 @@ fn malformed_configuration_rejects_without_returning_a_handle() {
         |c| c.adjustment_step = c.maximum_delay + 1,
         |c| c.concealment_span = 0,
         |c| c.concealment_span = c.maximum_delay + 1,
-        |c| c.adjustment_step = 81,
         |c| c.maximum_packets = 0,
         |c| c.maximum_packets = 201,
         |c| c.maximum_payload_bytes = 0,
-        |c| c.maximum_payload_bytes = 1501,
+        |c| c.maximum_payload_bytes = 65528,
     ];
     for mutate in mutations {
         let mut options = config();
@@ -445,7 +511,7 @@ fn invalid_packet_arguments_do_not_change_the_queue_and_expired_packets_are_coun
     let mut jitter = Jitter::new(config());
     for (timestamp, span, arrival, payload) in [
         (1000, 0, 0, &[1][..]),
-        (1000, 4001, 0, &[1][..]),
+        (1000, i32::MAX as u32, 0, &[1][..]),
         (1000, 160, 0, &[][..]),
         (u64::MAX, 160, 0, &[1][..]),
     ] {

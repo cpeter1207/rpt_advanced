@@ -59,7 +59,7 @@ def test_standalone_package_declares_its_native_runtime_providers() -> None:
         "librptadv-portaudio-alsa-adapter2",
         "librptadv-gpio-adapter1",
         "librptadv-ffmpeg-adapter1",
-        "librptadv-iax2-client1",
+        "librptadv-iax2-client2",
         "librptadv-resolver-adapter1",
         "librptadv-jitter-adapter1",
     ):
