@@ -1593,6 +1593,14 @@ mod tests {
             1234
         );
         assert_eq!(
+            unsafe { super::peer_reset_encoder(ptr::null_mut(), handle) },
+            0
+        );
+        assert_eq!(
+            unsafe { super::peer_reset_encoder(ptr::null_mut(), ptr::null_mut()) },
+            -1
+        );
+        assert_eq!(
             unsafe { super::peer_send_text(ptr::null_mut(), handle, c"status".as_ptr(), 6) },
             0
         );
@@ -1698,6 +1706,9 @@ mod tests {
             SecretsFile::parse("").unwrap(),
         )
         .unwrap();
+        let ingress = host.context.ingress.take();
+        host.enable_listener(&mut server).unwrap();
+        host.context.ingress = ingress;
         host.enable_listener(&mut server).unwrap();
         let mut resolver = *providers.resolver_descriptor().unwrap();
         resolver.resolve_addresses = Some(ordered_addresses);

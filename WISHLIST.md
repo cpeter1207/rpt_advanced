@@ -21,7 +21,7 @@ completion is not a claim of physical hardware qualification or deployment.
 
 ### Complete Asterisk 20 IAX audio-format interoperability
 
-**Status: Approved scope; implementation pending (2026-10-26).** The full
+**Status: Sixteen active formats implemented; final controller verification in progress (2026-10-27).** The full
 target remains all 19 audio formats mapped by Asterisk 20's IAX compatibility
 layer. The user deferred `siren7`, `siren14`, and `g719`; the remaining 16
 formats are the active implementation scope. Format recognition alone is not
@@ -29,10 +29,11 @@ complete codec support.
 
 The [codec and text-media design](docs/superpowers/specs/2026-10-27-protocol-neutral-codecs-and-text-media-design.md)
 was approved on 2026-10-27. Its [implementation plan](docs/superpowers/plans/2026-10-27-protocol-neutral-codecs-and-text-media.md)
-is approved and implementation is in progress. Codec-provider framing, native
-concealment, negotiation foundations, and finite speech-stream helpers have
-focused test coverage. End-to-end integration and the full quality gate remain
-pending; the running node has not been upgraded for this feature.
+is approved. Provider and IAX library gates pass on native Debian 13 amd64 and
+arm64, including full production coverage. The ABI-matched candidate is running
+on 524950; local repeat, courtesy, and time speech are confirmed. The controller
+gate and final incoming-text refinements remain in verification. These candidate
+components have not been released.
 
 **Requirements and decisions recorded**
 
@@ -80,7 +81,7 @@ resume the three explicitly deferred formats.
 
 ### Incoming text-message speech codec
 
-**Status: Approved scope; implementation pending (2026-10-26).** Treat human text
+**Status: Implemented in the candidate; final verification in progress (2026-10-27).** Treat human text
 messages from text-capable protocols as a protocol-neutral codec input that
 produces local-only spoken incoming media, not controller telemetry. This is
 separate from the 19 Asterisk IAX audio-format identifiers above.
@@ -88,7 +89,10 @@ separate from the 19 Asterisk IAX audio-format identifiers above.
 The approved [design](docs/superpowers/specs/2026-10-27-protocol-neutral-codecs-and-text-media-design.md)
 describes local speech and independent text forwarding. Its
 [implementation plan](docs/superpowers/plans/2026-10-27-protocol-neutral-codecs-and-text-media.md)
-is prepared for review; implementation remains pending.
+is approved. A real directed IAX loopback message was heard locally on 524950.
+The initial-attachment race, sender attribution, and interruption of ordinary
+voice telemetry are covered by focused regressions; their live retest and the
+controller's final gate remain pending. EchoLink's protocol adapter remains planned.
 
 **Requirements and decisions recorded**
 
@@ -103,6 +107,10 @@ is prepared for review; implementation remains pending.
 - Mix the resulting speech with active incoming audio rather than waiting
   for other transmissions to end. This includes concurrent audio from the
   same peer that sent the text, not just audio from other peers.
+- Prefix speech with the stated sender: localized "node [digits] says:" or
+  "[callsign] says:". Spell sender characters, but retain the literal body and
+  original forwarding bytes. Playable text speech interrupts ordinary voice
+  telemetry using its Morse fallback; it does not assert RF receive activity.
 - Send text-derived speech only to the local transmitter, mixed with incoming
   audio there. Never include that speech in peer audio egress. Retain the
   originating peer identity. Do not put it through the polite controller-

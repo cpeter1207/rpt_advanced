@@ -648,6 +648,7 @@ impl NodeController {
         let receive = receiving || linked;
         let status_idle = !receive
             && !source_activity
+            && local_media.is_none()
             && self
                 .telemetry
                 .peer_status()
@@ -922,7 +923,7 @@ impl NodeController {
         if let Some((playback, occurrence)) = playback {
             let first_output = !playback.has_output();
             let interrupt = force_morse
-                || ((receive || source_activity)
+                || ((receive || source_activity || (local_media.is_some() && !peer_status))
                     && matches!(
                         rendered_source,
                         Some(

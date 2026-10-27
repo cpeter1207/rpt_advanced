@@ -40,6 +40,50 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
+    let (mut node, mut control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    node.process_audio(false, false, &[], &mut [0.0; 12000]);
+    assert!(control.queue_prepared_status(media(0.75, 100)));
+    let mut output = [0.0];
+    node.process_audio(false, false, &[], &mut output);
+    assert_eq!(output, [0.75]);
+    let mut parrot = [0.0];
+    let mut active = false;
+    node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut output,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+            replies: None,
+            regeneration: None,
+            local_media: crate::link::LocalMedia {
+                samples: &[0.25],
+                active: true,
+            },
+        },
+    );
+    assert_eq!(output, [0.25], "voice stops at the first text sample");
+    node.process_audio(false, false, &[], &mut output);
+    assert!(
+        output[0] > 0.0 && output[0] < 0.5,
+        "Morse remains selected after text"
+    );
+}
+
+#[test]
 fn text_local_mix_callback_does_not_allocate_or_release_storage() {
     let (mut node, _control) = NodeController::new(
         ControllerSettings {

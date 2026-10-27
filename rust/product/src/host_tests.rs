@@ -327,9 +327,10 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let config = document("usb", "[speech]\nvoice=voice.onnx\nlevel_db=-6\n");
+    let speech = Arc::<crate::media::text::tests::SpeechFixture>::default();
     let mut host = Host::start(
         config.clone(),
-        crate::media::text::tests::preparer(Arc::default()),
+        crate::media::text::tests::preparer(speech.clone()),
         services(),
         Instant::now(),
         clock(),
@@ -351,6 +352,7 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
         .push_back(Input::Text(b"M 4000 0 B literal speech"));
     pump_until(&mut host, |host| {
         host.text.observation().admitted == 1
+            && !speech.opened.lock().unwrap().is_empty()
             && egress
                 .lock()
                 .unwrap()
@@ -358,6 +360,10 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
                 .iter()
                 .any(|text| text == b"M 4000 0 B literal speech")
     });
+    assert_eq!(
+        speech.opened.lock().unwrap()[0],
+        "Node 4,0,0,0 says: B literal speech"
+    );
     ingress
         .lock()
         .unwrap()

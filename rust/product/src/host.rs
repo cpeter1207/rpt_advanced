@@ -1018,10 +1018,15 @@ impl Host {
             let settings = ResolvedSpeechSettings::resolve(self.runtime.document(), &node)
                 .expect("validated station speech settings")
                 .value;
+            let spoken = self
+                .runtime
+                .node(local)
+                .expect("admitted local station")
+                .incoming_text_speech(&message.source, &message.body);
             let _ = self.text.admit(
                 message,
                 SpeechSource {
-                    text: String::new(),
+                    text: spoken,
                     model: settings.voice.into(),
                     speed_percent: settings.speed_percent as u32,
                     level_db: settings.level_db as i32,

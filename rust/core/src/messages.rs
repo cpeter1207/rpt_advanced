@@ -46,6 +46,7 @@ const REQUIRED_IDS: &[&str] = &[
     "pad-test-empty",
     "pad-test-overflow",
     "dtmf-symbol",
+    "incoming-text",
 ];
 
 /// A typed built-in RF message request; callers cannot select arbitrary Fluent IDs.
@@ -371,6 +372,46 @@ impl MessageCatalog {
     /// Format three RF variants, falling back independently to English per attribute.
     pub fn format(&self, message: &Message<'_>) -> Result<MessageForms, CatalogError> {
         self.format_attributes(message.id(), |_| message.args())
+    }
+
+    /// Attribute incoming human text without interpreting its body as a template.
+    /// Sender characters are separated only for speech; the total bound includes
+    /// the already-bounded source/body and one translated catalog literal.
+    pub fn format_incoming_text(
+        &self,
+        source: &str,
+        body: &str,
+    ) -> Result<MessageForms, CatalogError> {
+        let spoken = source
+            .chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.format_bounded_attributes(
+            "incoming-text",
+            |attribute| {
+                let mut args = FluentArgs::new();
+                args.set(
+                    "source",
+                    if attribute == "tts" {
+                        spoken.as_str()
+                    } else {
+                        source
+                    },
+                );
+                args.set(
+                    "kind",
+                    if source.bytes().all(|byte| byte.is_ascii_digit()) {
+                        "node"
+                    } else {
+                        "callsign"
+                    },
+                );
+                args.set("body", body);
+                args
+            },
+            |_| MAX_MESSAGE_BYTES + spoken.len() + body.len(),
+        )
     }
 
     /// Format a validated configuration-selected ID; arguments are data, never content tokens.
@@ -796,6 +837,11 @@ fn validate_translation(bundle: &Bundle, require_builtin_attributes: bool) -> Ve
 fn required_sample_args(id: &str) -> FluentArgs<'static> {
     let mut args = FluentArgs::new();
     match id {
+        "incoming-text" => {
+            args.set("source", "2000");
+            args.set("kind", "node");
+            args.set("body", "test message");
+        }
         "dtmf-symbol" => {
             args.set("symbol", "*");
             args.set("kind", "star");

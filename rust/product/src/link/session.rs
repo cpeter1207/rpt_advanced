@@ -211,7 +211,21 @@ impl PeerControl {
     }
     /// Read one copied event for current-policy processing outside the IAX owner.
     pub fn event(&mut self) -> Option<Event> {
-        let event = self.events.pop().ok()?;
+        // ACCEPT can reach the caller before this station's first audio
+        // generation is published. Keep that first human message queued.
+        if self.events.peek().is_ok_and(|event| {
+            matches!(event, Event::HumanText(message)
+                if message.origin.station_generation == 0
+                    && self.text_identity.station.load(Ordering::Acquire) == 0)
+        }) {
+            return None;
+        }
+        let mut event = self.events.pop().ok()?;
+        if let Event::HumanText(message) = &mut event {
+            if message.origin.station_generation == 0 {
+                message.origin = self.text_origin();
+            }
+        }
         if let Event::Redirected(observer) = &event {
             self.observer = observer.clone();
         }

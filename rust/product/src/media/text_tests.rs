@@ -13,7 +13,7 @@ use std::{
 #[derive(Default)]
 pub(crate) struct SpeechFixture {
     release: AtomicBool,
-    opened: Mutex<Vec<String>>,
+    pub(crate) opened: Mutex<Vec<String>>,
     active: AtomicUsize,
     maximum: AtomicUsize,
 }
@@ -62,12 +62,16 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
         count: *mut usize,
     ) -> i32 {
         let stream = unsafe { &mut *handle.cast::<StreamFixture>() };
-        if stream.text.starts_with("F failure") {
+        let body = stream
+            .text
+            .split_once(" says: ")
+            .map_or(stream.text.as_str(), |(_, body)| body);
+        if body.starts_with("F failure") {
             return -4;
         }
         let cancel = unsafe { &*cancel };
         // Deterministic external-source stall, released by the test or cancellation.
-        while (stream.text.starts_with('A') || stream.text.starts_with('é'))
+        while (body.starts_with('A') || body.starts_with('é'))
             && !stream.state.release.load(Ordering::Acquire)
         {
             if unsafe { cancel.is_cancelled.unwrap()(cancel.context) } != 0 {
@@ -75,16 +79,16 @@ pub(crate) fn preparer(state: Arc<SpeechFixture>) -> NativeMediaPreparer {
             }
             thread::park_timeout(Duration::from_millis(1));
         }
-        let frames = if stream.text.starts_with("empty") {
+        let frames = if body.starts_with("empty") {
             0
-        } else if stream.text.starts_with("large") {
+        } else if body.starts_with("large") {
             if stream.read < 20 { capacity } else { 0 }
         } else {
             usize::from(stream.read == 0)
         };
         unsafe {
             *count = frames;
-            std::slice::from_raw_parts_mut(output, frames).fill(if stream.text.starts_with('B') {
+            std::slice::from_raw_parts_mut(output, frames).fill(if body.starts_with('B') {
                 0.5
             } else {
                 0.25

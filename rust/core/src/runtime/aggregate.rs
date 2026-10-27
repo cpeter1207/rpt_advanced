@@ -212,6 +212,15 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     pub fn settings(&self) -> &ResolvedNodeSettings {
         &self.settings
     }
+
+    /// Local speech rendition with a localized sender label and literal human body.
+    pub fn incoming_text_speech(&self, source: &str, body: &str) -> String {
+        self.control
+            .catalog
+            .format_incoming_text(source, body)
+            .expect("validated catalog and bounded human text")
+            .tts
+    }
     /// Serialized link policy, shared by CLI, incoming admission, DTMF, and ticker work.
     pub fn links(&mut self) -> &mut NodeLinkControl {
         &mut self.links

@@ -10,7 +10,9 @@ been validated on node 524950.
 
 Amended 2026-10-27: codec-native concealment must remain enabled and take
 priority over shared-ring fallback. The codec-provider cutover implementing
-this amendment is in progress; it has not been installed on node 524950.
+this amendment is running as an ABI-matched native candidate on node 524950.
+Provider and IAX native-platform gates pass; the controller's final gate is
+pending. This candidate cutover has not been released.
 
 ## Context
 

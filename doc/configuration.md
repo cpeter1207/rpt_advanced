@@ -111,10 +111,10 @@ mismatch rejects the request without trying a later source. With the Asterisk
 adapter, incoming links use the `RptAdvanced(node)` dialplan application.
 Configure its IAX registration and dialplan in Asterisk.
 
-The local radio uses 48 kHz audio. With the Asterisk adapter, an outbound IAX
-link tries supported codecs from the highest rate down, within a 20-second
-dialing limit; a peer can use a rate at or below 48 kHz. The standalone service
-uses 8 kHz ULAW for IAX links.
+The local radio uses 48 kHz audio. Standalone links prefer ULAW and can use the
+[supported link formats](allstarlink-status.md#link-audio-and-text).
+The Asterisk adapter uses the formats available in its Asterisk installation,
+at rates up to 48 kHz, within a 20-second dialing limit.
 
 ## Standalone IAX passwords
 

@@ -3,6 +3,41 @@ use super::messages::{CatalogError, Message, MessageCatalog, MessageForms};
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
 #[test]
+fn incoming_text_attributes_the_sender_without_expanding_the_body() {
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (source, expected) in [
+        ("524950", "Node 5,2,4,9,5,0 says: ${time} is literal."),
+        ("KG0BP", "K,G,0,B,P says: ${time} is literal."),
+    ] {
+        assert_eq!(
+            catalog
+                .format_incoming_text(source, "${time} is literal.")
+                .unwrap()
+                .tts,
+            expected
+        );
+    }
+    let body = "é".repeat(2048);
+    assert!(
+        catalog
+            .format_incoming_text(&"9".repeat(63), &body)
+            .unwrap()
+            .tts
+            .ends_with(&body)
+    );
+    let translated = MessageCatalog::from_sources(
+        "es",
+        ENGLISH,
+        Some("incoming-text =\n    .tts = { $source } dice: { $body }\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        translated.format_incoming_text("2000", "Hola").unwrap().tts,
+        "2,0,0,0 dice: Hola"
+    );
+}
+
+#[test]
 fn timeout_notice_formats_the_configured_duration() {
     use super::messages::MessageArgument;
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();

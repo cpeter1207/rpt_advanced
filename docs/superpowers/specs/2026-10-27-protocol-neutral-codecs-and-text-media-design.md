@@ -270,6 +270,15 @@ receive text only, and independently decide whether/how to render it.
 
 ## 8. Local speech production and mixing
 
+Manual acceptance refinement (2026-10-27): prefix local speech with the stated
+sender using the translated message bundle: "node [individual digits] says:"
+or "[individual callsign characters] says:". Leave the original human body
+literal and forwarding bytes unchanged. Playable text PCM counts as an
+interruption for ordinary local voice telemetry, selecting its existing Morse
+fallback. It is not RF activity and must not create courtesy, CTCSS or traffic
+timer edges. Keep initial pre-publication human events in their existing queue
+until the station has a valid generation; never rewrite a nonzero retired fence.
+
 Use the existing speech adapter and source-rate PCM stream primitives.
 Preserve the node's configured speech voice/model, speed and level; do not
 hardcode levels or apply a second gain. Treat received text as literal data,

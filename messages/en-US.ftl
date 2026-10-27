@@ -3,6 +3,14 @@ no-links =
     .tts = No links
     .morse = NO LINKS
 
+incoming-text =
+    .text = { $source } says: { $body }
+    .tts = { $kind ->
+        [node] Node { $source } says: { $body }
+       *[callsign] { $source } says: { $body }
+        }
+    .morse = { $source } SAYS { $body }
+
 peer-connected-local =
     .text = { $peer } connected
     .tts = { $peer } connected

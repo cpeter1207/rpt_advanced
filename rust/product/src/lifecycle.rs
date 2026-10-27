@@ -55,6 +55,16 @@ static HOST_STOP_MODE: AtomicU64 = AtomicU64::new(0);
 
 static ENGINE: Mutex<Option<Arc<Engine>>> = Mutex::new(None);
 
+fn spawn_dial(operation: impl FnOnce() + Send + 'static) -> std::io::Result<JoinHandle<()>> {
+    #[cfg(test)]
+    if FAIL_DIAL_THREAD.swap(false, Ordering::AcqRel) {
+        return Err(std::io::Error::other("injected dial-thread failure"));
+    }
+    std::thread::Builder::new()
+        .name("rpt-link-dial".into())
+        .spawn(operation)
+}
+
 #[path = "lifecycle_site.rs"]
 mod site;
 
@@ -314,18 +324,7 @@ impl Engine {
                 .expect("accepted dial owns its job");
             let _ = engine.complete_dial(job, revision);
         };
-        #[cfg(test)]
-        let thread = if FAIL_DIAL_THREAD.swap(false, Ordering::AcqRel) {
-            Err(std::io::Error::other("injected dial-thread failure"))
-        } else {
-            std::thread::Builder::new()
-                .name("rpt-link-dial".into())
-                .spawn(operation)
-        };
-        #[cfg(not(test))]
-        let thread = std::thread::Builder::new()
-            .name("rpt-link-dial".into())
-            .spawn(operation);
+        let thread = spawn_dial(operation);
         let thread = match thread {
             Ok(thread) => thread,
             Err(_) => {

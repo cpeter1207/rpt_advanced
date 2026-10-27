@@ -525,8 +525,15 @@ fn produce(state: &State, job: &Job) -> Result<(), MediaError> {
             || Instant::now() >= deadline
     };
     let token = Cancellation::default();
+    // The host may supply a localized attribution; forwarding retains the
+    // original message body. Direct executor users may submit literal text.
+    let text = if job.speech.text.is_empty() {
+        job.message.body.as_ref()
+    } else {
+        &job.speech.text
+    };
     let mut stream = state.preparer.open_speech_stream(&SpeechRequest {
-        text: &job.message.body,
+        text,
         model: &job.speech.model,
         speed_percent: job.speech.speed_percent,
         level_db: job.speech.level_db,

@@ -57,6 +57,28 @@ pub(crate) struct State {
 type Shared = Arc<Mutex<State>>;
 
 #[test]
+fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
+    let (mut session, mut control, _, _) = make_session("1000");
+    session
+        .text(b"M 4000 1000 first message".to_vec(), 0)
+        .unwrap();
+    assert!(control.event().is_none(), "station is not published yet");
+    let first = control.bind_text_generation(42);
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("missing first message after binding");
+    };
+    assert_eq!(message.origin, first);
+    session
+        .text(b"M 4000 1000 old generation".to_vec(), 0)
+        .unwrap();
+    control.bind_text_generation(43);
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("missing queued old-generation message");
+    };
+    assert_eq!(message.origin, first, "reload must retain the old fence");
+}
+
+#[test]
 fn text_forwarding_classification_binds_authenticated_origin_and_drops_overflow_without_hangup() {
     let (mut session, mut control, _, _) = make_session("1000");
     let origin = control.bind_text_generation(42);
