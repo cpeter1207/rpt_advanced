@@ -251,6 +251,10 @@ fn site_manual_command_publishes_inhibit_without_waiting_for_poll() {
             .unwrap()
             .site_command(crate::site::SiteCommand::Inhibit(inhibit), 0)
             .unwrap();
+        runtime
+            .node("1000")
+            .unwrap()
+            .advance_site(0, &Default::default(), &Default::default());
         let mut guard = tx.acquire().unwrap();
         let mut audio = [0.25; 48];
         actual.push(
@@ -560,6 +564,10 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
     )
     .unwrap();
     assert_eq!(
+        runtime.cancel_message("missing"),
+        Err(RuntimeError::MissingNode)
+    );
+    assert_eq!(
         runtime.queue_named_message("missing", "ready"),
         Err(RuntimeError::MissingNode)
     );
@@ -612,6 +620,12 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
     );
     assert!(audio.iter().any(|sample| *sample != 0.0));
     assert!(replies.iter().all(|sample| sample.sample == 0.0));
+    runtime.cancel_message("1000").unwrap();
+    generation
+        .transmit()
+        .controller
+        .process_audio(false, false, &[], &mut audio);
+    assert_eq!(audio, [0.0; 960]);
     drop(generation);
     assert!(runtime.stop(0));
 }
@@ -1748,6 +1762,14 @@ fn aggregate_scheduled_template_and_macro_use_trigger_clock_and_current_node() {
         clock(),
     )
     .unwrap();
+    assert_eq!(
+        runtime.site_macro("1000", "connect").unwrap(),
+        crate::command::Command {
+            action: LinkAction::Transceive,
+            node: "2000".into()
+        }
+    );
+    assert!(runtime.site_macro("1000", "missing").is_err());
     let dispatch = runtime.next_event(clock()).unwrap().unwrap();
     assert_eq!(dispatch.morse(), Some("1000. 9:07 AM"));
     assert!(dispatch.speech().unwrap().starts_with("node,1,0,0,0."));
@@ -2913,20 +2935,22 @@ fn link_reconnect_truncates_a_disconnect_that_already_started() {
 
 #[test]
 fn link_reconnect_cancels_only_the_same_actual_link_pair() {
-    let mut runtime = link_notice_runtime("[4000]\n", Arc::new(AtomicBool::new(false)));
-    runtime.queue_link_event("1000", "2000", false).unwrap();
-    runtime.queue_link_event("3000", "2000", false).unwrap();
-    runtime.queue_link_event("2000", "1000", true).unwrap();
-    let (_, mut tx) = runtime.node("4000").unwrap().register_audio().unwrap();
-    let mut audio = vec![0.0; 12_016];
-    tx.acquire()
-        .unwrap()
-        .state()
-        .controller
-        .process_audio(false, false, &[], &mut audio);
-    let heard: Vec<_> = audio.into_iter().filter(|sample| *sample != 0.0).collect();
-    assert_eq!(heard, [0.5, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25]);
-    assert!(runtime.stop(0));
+    for (first, second) in [("3000", "2000"), ("1000", "3000")] {
+        let mut runtime = link_notice_runtime("[4000]\n", Arc::new(AtomicBool::new(false)));
+        runtime.queue_link_event("1000", "2000", false).unwrap();
+        runtime.queue_link_event(first, second, false).unwrap();
+        runtime.queue_link_event("2000", "1000", true).unwrap();
+        let (_, mut tx) = runtime.node("4000").unwrap().register_audio().unwrap();
+        let mut audio = vec![0.0; 12_016];
+        tx.acquire()
+            .unwrap()
+            .state()
+            .controller
+            .process_audio(false, false, &[], &mut audio);
+        let heard: Vec<_> = audio.into_iter().filter(|sample| *sample != 0.0).collect();
+        assert_eq!(heard, [0.5, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25]);
+        assert!(runtime.stop(0));
+    }
 }
 
 #[test]

@@ -1032,7 +1032,8 @@ impl NodeController {
         if !self.traffic_keyed {
             self.duplex = DuplexPolicy::default();
         }
-        if transmit && may_transmit && self.traffic_keyed {
+        // Allowed traffic is keyed above; a blocked timeout has already returned.
+        if transmit && may_transmit {
             self.last_audio = self.now;
             self.release_hang = hang;
             self.exempt_release = false;
@@ -1077,7 +1078,7 @@ impl NodeController {
             } else {
                 0.0
             };
-        let link = if may_transmit && linked && self.traffic_keyed && !suppress_repeat {
+        let link = if may_transmit && linked && !suppress_repeat {
             link_sample
         } else {
             0.0
@@ -1115,11 +1116,7 @@ impl NodeController {
             }
         }
         if let Some(sample) = regeneration {
-            if may_transmit && self.traffic_keyed {
-                sample
-            } else {
-                0.0
-            }
+            if may_transmit { sample } else { 0.0 }
         } else if inhibited {
             0.0
         } else {

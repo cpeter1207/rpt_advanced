@@ -73,6 +73,7 @@ fn timeout_notice_obeys_site_inhibit_without_losing_recovery() {
     assert!(!node.process_audio(true, false, &[], &mut inhibited));
     assert_eq!(inhibited, [0.0; 960]);
     control.set_site_inhibit(false);
+    assert!(node.process_event(true, false));
     let mut notice = [0.8; 3];
     assert!(node.process_audio(true, false, &[], &mut notice));
     assert_eq!(notice, [0.25; 3]);

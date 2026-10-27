@@ -2711,7 +2711,7 @@ fn courtesy_selection_cancellation_latest_unkey_and_kerchunk() {
 fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
     for (limit, frames, expect_hang) in [(1, 1, false), (1, 48, false), (1, 49, true), (0, 1, true)]
     {
-        for release_message in [false, true] {
+        for release_interval in [None, Some(0), Some(60_000)] {
             let (mut node, _) = NodeController::new(
                 ControllerSettings {
                     full_duplex: true,
@@ -2720,10 +2720,10 @@ fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
                     ..ControllerSettings::default()
                 },
                 vec![],
-                if release_message {
+                if let Some(interval_ms) = release_interval {
                     vec![Announcement {
                         media: media(0.5, 1),
-                        interval_ms: 0,
+                        interval_ms,
                     }]
                 } else {
                     vec![]
@@ -2735,7 +2735,7 @@ fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
             assert_eq!(
                 node.process_event(false, false),
                 expect_hang,
-                "limit={limit} frames={frames} message={release_message}"
+                "limit={limit} frames={frames} message={release_interval:?}"
             );
             if !expect_hang {
                 let mut output = [0.0; 1000];
