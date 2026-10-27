@@ -2,9 +2,9 @@
 
 Date: 2026-10-27
 
-Status: Draft for owner approval. Requirements below are agreed; proposed
-implementation choices are identified separately. No implementation, release,
-installation or live-node change is authorized by writing this document.
+Status: Approved by the owner on 2026-10-27, including the implementation
+choices and bounded-resource defaults below. Implementation is pending. This
+approval does not authorize a release, installation or live-node change.
 
 ## 1. Goal and scope
 
@@ -78,7 +78,7 @@ the telemetry queue, and sending locally synthesized text as peer audio. Each
 violates an explicit requirement. Rewriting available codec algorithms adds
 maintenance without meeting an unmet need and is also rejected.
 
-Implementation proposal: use one small common codec contract and separate
+Approved implementation: use one small common codec contract and separate
 provider DSOs for independently replaceable implementations. One provider may
 support related profiles; do not duplicate a library just because two protocols
 or two packing variants use it. Reuse the existing speech adapter as the
@@ -89,7 +89,7 @@ Do not expand the FFmpeg *graph* ABI into a catch-all codec API.
 
 Wire mappings belong to protocol adapters, not codec providers. The following
 IAX profiles guide initial provider selection. Outgoing 20 ms packetization is
-a proposed default for stream codecs, not a requirement to force every codec
+the approved default for stream codecs, not a requirement to force every codec
 into a 20 ms frame. Receive must handle valid peer aggregation and durations.
 
 | IAX name | PCM rate | Required framing/profile | Candidate released implementation |
@@ -135,7 +135,7 @@ Specific qualifications:
 - SLIN byte order, LPC10 timing and G.726 packing require independent fixtures
   from the pinned implementation. The RFC's old codec table alone is not an
   exact Asterisk 20 behavior contract. Do not silently make SLIN16 match SLIN8.
-- Proposed Opus transmit policy is mono, 48 kHz PCM and 20 ms packets. Derive
+- Approved Opus transmit policy is mono, 48 kHz PCM and 20 ms packets. Derive
   received duration from a valid packet, not a constant. Other supported Opus
   packet durations must not be mistaken for loss or malformed voice.
 - Disable optional encoder DTX initially where supported to preserve existing
@@ -184,7 +184,7 @@ Read/write legacy and extended `FORMAT`/`CAPABILITY` information elements using
 Asterisk's precedence/version rules. Speex16 and Opus cannot fit in `u32`.
 Keep all IAX identifiers in the protocol implementation.
 
-Build offers from verified bidirectional profiles and retain mu-law. Proposed
+Build offers from verified bidirectional profiles and retain mu-law. The approved
 initial preference preserves current behavior by keeping mu-law first; other
 formats remain available when selected by the peer or the existing host codec
 policy. Do not change codec preference based only on sample rate.
@@ -289,9 +289,9 @@ audio cannot be undone. Never use Morse, restart another speech attempt
 automatically, stop other audio, or cancel otherwise valid text forwarding.
 Successful EOF drains the finite stream, then releases its local activity.
 
-### Proposed bounded-resource defaults
+### Approved bounded-resource defaults
 
-These are design choices for review, not previously approved user requirements:
+The owner approved these design choices with this specification:
 
 - Admit at most 4096 UTF-8 bytes per local rendition. Reject/count an oversized
   local rendition rather than truncate it; otherwise valid text may still be
@@ -405,8 +405,8 @@ operator documentation immediately before a PR, as required by `AGENTS.md`.
 ## 12. Traceability and source baseline
 
 Owner decisions are recorded in `WISHLIST.md`, ADRs 0007/0022, and sibling
-`librptadviax2/requirements.md` IA-018 through IA-023. This draft combines those
-decisions with the explicitly proposed defaults above. It does not mark them
+`librptadviax2/requirements.md` IA-018 through IA-023. This specification combines
+those decisions with the approved defaults above. It does not mark them
 implemented or replace the implementation plan.
 
 Source baseline checked on 2026-10-27:
