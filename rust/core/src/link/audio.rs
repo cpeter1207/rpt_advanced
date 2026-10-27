@@ -179,6 +179,8 @@ impl<P: PeerInput> AudioPeer<P> {
 
 /// Fixed prepared peer set retained until its generation is detached and reclaimed.
 pub struct LinkAudio<P: PeerInput> {
+    text: Option<Box<dyn LocalTextInput>>,
+    text_samples: Vec<f32>,
     peers: Vec<AudioPeer<P>>,
     local: Vec<f32>,
     mix: Vec<f32>,
@@ -193,6 +195,20 @@ pub struct LinkAudio<P: PeerInput> {
     selected_groups: Vec<usize>,
     publish: Producer<ProgramBlock>,
     recycled: Consumer<ProgramBlock>,
+}
+
+/// Prepared local incoming speech, never a peer source or telemetry command.
+pub trait LocalTextInput: Send {
+    /// Add available PCM without blocking/allocating; pending synthesis is inactive.
+    fn render(&mut self, pcm: &mut [f32]) -> bool;
+}
+/// Local-only media and its playable-output demand under normal RF safety gates.
+#[derive(Clone, Copy, Default)]
+pub struct LocalMedia<'a> {
+    /// Prepared normalized48-kHz speech; excluded from fanout/capture.
+    pub samples: &'a [f32],
+    /// True for playable media, not merely queued text.
+    pub active: bool,
 }
 
 /// Position supplied by the existing native stream clock, not generation preparation time.
@@ -379,6 +395,8 @@ impl<P: PeerInput> LinkAudio<P> {
         };
         Ok((
             Self {
+                text: None,
+                text_samples: vec![0.0; maximum],
                 routing: vec![Destination::default(); peers.len()],
                 peers,
                 local: vec![0.0; maximum],
@@ -400,6 +418,11 @@ impl<P: PeerInput> LinkAudio<P> {
     /// Attach a prepared finite local-only signaling consumer before publication.
     pub fn with_regeneration(mut self, input: P) -> Self {
         self.regeneration = Some(input);
+        self
+    }
+    /// Compose local incoming speech before this generation reaches audio.
+    pub fn with_text(mut self, input: Box<dyn LocalTextInput>) -> Self {
+        self.text = Some(input);
         self
     }
     /// Clone the read-only status handle before audio ownership is published.
@@ -515,6 +538,11 @@ impl<P: PeerInput> LinkAudio<P> {
                 .as_mut()
                 .and_then(PeerInput::render_sample);
         }
+        self.text_samples[..count].fill(0.0);
+        let text_active = self
+            .text
+            .as_mut()
+            .is_some_and(|input| input.render(&mut self.text_samples[..count]));
         let keyed = controller.process_audio_with_parrot(
             receiving,
             linked_active,
@@ -526,6 +554,10 @@ impl<P: PeerInput> LinkAudio<P> {
                 active: &mut parrot_active,
                 replies: Some(&mut self.reply_output[..count]),
                 regeneration: Some(&self.regeneration_samples[..count]),
+                local_media: LocalMedia {
+                    samples: &self.text_samples[..count],
+                    active: text_active,
+                },
             },
         );
         if count == 0 || self.peers.is_empty() {

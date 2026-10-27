@@ -12,7 +12,7 @@ mod topology;
 
 pub use audio::{
     AudioPeer, DispatchProgress, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus,
-    LinkDispatcher, PeerInput, SourcePosition,
+    LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, SourcePosition,
 };
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use peer::{Peer, ReceiveState};

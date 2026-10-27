@@ -91,6 +91,8 @@ pub(crate) struct ParrotOutput<'a> {
     pub replies: Option<&'a mut [PeerReplySample]>,
     /// Local-only finite signaling; real zero samples keep their gap timing.
     pub regeneration: Option<&'a [Option<f32>]>,
+    /// Independent local speech, excluded from reply/broadcast/capture outputs.
+    pub local_media: crate::link::LocalMedia<'a>,
 }
 
 /// Per-sample addressed media, independent of RF and ordinary mix-minus routing.
@@ -109,6 +111,7 @@ struct ProgramSample<'a> {
     parrot_active: &'a mut bool,
     reply: Option<&'a mut PeerReplySample>,
     regeneration: Option<f32>,
+    local_media: Option<f32>,
 }
 
 /// Single audio-owner node aggregate; construction and media preparation belong to control.
@@ -438,6 +441,14 @@ impl NodeController {
                     .as_deref_mut()
                     .and_then(|replies| replies.get_mut(offset)),
                 regeneration: output.regeneration.and_then(|samples| samples[offset]),
+                local_media: output.local_media.active.then(|| {
+                    output
+                        .local_media
+                        .samples
+                        .get(offset)
+                        .copied()
+                        .unwrap_or(0.0)
+                }),
             });
             let rf = self.step(
                 receiving,
@@ -622,6 +633,7 @@ impl NodeController {
         link_sample: f32,
         parrot_output: Option<ProgramSample<'_>>,
     ) -> f32 {
+        let local_media = parrot_output.as_ref().and_then(|output| output.local_media);
         if self.telemetry.cancel_message.swap(false, Ordering::AcqRel) {
             let source = self
                 .telemetry
@@ -809,7 +821,7 @@ impl NodeController {
         let regeneration = parrot_output
             .as_ref()
             .and_then(|output| output.regeneration);
-        let demand = regeneration.is_some() || linked
+        let demand = local_media.is_some() || regeneration.is_some() || linked
             || (self.settings.full_duplex && receiving)
             || (local_telemetry && !active_stream)
             || self.courtesy.pending()
@@ -959,7 +971,8 @@ impl NodeController {
             || (self.settings.full_duplex && receiving)
             || self.courtesy.pending()
             || (status_ready && !peer_status && !exempt);
-        let transmit = regeneration.is_some()
+        let transmit = local_media.is_some()
+            || regeneration.is_some()
             || other
             || (telemetry_audio && !exempt)
             || (continuing_media && !peer_status && !exempt)
@@ -1095,7 +1108,12 @@ impl NodeController {
         } else if inhibited {
             0.0
         } else {
-            (local + link + telemetry).clamp(-1.0, 1.0)
+            let incoming_text = if may_transmit && self.traffic_keyed && !suppress_repeat {
+                local_media.unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            (local + link + telemetry + incoming_text).clamp(-1.0, 1.0)
         }
     }
 }

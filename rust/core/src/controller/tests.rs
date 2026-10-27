@@ -37,6 +37,47 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn text_local_mix_callback_does_not_allocate_or_release_storage() {
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut output = [0.0; 16];
+    let mut parrot = [0.0; 16];
+    let mut active = false;
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    let keyed = node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut output,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+            replies: None,
+            regeneration: None,
+            local_media: crate::link::LocalMedia {
+                samples: &[0.25; 16],
+                active: true,
+            },
+        },
+    );
+    let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(allocations, Some(0));
+    assert!(keyed);
+    assert_eq!(output, [0.25; 16]);
+    assert_eq!(parrot, [0.0; 16]);
+    assert!(!active);
+}
+
+#[test]
 fn current_message_cancel_stops_every_preparation_phase_and_restores_repeat() {
     struct Stream {
         phase: Arc<std::sync::atomic::AtomicU8>,
@@ -630,6 +671,7 @@ fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
                             active: &mut parrot_active,
                             replies: Some(&mut replies),
                             regeneration: None,
+                            local_media: Default::default(),
                         },
                     );
                     if source == 3 {
@@ -784,6 +826,7 @@ fn regenerate(
             active: &mut active,
             replies: None,
             regeneration: Some(tones),
+            local_media: Default::default(),
         },
     )
 }
@@ -910,6 +953,7 @@ fn regeneration_consumption_does_not_allocate_or_free_on_audio() {
             active: &mut active,
             replies: None,
             regeneration: Some(&[Some(0.2), Some(0.0), None]),
+            local_media: Default::default(),
         },
     );
     let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
@@ -951,6 +995,7 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
                 active: &mut active,
                 replies: Some(&mut replies),
                 regeneration: None,
+                local_media: Default::default(),
             },
         );
         let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
@@ -1005,6 +1050,7 @@ fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
                 active: &mut active,
                 replies: Some(replies),
                 regeneration: None,
+                local_media: Default::default(),
             },
         )
     };
@@ -1192,6 +1238,7 @@ fn parrot_output_size_mismatch_skips_sample_processing() {
             active: &mut active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
 
@@ -1678,6 +1725,7 @@ fn receive_activity_discards_a_queued_parrot_before_playback() {
             active: &mut parrot_active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
 
@@ -1714,6 +1762,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
             active: &mut parrot_active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -1730,6 +1779,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
             active: &mut parrot_active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
 
@@ -1766,6 +1816,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
             active: &mut active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -1782,6 +1833,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
             active: &mut active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert_eq!(parrot, [0.0]);

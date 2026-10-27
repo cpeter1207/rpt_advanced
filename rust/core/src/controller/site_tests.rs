@@ -68,6 +68,7 @@ fn site_inhibit_does_not_block_an_addressed_peer_reply() {
                 active: &mut active,
                 replies: Some(&mut replies),
                 regeneration: None,
+                local_media: Default::default(),
             },
         );
         delivered |= replies

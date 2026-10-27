@@ -2,6 +2,9 @@ use super::*;
 use crate::audio::{LinkAudioConsumer, LinkAudioQueue};
 use crate::controller::{ControllerSettings, CourtesySettings};
 
+#[path = "text_audio_tests.rs"]
+mod text;
+
 struct FiniteInput {
     signals: PeerSignals,
     samples: std::collections::VecDeque<f32>,

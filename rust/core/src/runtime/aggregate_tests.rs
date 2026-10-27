@@ -496,6 +496,7 @@ fn site_report_captures_after_unkey_and_answers_only_the_requesting_peer() {
                 active: &mut active,
                 replies: Some(&mut replies),
                 regeneration: None,
+                local_media: Default::default(),
             },
         );
         assert!(audio.iter().all(|sample| *sample == 0.0));
@@ -606,6 +607,7 @@ fn site_named_notification_retries_after_queue_pressure_and_plays_locally() {
             active: &mut active,
             replies: Some(&mut replies),
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert!(audio.iter().any(|sample| *sample != 0.0));
@@ -823,6 +825,7 @@ fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audien
             active: &mut parrot_active,
             replies: Some(&mut replies),
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert!(audio.iter().any(|sample| *sample == 0.25));
