@@ -2,7 +2,7 @@
 
 use super::{
     Context,
-    finite::{SegmentConsumer, SegmentProgress, valid_stream},
+    finite::{FiniteWriter, SegmentConsumer, SegmentProgress, valid_stream},
     status,
 };
 use crate::{
@@ -846,25 +846,19 @@ fn run_job(
             }
             break 'segments;
         };
-        let Ok((mut producer, ring)) = open_ring(stream.rate(), InboundPolicy::Media) else {
-            fail(control, generation);
-            break 'segments;
-        };
-        let Ok(delay) = producer.output_delay_samples() else {
+        let Ok((producer, ring)) = open_ring(stream.rate(), InboundPolicy::Media) else {
             fail(control, generation);
             break 'segments;
         };
         let progress = Arc::new(SegmentProgress::default());
-        let mut source_samples = 0_u64;
-        let rate = stream.rate();
-        let mut publish = |accepted: usize| {
-            source_samples = source_samples.saturating_add(accepted as u64);
-            progress.budget.store(
-                delay.saturating_add(source_samples.saturating_mul(48_000) / u64::from(rate)),
-                Ordering::Release,
-            );
+        let Ok(mut writer) = FiniteWriter::new(producer, Arc::clone(&progress), stream.rate())
+        else {
+            fail(control, generation);
+            break 'segments;
         };
-        if !push_counted(&mut producer, &first[..count], &cancellation, &mut publish) {
+        let delay = writer.delay();
+        let cancelled = || control.is_cancelled(stopping, generation);
+        if writer.write(&first[..count], &cancelled).is_err() {
             if !control.is_cancelled(stopping, generation) {
                 fail(control, generation);
             }
@@ -892,13 +886,7 @@ fn run_job(
             }
             match stream.read(&mut chunk, &cancellation) {
                 Ok(0) => break,
-                Ok(count)
-                    if push_counted(
-                        &mut producer,
-                        &chunk[..count],
-                        &cancellation,
-                        &mut publish,
-                    ) => {}
+                Ok(count) if writer.write(&chunk[..count], &cancelled).is_ok() => {}
                 _ => {
                     failed = true;
                     break;
@@ -908,31 +896,9 @@ fn run_job(
         if control.is_cancelled(stopping, generation) {
             return;
         }
-        progress.budget.store(
-            delay.saturating_add(
-                source_samples
-                    .saturating_mul(48_000)
-                    .div_ceil(u64::from(rate)),
-            ),
-            Ordering::Release,
-        );
-        let mut remaining = delay
-            .saturating_add(1)
-            .saturating_mul(u64::from(rate))
-            .div_ceil(48_000);
-        let zeros = [0.0; 256];
-        while remaining != 0 {
-            let count = remaining.min(zeros.len() as u64) as usize;
-            if !push_all(&mut producer, &zeros[..count], &cancellation) {
-                progress.undrainable.store(true, Ordering::Release);
-                failed = true;
-                break;
-            }
-            remaining -= count as u64;
-        }
         // Publish segment end only after duration and padding; readers drain the
         // finite budget even if the converter temporarily reports no output.
-        drop(producer);
+        failed |= writer.finish(&cancelled).is_err();
         if control.is_cancelled(stopping, generation) {
             return;
         }
@@ -969,39 +935,6 @@ fn one_shot_done(job: &WorkerJob) -> bool {
 fn fail(control: &JobControl, generation: u64) {
     control.failed.store(generation, Ordering::Release);
     control.completed.store(generation, Ordering::Release);
-}
-
-fn push_all(
-    producer: &mut InboundProducer,
-    samples: &[f32],
-    cancellation: &Cancellation<'_>,
-) -> bool {
-    push_counted(producer, samples, cancellation, &mut |_| {})
-}
-
-fn push_counted(
-    producer: &mut InboundProducer,
-    mut samples: &[f32],
-    cancellation: &Cancellation<'_>,
-    accepted_samples: &mut impl FnMut(usize),
-) -> bool {
-    while !samples.is_empty() {
-        if cancellation
-            .control
-            .is_cancelled(cancellation.stopping, cancellation.generation)
-        {
-            return false;
-        }
-        match producer.write(samples) {
-            Ok(0) => thread::sleep(Duration::from_millis(1)),
-            Ok(accepted) => {
-                accepted_samples(accepted);
-                samples = &samples[accepted..];
-            }
-            Err(_) => return false,
-        }
-    }
-    true
 }
 
 #[cfg(test)]

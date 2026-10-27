@@ -2253,11 +2253,18 @@ fn producer_write_retries_zero_and_partial_acceptance() {
         stopping: &stopping,
         generation: 1,
     };
-    for (mut producer, _) in [
+    for (producer, _) in [
         crate::link::ring::tests::zero_then_push_endpoints(),
         crate::link::ring::tests::partial_then_push_endpoints(),
     ] {
-        assert!(push_all(&mut producer, &[0.25; 8], &cancellation));
+        let mut writer =
+            FiniteWriter::new(producer, Arc::new(SegmentProgress::default()), 48000).unwrap();
+        assert!(
+            writer
+                .write(&[0.25; 8], &|| control
+                    .is_cancelled(cancellation.stopping, 1))
+                .is_ok()
+        );
     }
 }
 

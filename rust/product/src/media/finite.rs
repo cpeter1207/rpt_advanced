@@ -1,6 +1,6 @@
 //! Shared finite-media consumer: real duration/EOF and endpoint retirement stay explicit.
 use super::{Context, ffi, status};
-use crate::link::ring::{InboundConsumer, RingError};
+use crate::link::ring::{InboundConsumer, InboundProducer, RingError};
 use rpt_advanced_core::link::PeerInput;
 use rpt_advanced_core::media::MediaError;
 use std::ffi::c_void;
@@ -8,6 +8,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use std::{thread, time::Duration};
 
 /// Finite duration excludes resampler padding; an empty ring alone is not EOF.
 pub(super) struct SegmentConsumer {
@@ -38,6 +39,95 @@ impl SegmentConsumer {
         } else {
             Ok(sample)
         }
+    }
+}
+
+/// Common finite-source accounting and filter-tail drain for every media producer.
+pub(super) struct FiniteWriter {
+    producer: InboundProducer,
+    progress: Arc<SegmentProgress>,
+    rate: u32,
+    delay: u64,
+    source_samples: u64,
+}
+impl FiniteWriter {
+    pub(super) fn new(
+        producer: InboundProducer,
+        progress: Arc<SegmentProgress>,
+        rate: u32,
+    ) -> Result<Self, MediaError> {
+        let delay = producer
+            .output_delay_samples()
+            .map_err(|_| MediaError::Io)?;
+        Ok(Self {
+            producer,
+            progress,
+            rate,
+            delay,
+            source_samples: 0,
+        })
+    }
+    pub(super) fn delay(&self) -> u64 {
+        self.delay
+    }
+    pub(super) fn write(
+        &mut self,
+        samples: &[f32],
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<(), MediaError> {
+        self.push(samples, cancelled, true)
+    }
+    fn push(
+        &mut self,
+        mut samples: &[f32],
+        cancelled: &impl Fn() -> bool,
+        real: bool,
+    ) -> Result<(), MediaError> {
+        while !samples.is_empty() {
+            if cancelled() {
+                return Err(MediaError::Cancelled);
+            }
+            let accepted = self.producer.write(samples).map_err(|_| MediaError::Io)?;
+            if accepted == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
+            if real {
+                self.source_samples = self.source_samples.saturating_add(accepted as u64);
+                self.progress.budget.store(
+                    self.delay.saturating_add(
+                        self.source_samples.saturating_mul(48000) / u64::from(self.rate),
+                    ),
+                    Ordering::Release,
+                );
+            }
+            samples = &samples[accepted..];
+        }
+        Ok(())
+    }
+    pub(super) fn finish(mut self, cancelled: &impl Fn() -> bool) -> Result<(), MediaError> {
+        self.progress.budget.store(
+            self.delay.saturating_add(
+                self.source_samples
+                    .saturating_mul(48000)
+                    .div_ceil(u64::from(self.rate)),
+            ),
+            Ordering::Release,
+        );
+        let mut remaining = self
+            .delay
+            .saturating_add(1)
+            .saturating_mul(u64::from(self.rate))
+            .div_ceil(48000);
+        let zeros = [0.0; 256];
+        while remaining != 0 {
+            let count = remaining.min(zeros.len() as u64) as usize;
+            if let Err(error) = self.push(&zeros[..count], cancelled, false) {
+                self.progress.undrainable.store(true, Ordering::Release);
+                return Err(error);
+            }
+            remaining -= count as u64;
+        }
+        Ok(())
     }
 }
 

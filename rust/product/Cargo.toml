@@ -10,6 +10,7 @@ version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+crossbeam-queue = "0.3"
 libloading = "0.8"
 rpt-advanced-core = { path = "../core" }
 rtrb = "0.3.2"

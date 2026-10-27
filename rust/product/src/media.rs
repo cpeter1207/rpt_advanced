@@ -14,12 +14,15 @@ use std::{
 
 #[path = "media/finite.rs"]
 mod finite;
+#[path = "media/text.rs"]
+pub mod text;
 #[path = "media/worker.rs"]
 mod worker;
 
 /// Independent file and speech owners, composed with the released native-rate converter.
 #[derive(Clone)]
 pub struct NativeMediaPreparer {
+    timeout_ms: u32,
     file_api: FileDescriptor,
     speech_api: SpeechDescriptor,
     file: Arc<Context>,
@@ -188,6 +191,7 @@ impl NativeMediaPreparer {
             open_speech: speech_api.open_speech,
         };
         Ok(Self {
+            timeout_ms,
             file_api,
             speech_api,
             file: Arc::new(file),

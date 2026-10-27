@@ -110,7 +110,7 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
 }
 
 impl NativeMediaPreparer {
-    fn new(ffmpeg: &Path, piper: &Path, timeout_ms: u32) -> Result<Self, MediaError> {
+    pub(super) fn new(ffmpeg: &Path, piper: &Path, timeout_ms: u32) -> Result<Self, MediaError> {
         // SAFETY: the linked descriptor has a process-lifetime readable ABI prefix.
         unsafe {
             Self::from_descriptors(
