@@ -48,6 +48,7 @@ fn lifecycle() -> abi::Descriptor {
         peer_detach: None,
         peer_wake: None,
         peer_set_deadline: None,
+        peer_destroy: None,
     }
 }
 
@@ -106,4 +107,30 @@ fn runtime_resource_tail_preserves_the_three_word_lifecycle_prefix() {
     assert_eq!(config.struct_size, 64);
     let words = unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&config).cast::<u32>(), 3) };
     assert_eq!(words, [64, 1, 0]);
+}
+
+#[test]
+fn lifecycle_prefix_does_not_require_the_new_qso_destruction_tail() {
+    let mut table = lifecycle();
+    table.struct_size = std::mem::offset_of!(abi::Descriptor, peer_destroy) as u32;
+    let api = unsafe { Api::open(&table) }.unwrap();
+    assert!(!api.network_available());
+    assert!(api.table().peer_destroy.is_none());
+}
+
+#[test]
+fn incoming_qso_transfer_has_an_explicit_writable_ownership_acknowledgement() {
+    let mut taken = 0_u32;
+    let event = abi::Event {
+        struct_size: size_of::<abi::Event>() as u32,
+        kind: 1,
+        qso: std::ptr::null_mut(),
+        generation: 9,
+        status: abi::Status::Pending,
+        taken: &mut taken,
+    };
+    assert_eq!(std::mem::offset_of!(abi::Event, taken), 32);
+    assert_eq!(taken, 0);
+    unsafe { event.taken.write(1) };
+    assert_eq!(taken, 1);
 }

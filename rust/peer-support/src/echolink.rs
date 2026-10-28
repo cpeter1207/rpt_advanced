@@ -20,12 +20,28 @@ impl Api {
     pub unsafe fn open(pointer: *const abi::Descriptor) -> Result<Self, ApiError> {
         if pointer.is_null()
             || unsafe { std::ptr::addr_of!((*pointer).struct_size).read() }
-                < std::mem::size_of::<abi::Descriptor>() as u32
+                < std::mem::offset_of!(abi::Descriptor, peer_destroy) as u32
         {
             return Err(ApiError);
         }
-        // SAFETY: the truthful size prefix covers the complete immutable record.
-        let table = unsafe { pointer.read() };
+        // The lifecycle prefix predates the compatible destruction tail. Every
+        // field is an integer, byte or nullable function pointer, so zero is a
+        // valid absent table. Copy only a complete, truthfully readable group.
+        let mut table: abi::Descriptor = unsafe { std::mem::zeroed() };
+        let length = if unsafe { (*pointer).struct_size } as usize
+            >= std::mem::size_of::<abi::Descriptor>()
+        {
+            std::mem::size_of::<abi::Descriptor>()
+        } else {
+            std::mem::offset_of!(abi::Descriptor, peer_destroy)
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                pointer.cast::<u8>(),
+                std::ptr::from_mut(&mut table).cast(),
+                length,
+            )
+        };
         if table.abi_version != 1
             || table.capability != *b"rptadv.echolink.v1\0\0\0\0\0\0"
             || table.capabilities & 1 == 0
@@ -54,6 +70,7 @@ impl Api {
                 table.peer_detach.is_some(),
                 table.peer_wake.is_some(),
                 table.peer_set_deadline.is_some(),
+                table.peer_destroy.is_some(),
             ]
             .into_iter()
             .all(|present| present)

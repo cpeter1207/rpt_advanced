@@ -282,6 +282,10 @@ pub struct Event {
     pub generation: u64,
     /// Value-free operation/termination status.
     pub status: Status,
+    /// Incoming-only ownership acknowledgement, initialized to zero by the provider.
+    /// Set to one before returning only when accepting ownership of `qso`; otherwise
+    /// the provider retains/retires it. Null for events that transfer no ownership.
+    pub taken: *mut u32,
 }
 /// Off-audio event callback. Must not unwind; copy borrowed data before returning.
 pub type EventFn = unsafe extern "C" fn(*mut c_void, *const Event);
@@ -349,4 +353,7 @@ pub struct Descriptor {
     pub peer_wake: Option<unsafe extern "C" fn(*mut Registration)>,
     /// Next product turn in relative nanoseconds; u64::MAX clears it.
     pub peer_set_deadline: Option<unsafe extern "C" fn(*mut Qso, u64) -> Status>,
+    /// Release caller ownership off executor after stop/detach. Null is accepted.
+    /// Required by the network group; older lifecycle-only prefixes need no tail.
+    pub peer_destroy: Option<unsafe extern "C" fn(*mut Qso)>,
 }
