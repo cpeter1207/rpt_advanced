@@ -135,7 +135,7 @@ pub struct StationMetadata {
     pub antenna_height_m: f64,
     /// Advertised antenna gain in dB.
     pub antenna_gain_db: f64,
-    /// Antenna direction in degrees.
+    /// Antenna direction in degrees, 0..360 (north at zero); -1 is omnidirectional.
     pub antenna_direction_deg: f64,
 }
 
