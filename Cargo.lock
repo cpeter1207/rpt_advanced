@@ -625,6 +625,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rptadv-jitter-client"
+version = "0.1.0-alpha17"
+
+[[package]]
 name = "rptadv-peer-support"
 version = "0.1.0-alpha17"
 dependencies = [
