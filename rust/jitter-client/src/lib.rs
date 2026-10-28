@@ -172,7 +172,8 @@ impl Jitter {
         unsafe { Self::new_at_rate(descriptor, CLOCK_RATE_HZ, CONCEALMENT_SPAN, MAX_PAYLOAD) }
     }
     /// Compose 160/180/500 ms delay bounds at the selected source clock, with a
-    /// positive coding unit and caller-owned protocol payload limit (at most 65,507 bytes).
+    /// positive coding unit and caller-owned payload limit (at most 65,527 bytes,
+    /// matching the neutral provider rather than a particular network transport).
     /// # Safety
     /// The descriptor must be readable for its declared size and its DSO must
     /// remain loaded until this exclusive context is destroyed.
@@ -185,7 +186,7 @@ impl Jitter {
         if !matches!(rate, 8000 | 16000 | 48000)
             || loss_unit == 0
             || loss_unit > rate / 2
-            || !(1..=65_507).contains(&maximum_payload_bytes)
+            || !(1..=65_527).contains(&maximum_payload_bytes)
         {
             return Err(Error::InvalidDescriptor);
         }

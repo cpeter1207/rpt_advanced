@@ -7,20 +7,23 @@ use std::sync::{
 #[test]
 fn protocol_payload_budget_is_preserved_and_invalid_bounds_fail_before_creation() {
     let descriptor = descriptor();
-    for maximum in [0, 65_508, usize::MAX] {
+    for maximum in [0, 65_528, usize::MAX] {
         assert!(matches!(
             unsafe { Jitter::new_at_rate(ptr::from_ref(&descriptor).cast(), 8000, 160, maximum) },
             Err(Error::InvalidDescriptor)
         ));
     }
-    let jitter =
-        unsafe { Jitter::new_at_rate(ptr::from_ref(&descriptor).cast(), 8000, 160, 252) }.unwrap();
-    assert_eq!(
-        unsafe { &*jitter.context.as_ptr().cast::<State>() }
-            .config
-            .maximum_payload_bytes,
-        252
-    );
+    for maximum in [252, 65_507, 65_523, 65_527] {
+        let jitter =
+            unsafe { Jitter::new_at_rate(ptr::from_ref(&descriptor).cast(), 8000, 160, maximum) }
+                .unwrap();
+        assert_eq!(
+            unsafe { &*jitter.context.as_ptr().cast::<State>() }
+                .config
+                .maximum_payload_bytes,
+            maximum as u32
+        );
+    }
 }
 
 #[test]
