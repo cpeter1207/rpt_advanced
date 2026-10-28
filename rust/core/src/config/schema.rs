@@ -22,6 +22,7 @@ pub struct Schema;
 enum KnownScope {
     General,
     Radio,
+    EchoLink,
     Identifier,
     Announcement,
     Tail,
@@ -48,6 +49,7 @@ impl KnownScope {
         Some(match kind {
             ScopeKind::General | ScopeKind::Node => Self::General,
             ScopeKind::RadioDefault | ScopeKind::RadioNode => Self::Radio,
+            ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode => Self::EchoLink,
             ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet => {
                 Self::Identifier
             }
@@ -122,6 +124,19 @@ impl Schema {
                 continue;
             };
             for entry in document.section_entries(section) {
+                if parsed.kind == ScopeKind::EchoLinkDefault
+                    && matches!(entry.key.as_str(), "callsign" | "node_number")
+                {
+                    warnings.push(ConfigWarning::new(
+                        entry.line,
+                        section,
+                        &entry.key,
+                        &entry.value,
+                        "account identity must be configured per node",
+                        "not configured",
+                    ));
+                    continue;
+                }
                 if parsed.kind == ScopeKind::EventNode
                     && matches!(entry.key.as_str(), "message" | "template")
                     && !entry.value.trim().is_empty()
@@ -198,6 +213,7 @@ impl Schema {
         validate_templates_and_macros(document)?;
         validate_events(document)?;
         validate_links(document)?;
+        super::echolink::validate_all(document)?;
         let mut site_outputs = BTreeSet::new();
         for node in document.nodes() {
             let site = super::site::resolve_definitions(document, &super::NodeId::new(node)?)?;
@@ -236,6 +252,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         return true;
     }
     match kind {
+        KnownScope::EchoLink => super::echolink::default_value(key).is_some(),
         KnownScope::Site { kind, named } => super::site::key_known(kind, named, key),
         KnownScope::Radio => {
             matches!(
@@ -439,6 +456,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if matches!(kind, ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode) {
+        return super::echolink::value_valid(key, value);
+    }
     if let ScopeKind::SiteDefault(site) | ScopeKind::SiteNode(site) | ScopeKind::SiteSet(site) =
         kind
     {
@@ -671,6 +691,12 @@ fn configured_node_list(value: &str) -> Option<Vec<&str>> {
 }
 
 fn default_value(kind: ScopeKind, key: &str) -> String {
+    if matches!(kind, ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode) {
+        return super::echolink::default_value(key)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("not configured")
+            .to_owned();
+    }
     if matches!(
         kind,
         ScopeKind::SiteDefault(_) | ScopeKind::SiteNode(_) | ScopeKind::SiteSet(_)
@@ -860,6 +886,9 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
             candidates.push((kind.name().to_owned(), key));
         }
         ScopeKind::RadioNode => candidates.push(("radio".to_owned(), key)),
+        ScopeKind::EchoLinkNode if !matches!(key, "callsign" | "node_number") => {
+            candidates.push(("echolink".to_owned(), key))
+        }
         ScopeKind::Node => candidates.push(("general".to_owned(), key)),
         ScopeKind::IdentifierNode => candidates.push(("identifier".to_owned(), key)),
         ScopeKind::IdentifierSet => {

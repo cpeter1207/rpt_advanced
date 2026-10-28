@@ -9,6 +9,8 @@ pub(crate) enum ScopeKind {
     Node,
     RadioDefault,
     RadioNode,
+    EchoLinkDefault,
+    EchoLinkNode,
     IdentifierDefault,
     IdentifierNode,
     IdentifierSet,
@@ -106,6 +108,8 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         ["general"] => Scope::flat(ScopeKind::General),
         ["radio"] => Scope::flat(ScopeKind::RadioDefault),
         ["radio", node] => Scope::node(ScopeKind::RadioNode, node),
+        ["echolink"] => Scope::flat(ScopeKind::EchoLinkDefault),
+        ["echolink", node] => Scope::node(ScopeKind::EchoLinkNode, node),
         ["identifier"] => Scope::flat(ScopeKind::IdentifierDefault),
         ["identifier", node] => Scope::node(ScopeKind::IdentifierNode, node),
         ["identifier", node, label] => Scope::named(ScopeKind::IdentifierSet, Some(node), label),
@@ -148,6 +152,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
             if matches!(
                 *known,
                 "general"
+                    | "echolink"
                     | "radio"
                     | "identifier"
                     | "announcement"
@@ -198,6 +203,7 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::SiteNode(_)
             | ScopeKind::SiteSet(_)
             | ScopeKind::RadioNode
+            | ScopeKind::EchoLinkNode
             | ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementNode
             | ScopeKind::TailNode
