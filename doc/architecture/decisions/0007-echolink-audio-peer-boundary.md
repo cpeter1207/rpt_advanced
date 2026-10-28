@@ -43,12 +43,14 @@ prevent supported text forwarding.
 Each configured rpt_advanced node owns one EchoLink identity. Its default UDP
 audio/control pair is 5198/5199, but the pair and optional bind address are
 configurable so local nodes can use unique adjacent pairs. Direct firewall/NAT
-forwarding remains an administrator responsibility. A node may instead route
-an account through a configured user-provided EchoLink-aware UDP proxy. The
-project does not ship, operate, authenticate, or secure that proxy. EchoLink
-calls use the existing link reconnect policy. The proxy contract is a host,
-audio/control port pair, and optional credential reference; it must preserve
-enough source identity for inbound calls. Configuration exposes the complete
+forwarding remains an administrator responsibility. Distinct local ports alone
+do not make multiple accounts publicly reachable: simultaneous nodes require
+distinct effective public endpoints. A node may instead use the published
+EchoLink Proxy protocol, normally over TCP port 8100, including its standard
+challenge authentication and directory/audio/control tunnels. The user supplies
+and operates the proxy; each proxy serves one client. EchoLink calls use the
+existing link reconnect policy. The proxy preserves the real remote IPv4
+address for directory-backed admission. Configuration exposes the complete
 ASL3 station and directory identity set: callsign, EchoLink node number,
 password or secret source, name, location, email, latitude/longitude, RF
 frequency, CTCSS tone, power, antenna height, gain, direction, and status
@@ -56,17 +58,31 @@ message.
 
 Incoming calls allow all valid EchoLink stations by default. Per-node wildcard
 callsign allow and deny lists refine that policy, with deny taking precedence.
-The default simultaneous-station limit is 20 and the default control-heartbeat
-timeout is 10 seconds; both are per-node configurable. Explicitly disconnected
+The default simultaneous-station limit is 20. Heartbeats run every 10 seconds
+and the control-heartbeat timeout is 100 seconds, corresponding to ASL's ten
+missed heartbeat cycles; both are per-node configurable. Explicitly disconnected
 or ordinary on-demand calls do not reconnect automatically. Permanent and
 scheduled calls use the established permanent-link reconnect policy.
 
 Outbound dialing uses only the normal configurable link-connect operation. The
-reserved EchoLink form pads a four- through six-digit EchoLink node number to
-six digits and prefixes it with `3`; callsign and directory lookup are not
-provided. The adapter supplies ASL3-equivalent receive/transmit gain
-adjustment, a connection-announcement mode of off, node number, callsign, or
+reserved EchoLink form pads the complete positive 32-bit EchoLink node number
+to at least six digits and prefixes it with `3`. Collect until the normal
+terminator or unkey, not a fixed seven-digit alias limit. Canonical internal
+identity is protocol-qualified and never the alias. Callsign-search dialing
+and a directory browser are not provided; the adapter performs directory
+lookups for normal dialing and admission. It supplies ASL3-equivalent
+receive/transmit gain adjustment, a connection-announcement mode of off, node number, callsign, or
 both, and configurable EchoLink telemetry output behavior.
+
+The owner approved the complete [EchoLink design](../../../docs/superpowers/specs/2026-10-28-echolink-interoperability-design.md)
+on 2026-10-28. Use released GPLv2-compatible Rust RTP/RTCP libraries where
+fixture tests prove they fit EchoLink's legacy wire variants. Keep any required
+compatibility adaptation narrow; do not implement another standards stack or
+add a WebRTC stack for anticipated protocols. Reuse across adapters is a goal,
+not a requirement to reject a useful dependency. The
+[implementation plan](../../../docs/superpowers/plans/2026-10-28-echolink-interoperability.md)
+records codec-client moves, packet-library fit tests and coordinated host/DTMF
+contracts. These are planned, not implemented ABI changes.
 
 ## Consequences
 
@@ -81,4 +97,4 @@ the shared product's existing status/logging ports in both hosts. The EchoLink
 transport itself remains planned. Its absence of topology advertisements means
 the existing advertised-topology loop prevention cannot infer EchoLink-only
 transitive paths. A generic HTTP proxy is not a valid EchoLink transport
-proxy; the selected proxy contract must carry audio and control UDP traffic.
+proxy; the selected standard TCP Proxy tunnels directory and peer traffic.

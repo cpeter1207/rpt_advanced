@@ -2,9 +2,9 @@
 
 Date: 2026-10-28
 
-Status: Proposed for owner approval. Design only; no implementation, repository
-publication, release, installation, account login, or radio test is authorized
-by this document.
+Status: Approved by the owner on 2026-10-28, including the Rust-library reuse
+clarification below. Design approval does not authorize repository publication,
+release, installation, account login, or radio testing.
 
 ## 1. Scope
 
@@ -46,8 +46,7 @@ manuals. Pin packet fixtures and expected behavior to these reviewed versions:
   `595cf9bb3325be753d05b219bdd39feab6a22b33`.
 - EchoLink's current official networking, account, and Proxy documentation.
 
-Three corrections are proposed for ADR 0007 and its wishlist entry when this
-design is approved:
+Three approved corrections apply to ADR 0007 and its wishlist entry:
 
 1. **Proxy:** standard EchoLink Proxy tunnels directory and peer traffic through
    TCP, normally port 8100. It is not a configurable UDP relay pair. [R1, R2]
@@ -63,8 +62,8 @@ reachability. Official EchoLink requires distinct effective public addresses for
 simultaneous nodes; each standard Proxy serves one client. These are network
 constraints, not software node-count limits. [R1, R6]
 
-The older records remain accepted historical decisions until the owner approves
-these corrections. Do not silently mark EchoLink implemented.
+Update the older records to these decisions. EchoLink remains planned, not
+implemented.
 
 ## 3. Approach
 
@@ -90,6 +89,20 @@ packet/state logic, source-reviewed fixtures and released codec/cryptographic
 libraries. Do not implement GSM, Speex, MD5, a new executor, queue algorithm,
 resampler, jitter buffer, or PLC algorithm. Retain required attribution and
 licenses for any incorporated upstream material. [R7]
+
+### Approved Rust-library reuse clarification
+
+Prefer freely available, GPLv2-compatible Rust libraries for standard protocol
+parts such as RTP and RTCP. Test their compatibility with EchoLink's legacy
+wire variants before selecting them; a small EchoLink-specific adaptation is
+preferable to another complete packet implementation. Evaluate dependency size,
+maintenance, toolchain support and licensing, not only the direct crate count.
+
+Reuse across protocol adapters is a goal, not a rigid condition for accepting a
+useful dependency. A future open-standards/WebRTC linking protocol is outside
+this work. Do not add its stack, implement another adapter, or create a generic
+framework just to prepare for it. Keep external crate types inside the provider
+so a later adapter can reuse the library without inheriting EchoLink policy.
 
 ## 4. Boundaries and reuse
 
@@ -553,18 +566,18 @@ future extensions.
 
 ## 14. Approval boundary and work left to the implementation plan
 
-The proposed choices needing review with this design are the independent Rust
-protocol adapter, standard TCP Proxy support, 100-second heartbeat timeout,
-untruncated terminated EchoLink dialing, source-rate reuse of the DTMF provider,
-and the explicit directory freshness/resource policy. They are not prior owner
-decisions merely because they are written here.
+The owner approved the independent Rust protocol adapter, standard TCP Proxy
+support, 100-second heartbeat timeout, untruncated terminated EchoLink dialing,
+source-rate reuse of the DTMF provider, and directory freshness/resource policy.
 
-After approval, update ADR 0007 and the EchoLink wishlist entry with the scope,
+Update ADR 0007 and the EchoLink wishlist entry with the scope,
 three factual corrections, chosen boundaries and status **planned**. Record any
 necessary host/DTMF ABI decision before code changes. The implementation plan
 chooses exact function-table layouts, tested queue/record size bounds, package
 names/version bumps and fixture ownership; it may not expand scope or weaken
-the invariants above. No product code or implementation plan is included here.
+the invariants above. The implementation plan is maintained separately at
+`../plans/2026-10-28-echolink-interoperability.md`. No product code is included
+here.
 
 ## References
 

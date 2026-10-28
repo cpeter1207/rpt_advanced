@@ -196,18 +196,20 @@ None.
   access control, configured station limits, and bridging an EchoLink call to
   its configured rpt_advanced node.
 - Permit each EchoLink account to use a user-provided proxy for its EchoLink
-  audio/control transport. The proxy may be used for NAT traversal or to make
-  multiple local nodes reachable from one host. Supplying, operating,
-  authenticating, and securing the proxy are outside the project scope.
+  directory/audio/control transport using the standard TCP Proxy protocol.
+  Distinct effective public endpoints are needed for simultaneous accounts;
+  different local UDP ports alone are insufficient. Supplying, operating and
+  securing the proxy are outside scope; standard client authentication is in scope.
 - Treat EchoLink peers as normal audio-link participants for transmitter,
   telemetry, identifier, courtesy-tone, and receive-activity behavior. Do not
   claim that EchoLink provides AllStarLink topology advertisements.
 - Provide ASL3-equivalent EchoLink audio receive/transmit gain adjustment,
   configurable connection-announcement content (off, node number, callsign,
   or both), and configurable EchoLink telemetry output behavior.
-- Support ASL3's reserved EchoLink dialling form: pad the four- through
-  six-digit EchoLink node number to six digits and prefix it with `3`, so it is
-  usable through the normal configurable link-connect command.
+- Support ASL3's reserved EchoLink dialling form: pad the complete positive
+  32-bit EchoLink node number to at least six digits and prefix it with `3`.
+  Collect until the normal terminator or unkey; do not truncate larger IDs.
+  Keep protocol-qualified real identity separate from the operator alias.
 - Convert incoming EchoLink human text messages to speech using the shared
   text-message codec. Mix that speech with live audio, including audio from
   the text sender, only at the local transmitter, not in peer audio egress.
@@ -231,25 +233,29 @@ None.
 - Incoming calls allow all valid EchoLink stations by default. Per-node
   callsign allow and deny lists support wildcards; deny takes precedence.
 - Outbound calls use only the normal configurable link-connect command and
-  `3xxxxxxx` EchoLink-node mapping. Callsign and directory lookup are not
-  required.
+  reversible `3`-prefixed EchoLink-node mapping. Callsign-search dialing and a
+  directory browser are not required; directory lookup for dialing/admission is.
 - The default simultaneous-station limit is 20, matching ASL3's documented
   configuration example. It is configurable per node.
-- The default control-heartbeat timeout is 10 seconds, matching ASL3's
-  documented default. It is configurable per node.
+- Heartbeats run every 10 seconds; the default timeout is 100 seconds,
+  corresponding to ASL3's ten missed heartbeat cycles, configurable per node.
 - EchoLink calls use the existing link reconnect policy: explicitly
   disconnected or ordinary on-demand calls do not reconnect automatically;
   permanent and scheduled links use their established reconnect policy.
 - EchoLink uses a per-node UDP audio/control port pair, defaulting to
   `5198`/`5199`. It binds all local interfaces unless an explicit bind address
-  is configured. Nodes sharing a host use unique adjacent pairs. The
+  is configured. Nodes sharing a host use unique adjacent pairs, subject to
+  the distinct-public-endpoint requirement above. The
   administrator provides direct router port forwarding and firewall rules when
   the account does not use its configured user-provided proxy.
-- The supported proxy contract is a user-operated EchoLink-aware UDP relay,
-  configured with a host, audio/control port pair, and optional credential
-  reference. It carries both UDP audio and control traffic and preserves enough
-  source identity for inbound-call access control. No proxy is shipped or
-  operated by rpt_advanced.
+- The supported proxy contract is the published EchoLink TCP Proxy protocol,
+  normally port 8100, with account-specific credentials and directory/UDP
+  tunnels preserving real remote addresses. No proxy is shipped or operated.
+- The owner approved the [full design](docs/superpowers/specs/2026-10-28-echolink-interoperability-design.md)
+  on 2026-10-28. The [implementation plan](docs/superpowers/plans/2026-10-28-echolink-interoperability.md)
+  starts with a released Rust RTP/RTCP library compatibility gate, keeps legacy
+  adaptation narrow and excludes implementation of other protocols or WebRTC.
+  EchoLink remains planned until implemented and verified.
 
 **Material decisions needed before implementation**
 
