@@ -38,12 +38,15 @@ const REQUIRED_IDS: &[&str] = &[
     "priority-group-selected",
     "priority-group-unavailable",
     "scheduled-link-change",
+    "repeater-timed-out",
+    "repeater-timeout-cleared",
     "duration-unit",
     "duration-join",
     "parrot-levels",
     "pad-test-empty",
     "pad-test-overflow",
     "dtmf-symbol",
+    "incoming-text",
 ];
 
 /// A typed built-in RF message request; callers cannot select arbitrary Fluent IDs.
@@ -145,6 +148,13 @@ pub enum Message<'a> {
         /// Localized remaining-time phrase.
         time_remaining: &'a str,
     },
+    /// Report the elapsed transmitter watchdog duration.
+    RepeaterTimedOut {
+        /// Localized elapsed-duration phrase for this output form.
+        duration: &'a str,
+    },
+    /// Announce that every receive input has cleared after a transmitter timeout.
+    RepeaterTimeoutCleared,
     /// Format one nonzero duration component, or zero seconds.
     DurationPart {
         /// Whole number of the selected units.
@@ -364,6 +374,46 @@ impl MessageCatalog {
         self.format_attributes(message.id(), |_| message.args())
     }
 
+    /// Attribute incoming human text without interpreting its body as a template.
+    /// Sender characters are separated only for speech; the total bound includes
+    /// the already-bounded source/body and one translated catalog literal.
+    pub fn format_incoming_text(
+        &self,
+        source: &str,
+        body: &str,
+    ) -> Result<MessageForms, CatalogError> {
+        let spoken = source
+            .chars()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.format_bounded_attributes(
+            "incoming-text",
+            |attribute| {
+                let mut args = FluentArgs::new();
+                args.set(
+                    "source",
+                    if attribute == "tts" {
+                        spoken.as_str()
+                    } else {
+                        source
+                    },
+                );
+                args.set(
+                    "kind",
+                    if source.bytes().all(|byte| byte.is_ascii_digit()) {
+                        "node"
+                    } else {
+                        "callsign"
+                    },
+                );
+                args.set("body", body);
+                args
+            },
+            |_| MAX_MESSAGE_BYTES + spoken.len() + body.len(),
+        )
+    }
+
     /// Format a validated configuration-selected ID; arguments are data, never content tokens.
     pub fn format_named(
         &self,
@@ -499,6 +549,25 @@ impl MessageCatalog {
         Ok(forms)
     }
 
+    /// Format a watchdog notice with matching localized duration forms.
+    /// Each duration fragment keeps its existing bound within the composed notice.
+    pub fn format_timeout(
+        &self,
+        seconds: u64,
+        local: CivilTime,
+    ) -> Result<MessageForms, CatalogError> {
+        let duration = self.format_duration(seconds, local)?;
+        self.format_bounded_attributes(
+            "repeater-timed-out",
+            |attribute| {
+                let mut args = FluentArgs::new();
+                args.set("duration", duration.attribute(attribute));
+                args
+            },
+            |attribute| MAX_MESSAGE_BYTES + duration.attribute(attribute).len(),
+        )
+    }
+
     /// Format a named connect/disconnect warning with matching localized duration forms.
     /// Bounded target and duration fragments feed the existing composed telemetry stream.
     pub fn format_schedule_warning(
@@ -610,6 +679,8 @@ impl Message<'_> {
             Self::PriorityGroupSelected { .. } => "priority-group-selected",
             Self::PriorityGroupUnavailable { .. } => "priority-group-unavailable",
             Self::ScheduledLinkChange { .. } => "scheduled-link-change",
+            Self::RepeaterTimedOut { .. } => "repeater-timed-out",
+            Self::RepeaterTimeoutCleared => "repeater-timeout-cleared",
             Self::DurationPart { .. } => "duration-unit",
             Self::ParrotLevels { .. } => "parrot-levels",
         }
@@ -621,6 +692,7 @@ impl Message<'_> {
             Self::NoLinks
             | Self::LastKeyedNone
             | Self::Greeting { .. }
+            | Self::RepeaterTimeoutCleared
             | Self::PadTestEmpty
             | Self::PadTestOverflow => {}
             Self::DtmfSymbol { symbol } => {
@@ -697,6 +769,7 @@ impl Message<'_> {
                 args.set("count", *count as i64);
                 args.set("unit", unit.key());
             }
+            Self::RepeaterTimedOut { duration } => args.set("duration", *duration),
             Self::ParrotLevels {
                 peak_dbfs,
                 rms_dbfs,
@@ -764,6 +837,11 @@ fn validate_translation(bundle: &Bundle, require_builtin_attributes: bool) -> Ve
 fn required_sample_args(id: &str) -> FluentArgs<'static> {
     let mut args = FluentArgs::new();
     match id {
+        "incoming-text" => {
+            args.set("source", "2000");
+            args.set("kind", "node");
+            args.set("body", "test message");
+        }
         "dtmf-symbol" => {
             args.set("symbol", "*");
             args.set("kind", "star");
@@ -797,6 +875,7 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
             args.set("direction", "connect");
             args.set("time_remaining", "1 minute");
         }
+        "repeater-timed-out" => args.set("duration", "3 minutes"),
         "duration-unit" => {
             args.set("unit", "second");
             args.set("count", 60);

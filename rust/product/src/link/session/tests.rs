@@ -40,12 +40,67 @@ pub(crate) struct State {
     pub(crate) bad_observe_size: bool,
     pub(crate) bad_observe_version: bool,
     encoded_calls: usize,
+    encoded_bytes: Option<usize>,
+    encode_position: u64,
+    encode_unit: Option<usize>,
+    encode_full: bool,
+    encode_pending: Vec<f32>,
+    encode_tail: usize,
+    tail_remaining: usize,
+    tail_calls: usize,
     pub(crate) prepared: Vec<(Vec<u8>, u32)>,
+    prepared_frames: Vec<u32>,
     pub(crate) prepared_result: i32,
     call_elapsed: u32,
     deadlines: Vec<u64>,
 }
 type Shared = Arc<Mutex<State>>;
+
+#[test]
+fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
+    let (mut session, mut control, _, _) = make_session("1000");
+    assert!(control.event().is_none());
+    session
+        .text(b"M 4000 1000 first message".to_vec(), 0)
+        .unwrap();
+    assert!(control.event().is_none(), "station is not published yet");
+    let first = control.bind_text_generation(42);
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("missing first message after binding");
+    };
+    assert_eq!(message.origin, first);
+    session
+        .text(b"M 4000 1000 old generation".to_vec(), 0)
+        .unwrap();
+    control.bind_text_generation(43);
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("missing queued old-generation message");
+    };
+    assert_eq!(message.origin, first, "reload must retain the old fence");
+}
+
+#[test]
+fn text_forwarding_classification_binds_authenticated_origin_and_drops_overflow_without_hangup() {
+    let (mut session, mut control, _, _) = make_session("1000");
+    let origin = control.bind_text_generation(42);
+    session.text(b"M 4000 0 hello world".to_vec(), 0).unwrap();
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("missing human event");
+    };
+    assert_eq!(message.origin, origin);
+    assert_eq!(message.origin.peer, "2000");
+    assert_eq!(message.source, "4000");
+    assert_eq!(&*message.body, "hello world");
+    for _ in 0..128 {
+        session.text(b"M 4000 0 human message".to_vec(), 0).unwrap();
+    }
+    assert!(!control.ended());
+    let (_, second, _, _) = make_session("1000");
+    assert_ne!(
+        second.bind_text_generation(42).connection_generation,
+        origin.connection_generation
+    );
+}
 
 #[test]
 fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
@@ -589,6 +644,7 @@ pub(crate) fn peer_with_egress(
     }
     if egress {
         table.peer_prepare_audio = Some(prepare_audio);
+        table.peer_reset_encoder = Some(reset_encoder);
         table.peer_send_prepared = Some(send_prepared);
         table.peer_elapsed_ms = Some(elapsed);
         table.peer_step_wake = Some(wake_only);
@@ -606,16 +662,75 @@ unsafe extern "C" fn prepare_audio(
     count: usize,
     output: *mut u8,
     capacity: usize,
+    flush: u32,
+    result: *mut abi::rptadv_codec_encode_result_v1,
 ) -> i32 {
-    assert!(capacity >= count);
     let mut state = unsafe { state(peer) }.lock().unwrap();
-    state.encoded_calls += 1;
-    for (input, output) in unsafe { std::slice::from_raw_parts(input, count) }
+    state.encoded_calls += usize::from(count != 0);
+    if state.encode_full {
+        unsafe {
+            *result = abi::rptadv_codec_encode_result_v1 {
+                struct_size: std::mem::size_of_val(&*result) as u32,
+                status: 2,
+                consumed_frames: 0,
+                encoded_bytes: 0,
+                source_start_frames: 0,
+                source_frames: 0,
+                packet_frames: 0,
+                required_capacity: 1,
+            };
+        }
+        return 2;
+    }
+    let unit = state.encode_unit.unwrap_or(count);
+    let consumed = count.min(unit.saturating_sub(state.encode_pending.len()));
+    state
+        .encode_pending
+        .extend_from_slice(unsafe { std::slice::from_raw_parts(input, consumed) });
+    let tail = flush != 0 && state.encode_pending.is_empty() && state.tail_remaining != 0;
+    let ready = tail
+        || !state.encode_pending.is_empty() && (state.encode_pending.len() == unit || flush != 0);
+    let real = if ready { state.encode_pending.len() } else { 0 };
+    let bytes = if ready {
+        state.encoded_bytes.unwrap_or(real)
+    } else {
+        0
+    };
+    assert!(capacity >= bytes);
+    for (input, output) in state
+        .encode_pending
         .iter()
-        .zip(unsafe { std::slice::from_raw_parts_mut(output, count) })
+        .zip(unsafe { std::slice::from_raw_parts_mut(output, bytes) })
     {
         *output = (input * 100.0) as u8;
     }
+    unsafe {
+        *result = abi::rptadv_codec_encode_result_v1 {
+            struct_size: std::mem::size_of_val(&*result) as u32,
+            status: u32::from(!ready && flush == 0),
+            consumed_frames: consumed,
+            encoded_bytes: bytes,
+            source_start_frames: state.encode_position,
+            source_frames: real as u32,
+            packet_frames: if ready { unit as u32 } else { 0 },
+            required_capacity: bytes,
+        };
+    }
+    state.encode_position += real as u64;
+    if ready {
+        state.encode_pending.clear();
+    }
+    if tail {
+        state.tail_remaining -= 1;
+        state.tail_calls += 1;
+    }
+    i32::from(!ready && flush == 0)
+}
+unsafe extern "C" fn reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.encode_position = 0;
+    state.encode_pending.clear();
+    state.tail_remaining = state.encode_tail;
     0
 }
 unsafe extern "C" fn send_prepared(
@@ -623,9 +738,11 @@ unsafe extern "C" fn send_prepared(
     peer: *mut c_void,
     input: *const u8,
     count: usize,
+    frames: u32,
     timestamp: u32,
 ) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
+    state.prepared_frames.push(frames);
     state.prepared.push((
         unsafe { std::slice::from_raw_parts(input, count) }.to_vec(),
         timestamp,
@@ -651,20 +768,190 @@ fn timed_session() -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
 }
 
 #[test]
+fn outbound_codec_tail_retry_keeps_packets_and_timestamp_before_unkey() {
+    let (mut session, _control, state, mut output) = timed_session();
+    {
+        let mut state = state.lock().unwrap();
+        state.encode_unit = Some(960);
+        state.encoded_bytes = Some(7);
+        state.encode_tail = 2;
+    }
+    output.write(timed_span(0, 0), &[0.25; 960]);
+    session.step(0).unwrap();
+    state.lock().unwrap().prepared_result = 1;
+    session.step(20).unwrap();
+    session.step(21).unwrap();
+    assert_eq!(state.lock().unwrap().tail_calls, 1);
+    state.lock().unwrap().prepared_result = 0;
+    session.step(22).unwrap();
+    session.step(42).unwrap();
+    session.step(62).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.tail_calls, 2);
+    assert_eq!(state.encoded_calls, 1);
+    assert_eq!(state.prepared_frames, [960, 960, 960, 960, 960, 0]);
+    assert_eq!(
+        state
+            .prepared
+            .iter()
+            .map(|(_, time)| *time)
+            .collect::<Vec<_>>(),
+        [2000, 2020, 2020, 2020, 2040, 2060]
+    );
+    assert!(state.prepared.last().unwrap().0.is_empty());
+}
+
+#[test]
+fn outbound_rejects_full_or_nonprogressing_encoder() {
+    for full in [false, true] {
+        let (mut session, _control, state, mut output) = timed_session();
+        {
+            let mut state = state.lock().unwrap();
+            state.encode_full = full;
+            state.encode_unit = Some(0);
+        }
+        output.write(timed_span(0, 0), &[0.25; 960]);
+        assert!(matches!(session.step(0), Err(Error::Translation)));
+    }
+}
+
+#[test]
+fn outbound_discards_partial_pcm_after_stream_restart() {
+    let (mut session, control, state, mut output) = timed_session();
+    let clock = Arc::new(SourceClock::default());
+    clock.restart();
+    session.bind_clock(clock.clone());
+    state.lock().unwrap().encode_unit = Some(1440);
+    for block in 0..2 {
+        output.write(timed_span(block * 960, block * 20), &[0.25; 960]);
+        session.step(block * 20).unwrap();
+    }
+    let calls = state.lock().unwrap().encoded_calls;
+    clock.restart();
+    session.step(21).unwrap();
+    assert_eq!(state.lock().unwrap().encoded_calls, calls);
+    assert_eq!(
+        control.snapshot().unwrap().egress.expired_native_samples,
+        480
+    );
+}
+
+#[test]
+fn outbound_lower_rate_pcm_and_prepared_paths_drain_before_unkey() {
+    for prepared in [false, true] {
+        let (io, state) = peer_with_egress(8000, prepared, prepared);
+        let (mut output, inbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, _control) = PeerSession::prepare(io, inbound, "1000", "2000").unwrap();
+        output.write(timed_span(0, 0), &[0.25; 960]);
+        for now in 0..180 {
+            session.step(now).unwrap();
+        }
+        let state = state.lock().unwrap();
+        if prepared {
+            assert_eq!(state.prepared_frames.iter().sum::<u32>(), 160);
+            assert!(state.prepared.last().unwrap().0.is_empty());
+        } else {
+            assert_eq!(state.audio.len(), 160);
+            assert_eq!(state.writes.last(), Some(&0));
+        }
+    }
+}
+
+#[test]
+fn outbound_codec_metadata_distinguishes_compressed_bytes_from_source_frames() {
+    let (mut session, _control, state, mut output) = timed_session();
+    state.lock().unwrap().encoded_bytes = Some(33);
+    output.write(timed_span(0, 0), &[0.25; 960]);
+    session.step(0).unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared.len(), 1);
+    assert_eq!(state.prepared[0].0.len(), 33);
+    assert_eq!(state.prepared_frames, [960]);
+}
+
+#[test]
+fn outbound_codec_metadata_retains_partial_input_and_need_input_without_sending_silence() {
+    let (mut session, _control, state, mut output) = timed_session();
+    {
+        let mut state = state.lock().unwrap();
+        state.encoded_bytes = Some(33);
+        state.encode_unit = Some(1440);
+    }
+    for block in 0..3 {
+        output.write(timed_span(block * 960, block * 20), &[0.25; 960]);
+        session.step(block * 20).unwrap();
+        if block == 0 {
+            assert!(state.lock().unwrap().prepared.is_empty());
+        }
+        session.step(block * 20 + 1).unwrap();
+    }
+    let state = state.lock().unwrap();
+    assert_eq!(state.prepared, [(vec![25; 33], 1980), (vec![25; 33], 2010)]);
+    assert_eq!(state.encode_position, 2880);
+    assert!(state.encode_pending.is_empty());
+    assert_eq!(state.prepared_frames, [1440, 1440]);
+}
+
+#[test]
+fn outbound_codec_metadata_uses_cumulative_fractional_packet_time_through_unkey() {
+    let (mut session, _control, state, mut output) = timed_session();
+    {
+        let mut state = state.lock().unwrap();
+        state.encoded_bytes = Some(7);
+        state.encode_unit = Some(1080); // 22.5 ms at this fixture's 48 kHz.
+    }
+    for block in 0..225 {
+        output.write(timed_span(block * 960, block * 20), &[0.25; 960]);
+        session.step(block * 20).unwrap();
+        session.step(block * 20 + 1).unwrap();
+    }
+    session.step(4520).unwrap();
+    let state = state.lock().unwrap();
+    let packets: Vec<_> = state
+        .prepared
+        .iter()
+        .filter(|(bytes, _)| !bytes.is_empty())
+        .collect();
+    assert_eq!(packets.len(), 200);
+    let origin = packets[0].1;
+    for (index, (_, timestamp)) in packets.into_iter().enumerate() {
+        assert_eq!(*timestamp, origin + (index * 1080 * 1000 / 48000) as u32);
+    }
+    assert_eq!(state.prepared.last(), Some(&(vec![], origin + 4500)));
+}
+
+#[test]
+fn outbound_codec_metadata_discards_expired_partial_encoder_input() {
+    let (mut session, control, state, mut output) = timed_session();
+    state.lock().unwrap().encode_unit = Some(1440);
+    output.write(timed_span(0, 0), &[0.25; 960]);
+    session.step(0).unwrap();
+    session.step(200).unwrap();
+    assert!(state.lock().unwrap().prepared.is_empty());
+    assert_eq!(
+        control.snapshot().unwrap().egress.expired_native_samples,
+        960
+    );
+}
+
+#[test]
 fn egress_host_contract_and_asterisk_pcm() {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_step_attach = Some(async_attach);
     table.peer_step_stop = Some(async_stop);
     table.peer_step_detach = Some(async_detach);
-    for mask in 0..32 {
+    for mask in 0..64 {
         table.peer_prepare_audio = (mask & 1 != 0).then_some(prepare_audio);
+        table.peer_reset_encoder = (mask & 32 != 0).then_some(reset_encoder);
         table.peer_send_prepared = (mask & 2 != 0).then_some(send_prepared);
         table.peer_elapsed_ms = (mask & 4 != 0).then_some(elapsed);
         table.peer_step_wake = (mask & 8 != 0).then_some(wake_only);
         table.peer_set_deadline = (mask & 16 != 0).then_some(deadline);
         assert_eq!(
             unsafe { HostServices::open(&table) }.is_ok(),
-            mask == 0 || mask == 31
+            mask == 0 || mask == 63
         );
     }
     table.peer_step_attach = None;
@@ -672,7 +959,7 @@ fn egress_host_contract_and_asterisk_pcm() {
     table.peer_step_detach = None;
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
-    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v7, peer_prepare_audio);
+    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v8, peer_prepare_audio);
     for length in boundary..std::mem::size_of_val(&table) {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];

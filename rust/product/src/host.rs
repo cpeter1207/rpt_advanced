@@ -4,16 +4,26 @@ use crate::{
         dispatcher::{MediaWorker, PreparedDispatch},
         ring::{InboundPolicy, InboundRing},
         session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
+        text::{TextDestination, TextRouter},
     },
-    media::NativeMediaPreparer,
+    media::{
+        NativeMediaPreparer,
+        text::{TextExecutor, TextReader},
+    },
     services::{HostServices, PeerIo},
     status_post::{PostConfig, StatusPostService},
     worker::{Audio, AudioOwners, LocalRingUpdate, RadioWorker},
 };
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
-    config::{ConfigDocument, LinkLookupMethod, ResolvedNodeSettings},
-    link::{AudioPeer, GroupMemberSelection, LinkAudio, LinkAudioStatus, Mode},
+    config::{
+        ConfigDocument, LinkLookupMethod, NodeId, ResolvedNodeSettings, ResolvedSpeechSettings,
+    },
+    link::{
+        AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, LocalTextInput,
+        Mode, TextAudience, TextOrigin,
+    },
+    media::SpeechSource,
     runtime::{
         DeviceHandoff, GenerationSettings, PreparedAdapter, Runtime, RuntimeClock, RuntimeError,
         dtmf::DigitOutcome, links::LinkEffect,
@@ -21,7 +31,10 @@ use rpt_advanced_core::{
 };
 use std::{
     ffi::CString,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -115,6 +128,7 @@ impl DeviceHandoff for Device {
 
 /// Dispatcher lifetime and endpoint-redirection acknowledgments for one audio generation.
 pub struct GenerationControl {
+    text_origins: Vec<(String, TextOrigin)>,
     dispatcher: PreparedDispatch,
     status: LinkAudioStatus,
     redirects: Vec<(String, PeerCommand)>,
@@ -139,6 +153,8 @@ struct PeerOwner {
 
 /// Product runtime; every method is invoked by the selected serialized control executor.
 pub struct Host {
+    text: TextExecutor,
+    text_notice_after_ms: u64,
     /// Core configuration, controller, schedule, and link-policy aggregate.
     pub runtime: Runtime<Audio, GenerationControl>,
     /// Selected descriptor-backed native media preparation owner.
@@ -163,7 +179,12 @@ fn prepared(
     settings: &ResolvedNodeSettings,
     peers: &[PeerOwner],
     worker: &mut MediaWorker,
+    text: &mut TextExecutor,
 ) -> Result<PreparedAdapter<Audio, GenerationControl>, RuntimeError> {
+    static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
+    let text_generation = NEXT_TEXT_STATION.fetch_add(1, Ordering::Relaxed);
+    let mut text_readers = Vec::new();
+    let mut text_origins = Vec::new();
     let mut audio = Vec::new();
     let mut redirects = Vec::new();
     let mut awaiting = Vec::new();
@@ -176,6 +197,13 @@ fn prepared(
         if snapshot.ended {
             continue;
         }
+        let mut origin = peer.control.text_origin();
+        origin.station_generation = text_generation;
+        text_readers.push(
+            text.register(local, origin.clone())
+                .map_err(|_| RuntimeError::Preparation)?,
+        );
+        text_origins.push((peer.remote.clone(), origin));
         let (inbound, input) = InboundRing::open(snapshot.input_rate, InboundPolicy::Peer)
             .map_err(|_| RuntimeError::Preparation)?;
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
@@ -203,6 +231,7 @@ fn prepared(
     }
     let (mut audio, dispatcher) =
         LinkAudio::new(audio, MAXIMUM_FRAMES).map_err(|_| RuntimeError::Preparation)?;
+    audio = audio.with_text(Box::new(TextMix(text_readers)));
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
             .map_err(|_| RuntimeError::Preparation)?;
@@ -218,6 +247,7 @@ fn prepared(
     Ok(PreparedAdapter {
         state: audio,
         control: GenerationControl {
+            text_origins,
             dispatcher,
             status,
             redirects,
@@ -228,6 +258,34 @@ fn prepared(
         receive_maximum: MAXIMUM_FRAMES,
         transmit_maximum: MAXIMUM_FRAMES,
     })
+}
+
+struct TextMix(Vec<TextReader>);
+impl LocalTextInput for TextMix {
+    fn render(&mut self, pcm: &mut [f32]) -> bool {
+        let mut active = false;
+        for reader in &mut self.0 {
+            active |= reader.render(pcm);
+        }
+        active
+    }
+}
+fn bind_text_origins(
+    local: &str,
+    control: &mut GenerationControl,
+    peers: &[PeerOwner],
+    text: &TextExecutor,
+) {
+    for (remote, origin) in control.text_origins.drain(..) {
+        if let Some(peer) = peers.iter().find(|peer| {
+            peer.local == local
+                && peer.remote == remote
+                && peer.control.text_origin().connection_generation == origin.connection_generation
+        }) {
+            text.cancel(&peer.control.text_origin());
+            peer.control.bind_text_generation(origin.station_generation);
+        }
+    }
 }
 
 fn media_worker<'a>(
@@ -264,13 +322,23 @@ impl Host {
         epoch: Instant,
         clock: RuntimeClock,
     ) -> Result<Self, RuntimeError> {
+        let mut text = TextExecutor::new(document.nodes().len().max(1), media.clone())
+            .map_err(|_| RuntimeError::Preparation)?;
         let peer_io = PeerIoWorker::start(epoch).map_err(|_| RuntimeError::Device)?;
         let mut leases = Vec::new();
         let mut media_workers = Vec::new();
         let runtime = Runtime::start(
             document,
             &media,
-            |name, settings| prepared(name, settings, &[], media_worker(&mut media_workers, name)?),
+            |name, settings| {
+                prepared(
+                    name,
+                    settings,
+                    &[],
+                    media_worker(&mut media_workers, name)?,
+                    &mut text,
+                )
+            },
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
                     quiesced: false,
@@ -285,6 +353,8 @@ impl Host {
             clock,
         )?;
         let mut host = Self {
+            text,
+            text_notice_after_ms: 0,
             runtime,
             media,
             services,
@@ -331,6 +401,7 @@ impl Host {
                     .expect("active generation retains its adapter control");
                 control.dispatcher.bind_clock(clock);
                 control.dispatcher.activate();
+                bind_text_origins(&local, control, &self.peers, &self.text);
             }
         }
     }
@@ -383,6 +454,8 @@ impl Host {
         document: ConfigDocument,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        let mut text = TextExecutor::prepare(document.nodes().len().max(1), self.media.clone())
+            .map_err(|_| RuntimeError::Preparation)?;
         let local_delays: Vec<_> = self
             .leases
             .iter()
@@ -404,8 +477,13 @@ impl Host {
             document,
             &self.media,
             |name, settings| {
-                let mut candidate =
-                    prepared(name, settings, peers, media_worker(media_workers, name)?)?;
+                let mut candidate = prepared(
+                    name,
+                    settings,
+                    peers,
+                    media_worker(media_workers, name)?,
+                    &mut text,
+                )?;
                 if local_delays
                     .iter()
                     .rev()
@@ -434,6 +512,9 @@ impl Host {
             clock,
         );
         if self.runtime.revision() != revision {
+            self.text.stop();
+            text.start().map_err(|_| RuntimeError::Preparation)?;
+            self.text = text;
             self.commit_sites()?;
         }
         self.prune_leases();
@@ -555,6 +636,7 @@ impl Host {
                 settings,
                 &self.peers,
                 media_worker(&mut self.media_workers, local)?,
+                &mut self.text,
             );
             let candidate = match candidate {
                 Ok(candidate) => candidate,
@@ -580,6 +662,7 @@ impl Host {
             .position(|peer| peer.local == local && peer.remote == remote)
         {
             let peer = self.peers.remove(index);
+            self.text.cancel(&peer.control.text_origin());
             let announced = peer.announced;
             peer.control.stop();
             self.peer_io.reap();
@@ -626,6 +709,36 @@ impl Host {
             let _ = writeln!(result, "{}", worker.local_status_text());
         }
         drop(lease);
+        let text = self.text.observation();
+        let _ = writeln!(
+            result,
+            "  incoming-text admitted={} rejected={:?} failed={} cancelled-origins={} queued={} active={} pending={} forwarded={} forwarding-rejected={}",
+            text.admitted,
+            text.rejected,
+            text.failures,
+            text.cancelled_origins,
+            text.queued,
+            text.active,
+            text.pending,
+            text.forwarded,
+            text.forwarding_rejected
+        );
+        for origin in self.text.origins().into_iter().filter(|origin| {
+            self.peers
+                .iter()
+                .any(|peer| peer.local == local && peer.control.text_origin() == origin.origin)
+        }) {
+            let _ = writeln!(
+                result,
+                "  incoming-text peer={} station-generation={} connection={} pending={} occupancy={} source-rate={}",
+                origin.origin.peer,
+                origin.origin.station_generation,
+                origin.origin.connection_generation,
+                origin.pending,
+                origin.occupancy_samples,
+                origin.source_rate_hz
+            );
+        }
         let generation = self
             .runtime
             .status(0)
@@ -821,8 +934,109 @@ impl Host {
             })
             .map_err(|_| RuntimeError::Rejected)
     }
+    fn report_text_failures(&mut self, now_ms: u64) {
+        for _ in 0..64 {
+            let Some(failure) = self.text.take_failure() else {
+                break;
+            };
+            if now_ms < self.text_notice_after_ms {
+                continue;
+            }
+            self.text_notice_after_ms = now_ms.saturating_add(60000);
+            let message = format!(
+                "rpt_advanced incoming text: peer={} generation={} job={} error={:?}",
+                failure.origin.peer, failure.origin.station_generation, failure.job, failure.error
+            );
+            #[cfg(test)]
+            crate::fixture::error_log(3, &message);
+            {
+                let message = CString::new(message).expect("validated peer identity in text error");
+                unsafe extern "C" {
+                    fn syslog(priority: std::ffi::c_int, format: *const std::ffi::c_char, ...);
+                }
+                // Constant format, validated peer identity and value-free error kind only.
+                unsafe {
+                    syslog(3, c"%s".as_ptr(), message.as_ptr());
+                }
+            }
+        }
+    }
+    fn human_text(&mut self, local: &str, message: HumanMessage) {
+        if !self.peers.iter().any(|peer| {
+            peer.local == local
+                && !peer.control.ended()
+                && peer.control.text_origin() == message.origin
+        }) {
+            return;
+        }
+        let router = TextRouter::new(
+            self.runtime
+                .node_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        let destinations = self
+            .peers
+            .iter()
+            .filter(|peer| peer.local == local)
+            .map(|peer| TextDestination {
+                connection_generation: peer.control.text_origin().connection_generation,
+                protocol: 1,
+                node: peer.remote.clone(),
+                can_forward_text: !peer.control.ended(),
+            })
+            .collect::<Vec<_>>();
+        let disposition = router.route(&message, &destinations, |destination, text| {
+            self.peers
+                .iter_mut()
+                .find(|peer| {
+                    peer.local == local
+                        && peer.remote == destination.node
+                        && peer.control.text_origin().connection_generation
+                            == destination.connection_generation
+                })
+                .expect("current text route snapshot")
+                .control
+                .send(PeerCommand::Text {
+                    text: text.to_owned(),
+                    advisory: false,
+                })
+                .is_ok()
+        });
+        self.text.record_forwarding(
+            disposition.destinations_admitted,
+            disposition.destinations_rejected,
+        );
+        // Each node is an independent station, not an implicit local patch.
+        // ASL consumes other configured local addresses without rendering here.
+        if disposition.locally_eligible
+            && !matches!(&message.audience, TextAudience::Node(node) if node != local)
+        {
+            // The local identity and immutable document were validated at station admission.
+            let node = NodeId::new(local).expect("admitted local station");
+            let settings = ResolvedSpeechSettings::resolve(self.runtime.document(), &node)
+                .expect("validated station speech settings")
+                .value;
+            let spoken = self
+                .runtime
+                .node(local)
+                .expect("admitted local station")
+                .incoming_text_speech(&message.source, &message.body);
+            let _ = self.text.admit(
+                message,
+                SpeechSource {
+                    text: spoken,
+                    model: settings.voice.into(),
+                    speed_percent: settings.speed_percent as u32,
+                    level_db: settings.level_db as i32,
+                },
+            );
+        }
+    }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        self.report_text_failures(clock.now_ms);
         self.advance_sites(clock);
         self.runtime.prepare_messages(clock);
         for (local, lease) in &self.leases {
@@ -866,6 +1080,9 @@ impl Host {
                 continue;
             };
             match event {
+                Event::HumanText(message) => {
+                    self.human_text(&local, message);
+                }
                 Event::Redirected(observer) => {
                     if let Some(generation) = node.status(clock.now_ms).active {
                         // This serialized owner has not changed the just-read generation.
@@ -947,6 +1164,7 @@ impl Host {
                 .expect("snapshot generation retains its adapter control");
             if status.active == Some(generation) {
                 control.dispatcher.activate();
+                bind_text_origins(&local, control, &self.peers, &self.text);
             }
             if control.awaiting_local {
                 // Runtime retains the device for every active or retiring generation.
@@ -1022,6 +1240,7 @@ impl Host {
             return false;
         }
         self.status_post.request_stop();
+        self.text.stop();
         let statuses = self.runtime.status(now_ms);
         for peer in &self.peers {
             peer.control.stop();

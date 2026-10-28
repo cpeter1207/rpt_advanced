@@ -193,6 +193,22 @@ datagram I/O; codec adapters use released codec libraries wherever available.
 These boundaries carry no controller routing policy or audio callback work,
 as defined by ADRs 0005, 0011, and 0012.
 
+The approved codec expansion uses protocol-neutral, replaceable shared adapters
+under ADR 0022. Other protocol adapters can reuse them without an IAX2 dependency;
+protocol-specific format IDs, negotiation and transport framing stay with each
+protocol adapter. This codec boundary is planned, not implemented support for
+additional protocols.
+The approved human-text codec converts supported messages to speech that mixes
+with live peer audio, including audio from the text sender, only at the local
+transmitter. This is incoming media, not polite controller telemetry, and never
+enters peer audio egress. Forward eligible messages only as text when protocols
+support forwarding; each peer chooses its own rendering. Protocol signaling
+remains non-audible.
+This applies to EchoLink and every other current or future text-capable protocol
+adapter. Failed synthesis skips only the local spoken rendition and logs an
+error, without Morse fallback, interruption of other audio, or suppression of
+supported text forwarding. These protocol and codec additions remain planned.
+
 ## Runtime structure
 
 `RuntimeNode` is the per-station policy and lifecycle aggregate. It owns that
@@ -257,8 +273,14 @@ Clock-scheduled, release-tail and manually selected messages share compiled
 recipes, one serialized producer and the telemetry ring. Scheduled occurrences
 retain bounded polite-start deadlines and at most one latest unstarted successor.
 Configured messages can select eligible link broadcast or suppress traffic
-repeat without disabling input/DTMF processing. Their PCM/PTT is independent of
-the traffic watchdog, while all hardware and duplex safety remains effective.
+repeat without disabling input/DTMF processing. Their own playout does not trip
+the traffic watchdog. A timeout caused by received traffic instead mutes that
+traffic at local RF, suspends other local playback for the spoken timeout and
+all-input-idle recovery notices, then restarts it without overlapping notices.
+The notices use the existing producer and telemetry ring, remain local-only,
+and retain physical site/hardware inhibition. Receive processing and peer
+routing continue throughout; ADR 0008 defines the priority exception to
+ordinary polite telemetry and the recovery sequence without a fixed lockout.
 The remappable cancel operation stops only the current attempt with an atomic
 audio-owner prompt; retirement stays off audio. ADRs 0008, 0009, 0017, 0023 and
 0025 define the timing, routing and ownership rules. No additional scheduler,
@@ -506,6 +528,12 @@ defines the full reload, hardware-handoff, and failure policy.
   Standalone selects a non-Asterisk control backend.
 - Telemetry is serialized. Speech is preferred and falls back to Morse when
   speech cannot be prepared.
+- A received-traffic timeout mutes receive and regenerated traffic only at
+  local RF. Its local-only priority notice completes before PTT drops; recovery
+  waits for every local and linked input to become inactive and completes the
+  cleared notice before restoring traffic. Other local playback resumes after
+  these notices. Physical site/hardware inhibition, all detectors, DTMF, ring
+  consumption and between-peer routing continue under ADR 0008.
 - Status and connection messages wait without a maximum until all local and
   linked receive activity ends. Before first PCM, new activity releases the
   producer for readmission after unkey. Once audible, new activity selects

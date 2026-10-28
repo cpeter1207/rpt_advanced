@@ -8,6 +8,12 @@ only through a separately versioned adapter. The ingress and egress implementati
 has passed the hosted native-platform gate, shipped in Debian packages, and
 been validated on node 524950.
 
+Amended 2026-10-27: codec-native concealment must remain enabled and take
+priority over shared-ring fallback. The codec-provider cutover implementing
+this amendment is running as an ABI-matched native candidate on node 524950.
+Provider and IAX native-platform gates pass; the controller's final gate is
+pending. This candidate cutover has not been released.
+
 ## Context
 
 The standalone controller must remain responsive with hundreds or
@@ -70,6 +76,16 @@ The independent control-path adapter in ADR 0038 does not schedule media work.
 
 ### Adaptive jitter adapter
 
+Codec integration accepts full legal UDP payloads and codec coding units that
+are not multiples of the 10 ms adjustment quantum. Packet duration is distinct
+from the jitter-delay ceiling: an aggregated packet may span more than that
+ceiling while its retained decoded tail keeps the source timeline intact.
+Opaque payload storage is allocated only for occupied slots on the peer owner,
+not at the maximum payload size for every slot. Reclaim native retirement
+notifications before slot reuse; retrieval copies bytes before releasing them.
+These changes retain jitter ABI 1 and the 160/180/500 ms policy. Integration
+validation is in progress with the codec host cutover.
+
 Use SpeexDSP's generic adaptive jitter buffer through a neutral packet-jitter
 capability under ADR 0022. Only the separate Rust `cdylib` adapter dynamically
 links SpeexDSP, owns its FFI/context and translates errors. Its versioned C
@@ -90,11 +106,17 @@ The approved packet-buffer policy is 160 ms minimum, 180 ms initial delay and 50
 maximum, with SpeexDSP's automatic lateness trade-off. These are packet-jitter
 limits, not the shared PCM ring's reserve, target or capacity.
 
-The existing shared PCM ring remains the sole source-rate converter, drift
-corrector and selected PLC owner. Missing/insertion spans must preserve their
-position among earlier and later PCM; omitting a write or appending zeros is
-not a loss-span contract. Do not duplicate PLC or silently compress the media
-timeline. The owner approved an ABI-3 descriptor-tail `ring_producer_gap`
+The existing shared PCM ring remains the sole source-rate converter and drift
+corrector. Codec-native concealment always remains enabled. The peer's decoder
+first handles damaged frames and supported explicit loss requests using its
+retained history. Recovered samples enter the ring as PCM; they are not also
+published as missing spans. Only unresolved loss uses ring PLC. Adaptive delay
+insertions do not advance the codec's source history.
+
+Missing/insertion spans must preserve their position among earlier and later
+PCM; omitting a write or appending zeros is not a loss-span contract. Do not
+conceal the same span twice or silently compress the media timeline. The owner
+approved an ABI-3 descriptor-tail `ring_producer_gap`
 operation to append counted missing source samples in order, without breaking
 existing callers. New consumers require its presence; prove placement through
 converter lookahead and pending buffers. The approved samplerate ABI-2 tail

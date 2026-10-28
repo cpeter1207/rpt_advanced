@@ -71,8 +71,6 @@ pub struct ResolvedNodeSettings {
     pub ctcss_hang_ms: u64,
     /// Continuous-source watchdog duration; zero disables it.
     pub transmit_timeout_ms: u64,
-    /// Post-watchdog lockout duration.
-    pub timeout_lockout_ms: u64,
     /// Kerchunk threshold in milliseconds.
     pub kerchunk_max_ms: u64,
     /// Receive-active telemetry attenuation in dB.
@@ -1965,7 +1963,6 @@ impl ResolvedNodeSettings {
             }
         }
         number!(transmit_timeout_ms, "transmit_timeout_ms");
-        number!(timeout_lockout_ms, "timeout_lockout_ms");
         number!(kerchunk_max_ms, "kerchunk_max_ms");
         number!(courtesy_delay_ms, "courtesy_delay_ms");
         if let Some(parsed) = lookup_valid(document, "telemetry_duck_db", &scopes, |raw| {
@@ -2080,7 +2077,6 @@ impl ResolvedNodeSettings {
             ctcss_encode_on_input: false,
             ctcss_hang_ms: 0,
             transmit_timeout_ms: 180_000,
-            timeout_lockout_ms: 30_000,
             kerchunk_max_ms: 500,
             telemetry_duck_db: -20,
             courtesy_delay_ms: 250,

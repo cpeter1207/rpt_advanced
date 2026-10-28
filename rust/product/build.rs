@@ -18,6 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
     println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_product.so.1");
     println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
+    println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
     let radio_include =
         env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned());
     let bindings = bindgen::Builder::default()
@@ -25,6 +26,11 @@ fn main() {
         .clang_arg("-I../media-support/include")
         .clang_arg("-I../control-abi/include")
         .clang_arg(format!("-I{radio_include}"))
+        .clang_arg(format!(
+            "-I{}",
+            env::var("RPTADV_CODEC_INCLUDE")
+                .unwrap_or_else(|_| "/usr/include/rptadv-codec".to_owned())
+        ))
         .allowlist_type("rptadv_.*")
         .allowlist_type("UrpNativeStationConfig")
         .allowlist_function("rpcr3_descriptor")

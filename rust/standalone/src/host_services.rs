@@ -14,7 +14,6 @@ use std::{
     mem::size_of,
     net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::Path,
     ptr,
 };
 
@@ -30,12 +29,13 @@ pub struct StandaloneHostContext {
 struct PeerIngress {
     executor: crate::iax::executor::Executor,
     jitter: &'static abi::rptadv_jitter_descriptor_v1,
+    client: IaxClient,
 }
 
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
-    descriptor: Box<abi::rptadv_host_services_v7>,
+    descriptor: Box<abi::rptadv_host_services_v8>,
 }
 
 impl HostServicesOwner {
@@ -53,6 +53,7 @@ impl HostServicesOwner {
                 Ok::<_, crate::providers::ProviderError>(PeerIngress {
                     executor: providers.iax_executor()?,
                     jitter: providers.jitter_descriptor()?,
+                    client: providers.iax_client()?,
                 })
             })
             .transpose()?;
@@ -63,10 +64,10 @@ impl HostServicesOwner {
             secrets,
             ingress,
         });
-        let descriptor = Box::new(abi::rptadv_host_services_v7 {
-            struct_size: size_of::<abi::rptadv_host_services_v7>() as u32,
-            abi_version: 7,
-            capability: *b"rptadv.hst7\0",
+        let descriptor = Box::new(abi::rptadv_host_services_v8 {
+            struct_size: size_of::<abi::rptadv_host_services_v8>() as u32,
+            abi_version: 8,
+            capability: *b"rptadv.hst8\0",
             context: ptr::from_mut(context.as_mut()).cast(),
             local_time: Some(local_time),
             command_notice: Some(command_notice),
@@ -89,13 +90,14 @@ impl HostServicesOwner {
             peer_read: Some(peer_read),
             peer_send_text: Some(peer_send_text),
             peer_send_digit: Some(peer_send_digit),
-            peer_write: Some(peer_write),
+            peer_write: None,
             peer_destroy: Some(peer_destroy),
             peer_step_attach: asynchronous.then_some(peer_step_attach),
             peer_step_stop: asynchronous.then_some(peer_step_stop),
             peer_step_detach: asynchronous.then_some(peer_step_detach),
             peer_observe: asynchronous.then_some(peer_observe),
             peer_prepare_audio: asynchronous.then_some(peer_prepare_audio),
+            peer_reset_encoder: asynchronous.then_some(peer_reset_encoder),
             peer_send_prepared: asynchronous.then_some(peer_send_prepared),
             peer_elapsed_ms: asynchronous.then_some(peer_elapsed_ms),
             peer_step_wake: asynchronous.then_some(peer_step_wake),
@@ -109,14 +111,14 @@ impl HostServicesOwner {
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
-    pub fn descriptor(&self) -> &abi::rptadv_host_services_v7 {
+    pub fn descriptor(&self) -> &abi::rptadv_host_services_v8 {
         let _keep_context_alive = &self.context;
         self.descriptor.as_ref()
     }
 
     /// Put one peer handle into the representation used by the host-services callbacks.
     pub fn peer_handle(&self, peer: IaxPeer) -> *mut c_void {
-        Box::into_raw(Box::new(PeerHandle(peer))).cast()
+        Box::into_raw(Box::new(PeerHandle::new(peer))).cast()
     }
 
     /// Destroy an unconsumed peer handle with the host's normal ownership rule.
@@ -153,7 +155,12 @@ impl HostServicesOwner {
     }
 }
 
-struct PeerHandle(IaxPeer);
+struct PeerHandle(IaxPeer, Vec<f32>);
+impl PeerHandle {
+    fn new(peer: IaxPeer) -> Self {
+        Self(peer, vec![0.0; 4096])
+    }
+}
 
 unsafe extern "C" fn peer_step_attach(
     context: *mut c_void,
@@ -401,8 +408,10 @@ unsafe extern "C" fn peer_dial(
             eprintln!("rpt-advanced: IAX2 destination validation or address resolution failed");
             return -1;
         };
-        let peer = match dial_peer(
-            Path::new("librptadviax2.so.1"),
+        let Some(ingress) = &context.ingress else {
+            return -1;
+        };
+        let peer = match ingress.client.clone().dial_configured(
             address,
             local,
             &remote,
@@ -419,13 +428,14 @@ unsafe extern "C" fn peer_dial(
             drop(peer);
             return -1;
         }
-        *output = Box::into_raw(Box::new(PeerHandle(peer))).cast();
+        *output = Box::into_raw(Box::new(PeerHandle::new(peer))).cast();
         0
     })
 }
 
+#[cfg(test)]
 fn dial_peer(
-    library: &Path,
+    library: &std::path::Path,
     address: SocketAddr,
     local: &str,
     remote: &str,
@@ -482,13 +492,21 @@ unsafe extern "C" fn peer_read(
         else {
             return -1;
         };
-        let mut samples = [0.0_f32; 4096];
-        // Match the IAX client's datagram capacity so large topology frames stay connected.
-        let mut text = [0_u8; 1500];
-        match peer.0.poll(&mut samples, &mut text) {
+        // Full legal datagram text remains deliverable; local synthesis has its own limit.
+        let mut text = [0_u8; 65507];
+        let mut input = peer.0.poll(&mut peer.1, &mut text);
+        if let Ok(IaxEvent::NeedCapacity(required)) = input {
+            if peer.1.try_reserve_exact(required - peer.1.len()).is_err() {
+                return -1;
+            }
+            peer.1.resize(required, 0.0);
+            // Native decode/PLC was retained, not consumed; retry once on this owner.
+            input = peer.0.poll(&mut peer.1, &mut text);
+        }
+        match input {
             Ok(IaxEvent::None) => 0,
             Ok(IaxEvent::Audio(length)) => unsafe {
-                event(event_context, 3, samples.as_ptr().cast(), length);
+                event(event_context, 3, peer.1.as_ptr().cast(), length);
                 0
             },
             Ok(IaxEvent::Gap(length)) => unsafe {
@@ -511,7 +529,7 @@ unsafe extern "C" fn peer_read(
                 event(event_context, 5, ptr::null(), 0);
                 0
             },
-            Ok(IaxEvent::Hangup) | Err(_) => -1,
+            Ok(IaxEvent::Hangup | IaxEvent::NeedCapacity(_)) | Err(_) => -1,
         }
     })
 }
@@ -546,32 +564,6 @@ unsafe extern "C" fn peer_send_digit(_: *mut c_void, peer: *mut c_void, digit: u
     })
 }
 
-unsafe extern "C" fn peer_write(
-    _: *mut c_void,
-    peer: *mut c_void,
-    samples: *const f32,
-    count: usize,
-) -> i32 {
-    boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut() }) else {
-            return -1;
-        };
-        if samples.is_null() && count != 0 {
-            return -1;
-        }
-        let samples = if count == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(samples, count) }
-        };
-        if peer.0.send_audio(samples).is_ok() {
-            0
-        } else {
-            -1
-        }
-    })
-}
-
 unsafe extern "C" fn peer_destroy(_: *mut c_void, peer: *mut c_void) {
     if !peer.is_null() {
         unsafe { drop(Box::from_raw(peer.cast::<PeerHandle>())) };
@@ -587,27 +579,40 @@ unsafe extern "C" fn peer_prepare_audio(
     count: usize,
     output: *mut u8,
     capacity: usize,
+    flush: u32,
+    result: *mut abi::rptadv_codec_encode_result_v1,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut() }) else {
             return -1;
         };
-        if count > capacity
+        if result.is_null()
+            || unsafe { ptr::addr_of!((*result).struct_size).read() }
+                < size_of::<abi::rptadv_codec_encode_result_v1>() as u32
             || count > isize::MAX as usize / size_of::<f32>()
-            || (count != 0 && (pcm.is_null() || output.is_null()))
+            || capacity > isize::MAX as usize
+            || (count != 0 && pcm.is_null())
+            || (capacity != 0 && output.is_null())
         {
             return -1;
         }
-        if count == 0 {
-            return 0;
-        }
-        let pcm = unsafe { std::slice::from_raw_parts(pcm, count) };
-        let output = unsafe { std::slice::from_raw_parts_mut(output, count) };
-        if peer.0.prepare_audio(pcm, output).is_ok() {
-            0
+        let pcm = if count == 0 {
+            &[]
         } else {
-            -1
-        }
+            unsafe { std::slice::from_raw_parts(pcm, count) }
+        };
+        let output = if capacity == 0 {
+            &mut []
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(output, capacity) }
+        };
+        peer.0
+            .prepare_audio(pcm, output, flush, unsafe { &mut *result })
+    })
+}
+unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
+    boundary(-1, || {
+        unsafe { peer.cast::<PeerHandle>().as_mut() }.map_or(-1, |peer| peer.0.reset_encoder())
     })
 }
 unsafe extern "C" fn peer_send_prepared(
@@ -615,6 +620,7 @@ unsafe extern "C" fn peer_send_prepared(
     peer: *mut c_void,
     bytes: *const u8,
     count: usize,
+    frames: u32,
     timestamp: u32,
 ) -> i32 {
     boundary(-1, || {
@@ -629,7 +635,7 @@ unsafe extern "C" fn peer_send_prepared(
         } else {
             unsafe { std::slice::from_raw_parts(bytes, count) }
         };
-        match peer.0.send_prepared(bytes, timestamp) {
+        match peer.0.send_prepared(bytes, frames, timestamp) {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(_) => -1,
@@ -836,16 +842,16 @@ mod tests {
     }
 
     #[test]
-    fn host_services_table_is_complete_and_uses_its_owned_context() {
+    fn host_services_table_retains_its_owned_context() {
         let owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
-            size_of::<crate::abi::rptadv_host_services_v7>() as u32
+            size_of::<crate::abi::rptadv_host_services_v8>() as u32
         );
-        assert_eq!(api.abi_version, 7);
-        assert_eq!(api.capability, *b"rptadv.hst7\0");
+        assert_eq!(api.abi_version, 8);
+        assert_eq!(api.capability, *b"rptadv.hst8\0");
         assert!(!api.context.is_null());
         assert!(api.local_time.is_some());
         assert!(api.peer_dial.is_some());
@@ -1060,7 +1066,7 @@ mod tests {
         let secrets = SecretsFile::parse("").unwrap();
         assert!(matches!(
             dial_peer(
-                Path::new("/no/such/librptadviax2.so.1"),
+                Path::new("/no/such/librptadviax2.so.2"),
                 address,
                 "524950",
                 "506315",
@@ -1071,7 +1077,7 @@ mod tests {
         ));
         assert!(matches!(
             dial_peer(
-                Path::new("librptadviax2.so.1"),
+                Path::new("librptadviax2.so.2"),
                 address,
                 "524950",
                 "506315",
@@ -1138,6 +1144,23 @@ mod tests {
             },
             -1
         );
+        let valid = c"radio@127.0.0.1:4569/506315";
+        assert_eq!(
+            unsafe {
+                peer_dial(
+                    descriptor.context,
+                    valid.as_ptr(),
+                    valid.to_bytes().len(),
+                    local.as_ptr(),
+                    local.to_bytes().len(),
+                    0,
+                    Some(current_yes),
+                    ptr::null_mut(),
+                    &mut output,
+                )
+            },
+            -1
+        );
         assert!(output.is_null());
     }
 
@@ -1146,11 +1169,17 @@ mod tests {
         let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
-        let library = Path::new("librptadviax2.so.1");
-        let mut server =
-            crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
+        let library = Path::new("librptadviax2.so.2");
+        let mut server = crate::iax::IaxServer::bind(
+            &crate::iax::IaxClient::load(library).unwrap(),
+            address,
+            &["506315".to_owned()],
+        )
+        .unwrap();
+        let providers = Box::leak(Box::new(crate::providers::ProviderSet::load().unwrap()));
         let owner =
-            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+            HostServicesOwner::new(Vec::new(), Some(providers), SecretsFile::parse("").unwrap())
+                .unwrap();
         let context = owner.descriptor().context as usize;
         let destination = format!("radio@{address}/506315");
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -1181,7 +1210,12 @@ mod tests {
                 .as_secs() as u32;
             unsafe {
                 server
-                    .poll(now, reject_test_peer, capture_test_peer, ptr::null_mut())
+                    .poll(
+                        now,
+                        Some(reject_test_peer),
+                        Some(capture_test_peer),
+                        ptr::null_mut(),
+                    )
                     .unwrap();
             }
             thread::sleep(Duration::from_millis(1));
@@ -1308,10 +1342,6 @@ mod tests {
             unsafe { super::peer_send_digit(ptr::null_mut(), ptr::null_mut(), b'1') },
             -1
         );
-        assert_eq!(
-            unsafe { super::peer_write(ptr::null_mut(), ptr::null_mut(), ptr::null(), 1) },
-            -1
-        );
         unsafe { super::peer_destroy(ptr::null_mut(), ptr::null_mut()) };
         owner.destroy_peer(ptr::null_mut());
     }
@@ -1341,11 +1371,14 @@ mod tests {
         let peer = owner.peer_handle(crate::iax::tests::peer_for_host_callback(0, false, false));
         let pcm = [0.0_f32];
         let mut output = [0xa5];
+        let mut result: crate::abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of::<crate::abi::rptadv_codec_encode_result_v1>() as u32;
         let output_ptr = output.as_mut_ptr();
         let oversized = isize::MAX as usize / size_of::<f32>() + 1;
         for (handle, samples, count, encoded, capacity) in [
             (ptr::null_mut(), pcm.as_ptr(), 1, output_ptr, 1),
             (peer, pcm.as_ptr(), oversized, output_ptr, oversized),
+            (peer, pcm.as_ptr(), 1, output_ptr, usize::MAX),
             (peer, ptr::null(), 1, output_ptr, 1),
             (peer, pcm.as_ptr(), 1, ptr::null_mut(), 1),
         ] {
@@ -1358,23 +1391,106 @@ mod tests {
                         count,
                         encoded,
                         capacity,
+                        0,
+                        &mut result,
                     )
                 },
                 -1
             );
             assert_eq!(output, [0xa5]);
         }
+        result.struct_size = 0;
+        for invalid in [ptr::null_mut(), ptr::from_mut(&mut result)] {
+            assert_eq!(
+                unsafe {
+                    super::peer_prepare_audio(
+                        ptr::null_mut(),
+                        peer,
+                        pcm.as_ptr(),
+                        1,
+                        output_ptr,
+                        1,
+                        0,
+                        invalid,
+                    )
+                },
+                -1
+            );
+            assert_eq!(output, [0xa5]);
+        }
+        result.struct_size = size_of::<crate::abi::rptadv_codec_encode_result_v1>() as u32;
+        assert_eq!(
+            unsafe {
+                super::peer_prepare_audio(
+                    ptr::null_mut(),
+                    peer,
+                    ptr::null(),
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    1,
+                    &mut result,
+                )
+            },
+            0
+        );
         for (handle, bytes, count, expected) in [
             (ptr::null_mut(), output.as_ptr(), 1, -1),
             (peer, output.as_ptr(), isize::MAX as usize + 1, -1),
             (peer, ptr::null(), 0, 0),
         ] {
             assert_eq!(
-                unsafe { super::peer_send_prepared(ptr::null_mut(), handle, bytes, count, 1234) },
+                unsafe {
+                    super::peer_send_prepared(
+                        ptr::null_mut(),
+                        handle,
+                        bytes,
+                        count,
+                        count as u32,
+                        1234,
+                    )
+                },
                 expected
             );
         }
         owner.destroy_peer(peer);
+    }
+
+    #[test]
+    fn host_codec_read_retries_native_plc_capacity_and_accepts_large_text() {
+        unsafe extern "C" fn count(
+            context: *mut c_void,
+            kind: u32,
+            _: *const c_void,
+            length: usize,
+        ) {
+            unsafe {
+                *context.cast::<(u32, usize)>() = (kind, length);
+            }
+        }
+        let owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        for (input, expected, length) in [
+            (1, 3, 6000),
+            (2, 1, 4096),
+            (1, 0, isize::MAX as usize / size_of::<f32>()),
+        ] {
+            let peer = owner.peer_handle(crate::iax::tests::peer_for_capacity(input, length));
+            let mut observed = (0, 0);
+            assert_eq!(
+                unsafe {
+                    super::peer_read(
+                        ptr::null_mut(),
+                        peer,
+                        Some(count),
+                        ptr::from_mut(&mut observed).cast(),
+                    )
+                },
+                if expected == 0 { -1 } else { 0 }
+            );
+            assert_eq!(observed, (expected, if expected == 0 { 0 } else { length }));
+            owner.destroy_peer(peer);
+        }
     }
 
     #[test]
@@ -1415,6 +1531,8 @@ mod tests {
         assert_eq!(unsafe { super::peer_rate(ptr::null_mut(), handle) }, 8000);
         assert_eq!(unsafe { super::peer_ready(ptr::null_mut(), handle) }, 1);
         let mut encoded = [0; 160];
+        let mut result: crate::abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of::<crate::abi::rptadv_codec_encode_result_v1>() as u32;
         assert_eq!(
             unsafe {
                 super::peer_prepare_audio(
@@ -1424,6 +1542,8 @@ mod tests {
                     160,
                     encoded.as_mut_ptr(),
                     160,
+                    0,
+                    &mut result,
                 )
             },
             0
@@ -1437,6 +1557,8 @@ mod tests {
                     0,
                     ptr::null_mut(),
                     0,
+                    1,
+                    &mut result,
                 )
             },
             0
@@ -1450,23 +1572,33 @@ mod tests {
                     1,
                     ptr::null_mut(),
                     0,
+                    0,
+                    &mut result,
                 )
             },
             -1
         );
         assert_eq!(
             unsafe {
-                super::peer_send_prepared(ptr::null_mut(), handle, encoded.as_ptr(), 160, 1234)
+                super::peer_send_prepared(ptr::null_mut(), handle, encoded.as_ptr(), 160, 160, 1234)
             },
             0
         );
         assert_eq!(
-            unsafe { super::peer_send_prepared(ptr::null_mut(), handle, ptr::null(), 1, 1234) },
+            unsafe { super::peer_send_prepared(ptr::null_mut(), handle, ptr::null(), 1, 1, 1234) },
             -1
         );
         assert_eq!(
             unsafe { super::peer_elapsed_ms(ptr::null_mut(), handle) },
             1234
+        );
+        assert_eq!(
+            unsafe { super::peer_reset_encoder(ptr::null_mut(), handle) },
+            0
+        );
+        assert_eq!(
+            unsafe { super::peer_reset_encoder(ptr::null_mut(), ptr::null_mut()) },
+            -1
         );
         assert_eq!(
             unsafe { super::peer_send_text(ptr::null_mut(), handle, c"status".as_ptr(), 6) },
@@ -1480,21 +1612,14 @@ mod tests {
             unsafe { super::peer_send_digit(ptr::null_mut(), handle, b'7') },
             0
         );
-        assert_eq!(
-            unsafe { super::peer_write(ptr::null_mut(), handle, ptr::null(), 0) },
-            0
-        );
-        assert_eq!(
-            unsafe { super::peer_write(ptr::null_mut(), handle, ptr::null(), 1) },
-            -1
-        );
+        assert!(owner.descriptor().peer_write.is_none());
         owner.destroy_peer(handle);
 
         let peer = crate::iax::tests::peer_for_host_callback(0, true, true);
         let handle = owner.peer_handle(peer);
         assert_eq!(
             unsafe {
-                super::peer_send_prepared(ptr::null_mut(), handle, encoded.as_ptr(), 160, 1234)
+                super::peer_send_prepared(ptr::null_mut(), handle, encoded.as_ptr(), 160, 160, 1234)
             },
             1,
             "congestion must remain retryable across both ABIs"
@@ -1508,6 +1633,8 @@ mod tests {
                     160,
                     encoded.as_mut_ptr(),
                     160,
+                    0,
+                    &mut result,
                 )
             },
             -1
@@ -1531,25 +1658,22 @@ mod tests {
             unsafe { super::peer_send_digit(ptr::null_mut(), handle, b'7') },
             -1
         );
-        let samples = [0.0_f32; 160];
-        assert_eq!(
-            unsafe { super::peer_write(ptr::null_mut(), handle, samples.as_ptr(), samples.len()) },
-            -1
-        );
         unsafe { super::peer_destroy(ptr::null_mut(), handle) };
     }
 
     #[test]
-    fn outbound_host_dial_connects_to_local_iax_server() {
-        host_dial_connects(false);
+    fn asynchronous_host_delivers_jittered_audio_and_quiesces_after_detach() {
+        host_dial_connects(None);
     }
 
     #[test]
-    fn asynchronous_host_delivers_jittered_audio_and_quiesces_after_detach() {
-        host_dial_connects(true);
+    fn asynchronous_codec_units_use_real_jitter_and_provider_tables() {
+        for profile in [4, 8, 11] {
+            host_dial_connects(Some(profile));
+        }
     }
 
-    fn host_dial_connects(asynchronous: bool) {
+    fn host_dial_connects(profile: Option<u32>) {
         unsafe extern "C" fn ordered_addresses(
             _: *mut c_void,
             endpoint: *const u8,
@@ -1564,20 +1688,27 @@ mod tests {
             }
             0
         }
-        let library = Path::new("librptadviax2.so.1");
+        let library = Path::new("librptadviax2.so.2");
         let reservation = UdpSocket::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
+        let client = profile.map_or_else(
+            || crate::iax::IaxClient::load(library).unwrap(),
+            |profile| crate::iax::tests::selected_client(library, profile),
+        );
         let mut server =
-            crate::iax::IaxServer::bind(library, address, &["506315".to_owned()]).unwrap();
+            crate::iax::IaxServer::bind(&client, address, &["506315".to_owned()]).unwrap();
         let accepted = AtomicUsize::new(0);
         let providers = Box::leak(Box::new(crate::providers::ProviderSet::load().unwrap()));
         let mut host = HostServicesOwner::new(
             Vec::new(),
-            asynchronous.then_some(&*providers),
+            Some(&*providers),
             SecretsFile::parse("").unwrap(),
         )
         .unwrap();
+        let ingress = host.context.ingress.take();
+        host.enable_listener(&mut server).unwrap();
+        host.context.ingress = ingress;
         host.enable_listener(&mut server).unwrap();
         let mut resolver = *providers.resolver_descriptor().unwrap();
         resolver.resolve_addresses = Some(ordered_addresses);
@@ -1616,8 +1747,8 @@ mod tests {
                 server
                     .poll(
                         now,
-                        allow_test_peer,
-                        capture_test_peer,
+                        Some(allow_test_peer),
+                        Some(capture_test_peer),
                         ptr::from_ref(&accepted).cast_mut().cast(),
                     )
                     .unwrap();
@@ -1634,7 +1765,7 @@ mod tests {
         let mut inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
 
         // The provider's packet bound is stricter than the host's safe-slice bound.
-        let oversized = [0xff; 1500];
+        let oversized = [0xff; 65508];
         assert_eq!(
             unsafe {
                 super::peer_send_prepared(
@@ -1642,6 +1773,7 @@ mod tests {
                     peer as *mut c_void,
                     oversized.as_ptr(),
                     oversized.len(),
+                    oversized.len() as u32,
                     0,
                 )
             },
@@ -1673,9 +1805,7 @@ mod tests {
             assert_eq!(observed, [message]);
             observed.clear();
         }
-        if asynchronous {
-            verify_async_audio(&host, peer as *mut c_void, &mut inbound);
-        }
+        verify_async_audio(&host, peer as *mut c_void, &mut inbound);
         unsafe { super::peer_destroy(ptr::null_mut(), peer as *mut c_void) };
         drop(inbound);
 
@@ -1712,8 +1842,8 @@ mod tests {
                 server
                     .poll(
                         now,
-                        allow_test_peer,
-                        capture_test_peer,
+                        Some(allow_test_peer),
+                        Some(capture_test_peer),
                         ptr::from_ref(&accepted).cast_mut().cast(),
                     )
                     .unwrap();
@@ -1727,11 +1857,7 @@ mod tests {
         let accepted_peer = accepted.swap(0, Ordering::AcqRel) as *mut c_void;
         let server_client = crate::iax::IaxClient::load(library).unwrap();
         let inbound = unsafe { server_client.adopt_inbound(accepted_peer) }.unwrap();
-        if asynchronous {
-            verify_attach_rejection(&mut host, inbound);
-        } else {
-            drop(inbound);
-        }
+        verify_attach_rejection(&mut host, inbound);
     }
 
     fn verify_attach_rejection(host: &mut HostServicesOwner, inbound: crate::iax::IaxPeer) {
@@ -1797,6 +1923,7 @@ mod tests {
         peer: *mut c_void,
         samples: AtomicUsize,
         observations: AtomicUsize,
+        failures: AtomicUsize,
     }
 
     unsafe extern "C" fn receive_samples(
@@ -1815,6 +1942,9 @@ mod tests {
         let state = unsafe { &*context.cast::<AsyncRead>() };
         let status =
             unsafe { super::peer_read(state.host, state.peer, Some(receive_samples), context) };
+        if status != 0 {
+            state.failures.fetch_add(1, Ordering::Relaxed);
+        }
         let mut observation: crate::abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
         observation.struct_size = size_of::<crate::abi::rptadv_peer_observation_v1>() as u32;
         observation.abi_version = 1;
@@ -1843,6 +1973,7 @@ mod tests {
             peer,
             samples: AtomicUsize::new(0),
             observations: AtomicUsize::new(0),
+            failures: AtomicUsize::new(0),
         }));
         let mut token = ptr::null_mut();
         assert_eq!(
@@ -1872,7 +2003,7 @@ mod tests {
             thread::yield_now();
         }
         let awakened = unsafe { (*state).observations.load(Ordering::Acquire) } > scheduled;
-        inbound.send_audio(&[0.25; 480]).unwrap();
+        crate::iax::tests::send_pcm(inbound, &[0.25; 480]);
         let deadline = Instant::now() + Duration::from_secs(3);
         while unsafe { (*state).samples.load(Ordering::Acquire) } < 480 && Instant::now() < deadline
         {
@@ -1888,7 +2019,14 @@ mod tests {
             "the owner deadline must schedule an idle peer"
         );
         assert!(awakened, "an explicit wake must schedule the parked peer");
-        assert_eq!(state.samples.load(Ordering::Acquire), 480);
+        assert!(
+            state.samples.load(Ordering::Acquire) >= 480,
+            "received {} frames, {} failed polls over {} callbacks at {} Hz",
+            state.samples.load(Ordering::Acquire),
+            state.failures.load(Ordering::Acquire),
+            state.observations.load(Ordering::Acquire),
+            inbound.sample_rate_hz()
+        );
         assert!(state.observations.load(Ordering::Acquire) > 0);
     }
 }

@@ -19,6 +19,11 @@ pub struct Egress {
     pending: Vec<f32>,
     used: usize,
     output: Vec<f32>,
+    delay: usize,
+    skip: usize,
+    input_frames: u64,
+    output_frames: u64,
+    finishing: bool,
 }
 // SAFETY: the noncloneable owner exclusively calls the converter; transfer does not
 // overlap any operation. The descriptor is process-lifetime immutable storage.
@@ -73,7 +78,7 @@ impl Egress {
                 }
                 return Err(EgressError);
             }
-            Ok(Self {
+            let mut value = Self {
                 api,
                 converter: NonNull::new(converter).ok_or(EgressError)?,
                 rate,
@@ -81,7 +86,21 @@ impl Egress {
                 pending: vec![0.0; maximum * 2],
                 used: 0,
                 output: vec![0.0; maximum * 2 + 64],
-            })
+                delay: 0,
+                skip: 0,
+                input_frames: 0,
+                output_frames: 0,
+                finishing: false,
+            };
+            let mut delay = 0;
+            if rate != 48000
+                && api.converter_output_delay.unwrap()(value.converter.as_ptr(), &mut delay) != 0
+            {
+                return Err(EgressError);
+            }
+            value.delay = delay as usize;
+            value.skip = value.delay;
+            Ok(value)
         }
     }
     /// Convert a continuing native block, retaining only unaccepted input.
@@ -90,15 +109,26 @@ impl Egress {
     /// output without flushing the continuing stream's FIR tail.
     /// The returned slice contains only real generated samples, never padded frames.
     pub fn process(&mut self, input: &[f32]) -> Result<&[f32], EgressError> {
+        if self.finishing && !input.is_empty() {
+            self.reset()?;
+        }
         if input.len() > self.maximum || self.used + input.len() > self.pending.len() {
             return Err(EgressError);
         }
+        self.input_frames = self
+            .input_frames
+            .checked_add(input.len() as u64)
+            .ok_or(EgressError)?;
         if self.rate == 48000 {
             self.output[..input.len()].copy_from_slice(input);
+            self.output_frames += input.len() as u64;
             return Ok(&self.output[..input.len()]);
         }
         self.pending[self.used..self.used + input.len()].copy_from_slice(input);
         self.used += input.len();
+        self.convert(usize::MAX)
+    }
+    fn convert(&mut self, limit: usize) -> Result<&[f32], EgressError> {
         let (mut consumed, mut generated) = (0, 0);
         // SAFETY: disjoint fixed buffers and unique converter; lengths fit u32.
         let result = unsafe {
@@ -118,11 +148,42 @@ impl Egress {
         }
         self.pending.copy_within(consumed as usize..self.used, 0);
         self.used -= consumed as usize;
-        Ok(&self.output[..generated as usize])
+        let skip = self.skip.min(generated as usize);
+        self.skip -= skip;
+        let count = (generated as usize - skip).min(limit);
+        self.output.copy_within(skip..skip + count, 0);
+        self.output_frames += count as u64;
+        Ok(&self.output[..count])
+    }
+    /// Drain the finite source, trimming startup history and zero padding. One
+    /// bounded step returns real source-rate output and whether its budget ended.
+    /// Subsequent real input starts a fresh burst; no shared adapter ABI change.
+    pub fn finish(&mut self) -> Result<(&[f32], bool), EgressError> {
+        self.finishing = true;
+        let budget = (u128::from(self.input_frames) * u128::from(self.rate)).div_ceil(48000);
+        let remaining = usize::try_from(budget.saturating_sub(u128::from(self.output_frames)))
+            .map_err(|_| EgressError)?;
+        if remaining == 0 {
+            return Ok((&self.output[..0], true));
+        }
+        let padding = self.maximum.min(self.pending.len() - self.used);
+        self.pending[self.used..self.used + padding].fill(0.0);
+        self.used += padding;
+        let count = self.convert(remaining)?.len();
+        Ok((&self.output[..count], count == remaining))
+    }
+    /// Borrow the previous process result until its encoder has consumed it.
+    /// `frames` is exactly the length returned by that process call.
+    pub(super) fn retained_output(&self, frames: usize) -> &[f32] {
+        &self.output[..frames]
     }
     /// Discard hidden FIR history after a discontinuity; never splice old PCM into a new span.
     pub(crate) fn reset(&mut self) -> Result<(), EgressError> {
         self.used = 0;
+        self.input_frames = 0;
+        self.output_frames = 0;
+        self.skip = self.delay;
+        self.finishing = false;
         // SAFETY: this owner exclusively holds the validated converter.
         (unsafe { self.api.reset.unwrap()(self.converter.as_ptr()) } == 0)
             .then_some(())

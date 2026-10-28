@@ -5,6 +5,7 @@
 #ifndef RPTADV_PRODUCT_H
 #define RPTADV_PRODUCT_H
 
+#include <rptadv_codec.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,13 +21,13 @@ struct UrpAstSiteRequest;
 struct UrpAstSiteSnapshot;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 5U
+#define RPTADV_PRODUCT_ABI_VERSION 6U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod5"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod6"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 7U
+#define RPTADV_HOST_ABI_VERSION 8U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst7"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst8"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -185,7 +186,7 @@ typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, si
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v7 {
+struct rptadv_host_services_v8 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -263,7 +264,8 @@ struct rptadv_host_services_v7 {
     int (*peer_send_text)(void *context, void *peer, const char *text, size_t length);
     /** Send one completed DTMF digit. */
     int (*peer_send_digit)(void *context, void *peer, uint8_t digit);
-    /** Send one normalized F32 PCM block, or one end-of-burst marker when empty. */
+    /** Send one normalized F32 PCM block, or one end-of-burst marker when empty.
+     * Required for PCM-only hosts; absent when the complete prepared group is supplied. */
     int (*peer_write)(void *context, void *peer, const float *samples, size_t sample_count);
     /** Destroy one uniquely owned peer. */
     void (*peer_destroy)(void *context, void *peer);
@@ -287,17 +289,21 @@ struct rptadv_host_services_v7 {
      * nonzero leaves the previous copied observation unchanged. */
     int (*peer_observe)(void *context, void *peer, struct rptadv_peer_observation_v1 *out);
 
-    /** Optional prepared-egress group: all five entries absent or present, with
-     * the async owner group. Encode codec-rate PCM into caller-owned bytes;
-     * zero succeeds, negative rejects. Capacity must cover sample_count. */
+    /** Optional prepared-egress group: all six entries absent or present, with
+     * the async owner group. Retain incomplete source units on the peer owner;
+     * return common codec status and explicit counts. OutputFull consumes no
+     * new PCM. Negative means invalid arguments or a host failure. */
     int (*peer_prepare_audio)(void *context, void *peer, const float *samples, size_t sample_count,
-                              uint8_t *encoded, size_t capacity);
+                              uint8_t *encoded, size_t capacity, uint32_t flush,
+                              struct rptadv_codec_encode_result_v1 *result);
+    /** Abandon expired/discontinuous PCM and encoder history, on the peer owner. */
+    int (*peer_reset_encoder)(void *context, void *peer);
     /** Submit encoded media at its original call-relative source timestamp.
      * Zero accepts ownership; one is uncommitted socket backpressure; negative
      * is terminal. The caller retains a would-block item without re-encoding.
      * A zero count submits the source-timed end-of-burst marker. */
     int (*peer_send_prepared)(void *context, void *peer, const uint8_t *encoded, size_t count,
-                              uint32_t timestamp_ms);
+                              uint32_t packet_frames, uint32_t timestamp_ms);
     /** Current call-relative monotonic milliseconds, saturating at UINT32_MAX. */
     uint32_t (*peer_elapsed_ms)(void *context, void *peer);
     /** Thread-safe signal-only wake. The caller must quiesce its notifications
@@ -363,7 +369,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v7 *host,
+    int (*start)(const struct rptadv_host_services_v8 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,

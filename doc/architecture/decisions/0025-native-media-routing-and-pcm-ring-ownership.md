@@ -274,8 +274,11 @@ of telemetry. Positive delays begin at actual controller unkey and do not
 restart when an ID intervenes. Expired polite-ID deadlines preempt a tail;
 its existing producer restarts the same captured attempt from the beginning,
 preserving Morse selection. Before first PCM, new receive cancels the opportunity;
-afterward it selects complete Morse. Traffic timeout does not suppress tail PCM
-or PTT; half-duplex and safety deferral cannot consume inaudible PCM or falsely
+afterward it selects complete Morse. Tail playout alone does not trip the
+traffic watchdog. When received traffic trips it, ADR 0008's local-only timeout
+and cleared notices suspend other local playback and restart it after recovery
+through this same producer and telemetry ring, without overlapping messages.
+Half-duplex and safety deferral cannot consume inaudible PCM or falsely
 advance cooldown. Only successful playback
 advances cooldown, and generated transmitter releases never arm another tail.
 

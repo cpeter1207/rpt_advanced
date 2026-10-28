@@ -37,7 +37,8 @@ typedef struct rptadv_jitter_config_v1 {
     uint32_t adjustment_step;       /**< Positive multiple of concealment_span. */
     uint32_t concealment_span;      /**< Smallest missing span. */
     uint32_t maximum_packets;       /**< Bounded opaque packet slots, 1 through 200. */
-    uint32_t maximum_payload_bytes; /**< Largest accepted opaque payload. */
+    uint32_t maximum_payload_bytes; /**< Largest opaque payload, 1 through 65527 bytes.
+                                     * Only occupied packets allocate payload storage. */
 } rptadv_jitter_config_v1;
 
 /** One received packet, copied before put returns. */

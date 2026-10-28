@@ -3,6 +3,14 @@ no-links =
     .tts = No links
     .morse = NO LINKS
 
+incoming-text =
+    .text = { $source } says: { $body }
+    .tts = { $kind ->
+        [node] Node { $source } says: { $body }
+       *[callsign] { $source } says: { $body }
+        }
+    .morse = { $source } SAYS { $body }
+
 peer-connected-local =
     .text = { $peer } connected
     .tts = { $peer } connected
@@ -235,6 +243,16 @@ scheduled-link-change =
         [connect] CONNECTING TO { $target } IN { $time_remaining }
        *[disconnect] DISCONNECTING FROM { $target } IN { $time_remaining }
         }
+
+repeater-timed-out =
+    .text = Repeater timed out after { $duration }.
+    .tts = Repeater timed out after { $duration }.
+    .morse = REPEATER TIMED OUT AFTER { $duration }
+
+repeater-timeout-cleared =
+    .text = Repeater timeout cleared.
+    .tts = Repeater timeout cleared.
+    .morse = REPEATER TIMEOUT CLEARED
 
 duration-unit =
     .text = { $unit ->

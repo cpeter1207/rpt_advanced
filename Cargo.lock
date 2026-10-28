@@ -627,6 +627,7 @@ name = "rptadv-product"
 version = "0.1.0-alpha17"
 dependencies = [
  "bindgen",
+ "crossbeam-queue",
  "libc",
  "libloading",
  "rpt-advanced-core",

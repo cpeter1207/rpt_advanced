@@ -9,7 +9,7 @@ The packages install separately. See
 ## Radio operation
 
 The controller uses 48 kHz audio at the local radio. It handles receiver audio,
-PTT, transmit hang time, time-out and lockout, local repeat, and half or full
+PTT, transmit hang time, transmit time-out, local repeat, and half or full
 duplex. It can play identifiers, announcements, courtesy tones, and scheduled
 messages. Media may come from a sound file, Piper speech, a generated tone, or
 Morse, according to the configured set. Piper and its voice model must be

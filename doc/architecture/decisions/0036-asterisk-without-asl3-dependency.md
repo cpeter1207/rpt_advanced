@@ -157,6 +157,19 @@ or package dependency check.
 
 ## Consequences
 
+### Codec host cutover (2026-10-27, integration in progress)
+
+Product ABI 6 (`rptadv.prod6`) requires host-services ABI 8 (`rptadv.hst8`).
+Prepared media carries encoder consumption, encoded bytes, real source span,
+wire-frame duration and timestamps independently. The standalone host delegates
+preparation/reset/send to IAX client ABI 2 and retains its codec catalog across
+calls and configuration reloads. Its listener uses server ABI 2 from the same
+IAX SONAME 2. The optional Asterisk host keeps its public PCM-only channel path;
+it does not load these codec providers or expose prepared-media operations.
+Both hosts require coordinated rebuilds. Product SONAME 1 and the existing
+control, radio and media-provider ABIs remain unchanged. Earlier ABI numbers
+below describe their original changes, not compatible current host tables.
+
 Audit imports, undefined symbols, module requirements, package dependencies,
 and startup assumptions, not just source file names. Build and integration
 validation must exercise rpt_advanced against supported ordinary Asterisk

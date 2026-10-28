@@ -55,6 +55,16 @@ static HOST_STOP_MODE: AtomicU64 = AtomicU64::new(0);
 
 static ENGINE: Mutex<Option<Arc<Engine>>> = Mutex::new(None);
 
+fn spawn_dial(operation: impl FnOnce() + Send + 'static) -> std::io::Result<JoinHandle<()>> {
+    #[cfg(test)]
+    if FAIL_DIAL_THREAD.swap(false, Ordering::AcqRel) {
+        return Err(std::io::Error::other("injected dial-thread failure"));
+    }
+    std::thread::Builder::new()
+        .name("rpt-link-dial".into())
+        .spawn(operation)
+}
+
 #[path = "lifecycle_site.rs"]
 mod site;
 
@@ -314,18 +324,7 @@ impl Engine {
                 .expect("accepted dial owns its job");
             let _ = engine.complete_dial(job, revision);
         };
-        #[cfg(test)]
-        let thread = if FAIL_DIAL_THREAD.swap(false, Ordering::AcqRel) {
-            Err(std::io::Error::other("injected dial-thread failure"))
-        } else {
-            std::thread::Builder::new()
-                .name("rpt-link-dial".into())
-                .spawn(operation)
-        };
-        #[cfg(not(test))]
-        let thread = std::thread::Builder::new()
-            .name("rpt-link-dial".into())
-            .spawn(operation);
+        let thread = spawn_dial(operation);
         let thread = match thread {
             Ok(thread) => thread,
             Err(_) => {
@@ -757,7 +756,7 @@ unsafe fn incoming_identity(
 /// # Safety
 /// The complete descriptor/code allocations must remain live through successful stop.
 unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v7,
+    host: *const abi::rptadv_host_services_v8,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
@@ -1071,8 +1070,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 5,
-    capability: *b"rptadv.prod5\0\0\0\0",
+    abi_version: 6,
+    capability: *b"rptadv.prod6\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),

@@ -49,7 +49,7 @@ def test_standalone_package_does_not_depend_on_asterisk() -> None:
     depends = stanza.split("Depends:", 1)[1].split("Description:", 1)[0]
     assert "asterisk" not in depends.lower()
     assert "app-rpt-advanced" not in depends.lower()
-    assert "librptadv-iax2-client1 (>= 0.1.0~alpha8)" in depends
+    assert "librptadv-iax2-client2 (>= 0.1.0~alpha9)" in depends
 
 
 def test_standalone_requires_radio_core_with_live_update_api() -> None:

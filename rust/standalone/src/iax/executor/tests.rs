@@ -188,7 +188,10 @@ unsafe extern "C" fn configure_failure(_: *mut c_void, _: *const c_void) -> i32 
 unsafe extern "C" fn enable_failure(_: *mut c_void, _: *mut c_void) -> i32 {
     -1
 }
-unsafe extern "C" fn observe(peer: *mut c_void, output: *mut c_void) -> i32 {
+unsafe extern "C" fn observe(
+    peer: *mut c_void,
+    output: *mut crate::abi::rptadv_iax2_peer_observation_v1,
+) -> i32 {
     assert_eq!(peer as usize, 123);
     unsafe { (*output.cast::<AtomicUsize>()).fetch_add(1, Ordering::Relaxed) };
     0

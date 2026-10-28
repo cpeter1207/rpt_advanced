@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 #[cfg(file_adapter)]
 use std::path::Path;
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 pub(crate) fn io_error(error: io::Error) -> MediaError {
@@ -83,6 +83,9 @@ impl Drop for ReaperGuard {
 pub(crate) struct ChildStream {
     child: OwnedChild,
     stdout: Option<ChildStdout>,
+    stdin: Option<ChildStdin>,
+    pending_input: Vec<u8>,
+    input_position: usize,
     _reaper: ReaperGuard,
     started: Instant,
     timeout: Duration,
@@ -90,7 +93,7 @@ pub(crate) struct ChildStream {
 }
 
 impl ChildStream {
-    /// Spawn an output stream, optionally writing and closing its stdin first.
+    /// Spawn without blocking on stdin; reads interleave bounded input/output progress.
     pub(crate) fn spawn(
         config: &Config,
         command: &mut Command,
@@ -125,6 +128,9 @@ impl ChildStream {
         let mut stream = Self {
             child: OwnedChild(child),
             stdout: None,
+            stdin: None,
+            pending_input: input.unwrap_or_default().to_vec(),
+            input_position: 0,
             _reaper: guard,
             started,
             timeout: config.process_timeout,
@@ -133,14 +139,14 @@ impl ChildStream {
         stream.stdout = stream.child.0.stdout.take();
         let stdout = stream.stdout.as_ref().ok_or(MediaError::Io)?;
         set_nonblocking(stdout).map_err(io_error)?;
-        if let Some(input) = input {
-            let mut stdin = stream
-                .child
-                .0
-                .stdin
-                .take()
-                .expect("stdin is piped whenever input is provided");
-            stdin.write_all(input).map_err(io_error)?;
+        stream.stdin = stream
+            .child
+            .0
+            .stdin
+            .take()
+            .filter(|_| !stream.pending_input.is_empty());
+        if let Some(stdin) = &stream.stdin {
+            set_nonblocking(stdin).map_err(io_error)?;
         }
         Ok(stream)
     }
@@ -153,6 +159,7 @@ impl ChildStream {
     ) -> Result<usize, MediaError> {
         loop {
             self.check_cancel_and_timeout(cancelled)?;
+            self.pump_input()?;
             let stdout = self.stdout.as_mut().ok_or(MediaError::Io)?;
             match read_retry_interrupted(|| stdout.read(output)) {
                 Ok(0) => return self.finish(cancelled),
@@ -169,6 +176,7 @@ impl ChildStream {
     fn finish(&mut self, cancelled: &impl Fn() -> bool) -> Result<usize, MediaError> {
         loop {
             self.check_cancel_and_timeout(cancelled)?;
+            self.pump_input()?;
             if let Some(status) = self.try_wait()? {
                 return if status.success() {
                     Ok(0)
@@ -178,6 +186,31 @@ impl ChildStream {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    fn pump_input(&mut self) -> Result<(), MediaError> {
+        let Some(stdin) = &mut self.stdin else {
+            return Ok(());
+        };
+        let end = (self.input_position + 8192).min(self.pending_input.len());
+        match stdin.write(&self.pending_input[self.input_position..end]) {
+            // A nonempty write to this owned nonblocking pipe makes progress or errors.
+            Ok(count) => self.input_position += count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(io_error(error)),
+        }
+        if self.input_position == self.pending_input.len() {
+            self.stdin.take();
+            self.pending_input.clear();
+        }
+        Ok(())
     }
 
     fn check_cancel_and_timeout(&self, cancelled: &impl Fn() -> bool) -> Result<(), MediaError> {
@@ -211,20 +244,18 @@ impl Drop for ChildStream {
     fn drop(&mut self) {
         // Close the pipe first so a child blocked writing can be killed and reaped.
         self.stdout.take();
+        self.stdin.take();
     }
 }
 
-fn set_nonblocking(stdout: &ChildStdout) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        set_nonblocking_fd(stdout.as_raw_fd())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = stdout;
-        Ok(())
-    }
+#[cfg(unix)]
+fn set_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
+    set_nonblocking_fd(pipe.as_raw_fd())
+}
+
+#[cfg(not(unix))]
+fn set_nonblocking<T>(_pipe: &T) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]

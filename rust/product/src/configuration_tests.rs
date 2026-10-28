@@ -95,7 +95,7 @@ unsafe extern "C" fn diagnostic(context: *mut c_void, pointer: *const c_char, le
 
 fn inspect(source: &str, secrets: bool) -> (i32, Collected) {
     let table = unsafe { &*rptadv_product_descriptor_v1() };
-    assert_eq!(table.abi_version, 5);
+    assert_eq!(table.abi_version, 6);
     let mut output = Collected::default();
     let context = (&mut output as *mut Collected).cast();
     let result = unsafe {

@@ -74,6 +74,36 @@ The audio, radio-control, and GPIO adapters are separate selected capabilities,
 not a single hardware-services facade. ADR 0028 assigns their ownership and
 requires them to replace the current `res_usbradio` dependency.
 
+### Protocol-neutral codec capabilities — accepted, implementation pending (2026-10-26)
+
+Codec implementations belong behind independently replaceable, versioned
+dynamic adapters. Their contracts are protocol-neutral: other protocol adapters
+can use the same codecs without importing or loading the IAX2 implementation.
+Codec adapters own codec bitstreams and encoder/decoder state. Each protocol
+adapter owns its format-ID mapping, negotiation and transport packet framing.
+Neither network I/O nor controller policy belongs in a codec adapter.
+
+Prefer released GPLv2-compatible implementations. Original implementations are
+allowed only for trivial gaps without a suitable compatible released library.
+Siren7, Siren14 and G.719 remain explicitly deferred. This decision defines a
+reusable codec boundary, not authorization to implement another protocol.
+Provider replacement retains this ADR's controlled reload/restart rules.
+
+The approved text-message codec likewise belongs to this protocol-neutral
+boundary. It applies to incoming human messages from EchoLink and every other
+text-capable protocol supported now or added later. It uses the
+speech-synthesis capability outside audio callbacks and produces incoming
+media, not polite controller telemetry. Controller policy routes its speech
+only to the local transmitter, mixed with receive audio including concurrent
+audio from its originating peer. Text-derived speech never enters peer audio
+egress. Forward eligible messages to other peers as text only when their
+protocols support forwarding; each peer chooses its own rendering. Retain the
+origin and normal no-echo policy. Protocol-control text is not a speech input.
+If synthesis fails, skip only the local spoken rendition and log an error,
+without Morse fallback or interruption of other audio. Text forwarding is
+independent of local synthesis. This does not implement any planned protocol
+adapter; the text-message codec remains unimplemented.
+
 ## Consequences
 
 FFmpeg, Hamlib, Piper, PortAudio/ALSA, the Asterisk integration,
@@ -113,7 +143,10 @@ existing owners; this decision does not introduce a generic OS adapter.
 ADR 0037 adds a mandatory standalone jitter adapter, initially backed by
 SpeexDSP's generic adaptive packet buffer. Only this separate Rust `cdylib`
 links SpeexDSP and owns its types, FFI and lifetime. Protocol/controller code
-uses neutral bounded packet operations; codecs and PCM-ring PLC remain separate.
+uses neutral bounded packet operations; codec-native concealment remains enabled
+and takes priority. The shared PCM ring supplies fallback concealment only for
+missing spans the codec cannot recover; it must not conceal native PLC output
+again. Codec work and fallback PCM-ring processing remain separate.
 It ships its own ABI-1 descriptor, SONAME and runtime/development packages,
 following the resolver adapter's workspace pattern. The standalone composition
 requires it at startup and retains it through peer-task shutdown. The standalone
@@ -191,3 +224,25 @@ timers, cooling and alarm protection continue while they acknowledge. Cached
 radio output masks do not prove current service: the successful shared service
 cycle must remain fresh. Stale status retains historical submission values
 without claiming current availability or electrical readback.
+
+### Finite codec source coverage (2026-10-27)
+
+The provider's existing ABI-1 encode result separates consumed input, covered
+real source frames and decoded wire duration. A finite flush emits at most one
+legal packet per call until delayed source content is drained. Priming packets
+may cover no real source; tail packets may consume no new input. Neither is
+discarded when it contains encoded bytes. Capacity failures do not advance the
+codec or its clocks. Reset abandons a segment's pending PCM and delayed tail.
+
+Only providers know their released codec's drain budget. Speex and Opus query
+their encoder API; Opus's documented total preskip is not labeled encoder-only
+buffering. Fixed released G.729, G.723.1 and LPC10 pipelines retain their tail
+padding without disabling decoder enhancement or native concealment. Causal
+filter delay is not silently folded into a forward-lookahead claim.
+
+The product's shared resampler owner trims setup history, drains the real
+source-duration budget and excludes zero padding before codec flush. Egress
+preserves original packet age and advances wire timestamps by decoded packet
+frames, including finite padding. A blocked send retries the same prepared
+bytes without another encode. Both hosts use the same conversion owner; the
+Asterisk PCM path retains its existing 20 ms pacing.

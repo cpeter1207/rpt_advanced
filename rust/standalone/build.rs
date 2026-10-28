@@ -6,6 +6,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DEB_HOST_MULTIARCH");
     println!("cargo:rerun-if-env-changed=RPT_ADVANCED_LIBDIR");
     println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
+    println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
+    println!("cargo:rerun-if-env-changed=RPTADV_IAX2_INCLUDE");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=../resolver-adapter/include/rptadv_resolver_adapter.h");
     println!("cargo:rerun-if-changed=../jitter-adapter/include/rptadv_jitter_adapter.h");
@@ -47,6 +49,16 @@ fn main() {
         .clang_arg("-I../speech-adapter/include")
         .clang_arg("-I../control-standalone-adapter/include")
         .clang_arg("-I/usr/include")
+        .clang_arg(format!(
+            "-I{}",
+            env::var("RPTADV_CODEC_INCLUDE")
+                .unwrap_or_else(|_| "/usr/include/rptadv-codec".to_owned())
+        ))
+        .clang_arg(format!(
+            "-I{}",
+            env::var("RPTADV_IAX2_INCLUDE")
+                .unwrap_or_else(|_| "/usr/include/rptadv_iax2".to_owned())
+        ))
         .clang_arg(format!(
             "-I{}",
             env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())

@@ -3,6 +3,9 @@ use super::*;
 #[path = "site_tests.rs"]
 mod site;
 
+#[path = "timeout_tests.rs"]
+mod timeout;
+
 thread_local! {
     static AUDIO_ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
@@ -34,6 +37,102 @@ static TEST_ALLOCATOR: AllocationCounter = AllocationCounter;
 
 fn media(value: f32, count: usize) -> PreparedMedia {
     PreparedMedia::new(Some(vec![value; count]), "E", MorseSettings::default()).unwrap()
+}
+
+#[test]
+fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
+    for peer_reply in [false, true] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.process_audio(false, false, &[], &mut [0.0; 12000]);
+        let peer = crate::link::PeerSignals::new();
+        assert!(control.queue_prepared_status(
+            media(0.75, 100).reply_to(peer_reply.then(|| peer.reply_target()))
+        ));
+        let mut output = [0.0];
+        node.process_audio(false, false, &[], &mut output);
+        assert_eq!(output, [if peer_reply { 0.0 } else { 0.75 }]);
+        let mut parrot = [0.0];
+        let mut active = false;
+        let mut replies = [PeerReplySample::default()];
+        node.process_audio_with_parrot(
+            false,
+            false,
+            false,
+            &[],
+            &mut output,
+            ParrotOutput {
+                samples: &mut parrot,
+                active: &mut active,
+                replies: Some(&mut replies),
+                regeneration: None,
+                local_media: crate::link::LocalMedia {
+                    samples: &[0.25],
+                    active: true,
+                },
+            },
+        );
+        assert_eq!(output, [0.25], "voice stops at the first text sample");
+        assert_eq!(replies[0].sample, if peer_reply { 0.75 } else { 0.0 });
+        node.process_audio(false, false, &[], &mut output);
+        if peer_reply {
+            assert_eq!(output, [0.0], "peer reply stays off the local transmitter");
+        } else {
+            assert!(
+                output[0] > 0.0 && output[0] < 0.5,
+                "Morse remains selected after text"
+            );
+        }
+    }
+}
+
+#[test]
+fn text_local_mix_callback_does_not_allocate_or_release_storage() {
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: true,
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut output = [0.0; 16];
+    let mut parrot = [0.0; 16];
+    let mut active = false;
+    AUDIO_ALLOCATIONS.with(|count| count.set(Some(0)));
+    let keyed = node.process_audio_with_parrot(
+        false,
+        false,
+        false,
+        &[],
+        &mut output,
+        ParrotOutput {
+            samples: &mut parrot,
+            active: &mut active,
+            replies: None,
+            regeneration: None,
+            local_media: crate::link::LocalMedia {
+                samples: &[0.25; 16],
+                active: true,
+            },
+        },
+    );
+    let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None));
+    assert_eq!(allocations, Some(0));
+    assert!(keyed);
+    assert_eq!(output, [0.25; 16]);
+    assert_eq!(parrot, [0.0; 16]);
+    assert!(!active);
 }
 
 #[test]
@@ -186,13 +285,12 @@ fn configured_message_suppresses_repeat_but_still_switches_to_morse_on_receive()
 }
 
 #[test]
-fn configured_message_survives_traffic_lockout_without_leaking_timed_out_receive() {
+fn configured_message_waits_out_traffic_timeout_without_leaking_receive() {
     let (mut node, mut control) = NodeController::new(
         ControllerSettings {
             full_duplex: true,
             telemetry_duck_db: 0,
             transmit_timeout_ms: 1,
-            timeout_lockout_ms: 100,
             ..Default::default()
         },
         vec![],
@@ -207,15 +305,11 @@ fn configured_message_survives_traffic_lockout_without_leaking_timed_out_receive
     );
     node.process_audio(false, false, &[], &mut [0.0]);
     let mut output = [0.25; 4800];
-    assert!(node.process_audio(true, false, &[0.25; 4800], &mut output));
-    assert!(
-        output[96..].iter().any(|sample| *sample != 0.0),
-        "Morse remains audible after traffic timeout"
-    );
-    assert!(
-        output[96..].iter().all(|sample| sample.abs() <= 0.502),
-        "timed-out receiver must not ride message PTT"
-    );
+    assert!(!node.process_audio(true, false, &[0.25; 4800], &mut output));
+    assert!(output[96..].iter().all(|sample| *sample == 0.0));
+    let mut restored = [0.0; 12096];
+    assert!(!node.process_audio(false, false, &[], &mut restored));
+    assert!(restored.iter().any(|sample| *sample != 0.0));
 }
 
 #[test]
@@ -630,6 +724,7 @@ fn receive_defers_status_and_switches_identifiers_and_announcements_to_morse() {
                             active: &mut parrot_active,
                             replies: Some(&mut replies),
                             regeneration: None,
+                            local_media: Default::default(),
                         },
                     );
                     if source == 3 {
@@ -784,6 +879,7 @@ fn regenerate(
             active: &mut active,
             replies: None,
             regeneration: Some(tones),
+            local_media: Default::default(),
         },
     )
 }
@@ -910,6 +1006,7 @@ fn regeneration_consumption_does_not_allocate_or_free_on_audio() {
             active: &mut active,
             replies: None,
             regeneration: Some(&[Some(0.2), Some(0.0), None]),
+            local_media: Default::default(),
         },
     );
     let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
@@ -951,6 +1048,7 @@ fn peer_reply_completion_and_cancellation_never_allocate_or_free_on_audio() {
                 active: &mut active,
                 replies: Some(&mut replies),
                 regeneration: None,
+                local_media: Default::default(),
             },
         );
         let allocations = AUDIO_ALLOCATIONS.with(|count| count.replace(None).unwrap());
@@ -1005,6 +1103,7 @@ fn pending_peer_reply_stays_silent_and_ended_reply_is_reclaimed() {
                 active: &mut active,
                 replies: Some(replies),
                 regeneration: None,
+                local_media: Default::default(),
             },
         )
     };
@@ -1192,6 +1291,7 @@ fn parrot_output_size_mismatch_skips_sample_processing() {
             active: &mut active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
 
@@ -1678,6 +1778,7 @@ fn receive_activity_discards_a_queued_parrot_before_playback() {
             active: &mut parrot_active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
 
@@ -1714,6 +1815,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
             active: &mut parrot_active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -1730,6 +1832,7 @@ fn receive_activity_interrupts_and_discards_active_parrot_audio() {
             active: &mut parrot_active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
 
@@ -1766,6 +1869,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
             active: &mut active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert_eq!(parrot, [0.4]);
@@ -1782,6 +1886,7 @@ fn disabling_parrot_interrupts_playback_at_the_next_audio_boundary() {
             active: &mut active,
             replies: None,
             regeneration: None,
+            local_media: Default::default(),
         },
     );
     assert_eq!(parrot, [0.0]);
@@ -2567,7 +2672,6 @@ fn timeout_requires_deadline_and_unkey() {
     let config = ControllerSettings {
         full_duplex: true,
         transmit_timeout_ms: 1,
-        timeout_lockout_ms: 2,
         ..ControllerSettings::default()
     };
     let (mut node, _) =
@@ -2662,7 +2766,7 @@ fn courtesy_selection_cancellation_latest_unkey_and_kerchunk() {
 fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
     for (limit, frames, expect_hang) in [(1, 1, false), (1, 48, false), (1, 49, true), (0, 1, true)]
     {
-        for release_message in [false, true] {
+        for release_interval in [None, Some(0), Some(60_000)] {
             let (mut node, _) = NodeController::new(
                 ControllerSettings {
                     full_duplex: true,
@@ -2671,10 +2775,10 @@ fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
                     ..ControllerSettings::default()
                 },
                 vec![],
-                if release_message {
+                if let Some(interval_ms) = release_interval {
                     vec![Announcement {
                         media: media(0.5, 1),
-                        interval_ms: 0,
+                        interval_ms,
                     }]
                 } else {
                     vec![]
@@ -2686,7 +2790,7 @@ fn kerchunk_unkeys_immediately_without_hang_or_release_messages() {
             assert_eq!(
                 node.process_event(false, false),
                 expect_hang,
-                "limit={limit} frames={frames} message={release_message}"
+                "limit={limit} frames={frames} message={release_interval:?}"
             );
             if !expect_hang {
                 let mut output = [0.0; 1000];

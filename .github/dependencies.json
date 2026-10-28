@@ -15,9 +15,20 @@
     "packages": ["librptadvdtmf1", "librptadvdtmf-dev"]
   },
   {
+    "repository": "rptadv-codec-adapters",
+    "sha": "c284e0cf4d2e3f400cba47c0ac8819d17fa8dfaf",
+    "packages": [
+      "librptadv-codec-dev", "librptadv-codec-g7111", "librptadv-codec-pcm1",
+      "librptadv-codec-gsm1", "librptadv-codec-speex1", "librptadv-codec-opus1",
+      "librptadv-codec-ffmpeg1", "librptadv-codec-bcg7291", "librptadv-codec-ilbc1",
+      "librptadv-codec-spandsp1", "librptadv-codec-dialogic1",
+      "librptadv-bcg729-gpl2-0", "librptadv-ilbc2-2", "librptadv-dialogic1"
+    ]
+  },
+  {
     "repository": "librptadviax2",
-    "sha": "dd32f7e8a05f844b6dd86938878274a06db0fc04",
-    "packages": ["librptadv-iax2-client1", "librptadv-iax2-client-dev"]
+    "sha": "3e77301944fd99e7a8e49ad63f6a488c98064e7f",
+    "packages": ["librptadv-iax2-client2", "librptadv-iax2-client-dev"]
   },
   {
     "repository": "rptadv-portaudio-alsa-adapter",

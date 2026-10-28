@@ -23,6 +23,27 @@ Incoming peers must have a verified node identity. Set `link_allow_nodes` and
 `link_lookup_method` and any directory files to control node lookup. See
 [node settings](configuration.md#node-settings) for the exact rules.
 
+## Link audio and text
+
+Standalone links support ULAW, ALAW, GSM, G.723.1, G.726 AAL2, Dialogic ADPCM,
+SLIN, LPC10, G.729, Speex, iLBC, G.726, G.722, SLIN16, Speex16, and Opus.
+ULAW is preferred when both nodes support it. The radio stays at 48 kHz.
+G.723.1 sends at 6.3 kb/s and accepts 5.3 or 6.3 kb/s. IAX iLBC uses 30 ms
+frames. Opus sends mono 20 ms packets. Siren7, Siren14, and G.719 are not offered.
+
+Human text addressed to this node, or sent to all nodes, is spoken on the local
+transmitter. It uses the node's speech voice, speed, and level. The spoken
+message identifies its sender and mixes with received audio. Playing voice
+telemetry switches to its Morse substitute when text speech starts.
+Protocol commands and unknown text forms are not spoken. Message text is not
+run as a command or expanded as a message template.
+
+Text may be forwarded as text to other eligible links. Its spoken audio is never
+sent to them. The original sender and incoming link do not receive a copy back.
+Local speech accepts up to 4096 UTF-8 bytes per message, four pending messages
+per source connection, and 64 per node. A full speech queue or speech failure
+skips local speech without stopping link audio or text forwarding.
+
 ## Control links by radio
 
 Send DTMF while using the local receiver. These are the default commands; a

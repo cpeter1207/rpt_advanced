@@ -8,31 +8,7 @@ use std::{
 
 pub(crate) type Step = unsafe extern "C" fn(*mut c_void) -> i32;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Descriptor {
-    struct_size: u32,
-    abi_version: u32,
-    capability: [u8; 16],
-    runtime_create: Option<unsafe extern "C" fn(*mut *mut c_void) -> i32>,
-    runtime_destroy: Option<unsafe extern "C" fn(*mut c_void)>,
-    peer_attach: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *mut c_void,
-            Option<Step>,
-            *mut c_void,
-            *mut *mut c_void,
-        ) -> i32,
-    >,
-    peer_stop: Option<unsafe extern "C" fn(*mut c_void)>,
-    peer_detach: Option<unsafe extern "C" fn(*mut c_void)>,
-    peer_configure_jitter: Option<unsafe extern "C" fn(*mut c_void, *const c_void) -> i32>,
-    server_enable: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32>,
-    peer_observe: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32>,
-    peer_wake: Option<unsafe extern "C" fn(*mut c_void)>,
-    peer_set_deadline: Option<unsafe extern "C" fn(*mut c_void, u64) -> i32>,
-}
+type Descriptor = crate::abi::rptadv_iax2_async_descriptor_v1;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Error {
@@ -198,7 +174,7 @@ impl Executor {
     /// Peer is exclusively owned by the caller. Output is a writable ABI1 peer
     /// observation record with its structure size and ABI version initialized.
     pub(crate) unsafe fn observe(&self, peer: *mut c_void, output: *mut c_void) -> i32 {
-        unsafe { self.api.peer_observe.unwrap()(peer, output) }
+        unsafe { self.api.peer_observe.unwrap()(peer, output.cast()) }
     }
 }
 

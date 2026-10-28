@@ -24,6 +24,25 @@ fn unknown_input_warns_once_with_source_context() {
 }
 
 #[test]
+fn obsolete_timeout_lockout_warns_without_blocking_watchdog_resolution() {
+    for section in ["general", "1000"] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[{section}]\ntimeout_lockout_ms=30000\ntransmit_timeout_ms=2500\n"
+        ))
+        .unwrap();
+        let resolved =
+            super::ResolvedNodeSettings::resolve(&document, &super::NodeId::new("1000").unwrap())
+                .unwrap();
+        assert_eq!(resolved.value.transmit_timeout_ms, 2500);
+        assert_eq!(resolved.warnings.len(), 1);
+        assert_eq!(resolved.warnings[0].section, section);
+        assert_eq!(resolved.warnings[0].key, "timeout_lockout_ms");
+        assert_eq!(resolved.warnings[0].message, "unknown option ignored");
+        assert_eq!(resolved.warnings[0].fallback, "not configured");
+    }
+}
+
+#[test]
 fn statpost_options_are_recognized_in_global_and_node_sections() {
     let document = ConfigDocument::parse(
         "[general]\nstatpost_url=https://stats.example/report?site=main\nstatpost_time=60\n[1000]\nstatpost_url=http://127.0.0.1:8080/status\nstatpost_time=300\n",
@@ -500,7 +519,6 @@ fn malformed_or_conflicting_permanent_node_lists_report_specific_errors() {
 fn invalid_typed_options_report_exact_builtin_fallbacks() {
     for (section, key, expected) in [
         ("general", "transmit_timeout_ms", "180000"),
-        ("general", "timeout_lockout_ms", "30000"),
         ("general", "kerchunk_max_ms", "500"),
         ("general", "telemetry_duck_db", "-20"),
         ("general", "courtesy_delay_ms", "250"),

@@ -6,6 +6,8 @@ Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
  libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha3),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha2),
+ librptadv-codec-dev (>= 0.1.0~alpha1),
+ librptadv-iax2-client-dev (>= 0.1.0~alpha9),
  librptadvtone-dev (>= 0.1.0~alpha1),
  librptadvmorse-dev (>= 0.1.0~alpha1-1),
  librptadvdtmf-dev (>= 0.1.0~alpha2-1),
@@ -36,7 +38,17 @@ Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
  librptadv-portaudio-alsa-adapter2 (>= 0.2.0~alpha3),
  librptadv-gpio-adapter1 (>= 0.1.0~alpha2),
  librptadv-ffmpeg-adapter1 (>= 0.1.0~alpha2),
- librptadv-iax2-client1 (>= 0.1.0~alpha8)
+ librptadv-codec-g7111 (>= 0.1.0~alpha1),
+ librptadv-codec-pcm1 (>= 0.1.0~alpha1),
+ librptadv-codec-gsm1 (>= 0.1.0~alpha1),
+ librptadv-codec-speex1 (>= 0.1.0~alpha1),
+ librptadv-codec-opus1 (>= 0.1.0~alpha1),
+ librptadv-codec-ffmpeg1 (>= 0.1.0~alpha1),
+ librptadv-codec-bcg7291 (>= 0.1.0~alpha1),
+ librptadv-codec-ilbc1 (>= 0.1.0~alpha1),
+ librptadv-codec-spandsp1 (>= 0.1.0~alpha1),
+ librptadv-codec-dialogic1 (>= 0.1.0~alpha1),
+ librptadv-iax2-client2 (>= 0.1.0~alpha9)
 Description: standalone Rust-owned radio controller
  Standalone controller service for configured radio nodes. It has no runtime
  dependency on Asterisk or ASL3; the deprecated Asterisk adapter is packaged
@@ -73,7 +85,7 @@ Description: portable controller product for rpt_advanced
 Package: librptadv-product-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-product1 (= ${binary:Version})
+Depends: ${misc:Depends}, librptadv-product1 (= ${binary:Version}), librptadv-codec-dev
 Description: development files for the rpt_advanced product
  Public C header and unversioned linker name for the versioned product.
 

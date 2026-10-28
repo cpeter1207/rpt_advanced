@@ -53,7 +53,14 @@ impl TailPlanner {
         })
     }
 
-    pub fn observe(&mut self, active: bool, now: u64, hang: u64, suppressed: bool) {
+    pub fn observe(
+        &mut self,
+        active: bool,
+        now: u64,
+        hang: u64,
+        suppressed: bool,
+        playback_allowed: bool,
+    ) {
         if active {
             self.hang_until = None;
             for item in &mut self.items {
@@ -61,7 +68,7 @@ impl TailPlanner {
                     item.tail.media.0.cancel();
                     item.pending = false;
                     item.deadline = None;
-                } else if item.suspended {
+                } else if item.suspended && playback_allowed {
                     // A receive edge during ID preemption still latches Morse for this attempt.
                     item.tail.media.0.render(true, &mut []);
                 }

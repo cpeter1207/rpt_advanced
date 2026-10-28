@@ -36,6 +36,7 @@ impl crate::audio::PcmStreamReader for StreamReader {
 
 struct Session {
     sources: Arc<Mutex<Vec<MediaSource>>>,
+    one_shot: Arc<Mutex<Vec<bool>>>,
     started: Arc<AtomicBool>,
     fail_register: bool,
     fail_start: bool,
@@ -44,11 +45,15 @@ impl StationMediaSession for Session {
     fn register_program(
         &mut self,
         program: crate::media::MediaProgram,
-        _: bool,
+        one_shot: bool,
     ) -> Result<Box<dyn crate::audio::PcmStreamReader>, MediaError> {
         if self.fail_register {
             return Err(MediaError::Io);
         }
+        if !one_shot {
+            assert!(!self.started.load(Ordering::Acquire));
+        }
+        self.one_shot.lock().unwrap().push(one_shot);
         self.sources.lock().unwrap().extend(program.primary);
         Ok(Box::new(StreamReader {
             samples: vec![0.5, 0.25],
@@ -77,6 +82,7 @@ impl StationMediaSession for Session {
 
 struct Media {
     sources: Arc<Mutex<Vec<MediaSource>>>,
+    one_shot: Arc<Mutex<Vec<bool>>>,
     started: Arc<AtomicBool>,
     fail_register: bool,
     fail_start: bool,
@@ -101,6 +107,7 @@ impl NativeMediaPreparer for Media {
         assert_eq!(generation, 7);
         Ok(Box::new(Session {
             sources: Arc::clone(&self.sources),
+            one_shot: Arc::clone(&self.one_shot),
             started: Arc::clone(&self.started),
             fail_register: self.fail_register,
             fail_start: self.fail_start,
@@ -110,6 +117,7 @@ impl NativeMediaPreparer for Media {
 fn media(fail_register: bool, fail_start: bool) -> Media {
     Media {
         sources: Arc::new(Mutex::new(Vec::new())),
+        one_shot: Arc::new(Mutex::new(Vec::new())),
         started: Arc::new(AtomicBool::new(false)),
         fail_register,
         fail_start,
@@ -126,9 +134,205 @@ fn settings() -> ResolvedIdentifierSettings {
 }
 
 #[test]
+fn timeout_notices_are_reusable_sources_prepared_before_station_start() {
+    let config = ConfigDocument::parse(
+        "[1000]\ntransmit_timeout_ms=180001\n\
+         [speech 1000]\nvoice=timeout.onnx\nspeed_percent=125\nlevel_db=-9\n\
+         [morse 1000]\nspeed_wpm=17\nfrequency_hz=725\nlevel_db=-12\n",
+    )
+    .unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    let media = media(false, false);
+    controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        None,
+    )
+    .unwrap();
+
+    assert!(media.started.load(Ordering::Acquire));
+    assert_eq!(*media.one_shot.lock().unwrap(), [false, false]);
+    let sources = media.sources.lock().unwrap();
+    assert_eq!(sources.len(), 2);
+    for (source, speech_text, morse_text) in [
+        (
+            &sources[0],
+            "Repeater timed out after 3 minutes, and 1 second.",
+            "REPEATER TIMED OUT AFTER 3M 1S",
+        ),
+        (
+            &sources[1],
+            "Repeater timeout cleared.",
+            "REPEATER TIMEOUT CLEARED",
+        ),
+    ] {
+        let speech = source.speech.as_ref().unwrap();
+        assert_eq!(speech.text, speech_text);
+        assert_eq!(speech.model, std::path::Path::new("timeout.onnx"));
+        assert_eq!(speech.speed_percent, 125);
+        assert_eq!(speech.level_db, -9);
+        let morse = source.morse.as_ref().unwrap();
+        assert_eq!(morse.text, morse_text);
+        assert_eq!(morse.speed_wpm, 17);
+        assert_eq!(morse.frequency_hz, 725.0);
+        assert_eq!(morse.level_db, -12);
+        assert!(source.file.is_none());
+        assert!(source.tone.is_none());
+        assert_eq!(source.provider_gain_db, 0);
+    }
+}
+
+#[test]
+fn disabled_timeout_registers_no_protection_sources() {
+    let config = ConfigDocument::parse("[1000]\ntransmit_timeout_ms=0\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    let media = media(false, false);
+    controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(media.started.load(Ordering::Acquire));
+    assert!(media.sources.lock().unwrap().is_empty());
+    assert!(media.one_shot.lock().unwrap().is_empty());
+}
+
+#[test]
+fn prepared_timeout_sources_reach_the_controller_priority_playback() {
+    let config = ConfigDocument::parse("[1000]\nfull_duplex=yes\ntransmit_timeout_ms=1\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    let media = media(false, false);
+    let (mut controller, _, _, _station, _) = controller(
+        &config,
+        &node,
+        &resolved,
+        &media,
+        7,
+        &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        None,
+    )
+    .unwrap();
+    controller.process_audio(true, false, &[], &mut [0.8; 48]);
+    let mut notice = [0.8; 2];
+    controller.process_audio(true, false, &[], &mut notice);
+    assert_eq!(notice, [0.5, 0.25]);
+    let mut cleared = [0.8; 2];
+    controller.process_audio(false, false, &[], &mut cleared);
+    assert_eq!(cleared, [0.5, 0.25]);
+}
+
+#[test]
+fn timeout_media_registration_and_start_failure_reject_preparation() {
+    let config = ConfigDocument::parse("[1000]\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    for (fail_register, fail_start) in [(true, false), (false, true)] {
+        let media = media(fail_register, fail_start);
+        assert!(matches!(
+            controller(
+                &config,
+                &node,
+                &resolved,
+                &media,
+                7,
+                &crate::messages::MessageCatalog::load("en-US").unwrap(),
+                None,
+            ),
+            Err(RuntimeError::Preparation)
+        ));
+        assert!(!media.started.load(Ordering::Acquire));
+    }
+}
+
+#[test]
+fn timeout_milliseconds_round_up_to_the_reported_second() {
+    for (milliseconds, speech, morse) in [
+        (1, "1 second", "1S"),
+        (1000, "1 second", "1S"),
+        (1001, "2 seconds", "2S"),
+        (60_000, "1 minute", "1M"),
+        (60_001, "1 minute, and 1 second", "1M 1S"),
+    ] {
+        let config =
+            ConfigDocument::parse(&format!("[1000]\ntransmit_timeout_ms={milliseconds}\n"))
+                .unwrap();
+        let node = NodeId::new("1000").unwrap();
+        let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+        let media = media(false, false);
+        controller(
+            &config,
+            &node,
+            &resolved,
+            &media,
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+            None,
+        )
+        .unwrap();
+        let sources = media.sources.lock().unwrap();
+        assert_eq!(
+            sources[0].speech.as_ref().unwrap().text,
+            format!("Repeater timed out after {speech}.")
+        );
+        assert_eq!(
+            sources[0].morse.as_ref().unwrap().text,
+            format!("REPEATER TIMED OUT AFTER {morse}")
+        );
+    }
+}
+
+#[test]
+fn timeout_duration_uses_the_captured_calendar_with_a_no_clock_fallback() {
+    let config = ConfigDocument::parse("[1000]\ntransmit_timeout_ms=2419200000\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
+    for (civil, speech, morse) in [
+        (None, "4 weeks", "4W"),
+        (
+            Some(CivilTime::new(2026, 2, 1, Weekday::Sunday, 0, 0).unwrap()),
+            "1 month",
+            "1M",
+        ),
+    ] {
+        let media = media(false, false);
+        controller(
+            &config,
+            &node,
+            &resolved,
+            &media,
+            7,
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+            civil,
+        )
+        .unwrap();
+        let sources = media.sources.lock().unwrap();
+        assert_eq!(
+            sources[0].speech.as_ref().unwrap().text,
+            format!("Repeater timed out after {speech}.")
+        );
+        assert_eq!(
+            sources[0].morse.as_ref().unwrap().text,
+            format!("REPEATER TIMED OUT AFTER {morse}")
+        );
+    }
+}
+
+#[test]
 fn static_telemetry_is_registered_and_identifiers_request_fresh_attempts() {
     let config = ConfigDocument::parse(
-        "[1000]\n\
+        "[1000]\ntransmit_timeout_ms=0\n\
          [identifier 1000 id]\ninterval_ms=1\nregardless_of_activity=yes\nsound_file=id.wav\nspeech_text=ID\nmorse_text=ID\n\
          [announcement 1000 news]\nmorse_text=NEWS\n\
          [courtesy 1000 link]\ninput=link\ntone_sequence=500/10\nmorse_text=L\n",
@@ -144,6 +348,7 @@ fn static_telemetry_is_registered_and_identifiers_request_fresh_attempts() {
         &media,
         7,
         &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        None,
     )
     .unwrap();
     assert!(media.started.load(Ordering::Acquire));
@@ -168,7 +373,7 @@ fn static_telemetry_is_registered_and_identifiers_request_fresh_attempts() {
 #[test]
 fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
     let config = ConfigDocument::parse(
-        "[1000]\n\
+        "[1000]\ntransmit_timeout_ms=0\n\
          [identifier 1000 empty]\n\
          [announcement 1000 empty]\n\
          [announcement 1000 recorded]\nsound_file=news.wav\n\
@@ -188,6 +393,7 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
         &media,
         7,
         &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        None,
     )
     .unwrap();
 
@@ -204,7 +410,7 @@ fn empty_sources_are_skipped_and_receiver_and_peer_courtesy_are_owned() {
 #[test]
 fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
     let config = ConfigDocument::parse(
-        "[1000]\ntransmit_hang_ms=0\nkerchunk_max_ms=0\n\
+        "[1000]\ntransmit_hang_ms=0\ntransmit_timeout_ms=0\nkerchunk_max_ms=0\n\
          [identifier 1000 broken]\ninterval_ms=1\nregardless_of_activity=yes\ncontent={message_macro_missing}\n\
          [tail 1000 empty]\n\
          [tail 1000 broken]\ncontent={message_macro_missing}\n\
@@ -224,6 +430,7 @@ fn invalid_recurring_content_is_disabled_without_blocking_a_valid_tail() {
         &media,
         7,
         &crate::messages::MessageCatalog::load("en-US").unwrap(),
+        None,
     )
     .unwrap();
     let disabled = recipes
@@ -281,6 +488,7 @@ fn tails_allow_file_or_speech_without_relaxing_identifier_morse_requirements() {
             &media,
             7,
             &crate::messages::MessageCatalog::load("en-US").unwrap(),
+            None,
         )
         .unwrap();
         let disabled: Vec<_> = recipes
@@ -318,6 +526,7 @@ fn manual_message_selectors_share_the_identifier_and_tail_namespace() {
             &media,
             7,
             &crate::messages::MessageCatalog::load("en-US").unwrap(),
+            None,
         );
         assert_eq!(
             result.is_ok(),
@@ -350,6 +559,7 @@ fn event_selectors_share_the_existing_message_namespace() {
             &media(false, false),
             7,
             &crate::messages::MessageCatalog::load("en-US").unwrap(),
+            None,
         );
         assert_eq!(result.is_ok(), selector == 2);
         if let Ok((_, _, _, _, recipes)) = result {
@@ -419,8 +629,10 @@ fn config_failures_convert_to_the_runtime_error_boundary() {
 
 #[test]
 fn station_registration_and_start_fail_before_publishing_controller_state() {
-    let config =
-        ConfigDocument::parse("[1000]\n[announcement 1000 news]\nmorse_text=NEWS\n").unwrap();
+    let config = ConfigDocument::parse(
+        "[1000]\ntransmit_timeout_ms=0\n[announcement 1000 news]\nmorse_text=NEWS\n",
+    )
+    .unwrap();
     let node = NodeId::new("1000").unwrap();
     let resolved = ResolvedNodeSettings::resolve(&config, &node).unwrap().value;
     assert!(matches!(
@@ -430,7 +642,8 @@ fn station_registration_and_start_fail_before_publishing_controller_state() {
             &resolved,
             &media(true, false),
             7,
-            &crate::messages::MessageCatalog::load("en-US").unwrap()
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+            None,
         ),
         Err(RuntimeError::Preparation)
     ));
@@ -441,7 +654,8 @@ fn station_registration_and_start_fail_before_publishing_controller_state() {
             &resolved,
             &media(false, true),
             7,
-            &crate::messages::MessageCatalog::load("en-US").unwrap()
+            &crate::messages::MessageCatalog::load("en-US").unwrap(),
+            None,
         ),
         Err(RuntimeError::Preparation)
     ));
