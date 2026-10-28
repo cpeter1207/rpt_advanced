@@ -87,6 +87,14 @@ pub struct RuntimeConfig {
     pub abi_version: u32,
     /// Explicit worker count 1..256 or zero for the default.
     pub worker_threads: u32,
+    /// Optional complete resource tail: path to the released GSM codec DSO.
+    /// All three empty retains lifecycle-only preparation; GSM and jitter are
+    /// required together for enabled accounts. Older 12-byte prefixes stay valid.
+    pub gsm_library: ByteSpan,
+    /// Optional released narrowband Speex DSO; empty retains mandatory GSM only.
+    pub speex_library: ByteSpan,
+    /// Released packet-jitter adapter DSO, retained through final QSO destruction.
+    pub jitter_library: ByteSpan,
 }
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -94,6 +102,9 @@ impl Default for RuntimeConfig {
             struct_size: size_of::<Self>() as u32,
             abi_version: 1,
             worker_threads: 0,
+            gsm_library: ByteSpan::default(),
+            speex_library: ByteSpan::default(),
+            jitter_library: ByteSpan::default(),
         }
     }
 }

@@ -83,3 +83,27 @@ fn partial_descriptor_fails_before_side_effect() {
     );
     assert_eq!(CALLS.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn runtime_resource_tail_preserves_the_three_word_lifecycle_prefix() {
+    use std::mem::offset_of;
+    let config = abi::RuntimeConfig {
+        gsm_library: abi::ByteSpan {
+            data: b"gsm.so".as_ptr(),
+            length: 6,
+        },
+        speex_library: abi::ByteSpan::default(),
+        jitter_library: abi::ByteSpan {
+            data: b"jitter.so".as_ptr(),
+            length: 9,
+        },
+        ..Default::default()
+    };
+    assert_eq!(offset_of!(abi::RuntimeConfig, worker_threads), 8);
+    assert_eq!(offset_of!(abi::RuntimeConfig, gsm_library), 16);
+    assert_eq!(offset_of!(abi::RuntimeConfig, speex_library), 32);
+    assert_eq!(offset_of!(abi::RuntimeConfig, jitter_library), 48);
+    assert_eq!(config.struct_size, 64);
+    let words = unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&config).cast::<u32>(), 3) };
+    assert_eq!(words, [64, 1, 0]);
+}
