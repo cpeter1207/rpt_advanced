@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
+use std::{collections::BTreeMap, fmt, path::Path};
 
 /// IAX secrets parsed from an owner-only configuration file.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,45 +36,9 @@ impl SecretsFile {
 
     /// Load a secrets file after enforcing owner-only Unix permissions.
     pub fn load(path: &Path) -> Result<Self, SecretError> {
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-        }
-        let mut file = options
-            .open(path)
-            .map_err(|_| SecretError("cannot open secrets file".into()))?;
-        validate_file(&file)?;
-        let mut text = String::new();
-        file.read_to_string(&mut text)
-            .map_err(|_| SecretError("cannot read secrets file".into()))?;
+        let text = rptadv_peer_support::secrets::read_private_file(path)
+            .map_err(|error| SecretError(error.to_string()))?;
         Self::parse(&text)
-    }
-}
-
-fn validate_file(file: &File) -> Result<(), SecretError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = file
-            .metadata()
-            .map_err(|_| SecretError("cannot inspect secrets file".into()))?;
-        if !metadata.file_type().is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o7777 != 0o600
-        {
-            return Err(SecretError(
-                "secrets file must be owned by this user with mode 0600".into(),
-            ));
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = file;
-        Err(SecretError("secrets files require Unix permissions".into()))
     }
 }
 

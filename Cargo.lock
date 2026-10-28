@@ -568,6 +568,7 @@ dependencies = [
  "crossbeam-queue",
  "libc",
  "libloading",
+ "rptadv-peer-support",
  "serde_json",
  "ureq",
 ]
@@ -577,6 +578,7 @@ name = "rptadv-asterisk-adapter"
 version = "0.1.0-alpha17"
 dependencies = [
  "bindgen",
+ "rptadv-peer-support",
 ]
 
 [[package]]
@@ -620,6 +622,13 @@ name = "rptadv-jitter-adapter"
 version = "0.1.0-alpha17"
 dependencies = [
  "bindgen",
+]
+
+[[package]]
+name = "rptadv-peer-support"
+version = "0.1.0-alpha17"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
