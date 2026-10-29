@@ -151,6 +151,14 @@ fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner
     );
     assert!(accounts.account("1000").is_none());
     assert!(accounts.account("2000").is_none());
+    assert!(
+        accounts.observe("2000").unwrap().is_some(),
+        "disabled accounts remain diagnosable without reopening admission"
+    );
+    assert!(
+        accounts.observe("1000").unwrap().is_none(),
+        "removed accounts are not retained by diagnostics"
+    );
     assert_eq!(
         unsafe { count() },
         1,

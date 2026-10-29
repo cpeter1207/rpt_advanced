@@ -861,10 +861,10 @@ impl PeerSession {
             }
         }
         let result = self.step_inner(now_ms);
-        if result.is_ok() {
-            if let Some(observation) = self.io.observe() {
-                self.peer_observation.store(observation);
-            }
+        if let Some(observation) = self.io.observe() {
+            // Capture the first failing turn before fail()/stop retires the
+            // protocol owner. Requested stops remain non-error terminations.
+            self.peer_observation.store(observation);
         }
         if let Err(error) = result {
             self.fail("peer I/O", error);

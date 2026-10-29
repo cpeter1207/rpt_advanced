@@ -523,6 +523,19 @@ impl Accounts {
             .map(|entry| Arc::clone(&entry.account))
     }
 
+    /// Copy diagnostics even when admission is disabled or a reload is in
+    /// progress. Release the map lock before querying the account's owner.
+    /// Removed entries are not retained merely for status. Host control only.
+    pub fn observe(&self, local: &str) -> Result<Option<abi::AccountObservation>, Error> {
+        let account = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(local)
+            .map(|entry| Arc::clone(&entry.account));
+        account.map(|account| account.observe()).transpose()
+    }
+
     /// Start each prepared account only when the captured product is callable.
     /// Partial startup failure stops all accounts before reporting the first error.
     /// # Safety
