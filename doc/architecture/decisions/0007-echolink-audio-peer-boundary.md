@@ -136,6 +136,13 @@ before any host visit; hosts prepare or copy the public record synchronously and
 load credentials relative to their actual configuration file. No host reparses
 the controller schema or retains parser spans. These fields belong to the same
 coordinated, pre-release host9/product7 and SONAME2 transition.
+Nonexclusive account policy and directory metadata updates use the existing
+bounded account command port. They retain routing/talker generations, completed
+directory entries and in-flight operation tokens. Changed registration metadata
+is renewed after the current transaction; its old reply cannot erase that request.
+Freshness changes preserve the original snapshot publication time. Only identity,
+credentials and the selected transport's effective fields require an exclusive
+account handoff; inactive transport fields do not interrupt calls.
 
 ## Consequences
 
