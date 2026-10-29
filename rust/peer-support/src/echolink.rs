@@ -1,6 +1,7 @@
 //! Shared EchoLink descriptor validation, with no protocol or media implementation.
 
 pub mod abi;
+pub mod host;
 
 /// Provider identity, layout or advertised operation group is not usable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

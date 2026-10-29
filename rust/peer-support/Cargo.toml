@@ -7,3 +7,4 @@ version.workspace = true
 
 [dependencies]
 libc = "0.2"
+libloading = "0.8"

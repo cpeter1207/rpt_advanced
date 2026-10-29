@@ -633,6 +633,7 @@ name = "rptadv-peer-support"
 version = "0.1.0-alpha17"
 dependencies = [
  "libc",
+ "libloading",
 ]
 
 [[package]]
