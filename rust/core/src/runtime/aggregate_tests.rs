@@ -2805,6 +2805,13 @@ fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
         *media.0.lock().unwrap(),
         ["Connection to node,2,0,0,0 rejected because it would create a link loop"]
     );
+    runtime
+        .queue_remote_command_unsupported("1000", "3123456", None)
+        .unwrap();
+    assert_eq!(
+        media.0.lock().unwrap().last().unwrap(),
+        "Remote commands are not supported for node,3,1,2,3,4,5,6"
+    );
     assert!(runtime.stop(0));
 }
 

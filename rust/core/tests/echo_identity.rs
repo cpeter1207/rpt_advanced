@@ -2,6 +2,67 @@ use rpt_advanced_core::command::DtmfCommandMap;
 use rpt_advanced_core::link::{EchoAlias, PeerIdentity, ProtocolId};
 
 #[test]
+fn echo_remote_commands_never_create_asl_control_envelopes() {
+    use rpt_advanced_core::{
+        access::AccessPolicy,
+        command::{Command, LinkAction},
+        runtime::{
+            GenerationSettings, NodeHost, RuntimeGeneration,
+            dtmf::{DigitEvent, DigitOperation},
+            links::NodeLinkControl,
+        },
+    };
+    let generation = RuntimeGeneration::prepare(
+        1,
+        GenerationSettings {
+            node: "524950".into(),
+            device: "radio0".into(),
+            receive_maximum: 960,
+            transmit_maximum: 960,
+            squelch_delay_ms: 0,
+            status_snapshot_interval_ms: 50,
+        },
+        (),
+        (),
+    )
+    .unwrap();
+    let mut host = NodeHost::new(generation);
+    let mut links = NodeLinkControl::new(
+        "524950",
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::standard(),
+        None,
+    )
+    .unwrap();
+    links.accept("3123456", true).unwrap();
+    for digit in [None, Some('5')] {
+        let mut command = DigitOperation::new(
+            Command {
+                action: LinkAction::Command,
+                node: "3123456".into(),
+            },
+            None,
+        );
+        command.digit = digit;
+        assert!(
+            links
+                .command(command, host.control().work().unwrap(), 0, true)
+                .is_err(),
+            "EchoLink is not an ASL remote-command route"
+        );
+    }
+    assert!(
+        links
+            .digit(DigitEvent::Digit {
+                digit: '5',
+                now_ms: 1
+            })
+            .is_none(),
+        "unsupported selection changed the local collector's remote destination"
+    );
+}
+
+#[test]
 fn protocol_identity_does_not_collide() {
     let asl = PeerIdentity::parse(ProtocolId::AllStarLink, "123456").unwrap();
     let echo = PeerIdentity::parse(ProtocolId::EchoLink, "123456").unwrap();

@@ -35,6 +35,7 @@ const REQUIRED_IDS: &[&str] = &[
     "greeting-evening",
     "time-announcement",
     "loop-rejected",
+    "remote-command-unsupported",
     "priority-group-selected",
     "priority-group-unavailable",
     "scheduled-link-change",
@@ -125,6 +126,11 @@ pub enum Message<'a> {
     /// Explain a rejected topology loop.
     LoopRejected {
         /// Node whose proposed connection would create a topology loop.
+        node: &'a str,
+    },
+    /// Explain that the destination protocol has no remote-command route.
+    RemoteCommandUnsupported {
+        /// Requested remote node's canonical operator alias.
         node: &'a str,
     },
     /// Announce the initially selected member of a named priority group.
@@ -676,6 +682,7 @@ impl Message<'_> {
             Self::DayOfWeek { .. } => "day-of-week",
             Self::TimeAnnouncement { .. } => "time-announcement",
             Self::LoopRejected { .. } => "loop-rejected",
+            Self::RemoteCommandUnsupported { .. } => "remote-command-unsupported",
             Self::PriorityGroupSelected { .. } => "priority-group-selected",
             Self::PriorityGroupUnavailable { .. } => "priority-group-unavailable",
             Self::ScheduledLinkChange { .. } => "scheduled-link-change",
@@ -747,7 +754,9 @@ impl Message<'_> {
                 args.set("greeting_tts", *greeting_tts);
                 args.set("time", *time);
             }
-            Self::LoopRejected { node } => args.set("node", *node),
+            Self::LoopRejected { node } | Self::RemoteCommandUnsupported { node } => {
+                args.set("node", *node)
+            }
             Self::PriorityGroupSelected { group, peer } => {
                 args.set("group", *group);
                 args.set("peer", *peer);

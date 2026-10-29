@@ -1411,6 +1411,29 @@ impl<A: Send, C: Send> Runtime<A, C> {
         peer: &str,
         reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
+        self.queue_link_rejection(local, peer, reply, Message::LoopRejected { node: peer })
+    }
+    /// Explain an unsupported remote-command route to the issuing endpoint.
+    pub fn queue_remote_command_unsupported(
+        &mut self,
+        local: &str,
+        peer: &str,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
+        self.queue_link_rejection(
+            local,
+            peer,
+            reply,
+            Message::RemoteCommandUnsupported { node: peer },
+        )
+    }
+    fn queue_link_rejection(
+        &mut self,
+        local: &str,
+        peer: &str,
+        reply: Option<crate::link::PeerReply>,
+        message: Message<'_>,
+    ) -> Result<(), RuntimeError> {
         let node = self
             .nodes
             .iter_mut()
@@ -1419,7 +1442,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let forms = node
             .control
             .catalog
-            .format(&Message::LoopRejected { node: peer })
+            .format(&message)
             .map_err(|_| RuntimeError::Preparation)?;
         let spoken = render::telemetry_speech(&forms.tts, &[peer]);
         queue_status_media(

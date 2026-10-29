@@ -223,6 +223,11 @@ loop-rejected =
     .tts = Connection to { $node } rejected because it would create a link loop
     .morse = LINK TO NODE { $node } REJECTED WOULD CREATE LOOP
 
+remote-command-unsupported =
+    .text = REMOTE COMMANDS NOT SUPPORTED FOR NODE { $node }
+    .tts = Remote commands are not supported for { $node }
+    .morse = REMOTE COMMANDS NOT SUPPORTED FOR NODE { $node }
+
 priority-group-selected =
     .text = { $group }: NODE { $peer } CONNECTED
     .tts = { $group }. { $peer } connected

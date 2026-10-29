@@ -15,6 +15,8 @@ pub enum AdmissionError {
     Invalid,
     /// An asynchronous dial was cancelled, paused, or belongs to an old generation.
     Stale,
+    /// The destination protocol cannot represent the requested operation.
+    UnsupportedRoute,
 }
 
 /// Independent destination-transmit and source-forwarding behavior.

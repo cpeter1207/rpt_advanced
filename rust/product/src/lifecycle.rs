@@ -183,6 +183,14 @@ impl Engine {
             {
                 self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer, reply))
             }
+            Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::UnsupportedRoute))
+                if dtmf_source =>
+            {
+                self.run(move |host| {
+                    host.runtime
+                        .queue_remote_command_unsupported(&local, &peer, reply)
+                })
+            }
             Err(error) => Err(error),
         }
     }

@@ -9,8 +9,8 @@ use crate::{
     access::AccessPolicy,
     command::{DtmfCommandMap, LinkAction},
     link::{
-        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, PeerReply,
-        Protocol, RetryAttempt, TopologyManager,
+        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, PeerIdentity,
+        PeerReply, Protocol, ProtocolId, RetryAttempt, TopologyManager,
     },
     schedule::CivilTime,
 };
@@ -649,6 +649,11 @@ impl NodeLinkControl {
                 }
             }
             LinkAction::Command => {
+                if PeerIdentity::from_operator(&remote)
+                    .is_ok_and(|identity| identity.protocol() == ProtocolId::EchoLink)
+                {
+                    return Err(AdmissionError::UnsupportedRoute);
+                }
                 if remote == self.local
                     || !self.policy.allows(&remote, true)
                     || (operation.digit.is_none() && !directory_verified)

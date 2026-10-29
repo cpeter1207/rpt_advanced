@@ -199,6 +199,10 @@ Disabled records do not require credentials. Removed accounts are disabled
 reversibly before commit and permanently retired only after success. Failed
 retirement retains callback storage and reports a separate error. Map locks are
 control-only and never span foreign calls or audio callbacks.
+Remote-command selection rejects EchoLink aliases before creating ASL digit
+envelopes or changing the source collector's destination. A completed DTMF
+request receives a localized unsupported-route explanation through the normal
+source-addressed, polite telemetry path. No EchoLink chat command is invented.
 
 ## Consequences
 
