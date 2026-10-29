@@ -467,7 +467,7 @@ fn text_forwarding_classification_binds_authenticated_origin_and_drops_overflow_
 #[test]
 fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
     for requested in [false, true] {
-        let (mut session, control, state, _) = make_session("1000");
+        let (mut session, control, state, _) = make_async_session("1000");
         crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
         if requested {
             control.stop();
@@ -475,6 +475,11 @@ fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
             state.lock().unwrap().fail_ready = true;
         }
         assert!(session.step(20).is_err());
+        assert_eq!(
+            state.lock().unwrap().observe_calls,
+            1,
+            "the first failing turn must preserve its protocol evidence before cleanup"
+        );
         assert!(session.step(21).is_err());
         drop(session);
         let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
