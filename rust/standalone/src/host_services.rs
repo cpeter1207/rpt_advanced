@@ -118,6 +118,7 @@ impl HostServicesOwner {
             scheduler_notice: Some(scheduler_notice),
             peer_info: Some(peer_info),
             peer_read_source: Some(peer_read_source),
+            peer_send_human_text: Some(peer_send_human_text),
         });
         Ok(Self {
             context,
@@ -1095,6 +1096,24 @@ unsafe extern "C" fn peer_read_source(
             }
             Err(_) => -1,
         }
+    })
+}
+
+unsafe extern "C" fn peer_send_human_text(
+    _: *mut c_void,
+    peer: *mut c_void,
+    sender: abi::rptadv_peer_bytes_v1,
+    body: abi::rptadv_peer_bytes_v1,
+) -> i32 {
+    boundary(-1, || {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
+            return -1;
+        };
+        let span = |value: abi::rptadv_peer_bytes_v1| echo::ByteSpan {
+            data: value.data,
+            length: value.length,
+        };
+        unsafe { peer.send_human_text(span(sender), span(body)) }.map_or(-1, |()| 0)
     })
 }
 
