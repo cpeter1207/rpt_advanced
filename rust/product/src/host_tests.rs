@@ -105,6 +105,35 @@ fn echo_alias_routing_precedes_allstar_directory_lookup() {
 }
 
 #[test]
+fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let (echo, state) = crate::link::session::tests::source_peer();
+    assert_eq!(echo.identity().node(), "2000");
+    host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
+    assert!(host.peers.iter().any(|peer| peer.remote == "3002000"));
+    assert_eq!(state.lock().unwrap().bound_radio.as_deref(), Some("usb"));
+    let (duplicate, rejected) = crate::link::session::tests::source_peer();
+    assert!(host.incoming_peer(duplicate, "192.0.2.2", clock()).is_err());
+    assert_eq!(rejected.lock().unwrap().drops, 1);
+    assert!(rejected.lock().unwrap().bound_radio.is_none());
+    // A numeric collision is a different protocol, but IAX still needs its own
+    // source authentication before the controller's common admission policy.
+    let (iax, rejected) = peer(8000);
+    assert!(host.incoming_peer(iax, "192.0.2.2", clock()).is_err());
+    assert_eq!(rejected.lock().unwrap().drops, 1);
+    let (iax, _) = peer(8000);
+    host.incoming_peer(iax, "127.0.0.1", clock()).unwrap();
+    assert_eq!(host.peers.len(), 2);
+    assert!(host.peers.iter().any(|peer| peer.remote == "2000"));
+    assert!(host.stop(20));
+    assert_eq!(state.lock().unwrap().drops, 1);
+    assert!(state.lock().unwrap().texts.is_empty());
+}
+
+#[test]
 fn echo_ring_policy_survives_prepared_generation() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

@@ -161,6 +161,11 @@ queue leaves the provider's QSO untouched. Stop gates notifications, joins accou
 callbacks, then drains accepted host work before the product can be released.
 This is one host-lifetime admission executor using the existing backend, never
 an executor per account/peer or a second packet/audio queue.
+Reserved operator aliases route to Echo before any ASL directory lookup. An
+incoming Echo QSO keeps its real protocol-qualified identity while its canonical
+operator alias supplies the existing controller link-policy key. It enters
+common limits/deny/topology policy only after provider admission; a source IP
+alone is never Echo admission proof. IAX retains its directory/source check.
 
 ## Consequences
 

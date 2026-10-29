@@ -953,21 +953,7 @@ unsafe extern "C" fn rptadv_product_incoming(
             return Err(RuntimeError::Rejected);
         }
         let clock = engine.clock();
-        engine.run(move |host| {
-            host.lookup(&local, &remote, Some(&source))?;
-            host.runtime.incoming(&local, &remote, true)?;
-            let result = host.attach_peer(
-                &local,
-                &remote,
-                rpt_advanced_core::link::Mode::TRANSCEIVE,
-                peer,
-                clock,
-            );
-            if result.is_err() {
-                host.reject_peer(&local, &remote, clock.now_ms);
-            }
-            result
-        })
+        engine.run(move |host| host.incoming_peer(peer, &source, clock))
     }));
     match result {
         Ok(Ok(())) => 0,

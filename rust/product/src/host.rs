@@ -567,6 +567,26 @@ impl Host {
             )
             .map_err(|_| RuntimeError::Rejected)
     }
+    /// Admit an inspected peer through common policy. Echo's fresh provider QSO
+    /// supplies authentication; only IAX uses an ASL directory/source lookup.
+    pub fn incoming_peer(
+        &mut self,
+        io: PeerIo,
+        source: &str,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
+        let local = io.local().to_owned();
+        let remote = io.identity().operator_alias();
+        if io.identity().protocol() == ProtocolId::AllStarLink {
+            self.lookup(&local, &remote, Some(source))?;
+        }
+        self.runtime.incoming(&local, &remote, true)?;
+        let result = self.attach_peer(&local, &remote, Mode::TRANSCEIVE, io, clock);
+        if result.is_err() {
+            self.reject_peer(&local, &remote, clock.now_ms);
+        }
+        result
+    }
     /// Bind an authorized peer to its exact radio before media starts, then publish its peer set.
     pub fn attach_peer(
         &mut self,
