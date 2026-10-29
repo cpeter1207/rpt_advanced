@@ -108,6 +108,11 @@ Both hosts share provider/context/account lifetime owners in peer-support.
 Their tagged peer handles keep the existing native IAX payload separate from
 the shared EchoLink QSO. IAX-only callbacks reject Echo handles before casting;
 Echo metadata retains the real decimal station number, not its dial alias.
+Source/prepared media, encoder reset and deadline calls share the QSO owner.
+Host callback tables expose complete operation groups, while each peer's copied
+capabilities select its actual operations. Serial registration tokens are tagged
+by protocol; no Echo token enters IAX's executor. Source callbacks translate
+borrowed records without copying raw PCM or retaining callback pointers.
 The prepared account retains its context and dynamically loaded provider; a
 failed stop retains foreign state rather than unload code beneath notifications.
 The provider's sized PeerInfo includes the observed incoming SDES endpoint,

@@ -3,6 +3,14 @@
 use rptadv_peer_support::echolink::{abi, host::Provider};
 use std::sync::atomic::{AtomicUsize, Ordering};
 mod support;
+#[test]
+fn prepared_peer_retains_its_account_without_an_external_owner() {
+    let fixture = support::Fixture::new("network");
+    let peer = fixture.peer();
+    assert_eq!(peer.revalidate(), Ok(()));
+    drop(peer);
+}
+
 use support::Fixture;
 
 #[test]

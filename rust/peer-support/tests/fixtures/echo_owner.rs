@@ -83,22 +83,72 @@ unsafe extern "C" fn attach(
     };
     abi::Status::Ok
 }
-operation!(deadline(*mut abi::Qso, u64));
-operation!(
-    read(
-        *mut abi::Qso,
-        u32,
-        *const abi::PcmSink,
-        Option<abi::TextFn>,
-        *mut c_void,
-        *mut abi::ReadResult,
-    )
-);
-operation!(encode(*mut abi::Qso, *const f32, usize, *mut u8, usize, u32, *mut c_void));
-operation!(reset(*mut abi::Qso));
-operation!(send(*mut abi::Qso, abi::ByteSpan, u32, u32));
-operation!(elapsed(*const abi::Qso, *mut u64));
-operation!(text(*mut abi::Qso, abi::ByteSpan, abi::ByteSpan));
+unsafe extern "C" fn deadline(_: *mut abi::Qso, after: u64) -> abi::Status {
+    assert!(after == 123456 || after == u64::MAX);
+    abi::Status::Ok
+}
+unsafe extern "C" fn read(
+    _: *mut abi::Qso, completion: u32, sink: *const abi::PcmSink,
+    text: Option<abi::TextFn>, context: *mut c_void, out: *mut abi::ReadResult,
+) -> abi::Status {
+    let mut result = abi::ReadResult::default();
+    if let Some(sink) = unsafe { sink.as_ref() } {
+        assert!(completion <= 2);
+        result.state = 1;
+        if completion == 0 {
+            assert_eq!(unsafe { sink.audio.unwrap()(sink.context, 800, [0.25, 0.5, -0.25].as_ptr(), 3, 1) }, 2);
+            assert_eq!(unsafe { sink.gap.unwrap()(sink.context, 803, 160) }, 80);
+            result.progress = 2;
+            result.activity = 1;
+            result.finish_pending = 1;
+        } else {
+            result.progress = 3;
+            result.activity = 2;
+        }
+    }
+    if let Some(text) = text {
+        unsafe { text(context, span(b"W1ABC"), span(b"hello")) };
+    }
+    unsafe { out.write(result) };
+    abi::Status::Ok
+}
+#[repr(C)]
+struct EncodeResult {
+    size: u32, status: u32, consumed: usize, bytes: usize,
+    start: u64, source: u32, packet: u32, required: usize,
+}
+unsafe extern "C" fn encode(_: *mut abi::Qso, pcm: *const f32, count: usize,
+    _: *mut u8, capacity: usize, flush: u32, result: *mut c_void) -> abi::Status {
+    assert_eq!(unsafe { std::slice::from_raw_parts(pcm, count) }, [0.25, -0.25]);
+    assert_eq!((capacity, flush), (4, 7));
+    let result = unsafe { &mut *result.cast::<EncodeResult>() };
+    assert_eq!(result.size, size_of::<EncodeResult>() as u32);
+    result.status = 2;
+    result.consumed = 0;
+    result.bytes = 0;
+    result.required = 12;
+    abi::Status::Ok
+}
+unsafe extern "C" fn reset(_: *mut abi::Qso) -> abi::Status { abi::Status::Ok }
+unsafe extern "C" fn send(_: *mut abi::Qso, bytes: abi::ByteSpan, frames: u32, timestamp: u32) -> abi::Status {
+    assert_eq!((frames, timestamp), (160, 4567));
+    match unsafe { std::slice::from_raw_parts(bytes.data, bytes.length) } {
+        b"ok" => abi::Status::Ok,
+        b"full" => abi::Status::Full,
+        b"pending" => abi::Status::Pending,
+        _ => abi::Status::Failed,
+    }
+}
+unsafe extern "C" fn elapsed(_: *const abi::Qso, out: *mut u64) -> abi::Status {
+    unsafe { out.write(0x1_0000_0007) };
+    abi::Status::Ok
+}
+fn span(bytes: &[u8]) -> abi::ByteSpan { abi::ByteSpan { data: bytes.as_ptr(), length: bytes.len() } }
+unsafe extern "C" fn text(_: *mut abi::Qso, sender: abi::ByteSpan, body: abi::ByteSpan) -> abi::Status {
+    assert_eq!(unsafe { std::slice::from_raw_parts(sender.data, sender.length) }, b"W1ABC");
+    assert_eq!(unsafe { std::slice::from_raw_parts(body.data, body.length) }, b"hello");
+    abi::Status::Ok
+}
 unsafe extern "C" fn registration_stop(registration: *mut abi::Registration) {
     unsafe { &*registration.cast::<Registration>() }
         .stopped

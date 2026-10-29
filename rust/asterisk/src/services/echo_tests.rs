@@ -3,6 +3,14 @@ use super::*;
 use rptadv_peer_support::echolink::{abi as echo, host::Provider};
 #[path = "../../../peer-support/tests/support/mod.rs"]
 mod support;
+use crate::bindings as host_abi;
+#[path = "../../../peer-support/tests/support/host_media.rs"]
+mod media;
+
+#[test]
+fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
+    unsafe { media::check(ptr::null_mut()) };
+}
 
 #[test]
 fn echo_handles_never_enter_asterisk_channel_callbacks() {

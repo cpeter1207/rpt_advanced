@@ -13,7 +13,10 @@ use crate::{
     },
     secrets::SecretsFile,
 };
-use rptadv_peer_support::echolink::host::HostPeer;
+use rptadv_peer_support::echolink::{
+    abi as echo,
+    host::{HostPeer, Registration},
+};
 use std::{
     ffi::{c_char, c_void},
     mem::size_of,
@@ -62,7 +65,6 @@ impl HostServicesOwner {
                 })
             })
             .transpose()?;
-        let asynchronous = ingress.is_some();
         let mut context = Box::new(StandaloneHostContext {
             radio: RadioHostContext::new(radios, providers),
             resolver,
@@ -97,19 +99,19 @@ impl HostServicesOwner {
             peer_send_digit: Some(peer_send_digit),
             peer_write: None,
             peer_destroy: Some(peer_destroy),
-            peer_step_attach: asynchronous.then_some(peer_step_attach),
-            peer_step_stop: asynchronous.then_some(peer_step_stop),
-            peer_step_detach: asynchronous.then_some(peer_step_detach),
-            peer_observe: asynchronous.then_some(peer_observe),
-            peer_prepare_audio: asynchronous.then_some(peer_prepare_audio),
-            peer_reset_encoder: asynchronous.then_some(peer_reset_encoder),
-            peer_send_prepared: asynchronous.then_some(peer_send_prepared),
-            peer_elapsed_ms: asynchronous.then_some(peer_elapsed_ms),
-            peer_step_wake: asynchronous.then_some(peer_step_wake),
-            peer_set_deadline: asynchronous.then_some(peer_set_deadline),
+            peer_step_attach: Some(peer_step_attach),
+            peer_step_stop: Some(peer_step_stop),
+            peer_step_detach: Some(peer_step_detach),
+            peer_observe: Some(peer_observe),
+            peer_prepare_audio: Some(peer_prepare_audio),
+            peer_reset_encoder: Some(peer_reset_encoder),
+            peer_send_prepared: Some(peer_send_prepared),
+            peer_elapsed_ms: Some(peer_elapsed_ms),
+            peer_step_wake: Some(peer_step_wake),
+            peer_set_deadline: Some(peer_set_deadline),
             scheduler_notice: Some(scheduler_notice),
             peer_info: Some(peer_info),
-            peer_read_source: None,
+            peer_read_source: Some(peer_read_source),
         });
         Ok(Self {
             context,
@@ -166,6 +168,12 @@ impl HostServicesOwner {
 }
 
 type PeerHandle = HostPeer<IaxHandle>;
+// Native tokens belong to the existing IAX executor; Echo tokens retain their
+// shared provider/QSO owner. Never pass one protocol's token to another runtime.
+enum PeerRegistration {
+    Iax(*mut c_void),
+    Echo(Registration),
+}
 struct IaxHandle(IaxPeer, Vec<f32>, String, String);
 impl IaxHandle {
     fn new(peer: IaxPeer, local: &str, remote: &str) -> Self {
@@ -265,6 +273,17 @@ unsafe extern "C" fn peer_step_attach(
             return -1;
         };
         *output = ptr::null_mut();
+        if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+            // Copy retention before attach, which may immediately reenter this handle.
+            let peer = std::sync::Arc::clone(peer);
+            return match unsafe { peer.attach(step, step_context) } {
+                Ok(token) => {
+                    *output = Box::into_raw(Box::new(PeerRegistration::Echo(token))).cast();
+                    0
+                }
+                Err(_) => -1,
+            };
+        }
         let (Some(context), Some(step)) = (
             unsafe { context.cast::<StandaloneHostContext>().as_ref() },
             step,
@@ -292,7 +311,7 @@ unsafe extern "C" fn peer_step_attach(
         }
         match unsafe { ingress.executor.attach(raw_peer, step, step_context) } {
             Ok(token) => {
-                *output = token;
+                *output = Box::into_raw(Box::new(PeerRegistration::Iax(token))).cast();
                 0
             }
             Err(_) => -1,
@@ -301,10 +320,16 @@ unsafe extern "C" fn peer_step_attach(
 }
 
 unsafe extern "C" fn peer_step_stop(context: *mut c_void, token: *mut c_void) {
-    if let Some(executor) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
-        .and_then(|context| context.ingress.as_ref().map(|ingress| &ingress.executor))
-    {
-        unsafe { executor.stop(token) };
+    match unsafe { token.cast::<PeerRegistration>().as_ref() } {
+        Some(PeerRegistration::Echo(token)) => token.stop(),
+        Some(PeerRegistration::Iax(token)) => {
+            if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
+                .and_then(|context| context.ingress.as_ref())
+            {
+                unsafe { ingress.executor.stop(*token) };
+            }
+        }
+        None => {}
     }
 }
 
@@ -327,10 +352,19 @@ unsafe extern "C" fn peer_observe(
 }
 
 unsafe extern "C" fn peer_step_detach(context: *mut c_void, token: *mut c_void) {
-    if let Some(executor) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
-        .and_then(|context| context.ingress.as_ref().map(|ingress| &ingress.executor))
-    {
-        unsafe { executor.detach(token) };
+    if token.is_null() {
+        return;
+    }
+    let token = unsafe { Box::from_raw(token.cast::<PeerRegistration>()) };
+    match *token {
+        PeerRegistration::Echo(token) => drop(token),
+        PeerRegistration::Iax(token) => {
+            if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
+                .and_then(|context| context.ingress.as_ref())
+            {
+                unsafe { ingress.executor.detach(token) };
+            }
+        }
     }
 }
 
@@ -680,9 +714,6 @@ unsafe extern "C" fn peer_prepare_audio(
     result: *mut abi::rptadv_codec_encode_result_v1,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
-            return -1;
-        };
         if result.is_null()
             || unsafe { ptr::addr_of!((*result).struct_size).read() }
                 < size_of::<abi::rptadv_codec_encode_result_v1>() as u32
@@ -703,12 +734,26 @@ unsafe extern "C" fn peer_prepare_audio(
         } else {
             unsafe { std::slice::from_raw_parts_mut(output, capacity) }
         };
-        peer.0
-            .prepare_audio(pcm, output, flush, unsafe { &mut *result })
+        match unsafe { peer.cast::<PeerHandle>().as_ref() } {
+            Some(HostPeer::Echo(peer)) => {
+                unsafe { peer.prepare_audio(pcm, output, flush, result.cast()) }
+                    .map_or(-1, |()| unsafe { (*result).status as i32 })
+            }
+            Some(HostPeer::Iax(_)) => {
+                unsafe { iax_peer_mut(peer) }
+                    .unwrap()
+                    .0
+                    .prepare_audio(pcm, output, flush, unsafe { &mut *result })
+            }
+            None => -1,
+        }
     })
 }
 unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
     boundary(-1, || {
+        if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+            return unsafe { peer.reset_encoder() }.map_or(-1, |()| 0);
+        }
         unsafe { iax_peer_mut(peer) }.map_or(-1, |peer| peer.0.reset_encoder())
     })
 }
@@ -721,9 +766,6 @@ unsafe extern "C" fn peer_send_prepared(
     timestamp: u32,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { iax_peer_mut(peer) }) else {
-            return -1;
-        };
         if count > isize::MAX as usize || (bytes.is_null() && count != 0) {
             return -1;
         }
@@ -732,7 +774,18 @@ unsafe extern "C" fn peer_send_prepared(
         } else {
             unsafe { std::slice::from_raw_parts(bytes, count) }
         };
-        match peer.0.send_prepared(bytes, frames, timestamp) {
+        let result = match unsafe { peer.cast::<PeerHandle>().as_ref() } {
+            Some(HostPeer::Echo(peer)) => {
+                unsafe { peer.send_prepared(bytes, frames, timestamp) }.map_err(|_| ())
+            }
+            Some(HostPeer::Iax(_)) => unsafe { iax_peer_mut(peer) }
+                .unwrap()
+                .0
+                .send_prepared(bytes, frames, timestamp)
+                .map_err(|_| ()),
+            None => return -1,
+        };
+        match result {
             Ok(true) => 0,
             Ok(false) => 1,
             Err(_) => -1,
@@ -740,17 +793,30 @@ unsafe extern "C" fn peer_send_prepared(
     })
 }
 unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
+    if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        return peer
+            .elapsed_ms()
+            .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32);
+    }
     unsafe { iax_peer_ref(peer) }.map_or(0, |peer| peer.0.elapsed_ms())
 }
 unsafe extern "C" fn peer_step_wake(context: *mut c_void, registration: *mut c_void) {
-    let Some(context) = (unsafe { context.cast::<StandaloneHostContext>().as_ref() }) else {
-        return;
-    };
-    if let Some(ingress) = &context.ingress {
-        unsafe { ingress.executor.wake(registration) };
+    match unsafe { registration.cast::<PeerRegistration>().as_ref() } {
+        Some(PeerRegistration::Echo(token)) => token.wake(),
+        Some(PeerRegistration::Iax(token)) => {
+            if let Some(ingress) = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
+                .and_then(|context| context.ingress.as_ref())
+            {
+                unsafe { ingress.executor.wake(*token) };
+            }
+        }
+        None => {}
     }
 }
 unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, after: u64) -> i32 {
+    if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        return unsafe { peer.set_deadline(after) }.map_or(-1, |()| 0);
+    }
     let (Some(context), Some(peer)) = (
         unsafe { context.cast::<StandaloneHostContext>().as_ref() },
         unsafe { iax_peer_ref(peer) },
@@ -759,6 +825,92 @@ unsafe extern "C" fn peer_set_deadline(context: *mut c_void, peer: *mut c_void, 
     };
     context.ingress.as_ref().map_or(-1, |ingress| unsafe {
         ingress.executor.set_deadline(peer.0.raw_handle(), after)
+    })
+}
+
+unsafe extern "C" fn peer_read_source(
+    _: *mut c_void,
+    peer: *mut c_void,
+    completion: u32,
+    sink: *const abi::rptadv_peer_source_sink_v1,
+    text: abi::rptadv_peer_source_text_v1,
+    text_context: *mut c_void,
+    output: *mut abi::rptadv_peer_source_result_v1,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(HostPeer::Echo(peer)), Some(output)) =
+            (unsafe { peer.cast::<PeerHandle>().as_ref() }, unsafe {
+                output.as_mut()
+            })
+        else {
+            return -1;
+        };
+        if output.struct_size < size_of::<abi::rptadv_peer_source_result_v1>() as u32
+            || output.abi_version != 1
+        {
+            return -1;
+        }
+        let sink = unsafe { sink.as_ref() };
+        if sink.is_some_and(|sink| {
+            sink.struct_size < size_of::<abi::rptadv_peer_source_sink_v1>() as u32
+                || sink.abi_version != 1
+        }) {
+            return -1;
+        }
+        let sink = sink.map(|sink| echo::PcmSink {
+            struct_size: size_of::<echo::PcmSink>() as u32,
+            abi_version: 1,
+            context: sink.context,
+            audio: sink.audio,
+            gap: sink.gap,
+        });
+        struct Text {
+            callback: abi::rptadv_peer_source_text_v1,
+            context: *mut c_void,
+        }
+        unsafe extern "C" fn forward(
+            context: *mut c_void,
+            sender: echo::ByteSpan,
+            body: echo::ByteSpan,
+        ) {
+            let text = unsafe { &*context.cast::<Text>() };
+            if let Some(callback) = text.callback {
+                unsafe {
+                    callback(
+                        text.context,
+                        abi::rptadv_peer_bytes_v1 {
+                            data: sender.data,
+                            length: sender.length,
+                        },
+                        abi::rptadv_peer_bytes_v1 {
+                            data: body.data,
+                            length: body.length,
+                        },
+                    )
+                };
+            }
+        }
+        let mut text = Text {
+            callback: text,
+            context: text_context,
+        };
+        match unsafe {
+            peer.read(
+                completion,
+                sink.as_ref(),
+                Some(forward),
+                ptr::from_mut(&mut text).cast(),
+            )
+        } {
+            Ok(result) => {
+                output.progress = result.progress;
+                output.activity = result.activity;
+                output.finish_pending = result.finish_pending;
+                output.state = result.state;
+                0
+            }
+            Err(_) => -1,
+        }
     })
 }
 
@@ -972,16 +1124,16 @@ mod tests {
         let owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
         let api = owner.descriptor();
-        assert!(api.peer_step_attach.is_none());
-        assert!(api.peer_step_stop.is_none());
-        assert!(api.peer_step_detach.is_none());
-        assert!(api.peer_observe.is_none());
+        assert!(api.peer_step_attach.is_some());
+        assert!(api.peer_step_stop.is_some());
+        assert!(api.peer_step_detach.is_some());
+        assert!(api.peer_observe.is_some());
         assert!(
-            api.peer_prepare_audio.is_none()
-                && api.peer_send_prepared.is_none()
-                && api.peer_elapsed_ms.is_none()
-                && api.peer_step_wake.is_none()
-                && api.peer_set_deadline.is_none()
+            api.peer_prepare_audio.is_some()
+                && api.peer_send_prepared.is_some()
+                && api.peer_elapsed_ms.is_some()
+                && api.peer_step_wake.is_some()
+                && api.peer_set_deadline.is_some()
         );
         unsafe {
             super::peer_step_wake(ptr::null_mut(), ptr::null_mut());

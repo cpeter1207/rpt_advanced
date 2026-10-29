@@ -3,6 +3,15 @@ use super::*;
 use rptadv_peer_support::echolink::{abi as echo, host::Provider};
 #[path = "../../../peer-support/tests/support/mod.rs"]
 mod support;
+use crate::abi as host_abi;
+#[path = "../../../peer-support/tests/support/host_media.rs"]
+mod media;
+
+#[test]
+fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
+    let host = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+    unsafe { media::check(host.descriptor().context) };
+}
 
 #[test]
 fn echo_handles_never_enter_iax_only_callbacks() {

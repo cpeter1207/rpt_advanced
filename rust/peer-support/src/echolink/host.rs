@@ -283,6 +283,164 @@ impl Peer {
         &self.remote
     }
 
+    /// Read source-rate PCM/text on the one serial peer owner. The provider
+    /// retains every unaccepted suffix and honors exact played/discard completion.
+    ///
+    /// # Safety
+    /// Sink/text callbacks and their contexts remain valid for this synchronous
+    /// turn, cannot unwind or reenter this QSO, and return truthful prefix credit.
+    pub unsafe fn read(
+        &self,
+        completion: u32,
+        sink: Option<&abi::PcmSink>,
+        text: Option<abi::TextFn>,
+        context: *mut std::ffi::c_void,
+    ) -> Result<abi::ReadResult, Error> {
+        let mut result = abi::ReadResult::default();
+        completed(unsafe {
+            self.account.provider.api.table().peer_read.unwrap()(
+                self.handle.as_ptr(),
+                completion,
+                sink.map_or(std::ptr::null(), std::ptr::from_ref),
+                text,
+                context,
+                &mut result,
+            )
+        })?;
+        Ok(result)
+    }
+
+    /// Prepare one bounded packet without consuming the caller's output on
+    /// backpressure. The common codec result carries its own status and counts.
+    ///
+    /// # Safety
+    /// Call on the serial owner with a complete writable released
+    /// rptadv_codec_encode_result_v1 at `result`. No same-QSO reentry is allowed.
+    pub unsafe fn prepare_audio(
+        &self,
+        pcm: &[f32],
+        output: &mut [u8],
+        flush: u32,
+        result: *mut std::ffi::c_void,
+    ) -> Result<(), Error> {
+        completed(unsafe {
+            self.account
+                .provider
+                .api
+                .table()
+                .peer_prepare_audio
+                .unwrap()(
+                self.handle.as_ptr(),
+                pcm.as_ptr(),
+                pcm.len(),
+                output.as_mut_ptr(),
+                output.len(),
+                flush,
+                result,
+            )
+        })
+    }
+
+    /// Reset encoder segment history on its serial owner, not connection clocks.
+    ///
+    /// # Safety
+    /// Only the registered serial owner may access this QSO's media state.
+    pub unsafe fn reset_encoder(&self) -> Result<(), Error> {
+        completed(unsafe {
+            self.account
+                .provider
+                .api
+                .table()
+                .peer_reset_encoder
+                .unwrap()(self.handle.as_ptr())
+        })
+    }
+
+    /// Submit the exact prepared bytes and pacing hints; false retains caller
+    /// ownership for an unchanged retry on ordinary provider backpressure.
+    ///
+    /// # Safety
+    /// Only the registered serial owner may access this QSO's media state.
+    pub unsafe fn send_prepared(
+        &self,
+        bytes: &[u8],
+        frames: u32,
+        timestamp: u32,
+    ) -> Result<bool, Error> {
+        match unsafe {
+            self.account
+                .provider
+                .api
+                .table()
+                .peer_send_prepared
+                .unwrap()(
+                self.handle.as_ptr(),
+                abi::ByteSpan {
+                    data: bytes.as_ptr(),
+                    length: bytes.len(),
+                },
+                frames,
+                timestamp,
+            )
+        } {
+            abi::Status::Ok => Ok(true),
+            abi::Status::Pending | abi::Status::Full => Ok(false),
+            status => Err(Error::Status(status)),
+        }
+    }
+
+    /// Copy the provider's monotonic clock without creating a second host epoch.
+    pub fn elapsed_ms(&self) -> Result<u64, Error> {
+        let mut elapsed = 0;
+        completed(unsafe {
+            self.account.provider.api.table().peer_elapsed_ms.unwrap()(
+                self.handle.as_ptr(),
+                &mut elapsed,
+            )
+        })?;
+        Ok(elapsed)
+    }
+
+    /// Set or clear the serial owner's next deadline; no new task is created.
+    ///
+    /// # Safety
+    /// Call only from the registered serial peer owner.
+    pub unsafe fn set_deadline(&self, after_ns: u64) -> Result<(), Error> {
+        completed(unsafe {
+            self.account.provider.api.table().peer_set_deadline.unwrap()(
+                self.handle.as_ptr(),
+                after_ns,
+            )
+        })
+    }
+
+    /// Send structured human text, never an ASL control envelope or speech PCM.
+    ///
+    /// # Safety
+    /// Only the registered serial owner may access this QSO's media state.
+    pub unsafe fn send_text(&self, sender: &[u8], body: &[u8]) -> Result<(), Error> {
+        let operation = self
+            .account
+            .provider
+            .api
+            .table()
+            .peer_send_text
+            .ok_or(Error::Contract)?;
+        completed(unsafe {
+            operation(
+                self.handle.as_ptr(),
+                abi::ByteSpan {
+                    data: sender.as_ptr(),
+                    length: sender.len(),
+                },
+                abi::ByteSpan {
+                    data: body.as_ptr(),
+                    length: body.len(),
+                },
+            )
+        })
+    }
+
     /// Recheck directory/account/QSO state at final admission, not as a live-call
     /// heartbeat. Copied metadata alone never grants a new attachment.
     pub fn revalidate(&self) -> Result<(), Error> {
