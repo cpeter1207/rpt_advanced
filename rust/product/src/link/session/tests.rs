@@ -583,6 +583,17 @@ unsafe extern "C" fn digit(_: *mut c_void, peer: *mut c_void, digit: u8) -> i32 
     unsafe { state(peer) }.lock().unwrap().digits.push(digit);
     0
 }
+unsafe extern "C" fn human_text(
+    context: *mut c_void,
+    peer: *mut c_void,
+    sender: abi::rptadv_peer_bytes_v1,
+    body: abi::rptadv_peer_bytes_v1,
+) -> i32 {
+    let mut value = unsafe { std::slice::from_raw_parts(sender.data, sender.length) }.to_vec();
+    value.push(b'>');
+    value.extend_from_slice(unsafe { std::slice::from_raw_parts(body.data, body.length) });
+    unsafe { text(context, peer, value.as_ptr().cast(), value.len()) }
+}
 unsafe extern "C" fn write(
     _: *mut c_void,
     peer: *mut c_void,
@@ -1008,6 +1019,7 @@ fn make_peer(rate_hz: u32, async_enabled: bool, egress: bool, source: bool) -> (
     table.peer_ready = Some(ready);
     table.peer_read = Some(read);
     table.peer_send_text = Some(text);
+    table.peer_send_human_text = Some(human_text);
     table.peer_send_digit = Some(digit);
     table.peer_write = Some(write);
     table.peer_destroy = Some(destroy);

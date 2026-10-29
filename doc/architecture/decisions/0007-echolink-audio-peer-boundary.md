@@ -211,6 +211,19 @@ represented callsign from the current directory snapshot, without using that
 claim for authorization. Both host bridges require the new result extent in
 this coordinated pre-release host9/product7 transition; descriptor versions and
 SONAMEs remain unchanged. An incomplete record fails closed before any write.
+The product copies that turn's one bounded text callback, validates the returned
+record, then publishes literal content and represented identity together. Multiple
+callbacks or an identity without text are contract errors. Text forwarding uses
+the current connection's actual protocol/capability, not a process-wide callback.
+Resolved Echo senders use their full reversible alias in ASL envelopes; unresolved
+claims remain eligible for local speech and Echo chat, but not invented ASL IDs.
+Echo chat preserves literal sender/body and has broadcast audience only. Directed
+ASL text is never widened to Echo broadcast. Local and ingress/represented source
+identities are excluded from forwarding. The appended host human-text operation
+passes structured spans to the existing provider serializer on its serial owner;
+it is not another ASL envelope, codec or speech path. Chat rejection drops only
+that message, not the audio connection. Both hosts update together under the
+coordinated pre-release host9/product7 descriptor-extent check, with SONAME2 unchanged.
 
 ## Consequences
 

@@ -4,7 +4,7 @@ use crate::{
         dispatcher::{MediaWorker, PreparedDispatch},
         ring::{InboundPolicy, InboundRing},
         session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
-        text::{TextDestination, TextRouter},
+        text::{TextDestination, TextPayload, TextRouter},
     },
     media::{
         NativeMediaPreparer,
@@ -1011,22 +1011,33 @@ impl Host {
         }) {
             return;
         }
-        let router = TextRouter::new(
-            self.runtime
-                .node_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        );
+        let mut locals = Vec::new();
+        for local in self.runtime.node_names() {
+            locals.push(local.to_owned());
+            let node = NodeId::new(local).expect("admitted station");
+            let account = rpt_advanced_core::config::EchoLinkSettings::resolve(
+                self.runtime.document(),
+                &node,
+            )
+            .expect("validated account settings")
+            .value;
+            if account.enabled {
+                locals.push(rpt_advanced_core::link::EchoAlias::format(
+                    account.node_number,
+                ));
+                locals.push(account.callsign);
+            }
+        }
+        let router = TextRouter::new(locals);
         let destinations = self
             .peers
             .iter()
             .filter(|peer| peer.local == local)
             .map(|peer| TextDestination {
                 connection_generation: peer.control.text_origin().connection_generation,
-                protocol: 1,
+                protocol: peer.control.text_origin().protocol,
                 node: peer.remote.clone(),
-                can_forward_text: !peer.control.ended(),
+                can_forward_text: peer.control.can_forward_text() && !peer.control.ended(),
             })
             .collect::<Vec<_>>();
         let disposition = router.route(&message, &destinations, |destination, text| {
@@ -1040,9 +1051,15 @@ impl Host {
                 })
                 .expect("current text route snapshot")
                 .control
-                .send(PeerCommand::Text {
-                    text: text.to_owned(),
-                    advisory: false,
+                .send(match text {
+                    TextPayload::AllStarLink(text) => PeerCommand::Text {
+                        text: text.to_owned(),
+                        advisory: false,
+                    },
+                    TextPayload::EchoLink { sender, body } => PeerCommand::HumanText {
+                        sender: sender.to_owned(),
+                        body: Arc::from(body),
+                    },
                 })
                 .is_ok()
         });

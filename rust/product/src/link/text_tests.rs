@@ -11,6 +11,7 @@ fn message(audience: TextAudience) -> HumanMessage {
             protocol: 1,
         },
         source: "4000".into(),
+        represented_source: None,
         audience,
         body: Arc::from("literal ${time} hello"),
     }
@@ -33,6 +34,9 @@ fn text_forwarding_preserves_asl_flood_exclusions_and_independent_destination_ad
     let peers = destinations();
     let mut seen = Vec::new();
     let disposition = router.route(&message(TextAudience::Broadcast), &peers, |peer, wire| {
+        let TextPayload::AllStarLink(wire) = wire else {
+            panic!("ASL destination")
+        };
         seen.push((peer.node.clone(), wire.to_str().unwrap().to_owned()));
         peer.node != "3000"
     });
@@ -77,6 +81,9 @@ fn text_forwarding_large_body_is_not_limited_by_local_synthesis_quota_or_failure
     message.body = Arc::from("é".repeat(3000));
     let mut forwarded = 0;
     let result = router.route(&message, &destinations(), |_, wire| {
+        let TextPayload::AllStarLink(wire) = wire else {
+            panic!("ASL destination")
+        };
         assert!(wire.to_bytes().ends_with(message.body.as_bytes()));
         forwarded += 1;
         true
@@ -90,7 +97,7 @@ fn text_forwarding_large_body_is_not_limited_by_local_synthesis_quota_or_failure
     assert_eq!(result.destinations_rejected, 2);
     message.body = Arc::from("normal text");
     let mut other = destinations().remove(1);
-    other.protocol = 2;
+    other.protocol = 3;
     let result = router.route(&message, &[other], |_, _| {
         panic!("no serializer for this protocol")
     });

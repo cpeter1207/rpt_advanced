@@ -695,6 +695,24 @@ unsafe extern "C" fn peer_read_source(
     })
 }
 
+unsafe extern "C" fn peer_send_human_text(
+    _: *mut c_void,
+    peer: *mut c_void,
+    sender: ffi::rptadv_peer_bytes_v1,
+    body: ffi::rptadv_peer_bytes_v1,
+) -> i32 {
+    boundary(-1, || {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
+            return -1;
+        };
+        let span = |value: ffi::rptadv_peer_bytes_v1| echo::ByteSpan {
+            data: value.data,
+            length: value.length,
+        };
+        unsafe { peer.send_human_text(span(sender), span(body)) }.map_or(-1, |()| 0)
+    })
+}
+
 /// Stable account context; only control/lifecycle calls inspect this map.
 struct HostContext {
     echo: Mutex<Option<Arc<Accounts>>>,
@@ -933,6 +951,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     scheduler_notice: Some(scheduler_notice),
     peer_info: Some(peer_info),
     peer_read_source: Some(peer_read_source),
+    peer_send_human_text: Some(peer_send_human_text),
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.

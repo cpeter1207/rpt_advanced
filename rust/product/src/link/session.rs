@@ -43,6 +43,13 @@ pub enum Command {
         /// Failure must not disconnect an advisory K exchange.
         advisory: bool,
     },
+    /// Literal protocol-native human text; rejection drops only this message.
+    HumanText {
+        /// Original represented sender, never command authority.
+        sender: String,
+        /// Original body, never synthesized peer PCM or control text.
+        body: Arc<str>,
+    },
     /// Prepared replacement generation endpoints; the old ingress becomes terminal.
     Redirect {
         /// Unique replacement inbound producer.
@@ -176,6 +183,7 @@ impl PeerObservationCache {
 }
 /// Single control producer/event consumer; never borrowed by audio callbacks.
 pub struct PeerControl {
+    can_forward_text: bool,
     text_identity: Arc<TextIdentity>,
     egress: Arc<EgressStatistics>,
     commands: Producer<Command>,
@@ -198,6 +206,10 @@ impl PeerControl {
     /// Snapshot this authenticated connection's current local-media generation.
     pub fn text_origin(&self) -> TextOrigin {
         self.text_identity.snapshot()
+    }
+    /// Copied per-connection capability; does not borrow the serial I/O owner.
+    pub fn can_forward_text(&self) -> bool {
+        self.can_forward_text
     }
     /// Capture this exact inbound endpoint for source-addressed command replies.
     pub fn reply_target(&self) -> rpt_advanced_core::link::PeerReply {
@@ -613,6 +625,7 @@ impl PeerSession {
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
         let control = PeerControl {
+            can_forward_text: io.can_forward_text(),
             text_identity: Arc::clone(&text_identity),
             egress: outbound.statistics.clone(),
             commands,
@@ -822,10 +835,21 @@ impl PeerSession {
                             }
                         })
                     }
-                    SourceInput::Text { sender, body } => {
+                    SourceInput::Text {
+                        sender,
+                        body,
+                        represented_node_number,
+                    } => {
                         let _ = events.push(Event::HumanText(HumanMessage {
                             origin: identity.snapshot(),
                             source: sender.to_owned(),
+                            represented_source: (represented_node_number != 0).then(|| {
+                                rpt_advanced_core::link::PeerIdentity::parse(
+                                    ProtocolId::EchoLink,
+                                    &represented_node_number.to_string(),
+                                )
+                                .expect("positive provider identity")
+                            }),
                             audience: TextAudience::Broadcast,
                             body: Arc::from(body),
                         }));
@@ -926,6 +950,10 @@ impl PeerSession {
                 break;
             };
             match command {
+                Command::HumanText { sender, body } => {
+                    // Chat queue failure is independent of media/session health.
+                    let _ = self.io.send_human_text(&sender, &body);
+                }
                 Command::Text { text, advisory } => {
                     if self.io.identity().protocol() == ProtocolId::EchoLink
                         && Protocol::parse(text.to_bytes()).is_some()

@@ -261,6 +261,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         rpt_advanced_core::link::HumanMessage {
             origin: origin.clone(),
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Node("1001".into()),
             body: Arc::from("B for the other station"),
         },
@@ -282,6 +283,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
             rpt_advanced_core::link::HumanMessage {
                 origin: origin.clone(),
                 source: "4000".into(),
+                represented_source: None,
                 audience: rpt_advanced_core::link::TextAudience::Node(destination.into()),
                 body: Arc::from("B directed speech"),
             },
@@ -293,6 +295,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         rpt_advanced_core::link::HumanMessage {
             origin: origin.clone(),
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B for this station and its peers"),
         },
@@ -309,6 +312,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B from an ended connection"),
         },
@@ -361,6 +365,7 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("one copy per connection"),
         },
@@ -413,6 +418,7 @@ fn text_forwarding_backpressure_does_not_block_local_speech() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "2000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B still local"),
         },
@@ -540,6 +546,7 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
         rpt_advanced_core::link::HumanMessage {
             origin: old,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B stale speech"),
         },
@@ -605,6 +612,7 @@ fn text_lifecycle_speech_failure_keeps_forwarding_and_logs_no_human_body() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("F failure second body"),
         },

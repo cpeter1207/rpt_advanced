@@ -412,6 +412,11 @@ struct rptadv_host_services_v9 {
                             const struct rptadv_peer_source_sink_v1 *sink,
                             rptadv_peer_source_text_v1 text, void *text_context,
                             struct rptadv_peer_source_result_v1 *out);
+    /** Structured human text for a capable protocol peer. Borrowed literal spans;
+     * never reinterpret as commands or send synthesized speech to the peer.
+     * Zero admits one message, nonzero rejects only that message. Serial owner only. */
+    int (*peer_send_human_text)(void *context, void *peer, struct rptadv_peer_bytes_v1 sender,
+                                struct rptadv_peer_bytes_v1 body);
 };
 
 /** Exact revision of a typed site control request. */

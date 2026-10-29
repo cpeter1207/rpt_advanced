@@ -739,3 +739,26 @@ pub enum HostPeer<Iax> {
     /// Verified EchoLink QSO retained through its serial registration.
     Echo(Arc<Peer>),
 }
+impl<Iax> HostPeer<Iax> {
+    /// Validate literal host spans once for both adapters, then use the provider's
+    /// existing human-text operation. An IAX handle is never cast to an Echo QSO.
+    ///
+    /// # Safety
+    /// Spans are truthful readable buffers borrowed for this call. Only the
+    /// registered serial owner may operate this QSO's media state.
+    pub unsafe fn send_human_text(
+        &self,
+        sender: abi::ByteSpan,
+        body: abi::ByteSpan,
+    ) -> Result<(), Error> {
+        let Self::Echo(peer) = self else {
+            return Err(Error::Contract);
+        };
+        let sender = unsafe { text(sender, 64) }?;
+        let body = unsafe { text(body, 4096) }?;
+        if sender.is_empty() || body.is_empty() {
+            return Err(Error::Contract);
+        }
+        unsafe { peer.send_text(sender.as_bytes(), body.as_bytes()) }
+    }
+}

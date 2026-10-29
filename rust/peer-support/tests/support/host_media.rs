@@ -80,6 +80,18 @@ pub unsafe fn check(context: *mut c_void) {
         assert_eq!(peer_reset_encoder(context, handle), 0);
         assert_eq!(peer_elapsed_ms(context, handle), u32::MAX);
         assert_eq!(peer_set_deadline(context, handle, 123456), 0);
+        let span = |value: &[u8]| abi::rptadv_peer_bytes_v1 {
+            data: value.as_ptr(),
+            length: value.len(),
+        };
+        assert_eq!(
+            peer_send_human_text(context, handle, span(b"W1ABC"), span(b"hello")),
+            0
+        );
+        assert_eq!(
+            peer_send_human_text(context, handle, span(b"W1ABC"), span(b"")),
+            -1
+        );
         for (bytes, expected) in [
             (&b"ok"[..], 0),
             (&b"full"[..], 1),

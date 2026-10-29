@@ -53,6 +53,8 @@ pub enum SourceInput<'a> {
         sender: &'a str,
         /// Literal UTF-8 body, not a command or message template.
         body: &'a str,
+        /// Fresh represented identity from the same read turn, zero if unresolved.
+        represented_node_number: u32,
     },
 }
 
@@ -502,6 +504,9 @@ impl HostServices {
                 && (protocol != ProtocolId::EchoLink
                     || self.0.peer_read_source.is_none()
                     || capabilities & 3 != 3))
+            || (protocol == ProtocolId::EchoLink
+                && capabilities & 4 != 0
+                && self.0.peer_send_human_text.is_none())
             || !callsign
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-/*_".contains(&byte))
@@ -698,6 +703,10 @@ impl PeerIo {
     pub fn generations(&self) -> (u64, u64) {
         (self.account_generation, self.qso_generation)
     }
+    /// Human-text routing support belongs to this connection, not the host table.
+    pub fn can_forward_text(&self) -> bool {
+        self.capabilities & 4 != 0
+    }
     /// Copy async registration inputs before callbacks can begin touching this peer.
     pub fn async_owner(&self) -> Option<(HostServices, *mut c_void)> {
         (self.capabilities & 1 != 0).then_some((self.services, self.handle.as_ptr()))
@@ -825,6 +834,7 @@ impl PeerIo {
             dispatch: F,
             failed: bool,
             completing: bool,
+            text: Option<(String, String)>,
         }
         fn accept<F: FnMut(SourceInput<'_>) -> usize>(
             state: &mut State<F>,
@@ -911,12 +921,17 @@ impl PeerIo {
                 state.failed = true;
                 return;
             };
-            accept(state, SourceInput::Text { sender, body }, usize::MAX);
+            if state.text.is_some() {
+                state.failed = true;
+            } else {
+                state.text = Some((sender.to_owned(), body.to_owned()));
+            }
         }
         let mut state = State {
             dispatch,
             failed: false,
             completing: completion != SourceCompletion::Pending,
+            text: None,
         };
         let context = ptr::from_mut(&mut state).cast();
         let sink = abi::rptadv_peer_source_sink_v1 {
@@ -948,7 +963,22 @@ impl PeerIo {
             || result.activity > 2
             || result.finish_pending > 1
             || result.state > 3
+            || (result.represented_node_number != 0 && state.text.is_none())
         {
+            return Err(Error::InvalidFrame);
+        }
+        if let Some((sender, body)) = state.text.take() {
+            accept(
+                &mut state,
+                SourceInput::Text {
+                    sender: &sender,
+                    body: &body,
+                    represented_node_number: result.represented_node_number,
+                },
+                usize::MAX,
+            );
+        }
+        if state.failed {
             return Err(Error::InvalidFrame);
         }
         Ok(SourceRead {
@@ -972,6 +1002,28 @@ impl PeerIo {
                 self.handle.as_ptr(),
                 bytes.as_ptr().cast(),
                 bytes.len(),
+            )
+        };
+        (code == 0).then_some(()).ok_or(Error::Write)
+    }
+    /// Send structured human content only through a capable EchoLink connection.
+    pub fn send_human_text(&mut self, sender: &str, body: &str) -> Result<(), Error> {
+        let operation = self
+            .services
+            .0
+            .peer_send_human_text
+            .filter(|_| self.identity.protocol() == ProtocolId::EchoLink && self.can_forward_text())
+            .ok_or(Error::Operation)?;
+        let bytes = |value: &str| abi::rptadv_peer_bytes_v1 {
+            data: value.as_ptr(),
+            length: value.len(),
+        };
+        let code = unsafe {
+            operation(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bytes(sender),
+                bytes(body),
             )
         };
         (code == 0).then_some(()).ok_or(Error::Write)

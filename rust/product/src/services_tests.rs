@@ -125,6 +125,7 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
         output.activity = 1;
         output.finish_pending = 1;
         output.state = 1;
+        output.represented_node_number = 123456;
         0
     }
     let (prepared, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
@@ -156,8 +157,13 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
                         assert_eq!((start, count), (16, 3));
                         seen.push("gap");
                     }
-                    SourceInput::Text { sender, body } => {
+                    SourceInput::Text {
+                        sender,
+                        body,
+                        represented_node_number,
+                    } => {
                         assert_eq!((sender, body), ("W1XYZ-R", "Hello"));
+                        assert_eq!(represented_node_number, 123456);
                         seen.push("text");
                     }
                 }
