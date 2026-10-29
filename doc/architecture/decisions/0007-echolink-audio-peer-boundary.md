@@ -143,6 +143,16 @@ is renewed after the current transaction; its old reply cannot erase that reques
 Freshness changes preserve the original snapshot publication time. Only identity,
 credentials and the selected transport's effective fields require an exclusive
 account handoff; inactive transport fields do not interrupt calls.
+Live gain/timing revisions wake each existing serial owner. Only that owner
+updates codecs and QSO timers; previously gained PCM/prepared RTP and elapsed
+timer anchors remain intact. An exclusive account replacement closes admissions,
+joins its notification/network/peer owners off-executor, then starts a new
+generation. Retained old handles remain readable for identity but reject media.
+Direct sockets may be reused only after that quiescence barrier; weak socket and
+driver records do not keep disabled accounts or peer owners active. Failed open
+restores the prior configuration and attempts reconnect, never claiming online
+status without a successful directory operation. Disabled activation retains its
+host callback for later enable; permanent stop cannot be reversed.
 
 ## Consequences
 

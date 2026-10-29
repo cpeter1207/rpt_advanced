@@ -3,6 +3,62 @@
 use rptadv_peer_support::echolink::{abi, host::Provider};
 use std::sync::atomic::{AtomicUsize, Ordering};
 mod support;
+
+#[test]
+fn account_activation_and_reload_keep_callback_and_local_ownership() {
+    use rptadv_peer_support::echolink::host::Error;
+    unsafe extern "C" fn notify(context: *mut std::ffi::c_void, event: *const abi::Event) {
+        let event = unsafe { &*event };
+        assert_eq!(event.status, abi::Status::Ok);
+        assert_eq!(event.generation, 4);
+        unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::Release);
+    }
+    let fixture = support::Fixture::new("network");
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let mut config = abi::AccountConfig {
+        enabled: 1,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..abi::AccountConfig::default()
+    };
+    let keys = abi::AccountSecrets {
+        struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+        abi_version: 1,
+        directory_password: abi::ByteSpan::default(),
+        proxy_password: abi::ByteSpan::default(),
+    };
+    let account = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    drop(provider);
+    let calls = AtomicUsize::new(0);
+    assert_eq!(
+        unsafe { account.activate(Some(notify), std::ptr::from_ref(&calls).cast_mut().cast()) },
+        Ok(())
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert_eq!(unsafe { account.reconfigure(&config, &keys) }, Ok(()));
+    config.node_number = 42;
+    assert_eq!(
+        unsafe { account.reconfigure(&config, &keys) },
+        Err(Error::Status(abi::Status::Full))
+    );
+    config.local_node = abi::ByteSpan {
+        data: b"508422".as_ptr(),
+        length: 6,
+    };
+    assert_eq!(
+        unsafe { account.reconfigure(&config, &keys) },
+        Err(Error::Contract)
+    );
+    account.stop().unwrap();
+    assert_eq!(
+        unsafe { account.activate(Some(notify), std::ptr::from_ref(&calls).cast_mut().cast()) },
+        Err(Error::Status(abi::Status::Closed))
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
 #[test]
 fn prepared_peer_retains_its_account_without_an_external_owner() {
     let fixture = support::Fixture::new("network");

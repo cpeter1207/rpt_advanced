@@ -131,6 +131,64 @@ pub struct Account {
 unsafe impl Send for Account {}
 unsafe impl Sync for Account {}
 impl Account {
+    /// Activate on host control after product startup. The callback may execute
+    /// before return, so its stable context must already be fully initialized.
+    ///
+    /// # Safety
+    /// Callback/context are thread-safe, cannot unwind, and remain live through
+    /// off-executor account stop plus accepted control-handoff drainage. Never
+    /// call from a provider or audio executor.
+    pub unsafe fn activate(
+        &self,
+        callback: Option<abi::EventFn>,
+        context: *mut std::ffi::c_void,
+    ) -> Result<(), Error> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Status(abi::Status::Closed));
+        }
+        if !self.provider.api.network_available() {
+            return Err(Error::Status(abi::Status::Unsupported));
+        }
+        completed(unsafe {
+            self.provider.api.table().account_activate.unwrap()(
+                self.handle.as_ptr(),
+                callback,
+                context,
+            )
+        })
+    }
+
+    /// Copy/commit one resolved update on the retained account owner. A changed
+    /// controller node requires a different owner; Echo identity/socket changes
+    /// use the provider's quiescent account-only handoff.
+    ///
+    /// # Safety
+    /// Resolved configuration/secret spans remain readable for this synchronous
+    /// control-only call. Retain the original callback context through disable
+    /// and re-enable, and quiesce it only with permanent stop.
+    pub unsafe fn reconfigure(
+        &self,
+        config: &abi::AccountConfig,
+        secrets: &abi::AccountSecrets,
+    ) -> Result<(), Error> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Status(abi::Status::Closed));
+        }
+        if !self.provider.api.network_available() {
+            return Err(Error::Status(abi::Status::Unsupported));
+        }
+        if unsafe { text(config.local_node, 32) }? != self.local {
+            return Err(Error::Contract);
+        }
+        completed(unsafe {
+            self.provider.api.table().account_reconfigure.unwrap()(
+                self.handle.as_ptr(),
+                config,
+                secrets,
+            )
+        })
+    }
+
     /// Dial one real EchoLink ID on host control/dial work, never on a provider
     /// or audio callback. Outbound calls have no observed incoming endpoint.
     pub fn dial(self: &Arc<Self>, node: u32) -> Result<Arc<Peer>, Error> {

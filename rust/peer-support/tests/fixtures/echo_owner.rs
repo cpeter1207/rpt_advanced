@@ -62,13 +62,15 @@ unsafe extern "C" fn info(peer: *const abi::Qso, output: *mut abi::PeerInfo) -> 
     };
     abi::Status::Ok
 }
-macro_rules! operation {
-    ($name:ident($($arg:ty),* $(,)?)) => {
-        unsafe extern "C" fn $name($(_: $arg),*) -> abi::Status { abi::Status::Failed }
-    };
+unsafe extern "C" fn activate(_: *mut abi::Account, callback: Option<abi::EventFn>, context: *mut c_void) -> abi::Status {
+    if let Some(callback) = callback {
+        unsafe { callback(context, &abi::Event { struct_size: size_of::<abi::Event>() as u32, kind: 0, qso: ptr::null_mut(), generation: 4, status: abi::Status::Ok, taken: ptr::null_mut() }) };
+    }
+    abi::Status::Ok
 }
-operation!(activate(*mut abi::Account, Option<abi::EventFn>, *mut c_void));
-operation!(reconfigure(*mut abi::Account, *const abi::AccountConfig, *const abi::AccountSecrets));
+unsafe extern "C" fn reconfigure(_: *mut abi::Account, config: *const abi::AccountConfig, _: *const abi::AccountSecrets) -> abi::Status {
+    if unsafe { (*config).node_number } == 42 { abi::Status::Full } else { abi::Status::Ok }
+}
 unsafe extern "C" fn dial(
     _: *mut abi::Account,
     node: u32,
