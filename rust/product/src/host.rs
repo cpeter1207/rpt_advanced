@@ -21,7 +21,7 @@ use rpt_advanced_core::{
     },
     link::{
         AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, LocalTextInput,
-        Mode, TextAudience, TextOrigin,
+        Mode, PeerIdentity, ProtocolId, TextAudience, TextOrigin,
     },
     media::SpeechSource,
     runtime::{
@@ -533,7 +533,7 @@ impl Host {
         }
         self.pump(clock)
     }
-    /// Resolve a destination and optionally authenticate the numeric incoming source address.
+    /// Route reserved Echo aliases before ASL lookup; an address alone cannot admit an Echo QSO.
     pub fn lookup(
         &self,
         local: &str,
@@ -544,6 +544,14 @@ impl Host {
             .runtime
             .settings(local)
             .ok_or(RuntimeError::MissingNode)?;
+        let identity = PeerIdentity::from_operator(remote).map_err(|_| RuntimeError::Rejected)?;
+        if identity.protocol() == ProtocolId::EchoLink {
+            return if source.is_none() {
+                Ok(format!("EchoLink/{}", identity.node()))
+            } else {
+                Err(RuntimeError::Rejected)
+            };
+        }
         let method = match settings.link_lookup_method {
             LinkLookupMethod::Both => 0,
             LinkLookupMethod::Dns => 1,
