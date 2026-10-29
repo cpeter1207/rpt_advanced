@@ -292,6 +292,57 @@ pub type EventFn = unsafe extern "C" fn(*mut c_void, *const Event);
 /// Serial peer turn; negative stops notification, detach waits for quiescence.
 pub type StepFn = unsafe extern "C" fn(*mut c_void) -> i32;
 
+/// Synchronous source-rate transfer to the product's existing inbound ring.
+/// Callbacks must not reenter the same QSO; return only the accepted prefix.
+#[repr(C)]
+pub struct PcmSink {
+    /// Complete readable record size.
+    pub struct_size: u32,
+    /// Exact ABI one.
+    pub abi_version: u32,
+    /// Borrowed only during peer_read, never retained by the provider.
+    pub context: *mut c_void,
+    /// Normalized 8 kHz PCM. Nonzero concealed means codec-native PLC and must
+    /// bypass the in-band DTMF detector. No callback is made with empty PCM.
+    pub audio: Option<unsafe extern "C" fn(*mut c_void, u64, *const f32, usize, u32) -> usize>,
+    /// Ordered unresolved source gap; the product ring supplies fallback PLC.
+    pub gap: Option<unsafe extern "C" fn(*mut c_void, u64, u32) -> u32>,
+}
+
+/// Human text only; both spans are borrowed for this synchronous callback.
+/// Sender is a represented label, not a substitute for the verified QSO identity.
+pub type TextFn = unsafe extern "C" fn(*mut c_void, ByteSpan, ByteSpan);
+
+/// Copied result of one bounded source-rate receive turn, not PCM occupancy.
+#[repr(C)]
+pub struct ReadResult {
+    /// Complete writable record size.
+    pub struct_size: u32,
+    /// Exact ABI one.
+    pub abi_version: u32,
+    /// Idle=0, advanced=1, blocked=2, provider source drained=3.
+    pub progress: u32,
+    /// No edge=0, selected key=1, selected unkey=2; never raw contenders.
+    pub activity: u32,
+    /// Nonzero requests an explicit product-ring finite end. The product keeps
+    /// its token and reports drained only after that exact token succeeds.
+    pub finish_pending: u32,
+    /// Connecting=0, connected=1, closing=2, closed=3.
+    pub state: u32,
+}
+impl Default for ReadResult {
+    fn default() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            abi_version: 1,
+            progress: 0,
+            activity: 0,
+            finish_pending: 0,
+            state: 0,
+        }
+    }
+}
+
 /// Versioned provider table. Null operation slots are not advertised as capabilities.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -356,4 +407,40 @@ pub struct Descriptor {
     /// Release caller ownership off executor after stop/detach. Null is accepted.
     /// Required by the network group; older lifecycle-only prefixes need no tail.
     pub peer_destroy: Option<unsafe extern "C" fn(*mut Qso)>,
+    /// Bounded receive turn. product_drained is zero unless the exact product
+    /// finite token succeeded; cancellation/failure is not successful drainage.
+    /// Sink/text callbacks are synchronous and cannot reenter this QSO.
+    pub peer_read: Option<
+        unsafe extern "C" fn(
+            *mut Qso,
+            u32,
+            *const PcmSink,
+            Option<TextFn>,
+            *mut c_void,
+            *mut ReadResult,
+        ) -> Status,
+    >,
+    /// Prepare at most one complete RTP packet outside audio. The final pointer
+    /// is a complete writable released rptadv_codec_encode_result_v1 record;
+    /// it stays opaque here so this leaf contract does not load codec bindings.
+    pub peer_prepare_audio: Option<
+        unsafe extern "C" fn(
+            *mut Qso,
+            *const f32,
+            usize,
+            *mut u8,
+            usize,
+            u32,
+            *mut c_void,
+        ) -> Status,
+    >,
+    /// Reset only encoder segment history, preserving connection RTP clocks.
+    pub peer_reset_encoder: Option<unsafe extern "C" fn(*mut Qso) -> Status>,
+    /// Admit already prepared RTP. Full/Pending consume nothing; retry the same
+    /// bytes. Frame count and timestamp are the product's existing pacing hints.
+    pub peer_send_prepared: Option<unsafe extern "C" fn(*mut Qso, ByteSpan, u32, u32) -> Status>,
+    /// Copy this QSO's monotonic elapsed milliseconds for existing pacing.
+    pub peer_elapsed_ms: Option<unsafe extern "C" fn(*const Qso, *mut u64) -> Status>,
+    /// Send bounded human sender/body text, never ASL controller signaling.
+    pub peer_send_text: Option<unsafe extern "C" fn(*mut Qso, ByteSpan, ByteSpan) -> Status>,
 }

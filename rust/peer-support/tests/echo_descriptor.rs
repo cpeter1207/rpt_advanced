@@ -49,6 +49,12 @@ fn lifecycle() -> abi::Descriptor {
         peer_wake: None,
         peer_set_deadline: None,
         peer_destroy: None,
+        peer_read: None,
+        peer_prepare_audio: None,
+        peer_reset_encoder: None,
+        peer_send_prepared: None,
+        peer_elapsed_ms: None,
+        peer_send_text: None,
     }
 }
 
