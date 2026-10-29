@@ -2,7 +2,7 @@
 use super::{Account, Error, Peer, Provider, abi};
 use crate::{
     control::{Client, RejectionReason},
-    secrets::load_account_secrets,
+    secrets::{account_secrets_path, load_account_secrets},
 };
 use std::{
     collections::BTreeMap,
@@ -15,6 +15,71 @@ use std::{
 };
 
 type Incoming = Arc<dyn Fn(Arc<Peer>) + Send + Sync>;
+
+/// Synchronous configuration-visitor target shared by both hosts. Disabled
+/// records do not load a provider, read credentials or open a control owner.
+pub struct Preparation<'a> {
+    configuration: &'a Path,
+    library: &'a Path,
+    resources: &'a abi::RuntimeConfig,
+    control: *const crate::control::Descriptor,
+    incoming: Incoming,
+    accounts: Option<Accounts>,
+}
+impl<'a> Preparation<'a> {
+    /// Borrow trusted composition inputs until the configuration visit finishes.
+    /// # Safety
+    /// The selected backend descriptor/code remains valid through account stop
+    /// and drain. The incoming target is callable after product startup and
+    /// remains live through that same barrier.
+    pub unsafe fn new(
+        configuration: &'a Path,
+        library: &'a Path,
+        resources: &'a abi::RuntimeConfig,
+        control: *const crate::control::Descriptor,
+        incoming: impl Fn(Arc<Peer>) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            configuration,
+            library,
+            resources,
+            control,
+            incoming: Arc::new(incoming),
+            accounts: None,
+        }
+    }
+
+    /// Prepare a borrowed resolved record without retaining its spans or opening
+    /// network I/O. Paths are relative to the actual host configuration file.
+    /// # Safety
+    /// The record's complete spans/lists remain readable for this call.
+    pub unsafe fn prepare(
+        &mut self,
+        config: &abi::AccountConfig,
+        configured_secrets: Option<&Path>,
+    ) -> Result<(), Error> {
+        if config.enabled == 0 {
+            return Ok(());
+        }
+        if self.accounts.is_none() {
+            let provider = unsafe { Provider::load(self.library, self.resources) }?;
+            let control = Arc::new(
+                unsafe { Client::open(self.control, "rpt_advanced/echolink", 512) }
+                    .map_err(|_| Error::Control)?,
+            );
+            let incoming = Arc::clone(&self.incoming);
+            self.accounts = Some(Accounts::new(provider, control, move |peer| incoming(peer)));
+        }
+        let path = account_secrets_path(self.configuration, configured_secrets);
+        unsafe { self.accounts.as_mut().unwrap().prepare(config, &path) }
+    }
+
+    /// Transfer inactive owners into stable host storage before product startup.
+    pub fn finish(self) -> Option<Accounts> {
+        self.accounts
+    }
+}
+
 struct Notifications {
     account: Weak<Account>,
     control: Arc<Client>,

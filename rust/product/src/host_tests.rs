@@ -114,7 +114,8 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     assert_eq!(echo.identity().node(), "2000");
     host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
     assert!(host.peers.iter().any(|peer| peer.remote == "3002000"));
-    assert_eq!(state.lock().unwrap().bound_radio.as_deref(), Some("usb"));
+    let bound = state.lock().unwrap().bound_radio.clone();
+    assert_eq!(bound.as_deref(), Some("1000\0usb"));
     let (duplicate, rejected) = crate::link::session::tests::source_peer();
     assert!(host.incoming_peer(duplicate, "192.0.2.2", clock()).is_err());
     assert_eq!(rejected.lock().unwrap().drops, 1);

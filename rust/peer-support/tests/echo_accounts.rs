@@ -4,7 +4,7 @@ use rptadv_peer_support::{
     control::Client,
     echolink::{
         abi,
-        host::{Accounts, Error, Provider},
+        host::{Accounts, Error, Preparation, Provider},
     },
 };
 use std::{
@@ -14,6 +14,66 @@ use std::{
 };
 #[path = "support/fixture.rs"]
 mod support;
+
+#[test]
+fn preparation_is_lazy_and_uses_the_real_configuration_directory() {
+    let fixture = support::Fixture::new("network");
+    let directory = fixture.0.parent().unwrap();
+    let configuration = directory.join("rpt_advanced.conf");
+    let resources = abi::RuntimeConfig::default();
+    let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+    let mut disabled = unsafe {
+        Preparation::new(
+            &configuration,
+            std::path::Path::new("missing-provider"),
+            &resources,
+            std::ptr::null(),
+            |_| {},
+        )
+    };
+    unsafe { disabled.prepare(&abi::AccountConfig::default(), None) }.unwrap();
+    assert!(
+        disabled.finish().is_none(),
+        "disabled accounts must open nothing"
+    );
+    let path = directory.join("echolink-secrets.conf");
+    std::fs::write(&path, "[524950]\ndirectory_password=fixture-value\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (send, receive) = mpsc::channel();
+    let mut candidate = unsafe {
+        Preparation::new(
+            &configuration,
+            &fixture.0,
+            &resources,
+            backend.cast(),
+            move |peer| {
+                send.send(peer.remote().to_owned()).unwrap();
+            },
+        )
+    };
+    let config = abi::AccountConfig {
+        enabled: 1,
+        node_number: 7,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..abi::AccountConfig::default()
+    };
+    unsafe { candidate.prepare(&config, None) }.unwrap();
+    let accounts = candidate.finish().unwrap();
+    assert!(
+        receive.try_recv().is_err(),
+        "preparation must not activate a callback"
+    );
+    unsafe { accounts.activate() }.unwrap();
+    assert_eq!(
+        receive.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "4294967295"
+    );
+    accounts.stop().unwrap();
+    std::fs::remove_file(path).unwrap();
+}
 
 #[test]
 fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking() {

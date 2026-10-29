@@ -2,7 +2,7 @@
 use super::{Api, abi};
 use libloading::Library;
 mod accounts;
-pub use accounts::Accounts;
+pub use accounts::{Accounts, Preparation};
 use std::{
     net::SocketAddrV4,
     path::Path,
