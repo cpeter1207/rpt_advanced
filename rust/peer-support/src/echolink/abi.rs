@@ -1,5 +1,8 @@
 //! Shared EchoLink C records; packet-library and runtime objects never cross this boundary.
 use std::{ffi::c_void, mem::size_of, ptr};
+#[path = "abi/observation.rs"]
+mod observation;
+pub use observation::{AccountObservation, JitterObservation, PeerObservation, ProxyObservation};
 
 /// Bounded operation outcome; Full does not consume input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -456,4 +459,11 @@ pub struct Descriptor {
     /// owned; success exchanges its settings with the target's previous settings
     /// for rollback. Failure preserves the candidate and prior configuration.
     pub account_apply_prepared: Option<unsafe extern "C" fn(*mut Account, *mut Account) -> Status>,
+    /// Copy account metadata off provider/audio executors; may wait on the
+    /// existing account control owner, never while borrowing a peer.
+    pub account_observe:
+        Option<unsafe extern "C" fn(*const Account, *mut AccountObservation) -> Status>,
+    /// Copy peer metadata only inside its registered serial step, including a
+    /// closing turn. No mutable borrow may survive a callback into the host.
+    pub peer_observe: Option<unsafe extern "C" fn(*const Qso, *mut PeerObservation) -> Status>,
 }

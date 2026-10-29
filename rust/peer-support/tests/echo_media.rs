@@ -50,6 +50,8 @@ status_fn!(send(*mut abi::Qso, abi::ByteSpan, u32, u32));
 status_fn!(elapsed(*const abi::Qso, *mut u64));
 status_fn!(text(*mut abi::Qso, abi::ByteSpan, abi::ByteSpan));
 status_fn!(apply(*mut abi::Account, *mut abi::Account));
+status_fn!(account_observe(*const abi::Account, *mut abi::AccountObservation));
+status_fn!(peer_observe(*const abi::Qso, *mut abi::PeerObservation));
 unsafe extern "C" fn context_destroy(_: *mut abi::Context) {}
 unsafe extern "C" fn account_destroy(_: *mut abi::Account) {}
 unsafe extern "C" fn registration(_: *mut abi::Registration) {}
@@ -84,6 +86,8 @@ fn complete() -> abi::Descriptor {
         peer_elapsed_ms: Some(elapsed),
         peer_send_text: Some(text),
         account_apply_prepared: Some(apply),
+        account_observe: Some(account_observe),
+        peer_observe: Some(peer_observe),
     }
 }
 
@@ -93,7 +97,7 @@ fn media_and_text_require_their_complete_sized_operation_groups() {
     assert!(api.network_available());
     assert!(api.prepared_media_available());
     assert!(api.text_available());
-    for missing in 0..11 {
+    for missing in 0..14 {
         let mut table = complete();
         match missing {
             0 => table.peer_read = None,
@@ -106,7 +110,10 @@ fn media_and_text_require_their_complete_sized_operation_groups() {
             7 => table.capabilities = 1 | 2 | 8,
             8 => table.struct_size = offset_of!(abi::Descriptor, peer_send_text) as u32,
             9 => table.account_apply_prepared = None,
-            _ => table.struct_size = offset_of!(abi::Descriptor, account_apply_prepared) as u32,
+            10 => table.struct_size = offset_of!(abi::Descriptor, account_apply_prepared) as u32,
+            11 => table.account_observe = None,
+            12 => table.peer_observe = None,
+            _ => table.struct_size = offset_of!(abi::Descriptor, peer_observe) as u32,
         }
         assert!(unsafe { Api::open(&table) }.is_err(), "case {missing}");
     }

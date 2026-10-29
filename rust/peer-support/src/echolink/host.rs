@@ -141,6 +141,34 @@ pub struct Account {
 unsafe impl Send for Account {}
 unsafe impl Sync for Account {}
 impl Account {
+    /// Copy account health on host control, including before any QSO exists or
+    /// after stop. This may wait on the provider's existing account owner;
+    /// never call from its executor or an audio callback. No admission is granted.
+    pub fn observe(&self) -> Result<abi::AccountObservation, Error> {
+        let call = self
+            .provider
+            .api
+            .table()
+            .account_observe
+            .ok_or(Error::Status(abi::Status::Unsupported))?;
+        let mut result = abi::AccountObservation {
+            struct_size: std::mem::size_of::<abi::AccountObservation>() as u32,
+            abi_version: 1,
+            ..Default::default()
+        };
+        completed(unsafe { call(self.handle.as_ptr(), &mut result) })?;
+        if result.struct_size as usize != std::mem::size_of::<abi::AccountObservation>()
+            || result.abi_version != 1
+            || result.state > 7
+            || result.transport > 1
+            || [result.fresh, result.registered, result.available]
+                .into_iter()
+                .any(|flag| flag > 1)
+        {
+            return Err(Error::Contract);
+        }
+        Ok(result)
+    }
     /// Apply an inactive prepared snapshot on this exact local account/provider.
     /// Success exchanges settings for rollback; neither handle is consumed.
     /// Provider validation/commit and any callback joins occur off executors.
@@ -484,6 +512,38 @@ pub struct Peer {
 unsafe impl Send for Peer {}
 unsafe impl Sync for Peer {}
 impl Peer {
+    /// Copy this exact QSO's metadata, including its first closing cause.
+    /// # Safety
+    /// Call only inside this peer's registered serial step, with no concurrent
+    /// provider operation or outstanding mutable provider borrow.
+    pub unsafe fn observe(&self) -> Result<abi::PeerObservation, Error> {
+        let call = self
+            .account
+            .provider
+            .api
+            .table()
+            .peer_observe
+            .ok_or(Error::Status(abi::Status::Unsupported))?;
+        let mut result = abi::PeerObservation {
+            struct_size: std::mem::size_of::<abi::PeerObservation>() as u32,
+            abi_version: 1,
+            ..Default::default()
+        };
+        completed(unsafe { call(self.handle.as_ptr(), &mut result) })?;
+        if result.struct_size as usize != std::mem::size_of::<abi::PeerObservation>()
+            || result.abi_version != 1
+            || result.state > 3
+            || result.first_cause > 6
+            || result.codec > 1
+            || result.transport > 1
+            || [result.raw_receiving, result.selected]
+                .into_iter()
+                .any(|flag| flag > 1)
+        {
+            return Err(Error::Contract);
+        }
+        Ok(result)
+    }
     /// Borrow the copied identity; fresh admission still uses provider revalidation.
     pub fn identity(&self) -> &Identity {
         &self.identity

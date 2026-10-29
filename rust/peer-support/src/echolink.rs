@@ -34,6 +34,7 @@ impl Api {
             std::mem::offset_of!(abi::Descriptor, peer_read),
             std::mem::offset_of!(abi::Descriptor, peer_send_text),
             std::mem::offset_of!(abi::Descriptor, account_apply_prepared),
+            std::mem::offset_of!(abi::Descriptor, account_observe),
             std::mem::size_of::<abi::Descriptor>(),
         ]
         .into_iter()
@@ -68,6 +69,8 @@ impl Api {
                 table.account_activate.is_some(),
                 table.account_reconfigure.is_some(),
                 table.account_apply_prepared.is_some(),
+                table.account_observe.is_some(),
+                table.peer_observe.is_some(),
                 table.dial.is_some(),
                 table.validate_pending.is_some(),
                 table.peer_info.is_some(),

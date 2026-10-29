@@ -94,6 +94,15 @@ fn account_activation_and_reload_keep_callback_and_local_ownership() {
     };
     let account = unsafe { provider.prepare(&config, &keys) }.unwrap();
     drop(provider);
+    let observed = account.observe().unwrap();
+    assert_eq!(
+        (
+            observed.state,
+            observed.generation,
+            observed.directory_failures
+        ),
+        (2, 4, 7)
+    );
     let calls = AtomicUsize::new(0);
     assert_eq!(
         unsafe { account.activate(Some(notify), std::ptr::from_ref(&calls).cast_mut().cast()) },

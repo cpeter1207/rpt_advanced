@@ -20,6 +20,15 @@ struct EncodeResult {
 fn shared_media_preserves_provider_status_and_original_pacing_arguments() {
     let fixture = support::Fixture::new("network");
     let peer = fixture.peer();
+    let observed = unsafe { peer.observe() }.unwrap();
+    assert_eq!(
+        (
+            observed.state,
+            observed.first_cause,
+            observed.codec_plc_samples
+        ),
+        (2, 4, 640)
+    );
     let mut result = EncodeResult {
         size: size_of::<EncodeResult>() as u32,
         status: 0,

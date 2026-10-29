@@ -92,6 +92,16 @@ unsafe extern "C" fn apply(target: *mut abi::Account, prepared: *mut abi::Accoun
     unsafe { ptr::swap(target.cast::<u32>(), prepared.cast::<u32>()) };
     abi::Status::Ok
 }
+unsafe extern "C" fn account_observe(_: *const abi::Account, out: *mut abi::AccountObservation) -> abi::Status {
+    unsafe { out.write(abi::AccountObservation { struct_size: size_of::<abi::AccountObservation>() as u32,
+        abi_version: 1, state: 2, generation: 4, directory_failures: 7, ..Default::default() }) };
+    abi::Status::Ok
+}
+unsafe extern "C" fn peer_observe(_: *const abi::Qso, out: *mut abi::PeerObservation) -> abi::Status {
+    unsafe { out.write(abi::PeerObservation { struct_size: size_of::<abi::PeerObservation>() as u32,
+        abi_version: 1, state: 2, first_cause: 4, codec_plc_samples: 640, ..Default::default() }) };
+    abi::Status::Ok
+}
 unsafe extern "C" fn dial(
     _: *mut abi::Account,
     node: u32,
@@ -365,6 +375,8 @@ pub extern "C" fn rptadv_echolink_descriptor_v1() -> *const abi::Descriptor {
         peer_elapsed_ms: if cfg!(network) { Some(elapsed) } else { None },
         peer_send_text: if cfg!(network) { Some(text) } else { None },
         account_apply_prepared: if cfg!(network) { Some(apply) } else { None },
+        account_observe: if cfg!(network) { Some(account_observe) } else { None },
+        peer_observe: if cfg!(network) { Some(peer_observe) } else { None },
     };
     ptr::from_ref(&TABLE)
 }

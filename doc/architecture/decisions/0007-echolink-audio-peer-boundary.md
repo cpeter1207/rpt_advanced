@@ -246,6 +246,19 @@ the only alias parser at these boundaries. Retries and status inherit that same
 key; leading-zero AllStar identities are not rewritten. Alternate Echo spellings
 cannot establish a second connection or bypass a configured deny rule.
 
+Echo diagnostics use sized metadata-only account and peer observation records in
+the shared descriptor. Account queries run on host control and use the existing
+bounded account command owner; no status sampler or per-packet snapshot allocation
+is added. Peer observations run only on the sole serial peer owner. Both hosts
+publish copied observations through their existing product status/logger ports.
+The complete network group requires both observation operations; an incomplete
+pre-release network table fails closed. Lifecycle-only preparation remains valid.
+The descriptor and SONAME remain 1; both current hosts and the unreleased provider
+advance together. Jitter/PLC spans use the 8 kHz source clock. Queue admission,
+complete local socket sends and unproven remote receipt are separate concepts.
+Proxy output counters include active/retired head-of-line stalls; a canceled
+partial write retains its cursor, and retirement cannot claim a successful send.
+
 ## Consequences
 
 No EchoLink protocol, directory, socket, control work or speech synthesis occurs
