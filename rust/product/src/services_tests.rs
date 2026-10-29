@@ -95,14 +95,18 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
         context: *mut c_void,
         output: *mut abi::rptadv_peer_source_result_v1,
     ) -> i32 {
-        assert_eq!(drained, 1);
+        assert!(drained <= 2);
+        let credit = if drained == 0 { 2 } else { 0 };
         let sink = unsafe { &*sink };
         let pcm = [0.25; 4];
         assert_eq!(
             unsafe { sink.audio.unwrap()(sink.context, 12, pcm.as_ptr(), pcm.len(), 1) },
-            2
+            credit
         );
-        assert_eq!(unsafe { sink.gap.unwrap()(sink.context, 16, 3) }, 2);
+        assert_eq!(
+            unsafe { sink.gap.unwrap()(sink.context, 16, 3) },
+            credit as u32
+        );
         unsafe {
             text.unwrap()(
                 context,
@@ -117,7 +121,7 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
             )
         };
         let output = unsafe { &mut *output };
-        output.progress = 2;
+        output.progress = drained;
         output.activity = 1;
         output.finish_pending = 1;
         output.state = 1;
@@ -131,40 +135,53 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
         table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
     });
     let mut peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
-    let mut seen = Vec::new();
-    let result = peer
-        .read_source(true, |input| {
-            match input {
-                SourceInput::Audio {
-                    start,
-                    samples,
-                    concealed,
-                } => {
-                    assert_eq!((start, samples, concealed), (12, &[0.25; 4][..], true));
-                    seen.push("audio");
+    for (completion, code) in [
+        (SourceCompletion::Pending, 0),
+        (SourceCompletion::Drained, 1),
+        (SourceCompletion::Cancelled, 2),
+    ] {
+        let mut seen = Vec::new();
+        let result = peer
+            .read_source(completion, |input| {
+                match input {
+                    SourceInput::Audio {
+                        start,
+                        samples,
+                        concealed,
+                    } => {
+                        assert_eq!((start, samples, concealed), (12, &[0.25; 4][..], true));
+                        seen.push("audio");
+                    }
+                    SourceInput::Gap { start, count } => {
+                        assert_eq!((start, count), (16, 3));
+                        seen.push("gap");
+                    }
+                    SourceInput::Text { sender, body } => {
+                        assert_eq!((sender, body), ("W1XYZ-R", "Hello"));
+                        seen.push("text");
+                    }
                 }
-                SourceInput::Gap { start, count } => {
-                    assert_eq!((start, count), (16, 3));
-                    seen.push("gap");
-                }
-                SourceInput::Text { sender, body } => {
-                    assert_eq!((sender, body), ("W1XYZ-R", "Hello"));
-                    seen.push("text");
-                }
+                2
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            if code == 0 {
+                vec!["audio", "gap", "text"]
+            } else {
+                vec!["text"]
             }
-            2
-        })
-        .unwrap();
-    assert_eq!(seen, ["audio", "gap", "text"]);
-    assert_eq!(
-        (
-            result.progress,
-            result.activity,
-            result.finish_pending,
-            result.closed
-        ),
-        (2, Some(true), true, false)
-    );
+        );
+        assert_eq!(
+            (
+                result.progress,
+                result.activity,
+                result.finish_pending,
+                result.closed
+            ),
+            (code, Some(true), true, false)
+        );
+    }
 }
 
 #[test]

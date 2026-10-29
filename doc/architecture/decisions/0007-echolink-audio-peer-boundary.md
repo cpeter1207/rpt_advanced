@@ -89,6 +89,14 @@ remote identities. Product SONAME 2 rejects the older host/product pair.
 EchoLink host attachment, account reload and finite source-read integration
 remain in progress; the provider does not yet advertise its network/media groups.
 
+Source reads return exact accepted-prefix credit; the provider retains rejected
+PCM and missing spans. The product holds one finite-ring token and acknowledges
+playout only when that token succeeds. A generation discard is a distinct
+completion, never proof that audio played. Completing turns admit no new PCM or
+gaps, which remain provider-owned until the next turn. Ring replacement preserves
+the protocol policy and retires the old token. EchoLink never enters IAX's
+NEWKEY, topology, downstream-source query or remote-command exchange.
+
 ## Consequences
 
 No EchoLink protocol, directory, socket, control work or speech synthesis occurs

@@ -407,8 +407,9 @@ pub struct Descriptor {
     /// Release caller ownership off executor after stop/detach. Null is accepted.
     /// Required by the network group; older lifecycle-only prefixes need no tail.
     pub peer_destroy: Option<unsafe extern "C" fn(*mut Qso)>,
-    /// Bounded receive turn. product_drained is zero unless the exact product
-    /// finite token succeeded; cancellation/failure is not successful drainage.
+    /// Bounded receive turn. Completion0 is pending,1 acknowledges the exact
+    /// played product token,2 explicitly discards a retired product generation.
+    /// A completing turn rejects new PCM/gaps; they remain for the next read.
     /// Sink/text callbacks are synchronous and cannot reenter this QSO.
     pub peer_read: Option<
         unsafe extern "C" fn(

@@ -394,10 +394,11 @@ struct rptadv_host_services_v9 {
      * Failure does not transfer ownership or retain the caller's result buffer. */
     int (*peer_info)(void *context, const void *peer, struct rptadv_peer_info_v1 *out);
     /** Optional accepted-prefix source group, selected by this peer capability.
-     * Unaccepted PCM/gap suffixes remain with the provider. product_drained is 1
-     * only after the exact finite token succeeds, never cancellation or empty occupancy.
+     * Unaccepted PCM/gap suffixes remain with the provider. Completion is 0 while
+     * pending, 1 only after the exact finite token plays, or 2 on explicit
+     * generation discard. A completing turn must reject new PCM/gap credit.
      * A null sink queries state without consuming input or advancing media. */
-    int (*peer_read_source)(void *context, void *peer, uint32_t product_drained,
+    int (*peer_read_source)(void *context, void *peer, uint32_t product_completion,
                             const struct rptadv_peer_source_sink_v1 *sink,
                             rptadv_peer_source_text_v1 text, void *text_context,
                             struct rptadv_peer_source_result_v1 *out);

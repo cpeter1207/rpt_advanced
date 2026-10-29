@@ -56,6 +56,19 @@ pub enum SourceInput<'a> {
     },
 }
 
+/// Exact disposition of the previously accepted product-ring prefix.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SourceCompletion {
+    /// The product still owns accepted audio.
+    #[default]
+    Pending = 0,
+    /// The exact finite token reached successful playout.
+    Drained = 1,
+    /// An explicit generation retirement discarded the accepted prefix.
+    Cancelled = 2,
+}
+
 /// Copied provider progress and selected activity, separate from PCM occupancy.
 pub struct SourceRead {
     /// 0 idle, 1 advanced, 2 blocked, 3 provider media drained.
@@ -797,7 +810,11 @@ impl PeerIo {
     }
 
     /// Read bounded provider-owned input; never copy or consume its rejected suffix.
-    pub fn read_source<F>(&mut self, drained: bool, dispatch: F) -> Result<SourceRead, Error>
+    pub fn read_source<F>(
+        &mut self,
+        completion: SourceCompletion,
+        dispatch: F,
+    ) -> Result<SourceRead, Error>
     where
         F: FnMut(SourceInput<'_>) -> usize,
     {
@@ -807,12 +824,18 @@ impl PeerIo {
         struct State<F> {
             dispatch: F,
             failed: bool,
+            completing: bool,
         }
         fn accept<F: FnMut(SourceInput<'_>) -> usize>(
             state: &mut State<F>,
             input: SourceInput<'_>,
             maximum: usize,
         ) -> usize {
+            // A prior burst's completion cannot acknowledge samples offered in
+            // this same turn. The provider retains them for the next read.
+            if state.completing && !matches!(&input, SourceInput::Text { .. }) {
+                return 0;
+            }
             match catch_unwind(AssertUnwindSafe(|| (state.dispatch)(input))) {
                 Ok(count) if count <= maximum => count,
                 _ => {
@@ -893,6 +916,7 @@ impl PeerIo {
         let mut state = State {
             dispatch,
             failed: false,
+            completing: completion != SourceCompletion::Pending,
         };
         let context = ptr::from_mut(&mut state).cast();
         let sink = abi::rptadv_peer_source_sink_v1 {
@@ -909,7 +933,7 @@ impl PeerIo {
             self.services.0.peer_read_source.unwrap()(
                 self.services.0.context,
                 self.handle.as_ptr(),
-                u32::from(drained),
+                completion as u32,
                 &sink,
                 Some(text::<F>),
                 context,

@@ -1,17 +1,23 @@
-//! Serialized IAX peer work, queued control delivery, and native egress composition.
+//! Serialized peer work, protocol-specific ingress, and native egress composition.
 use super::{
     dispatcher::PeerWake,
     outbound::{EgressObservation, EgressStatistics, Outbound},
-    ring::{InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation, RingError},
+    ring::{
+        FinishState, InboundObserver, InboundPolicy, InboundProducer, InboundRing, Observation,
+        RingError,
+    },
     source_clock::SourceClock,
 };
 use crate::{
     Error,
-    services::{HostServices, PeerInput, PeerIo},
+    services::{HostServices, PeerInput, PeerIo, SourceCompletion, SourceInput},
 };
 use rpt_advanced_core::{
     audio::LinkAudioConsumer,
-    link::{ClassifiedText, HumanMessage, Peer, Protocol, TextOrigin, classify_asl},
+    link::{
+        ClassifiedText, HumanMessage, Peer, Protocol, ProtocolId, TextAudience, TextOrigin,
+        classify_asl,
+    },
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
@@ -193,6 +199,10 @@ impl PeerControl {
     pub fn reply_target(&self) -> rpt_advanced_core::link::PeerReply {
         self.observer.signals().reply_target()
     }
+    /// Preserve the protocol's immutable ring policy when preparing a generation.
+    pub(crate) fn inbound_policy(&self) -> InboundPolicy {
+        self.observer.policy()
+    }
     /// Queue bounded work, returning ownership to the caller when full.
     pub fn send(&mut self, command: Command) -> Result<(), Command> {
         self.commands
@@ -284,6 +294,9 @@ pub struct PeerSession {
     peer_observation: Arc<PeerObservationCache>,
     pending_input: Option<PendingInput>,
     pending_pcm: [f32; MAX_PEER_INPUT_SAMPLES],
+    source_finish: Option<u64>,
+    source_completion: SourceCompletion,
+    source_dirty: bool,
     peer: Peer,
     local: String,
     remote: String,
@@ -306,6 +319,7 @@ struct TextIdentity {
     station: AtomicU64,
     connection: u64,
     peer: String,
+    protocol: u32,
 }
 impl TextIdentity {
     fn snapshot(&self) -> TextOrigin {
@@ -313,7 +327,7 @@ impl TextIdentity {
             station_generation: self.station.load(Ordering::Acquire),
             connection_generation: self.connection,
             peer: self.peer.clone(),
-            protocol: 1,
+            protocol: self.protocol,
         }
     }
 }
@@ -563,9 +577,19 @@ impl PeerSession {
             return Err(Error::Reservation);
         }
         let outbound = Outbound::new(io.rate(), outbound)?;
-        let (inbound, _input) =
-            InboundRing::open(io.rate(), InboundPolicy::Peer).map_err(|_| Error::Allocation)?;
-        io.send_text(c"!NEWKEY1!")?;
+        let source = io.source_media();
+        let (inbound, _input) = InboundRing::open(
+            io.rate(),
+            if source {
+                InboundPolicy::Echo
+            } else {
+                InboundPolicy::Peer
+            },
+        )
+        .map_err(|_| Error::Allocation)?;
+        if !source {
+            io.send_text(c"!NEWKEY1!")?;
+        }
         let (commands, incoming) = RingBuffer::new(64);
         let (events, outgoing) = RingBuffer::new(64);
         let stop = Arc::new(AtomicBool::new(false));
@@ -575,6 +599,7 @@ impl PeerSession {
             station: AtomicU64::new(0),
             connection: NEXT_TEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
             peer: remote.into(),
+            protocol: io.identity().protocol() as u32,
         });
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
@@ -598,6 +623,9 @@ impl PeerSession {
                 peer_observation,
                 pending_input: None,
                 pending_pcm: [0.0; MAX_PEER_INPUT_SAMPLES],
+                source_finish: None,
+                source_completion: SourceCompletion::Pending,
+                source_dirty: false,
                 peer,
                 local: local.into(),
                 remote: remote.into(),
@@ -609,7 +637,11 @@ impl PeerSession {
                 edge: 0,
                 query_epoch: None,
                 replied_newkey: false,
-                radio_control: RadioControlState::Negotiating(None),
+                radio_control: if source {
+                    RadioControlState::Disabled
+                } else {
+                    RadioControlState::Negotiating(None)
+                },
                 async_epoch: None,
                 #[cfg(test)]
                 owner_thread,
@@ -716,6 +748,85 @@ impl PeerSession {
         }
         Ok(())
     }
+    // Echo retains rejected prefixes. Only the exact ring token can release the
+    // selected talker; provider/jitter completion alone is not audible completion.
+    fn read_source(&mut self) -> Result<bool, Error> {
+        for _ in 0..MAX_ASYNC_READS_PER_STEP {
+            let completion = match self.source_finish {
+                Some(token) => match self
+                    .inbound
+                    .finish_status(token)
+                    .map_err(|_| Error::Write)?
+                {
+                    FinishState::Pending => SourceCompletion::Pending,
+                    FinishState::Drained => SourceCompletion::Drained,
+                    FinishState::Cancelled => SourceCompletion::Cancelled,
+                    FinishState::Failed => return Err(Error::Write),
+                },
+                None => self.source_completion,
+            };
+            let mut admission_error = None;
+            let mut accepted = false;
+            let inbound = &mut self.inbound;
+            let events = &mut self.events;
+            let identity = &self.text_identity;
+            let result = self.io.read_source(completion, |input| {
+                let credit = match input {
+                    SourceInput::Audio { samples, .. } => inbound.write(samples),
+                    SourceInput::Gap { count, .. } => inbound
+                        .gap(count.min(MAX_PEER_INPUT_SAMPLES) as u64)
+                        .map(|n| n as usize),
+                    SourceInput::Text { sender, body } => {
+                        let _ = events.push(Event::HumanText(HumanMessage {
+                            origin: identity.snapshot(),
+                            source: sender.to_owned(),
+                            audience: TextAudience::Broadcast,
+                            body: Arc::from(body),
+                        }));
+                        return 0;
+                    }
+                };
+                match credit {
+                    Ok(count) => {
+                        accepted |= count != 0;
+                        count
+                    }
+                    Err(_) => {
+                        admission_error = Some(Error::Write);
+                        0
+                    }
+                }
+            })?;
+            if let Some(error) = admission_error {
+                return Err(error);
+            }
+            if completion != SourceCompletion::Pending {
+                self.source_finish = None;
+                self.source_completion = SourceCompletion::Pending;
+                self.source_dirty = false;
+            }
+            self.source_dirty |= accepted;
+            if let Some(keyed) = result.activity {
+                self.inbound.signals().set_radio_keyed(keyed);
+            }
+            if result.closed {
+                return Err(Error::Hangup);
+            }
+            if result.finish_pending {
+                if self.source_finish.is_none() {
+                    self.source_finish = Some(self.inbound.finish().map_err(|_| Error::Write)?);
+                }
+                return Ok(true);
+            }
+            if result.progress == 2 {
+                return Ok(true);
+            }
+            if result.progress == 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     /// Execute one bounded iteration; report its first unexpected failure and publish EOF.
     pub fn step(&mut self, now_ms: u64) -> Result<(), Error> {
         #[cfg(test)]
@@ -755,12 +866,22 @@ impl PeerSession {
             };
             match command {
                 Command::Text { text, advisory } => {
+                    if self.io.identity().protocol() == ProtocolId::EchoLink
+                        && Protocol::parse(text.to_bytes()).is_some()
+                    {
+                        continue;
+                    }
                     let result = self.io.send_text(&text);
                     if !advisory {
                         result?;
                     }
                 }
                 Command::Redirect { inbound, outbound } => {
+                    if self.source_dirty {
+                        self.source_completion = SourceCompletion::Cancelled;
+                    }
+                    self.source_finish = None;
+                    self.source_dirty = false;
                     self.inbound = inbound;
                     self.pending_input = None;
                     self.outbound.redirect(outbound)?;
@@ -777,15 +898,26 @@ impl PeerSession {
             self.query_epoch = None;
             self.edge = edge;
         }
-        if let Some(epoch) = self.peer.activity(edge & 1 != 0, now_ms) {
-            self.query(edge, epoch)?;
+        if !self.io.source_media() {
+            if let Some(epoch) = self.peer.activity(edge & 1 != 0, now_ms) {
+                self.query(edge, epoch)?;
+            }
         }
+        let source_wait = if self.io.source_media() {
+            self.read_source()?
+        } else {
+            false
+        };
         let read_budget = if self.io.async_owner().is_some() {
             MAX_ASYNC_READS_PER_STEP
         } else {
             1
         };
-        for _ in 0..read_budget {
+        for _ in 0..if self.io.source_media() {
+            0
+        } else {
+            read_budget
+        } {
             self.flush_pending_input()?;
             if self.pending_input.is_some() || !self.io.ready()? {
                 break;
@@ -864,7 +996,7 @@ impl PeerSession {
         let mut after = deadline.map_or(u64::MAX, |deadline| deadline.saturating_sub(now));
         // Space can become available without an activity edge; retry only that
         // backpressure. The media dispatcher wakes ordinary activity changes.
-        if self.pending_input.is_some() {
+        if self.pending_input.is_some() || source_wait {
             after = after.min(10_000_000);
         }
         if self.commands.slots() != 0 {

@@ -204,8 +204,9 @@ fn prepared(
                 .map_err(|_| RuntimeError::Preparation)?,
         );
         text_origins.push((peer.remote.clone(), origin));
-        let (inbound, input) = InboundRing::open(snapshot.input_rate, InboundPolicy::Peer)
-            .map_err(|_| RuntimeError::Preparation)?;
+        let (inbound, input) =
+            InboundRing::open(snapshot.input_rate, peer.control.inbound_policy())
+                .map_err(|_| RuntimeError::Preparation)?;
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
