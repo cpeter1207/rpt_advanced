@@ -787,7 +787,13 @@ impl PeerSession {
             let source = self.source.as_mut().ok_or(Error::Operation)?;
             let scratch = &mut self.pending_pcm;
             let peer = &mut self.peer;
+            let finishing = self.source_finish.is_some();
             let result = self.io.read_source(completion, |input| {
+                // Future PCM must not advance detection or its current mute gate
+                // while the previous finite burst is still audible.
+                if finishing && !matches!(&input, SourceInput::Text { .. }) {
+                    return 0;
+                }
                 let credit = match input {
                     SourceInput::Audio {
                         start,

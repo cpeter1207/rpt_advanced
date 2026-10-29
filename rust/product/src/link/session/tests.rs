@@ -156,13 +156,13 @@ fn echo_source_never_joins_detector_qualification_across_loss_or_codec_plc() {
             .ok()
             .unwrap();
         state.lock().unwrap().input.extend([
-            Input::Audio(five_tone(200)),
+            Input::Audio(five_tone(100)),
             if concealed {
                 Input::Concealed(five_tone(160))
             } else {
                 Input::Gap(160)
             },
-            Input::Audio(five_tone(200)),
+            Input::Audio(five_tone(100)),
             Input::Audio(vec![0.0; 640]),
         ]);
         session.step(0).unwrap();
@@ -174,7 +174,7 @@ fn echo_source_never_joins_detector_qualification_across_loss_or_codec_plc() {
         }
         assert!(
             digits.is_empty(),
-            "neither 25-ms real fragment qualifies: {digits:?}, concealed={concealed}"
+            "neither 12.5-ms real fragment qualifies: {digits:?}, concealed={concealed}"
         );
         for now in 1..20 {
             consumer.render(&mut [0.0; 960]).unwrap();
