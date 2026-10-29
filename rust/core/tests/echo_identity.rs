@@ -2,6 +2,20 @@ use rpt_advanced_core::command::DtmfCommandMap;
 use rpt_advanced_core::link::{EchoAlias, PeerIdentity, ProtocolId};
 
 #[test]
+fn unsupported_remote_command_catalog_validates_and_renders_every_form() {
+    use rpt_advanced_core::messages::{Message, MessageCatalog};
+    let catalog =
+        MessageCatalog::from_sources("en-US", include_str!("../../../messages/en-US.ftl"), None)
+            .unwrap();
+    let forms = catalog
+        .format(&Message::RemoteCommandUnsupported { node: "3123456" })
+        .unwrap();
+    assert!(forms.text.contains("3123456"));
+    assert!(forms.tts.contains("3123456"));
+    assert!(forms.morse.contains("3123456"));
+}
+
+#[test]
 fn echo_remote_commands_never_create_asl_control_envelopes() {
     use rpt_advanced_core::{
         access::AccessPolicy,

@@ -873,7 +873,7 @@ fn required_sample_args(id: &str) -> FluentArgs<'static> {
             args.set("greeting_tts", "Good morning");
             args.set("time", "12:00 AM");
         }
-        "loop-rejected" => args.set("node", "2000"),
+        "loop-rejected" | "remote-command-unsupported" => args.set("node", "2000"),
         "priority-group-selected" => {
             args.set("group", "test group");
             args.set("peer", "2000");
