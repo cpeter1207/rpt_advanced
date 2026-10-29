@@ -77,6 +77,11 @@ unsafe extern "C" fn activate(account: *mut abi::Account, callback: Option<abi::
 unsafe extern "C" fn reconfigure(_: *mut abi::Account, config: *const abi::AccountConfig, _: *const abi::AccountSecrets) -> abi::Status {
     if unsafe { (*config).node_number } == 42 { abi::Status::Full } else { abi::Status::Ok }
 }
+unsafe extern "C" fn apply(target: *mut abi::Account, prepared: *mut abi::Account) -> abi::Status {
+    if unsafe { *prepared.cast::<u32>() } == 42 { return abi::Status::Full; }
+    unsafe { ptr::swap(target.cast::<u32>(), prepared.cast::<u32>()) };
+    abi::Status::Ok
+}
 unsafe extern "C" fn dial(
     _: *mut abi::Account,
     node: u32,
@@ -348,6 +353,7 @@ pub extern "C" fn rptadv_echolink_descriptor_v1() -> *const abi::Descriptor {
         peer_send_prepared: if cfg!(network) { Some(send) } else { None },
         peer_elapsed_ms: if cfg!(network) { Some(elapsed) } else { None },
         peer_send_text: if cfg!(network) { Some(text) } else { None },
+        account_apply_prepared: if cfg!(network) { Some(apply) } else { None },
     };
     ptr::from_ref(&TABLE)
 }

@@ -137,6 +137,30 @@ pub struct Account {
 unsafe impl Send for Account {}
 unsafe impl Sync for Account {}
 impl Account {
+    /// Apply an inactive prepared snapshot on this exact local account/provider.
+    /// Success exchanges settings for rollback; neither handle is consumed.
+    /// Provider validation/commit and any callback joins occur off executors.
+    pub fn apply_prepared(&self, prepared: &Self) -> Result<(), Error> {
+        if self.stopped.load(Ordering::Acquire) || prepared.stopped.load(Ordering::Acquire) {
+            return Err(Error::Status(abi::Status::Closed));
+        }
+        if std::ptr::eq(self, prepared)
+            || !Arc::ptr_eq(&self.provider, &prepared.provider)
+            || self.local != prepared.local
+        {
+            return Err(Error::Contract);
+        }
+        if !self.provider.api.network_available() {
+            return Err(Error::Status(abi::Status::Unsupported));
+        }
+        completed(unsafe {
+            self.provider.api.table().account_apply_prepared.unwrap()(
+                self.handle.as_ptr(),
+                prepared.handle.as_ptr(),
+            )
+        })
+    }
+
     /// Activate on host control after product startup. The callback may execute
     /// before return, so its stable context must already be fully initialized.
     ///

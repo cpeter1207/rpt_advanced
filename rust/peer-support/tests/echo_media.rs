@@ -49,6 +49,7 @@ status_fn!(reset(*mut abi::Qso));
 status_fn!(send(*mut abi::Qso, abi::ByteSpan, u32, u32));
 status_fn!(elapsed(*const abi::Qso, *mut u64));
 status_fn!(text(*mut abi::Qso, abi::ByteSpan, abi::ByteSpan));
+status_fn!(apply(*mut abi::Account, *mut abi::Account));
 unsafe extern "C" fn context_destroy(_: *mut abi::Context) {}
 unsafe extern "C" fn account_destroy(_: *mut abi::Account) {}
 unsafe extern "C" fn registration(_: *mut abi::Registration) {}
@@ -82,6 +83,7 @@ fn complete() -> abi::Descriptor {
         peer_send_prepared: Some(send),
         peer_elapsed_ms: Some(elapsed),
         peer_send_text: Some(text),
+        account_apply_prepared: Some(apply),
     }
 }
 
@@ -91,7 +93,7 @@ fn media_and_text_require_their_complete_sized_operation_groups() {
     assert!(api.network_available());
     assert!(api.prepared_media_available());
     assert!(api.text_available());
-    for missing in 0..9 {
+    for missing in 0..11 {
         let mut table = complete();
         match missing {
             0 => table.peer_read = None,
@@ -102,14 +104,16 @@ fn media_and_text_require_their_complete_sized_operation_groups() {
             5 => table.peer_send_text = None,
             6 => table.capabilities = 1 | 4,
             7 => table.capabilities = 1 | 2 | 8,
-            _ => table.struct_size = offset_of!(abi::Descriptor, peer_send_text) as u32,
+            8 => table.struct_size = offset_of!(abi::Descriptor, peer_send_text) as u32,
+            9 => table.account_apply_prepared = None,
+            _ => table.struct_size = offset_of!(abi::Descriptor, account_apply_prepared) as u32,
         }
         assert!(unsafe { Api::open(&table) }.is_err(), "case {missing}");
     }
 }
 
 #[test]
-fn earlier_network_prefix_remains_usable_without_a_media_tail() {
+fn earlier_network_prefix_is_rejected_without_prepared_account_commit() {
     let mut table = complete();
     table.capabilities = 3;
     let length = offset_of!(abi::Descriptor, peer_read);
@@ -122,12 +126,7 @@ fn earlier_network_prefix_remains_usable_without_a_media_tail() {
             length,
         );
     }
-    let api = unsafe { Api::open(prefix.as_ptr().cast()) }.unwrap();
-    assert!(api.network_available());
-    assert!(!api.prepared_media_available());
-    assert!(!api.text_available());
-    assert!(api.table().peer_destroy.is_some());
-    assert!(api.table().peer_read.is_none());
+    assert!(unsafe { Api::open(prefix.as_ptr().cast()) }.is_err());
 }
 
 #[test]

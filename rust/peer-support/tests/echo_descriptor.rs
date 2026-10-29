@@ -55,6 +55,7 @@ fn lifecycle() -> abi::Descriptor {
         peer_send_prepared: None,
         peer_elapsed_ms: None,
         peer_send_text: None,
+        account_apply_prepared: None,
     }
 }
 

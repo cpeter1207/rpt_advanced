@@ -5,6 +5,69 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod support;
 
 #[test]
+fn prepared_account_commit_keeps_handles_owned_and_rejects_cross_account_sources() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = support::Fixture::new("network");
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let mut config = abi::AccountConfig {
+        enabled: 1,
+        node_number: 1,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..Default::default()
+    };
+    let keys = abi::AccountSecrets {
+        struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+        abi_version: 1,
+        directory_password: abi::ByteSpan::default(),
+        proxy_password: abi::ByteSpan::default(),
+    };
+    let target = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    config.node_number = 42;
+    let failed = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(
+        target.apply_prepared(&failed),
+        Err(Error::Status(abi::Status::Full))
+    );
+    config.node_number = 2;
+    let prepared = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(target.apply_prepared(&target), Err(Error::Contract));
+    assert_eq!(target.apply_prepared(&prepared), Ok(()));
+    assert_eq!(
+        target.apply_prepared(&prepared),
+        Ok(()),
+        "retained snapshot can roll back"
+    );
+    config.local_node = abi::ByteSpan {
+        data: b"508422".as_ptr(),
+        length: 6,
+    };
+    let other_local = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(target.apply_prepared(&other_local), Err(Error::Contract));
+    let other_fixture = support::Fixture::new("network");
+    let other_provider =
+        unsafe { Provider::load(&other_fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    config.local_node = abi::ByteSpan {
+        data: b"524950".as_ptr(),
+        length: 6,
+    };
+    let other_context = unsafe { other_provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(target.apply_prepared(&other_context), Err(Error::Contract));
+    prepared.stop().unwrap();
+    assert_eq!(
+        target.apply_prepared(&prepared),
+        Err(Error::Status(abi::Status::Closed))
+    );
+    target.stop().unwrap();
+    assert_eq!(
+        target.apply_prepared(&failed),
+        Err(Error::Status(abi::Status::Closed))
+    );
+}
+
+#[test]
 fn account_activation_and_reload_keep_callback_and_local_ownership() {
     use rptadv_peer_support::echolink::host::Error;
     unsafe extern "C" fn notify(context: *mut std::ffi::c_void, event: *const abi::Event) {

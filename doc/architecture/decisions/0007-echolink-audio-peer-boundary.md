@@ -175,6 +175,15 @@ host lifecycle lock. Outbound Echo destinations use that local account and
 check cancellation before and after dial. No Asterisk channel is constructed.
 These startup/stop paths are implemented on the feature branch; transactional
 host reload and complete provider capability publication remain pending.
+The sized descriptor's prepared-apply tail uses an inactive account handle as
+the provider-owned validated configuration/credential snapshot. Applying it
+exchanges that snapshot with the target's old settings, retaining both handles
+for rollback without copying the protocol schema into either host. Preparation
+is side-effect-free; apply executes off executors under ordered lifecycle
+serialization. The host requires the complete network group including this
+operation. Lifecycle-only sized prefixes remain usable; older incomplete
+network groups fail closed. Descriptor version/SONAME stay1 because the
+operation is an appended, sized capability requirement, not a prefix change.
 
 ## Consequences
 

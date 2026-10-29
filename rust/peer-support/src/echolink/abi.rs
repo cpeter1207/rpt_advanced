@@ -448,4 +448,8 @@ pub struct Descriptor {
     pub peer_elapsed_ms: Option<unsafe extern "C" fn(*const Qso, *mut u64) -> Status>,
     /// Send bounded human sender/body text, never ASL controller signaling.
     pub peer_send_text: Option<unsafe extern "C" fn(*mut Qso, ByteSpan, ByteSpan) -> Status>,
+    /// Apply an inactive same-context snapshot off executor. Both handles remain
+    /// owned; success exchanges its settings with the target's previous settings
+    /// for rollback. Failure preserves the candidate and prior configuration.
+    pub account_apply_prepared: Option<unsafe extern "C" fn(*mut Account, *mut Account) -> Status>,
 }

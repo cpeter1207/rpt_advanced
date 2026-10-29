@@ -111,6 +111,7 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
         .unwrap_or_else(|error| error.into_inner());
     let mut host = host();
     let (echo, state) = crate::link::session::tests::source_peer();
+    state.lock().unwrap().continuous_async = true;
     assert_eq!(echo.identity().node(), "2000");
     host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
     pump_until(&mut host, |host| {
