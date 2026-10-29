@@ -113,6 +113,12 @@ Host callback tables expose complete operation groups, while each peer's copied
 capabilities select its actual operations. Serial registration tokens are tagged
 by protocol; no Echo token enters IAX's executor. Source callbacks translate
 borrowed records without copying raw PCM or retaining callback pointers.
+Incoming notifications transfer an owned, generation-bound QSO through the
+selected bounded control executor without waiting on the provider callback.
+Submission rejection leaves provider ownership unchanged. Accepted control
+work revalidates the pending QSO before admission and retires it on failure.
+The task may finish before submit returns; only the original acknowledgement
+is accessed after acceptance. Host teardown drains accepted handoffs.
 The prepared account retains its context and dynamically loaded provider; a
 failed stop retains foreign state rather than unload code beneath notifications.
 The provider's sized PeerInfo includes the observed incoming SDES endpoint,

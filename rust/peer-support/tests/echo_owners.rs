@@ -14,6 +14,90 @@ fn prepared_peer_retains_its_account_without_an_external_owner() {
 use support::Fixture;
 
 #[test]
+fn pending_handoff_handles_rejection_and_execution_before_submit_returns() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let account = unsafe {
+        provider.prepare(
+            &abi::AccountConfig {
+                enabled: 1,
+                local_node: abi::ByteSpan {
+                    data: b"524950".as_ptr(),
+                    length: 6,
+                },
+                ..abi::AccountConfig::default()
+            },
+            &abi::AccountSecrets {
+                struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+                abi_version: 1,
+                directory_password: abi::ByteSpan::default(),
+                proxy_password: abi::ByteSpan::default(),
+            },
+        )
+    }
+    .unwrap();
+    let create =
+        unsafe { library.get::<unsafe extern "C" fn() -> *mut abi::Qso>(b"fixture_peer\0") }
+            .unwrap();
+    let destroy =
+        unsafe { library.get::<unsafe extern "C" fn(*mut abi::Qso)>(b"fixture_peer_destroy\0") }
+            .unwrap();
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_peers\0") }.unwrap();
+    for (accept, generation) in [(false, 9), (true, 8), (true, 9)] {
+        let qso = unsafe { create() };
+        let mut taken = 0;
+        let event = abi::Event {
+            struct_size: std::mem::size_of::<abi::Event>() as u32,
+            kind: 1,
+            qso,
+            generation,
+            status: abi::Status::Pending,
+            taken: &mut taken,
+        };
+        let result = unsafe {
+            account.dispatch_pending(&event, |pending| {
+                if !accept {
+                    return Err((Error::Status(abi::Status::Full), pending));
+                }
+                // Accepted control work may finish and release its payload before submit returns.
+                let claimed = std::thread::spawn(move || pending.claim()).join().unwrap();
+                if generation == 9 {
+                    let peer = claimed.unwrap();
+                    assert_eq!(peer.identity().source.to_string(), "127.0.0.2:49152");
+                    drop(peer);
+                } else {
+                    assert!(
+                        claimed.is_err(),
+                        "the off-executor task must revalidate the exact generation"
+                    );
+                }
+                Ok(())
+            })
+        };
+        assert_eq!(taken, u32::from(accept));
+        if accept {
+            assert_eq!(result, Ok(()));
+            assert_eq!(
+                unsafe { count() },
+                0,
+                "accepted failure must retire its owned QSO"
+            );
+        } else {
+            assert_eq!(result, Err(Error::Status(abi::Status::Full)));
+            assert_eq!(
+                unsafe { count() },
+                1,
+                "rejection must leave provider ownership intact"
+            );
+            unsafe { destroy(qso) };
+        }
+    }
+}
+
+#[test]
 fn account_retains_context_after_the_host_releases_its_provider() {
     let fixture = Fixture::new("lifecycle");
     let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();

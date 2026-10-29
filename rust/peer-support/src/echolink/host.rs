@@ -147,18 +147,7 @@ impl Account {
     /// from this exact account; the host must transfer/destroy accepted peers on
     /// control and drain accepted handoffs before releasing the callback context.
     pub unsafe fn take_pending(self: &Arc<Self>, event: &abi::Event) -> Result<Arc<Peer>, Error> {
-        if self.stopped.load(Ordering::Acquire) {
-            return Err(Error::Status(abi::Status::Closed));
-        }
-        if event.struct_size < std::mem::size_of::<abi::Event>() as u32
-            || event.kind != 1
-            || event.status != abi::Status::Pending
-            || event.taken.is_null()
-            || unsafe { event.taken.read() } != 0
-        {
-            return Err(Error::Contract);
-        }
-        let handle = NonNull::new(event.qso).ok_or(Error::Contract)?;
+        let handle = unsafe { self.pending_handle(event) }?;
         let identity = unsafe { Identity::read(&self.provider.api, handle) }?;
         if identity.local != self.local || identity.qso_generation != event.generation {
             return Err(Error::Contract);
@@ -172,6 +161,55 @@ impl Account {
         unsafe { event.taken.write(1) };
         Ok(peer)
     }
+
+    unsafe fn pending_handle(&self, event: &abi::Event) -> Result<NonNull<abi::Qso>, Error> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Status(abi::Status::Closed));
+        }
+        if event.struct_size < std::mem::size_of::<abi::Event>() as u32
+            || event.kind != 1
+            || event.status != abi::Status::Pending
+            || event.taken.is_null()
+            || unsafe { event.taken.read() } != 0
+        {
+            return Err(Error::Contract);
+        }
+        NonNull::new(event.qso).ok_or(Error::Contract)
+    }
+
+    /// Transfer a provider callback's pending QSO to the host's existing bounded
+    /// control executor, without waiting or retaining the borrowed event/ack.
+    /// Rejection leaves provider ownership unchanged. Accepted work may already
+    /// have run and retired the QSO before submission returns.
+    ///
+    /// # Safety
+    /// Event/ack obey `take_pending`'s live-borrow contract. Submission cannot
+    /// unwind; success transfers the payload to off-provider control and drains
+    /// it before host teardown, while rejection returns that untouched payload.
+    /// The account callback context remains retained through stop and drain.
+    pub unsafe fn dispatch_pending(
+        self: &Arc<Self>,
+        event: &abi::Event,
+        submit: impl FnOnce(PendingIncoming) -> Result<(), (Error, PendingIncoming)>,
+    ) -> Result<(), Error> {
+        let handle = unsafe { self.pending_handle(event) }?;
+        let pending = PendingIncoming {
+            handle: Some(handle),
+            account: Arc::clone(self),
+            generation: event.generation,
+        };
+        match submit(pending) {
+            Ok(()) => {
+                // Do not touch the accepted payload: it may already be released.
+                unsafe { event.taken.write(1) };
+                Ok(())
+            }
+            Err((error, mut pending)) => {
+                pending.handle = None; // Original provider still owns rejection.
+                Err(error)
+            }
+        }
+    }
 }
 impl Drop for Account {
     fn drop(&mut self) {
@@ -181,6 +219,41 @@ impl Drop for Account {
             // A failed join may still execute provider code. Retain its context/DSO
             // along with the foreign account rather than unload beneath that work.
             std::mem::forget(Arc::clone(&self.provider));
+        }
+    }
+}
+
+/// One accepted control handoff retaining its exact account and QSO generation.
+/// Claim or retire on host control, never on the provider/audio executor.
+pub struct PendingIncoming {
+    handle: Option<NonNull<abi::Qso>>,
+    account: Arc<Account>,
+    generation: u64,
+}
+// Transfer only to the existing serialized control executor; no mutable sharing.
+unsafe impl Send for PendingIncoming {}
+impl PendingIncoming {
+    /// Freshly validate and claim this owned QSO. Failure retires it, rather than
+    /// leak an accepted handoff or treat copied metadata as authentication.
+    pub fn claim(mut self) -> Result<Arc<Peer>, Error> {
+        let mut taken = 0;
+        let event = abi::Event {
+            struct_size: std::mem::size_of::<abi::Event>() as u32,
+            kind: 1,
+            qso: self.handle.unwrap().as_ptr(),
+            generation: self.generation,
+            status: abi::Status::Pending,
+            taken: &mut taken,
+        };
+        let peer = unsafe { self.account.take_pending(&event) }?;
+        self.handle = None; // Peer now owns the accepted QSO.
+        Ok(peer)
+    }
+}
+impl Drop for PendingIncoming {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle {
+            unsafe { self.account.provider.api.table().peer_destroy.unwrap()(handle.as_ptr()) };
         }
     }
 }

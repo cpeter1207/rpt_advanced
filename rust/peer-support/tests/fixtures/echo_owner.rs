@@ -10,13 +10,16 @@ use std::{
 
 static CONTEXTS: AtomicUsize = AtomicUsize::new(0);
 static ACCOUNTS: AtomicUsize = AtomicUsize::new(0);
+static PEERS: AtomicUsize = AtomicUsize::new(0);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fixture_peer() -> *mut abi::Qso {
+    PEERS.fetch_add(1, Ordering::SeqCst);
     Box::into_raw(Box::new(1_u8)).cast()
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fixture_peer_destroy(peer: *mut abi::Qso) {
+    assert_ne!(PEERS.fetch_sub(1, Ordering::SeqCst), 0);
     unsafe { drop(Box::from_raw(peer.cast::<u8>())) };
 }
 #[unsafe(no_mangle)]
@@ -208,6 +211,10 @@ pub extern "C" fn fixture_contexts() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn fixture_accounts() -> usize {
     ACCOUNTS.load(Ordering::SeqCst)
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_peers() -> usize {
+    PEERS.load(Ordering::SeqCst)
 }
 
 #[unsafe(no_mangle)]
