@@ -458,6 +458,7 @@ static mut HOST: crate::abi::rptadv_host_services_v9 = crate::abi::rptadv_host_s
     peer_set_deadline: None,
     scheduler_notice: Some(scheduler_notice),
     peer_info: Some(peer_info),
+    peer_read_source: None,
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v9 {

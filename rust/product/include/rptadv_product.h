@@ -90,6 +90,33 @@ struct rptadv_incoming_peer_v1 {
     struct rptadv_peer_bytes_v1 source; /**< Observed numeric network source. */
 };
 
+/** Accepted-prefix source PCM. Concealed is 1 only for codec-native PLC;
+ * it must bypass in-band detection. Returned credit never exceeds count. */
+typedef size_t (*rptadv_peer_source_audio_v1)(void *context, uint64_t source_start,
+                                              const float *pcm, size_t count, uint32_t concealed);
+/** Counted unresolved source loss, retained by the provider until accepted. */
+typedef uint32_t (*rptadv_peer_source_gap_v1)(void *context, uint64_t source_start, uint32_t count);
+/** Borrowed human text, separate from protocol control and claimed sender authority. */
+typedef void (*rptadv_peer_source_text_v1)(void *context, struct rptadv_peer_bytes_v1 sender,
+                                           struct rptadv_peer_bytes_v1 body);
+/** Synchronous source sink; callbacks cannot reenter the same peer. */
+struct rptadv_peer_source_sink_v1 {
+    uint32_t struct_size;              /**< Complete readable size. */
+    uint32_t abi_version;              /**< Exactly 1. */
+    void *context;                     /**< Borrowed during one source-read call. */
+    rptadv_peer_source_audio_v1 audio; /**< Accept a leading PCM prefix. */
+    rptadv_peer_source_gap_v1 gap;     /**< Accept a leading missing-sample prefix. */
+};
+/** Copied bounded source turn, not raw packet or heartbeat receive state. */
+struct rptadv_peer_source_result_v1 {
+    uint32_t struct_size;    /**< Complete caller-provided size. */
+    uint32_t abi_version;    /**< Exactly 1. */
+    uint32_t progress;       /**< 0 idle, 1 advanced, 2 blocked, 3 provider drained. */
+    uint32_t activity;       /**< 0 unchanged, 1 selected key, 2 selected unkey. */
+    uint32_t finish_pending; /**< Publish one finite token and await its exact result. */
+    uint32_t state;          /**< 0 connecting, 1 connected, 2 closing, 3 closed. */
+};
+
 /** Non-transactional peer ingress/jitter counters. Durations are negotiated
  * source-rate samples, never native 48 kHz ring samples. Buffered span is the
  * sum of queued packet spans and can include packet overlap. Drop fields count
@@ -366,6 +393,14 @@ struct rptadv_host_services_v9 {
     /** Copy this handle's immutable identity and capabilities before media starts.
      * Failure does not transfer ownership or retain the caller's result buffer. */
     int (*peer_info)(void *context, const void *peer, struct rptadv_peer_info_v1 *out);
+    /** Optional accepted-prefix source group, selected by this peer capability.
+     * Unaccepted PCM/gap suffixes remain with the provider. product_drained is 1
+     * only after the exact finite token succeeds, never cancellation or empty occupancy.
+     * A null sink queries state without consuming input or advancing media. */
+    int (*peer_read_source)(void *context, void *peer, uint32_t product_drained,
+                            const struct rptadv_peer_source_sink_v1 *sink,
+                            rptadv_peer_source_text_v1 text, void *text_context,
+                            struct rptadv_peer_source_result_v1 *out);
 };
 
 /** Exact revision of a typed site control request. */

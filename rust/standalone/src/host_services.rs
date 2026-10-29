@@ -104,6 +104,7 @@ impl HostServicesOwner {
             peer_set_deadline: asynchronous.then_some(peer_set_deadline),
             scheduler_notice: Some(scheduler_notice),
             peer_info: Some(peer_info),
+            peer_read_source: None,
         });
         Ok(Self {
             context,

@@ -29,6 +29,45 @@ pub enum PeerInput<'a> {
     RadioUnkey,
 }
 
+/// Borrowed provider-owned source input. Only the accepted prefix transfers.
+pub enum SourceInput<'a> {
+    /// Codec-rate PCM and its original position; codec PLC bypasses detection.
+    Audio {
+        /// Original source-rate position of the offered prefix.
+        start: u64,
+        /// Borrowed decoded PCM, retained by the provider until accepted.
+        samples: &'a [f32],
+        /// Codec-native PLC, never fresh in-band detector input.
+        concealed: bool,
+    },
+    /// Unresolved counted loss in the same source timeline.
+    Gap {
+        /// Original source position of the missing prefix.
+        start: u64,
+        /// Offered source samples, not native output frames.
+        count: usize,
+    },
+    /// Represented sender and literal body; never an ASL control envelope.
+    Text {
+        /// Represented sender; admission identity remains with the peer.
+        sender: &'a str,
+        /// Literal UTF-8 body, not a command or message template.
+        body: &'a str,
+    },
+}
+
+/// Copied provider progress and selected activity, separate from PCM occupancy.
+pub struct SourceRead {
+    /// 0 idle, 1 advanced, 2 blocked, 3 provider media drained.
+    pub progress: u32,
+    /// Selected key/unkey only; heartbeats and contenders are not activity.
+    pub activity: Option<bool>,
+    /// The provider needs a finite product-ring token, not an implicit flush.
+    pub finish_pending: bool,
+    /// Terminal state after both provider and product media drained.
+    pub closed: bool,
+}
+
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
 pub struct HostServices(abi::rptadv_host_services_v9);
@@ -228,6 +267,7 @@ impl HostServices {
             || !matches!(egress_count, 0 | 6)
             || (egress_count == 6 && async_count != 3)
             || (egress_count == 0 && api.peer_write.is_none())
+            || (api.peer_read_source.is_some() && egress_count != 6)
         {
             return Err(Error::Admission);
         }
@@ -440,11 +480,15 @@ impl HostServices {
         if identity.node() != remote
             || local.is_empty()
             || !local.bytes().all(|b| b.is_ascii_digit())
-            || capabilities & !15 != 0
+            || capabilities & !31 != 0
             || (capabilities & 1 != 0 && !self.peer_step_available())
             || (capabilities & 2 != 0
                 && (capabilities & 1 == 0 || self.0.peer_prepare_audio.is_none()))
             || (capabilities & 2 == 0 && self.0.peer_write.is_none())
+            || (capabilities & 16 != 0
+                && (protocol != ProtocolId::EchoLink
+                    || self.0.peer_read_source.is_none()
+                    || capabilities & 3 != 3))
             || !callsign
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"-/*_".contains(&byte))
@@ -452,7 +496,8 @@ impl HostServices {
                 && (raw.account_generation == 0
                     || raw.qso_generation == 0
                     || callsign.is_empty()
-                    || capabilities & 8 != 0))
+                    || capabilities & 8 != 0
+                    || capabilities & 19 != 19))
         {
             return Err(Error::Admission);
         }
@@ -746,6 +791,154 @@ impl PeerIo {
             .then_some(state.seen)
             .ok_or(Error::Hangup)
     }
+    /// Whether this peer retains unaccepted source prefixes and finite-boundary state.
+    pub fn source_media(&self) -> bool {
+        self.capabilities & 16 != 0
+    }
+
+    /// Read bounded provider-owned input; never copy or consume its rejected suffix.
+    pub fn read_source<F>(&mut self, drained: bool, dispatch: F) -> Result<SourceRead, Error>
+    where
+        F: FnMut(SourceInput<'_>) -> usize,
+    {
+        if !self.source_media() {
+            return Err(Error::Operation);
+        }
+        struct State<F> {
+            dispatch: F,
+            failed: bool,
+        }
+        fn accept<F: FnMut(SourceInput<'_>) -> usize>(
+            state: &mut State<F>,
+            input: SourceInput<'_>,
+            maximum: usize,
+        ) -> usize {
+            match catch_unwind(AssertUnwindSafe(|| (state.dispatch)(input))) {
+                Ok(count) if count <= maximum => count,
+                _ => {
+                    state.failed = true;
+                    0
+                }
+            }
+        }
+        unsafe extern "C" fn audio<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            start: u64,
+            data: *const f32,
+            count: usize,
+            concealed: u32,
+        ) -> usize {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            if count > 4096
+                || (data.is_null() && count != 0)
+                || concealed > 1
+                || start.checked_add(count as u64).is_none()
+            {
+                state.failed = true;
+                return 0;
+            }
+            let samples = if count == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(data, count) }
+            };
+            accept(
+                state,
+                SourceInput::Audio {
+                    start,
+                    samples,
+                    concealed: concealed == 1,
+                },
+                count,
+            )
+        }
+        unsafe extern "C" fn gap<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            start: u64,
+            count: u32,
+        ) -> u32 {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            if start.checked_add(u64::from(count)).is_none() {
+                state.failed = true;
+                return 0;
+            }
+            accept(
+                state,
+                SourceInput::Gap {
+                    start,
+                    count: count as usize,
+                },
+                count as usize,
+            ) as u32
+        }
+        unsafe extern "C" fn text<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            sender: abi::rptadv_peer_bytes_v1,
+            body: abi::rptadv_peer_bytes_v1,
+        ) {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            let bytes = |span: abi::rptadv_peer_bytes_v1, maximum: usize| {
+                if span.length > maximum || span.length == 0 || span.data.is_null() {
+                    return None;
+                }
+                std::str::from_utf8(unsafe { std::slice::from_raw_parts(span.data, span.length) })
+                    .ok()
+            };
+            let (Some(sender), Some(body)) = (bytes(sender, 64), bytes(body, 4096)) else {
+                state.failed = true;
+                return;
+            };
+            accept(state, SourceInput::Text { sender, body }, usize::MAX);
+        }
+        let mut state = State {
+            dispatch,
+            failed: false,
+        };
+        let context = ptr::from_mut(&mut state).cast();
+        let sink = abi::rptadv_peer_source_sink_v1 {
+            struct_size: size_of::<abi::rptadv_peer_source_sink_v1>() as u32,
+            abi_version: 1,
+            context,
+            audio: Some(audio::<F>),
+            gap: Some(gap::<F>),
+        };
+        let mut result: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of_val(&result) as u32;
+        result.abi_version = 1;
+        let code = unsafe {
+            self.services.0.peer_read_source.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                u32::from(drained),
+                &sink,
+                Some(text::<F>),
+                context,
+                &mut result,
+            )
+        };
+        if code != 0
+            || state.failed
+            || result.struct_size < size_of_val(&result) as u32
+            || result.abi_version != 1
+            || result.progress > 3
+            || result.activity > 2
+            || result.finish_pending > 1
+            || result.state > 3
+        {
+            return Err(Error::InvalidFrame);
+        }
+        Ok(SourceRead {
+            progress: result.progress,
+            activity: match result.activity {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            },
+            finish_pending: result.finish_pending == 1,
+            closed: result.state == 3,
+        })
+    }
+
     /// Send one NUL-free text payload.
     pub fn send_text(&mut self, text: &CStr) -> Result<(), Error> {
         let bytes = text.to_bytes();
