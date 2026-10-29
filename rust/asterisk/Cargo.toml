@@ -17,3 +17,4 @@ bindgen = "0.72.1"
 
 [dev-dependencies]
 libloading = "0.8"
+rptadv-control-standalone-adapter = { path = "../control-standalone-adapter" }

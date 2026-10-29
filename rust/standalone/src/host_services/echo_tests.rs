@@ -7,6 +7,16 @@ use crate::abi as host_abi;
 #[path = "../../../peer-support/tests/support/host_media.rs"]
 mod media;
 
+#[path = "../../../peer-support/tests/support/host_accounts.rs"]
+mod accounts;
+
+#[test]
+fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
+    accounts::check(
+        HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap(),
+    );
+}
+
 #[test]
 fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
     let host = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();

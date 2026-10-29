@@ -166,6 +166,15 @@ incoming Echo QSO keeps its real protocol-qualified identity while its canonical
 operator alias supplies the existing controller link-policy key. It enters
 common limits/deny/topology policy only after provider admission; a source IP
 alone is never Echo admission proof. IAX retains its directory/source check.
+Standalone retains accounts in its stable host-services context; Asterisk owns
+an equivalent table/context instead of using the null-context template at
+runtime. Preparation precedes product startup, activation follows it, and
+account stop plus admission drainage precedes product shutdown. An accepted
+callback captures the validated product directly rather than reacquiring the
+host lifecycle lock. Outbound Echo destinations use that local account and
+check cancellation before and after dial. No Asterisk channel is constructed.
+These startup/stop paths are implemented on the feature branch; transactional
+host reload and complete provider capability publication remain pending.
 
 ## Consequences
 

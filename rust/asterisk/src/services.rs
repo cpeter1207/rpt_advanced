@@ -15,13 +15,14 @@ use crate::{
 };
 use rptadv_peer_support::echolink::{
     abi as echo,
-    host::{HostPeer, Registration},
+    host::{Accounts, HostPeer, Preparation, Registration},
 };
 use std::{
     ffi::{CString, c_char, c_void},
     mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
     ptr,
+    sync::{Arc, Mutex},
 };
 
 pub(crate) unsafe fn text<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
@@ -294,7 +295,6 @@ unsafe extern "C" fn peer_dial(
     output: *mut *mut c_void,
 ) -> i32 {
     boundary(-1, || {
-        let _ = context;
         let Some(output) = (unsafe { output.as_mut() }) else {
             return -1;
         };
@@ -308,6 +308,26 @@ unsafe extern "C" fn peer_dial(
         let (Some(destination), Some(local), Some(current)) = (values.0, values.1, current) else {
             return -1;
         };
+        if let Some(remote) = destination.strip_prefix("EchoLink/") {
+            if unsafe { current(current_context) } == 0 {
+                return -1;
+            }
+            let Some(context) = (unsafe { context.cast::<HostContext>().as_ref() }) else {
+                return -1;
+            };
+            let peer = remote
+                .parse::<u32>()
+                .ok()
+                .and_then(|node| context.echo_accounts()?.account(local)?.dial(node).ok());
+            let Some(peer) = peer else {
+                return -1;
+            };
+            if unsafe { current(current_context) } == 0 {
+                return -1;
+            }
+            *output = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
+            return 0;
+        }
         let (Ok(destination), Ok(local)) = (CString::new(destination), CString::new(local)) else {
             return -1;
         };
@@ -667,6 +687,160 @@ unsafe extern "C" fn peer_read_source(
             Err(_) => -1,
         }
     })
+}
+
+/// Stable account context; only control/lifecycle calls inspect this map.
+struct HostContext {
+    echo: Mutex<Option<Arc<Accounts>>>,
+}
+impl HostContext {
+    fn echo_accounts(&self) -> Option<Arc<Accounts>> {
+        self.echo
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+/// Owned immutable host table retained until all product/account callbacks stop.
+pub(crate) struct HostServicesOwner {
+    context: Box<HostContext>,
+    descriptor: Box<ffi::rptadv_host_services_v9>,
+}
+// The table/context allocations remain stable, and accounts are thread-safe.
+unsafe impl Send for HostServicesOwner {}
+impl HostServicesOwner {
+    /// Allocate the callback context before exposing its immutable table.
+    pub(crate) fn new() -> Self {
+        let mut context = Box::new(HostContext {
+            echo: Mutex::new(None),
+        });
+        let mut descriptor = Box::new(SERVICES.0);
+        descriptor.context = ptr::from_mut(context.as_mut()).cast();
+        Self {
+            context,
+            descriptor,
+        }
+    }
+    /// Borrow the immutable table through successful account/product stop.
+    pub(crate) fn descriptor(&self) -> &ffi::rptadv_host_services_v9 {
+        &self.descriptor
+    }
+    /// Prepare resolved accounts while their record spans are borrowed. Store
+    /// stable owners before product startup; activation is a separate phase.
+    /// # Safety
+    /// Product inspection and the preparation's backend code remain loaded
+    /// through successful product/account shutdown.
+    pub(crate) unsafe fn prepare_echo(
+        &mut self,
+        product: &ffi::rptadv_product_descriptor_v1,
+        configuration: &str,
+        mut preparation: Preparation<'_>,
+    ) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        use rptadv_peer_support::echolink::host::Error;
+        let inspect = product.inspect_configuration.ok_or(Error::Contract)?;
+        let result = unsafe {
+            inspect(
+                configuration.as_ptr().cast(),
+                configuration.len(),
+                Some(prepare_account),
+                ptr::from_mut(&mut preparation).cast(),
+                None,
+                ptr::null_mut(),
+            )
+        };
+        if result != 0 {
+            return Err(Error::Contract);
+        }
+        *self
+            .context
+            .echo
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner()) = preparation.finish().map(Arc::new);
+        Ok(())
+    }
+
+    /// Start accounts only after their captured product target is callable.
+    /// # Safety
+    /// Call off executors; retain product/backend code through stop and drain.
+    pub(crate) unsafe fn activate_echo(
+        &self,
+    ) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        if let Some(accounts) = self.context.echo_accounts() {
+            unsafe { accounts.activate() }?;
+        }
+        Ok(())
+    }
+
+    /// Gate producers and drain accepted admissions before stopping the product.
+    pub(crate) fn stop_echo(&self) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        if let Some(accounts) = self.context.echo_accounts() {
+            accounts.stop()?;
+        }
+        Ok(())
+    }
+}
+
+unsafe extern "C" fn prepare_account(
+    context: *mut c_void,
+    node: *const ffi::rptadv_node_host_configuration,
+) -> i32 {
+    boundary(-1, || {
+        let Some(node) = (unsafe { node.as_ref() }) else {
+            return -1;
+        };
+        if node.struct_size as usize != size_of::<ffi::rptadv_node_host_configuration>() {
+            return -1;
+        }
+        let Some(config) = (unsafe { node.echolink.cast::<echo::AccountConfig>().as_ref() }) else {
+            return -1;
+        };
+        let Some(path) = (unsafe {
+            text(
+                node.echolink_secrets_file.cast(),
+                node.echolink_secrets_file_length,
+            )
+        }) else {
+            return -1;
+        };
+        let preparation = unsafe { &mut *context.cast::<Preparation<'_>>() };
+        unsafe {
+            preparation.prepare(
+                config,
+                (!path.is_empty()).then(|| std::path::Path::new(path)),
+            )
+        }
+        .map_or(-1, |()| 0)
+    })
+}
+
+/// Transfer an already claimed incoming QSO using this host's actual enum layout.
+/// # Safety
+/// Product code remains callable through the account's admission-drain barrier.
+pub(crate) unsafe fn incoming_echo(
+    incoming: unsafe extern "C" fn(*const ffi::rptadv_incoming_peer_v1, *mut c_void) -> i32,
+    peer: Arc<rptadv_peer_support::echolink::host::Peer>,
+) {
+    let Some(source) = peer.identity().source else {
+        return;
+    };
+    let source = source.ip().to_string();
+    let bytes = |text: &str| ffi::rptadv_peer_bytes_v1 {
+        data: text.as_ptr(),
+        length: text.len(),
+    };
+    let request = ffi::rptadv_incoming_peer_v1 {
+        struct_size: size_of::<ffi::rptadv_incoming_peer_v1>() as u32,
+        abi_version: 1,
+        protocol: 2,
+        local: bytes(&peer.identity().local),
+        remote: bytes(peer.remote()),
+        source: bytes(&source),
+    };
+    let handle = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
+    if unsafe { incoming(&request, handle) } > 0 {
+        unsafe { drop(Box::from_raw(handle.cast::<PeerHandle>())) };
+    }
 }
 
 struct Services(ffi::rptadv_host_services_v9);

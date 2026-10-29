@@ -568,6 +568,7 @@ dependencies = [
  "crossbeam-queue",
  "libc",
  "libloading",
+ "rptadv-control-standalone-adapter",
  "rptadv-peer-support",
  "serde_json",
  "ureq",
@@ -579,6 +580,7 @@ version = "0.1.0-alpha17"
 dependencies = [
  "bindgen",
  "libloading",
+ "rptadv-control-standalone-adapter",
  "rptadv-peer-support",
 ]
 

@@ -12,6 +12,19 @@ unsafe impl Send for Product {}
 unsafe impl Sync for Product {}
 
 impl Product {
+    /// Borrow the validated table while the composition loader retains its DSO.
+    pub(crate) fn descriptor(&self) -> &'static ffi::rptadv_product_descriptor_v1 {
+        self.0
+    }
+
+    /// Admit a claimed Echo QSO without a channel or lifecycle-global lookup.
+    pub(crate) fn incoming_echo(
+        &self,
+        peer: std::sync::Arc<rptadv_peer_support::echolink::host::Peer>,
+    ) {
+        unsafe { crate::services::incoming_echo(self.0.incoming.unwrap(), peer) };
+    }
+
     /// Validate an immutable complete product table.
     ///
     /// # Safety

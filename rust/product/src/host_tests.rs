@@ -113,6 +113,14 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     let (echo, state) = crate::link::session::tests::source_peer();
     assert_eq!(echo.identity().node(), "2000");
     host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        named_peer_ready(host, "3002000")
+            && host
+                .runtime
+                .status(clock().now_ms)
+                .iter()
+                .all(|(_, status)| status.retiring.is_none())
+    });
     assert!(host.peers.iter().any(|peer| peer.remote == "3002000"));
     let bound = state.lock().unwrap().bound_radio.clone();
     assert_eq!(bound.as_deref(), Some("1000\0usb"));

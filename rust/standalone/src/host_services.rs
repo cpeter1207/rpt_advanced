@@ -15,7 +15,7 @@ use crate::{
 };
 use rptadv_peer_support::echolink::{
     abi as echo,
-    host::{HostPeer, Registration},
+    host::{Accounts, HostPeer, Preparation, Registration},
 };
 use std::{
     ffi::{c_char, c_void},
@@ -23,6 +23,7 @@ use std::{
     net::SocketAddr,
     panic::{AssertUnwindSafe, catch_unwind},
     ptr,
+    sync::{Arc, Mutex},
 };
 
 /// Context retained while the product uses the standalone host table.
@@ -31,6 +32,7 @@ pub struct StandaloneHostContext {
     pub(crate) resolver: Option<directory::Resolver>,
     secrets: SecretsFile,
     ingress: Option<PeerIngress>,
+    echo: Mutex<Option<Arc<Accounts>>>,
 }
 
 /// An executor cannot publish peers until its jitter provider is available.
@@ -70,6 +72,7 @@ impl HostServicesOwner {
             resolver,
             secrets,
             ingress,
+            echo: Mutex::new(None),
         });
         let descriptor = Box::new(abi::rptadv_host_services_v9 {
             struct_size: size_of::<abi::rptadv_host_services_v9>() as u32,
@@ -125,6 +128,60 @@ impl HostServicesOwner {
         self.descriptor.as_ref()
     }
 
+    /// Prepare resolved accounts while their record spans are borrowed. Store
+    /// stable owners before product startup; activation is a separate phase.
+    /// # Safety
+    /// Product inspection and the preparation's backend code remain loaded
+    /// through successful product/account shutdown.
+    pub(crate) unsafe fn prepare_echo(
+        &mut self,
+        product: &abi::rptadv_product_descriptor_v1,
+        configuration: &str,
+        mut preparation: Preparation<'_>,
+    ) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        use rptadv_peer_support::echolink::host::Error;
+        let inspect = product.inspect_configuration.ok_or(Error::Contract)?;
+        let result = unsafe {
+            inspect(
+                configuration.as_ptr().cast(),
+                configuration.len(),
+                Some(prepare_account),
+                ptr::from_mut(&mut preparation).cast(),
+                None,
+                ptr::null_mut(),
+            )
+        };
+        if result != 0 {
+            return Err(Error::Contract);
+        }
+        *self
+            .context
+            .echo
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner()) = preparation.finish().map(Arc::new);
+        Ok(())
+    }
+
+    /// Start accounts only after their captured product target is callable.
+    /// # Safety
+    /// Call off executors; retain product/backend code through stop and drain.
+    pub(crate) unsafe fn activate_echo(
+        &self,
+    ) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        if let Some(accounts) = self.context.echo_accounts() {
+            unsafe { accounts.activate() }?;
+        }
+        Ok(())
+    }
+
+    /// Gate producers and drain accepted admissions before stopping the product.
+    pub(crate) fn stop_echo(&self) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        if let Some(accounts) = self.context.echo_accounts() {
+            accounts.stop()?;
+        }
+        Ok(())
+    }
+
     /// Put one peer handle into the representation used by the host-services callbacks.
     pub fn peer_handle(&self, peer: IaxPeer, local: &str, remote: &str) -> *mut c_void {
         Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle::new(
@@ -164,6 +221,77 @@ impl HostServicesOwner {
     /// Discard candidate radio settings after reload failure.
     pub fn discard_staged_radios(&self) {
         self.context.radio.discard_staged_radios();
+    }
+}
+
+impl StandaloneHostContext {
+    fn echo_accounts(&self) -> Option<Arc<Accounts>> {
+        self.echo
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+unsafe extern "C" fn prepare_account(
+    context: *mut c_void,
+    node: *const abi::rptadv_node_host_configuration,
+) -> i32 {
+    boundary(-1, || {
+        let Some(node) = (unsafe { node.as_ref() }) else {
+            return -1;
+        };
+        if node.struct_size as usize != size_of::<abi::rptadv_node_host_configuration>() {
+            return -1;
+        }
+        let Some(config) = (unsafe { node.echolink.cast::<echo::AccountConfig>().as_ref() }) else {
+            return -1;
+        };
+        let Some(path) = (unsafe {
+            input(
+                node.echolink_secrets_file.cast(),
+                node.echolink_secrets_file_length,
+            )
+        }) else {
+            return -1;
+        };
+        let preparation = unsafe { &mut *context.cast::<Preparation<'_>>() };
+        unsafe {
+            preparation.prepare(
+                config,
+                (!path.is_empty()).then(|| std::path::Path::new(path)),
+            )
+        }
+        .map_or(-1, |()| 0)
+    })
+}
+
+/// Transfer an already claimed incoming QSO using this host's actual enum layout.
+/// # Safety
+/// Product code remains callable through the account's admission-drain barrier.
+pub(crate) unsafe fn incoming_echo(
+    incoming: unsafe extern "C" fn(*const abi::rptadv_incoming_peer_v1, *mut c_void) -> i32,
+    peer: Arc<rptadv_peer_support::echolink::host::Peer>,
+) {
+    let Some(source) = peer.identity().source else {
+        return;
+    };
+    let source = source.ip().to_string();
+    let bytes = |text: &str| abi::rptadv_peer_bytes_v1 {
+        data: text.as_ptr(),
+        length: text.len(),
+    };
+    let request = abi::rptadv_incoming_peer_v1 {
+        struct_size: size_of::<abi::rptadv_incoming_peer_v1>() as u32,
+        abi_version: 1,
+        protocol: 2,
+        local: bytes(&peer.identity().local),
+        remote: bytes(peer.remote()),
+        source: bytes(&source),
+    };
+    let handle = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
+    if unsafe { incoming(&request, handle) } > 0 {
+        unsafe { drop(Box::from_raw(handle.cast::<PeerHandle>())) };
     }
 }
 
@@ -520,6 +648,20 @@ unsafe extern "C" fn peer_dial(
         *output = ptr::null_mut();
         if unsafe { current(current_context) } == 0 {
             return -1;
+        }
+        if let Some(remote) = destination.strip_prefix("EchoLink/") {
+            let peer = remote
+                .parse::<u32>()
+                .ok()
+                .and_then(|node| context.echo_accounts()?.account(local)?.dial(node).ok());
+            let Some(peer) = peer else {
+                return -1;
+            };
+            if unsafe { current(current_context) } == 0 {
+                return -1;
+            }
+            *output = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
+            return 0;
         }
         let Some((address, remote)) = parse_destination(destination, |endpoint| {
             context

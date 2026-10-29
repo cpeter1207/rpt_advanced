@@ -74,9 +74,14 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let providers = crate::providers::ProviderSet::load().map_err(ForegroundError::Provider)?;
         let client = providers.iax_client().map_err(ForegroundError::Provider)?;
         let mut iax_listeners = bind_iax_listeners(&client, &radios)?;
-        let mut runtime =
-            crate::runtime::ProductRuntime::start_with_providers(&text, radios, secrets, providers)
-                .map_err(ForegroundError::Runtime)?;
+        let mut runtime = crate::runtime::ProductRuntime::start_with_providers(
+            configuration,
+            &text,
+            radios,
+            secrets,
+            providers,
+        )
+        .map_err(ForegroundError::Runtime)?;
         enable_iax_listeners(&mut iax_listeners, &runtime)?;
         let mut registration = crate::registration::RegistrationWorker::start(registrations)
             .map_err(ForegroundError::Registration)?;

@@ -10,6 +10,8 @@ pub enum RuntimeError {
     InvalidDescriptor,
     /// A required shared provider is missing or incompatible.
     Provider(crate::providers::ProviderError),
+    /// EchoLink account preparation or notification drainage failed.
+    Echo(rptadv_peer_support::echolink::host::Error),
     /// Product start rejected the selected providers or configuration.
     Start,
     /// Product could not prepare the replacement configuration.
@@ -26,6 +28,9 @@ impl std::fmt::Display for RuntimeError {
             Self::Reload => "standalone configuration reload failed",
             Self::Stop => "standalone product shutdown failed",
             Self::Provider(error) => return error.fmt(formatter),
+            Self::Echo(error) => {
+                return write!(formatter, "EchoLink account operation failed: {error:?}");
+            }
         })
     }
 }
@@ -102,6 +107,7 @@ impl ProductRuntime {
 
     /// Load and start the full released-provider composition for one standalone process.
     pub fn start_with_providers(
+        configuration_path: &std::path::Path,
         configuration: &str,
         radios: Vec<crate::ResolvedRadioNode>,
         secrets: crate::secrets::SecretsFile,
@@ -116,8 +122,37 @@ impl ProductRuntime {
         let descriptors = provider_ref
             .product_runtime_descriptors()
             .map_err(RuntimeError::Provider)?;
-        let host = HostServicesOwner::new(radios, Some(provider_ref), secrets)
+        let mut host = HostServicesOwner::new(radios, Some(provider_ref), secrets)
             .map_err(RuntimeError::Provider)?;
+        let jitter =
+            std::path::Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
+        let span = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
+            data: value.as_ptr(),
+            length: value.len(),
+        };
+        let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
+            gsm_library: span("librptadv_codec_gsm.so.1"),
+            speex_library: span("librptadv_codec_speex.so.1"),
+            jitter_library: span(jitter.to_str().ok_or(RuntimeError::InvalidDescriptor)?),
+            ..Default::default()
+        };
+        let incoming = descriptors
+            .product
+            .incoming
+            .ok_or(RuntimeError::InvalidDescriptor)?;
+        let preparation = unsafe {
+            rptadv_peer_support::echolink::host::Preparation::new(
+                configuration_path,
+                std::path::Path::new("librptadv_echolink.so.1"),
+                &resources,
+                std::ptr::from_ref(descriptors.control).cast(),
+                move |peer| {
+                    crate::host_services::incoming_echo(incoming, peer);
+                },
+            )
+        };
+        unsafe { host.prepare_echo(descriptors.product, configuration, preparation) }
+            .map_err(RuntimeError::Echo)?;
         // SAFETY: provider_ref points into the boxed owner moved into ProductRuntime below. The
         // product stops before host and provider boxes are dropped, including startup rollback.
         let mut runtime = unsafe {
@@ -131,6 +166,7 @@ impl ProductRuntime {
             )?
         };
         runtime.providers = Some(providers);
+        unsafe { runtime.host.as_ref().unwrap().activate_echo() }.map_err(RuntimeError::Echo)?;
         Ok(runtime)
     }
 
@@ -220,6 +256,9 @@ impl ProductRuntime {
 
     /// Stop product workers before releasing host state and provider libraries.
     pub fn stop(&mut self) -> Result<(), RuntimeError> {
+        if let Some(host) = &self.host {
+            host.stop_echo().map_err(RuntimeError::Echo)?;
+        }
         if unsafe { (self.stop)() } != 0 {
             return Err(RuntimeError::Stop);
         }
@@ -255,13 +294,10 @@ fn incoming_request(
 
 impl Drop for ProductRuntime {
     fn drop(&mut self) {
-        let Some(host) = self.host.take() else {
-            return;
-        };
-        if unsafe { (self.stop)() } != 0 {
+        if self.host.is_some() && self.stop().is_err() {
             // A failed stop may still have callbacks into host state and provider code.
             // Retain both rather than unloading code under live callbacks.
-            std::mem::forget(host);
+            std::mem::forget(self.host.take());
             if let Some(providers) = self.providers.take() {
                 std::mem::forget(providers);
             }
@@ -614,6 +650,7 @@ mod tests {
         ] {
             assert_eq!(
                 ProductRuntime::start_with_providers(
+                    std::path::Path::new("rpt_advanced.conf"),
                     "[general]\n",
                     Vec::new(),
                     SecretsFile::parse("").unwrap(),
@@ -704,6 +741,7 @@ mod tests {
     fn released_provider_composition_starts_and_stops_without_radio_hardware() {
         let providers = crate::providers::ProviderSet::load().unwrap();
         let mut process = ProductRuntime::start_with_providers(
+            std::path::Path::new("rpt_advanced.conf"),
             "[general]\nenabled=no\n",
             Vec::new(),
             SecretsFile::parse("").unwrap(),

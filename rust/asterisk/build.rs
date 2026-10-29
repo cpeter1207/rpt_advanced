@@ -1,6 +1,18 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=RPT_ADVANCED_LIBDIR");
+    println!("cargo:rerun-if-env-changed=DEB_HOST_MULTIARCH");
+    let multiarch = env::var("DEB_HOST_MULTIARCH").unwrap_or_else(|_| {
+        match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+            Ok("x86_64") => "x86_64-linux-gnu".into(),
+            Ok("aarch64") => "aarch64-linux-gnu".into(),
+            other => panic!("unsupported Debian architecture: {other:?}"),
+        }
+    });
+    let directory = env::var("RPT_ADVANCED_LIBDIR")
+        .unwrap_or_else(|_| format!("/usr/lib/{multiarch}/rpt_advanced"));
+    println!("cargo:rustc-env=RPT_ADVANCED_LIBDIR={directory}");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
