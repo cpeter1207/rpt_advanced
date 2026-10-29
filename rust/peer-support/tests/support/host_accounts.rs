@@ -2,15 +2,17 @@
 use super::*;
 
 unsafe extern "C" fn inspect_accounts(
-    _: *const c_char,
-    _: usize,
+    configuration: *const c_char,
+    length: usize,
     sink: host_abi::rptadv_configuration_sink,
     context: *mut c_void,
     _: host_abi::rptadv_text_sink_v1,
     _: *mut c_void,
 ) -> i32 {
+    let disabled =
+        unsafe { std::slice::from_raw_parts(configuration.cast::<u8>(), length) } == b"disabled";
     let config = echo::AccountConfig {
-        enabled: 1,
+        enabled: u32::from(!disabled),
         node_number: 7,
         local_node: echo::ByteSpan {
             data: b"524950".as_ptr(),
@@ -77,6 +79,44 @@ pub fn check(mut host: HostServicesOwner) {
     );
     assert!(!peer.is_null());
     unsafe { peer_destroy(context, peer) };
+    for (configuration_text, enabled) in [("disabled", false), ("fixture", true)] {
+        let preparation = unsafe {
+            Preparation::new(
+                &configuration,
+                &fixture.0,
+                &resources,
+                backend.cast(),
+                |_| {},
+            )
+        };
+        let outcome = unsafe {
+            host.reload_echo(&product, configuration_text, preparation, || true, || true)
+        }
+        .unwrap();
+        assert!(outcome.retirement.is_none());
+        let mut peer = ptr::null_mut();
+        let result = unsafe {
+            peer_dial(
+                context,
+                c"EchoLink/4294967295".as_ptr(),
+                19,
+                c"524950".as_ptr(),
+                6,
+                960,
+                Some(current),
+                ptr::null_mut(),
+                &mut peer,
+            )
+        };
+        assert_eq!(
+            result == 0,
+            enabled,
+            "account reload did not change host dial admission"
+        );
+        if !peer.is_null() {
+            unsafe { peer_destroy(context, peer) };
+        }
+    }
     host.stop_echo().unwrap();
     assert!(notifications.try_recv().is_err());
     assert_ne!(

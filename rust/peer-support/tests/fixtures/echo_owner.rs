@@ -71,6 +71,7 @@ unsafe extern "C" fn info(peer: *const abi::Qso, output: *mut abi::PeerInfo) -> 
     abi::Status::Ok
 }
 unsafe extern "C" fn activate(account: *mut abi::Account, callback: Option<abi::EventFn>, context: *mut c_void) -> abi::Status {
+    if unsafe { *account.cast::<u32>() } == 42 { return abi::Status::Full; }
     if let Some(callback) = callback {
         unsafe { callback(context, &abi::Event { struct_size: size_of::<abi::Event>() as u32, kind: 0, qso: ptr::null_mut(), generation: 4, status: abi::Status::Ok, taken: ptr::null_mut() }) };
         if unsafe { *account.cast::<u32>() } == 7 {

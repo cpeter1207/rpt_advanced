@@ -13,7 +13,15 @@ struct State {
     product: Product,
     registration: Option<Registration>,
     services: crate::services::HostServicesOwner,
+    configuration: String,
+    path: PathBuf,
+    control: EchoBackend,
 }
+
+#[derive(Clone, Copy)]
+struct EchoBackend(*const ffi::rptadv_control_descriptor_v1);
+// Immutable selected table/code is retained by the loader through product stop.
+unsafe impl Send for EchoBackend {}
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 #[cfg(test)]
 static TEST_PRODUCT: Mutex<Option<Product>> = Mutex::new(None);
@@ -56,6 +64,49 @@ fn configuration() -> Option<String> {
     std::fs::read_to_string(configuration_path()?).ok()
 }
 
+fn with_echo_preparation<T>(
+    path: &Path,
+    product: Product,
+    control: EchoBackend,
+    operation: impl FnOnce(rptadv_peer_support::echolink::host::Preparation<'_>) -> T,
+) -> Option<T> {
+    let jitter = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
+    let bytes = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
+        data: value.as_ptr(),
+        length: value.len(),
+    };
+    let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
+        gsm_library: bytes("librptadv_codec_gsm.so.1"),
+        speex_library: bytes("librptadv_codec_speex.so.1"),
+        jitter_library: bytes(jitter.to_str()?),
+        ..Default::default()
+    };
+    Some(operation(unsafe {
+        rptadv_peer_support::echolink::host::Preparation::new(
+            path,
+            Path::new("librptadv_echolink.so.1"),
+            &resources,
+            control.0.cast(),
+            move |peer| product.incoming_echo(peer),
+        )
+    }))
+}
+
+fn echo_reload_error(error: impl std::fmt::Debug) {
+    let text =
+        std::ffi::CString::new(format!("{error:?}")).expect("typed Echo errors contain no NUL");
+    unsafe {
+        ffi::ast_log(
+            ffi::__LOG_ERROR as i32,
+            c"rust/asterisk/lifecycle.rs".as_ptr(),
+            0,
+            c"reload".as_ptr(),
+            c"rpt_advanced: EchoLink reload: %s\n".as_ptr(),
+            text.as_ptr(),
+        )
+    };
+}
+
 /// Return the selected product while registrations retain its callback code.
 pub(crate) fn product() -> Option<Product> {
     #[cfg(test)]
@@ -93,33 +144,12 @@ unsafe extern "C" fn load(
         let Some(path) = configuration_path() else {
             return 1;
         };
-        let jitter = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
-        let Some(jitter) = jitter.to_str() else {
-            return 1;
-        };
-        let bytes = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
-            data: value.as_ptr(),
-            length: value.len(),
-        };
-        let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
-            gsm_library: bytes("librptadv_codec_gsm.so.1"),
-            speex_library: bytes("librptadv_codec_speex.so.1"),
-            jitter_library: bytes(jitter),
-            ..Default::default()
-        };
-        let preparation = unsafe {
-            rptadv_peer_support::echolink::host::Preparation::new(
-                &path,
-                Path::new("librptadv_echolink.so.1"),
-                &resources,
-                control.cast(),
-                move |peer| product.incoming_echo(peer),
-            )
-        };
         let mut services = crate::services::HostServicesOwner::new();
-        if unsafe { services.prepare_echo(product.descriptor(), &configuration, preparation) }
-            .is_err()
-        {
+        let prepared =
+            with_echo_preparation(&path, product, EchoBackend(control), |preparation| unsafe {
+                services.prepare_echo(product.descriptor(), &configuration, preparation)
+            });
+        if !matches!(prepared, Some(Ok(()))) {
             return 1;
         }
         if !unsafe { product.start(services.descriptor(), control, file, speech, &configuration) } {
@@ -147,6 +177,9 @@ unsafe extern "C" fn load(
                     product,
                     registration: Some(registration),
                     services,
+                    configuration,
+                    path,
+                    control: EchoBackend(control),
                 });
                 0
             }
@@ -159,6 +192,9 @@ unsafe extern "C" fn load(
                         product,
                         registration: None,
                         services,
+                        configuration,
+                        path,
+                        control: EchoBackend(control),
                     });
                     0
                 }
@@ -170,13 +206,40 @@ unsafe extern "C" fn load(
 
 extern "C" fn reload() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let Some(configuration) = configuration() else {
+        let mut selected = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(state) = selected.as_mut() else {
             return -1;
         };
-        if product().is_some_and(|product| product.reload(&configuration)) {
-            0
-        } else {
-            -1
+        let Ok(configuration) = std::fs::read_to_string(&state.path) else {
+            return -1;
+        };
+        let result = with_echo_preparation(
+            &state.path,
+            state.product,
+            state.control,
+            |preparation| unsafe {
+                state.services.reload_echo(
+                    state.product.descriptor(),
+                    &configuration,
+                    preparation,
+                    || state.product.reload(&configuration),
+                    || state.product.reload(&state.configuration),
+                )
+            },
+        );
+        match result {
+            Some(Ok(outcome)) => {
+                if let Some(error) = outcome.retirement {
+                    echo_reload_error(error);
+                }
+                state.configuration = configuration;
+                0
+            }
+            Some(Err(error)) => {
+                echo_reload_error(error);
+                -1
+            }
+            None => -1,
         }
     }))
     .unwrap_or(-1)

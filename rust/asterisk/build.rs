@@ -43,7 +43,7 @@ fn main() {
         .allowlist_function("(__ast_cli_register_multiple|__ast_channel_alloc|__ao2_unlock)")
         .allowlist_function("localtime_r")
         .allowlist_function("ast_log")
-        .allowlist_var("__LOG_(NOTICE|WARNING)")
+        .allowlist_var("__LOG_(NOTICE|WARNING|ERROR)")
         .allowlist_type("ast_(cli_entry|cli_args|cli_command|module)")
         .allowlist_var("(RESULT_.*|AST_MODULE_LOAD_.*|AST_AMA_NONE|ast_config_AST_CONFIG_DIR)")
         .allowlist_type("ast_channel_state")

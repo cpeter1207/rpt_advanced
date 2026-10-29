@@ -5,7 +5,7 @@ use crate::{
     secrets::{account_secrets_path, load_account_secrets},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::c_void,
     path::Path,
     sync::{
@@ -15,6 +15,10 @@ use std::{
 };
 
 type Incoming = Arc<dyn Fn(Arc<Peer>) + Send + Sync>;
+
+/// Synchronous resolved-record visitor. Spans are copied before each call ends.
+pub type AccountVisitor<'a> =
+    dyn FnMut(&abi::AccountConfig, Option<&Path>) -> Result<(), Error> + 'a;
 
 /// Synchronous configuration-visitor target shared by both hosts. Disabled
 /// records do not load a provider, read credentials or open a control owner.
@@ -78,6 +82,51 @@ impl<'a> Preparation<'a> {
     pub fn finish(self) -> Option<Accounts> {
         self.accounts
     }
+
+    /// Reuse the live account owner, or lazily create it for the first enabled
+    /// record. The host publishes the returned owner only on success. Disabled
+    /// configurations require no provider or private file.
+    /// # Safety
+    /// The visitor supplies complete valid borrowed records. Product/backend
+    /// code remains live through stop/drain. Serialize host lifecycle changes
+    /// and call off provider, control and audio executors.
+    pub unsafe fn reload(
+        mut self,
+        current: Option<Arc<Accounts>>,
+        visit: impl FnOnce(&mut AccountVisitor<'_>) -> Result<(), Error>,
+        product: impl FnOnce() -> bool,
+        restore_product: impl FnOnce() -> bool,
+    ) -> Result<(Option<Arc<Accounts>>, UpdateOutcome), UpdateError> {
+        if let Some(accounts) = current {
+            let mut update = accounts.prepare_update()?;
+            visit(&mut |config, path| unsafe {
+                update.prepare(config, &account_secrets_path(self.configuration, path))
+            })?;
+            update.remove_unlisted()?;
+            let outcome = update.commit(product, restore_product)?;
+            return Ok((Some(accounts), outcome));
+        }
+        visit(&mut |config, path| unsafe { self.prepare(config, path) })?;
+        let accounts = self.finish().map(Arc::new);
+        if !product() {
+            return Err(UpdateError {
+                cause: Error::Product,
+                rollback: (!restore_product()).then_some(Error::Product),
+            });
+        }
+        if let Some(accounts) = &accounts {
+            accounts.updating.store(true, Ordering::Release);
+            if let Err(cause) = unsafe { accounts.activate() } {
+                let mut rollback = accounts.stop().err();
+                if !restore_product() {
+                    rollback.get_or_insert(Error::Product);
+                }
+                return Err(UpdateError { cause, rollback });
+            }
+            accounts.updating.store(false, Ordering::Release);
+        }
+        Ok((accounts, UpdateOutcome::default()))
+    }
 }
 
 struct Notifications {
@@ -90,6 +139,34 @@ struct Notifications {
 struct Entry {
     account: Arc<Account>,
     notifications: Arc<Notifications>,
+}
+impl Entry {
+    fn new(account: Arc<Account>, owner: &Accounts) -> Arc<Self> {
+        let notifications = Arc::new(Notifications {
+            account: Arc::downgrade(&account),
+            control: Arc::clone(&owner.control),
+            incoming: Arc::clone(&owner.incoming),
+            enabled: Arc::new(AtomicBool::new(false)),
+            updating: Arc::clone(&owner.updating),
+        });
+        Arc::new(Self {
+            account,
+            notifications,
+        })
+    }
+
+    unsafe fn activate(&self) -> Result<(), Error> {
+        let context = Arc::as_ptr(&self.notifications).cast_mut().cast();
+        unsafe { self.account.activate(Some(notify), context) }
+    }
+}
+
+/// Configuration committed; a failed retired-owner join remains retained and is
+/// reported independently rather than falsely claiming the update rolled back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UpdateOutcome {
+    /// Removed accounts whose callback storage must remain owned until stop.
+    pub retirement: Option<Error>,
 }
 
 /// First commit failure and an independent rollback failure, without secrets.
@@ -111,9 +188,10 @@ impl From<Error> for UpdateError {
 
 struct Change {
     entry: Arc<Entry>,
-    prepared: Arc<Account>,
+    prepared: Option<Arc<Account>>,
     enabled: bool,
     was_enabled: bool,
+    removed: bool,
 }
 
 /// Provider-owned snapshots only. Dropping a staged update never stops the
@@ -122,6 +200,7 @@ pub struct PreparedUpdate<'a> {
     owner: &'a Accounts,
     revision: u64,
     changes: BTreeMap<String, Change>,
+    visited: BTreeSet<String>,
 }
 impl PreparedUpdate<'_> {
     /// Validate/copy a resolved record while its spans and private file exist.
@@ -133,20 +212,61 @@ impl PreparedUpdate<'_> {
         secrets: &Path,
     ) -> Result<(), Error> {
         let local = unsafe { local(config) }?;
-        if self.changes.contains_key(&local) {
+        if !self.visited.insert(local.clone()) {
             return Err(Error::Contract);
         }
-        let entry = self.owner.entries.get(&local).ok_or(Error::Contract)?;
+        let entry = self
+            .owner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&local)
+            .cloned();
+        if entry.is_none() && config.enabled == 0 {
+            return Ok(());
+        }
         let prepared = unsafe { self.owner.prepare_account(config, &local, secrets) }?;
+        let (entry, prepared) = match entry {
+            Some(entry) => (entry, Some(prepared)),
+            None => (Entry::new(prepared, self.owner), None),
+        };
+        let was_enabled = entry.notifications.enabled.load(Ordering::Acquire);
         self.changes.insert(
             local,
             Change {
-                entry: Arc::clone(entry),
+                entry,
                 prepared,
                 enabled: config.enabled == 1,
-                was_enabled: entry.notifications.enabled.load(Ordering::Acquire),
+                was_enabled,
+                removed: false,
             },
         );
+        Ok(())
+    }
+
+    /// After visiting a complete host configuration, stage absent accounts as
+    /// disabled snapshots. Permanent retirement follows successful commit only.
+    pub fn remove_unlisted(&mut self) -> Result<(), Error> {
+        let absent: Vec<_> = self
+            .owner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .keys()
+            .filter(|local| !self.visited.contains(*local))
+            .cloned()
+            .collect();
+        for local in absent {
+            let config = abi::AccountConfig {
+                local_node: abi::ByteSpan {
+                    data: local.as_ptr(),
+                    length: local.len(),
+                },
+                ..Default::default()
+            };
+            unsafe { self.prepare(&config, Path::new("")) }?;
+            self.changes.get_mut(&local).unwrap().removed = true;
+        }
         Ok(())
     }
 
@@ -159,7 +279,7 @@ impl PreparedUpdate<'_> {
         self,
         product: impl FnOnce() -> bool,
         restore_product: impl FnOnce() -> bool,
-    ) -> Result<(), UpdateError> {
+    ) -> Result<UpdateOutcome, UpdateError> {
         let _operation = self.owner.operation.lock().map_err(|_| Error::Control)?;
         if self.owner.stopped.load(Ordering::Acquire) {
             return Err(Error::Status(abi::Status::Closed).into());
@@ -196,10 +316,21 @@ impl PreparedUpdate<'_> {
         }
         let mut applied: Vec<&Change> = Vec::with_capacity(self.changes.len());
         for change in self.changes.values() {
-            if let Err(cause) = change.entry.account.apply_prepared(&change.prepared) {
+            let result = if let Some(prepared) = &change.prepared {
+                change.entry.account.apply_prepared(prepared)
+            } else {
+                // Even a failed activation may have started a callback producer.
+                applied.push(change);
+                unsafe { change.entry.activate() }
+            };
+            if let Err(cause) = result {
                 let mut failure = UpdateError::from(cause);
                 for change in applied.into_iter().rev() {
-                    if let Err(error) = change.entry.account.apply_prepared(&change.prepared) {
+                    let restored = match &change.prepared {
+                        Some(prepared) => change.entry.account.apply_prepared(prepared),
+                        None => self.owner.retire(Arc::clone(&change.entry)),
+                    };
+                    if let Err(error) = restored {
                         failure.rollback.get_or_insert(error);
                     }
                 }
@@ -218,17 +349,37 @@ impl PreparedUpdate<'_> {
                 }
                 return Err(failure);
             }
-            applied.push(change);
+            if change.prepared.is_some() {
+                applied.push(change);
+            }
         }
-        for change in self.changes.values() {
-            change
-                .entry
-                .notifications
-                .enabled
-                .store(change.enabled, Ordering::Release);
+        {
+            let mut entries = self
+                .owner
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            for (local, change) in &self.changes {
+                if change.removed {
+                    entries.remove(local);
+                } else {
+                    entries.insert(local.clone(), Arc::clone(&change.entry));
+                }
+                change
+                    .entry
+                    .notifications
+                    .enabled
+                    .store(change.enabled, Ordering::Release);
+            }
+        }
+        let mut outcome = UpdateOutcome::default();
+        for change in self.changes.values().filter(|change| change.removed) {
+            if let Err(error) = self.owner.retire(Arc::clone(&change.entry)) {
+                outcome.retirement.get_or_insert(error);
+            }
         }
         self.owner.updating.store(false, Ordering::Release);
-        Ok(())
+        Ok(outcome)
     }
 }
 
@@ -247,7 +398,8 @@ pub struct Accounts {
     provider: Arc<Provider>,
     control: Arc<Client>,
     incoming: Incoming,
-    entries: BTreeMap<String, Arc<Entry>>,
+    entries: Mutex<BTreeMap<String, Arc<Entry>>>,
+    retired: Mutex<Vec<Arc<Entry>>>,
     activated: AtomicBool,
     stopped: AtomicBool,
     updating: Arc<AtomicBool>,
@@ -266,7 +418,8 @@ impl Accounts {
             provider,
             control,
             incoming: Arc::new(incoming),
-            entries: BTreeMap::new(),
+            entries: Mutex::new(BTreeMap::new()),
+            retired: Mutex::new(Vec::new()),
             activated: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             updating: Arc::new(AtomicBool::new(false)),
@@ -291,24 +444,20 @@ impl Accounts {
             return Ok(());
         }
         let local = unsafe { local(config) }?;
-        if self.entries.contains_key(&local) {
+        if self
+            .entries
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(&local)
+        {
             return Err(Error::Contract);
         }
         let account = unsafe { self.prepare_account(config, &local, secrets) }?;
-        let notifications = Arc::new(Notifications {
-            account: Arc::downgrade(&account),
-            control: Arc::clone(&self.control),
-            incoming: Arc::clone(&self.incoming),
-            enabled: Arc::new(AtomicBool::new(false)),
-            updating: Arc::clone(&self.updating),
-        });
-        self.entries.insert(
-            local,
-            Arc::new(Entry {
-                account,
-                notifications,
-            }),
-        );
+        let entry = Entry::new(account, self);
+        self.entries
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(local, entry);
         Ok(())
     }
 
@@ -354,6 +503,7 @@ impl Accounts {
             owner: self,
             revision: self.revision.load(Ordering::Acquire),
             changes: BTreeMap::new(),
+            visited: BTreeSet::new(),
         })
     }
 
@@ -363,7 +513,13 @@ impl Accounts {
             return None;
         }
         self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .get(local)
+            .filter(|entry| {
+                entry.notifications.enabled.load(Ordering::Acquire)
+                    || !self.activated.load(Ordering::Acquire)
+            })
             .map(|entry| Arc::clone(&entry.account))
     }
 
@@ -380,10 +536,9 @@ impl Accounts {
         if self.activated.swap(true, Ordering::AcqRel) {
             return Err(Error::Contract);
         }
-        for entry in self.entries.values() {
+        for entry in self.current_entries() {
             entry.notifications.enabled.store(true, Ordering::Release);
-            let context = Arc::as_ptr(&entry.notifications).cast_mut().cast();
-            if let Err(error) = unsafe { entry.account.activate(Some(notify), context) } {
+            if let Err(error) = unsafe { entry.activate() } {
                 let _ = self.stop();
                 return Err(error);
             }
@@ -396,14 +551,42 @@ impl Accounts {
     pub fn stop(&self) -> Result<(), Error> {
         let _operation = self.operation.lock().map_err(|_| Error::Control)?;
         self.stopped.store(true, Ordering::Release);
-        for entry in self.entries.values() {
+        let mut entries = self.current_entries();
+        entries.extend(
+            self.retired
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .cloned(),
+        );
+        for entry in &entries {
             entry.notifications.enabled.store(false, Ordering::Release);
         }
         let mut result = Ok(());
-        for entry in self.entries.values() {
+        for entry in &entries {
             result = result.and(entry.account.stop());
         }
         result.and(self.control.stop_and_drain().map_err(|_| Error::Control))
+    }
+
+    fn current_entries(&self) -> Vec<Arc<Entry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn retire(&self, entry: Arc<Entry>) -> Result<(), Error> {
+        let result = entry.account.stop();
+        if result.is_err() {
+            self.retired
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(entry);
+        }
+        result
     }
 }
 impl Drop for Accounts {
@@ -411,8 +594,14 @@ impl Drop for Accounts {
         if self.stop().is_err() {
             // Failed quiescence cannot free callback storage/provider code. Hosts
             // also retain their product/backend code until explicit stop succeeds.
-            for entry in self.entries.values() {
-                std::mem::forget(Arc::clone(entry));
+            for entry in self.current_entries().into_iter().chain(
+                self.retired
+                    .get_mut()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .cloned(),
+            ) {
+                std::mem::forget(entry);
             }
             std::mem::forget(Arc::clone(&self.control));
         }

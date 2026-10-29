@@ -1,11 +1,17 @@
 use super::*;
 use crate::bindings as ffi;
-use std::{cell::Cell, ffi::c_void, mem::size_of, ptr};
+use std::{
+    cell::{Cell, RefCell},
+    ffi::c_void,
+    mem::size_of,
+    ptr,
+};
 
 thread_local! {
     static START_RESULT: Cell<i32> = const { Cell::new(0) };
     static STOP_RESULT: Cell<i32> = const { Cell::new(0) };
     static INCOMING_RESULT: Cell<i32> = const { Cell::new(0) };
+    static RELOAD_DOCUMENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 #[unsafe(no_mangle)]
@@ -58,8 +64,16 @@ unsafe extern "C" fn start(
     START_RESULT.get()
 }
 
-unsafe extern "C" fn reload(_: *const std::ffi::c_char, _: usize) -> i32 {
-    0
+unsafe extern "C" fn reload(configuration: *const std::ffi::c_char, length: usize) -> i32 {
+    let text = unsafe {
+        std::str::from_utf8(std::slice::from_raw_parts(
+            configuration.cast::<u8>(),
+            length,
+        ))
+    }
+    .unwrap();
+    RELOAD_DOCUMENTS.with_borrow_mut(|documents| documents.push(text.to_owned()));
+    -i32::from(text == "rejected-candidate")
 }
 
 unsafe extern "C" fn stop() -> i32 {
@@ -265,6 +279,7 @@ fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() 
 #[test]
 fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
     let _serial = crate::fixture::LIFECYCLE.lock().unwrap();
+    RELOAD_DOCUMENTS.with_borrow_mut(Vec::clear);
     let root = std::env::temp_dir().join(format!("rpt-adapter-lifecycle-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let directory = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
@@ -311,6 +326,21 @@ fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
     crate::module::tests::fail_registration(0);
     assert_eq!(load_selected(&DESCRIPTOR), 0);
     assert_eq!(super::reload(), 0);
+    std::fs::write(root.join("rpt_advanced.conf"), "accepted-candidate").unwrap();
+    assert_eq!(super::reload(), 0);
+    std::fs::write(root.join("rpt_advanced.conf"), "rejected-candidate").unwrap();
+    assert_eq!(super::reload(), -1);
+    RELOAD_DOCUMENTS.with_borrow(|documents| {
+        assert_eq!(
+            documents,
+            &[
+                "[1000]\nnode_enabled=no\n",
+                "accepted-candidate",
+                "rejected-candidate",
+                "accepted-candidate"
+            ]
+        )
+    });
     assert_eq!(unload(), 0);
     assert_eq!(super::reload(), -1);
     unsafe { ast_config_AST_CONFIG_DIR = ptr::null() };

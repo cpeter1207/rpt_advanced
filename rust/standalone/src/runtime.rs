@@ -1,7 +1,12 @@
 //! Process-lifetime owner for the portable product.
 
 use crate::{abi, host_services::HostServicesOwner};
-use std::{ffi::c_char, mem::size_of};
+use std::{
+    ffi::c_char,
+    mem::size_of,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 /// Product startup, reload, or shutdown failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,6 +17,8 @@ pub enum RuntimeError {
     Provider(crate::providers::ProviderError),
     /// EchoLink account preparation or notification drainage failed.
     Echo(rptadv_peer_support::echolink::host::Error),
+    /// A staged account/product update failed, possibly with a separate rollback failure.
+    EchoUpdate(rptadv_peer_support::echolink::host::UpdateError),
     /// Product start rejected the selected providers or configuration.
     Start,
     /// Product could not prepare the replacement configuration.
@@ -31,6 +38,9 @@ impl std::fmt::Display for RuntimeError {
             Self::Echo(error) => {
                 return write!(formatter, "EchoLink account operation failed: {error:?}");
             }
+            Self::EchoUpdate(error) => {
+                return write!(formatter, "EchoLink reload failed: {error:?}");
+            }
         })
     }
 }
@@ -44,6 +54,9 @@ pub struct ProductRuntime {
     stop: unsafe extern "C" fn() -> i32,
     host: Option<HostServicesOwner>,
     providers: Option<Box<crate::providers::ProviderSet>>,
+    composition: Option<crate::providers::ProductRuntimeDescriptors>,
+    configuration: Mutex<String>,
+    configuration_path: Option<PathBuf>,
 }
 
 impl ProductRuntime {
@@ -102,6 +115,9 @@ impl ProductRuntime {
             stop,
             host: Some(host),
             providers: None,
+            composition: None,
+            configuration: Mutex::new(configuration.to_owned()),
+            configuration_path: None,
         })
     }
 
@@ -124,35 +140,10 @@ impl ProductRuntime {
             .map_err(RuntimeError::Provider)?;
         let mut host = HostServicesOwner::new(radios, Some(provider_ref), secrets)
             .map_err(RuntimeError::Provider)?;
-        let jitter =
-            std::path::Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
-        let span = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
-            data: value.as_ptr(),
-            length: value.len(),
-        };
-        let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
-            gsm_library: span("librptadv_codec_gsm.so.1"),
-            speex_library: span("librptadv_codec_speex.so.1"),
-            jitter_library: span(jitter.to_str().ok_or(RuntimeError::InvalidDescriptor)?),
-            ..Default::default()
-        };
-        let incoming = descriptors
-            .product
-            .incoming
-            .ok_or(RuntimeError::InvalidDescriptor)?;
-        let preparation = unsafe {
-            rptadv_peer_support::echolink::host::Preparation::new(
-                configuration_path,
-                std::path::Path::new("librptadv_echolink.so.1"),
-                &resources,
-                std::ptr::from_ref(descriptors.control).cast(),
-                move |peer| {
-                    crate::host_services::incoming_echo(incoming, peer);
-                },
-            )
-        };
-        unsafe { host.prepare_echo(descriptors.product, configuration, preparation) }
-            .map_err(RuntimeError::Echo)?;
+        with_echo_preparation(configuration_path, &descriptors, |preparation| {
+            unsafe { host.prepare_echo(descriptors.product, configuration, preparation) }
+                .map_err(RuntimeError::Echo)
+        })?;
         // SAFETY: provider_ref points into the boxed owner moved into ProductRuntime below. The
         // product stops before host and provider boxes are dropped, including startup rollback.
         let mut runtime = unsafe {
@@ -166,21 +157,56 @@ impl ProductRuntime {
             )?
         };
         runtime.providers = Some(providers);
+        runtime.composition = Some(descriptors);
+        runtime.configuration_path = Some(configuration_path.to_owned());
         unsafe { runtime.host.as_ref().unwrap().activate_echo() }.map_err(RuntimeError::Echo)?;
         Ok(runtime)
     }
 
     /// Replace configuration without stopping the process; failed preparation keeps old state.
     pub fn reload(&self, configuration: &str) -> Result<(), RuntimeError> {
+        let mut active = self
+            .configuration
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let host = self.host.as_ref().ok_or(RuntimeError::InvalidDescriptor)?;
+        let apply =
+            || unsafe { (self.reload)(configuration.as_ptr().cast(), configuration.len()) == 0 };
+        let restore = || {
+            // A product failure may follow publication. Reopen only the old
+            // hardware snapshot while restoring the last successful document.
+            host.discard_staged_radios();
+            unsafe { (self.reload)(active.as_ptr().cast(), active.len()) == 0 }
+        };
         if let Some(providers) = &self.providers {
             providers
                 .validate_runtime()
                 .map_err(RuntimeError::Provider)?;
+            let descriptors = self
+                .composition
+                .as_ref()
+                .ok_or(RuntimeError::InvalidDescriptor)?;
+            let path = self
+                .configuration_path
+                .as_deref()
+                .ok_or(RuntimeError::InvalidDescriptor)?;
+            let outcome = with_echo_preparation(path, descriptors, |preparation| {
+                unsafe {
+                    host.reload_echo(self.product, configuration, preparation, apply, restore)
+                }
+                .map_err(RuntimeError::EchoUpdate)
+            })?;
+            if let Some(error) = outcome.retirement {
+                eprintln!("rpt-advanced: EchoLink retired account remains retained: {error:?}");
+            }
+        } else if !apply() {
+            if !restore() {
+                eprintln!("rpt-advanced: configuration rollback failed");
+            }
+            return Err(RuntimeError::Reload);
         }
-        (unsafe { (self.reload)(configuration.as_ptr().cast::<c_char>(), configuration.len()) }
-            == 0)
-            .then_some(())
-            .ok_or(RuntimeError::Reload)
+        *active = configuration.to_owned();
+        Ok(())
     }
 
     /// Reload product and host radio settings as one control-plane transaction.
@@ -263,9 +289,45 @@ impl ProductRuntime {
             return Err(RuntimeError::Stop);
         }
         self.host.take();
+        self.composition.take();
         self.providers.take();
         Ok(())
     }
+}
+
+fn with_echo_preparation<T>(
+    path: &Path,
+    descriptors: &crate::providers::ProductRuntimeDescriptors,
+    operation: impl FnOnce(
+        rptadv_peer_support::echolink::host::Preparation<'_>,
+    ) -> Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    let jitter = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
+    let span = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
+        data: value.as_ptr(),
+        length: value.len(),
+    };
+    let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
+        gsm_library: span("librptadv_codec_gsm.so.1"),
+        speex_library: span("librptadv_codec_speex.so.1"),
+        jitter_library: span(jitter.to_str().ok_or(RuntimeError::InvalidDescriptor)?),
+        ..Default::default()
+    };
+    let incoming = descriptors
+        .product
+        .incoming
+        .ok_or(RuntimeError::InvalidDescriptor)?;
+    operation(unsafe {
+        rptadv_peer_support::echolink::host::Preparation::new(
+            path,
+            Path::new("librptadv_echolink.so.1"),
+            &resources,
+            std::ptr::from_ref(descriptors.control).cast(),
+            move |peer| {
+                crate::host_services::incoming_echo(incoming, peer);
+            },
+        )
+    })
 }
 
 fn incoming_request(
@@ -570,6 +632,49 @@ mod tests {
         );
         assert!(!radio_channel_available(&process, "old"));
         assert!(radio_channel_available(&process, "new"));
+        process.stop().unwrap();
+    }
+
+    #[test]
+    fn reload_restores_the_last_successful_configuration_after_partial_publication() {
+        static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        unsafe extern "C" fn publish_then_reject(
+            configuration: *const c_char,
+            length: usize,
+        ) -> i32 {
+            let text = unsafe {
+                std::str::from_utf8(std::slice::from_raw_parts(
+                    configuration.cast::<u8>(),
+                    length,
+                ))
+            }
+            .unwrap();
+            SEEN.lock().unwrap().push(text.to_owned());
+            -i32::from(text == "candidate-rejected")
+        }
+        SEEN.lock().unwrap().clear();
+        let mut process = unsafe {
+            ProductRuntime::start(
+                descriptor_with_reload(
+                    start_without_counts,
+                    publish_then_reject,
+                    stop_without_counts,
+                    None,
+                ),
+                host(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                "original",
+            )
+        }
+        .unwrap();
+        process.reload("last-successful").unwrap();
+        assert!(process.reload("candidate-rejected").is_err());
+        assert_eq!(
+            *SEEN.lock().unwrap(),
+            ["last-successful", "candidate-rejected", "last-successful"]
+        );
         process.stop().unwrap();
     }
 

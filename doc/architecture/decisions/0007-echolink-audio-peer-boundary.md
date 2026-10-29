@@ -173,8 +173,8 @@ account stop plus admission drainage precedes product shutdown. An accepted
 callback captures the validated product directly rather than reacquiring the
 host lifecycle lock. Outbound Echo destinations use that local account and
 check cancellation before and after dial. No Asterisk channel is constructed.
-These startup/stop paths are implemented on the feature branch; transactional
-host reload and complete provider capability publication remain pending.
+These startup/stop and transactional host-reload paths are implemented on the
+feature branch; complete provider capability publication remains pending.
 The sized descriptor's prepared-apply tail uses an inactive account handle as
 the provider-owned validated configuration/credential snapshot. Applying it
 exchanges that snapshot with the target's old settings, retaining both handles
@@ -191,8 +191,14 @@ reverse before restoring the product. A product error also triggers restoration:
 it can occur after publication. Gates reopen only after successful restoration;
 failed rollback remains visible and fail-closed. Stale staged revisions cannot
 commit over a newer configuration. Queued admissions recheck the gate before
-claiming their QSO. Full account-set replacement and host reload wiring remain
-in progress.
+claiming their QSO. Both hosts retain the last successful configuration for
+restoration. Standalone discards staged radio settings before reopening the old
+configuration. Account addition creates stable gated callback storage before
+activation; rollback stops only that new account, not the shared executor.
+Disabled records do not require credentials. Removed accounts are disabled
+reversibly before commit and permanently retired only after success. Failed
+retirement retains callback storage and reports a separate error. Map locks are
+control-only and never span foreign calls or audio callbacks.
 
 ## Consequences
 

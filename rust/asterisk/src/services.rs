@@ -15,7 +15,10 @@ use crate::{
 };
 use rptadv_peer_support::echolink::{
     abi as echo,
-    host::{Accounts, HostPeer, Preparation, Registration},
+    host::{
+        AccountVisitor, Accounts, Error as EchoError, HostPeer, Preparation, Registration,
+        UpdateError, UpdateOutcome,
+    },
 };
 use std::{
     ffi::{CString, c_char, c_void},
@@ -737,27 +740,45 @@ impl HostServicesOwner {
         configuration: &str,
         mut preparation: Preparation<'_>,
     ) -> Result<(), rptadv_peer_support::echolink::host::Error> {
-        use rptadv_peer_support::echolink::host::Error;
-        let inspect = product.inspect_configuration.ok_or(Error::Contract)?;
-        let result = unsafe {
-            inspect(
-                configuration.as_ptr().cast(),
-                configuration.len(),
-                Some(prepare_account),
-                ptr::from_mut(&mut preparation).cast(),
-                None,
-                ptr::null_mut(),
-            )
-        };
-        if result != 0 {
-            return Err(Error::Contract);
-        }
+        unsafe {
+            visit_accounts(product, configuration, &mut |config, path| {
+                preparation.prepare(config, path)
+            })
+        }?;
         *self
             .context
             .echo
             .get_mut()
             .unwrap_or_else(|error| error.into_inner()) = preparation.finish().map(Arc::new);
         Ok(())
+    }
+
+    /// Apply the shared account/product transaction without retaining a host
+    /// context lock over a provider callback or product reload.
+    /// # Safety
+    /// Same lifetime/off-executor contract as preparation and account stop.
+    pub(crate) unsafe fn reload_echo(
+        &self,
+        product: &ffi::rptadv_product_descriptor_v1,
+        configuration: &str,
+        preparation: Preparation<'_>,
+        apply: impl FnOnce() -> bool,
+        restore: impl FnOnce() -> bool,
+    ) -> Result<UpdateOutcome, UpdateError> {
+        let (accounts, outcome) = unsafe {
+            preparation.reload(
+                self.context.echo_accounts(),
+                |visit| visit_accounts(product, configuration, visit),
+                apply,
+                restore,
+            )
+        }?;
+        *self
+            .context
+            .echo
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = accounts;
+        Ok(outcome)
     }
 
     /// Start accounts only after their captured product target is callable.
@@ -778,6 +799,29 @@ impl HostServicesOwner {
             accounts.stop()?;
         }
         Ok(())
+    }
+}
+
+unsafe fn visit_accounts(
+    product: &ffi::rptadv_product_descriptor_v1,
+    configuration: &str,
+    mut visit: &mut AccountVisitor<'_>,
+) -> Result<(), EchoError> {
+    let inspect = product.inspect_configuration.ok_or(EchoError::Contract)?;
+    let result = unsafe {
+        inspect(
+            configuration.as_ptr().cast(),
+            configuration.len(),
+            Some(prepare_account),
+            ptr::from_mut(&mut visit).cast(),
+            None,
+            ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(EchoError::Contract)
     }
 }
 
@@ -803,13 +847,11 @@ unsafe extern "C" fn prepare_account(
         }) else {
             return -1;
         };
-        let preparation = unsafe { &mut *context.cast::<Preparation<'_>>() };
-        unsafe {
-            preparation.prepare(
-                config,
-                (!path.is_empty()).then(|| std::path::Path::new(path)),
-            )
-        }
+        let visit = unsafe { &mut *context.cast::<&mut AccountVisitor<'_>>() };
+        visit(
+            config,
+            (!path.is_empty()).then(|| std::path::Path::new(path)),
+        )
         .map_or(-1, |()| 0)
     })
 }

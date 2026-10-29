@@ -16,6 +16,169 @@ use std::{
 mod support;
 
 #[test]
+fn failed_replacement_retires_only_new_accounts_and_restores_the_product() {
+    for failure_in_new_account in [false, true] {
+        let fixture = support::Fixture::new("network");
+        let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+        let count =
+            unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_accounts\0") }
+                .unwrap();
+        let provider =
+            unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+        let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+        let control =
+            Arc::new(unsafe { Client::open(backend.cast(), "echo-failed-add-test", 8) }.unwrap());
+        let mut accounts = Accounts::new(provider, control, |_| {});
+        let path = fixture.0.parent().unwrap().join("credentials.conf");
+        std::fs::write(
+            &path,
+            "[1000]\ndirectory_password=fixture-first\n[2000]\ndirectory_password=fixture-second\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let config = |local: &'static str, node_number| abi::AccountConfig {
+            enabled: 1,
+            node_number,
+            local_node: abi::ByteSpan {
+                data: local.as_ptr(),
+                length: local.len(),
+            },
+            ..Default::default()
+        };
+        unsafe { accounts.prepare(&config("2000", 1), &path) }.unwrap();
+        unsafe { accounts.activate() }.unwrap();
+        let original = accounts.account("2000").unwrap();
+        let mut update = accounts.prepare_update().unwrap();
+        unsafe {
+            update.prepare(
+                &config("1000", if failure_in_new_account { 42 } else { 3 }),
+                &path,
+            )
+        }
+        .unwrap();
+        unsafe {
+            update.prepare(
+                &config("2000", if failure_in_new_account { 1 } else { 42 }),
+                &path,
+            )
+        }
+        .unwrap();
+        let mut restored = false;
+        let error = update
+            .commit(
+                || true,
+                || {
+                    restored = true;
+                    true
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.cause, Error::Status(abi::Status::Full));
+        assert!(error.rollback.is_none());
+        assert!(restored);
+        assert!(accounts.account("1000").is_none());
+        assert!(Arc::ptr_eq(&original, &accounts.account("2000").unwrap()));
+        assert_eq!(
+            unsafe { count() },
+            1,
+            "new callback owner survived rolled-back addition"
+        );
+        accounts.stop().unwrap();
+    }
+}
+
+#[test]
+fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner() {
+    let fixture = support::Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_accounts\0") }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+    let control =
+        Arc::new(unsafe { Client::open(backend.cast(), "echo-replacement-test", 8) }.unwrap());
+    let mut accounts = Accounts::new(provider, control.clone(), |_| {});
+    let path = fixture.0.parent().unwrap().join("credentials.conf");
+    std::fs::write(
+        &path,
+        "[1000]\ndirectory_password=fixture-first\n[2000]\ndirectory_password=fixture-second\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let config = |local: &'static str, enabled, node_number| abi::AccountConfig {
+        enabled,
+        node_number,
+        local_node: abi::ByteSpan {
+            data: local.as_ptr(),
+            length: local.len(),
+        },
+        ..Default::default()
+    };
+    unsafe { accounts.prepare(&config("1000", 1, 1), &path) }.unwrap();
+    unsafe { accounts.activate() }.unwrap();
+    {
+        let mut update = accounts.prepare_update().unwrap();
+        unsafe { update.prepare(&config("1000", 1, 1), &path) }.unwrap();
+        unsafe { update.prepare(&config("2000", 1, 3), &path) }.unwrap();
+        unsafe { update.prepare(&config("3000", 0, 0), &path) }.unwrap(); // No secrets for disabled record.
+        update.remove_unlisted().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            update
+                .commit(|| true, || true)
+                .unwrap()
+                .retirement
+                .is_none()
+        );
+    }
+    assert!(accounts.account("1000").is_some());
+    assert!(accounts.account("2000").is_some());
+    assert!(accounts.account("3000").is_none());
+    assert_eq!(
+        unsafe { count() },
+        2,
+        "inactive snapshots were not released"
+    );
+    let mut update = accounts.prepare_update().unwrap();
+    unsafe { update.prepare(&config("2000", 0, 0), &path) }.unwrap();
+    update.remove_unlisted().unwrap();
+    assert!(
+        update
+            .commit(|| true, || true)
+            .unwrap()
+            .retirement
+            .is_none()
+    );
+    assert!(accounts.account("1000").is_none());
+    assert!(accounts.account("2000").is_none());
+    assert_eq!(
+        unsafe { count() },
+        1,
+        "removed foreign account was not released"
+    );
+    let (sent, received) = mpsc::channel();
+    assert!(
+        control
+            .submit(sent, |sent| {
+                sent.send(()).unwrap();
+            })
+            .is_ok()
+    );
+    received.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut remove_all = accounts.prepare_update().unwrap();
+    remove_all.remove_unlisted().unwrap();
+    assert!(
+        remove_all
+            .commit(|| true, || true)
+            .unwrap()
+            .retirement
+            .is_none()
+    );
+    assert_eq!(unsafe { count() }, 0);
+    accounts.stop().unwrap();
+}
+
+#[test]
 fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
     let fixture = support::Fixture::new("network");
     let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
@@ -256,6 +419,68 @@ fn preparation_is_lazy_and_uses_the_real_configuration_directory() {
     );
     accounts.stop().unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
+    let fixture = support::Fixture::new("network");
+    let directory = fixture.0.parent().unwrap();
+    let configuration = directory.join("rpt_advanced.conf");
+    let resources = abi::RuntimeConfig::default();
+    let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+    let preparation = || unsafe {
+        Preparation::new(
+            &configuration,
+            &fixture.0,
+            &resources,
+            backend.cast(),
+            |_| {},
+        )
+    };
+    let disabled = unsafe {
+        preparation().reload(
+            None,
+            |visit| visit(&abi::AccountConfig::default(), None),
+            || true,
+            || panic!("successful product reload cannot restore"),
+        )
+    }
+    .unwrap();
+    assert!(disabled.0.is_none());
+    let path = directory.join("echolink-secrets.conf");
+    std::fs::write(&path, "[524950]\ndirectory_password=fixture-value\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut config = abi::AccountConfig {
+        enabled: 1,
+        node_number: 1,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..Default::default()
+    };
+    let owner =
+        unsafe { preparation().reload(None, |visit| visit(&config, None), || true, || true) }
+            .unwrap()
+            .0
+            .unwrap();
+    assert!(owner.account("524950").is_some());
+    config.enabled = 0;
+    std::fs::remove_file(path).unwrap();
+    let same = unsafe {
+        preparation().reload(
+            Some(owner.clone()),
+            |visit| visit(&config, None),
+            || true,
+            || true,
+        )
+    }
+    .unwrap()
+    .0
+    .unwrap();
+    assert!(Arc::ptr_eq(&owner, &same));
+    assert!(owner.account("524950").is_none());
+    owner.stop().unwrap();
 }
 
 #[test]
