@@ -110,6 +110,12 @@ pub trait PeerInput: Send {
     fn signals(&self) -> &PeerSignals;
     /// Queued source-rate samples, excluding converter and PLC lookahead.
     fn available(&self) -> u64;
+    /// An explicit finite source boundary: true retains a bounded tail, false
+    /// means it finished or was cancelled. None preserves normal peer priming
+    /// and shortfall grace; this is not terminal transport EOF.
+    fn finite_playout(&self) -> Option<bool> {
+        None
+    }
     /// Render native F32, returning real samples (not concealment), or None on failure.
     fn render(&mut self, output: &mut [f32]) -> Option<usize>;
     /// One real media sample; unlike PCM zero, absence cannot demand PTT.

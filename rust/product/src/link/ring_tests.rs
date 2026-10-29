@@ -11,6 +11,84 @@ thread_local! {
 }
 
 #[test]
+fn finite_echo_peer_drains_a_subtarget_burst_without_changing_ordinary_peer_policy() {
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode},
+    };
+    let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    assert_eq!(producer.write(&[0.25; 640]), Ok(640));
+    let token = producer.finish().unwrap();
+    assert_eq!(producer.finish_status(token), Ok(FinishState::Pending));
+    assert_eq!(producer.write(&[0.5]), Ok(0));
+    let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, consumer, outbound, 960, 0).unwrap();
+    let (mut links, _) = LinkAudio::new(vec![peer], 960).unwrap();
+    let (mut controller, _control) = NodeController::new(
+        ControllerSettings {
+            hang_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut heard = false;
+    let mut output = [0.0; 960];
+    for _ in 0..10 {
+        output.fill(0.0);
+        links
+            .process(
+                &mut controller,
+                false,
+                &mut output,
+                rpt_advanced_core::link::SourcePosition::default(),
+            )
+            .unwrap();
+        heard |= output.iter().any(|sample| sample.abs() > 0.1);
+        if producer.finish_status(token) == Ok(FinishState::Drained) {
+            break;
+        }
+    }
+    assert!(
+        heard,
+        "a finite Echo burst must bypass the ordinary 260ms startup gate"
+    );
+    assert_eq!(producer.finish_status(token), Ok(FinishState::Drained));
+    output.fill(0.0);
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut output,
+            rpt_advanced_core::link::SourcePosition::default(),
+        )
+        .unwrap();
+    assert_eq!(links.active_count(), 0);
+    assert_eq!(producer.observer().observe().unwrap().missing_samples, 0);
+}
+
+#[test]
+fn ordinary_ring_accepts_pre_finite_prefix_but_echo_rejects_it_before_creation() {
+    unsafe {
+        let original = *ffi::rpcr3_descriptor();
+        let size = std::mem::offset_of!(ffi::rpcr3_descriptor, ring_producer_finish);
+        let mut prefix = vec![0_usize; size / size_of::<usize>()];
+        ptr::copy_nonoverlapping(
+            (&original as *const ffi::rpcr3_descriptor).cast::<u8>(),
+            prefix.as_mut_ptr().cast::<u8>(),
+            size,
+        );
+        let pointer = prefix.as_mut_ptr().cast::<ffi::rpcr3_descriptor>();
+        ptr::addr_of_mut!((*pointer).struct_size).write(size as u32);
+        assert!(InboundRing::from_descriptor(8000, InboundPolicy::Peer, pointer).is_ok());
+        assert!(InboundRing::from_descriptor(8000, InboundPolicy::Echo, pointer).is_err());
+    }
+}
+
+#[test]
 fn peer_preparation_reserves_one_maximum_callback_and_producer_write() {
     for (rate, reserve, target, capacity) in [(8000, 685, 2080, 6176), (48000, 4102, 12480, 16576)]
     {

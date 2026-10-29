@@ -3,9 +3,12 @@ use crate::abi as ffi;
 use rpt_advanced_core::link::{PeerInput, PeerSignals};
 use std::{
     ffi::CStr,
-    mem::size_of,
+    mem::{offset_of, size_of},
     ptr::{self, NonNull},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 /// Invalid or unavailable ring capability, construction, or operation.
@@ -17,6 +20,8 @@ pub struct RingError;
 pub enum InboundPolicy {
     /// Decoded network PCM uses G.711 PLC and the peer playout target.
     Peer,
+    /// EchoLink selected-talker PCM, with explicit finite-burst drainage.
+    Echo,
     /// Local RF uses silence on shortfall and only its captured squelch delay.
     Local {
         /// Delay captured at worker construction; changing it requires a new ring.
@@ -26,13 +31,60 @@ pub enum InboundPolicy {
     Media,
 }
 
+/// Exact outcome of the most recently published finite source boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinishState {
+    /// SRC or PLC still retains accepted audio.
+    Pending,
+    /// Every accepted source position played and the warmed stream reset.
+    Drained,
+    /// The consumer explicitly reset/discarded this burst.
+    Cancelled,
+    /// Conversion or its final reset failed.
+    Failed,
+}
+
+/// Copy only a fully readable compatible descriptor prefix. Nullable function
+/// pointers are zero-valid; absent tails stay unavailable instead of borrowing
+/// a larger Rust record over an older allocation.
+pub(crate) unsafe fn checked_descriptor(
+    pointer: *const ffi::rpcr3_descriptor,
+) -> Result<ffi::rpcr3_descriptor, RingError> {
+    if pointer.is_null() {
+        return Err(RingError);
+    }
+    let length = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
+    let prefix = offset_of!(ffi::rpcr3_descriptor, ring_producer_finish);
+    if length < prefix
+        || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != ffi::RPCR3_ABI_VERSION
+    {
+        return Err(RingError);
+    }
+    let count = if length >= size_of::<ffi::rpcr3_descriptor>() {
+        size_of::<ffi::rpcr3_descriptor>()
+    } else {
+        prefix
+    };
+    let mut api: ffi::rpcr3_descriptor = unsafe { std::mem::zeroed() };
+    unsafe {
+        ptr::copy_nonoverlapping(
+            pointer.cast::<u8>(),
+            (&mut api as *mut ffi::rpcr3_descriptor).cast::<u8>(),
+            count,
+        )
+    };
+    Ok(api)
+}
+
 /// Individually current released-ring diagnostics; fields are not transactional.
 pub type Observation = ffi::rpcr3_observation;
 
 struct Shared {
     handle: NonNull<ffi::rpcr3_ring>,
-    api: &'static ffi::rpcr3_descriptor,
+    api: ffi::rpcr3_descriptor,
     input_rate: u32,
+    policy: InboundPolicy,
+    finite: AtomicU64,
     signals: PeerSignals,
 }
 // SAFETY: exactly one non-cloneable producer and one consumer call the released SPSC API.
@@ -68,6 +120,10 @@ impl InboundObserver {
     pub fn rate(&self) -> u32 {
         self.0.input_rate
     }
+    /// Preserve the exact per-protocol policy during a prepared generation swap.
+    pub fn policy(&self) -> InboundPolicy {
+        self.0.policy
+    }
     /// Activity/source/terminal atomics belonging to this exact ring generation.
     pub fn signals(&self) -> &PeerSignals {
         &self.0.signals
@@ -101,17 +157,7 @@ impl InboundRing {
         }
         // SAFETY: linked released library guarantees a process-lifetime descriptor header.
         unsafe {
-            if pointer.is_null() {
-                return Err(RingError);
-            }
-            // Inspect the header before borrowing the complete current function table.
-            if ptr::addr_of!((*pointer).struct_size).read()
-                < size_of::<ffi::rpcr3_descriptor>() as u32
-                || ptr::addr_of!((*pointer).abi_version).read() != ffi::RPCR3_ABI_VERSION
-            {
-                return Err(RingError);
-            }
-            let api = &*pointer;
+            let api = checked_descriptor(pointer)?;
             if api.capability_name.is_null()
                 || CStr::from_ptr(api.capability_name) != c"rptadv.rate-adjusting-pcm-ring.f32"
                 || api.ring_create.is_none()
@@ -123,12 +169,14 @@ impl InboundRing {
                 || api.ring_consumer_reset.is_none()
                 || api.ring_output_delay.is_none()
                 || api.ring_observe.is_none()
+                || (matches!(policy, InboundPolicy::Echo)
+                    && (api.ring_producer_finish.is_none() || api.ring_finish_status.is_none()))
             {
                 return Err(RingError);
             }
             let rate = u64::from(input_rate);
             let (reserve, target, capacity, plc_mode) = match policy {
-                InboundPolicy::Peer => {
+                InboundPolicy::Peer | InboundPolicy::Echo => {
                     // Input is at most 48 kHz, so qmin's 1/256 floor is inactive.
                     // Include one maximum callback at -1000 ppm and its successor.
                     let budget = (4096 * rate * 1000).div_ceil(48000 * 999) + 1;
@@ -163,6 +211,8 @@ impl InboundRing {
                 handle: NonNull::new(handle).ok_or(RingError)?,
                 api,
                 input_rate,
+                policy,
+                finite: AtomicU64::new(0),
                 signals: PeerSignals::new(),
             });
             Ok((InboundProducer(shared.clone()), InboundConsumer(shared)))
@@ -196,6 +246,7 @@ impl InboundProducer {
         };
         if code == 0 {
             if accepted != 0 {
+                self.0.finite.store(0, Ordering::Release);
                 self.0.signals.publish_pcm();
             }
             Ok(accepted as usize)
@@ -212,6 +263,9 @@ impl InboundProducer {
             (self.0.api.ring_producer_gap.unwrap())(self.0.handle.as_ptr(), samples, &mut accepted)
         };
         if code == 0 {
+            if accepted != 0 {
+                self.0.finite.store(0, Ordering::Release);
+            }
             Ok(accepted)
         } else {
             Err(RingError)
@@ -220,6 +274,25 @@ impl InboundProducer {
     /// Intrinsic resampler delay in native output samples for end-padding finite media.
     pub fn output_delay_samples(&self) -> Result<u64, RingError> {
         self.0.output_delay_samples()
+    }
+    /// Publish EchoLink's accepted finite prefix, retaining one exact ring token.
+    pub fn finish(&mut self) -> Result<u64, RingError> {
+        if !matches!(self.0.policy, InboundPolicy::Echo) {
+            return Err(RingError);
+        }
+        let mut token = 0;
+        let code =
+            unsafe { self.0.api.ring_producer_finish.unwrap()(self.0.handle.as_ptr(), &mut token) };
+        if code != 0 || token == 0 {
+            return Err(RingError);
+        }
+        self.0.finite.store(token, Ordering::Release);
+        Ok(token)
+    }
+    /// Acquire played-versus-cancelled/failed completion; occupancy alone cannot
+    /// establish whether accepted FIR and PLC lookahead has reached the radio.
+    pub fn finish_status(&self, token: u64) -> Result<FinishState, RingError> {
+        self.0.finish_status(token)
     }
 }
 impl Drop for InboundProducer {
@@ -237,6 +310,10 @@ impl PeerInput for InboundConsumer {
     fn available(&self) -> u64 {
         self.observe()
             .map_or(0, |observation| observation.available_samples)
+    }
+    fn finite_playout(&self) -> Option<bool> {
+        let token = self.0.finite.load(Ordering::Acquire);
+        (token != 0).then(|| self.0.finish_status(token) == Ok(FinishState::Pending))
     }
     fn render(&mut self, output: &mut [f32]) -> Option<usize> {
         InboundConsumer::render(self, output).ok()
@@ -294,6 +371,21 @@ impl InboundConsumer {
     }
 }
 impl Shared {
+    fn finish_status(&self, token: u64) -> Result<FinishState, RingError> {
+        let query = self.api.ring_finish_status.ok_or(RingError)?;
+        let mut status = u32::MAX;
+        let code = unsafe { query(self.handle.as_ptr(), token, &mut status) };
+        if code != 0 {
+            return Err(RingError);
+        }
+        Ok(match status {
+            0 => FinishState::Pending,
+            1 => FinishState::Drained,
+            2 => FinishState::Cancelled,
+            3 => FinishState::Failed,
+            _ => return Err(RingError),
+        })
+    }
     fn output_delay_samples(&self) -> Result<u64, RingError> {
         let mut delay = 0;
         // SAFETY: the ring remains live and delay is writable output storage.
