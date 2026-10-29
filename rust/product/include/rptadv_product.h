@@ -213,6 +213,7 @@ typedef int32_t (*rptadv_peer_step_v1)(void *step_context);
 /** Borrowed status text sink. */
 typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t length);
 struct UrpNativeStationConfig;
+struct rptadv_echolink_account_config_v1;
 /** Resolved host requirements, borrowed only during the configuration visitor. */
 struct rptadv_node_host_configuration {
     uint32_t struct_size;           /**< Complete readable record size. */
@@ -226,6 +227,12 @@ struct rptadv_node_host_configuration {
     size_t registration_url_length; /**< Endpoint byte count. */
     uint64_t registration_interval_seconds;     /**< Effective registration interval. */
     const struct UrpNativeStationConfig *radio; /**< Borrowed native station request. */
+    /** Resolved public EchoLink settings, including disabled accounts. No passwords.
+     * The provider ABI record and its nested spans/lists live only during this visit. */
+    const struct rptadv_echolink_account_config_v1 *echolink;
+    const uint8_t
+        *echolink_secrets_file; /**< Configured host-relative path, or empty for default. */
+    size_t echolink_secrets_file_length; /**< Path byte count; not NUL terminated. */
 };
 /** Copy one node's requirements; return nonzero to abort inspection. */
 typedef int (*rptadv_configuration_sink)(void *context,

@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 crossbeam-queue = "0.3"
 libloading = "0.8"
 rpt-advanced-core = { path = "../core" }
+rptadv-peer-support = { path = "../peer-support" }
 rtrb = "0.3.2"
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = "2.5"

@@ -649,6 +649,7 @@ dependencies = [
  "rpt-advanced-standalone",
  "rptadv-control-standalone-adapter",
  "rptadv-file-adapter",
+ "rptadv-peer-support",
  "rptadv-speech-adapter",
  "rtrb",
  "serde_json",

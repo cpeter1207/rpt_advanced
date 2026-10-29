@@ -1,4 +1,5 @@
 use crate::{abi, lifecycle::rptadv_product_descriptor_v1};
+use rptadv_peer_support::echolink::abi as echo;
 use std::{
     ffi::{c_char, c_void},
     mem::size_of,
@@ -10,6 +11,21 @@ struct Collected {
     secrets: Vec<(String, String)>,
     diagnostics: Vec<String>,
     radios: Vec<CapturedRadio>,
+    echoes: Vec<CapturedEcho>,
+}
+
+#[derive(Debug, PartialEq)]
+struct CapturedEcho {
+    local: String,
+    callsign: String,
+    number: u32,
+    enabled: bool,
+    transport: u32,
+    servers: Vec<String>,
+    receive_gain: f64,
+    transmit_gain: f64,
+    max_stations: u32,
+    secrets_file: String,
 }
 
 #[derive(Debug)]
@@ -37,6 +53,37 @@ unsafe extern "C" fn node(
         size_of::<abi::rptadv_node_host_configuration>()
     );
     let output = unsafe { &mut *context.cast::<Collected>() };
+    let echo = unsafe { &*record.echolink.cast::<echo::AccountConfig>() };
+    let servers = if echo.transport.directory_servers.count == 0 {
+        &[]
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(
+                echo.transport.directory_servers.items,
+                echo.transport.directory_servers.count,
+            )
+        }
+    };
+    output.echoes.push(CapturedEcho {
+        local: unsafe { text(echo.local_node.data.cast(), echo.local_node.length) },
+        callsign: unsafe { text(echo.callsign.data.cast(), echo.callsign.length) },
+        number: echo.node_number,
+        enabled: echo.enabled != 0,
+        transport: echo.transport.kind,
+        servers: servers
+            .iter()
+            .map(|server| unsafe { text(server.data.cast(), server.length) })
+            .collect(),
+        receive_gain: echo.policy.receive_gain_db,
+        transmit_gain: echo.policy.transmit_gain_db,
+        max_stations: echo.policy.max_stations,
+        secrets_file: unsafe {
+            text(
+                record.echolink_secrets_file.cast(),
+                record.echolink_secrets_file_length,
+            )
+        },
+    });
     let native = unsafe { &*record.radio };
     output.radios.push(CapturedRadio {
         request: *native,
@@ -95,7 +142,7 @@ unsafe extern "C" fn diagnostic(context: *mut c_void, pointer: *const c_char, le
 
 fn inspect(source: &str, secrets: bool) -> (i32, Collected) {
     let table = unsafe { &*rptadv_product_descriptor_v1() };
-    assert_eq!(table.abi_version, 6);
+    assert_eq!(table.abi_version, 7);
     let mut output = Collected::default();
     let context = (&mut output as *mut Collected).cast();
     let result = unsafe {
@@ -120,6 +167,44 @@ fn inspect(source: &str, secrets: bool) -> (i32, Collected) {
         }
     };
     (result, output)
+}
+
+#[test]
+fn resolved_echo_accounts_cross_the_visitor_without_identity_inheritance_or_secrets() {
+    let (result, output) = inspect(
+        "[echolink]\nreceive_gain_db=-6\ntransmit_gain_db=2\nmax_stations=44\ndirectory_servers=first.example,second.example\n[1000]\n[echolink 1000]\nenabled=yes\ncallsign=kg0bp-r\nnode_number=4294967295\ntransport=proxy\nproxy_host=proxy.example\nsecrets_file=private/echo.conf\n[2000]\n",
+        false,
+    );
+    assert_eq!(result, 0, "{output:?}");
+    assert_eq!(
+        output.echoes,
+        [
+            CapturedEcho {
+                local: "1000".into(),
+                callsign: "KG0BP-R".into(),
+                number: u32::MAX,
+                enabled: true,
+                transport: 1,
+                servers: vec!["first.example".into(), "second.example".into()],
+                receive_gain: -6.0,
+                transmit_gain: 2.0,
+                max_stations: 44,
+                secrets_file: "private/echo.conf".into()
+            },
+            CapturedEcho {
+                local: "2000".into(),
+                callsign: "".into(),
+                number: 0,
+                enabled: false,
+                transport: 0,
+                servers: vec!["first.example".into(), "second.example".into()],
+                receive_gain: -6.0,
+                transmit_gain: 2.0,
+                max_stations: 44,
+                secrets_file: "".into()
+            },
+        ]
+    );
 }
 
 #[test]

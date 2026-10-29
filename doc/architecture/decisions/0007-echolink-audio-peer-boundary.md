@@ -126,6 +126,12 @@ including port zero for Proxy framing. This supplies the typed incoming request
 without substituting a directory address or assumed port for an observation.
 The network/media operation group remains unpublished while this record and
 the shared host glue are integrated; lifecycle-only users do not consume it.
+The product's existing configuration visitor carries a borrowed provider account
+record and its configured secrets-file path. Product code resolves every account
+before any host visit; hosts prepare or copy the public record synchronously and
+load credentials relative to their actual configuration file. No host reparses
+the controller schema or retains parser spans. These fields belong to the same
+coordinated, pre-release host9/product7 and SONAME2 transition.
 
 ## Consequences
 
