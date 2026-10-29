@@ -89,6 +89,7 @@ fn with_echo_preparation<T>(
             control.0.cast(),
             move |peer| product.incoming_echo(peer),
         )
+        .with_notice(crate::services::echo_notice)
     }))
 }
 

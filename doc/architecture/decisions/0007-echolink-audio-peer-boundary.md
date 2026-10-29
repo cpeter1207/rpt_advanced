@@ -272,6 +272,12 @@ current host table tail. It uses the existing borrowed text sink, not a second
 copy of the provider record. Missing accounts emit no text; query failure is
 unavailable, not an offline assertion. The paired current host table extent
 changes; the descriptor versions and SONAMEs remain unchanged.
+Account health notifications enqueue coalesced metadata work on the existing
+host control owner. They never query or log while inside the provider callback.
+Execution rechecks admission/reload gates and the exact account generation.
+Repeated failures log at most once per30seconds; online recovery or a new
+generation resets that episode. Shutdown gates producers, joins callbacks and
+drains accepted control work before releasing logger/backend storage.
 
 ## Consequences
 

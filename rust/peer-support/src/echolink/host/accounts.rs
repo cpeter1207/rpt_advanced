@@ -15,6 +15,7 @@ use std::{
 };
 
 type Incoming = Arc<dyn Fn(Arc<Peer>) + Send + Sync>;
+type Notice = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Synchronous resolved-record visitor. Spans are copied before each call ends.
 pub type AccountVisitor<'a> =
@@ -28,6 +29,7 @@ pub struct Preparation<'a> {
     resources: &'a abi::RuntimeConfig,
     control: *const crate::control::Descriptor,
     incoming: Incoming,
+    notice: Option<Notice>,
     accounts: Option<Accounts>,
 }
 impl<'a> Preparation<'a> {
@@ -49,8 +51,20 @@ impl<'a> Preparation<'a> {
             resources,
             control,
             incoming: Arc::new(incoming),
+            notice: None,
             accounts: None,
         }
+    }
+
+    /// Select a metadata-only logger before visiting any account records.
+    /// It executes on the existing host control owner, never the provider callback.
+    pub fn with_notice(mut self, notice: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        assert!(
+            self.accounts.is_none(),
+            "select the logger before account preparation"
+        );
+        self.notice = Some(Arc::new(notice));
+        self
     }
 
     /// Prepare a borrowed resolved record without retaining its spans or opening
@@ -72,7 +86,9 @@ impl<'a> Preparation<'a> {
                     .map_err(|_| Error::Control)?,
             );
             let incoming = Arc::clone(&self.incoming);
-            self.accounts = Some(Accounts::new(provider, control, move |peer| incoming(peer)));
+            let mut accounts = Accounts::new(provider, control, move |peer| incoming(peer));
+            accounts.notice = self.notice.clone();
+            self.accounts = Some(accounts);
         }
         let path = account_secrets_path(self.configuration, configured_secrets);
         unsafe { self.accounts.as_mut().unwrap().prepare(config, &path) }
@@ -135,6 +151,32 @@ struct Notifications {
     incoming: Incoming,
     enabled: Arc<AtomicBool>,
     updating: Arc<AtomicBool>,
+    notices: Option<Arc<Notices>>,
+}
+struct Notices {
+    target: Notice,
+    pending: AtomicBool,
+    last: Mutex<Option<(u64, std::time::Instant)>>,
+}
+impl Notices {
+    fn publish(&self, local: &str, record: &abi::AccountObservation, now: std::time::Instant) {
+        let mut last = self.last.lock().unwrap_or_else(|error| error.into_inner());
+        if record.state == 2 {
+            *last = None;
+        }
+        if !matches!(record.state, 3 | 7) {
+            return;
+        }
+        if last.is_some_and(|(generation, at)| {
+            generation == record.generation
+                && now.duration_since(at) < std::time::Duration::from_secs(30)
+        }) {
+            return;
+        }
+        *last = Some((record.generation, now));
+        drop(last);
+        (self.target)(&super::describe_account(local, record));
+    }
 }
 struct Entry {
     account: Arc<Account>,
@@ -148,6 +190,13 @@ impl Entry {
             incoming: Arc::clone(&owner.incoming),
             enabled: Arc::new(AtomicBool::new(false)),
             updating: Arc::clone(&owner.updating),
+            notices: owner.notice.as_ref().map(|target| {
+                Arc::new(Notices {
+                    target: Arc::clone(target),
+                    pending: AtomicBool::new(false),
+                    last: Mutex::new(None),
+                })
+            }),
         });
         Arc::new(Self {
             account,
@@ -398,6 +447,7 @@ pub struct Accounts {
     provider: Arc<Provider>,
     control: Arc<Client>,
     incoming: Incoming,
+    notice: Option<Notice>,
     entries: Mutex<BTreeMap<String, Arc<Entry>>>,
     retired: Mutex<Vec<Arc<Entry>>>,
     activated: AtomicBool,
@@ -418,6 +468,7 @@ impl Accounts {
             provider,
             control,
             incoming: Arc::new(incoming),
+            notice: None,
             entries: Mutex::new(BTreeMap::new()),
             retired: Mutex::new(Vec::new()),
             activated: AtomicBool::new(false),
@@ -426,6 +477,19 @@ impl Accounts {
             operation: Mutex::new(()),
             revision: AtomicU64::new(0),
         }
+    }
+
+    /// Install the host logger before preparing records, retaining no payloads.
+    pub fn with_notice(mut self, notice: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        assert!(
+            self.entries
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "select the logger before account preparation"
+        );
+        self.notice = Some(Arc::new(notice));
+        self
     }
 
     /// Copy one resolved account and its private credentials without login. A
@@ -626,8 +690,7 @@ unsafe extern "C" fn notify(context: *mut c_void, event: *const abi::Event) {
     let Some(event) = (unsafe { event.as_ref() }) else {
         return;
     };
-    if event.kind != 1
-        || !notifications.enabled.load(Ordering::Acquire)
+    if !notifications.enabled.load(Ordering::Acquire)
         || notifications.updating.load(Ordering::Acquire)
     {
         return;
@@ -635,6 +698,42 @@ unsafe extern "C" fn notify(context: *mut c_void, event: *const abi::Event) {
     let Some(account) = notifications.account.upgrade() else {
         return;
     };
+    if event.kind == 0 {
+        let Some(notices) = &notifications.notices else {
+            return;
+        };
+        if notices.pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let result = notifications.control.submit(
+            (
+                account,
+                Arc::clone(notices),
+                Arc::clone(&notifications.enabled),
+                Arc::clone(&notifications.updating),
+                event.generation,
+            ),
+            |(account, notices, enabled, updating, generation)| {
+                // At most one additional job may queue while this owner is querying.
+                notices.pending.store(false, Ordering::Release);
+                if !enabled.load(Ordering::Acquire) || updating.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Ok(record) = account.observe() {
+                    if record.generation == generation {
+                        notices.publish(&account.local, &record, std::time::Instant::now());
+                    }
+                }
+            },
+        );
+        if result.is_err() {
+            notices.pending.store(false, Ordering::Release);
+        }
+        return;
+    }
+    if event.kind != 1 {
+        return;
+    }
     let _ = unsafe {
         account.dispatch_pending(event, |pending| {
             notifications
@@ -665,4 +764,37 @@ unsafe extern "C" fn notify(context: *mut c_void, event: *const abi::Event) {
                 })
         })
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn failure_notice_period_is_monotonic_and_recovery_or_generation_resets_it() {
+        use std::time::{Duration, Instant};
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let target = Arc::clone(&lines);
+        let notices = Notices {
+            target: Arc::new(move |text| target.lock().unwrap().push(text.to_owned())),
+            pending: AtomicBool::new(false),
+            last: Mutex::new(None),
+        };
+        let mut record = abi::AccountObservation {
+            state: 3,
+            generation: 1,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        for seconds in [0, 29, 30] {
+            notices.publish("1000", &record, now + Duration::from_secs(seconds));
+        }
+        assert_eq!(lines.lock().unwrap().len(), 2);
+        record.state = 2;
+        notices.publish("1000", &record, now + Duration::from_secs(31));
+        record.state = 3;
+        notices.publish("1000", &record, now + Duration::from_secs(31));
+        record.generation = 2;
+        notices.publish("1000", &record, now + Duration::from_secs(32));
+        assert_eq!(lines.lock().unwrap().len(), 4);
+    }
 }

@@ -12,6 +12,24 @@ static CONTEXTS: AtomicUsize = AtomicUsize::new(0);
 static ACCOUNTS: AtomicUsize = AtomicUsize::new(0);
 static PEERS: AtomicUsize = AtomicUsize::new(0);
 static UPDATES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+static ACCOUNT_CALLBACKS: std::sync::Mutex<Vec<(usize, abi::EventFn, usize)>> = std::sync::Mutex::new(Vec::new());
+static ACCOUNT_STATE: AtomicUsize = AtomicUsize::new(2);
+static ACCOUNT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(4);
+thread_local! { static NOTIFYING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_account_event(state: u32, snapshot_generation: u64, event_generation: u64) {
+    ACCOUNT_STATE.store(state as usize, Ordering::Release);
+    ACCOUNT_GENERATION.store(snapshot_generation, Ordering::Release);
+    let callbacks = ACCOUNT_CALLBACKS.lock().unwrap().clone();
+    NOTIFYING.set(true);
+    for (_, callback, context) in callbacks {
+        unsafe { callback(context as *mut c_void, &abi::Event { struct_size: size_of::<abi::Event>() as u32,
+            kind: 0, qso: ptr::null_mut(), generation: event_generation,
+            status: if matches!(state, 3 | 7) { abi::Status::Failed } else { abi::Status::Ok }, taken: ptr::null_mut() }) };
+    }
+    NOTIFYING.set(false);
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fixture_update_count() -> usize { UPDATES.lock().unwrap().len() }
@@ -73,6 +91,8 @@ unsafe extern "C" fn info(peer: *const abi::Qso, output: *mut abi::PeerInfo) -> 
 unsafe extern "C" fn activate(account: *mut abi::Account, callback: Option<abi::EventFn>, context: *mut c_void) -> abi::Status {
     if unsafe { *account.cast::<u32>() } == 42 { return abi::Status::Full; }
     if let Some(callback) = callback {
+        ACCOUNT_CALLBACKS.lock().unwrap().retain(|(owner, _, _)| *owner != account as usize);
+        ACCOUNT_CALLBACKS.lock().unwrap().push((account as usize, callback, context as usize));
         unsafe { callback(context, &abi::Event { struct_size: size_of::<abi::Event>() as u32, kind: 0, qso: ptr::null_mut(), generation: 4, status: abi::Status::Ok, taken: ptr::null_mut() }) };
         if unsafe { *account.cast::<u32>() } == 7 {
             let peer = fixture_peer();
@@ -93,8 +113,10 @@ unsafe extern "C" fn apply(target: *mut abi::Account, prepared: *mut abi::Accoun
     abi::Status::Ok
 }
 unsafe extern "C" fn account_observe(_: *const abi::Account, out: *mut abi::AccountObservation) -> abi::Status {
+    assert!(!NOTIFYING.get(), "account observation reentered its notification callback");
     unsafe { out.write(abi::AccountObservation { struct_size: size_of::<abi::AccountObservation>() as u32,
-        abi_version: 1, state: 2, generation: 4, directory_failures: 7, ..Default::default() }) };
+        abi_version: 1, state: ACCOUNT_STATE.load(Ordering::Acquire) as u32,
+        generation: ACCOUNT_GENERATION.load(Ordering::Acquire), directory_failures: 7, ..Default::default() }) };
     abi::Status::Ok
 }
 unsafe extern "C" fn peer_observe(_: *const abi::Qso, out: *mut abi::PeerObservation) -> abi::Status {
@@ -301,6 +323,7 @@ unsafe extern "C" fn stop(account: *mut abi::Account) -> abi::Status {
     }
 }
 unsafe extern "C" fn destroy(account: *mut abi::Account) {
+    ACCOUNT_CALLBACKS.lock().unwrap().retain(|(owner, _, _)| *owner != account as usize);
     ACCOUNTS.fetch_sub(1, Ordering::SeqCst);
     unsafe { drop(Box::from_raw(account.cast::<u32>())) };
 }

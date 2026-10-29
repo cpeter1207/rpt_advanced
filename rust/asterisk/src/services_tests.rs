@@ -85,7 +85,8 @@ unsafe extern "C" fn ast_log(
     format: *const c_char,
     text: *const c_char,
 ) {
-    if unsafe { std::ffi::CStr::from_ptr(function) } == c"scheduler" {
+    if matches!(unsafe { std::ffi::CStr::from_ptr(function) }, name if name == c"scheduler" || name == c"echolink")
+    {
         SCHEDULER_LOGS.with(|logs| {
             logs.borrow_mut().push((
                 level,
@@ -105,6 +106,22 @@ unsafe extern "C" fn ast_log(
 thread_local! {
     static SCHEDULER_LOGS: std::cell::RefCell<Vec<(i32, String, String)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[test]
+fn echo_notice_uses_error_logger_and_never_a_foreign_format_string() {
+    SCHEDULER_LOGS.with(|logs| logs.borrow_mut().clear());
+    echo_notice("echo account failure 50% %n");
+    SCHEDULER_LOGS.with(|logs| {
+        assert_eq!(
+            *logs.borrow(),
+            [(
+                4,
+                "rpt_advanced: EchoLink: %s\n".into(),
+                "echo account failure 50% %n".into()
+            )]
+        )
+    });
 }
 
 #[test]

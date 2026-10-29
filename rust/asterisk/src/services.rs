@@ -127,6 +127,24 @@ unsafe extern "C" fn scheduler_notice(_: *mut c_void, pointer: *const c_char, le
         }
     });
 }
+/// Metadata-only account failures on the existing host control owner.
+pub(crate) fn echo_notice(message: &str) {
+    boundary((), || {
+        let Ok(message) = CString::new(message) else {
+            return;
+        };
+        unsafe {
+            ffi::ast_log(
+                ffi::__LOG_ERROR as i32,
+                c"rust/asterisk/services.rs".as_ptr(),
+                0,
+                c"echolink".as_ptr(),
+                c"rpt_advanced: EchoLink: %s\n".as_ptr(),
+                message.as_ptr(),
+            )
+        };
+    });
+}
 struct ReservedRadio {
     radio: Option<Radio>,
     name: CString,

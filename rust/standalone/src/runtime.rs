@@ -327,6 +327,7 @@ fn with_echo_preparation<T>(
                 crate::host_services::incoming_echo(incoming, peer);
             },
         )
+        .with_notice(|message| eprintln!("rpt-advanced: EchoLink: {message}"))
     })
 }
 

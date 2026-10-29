@@ -465,6 +465,41 @@ fn text_forwarding_classification_binds_authenticated_origin_and_drops_overflow_
 }
 
 #[test]
+fn human_text_send_failure_is_rate_limited_without_ending_the_audio_peer() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state.lock().unwrap().fail_text = true;
+    crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+    for now in [10, 11, 30010] {
+        assert!(
+            control
+                .send(Command::HumanText {
+                    sender: "W1XYZ".into(),
+                    body: "private body".into()
+                })
+                .is_ok()
+        );
+        assert!(
+            session.step(now).is_ok(),
+            "chat failure cannot terminate audio"
+        );
+        assert!(!control.ended());
+    }
+    let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+    assert_eq!(logs.len(), 2, "first failure and next30second window only");
+    for (_, message) in logs {
+        assert!(message.contains("human-text send rejected"), "{message}");
+        assert!(!message.contains("private body"));
+        assert!(!message.contains("W1XYZ"));
+    }
+    session.stop();
+}
+
+#[test]
 fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
     for requested in [false, true] {
         let (mut session, control, state, _) = make_async_session("1000");

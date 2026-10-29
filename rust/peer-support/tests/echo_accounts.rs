@@ -16,6 +16,69 @@ use std::{
 mod support;
 
 #[test]
+fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored() {
+    let fixture = support::Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let event =
+        unsafe { library.get::<unsafe extern "C" fn(u32, u64, u64)>(b"fixture_account_event\0") }
+            .unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+    let control = Arc::new(unsafe { Client::open(backend.cast(), "echo-notices", 8) }.unwrap());
+    let (send, received) = mpsc::channel();
+    let mut accounts =
+        Accounts::new(provider, Arc::clone(&control), |_| {}).with_notice(move |text| {
+            send.send(text.to_owned()).unwrap();
+        });
+    let path = fixture.0.parent().unwrap().join("credentials.conf");
+    std::fs::write(&path, "[1000]\ndirectory_password=fixture-value\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let config = abi::AccountConfig {
+        enabled: 1,
+        local_node: abi::ByteSpan {
+            data: b"1000".as_ptr(),
+            length: 4,
+        },
+        ..Default::default()
+    };
+    unsafe { accounts.prepare(&config, &path) }.unwrap();
+    unsafe { accounts.activate() }.unwrap();
+    let drain = || {
+        let (send, done) = mpsc::channel();
+        assert!(control.submit(send, |send| send.send(()).unwrap()).is_ok());
+        done.recv_timeout(Duration::from_secs(5)).unwrap();
+    };
+    drain();
+    unsafe { event(3, 4, 3) }; // A retired-generation event is not current evidence.
+    drain();
+    assert!(received.try_recv().is_err());
+    unsafe { event(3, 4, 4) };
+    drain();
+    let line = received.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(line.contains("state=retrying"), "{line}");
+    assert!(!line.contains("fixture-value"));
+    for _ in 0..3 {
+        unsafe { event(3, 4, 4) };
+        drain();
+    }
+    assert!(
+        received.try_recv().is_err(),
+        "repeat failure was not rate-limited"
+    );
+    unsafe { event(2, 4, 4) };
+    drain();
+    unsafe { event(3, 4, 4) };
+    drain();
+    assert!(
+        received.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "healthy recovery must reset the failure episode"
+    );
+    accounts.stop().unwrap();
+    unsafe { event(3, 4, 4) };
+    assert!(received.try_recv().is_err());
+}
+
+#[test]
 fn failed_replacement_retires_only_new_accounts_and_restores_the_product() {
     for failure_in_new_account in [false, true] {
         let fixture = support::Fixture::new("network");

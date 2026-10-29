@@ -402,6 +402,24 @@ impl HostServices {
             self.0.scheduler_notice.unwrap()(self.0.context, text.as_ptr().cast(), text.len());
         }
     }
+    /// Query optional account diagnostics on control, even with no live peers.
+    /// A failed query is unavailable evidence, not proof that an account is offline.
+    pub fn echo_account_status(&self, local: &str) -> Result<Option<String>, BackendError> {
+        let Some(call) = self.0.echo_account_status else {
+            return Ok(None);
+        };
+        let mut result = DirectoryResults::new();
+        let code = unsafe {
+            call(
+                self.0.context,
+                local.as_ptr().cast(),
+                local.len(),
+                Some(directory_text),
+                ptr::from_mut(&mut result).cast(),
+            )
+        };
+        result.finish(code)?.single()
+    }
     /// Child-reaper acquisition callback for process-backed media providers.
     pub fn reaper_acquire(&self) -> unsafe extern "C" fn() {
         self.0.reaper_acquire.unwrap()

@@ -755,6 +755,15 @@ impl Host {
                 if peers.len() == 1 { "link" } else { "links" }
             )
         };
+        match self.services.echo_account_status(local) {
+            Ok(Some(account)) => {
+                let _ = writeln!(result, "  {account}");
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = writeln!(result, "  echo-account status-unavailable");
+            }
+        }
         let (_, lease) = self
             .leases
             .iter()
