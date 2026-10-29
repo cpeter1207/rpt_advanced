@@ -111,11 +111,6 @@ unsafe extern "C" fn inspect_incoming(
     assert_eq!(text(request.local), "524950");
     assert_eq!(text(request.remote), "4294967295");
     assert_eq!(text(request.source), "127.0.0.2");
-    let mut info: host_abi::rptadv_peer_info_v1 = unsafe { std::mem::zeroed() };
-    info.struct_size = size_of::<host_abi::rptadv_peer_info_v1>() as u32;
-    info.abi_version = 1;
-    assert_eq!(unsafe { peer_info(ptr::null_mut(), peer, &mut info) }, 0);
-    assert_eq!(info.protocol, 2);
-    assert_eq!(text(info.remote), "4294967295");
+    assert_eq!(unsafe { peer_rate(ptr::null_mut(), peer) }, 8000);
     1 // Leave ownership with the adapter to exercise its rejection cleanup.
 }

@@ -891,6 +891,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
+#[cfg(test)]
 pub fn descriptor() -> &'static ffi::rptadv_host_services_v9 {
     &SERVICES.0
 }
