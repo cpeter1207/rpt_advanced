@@ -58,11 +58,129 @@ pub(crate) struct State {
     source_position: u64,
     source_keyed: bool,
     source_finish: bool,
+    source_interleave: bool,
     source_acknowledgements: usize,
     source_completions: Vec<u32>,
     source_credits: Vec<(u64, usize)>,
 }
 type Shared = Arc<Mutex<State>>;
+
+fn five_tone(count: usize) -> Vec<f32> {
+    (0..count)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect()
+}
+
+#[test]
+fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retires() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            outbound,
+            dtmf_muting: true,
+        })
+        .ok()
+        .unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.25; 640]));
+    session.step(0).unwrap();
+    while control.event().is_some() {}
+    let mut tone = five_tone(400);
+    tone.extend_from_slice(&[0.0; 240]);
+    {
+        let mut state = state.lock().unwrap();
+        state.source_interleave = true;
+        state.input.push_back(Input::Audio(tone));
+    }
+    session.step(10).unwrap();
+    assert!(
+        !matches!(control.event(), Some(Event::Digit(_))),
+        "unaccepted next-generation PCM must not issue a command"
+    );
+    let mut digits = Vec::new();
+    for now in 1..30 {
+        consumer.render(&mut [0.0; 960]).unwrap();
+        session.step(now * 20).unwrap();
+        while let Some(event) = control.event() {
+            if let Event::Digit(digit) = event {
+                digits.push(digit);
+            }
+        }
+        if state.lock().unwrap().source_acknowledgements == 2 {
+            break;
+        }
+    }
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 2);
+    assert_eq!(digits, ['5', '#']);
+}
+
+#[test]
+fn echo_source_never_joins_detector_qualification_across_loss_or_codec_plc() {
+    for concealed in [false, true] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+        let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect {
+                inbound,
+                outbound,
+                dtmf_muting: true,
+            })
+            .ok()
+            .unwrap();
+        state.lock().unwrap().input.extend([
+            Input::Audio(five_tone(200)),
+            if concealed {
+                Input::Concealed(five_tone(160))
+            } else {
+                Input::Gap(160)
+            },
+            Input::Audio(five_tone(200)),
+            Input::Audio(vec![0.0; 640]),
+        ]);
+        session.step(0).unwrap();
+        let mut digits = Vec::new();
+        while let Some(event) = control.event() {
+            if let Event::Digit(digit) = event {
+                digits.push(digit);
+            }
+        }
+        assert!(
+            digits.is_empty(),
+            "neither 25-ms real fragment qualifies: {digits:?}, concealed={concealed}"
+        );
+        for now in 1..20 {
+            consumer.render(&mut [0.0; 960]).unwrap();
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+    }
+}
 
 #[test]
 fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc() {
@@ -89,12 +207,7 @@ fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc()
             })
             .ok()
             .unwrap();
-        let tone: Vec<_> = (0..640)
-            .map(|n| {
-                let phase = n as f32 * std::f32::consts::TAU / 8000.0;
-                0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
-            })
-            .collect();
+        let tone = five_tone(640);
         state.lock().unwrap().input.extend([
             if concealed {
                 Input::Concealed(tone)
@@ -962,7 +1075,7 @@ unsafe extern "C" fn read_source(
         state.source_keyed = false;
         result.activity = 2;
         result.progress = 3;
-    } else if state.source_finish {
+    } else if state.source_finish && (!state.source_interleave || state.input.is_empty()) {
         result.finish_pending = 1;
         result.progress = 2;
     } else if let Some(input) = state.input.pop_front() {
