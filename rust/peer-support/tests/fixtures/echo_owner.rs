@@ -11,6 +11,14 @@ use std::{
 static CONTEXTS: AtomicUsize = AtomicUsize::new(0);
 static ACCOUNTS: AtomicUsize = AtomicUsize::new(0);
 static PEERS: AtomicUsize = AtomicUsize::new(0);
+static UPDATES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_update_count() -> usize { UPDATES.lock().unwrap().len() }
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_update(index: usize) -> u64 {
+    UPDATES.lock().unwrap().get(index).copied().unwrap_or(u64::MAX)
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fixture_peer() -> *mut abi::Qso {
@@ -78,6 +86,7 @@ unsafe extern "C" fn reconfigure(_: *mut abi::Account, config: *const abi::Accou
     if unsafe { (*config).node_number } == 42 { abi::Status::Full } else { abi::Status::Ok }
 }
 unsafe extern "C" fn apply(target: *mut abi::Account, prepared: *mut abi::Account) -> abi::Status {
+    UPDATES.lock().unwrap().push((u64::from(unsafe { *target.cast::<u32>() }) << 32) | u64::from(unsafe { *prepared.cast::<u32>() }));
     if unsafe { *prepared.cast::<u32>() } == 42 { return abi::Status::Full; }
     unsafe { ptr::swap(target.cast::<u32>(), prepared.cast::<u32>()) };
     abi::Status::Ok

@@ -184,6 +184,15 @@ serialization. The host requires the complete network group including this
 operation. Lifecycle-only sized prefixes remain usable; older incomplete
 network groups fail closed. Descriptor version/SONAME stay1 because the
 operation is an appended, sized capability requirement, not a prefix change.
+The shared host account manager stages opaque snapshots without opening another
+admission executor. Commit gates outbound lookup and incoming handoffs, applies
+product settings, then account snapshots. Account failures restore snapshots in
+reverse before restoring the product. A product error also triggers restoration:
+it can occur after publication. Gates reopen only after successful restoration;
+failed rollback remains visible and fail-closed. Stale staged revisions cannot
+commit over a newer configuration. Queued admissions recheck the gate before
+claiming their QSO. Full account-set replacement and host reload wiring remain
+in progress.
 
 ## Consequences
 

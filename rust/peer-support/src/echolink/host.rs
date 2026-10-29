@@ -2,7 +2,7 @@
 use super::{Api, abi};
 use libloading::Library;
 mod accounts;
-pub use accounts::{Accounts, Preparation};
+pub use accounts::{Accounts, Preparation, PreparedUpdate, UpdateError};
 use std::{
     net::SocketAddrV4,
     path::Path,
@@ -26,6 +26,8 @@ pub enum Error {
     Secrets,
     /// The selected control owner could not quiesce off executor.
     Control,
+    /// The product rejected configuration application or restoration.
+    Product,
 }
 
 fn completed(status: abi::Status) -> Result<(), Error> {

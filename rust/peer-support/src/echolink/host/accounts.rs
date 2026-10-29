@@ -9,8 +9,8 @@ use std::{
     ffi::c_void,
     path::Path,
     sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -84,11 +84,160 @@ struct Notifications {
     account: Weak<Account>,
     control: Arc<Client>,
     incoming: Incoming,
-    enabled: AtomicBool,
+    enabled: Arc<AtomicBool>,
+    updating: Arc<AtomicBool>,
 }
 struct Entry {
     account: Arc<Account>,
     notifications: Arc<Notifications>,
+}
+
+/// First commit failure and an independent rollback failure, without secrets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateError {
+    /// Original product/account failure.
+    pub cause: Error,
+    /// A failed restoration keeps new admissions gated rather than claim success.
+    pub rollback: Option<Error>,
+}
+impl From<Error> for UpdateError {
+    fn from(cause: Error) -> Self {
+        Self {
+            cause,
+            rollback: None,
+        }
+    }
+}
+
+struct Change {
+    entry: Arc<Entry>,
+    prepared: Arc<Account>,
+    enabled: bool,
+    was_enabled: bool,
+}
+
+/// Provider-owned snapshots only. Dropping a staged update never stops the
+/// running admission executor or rereads credentials during commit/rollback.
+pub struct PreparedUpdate<'a> {
+    owner: &'a Accounts,
+    revision: u64,
+    changes: BTreeMap<String, Change>,
+}
+impl PreparedUpdate<'_> {
+    /// Validate/copy a resolved record while its spans and private file exist.
+    /// # Safety
+    /// The complete record and nested spans/lists are readable for this call.
+    pub unsafe fn prepare(
+        &mut self,
+        config: &abi::AccountConfig,
+        secrets: &Path,
+    ) -> Result<(), Error> {
+        let local = unsafe { local(config) }?;
+        if self.changes.contains_key(&local) {
+            return Err(Error::Contract);
+        }
+        let entry = self.owner.entries.get(&local).ok_or(Error::Contract)?;
+        let prepared = unsafe { self.owner.prepare_account(config, &local, secrets) }?;
+        self.changes.insert(
+            local,
+            Change {
+                entry: Arc::clone(entry),
+                prepared,
+                enabled: config.enabled == 1,
+                was_enabled: entry.notifications.enabled.load(Ordering::Acquire),
+            },
+        );
+        Ok(())
+    }
+
+    /// Commit product configuration and account snapshots with admission gated.
+    /// A product error may follow publication, so it also requires restoration.
+    /// Later account failure restores snapshots in reverse before restoring the
+    /// product. Call both closures off executors. Failed restoration keeps the
+    /// admission gate closed.
+    pub fn commit(
+        self,
+        product: impl FnOnce() -> bool,
+        restore_product: impl FnOnce() -> bool,
+    ) -> Result<(), UpdateError> {
+        let _operation = self.owner.operation.lock().map_err(|_| Error::Control)?;
+        if self.owner.stopped.load(Ordering::Acquire) {
+            return Err(Error::Status(abi::Status::Closed).into());
+        }
+        if self.owner.revision.load(Ordering::Acquire) != self.revision {
+            return Err(Error::Contract.into());
+        }
+        let next = self.revision.checked_add(1).ok_or(Error::Contract)?;
+        self.owner.revision.store(next, Ordering::Release);
+        self.owner.updating.store(true, Ordering::Release);
+        for change in self.changes.values() {
+            change
+                .entry
+                .notifications
+                .enabled
+                .store(false, Ordering::Release);
+        }
+        if !product() {
+            let rollback = (!restore_product()).then_some(Error::Product);
+            if rollback.is_none() {
+                for change in self.changes.values() {
+                    change
+                        .entry
+                        .notifications
+                        .enabled
+                        .store(change.was_enabled, Ordering::Release);
+                }
+                self.owner.updating.store(false, Ordering::Release);
+            }
+            return Err(UpdateError {
+                cause: Error::Product,
+                rollback,
+            });
+        }
+        let mut applied: Vec<&Change> = Vec::with_capacity(self.changes.len());
+        for change in self.changes.values() {
+            if let Err(cause) = change.entry.account.apply_prepared(&change.prepared) {
+                let mut failure = UpdateError::from(cause);
+                for change in applied.into_iter().rev() {
+                    if let Err(error) = change.entry.account.apply_prepared(&change.prepared) {
+                        failure.rollback.get_or_insert(error);
+                    }
+                }
+                if !restore_product() {
+                    failure.rollback.get_or_insert(Error::Product);
+                }
+                if failure.rollback.is_none() {
+                    for change in self.changes.values() {
+                        change
+                            .entry
+                            .notifications
+                            .enabled
+                            .store(change.was_enabled, Ordering::Release);
+                    }
+                    self.owner.updating.store(false, Ordering::Release);
+                }
+                return Err(failure);
+            }
+            applied.push(change);
+        }
+        for change in self.changes.values() {
+            change
+                .entry
+                .notifications
+                .enabled
+                .store(change.enabled, Ordering::Release);
+        }
+        self.owner.updating.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
+unsafe fn local(config: &abi::AccountConfig) -> Result<String, Error> {
+    let local = unsafe { super::text(config.local_node, 32) }?;
+    if config.enabled > 1 || local.is_empty() || !local.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::Contract);
+    }
+    Ok(local)
 }
 
 /// One host's prepared accounts. Prepare before product startup, activate only
@@ -101,6 +250,9 @@ pub struct Accounts {
     entries: BTreeMap<String, Arc<Entry>>,
     activated: AtomicBool,
     stopped: AtomicBool,
+    updating: Arc<AtomicBool>,
+    operation: Mutex<()>,
+    revision: AtomicU64,
 }
 impl Accounts {
     /// Keep the actual product admission target, rather than a host-global lookup
@@ -117,6 +269,9 @@ impl Accounts {
             entries: BTreeMap::new(),
             activated: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
+            updating: Arc::new(AtomicBool::new(false)),
+            operation: Mutex::new(()),
+            revision: AtomicU64::new(0),
         }
     }
 
@@ -135,31 +290,17 @@ impl Accounts {
         if config.enabled == 0 {
             return Ok(());
         }
-        let local = unsafe { super::text(config.local_node, 32) }?;
-        if config.enabled != 1
-            || local.is_empty()
-            || !local.bytes().all(|byte| byte.is_ascii_digit())
-            || self.entries.contains_key(&local)
-        {
+        let local = unsafe { local(config) }?;
+        if self.entries.contains_key(&local) {
             return Err(Error::Contract);
         }
-        let secrets = load_account_secrets(secrets, &local).map_err(|_| Error::Secrets)?;
-        let bytes = |value: &str| abi::ByteSpan {
-            data: value.as_ptr(),
-            length: value.len(),
-        };
-        let keys = abi::AccountSecrets {
-            struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
-            abi_version: 1,
-            directory_password: bytes(secrets.directory_password()),
-            proxy_password: bytes(secrets.proxy_password().unwrap_or("")),
-        };
-        let account = unsafe { self.provider.prepare(config, &keys) }?;
+        let account = unsafe { self.prepare_account(config, &local, secrets) }?;
         let notifications = Arc::new(Notifications {
             account: Arc::downgrade(&account),
             control: Arc::clone(&self.control),
             incoming: Arc::clone(&self.incoming),
-            enabled: AtomicBool::new(false),
+            enabled: Arc::new(AtomicBool::new(false)),
+            updating: Arc::clone(&self.updating),
         });
         self.entries.insert(
             local,
@@ -171,8 +312,56 @@ impl Accounts {
         Ok(())
     }
 
+    unsafe fn prepare_account(
+        &self,
+        config: &abi::AccountConfig,
+        local: &str,
+        path: &Path,
+    ) -> Result<Arc<Account>, Error> {
+        let secrets = if config.enabled == 0 {
+            None
+        } else {
+            Some(load_account_secrets(path, local).map_err(|_| Error::Secrets)?)
+        };
+        let bytes = |value: &str| abi::ByteSpan {
+            data: value.as_ptr(),
+            length: value.len(),
+        };
+        let keys = abi::AccountSecrets {
+            struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+            abi_version: 1,
+            directory_password: bytes(
+                secrets
+                    .as_ref()
+                    .map_or("", |keys| keys.directory_password()),
+            ),
+            proxy_password: bytes(
+                secrets
+                    .as_ref()
+                    .and_then(|keys| keys.proxy_password())
+                    .unwrap_or(""),
+            ),
+        };
+        unsafe { self.provider.prepare(config, &keys) }
+    }
+
+    /// Stage updates to running accounts without opening another executor.
+    pub fn prepare_update(&self) -> Result<PreparedUpdate<'_>, Error> {
+        if self.stopped.load(Ordering::Acquire) || !self.activated.load(Ordering::Acquire) {
+            return Err(Error::Status(abi::Status::Closed));
+        }
+        Ok(PreparedUpdate {
+            owner: self,
+            revision: self.revision.load(Ordering::Acquire),
+            changes: BTreeMap::new(),
+        })
+    }
+
     /// Lookup owns its account/DSO through an independent outbound control call.
     pub fn account(&self, local: &str) -> Option<Arc<Account>> {
+        if self.stopped.load(Ordering::Acquire) || self.updating.load(Ordering::Acquire) {
+            return None;
+        }
         self.entries
             .get(local)
             .map(|entry| Arc::clone(&entry.account))
@@ -205,6 +394,7 @@ impl Accounts {
     /// Gate notification producers, join them, then drain accepted admissions
     /// while the captured product is still callable. Preserve the first failure.
     pub fn stop(&self) -> Result<(), Error> {
+        let _operation = self.operation.lock().map_err(|_| Error::Control)?;
         self.stopped.store(true, Ordering::Release);
         for entry in self.entries.values() {
             entry.notifications.enabled.store(false, Ordering::Release);
@@ -234,7 +424,10 @@ unsafe extern "C" fn notify(context: *mut c_void, event: *const abi::Event) {
     let Some(event) = (unsafe { event.as_ref() }) else {
         return;
     };
-    if event.kind != 1 || !notifications.enabled.load(Ordering::Acquire) {
+    if event.kind != 1
+        || !notifications.enabled.load(Ordering::Acquire)
+        || notifications.updating.load(Ordering::Acquire)
+    {
         return;
     }
     let Some(account) = notifications.account.upgrade() else {
@@ -245,8 +438,16 @@ unsafe extern "C" fn notify(context: *mut c_void, event: *const abi::Event) {
             notifications
                 .control
                 .submit(
-                    (pending, Arc::clone(&notifications.incoming)),
-                    |(pending, incoming)| {
+                    (
+                        pending,
+                        Arc::clone(&notifications.incoming),
+                        Arc::clone(&notifications.enabled),
+                        Arc::clone(&notifications.updating),
+                    ),
+                    |(pending, incoming, enabled, updating)| {
+                        if !enabled.load(Ordering::Acquire) || updating.load(Ordering::Acquire) {
+                            return;
+                        }
                         if let Ok(peer) = pending.claim() {
                             incoming(peer);
                         }
