@@ -58,6 +58,7 @@ pub(crate) struct State {
     source_keyed: bool,
     source_finish: bool,
     source_acknowledgements: usize,
+    source_completions: Vec<u32>,
     source_credits: Vec<(u64, usize)>,
 }
 type Shared = Arc<Mutex<State>>;
@@ -156,6 +157,67 @@ fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
     assert_eq!(state.source_position, 8992);
     assert_eq!(state.source_acknowledgements, 1);
     assert!(!consumer.signals().radio_keyed());
+}
+
+#[test]
+fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
+    for redirect in [false, true] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+        let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect { inbound, outbound })
+            .ok()
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 640]));
+        session.step(0).unwrap();
+        assert_eq!(consumer.finite_playout(), Some(true));
+        if redirect {
+            let (inbound, next) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+            let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+                .unwrap()
+                .into_endpoints();
+            control
+                .send(Command::Redirect { inbound, outbound })
+                .ok()
+                .unwrap();
+            consumer = next;
+        } else {
+            consumer.reset().unwrap();
+        }
+        session.step(10).unwrap();
+        assert_eq!(state.lock().unwrap().source_completions, [2]);
+        assert!(!consumer.signals().radio_keyed());
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.5; 640]));
+        session.step(20).unwrap();
+        let mut heard = false;
+        for now in 2..12 {
+            let mut output = [0.0; 960];
+            consumer.render(&mut output).unwrap();
+            heard |= output.iter().any(|sample| sample.abs() > 0.3);
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_completions.len() == 2 {
+                break;
+            }
+        }
+        assert!(heard);
+        assert_eq!(state.lock().unwrap().source_completions, [2, 1]);
+    }
 }
 
 #[test]
@@ -727,7 +789,7 @@ pub(crate) fn peer_with_egress(
 ) -> (PeerIo, Shared) {
     make_peer(rate_hz, async_enabled, egress, false)
 }
-fn source_peer() -> (PeerIo, Shared) {
+pub(crate) fn source_peer() -> (PeerIo, Shared) {
     make_peer(8000, true, true, true)
 }
 fn make_peer(rate_hz: u32, async_enabled: bool, egress: bool, source: bool) -> (PeerIo, Shared) {
@@ -813,6 +875,7 @@ unsafe extern "C" fn read_source(
     result.state = 1;
     if drained != 0 {
         assert!(state.source_finish);
+        state.source_completions.push(drained);
         state.source_acknowledgements += 1;
         state.source_finish = false;
         state.source_keyed = false;

@@ -11,6 +11,44 @@ thread_local! {
 }
 
 #[test]
+fn tagged_source_muting_follows_finite_resets_without_becoming_loss_or_plc() {
+    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    for (start, interval_only) in [(1000, false), (1640, true), (2280, false)] {
+        let spans = [MuteSpan {
+            start,
+            end: start + 640,
+        }];
+        let tagged = if interval_only || start == 2280 {
+            &[][..]
+        } else {
+            &spans[..]
+        };
+        assert_eq!(
+            producer.write_tagged(&[0.5; 640], 7, start, tagged),
+            Ok(640)
+        );
+        if interval_only {
+            assert_eq!(producer.mute(7, &spans), Ok(1));
+        }
+        let token = producer.finish().unwrap();
+        let mut real = 0;
+        let mut audible = false;
+        for _ in 0..10 {
+            let mut output = [0.0; 960];
+            real += consumer.render(&mut output).unwrap();
+            audible |= output.iter().any(|sample| sample.abs() > 0.1);
+            if producer.finish_status(token) == Ok(FinishState::Drained) {
+                break;
+            }
+        }
+        assert_eq!(producer.finish_status(token), Ok(FinishState::Drained));
+        assert!(real != 0);
+        assert_eq!(audible, start == 2280, "source start {start}");
+        assert_eq!(producer.observer().observe().unwrap().missing_samples, 0);
+    }
+}
+
+#[test]
 fn finite_echo_peer_drains_a_subtarget_burst_without_changing_ordinary_peer_policy() {
     use rpt_advanced_core::{
         audio::LinkAudioQueue,

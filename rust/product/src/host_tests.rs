@@ -70,6 +70,41 @@ fn host() -> Host {
 }
 
 #[test]
+fn echo_ring_policy_survives_prepared_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let (io, _) = crate::link::session::tests::source_peer();
+    let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    host.peers.push(PeerOwner {
+        local: "1000".into(),
+        remote: "2000".into(),
+        mode: Mode::TRANSCEIVE,
+        group: None,
+        announced: false,
+        control,
+    });
+    let candidate = prepared(
+        "1000",
+        host.runtime.settings("1000").unwrap(),
+        &host.peers,
+        media_worker(&mut host.media_workers, "1000").unwrap(),
+        &mut host.text,
+    )
+    .unwrap();
+    assert_eq!(candidate.control.redirects.len(), 1);
+    let PeerCommand::Redirect { inbound, .. } = &candidate.control.redirects[0].1 else {
+        panic!("missing replacement ring");
+    };
+    assert!(matches!(inbound.observer().policy(), InboundPolicy::Echo));
+    session.stop();
+    drop(candidate);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

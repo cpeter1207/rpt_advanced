@@ -78,6 +78,8 @@ pub(crate) unsafe fn checked_descriptor(
 
 /// Individually current released-ring diagnostics; fields are not transactional.
 pub type Observation = ffi::rpcr3_observation;
+/// Half-open absolute source interval muted at actual ring playout.
+pub type MuteSpan = ffi::rpcr3_mute_span;
 
 struct Shared {
     handle: NonNull<ffi::rpcr3_ring>,
@@ -170,7 +172,10 @@ impl InboundRing {
                 || api.ring_output_delay.is_none()
                 || api.ring_observe.is_none()
                 || (matches!(policy, InboundPolicy::Echo)
-                    && (api.ring_producer_finish.is_none() || api.ring_finish_status.is_none()))
+                    && (api.ring_producer_finish.is_none()
+                        || api.ring_finish_status.is_none()
+                        || api.ring_producer_push_tagged.is_none()
+                        || api.ring_producer_mute.is_none()))
             {
                 return Err(RingError);
             }
@@ -253,6 +258,54 @@ impl InboundProducer {
         } else {
             Err(RingError)
         }
+    }
+    /// Publish tags before their accepted PCM prefix. Retries retain original
+    /// source positions; a new generation requires a quiescent consumer reset.
+    pub fn write_tagged(
+        &mut self,
+        samples: &[f32],
+        generation: u64,
+        start: u64,
+        spans: &[MuteSpan],
+    ) -> Result<usize, RingError> {
+        let operation = self.0.api.ring_producer_push_tagged.ok_or(RingError)?;
+        let mut accepted = 0;
+        let code = unsafe {
+            operation(
+                self.0.handle.as_ptr(),
+                samples.as_ptr(),
+                samples.len() as u64,
+                generation,
+                start,
+                spans.as_ptr(),
+                u32::try_from(spans.len()).map_err(|_| RingError)?,
+                &mut accepted,
+            )
+        };
+        if code != 0 {
+            return Err(RingError);
+        }
+        if accepted != 0 {
+            self.0.finite.store(0, Ordering::Release);
+            self.0.signals.publish_pcm();
+        }
+        Ok(accepted as usize)
+    }
+    /// Add a retained lookback interval to already accepted PCM, including SRC
+    /// output caches. Return exact interval credit; never advance PCM on refusal.
+    pub fn mute(&mut self, generation: u64, spans: &[MuteSpan]) -> Result<usize, RingError> {
+        let operation = self.0.api.ring_producer_mute.ok_or(RingError)?;
+        let mut accepted = 0;
+        let code = unsafe {
+            operation(
+                self.0.handle.as_ptr(),
+                generation,
+                spans.as_ptr(),
+                u32::try_from(spans.len()).map_err(|_| RingError)?,
+                &mut accepted,
+            )
+        };
+        (code == 0).then_some(accepted as usize).ok_or(RingError)
     }
     /// Publish at most one bounded block of counted missing source samples.
     pub fn gap(&mut self, samples: u64) -> Result<u64, RingError> {
