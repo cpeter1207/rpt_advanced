@@ -97,6 +97,13 @@ gaps, which remain provider-owned until the next turn. Ring replacement preserve
 the protocol policy and retires the old token. EchoLink never enters IAX's
 NEWKEY, topology, downstream-source query or remote-command exchange.
 
+The serial source owner detects fresh selected-talker PCM at 8 kHz, using the
+node's DTMF muting setting. Codec-concealed PCM and counted gaps are not fresh
+detector input. Its immediate atomic suppression gates delayed output while
+source intervals retain mute decisions through ring playout. The existing
+per-peer scratch block holds only derived processing state during a partial
+admission; it is not another audio delay queue or a second raw-input owner.
+
 ## Consequences
 
 No EchoLink protocol, directory, socket, control work or speech synthesis occurs

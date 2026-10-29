@@ -7,6 +7,7 @@ pub(crate) enum Input {
     Text(&'static [u8]),
     Digit(u8),
     Audio(Vec<f32>),
+    Concealed(Vec<f32>),
     Gap(usize),
     RadioKey,
     RadioUnkey,
@@ -64,12 +65,75 @@ pub(crate) struct State {
 type Shared = Arc<Mutex<State>>;
 
 #[test]
+fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc() {
+    for (muting, concealed, audible, digits) in [
+        (true, false, false, 1),
+        (false, false, true, 1),
+        (true, true, true, 0),
+    ] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", muting).unwrap();
+        let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect {
+                inbound,
+                dtmf_muting: muting,
+                outbound,
+            })
+            .ok()
+            .unwrap();
+        let tone: Vec<_> = (0..640)
+            .map(|n| {
+                let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+                0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+            })
+            .collect();
+        state.lock().unwrap().input.extend([
+            if concealed {
+                Input::Concealed(tone)
+            } else {
+                Input::Audio(tone)
+            },
+            Input::Audio(vec![0.0; 640]),
+        ]);
+        session.step(0).unwrap();
+        let mut decoded = Vec::new();
+        while let Some(event) = control.event() {
+            if let Event::Digit(digit) = event {
+                decoded.push(digit);
+            }
+        }
+        assert_eq!(decoded, if digits == 0 { vec![] } else { vec!['5', '#'] });
+        let mut heard = false;
+        for now in 1..20 {
+            let mut pcm = [0.0; 960];
+            consumer.render(&mut pcm).unwrap();
+            heard |= pcm.iter().any(|sample| sample.abs() > 0.05);
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        assert_eq!(heard, audible, "muting={muting}, concealed={concealed}");
+        assert_eq!(consumer.observe().unwrap().missing_samples, 0);
+    }
+}
+
+#[test]
 fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     let (io, state) = source_peer();
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, mut control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     assert!(state.lock().unwrap().texts.is_empty());
     assert_eq!(control.bind_text_generation(7).protocol, 2);
     assert!(matches!(control.observer.policy(), InboundPolicy::Echo));
@@ -78,7 +142,11 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
         .unwrap()
         .into_endpoints();
     control
-        .send(Command::Redirect { inbound, outbound })
+        .send(Command::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
         .ok()
         .unwrap();
     state
@@ -120,13 +188,18 @@ fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, mut control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
     control
-        .send(Command::Redirect { inbound, outbound })
+        .send(Command::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
         .ok()
         .unwrap();
     state.lock().unwrap().input.extend([
@@ -167,13 +240,17 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
             .unwrap()
             .into_endpoints();
         let (mut session, mut control) =
-            PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
         let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
         let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
             .unwrap()
             .into_endpoints();
         control
-            .send(Command::Redirect { inbound, outbound })
+            .send(Command::Redirect {
+                inbound,
+                dtmf_muting: true,
+                outbound,
+            })
             .ok()
             .unwrap();
         state
@@ -189,7 +266,11 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
                 .unwrap()
                 .into_endpoints();
             control
-                .send(Command::Redirect { inbound, outbound })
+                .send(Command::Redirect {
+                    inbound,
+                    dtmf_muting: true,
+                    outbound,
+                })
                 .ok()
                 .unwrap();
             consumer = next;
@@ -358,7 +439,7 @@ unsafe extern "C" fn read(
                     event.unwrap()(context, 1, bytes.as_ptr().cast(), bytes.len())
                 }
                 Input::Digit(digit) => event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1),
-                Input::Audio(samples) => {
+                Input::Audio(samples) | Input::Concealed(samples) => {
                     event.unwrap()(context, 3, samples.as_ptr().cast(), samples.len())
                 }
                 Input::Gap(samples) => event.unwrap()(context, 6, ptr::null(), samples),
@@ -890,13 +971,29 @@ unsafe extern "C" fn read_source(
             state.source_keyed = true;
         }
         let start = state.source_position;
+        let concealed = matches!(&input, Input::Concealed(_));
         let (accepted, offered, remaining) = match input {
-            Input::Audio(mut pcm) => {
+            Input::Audio(mut pcm) | Input::Concealed(mut pcm) => {
                 let offered = pcm.len();
-                let accepted =
-                    unsafe { sink.audio.unwrap()(sink.context, start, pcm.as_ptr(), offered, 0) };
+                let accepted = unsafe {
+                    sink.audio.unwrap()(
+                        sink.context,
+                        start,
+                        pcm.as_ptr(),
+                        offered,
+                        u32::from(concealed),
+                    )
+                };
                 pcm.drain(..accepted);
-                (accepted, offered, Input::Audio(pcm))
+                (
+                    accepted,
+                    offered,
+                    if concealed {
+                        Input::Concealed(pcm)
+                    } else {
+                        Input::Audio(pcm)
+                    },
+                )
             }
             Input::Gap(count) => {
                 let accepted =
@@ -1027,7 +1124,7 @@ fn timed_session() -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     (session, control, state, output)
 }
 
@@ -1107,7 +1204,8 @@ fn outbound_lower_rate_pcm_and_prepared_paths_drain_before_unkey() {
         let (mut output, inbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
             .unwrap()
             .into_endpoints();
-        let (mut session, _control) = PeerSession::prepare(io, inbound, "1000", "2000").unwrap();
+        let (mut session, _control) =
+            PeerSession::prepare(io, inbound, "1000", "2000", true).unwrap();
         output.write(timed_span(0, 0), &[0.25; 960]);
         for now in 0..180 {
             session.step(now).unwrap();
@@ -1458,7 +1556,7 @@ fn egress_fir_output_keeps_sample_time_across_small_partitions_and_a_gap() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     let mut position = 48_000;
     for count in [1, 2, 17, 600, 1, 1, 1, 337] {
         let mut span = timed_span(position, 1_000);
@@ -1497,7 +1595,7 @@ fn egress_fractional_fir_phase_keeps_retained_audio_age_across_clock_remap() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     // The real adapter preserves fractional phase through reset. These complete
     // bursts leave the third burst's output behind its input at sample 622.
     for burst in 0..3 {
@@ -1537,7 +1635,7 @@ fn egress_clock_remap_does_not_renew_hidden_fir_history() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     output.write(timed_span(48_000, 1_000), &[0.9; 600]);
     session.step(1_000).unwrap();
     output.write(timed_span(48_600, 1_300), &[0.0; 960]);
@@ -1558,7 +1656,8 @@ fn egress_discontinuities_reset_filter_history_without_splicing_old_audio() {
         let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
             .unwrap()
             .into_endpoints();
-        let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+        let (mut session, _control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
         output.write(timed_span(48_000, 1_000), &[0.9; 960]);
         session.step(1_000).unwrap();
         let mut next = timed_span(48_960, 1_020);
@@ -1667,7 +1766,11 @@ fn egress_future_reopen_and_redirect_discard_uncommitted_media() {
     let (inbound, _) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     assert!(
         control
-            .send(Command::Redirect { inbound, outbound })
+            .send(Command::Redirect {
+                inbound,
+                dtmf_muting: true,
+                outbound
+            })
             .is_ok()
     );
     span.generation += 1;
@@ -1709,7 +1812,7 @@ fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAud
     let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
+    let (session, control) = PeerSession::prepare(io, outbound, local, "2000", true).unwrap();
     (session, control, state, output)
 }
 fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
@@ -1717,7 +1820,7 @@ fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProd
     let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
+    let (session, control) = PeerSession::prepare(io, outbound, local, "2000", true).unwrap();
     (session, control, state, output)
 }
 
@@ -2255,7 +2358,11 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
         .unwrap()
         .into_endpoints();
     control
-        .send(Command::Redirect { inbound, outbound })
+        .send(Command::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
         .ok()
         .unwrap();
     session.step(3022).unwrap();
@@ -2301,6 +2408,7 @@ fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
             control
                 .send(Command::Redirect {
                     inbound,
+                    dtmf_muting: true,
                     outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                         .unwrap()
                         .into_endpoints()
@@ -2327,6 +2435,7 @@ fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
     control
         .send(Command::Redirect {
             inbound,
+            dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
@@ -2349,6 +2458,7 @@ fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
     control
         .send(Command::Redirect {
             inbound,
+            dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
@@ -2403,6 +2513,7 @@ fn partial_pcm_is_staged_before_a_following_counted_gap() {
     control
         .send(Command::Redirect {
             inbound,
+            dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
@@ -2578,7 +2689,7 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
         let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
             .unwrap()
             .into_endpoints();
-        assert!(PeerSession::prepare(io, outbound, local, remote).is_err());
+        assert!(PeerSession::prepare(io, outbound, local, remote, true).is_err());
         assert_eq!(state.lock().unwrap().drops, 1);
     }
 }
@@ -2600,7 +2711,7 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     assert_eq!(
         output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5]),
         0

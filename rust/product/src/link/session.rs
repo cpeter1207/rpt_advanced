@@ -20,6 +20,8 @@ use rpt_advanced_core::{
     },
 };
 use rtrb::{Consumer, Producer, RingBuffer};
+mod source;
+use source::{Decoded, SourceIngress};
 use std::{
     ffi::{CString, c_void},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -47,6 +49,8 @@ pub enum Command {
         inbound: InboundProducer,
         /// Unique replacement native outbound consumer.
         outbound: LinkAudioConsumer,
+        /// Resolved node setting, applied before this generation admits source PCM.
+        dtmf_muting: bool,
     },
 }
 /// Copied peer events for the serialized core control owner.
@@ -297,6 +301,7 @@ pub struct PeerSession {
     source_finish: Option<u64>,
     source_completion: SourceCompletion,
     source_dirty: bool,
+    source: Option<SourceIngress>,
     peer: Peer,
     local: String,
     remote: String,
@@ -571,6 +576,7 @@ impl PeerSession {
         outbound: LinkAudioConsumer,
         local: &str,
         remote: &str,
+        dtmf_muting: bool,
     ) -> Result<(Self, PeerControl), Error> {
         let peer = Peer::new(remote).map_err(|_| Error::Reservation)?;
         if rpt_advanced_core::config::NodeId::new(local).is_err() || local.contains('\0') {
@@ -578,6 +584,9 @@ impl PeerSession {
         }
         let outbound = Outbound::new(io.rate(), outbound)?;
         let source = io.source_media();
+        if source && io.rate() != 8000 {
+            return Err(Error::UnsupportedFormat);
+        }
         let (inbound, _input) = InboundRing::open(
             io.rate(),
             if source {
@@ -626,6 +635,11 @@ impl PeerSession {
                 source_finish: None,
                 source_completion: SourceCompletion::Pending,
                 source_dirty: false,
+                source: if source {
+                    Some(SourceIngress::new(dtmf_muting)?)
+                } else {
+                    None
+                },
                 peer,
                 local: local.into(),
                 remote: remote.into(),
@@ -750,7 +764,7 @@ impl PeerSession {
     }
     // Echo retains rejected prefixes. Only the exact ring token can release the
     // selected talker; provider/jitter completion alone is not audible completion.
-    fn read_source(&mut self) -> Result<bool, Error> {
+    fn read_source(&mut self, now_ms: u64) -> Result<bool, Error> {
         for _ in 0..MAX_ASYNC_READS_PER_STEP {
             let completion = match self.source_finish {
                 Some(token) => match self
@@ -770,12 +784,31 @@ impl PeerSession {
             let inbound = &mut self.inbound;
             let events = &mut self.events;
             let identity = &self.text_identity;
+            let source = self.source.as_mut().ok_or(Error::Operation)?;
+            let scratch = &mut self.pending_pcm;
+            let peer = &mut self.peer;
             let result = self.io.read_source(completion, |input| {
                 let credit = match input {
-                    SourceInput::Audio { samples, .. } => inbound.write(samples),
-                    SourceInput::Gap { count, .. } => inbound
-                        .gap(count.min(MAX_PEER_INPUT_SAMPLES) as u64)
-                        .map(|n| n as usize),
+                    SourceInput::Audio {
+                        start,
+                        samples,
+                        concealed,
+                    } => source.audio(
+                        inbound,
+                        scratch,
+                        Decoded {
+                            start,
+                            pcm: samples,
+                            concealed,
+                        },
+                        |digit| {
+                            peer.digit(digit, now_ms);
+                            if events.push(Event::Digit(digit)).is_err() {
+                                admission_error = Some(Error::Write);
+                            }
+                        },
+                    ),
+                    SourceInput::Gap { start, count } => source.gap(inbound, start, count),
                     SourceInput::Text { sender, body } => {
                         let _ = events.push(Event::HumanText(HumanMessage {
                             origin: identity.snapshot(),
@@ -791,8 +824,8 @@ impl PeerSession {
                         accepted |= count != 0;
                         count
                     }
-                    Err(_) => {
-                        admission_error = Some(Error::Write);
+                    Err(error) => {
+                        admission_error = Some(error);
                         0
                     }
                 }
@@ -804,6 +837,7 @@ impl PeerSession {
                 self.source_finish = None;
                 self.source_completion = SourceCompletion::Pending;
                 self.source_dirty = false;
+                source.reset()?;
             }
             self.source_dirty |= accepted;
             if let Some(keyed) = result.activity {
@@ -814,6 +848,20 @@ impl PeerSession {
             }
             if result.finish_pending {
                 if self.source_finish.is_none() {
+                    let mut overflow = false;
+                    if !source.finish(&mut self.inbound, |digit| {
+                        self.peer.digit(digit, now_ms);
+                        overflow |= self.events.push(Event::Digit(digit)).is_err();
+                    })? {
+                        return Ok(true);
+                    }
+                    if overflow {
+                        return Err(Error::Write);
+                    }
+                    if self.peer.deadline_ms().is_some() {
+                        self.peer.digit('#', now_ms);
+                        self.event(Event::Digit('#'))?;
+                    }
                     self.source_finish = Some(self.inbound.finish().map_err(|_| Error::Write)?);
                 }
                 return Ok(true);
@@ -876,12 +924,20 @@ impl PeerSession {
                         result?;
                     }
                 }
-                Command::Redirect { inbound, outbound } => {
+                Command::Redirect {
+                    inbound,
+                    outbound,
+                    dtmf_muting,
+                } => {
                     if self.source_dirty {
                         self.source_completion = SourceCompletion::Cancelled;
                     }
                     self.source_finish = None;
                     self.source_dirty = false;
+                    if let Some(source) = &mut self.source {
+                        source.reset()?;
+                        source.set_muting(dtmf_muting);
+                    }
                     self.inbound = inbound;
                     self.pending_input = None;
                     self.outbound.redirect(outbound)?;
@@ -904,7 +960,7 @@ impl PeerSession {
             }
         }
         let source_wait = if self.io.source_media() {
-            self.read_source()?
+            self.read_source(now_ms)?
         } else {
             false
         };
@@ -990,6 +1046,9 @@ impl PeerSession {
         }
         if self.peer.expire_digit(now_ms) {
             self.event(Event::Digit('#'))?;
+            if let Some(source) = &mut self.source {
+                source.timeout(&self.inbound);
+            }
         }
         let deadline = self.outbound.step(&mut self.io, now_ms)?;
         let now = now_ms.saturating_mul(1_000_000);

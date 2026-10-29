@@ -77,7 +77,7 @@ fn echo_ring_policy_survives_prepared_generation() {
     let mut host = host();
     let (io, _) = crate::link::session::tests::source_peer();
     let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
-    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     host.peers.push(PeerOwner {
         local: "1000".into(),
         remote: "2000".into(),
@@ -95,7 +95,12 @@ fn echo_ring_policy_survives_prepared_generation() {
     )
     .unwrap();
     assert_eq!(candidate.control.redirects.len(), 1);
-    let PeerCommand::Redirect { inbound, .. } = &candidate.control.redirects[0].1 else {
+    let PeerCommand::Redirect {
+        inbound,
+        dtmf_muting: true,
+        ..
+    } = &candidate.control.redirects[0].1
+    else {
         panic!("missing replacement ring");
     };
     assert!(matches!(inbound.observer().policy(), InboundPolicy::Echo));
@@ -2041,7 +2046,11 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     let (_, outbound) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     host.peers[0]
         .control
-        .send(PeerCommand::Redirect { inbound, outbound })
+        .send(PeerCommand::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
         .ok()
         .unwrap();
     std::thread::sleep(Duration::from_millis(2));

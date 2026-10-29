@@ -227,7 +227,11 @@ fn prepared(
         wakes.push(peer.control.wake());
         redirects.push((
             peer.remote.clone(),
-            PeerCommand::Redirect { inbound, outbound },
+            PeerCommand::Redirect {
+                inbound,
+                outbound,
+                dtmf_muting: settings.dtmf_muting,
+            },
         ));
     }
     let (mut audio, dispatcher) =
@@ -594,8 +598,17 @@ impl Host {
         let (_, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
-        let (mut session, control) = PeerSession::prepare(io, outbound, local, remote)
-            .map_err(|_| RuntimeError::Preparation)?;
+        let (mut session, control) = PeerSession::prepare(
+            io,
+            outbound,
+            local,
+            remote,
+            self.runtime
+                .settings(local)
+                .ok_or(RuntimeError::MissingNode)?
+                .dtmf_muting,
+        )
+        .map_err(|_| RuntimeError::Preparation)?;
         session.bind_clock(source_clock);
         if let Err(session) = self.peer_io.attach(session) {
             session.stop();

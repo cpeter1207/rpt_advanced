@@ -389,6 +389,9 @@ impl InboundConsumer {
             )
         };
         if code == 0 {
+            if self.0.signals.dtmf_muted() {
+                samples.fill(0.0);
+            }
             Ok(real as usize)
         } else {
             samples.fill(0.0);
@@ -408,6 +411,9 @@ impl InboundConsumer {
             )
         };
         if code == 0 {
+            if self.0.signals.dtmf_muted() {
+                sample = 0.0;
+            }
             Ok(real.then_some(sample))
         } else {
             Err(RingError)

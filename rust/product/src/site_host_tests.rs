@@ -725,7 +725,7 @@ fn site_host_publishes_site_replacement_with_runtime_before_post_reload_polling(
             let (io, state) = peer(48000);
             let (_producer, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
             let (mut pending, control) =
-                PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+                PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
             host.peers.push(PeerOwner {
                 local: "1000".into(),
                 remote: "2000".into(),

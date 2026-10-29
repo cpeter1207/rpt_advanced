@@ -13,12 +13,18 @@ thread_local! {
 #[test]
 fn tagged_source_muting_follows_finite_resets_without_becoming_loss_or_plc() {
     let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
-    for (start, interval_only) in [(1000, false), (1640, true), (2280, false)] {
+    for (start, interval_only, current_mute, expected_audible) in [
+        (1000, false, false, false),
+        (1640, true, false, false),
+        (2280, false, false, true),
+        (2920, false, true, false),
+        (3560, false, false, true),
+    ] {
         let spans = [MuteSpan {
             start,
             end: start + 640,
         }];
-        let tagged = if interval_only || start == 2280 {
+        let tagged = if interval_only || start >= 2280 {
             &[][..]
         } else {
             &spans[..]
@@ -30,6 +36,7 @@ fn tagged_source_muting_follows_finite_resets_without_becoming_loss_or_plc() {
         if interval_only {
             assert_eq!(producer.mute(7, &spans), Ok(1));
         }
+        producer.signals().set_dtmf_muted(current_mute);
         let token = producer.finish().unwrap();
         let mut real = 0;
         let mut audible = false;
@@ -43,7 +50,7 @@ fn tagged_source_muting_follows_finite_resets_without_becoming_loss_or_plc() {
         }
         assert_eq!(producer.finish_status(token), Ok(FinishState::Drained));
         assert!(real != 0);
-        assert_eq!(audible, start == 2280, "source start {start}");
+        assert_eq!(audible, expected_audible, "source start {start}");
         assert_eq!(producer.observer().observe().unwrap().missing_samples, 0);
     }
 }
