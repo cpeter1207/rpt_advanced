@@ -115,8 +115,13 @@ concurrently with queued work, reload, and shutdown.
 ## Implementation status — 2026-10-15
 
 `librptadv_control_asterisk_adapter.so.1` now implements the versioned execution
-descriptor. The product-owned client implements core's neutral `ControlExecutor`
-contract; neither the controller core nor the product owns an Asterisk
+descriptor. The product adapter implements core's neutral `ControlExecutor`
+contract over the shared `rptadv-peer-support::control` client. Host admission
+uses that same client for descriptor validation, owned-task transfer, rejection,
+drain and close; it does not duplicate these rules or depend on the core. The
+existing C ABI and both backend implementations are unchanged. Generated product
+records verify the shared leaf mirror's layout. Neither the controller core nor
+the product owns an Asterisk
 taskprocessor handle. Application/CLI entry handling stays in the separate
 Asterisk adapter and forwards into product lifecycle/control operations.
 
