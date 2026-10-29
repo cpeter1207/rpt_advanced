@@ -104,6 +104,15 @@ source intervals retain mute decisions through ring playout. The existing
 per-peer scratch block holds only derived processing state during a partial
 admission; it is not another audio delay queue or a second raw-input owner.
 
+Both hosts share provider/context/account lifetime owners in peer-support.
+The prepared account retains its context and dynamically loaded provider; a
+failed stop retains foreign state rather than unload code beneath notifications.
+The provider's sized PeerInfo includes the observed incoming SDES endpoint,
+including port zero for Proxy framing. This supplies the typed incoming request
+without substituting a directory address or assumed port for an observation.
+The network/media operation group remains unpublished while this record and
+the shared host glue are integrated; lifecycle-only users do not consume it.
+
 ## Consequences
 
 No EchoLink protocol, directory, socket, control work or speech synthesis occurs

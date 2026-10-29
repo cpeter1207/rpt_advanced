@@ -267,6 +267,9 @@ pub struct PeerInfo {
     pub callsign: ByteSpan,
     /// Owning controller node, stable until QSO destruction.
     pub local_node: ByteSpan,
+    /// Observed incoming SDES endpoint as IPv4:port, stable until QSO destruction.
+    /// Proxy framing supplies port zero. Empty for a dial with no incoming handshake.
+    pub source: ByteSpan,
 }
 
 /// Borrowed account event; an incoming QSO's ownership is explicitly accepted or retained.
