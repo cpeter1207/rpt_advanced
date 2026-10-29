@@ -101,14 +101,18 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
         .push_back(Input::Audio(vec![0.25; 640]));
     session.step(0).unwrap();
     while control.event().is_some() {}
-    let mut tone = five_tone(400);
-    tone.extend_from_slice(&[0.0; 240]);
+    let mut tone = five_tone(256);
+    tone.extend_from_slice(&[0.0; 384]);
     {
         let mut state = state.lock().unwrap();
         state.source_interleave = true;
         state.input.push_back(Input::Audio(tone));
     }
     session.step(10).unwrap();
+    assert!(
+        !consumer.signals().dtmf_muted(),
+        "future unaccepted audio must not mute the previous burst"
+    );
     assert!(
         !matches!(control.event(), Some(Event::Digit(_))),
         "unaccepted next-generation PCM must not issue a command"

@@ -808,7 +808,14 @@ impl PeerSession {
                             }
                         },
                     ),
-                    SourceInput::Gap { start, count } => source.gap(inbound, start, count),
+                    SourceInput::Gap { start, count } => {
+                        source.gap(inbound, start, count, |digit| {
+                            peer.digit(digit, now_ms);
+                            if events.push(Event::Digit(digit)).is_err() {
+                                admission_error = Some(Error::Write);
+                            }
+                        })
+                    }
                     SourceInput::Text { sender, body } => {
                         let _ = events.push(Event::HumanText(HumanMessage {
                             origin: identity.snapshot(),

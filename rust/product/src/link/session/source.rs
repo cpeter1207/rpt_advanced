@@ -102,6 +102,24 @@ impl SourceIngress {
         Ok(true)
     }
 
+    // Loss is not contiguous fresh tone. Complete only an already qualified
+    // real digit; never let analysis windows straddle unknown or codec-PLC PCM.
+    fn discontinuity(&mut self, mut emit: impl FnMut(char)) -> Result<(), Error> {
+        let command_muted = &mut self.command_muted;
+        let muting = self.muting;
+        self.detector
+            .process_spans(
+                false,
+                &mut [],
+                |digit| {
+                    *command_muted = muting && digit != '#';
+                    emit(digit);
+                },
+                |_| {},
+            )
+            .map_err(|_| Error::InvalidFrame)
+    }
+
     pub(super) fn audio(
         &mut self,
         inbound: &mut InboundProducer,
@@ -117,6 +135,11 @@ impl SourceIngress {
                 return Err(Error::InvalidFrame);
             }
             let burst_start = *self.burst_start.get_or_insert(block.start);
+            let concealed_muted =
+                block.concealed && (self.command_muted || self.detector.suppressing());
+            if block.concealed {
+                self.discontinuity(&mut emit)?;
+            }
             scratch[..block.pcm.len()].copy_from_slice(block.pcm);
             self.span_count = 0;
             // Eight-ms partitions bound the end-of-command mute granularity.
@@ -157,7 +180,8 @@ impl SourceIngress {
                 if let Some(error) = failure {
                     return Err(error);
                 }
-                let muted = self.muting && (was_muted || first.is_some() || digit.is_some());
+                let muted = self.muting
+                    && (was_muted || first.is_some() || digit.is_some() || concealed_muted);
                 if muted {
                     span(
                         &mut self.spans,
@@ -166,7 +190,9 @@ impl SourceIngress {
                         end,
                     )?;
                 }
-                self.command_muted = muted && digit != Some('#');
+                if !block.concealed {
+                    self.command_muted = muted && digit != Some('#');
+                }
             }
             self.cached = Some(Cached {
                 start: block.start,
@@ -219,6 +245,7 @@ impl SourceIngress {
         inbound: &mut InboundProducer,
         start: u64,
         count: usize,
+        emit: impl FnMut(char),
     ) -> Result<usize, Error> {
         if self.cached.is_some() {
             return Err(Error::InvalidFrame);
@@ -226,6 +253,8 @@ impl SourceIngress {
         if !self.flush_mute(inbound)? {
             return Ok(0);
         }
+        self.discontinuity(emit)?;
+        inbound.signals().set_dtmf_muted(self.command_muted);
         let accepted = inbound
             .gap(count.min(4096) as u64)
             .map_err(|_| Error::Write)?;
@@ -252,22 +281,8 @@ impl SourceIngress {
             return Ok(false);
         }
         if !self.finishing {
-            let cursor = self.cursor;
-            let beginning = self.burst_start.unwrap_or(cursor);
-            let pending = &mut self.pending_mute;
-            self.detector
-                .process_spans(false, &mut [], &mut emit, |range| {
-                    let start = cursor.saturating_add_signed(range.start).max(beginning);
-                    let end = cursor.saturating_add_signed(range.end).min(cursor);
-                    if start < end {
-                        *pending = Some(MuteSpan { start, end });
-                    }
-                })
-                .map_err(|_| Error::InvalidFrame)?;
+            self.discontinuity(&mut emit)?;
             self.finishing = true;
-        }
-        if !self.flush_mute(inbound)? {
-            return Ok(false);
         }
         self.command_muted = false;
         inbound.signals().set_dtmf_muted(false);
