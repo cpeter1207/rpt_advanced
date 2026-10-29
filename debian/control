@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
  libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
- librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha3),
+ librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha4),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha2),
  librptadv-codec-dev (>= 0.1.0~alpha1),
  librptadv-iax2-client-dev (>= 0.1.0~alpha9),
@@ -25,7 +25,7 @@ Rules-Requires-Root: no
 Package: rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha3),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha4),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadv-product1 (= ${binary:Version}),
  libusbradioplus-product1 (>= 0.1.0~alpha25-1.deb13),
@@ -57,7 +57,7 @@ Description: standalone Rust-owned radio controller
 Package: app-rpt-advanced
 Architecture: amd64 arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, ${asterisk:Depends},
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha3),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha4),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadv-product1 (= ${binary:Version}),
  librptadv-file-adapter1 (= ${binary:Version}),
@@ -71,7 +71,7 @@ Package: librptadv-product1
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
- librate-adjusting-pcm-ring3 (>= 3.0.0~alpha3),
+ librate-adjusting-pcm-ring3 (>= 3.0.0~alpha4),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadvtone1 (>= 0.1.0~alpha1),
  librptadvmorse1 (>= 0.1.0~alpha1-1),
