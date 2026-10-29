@@ -20,12 +20,12 @@ impl Product {
         if pointer.is_null()
             || unsafe { ptr::addr_of!((*pointer).struct_size).read() }
                 != size_of::<ffi::rptadv_product_descriptor_v1>() as u32
-            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 6
+            || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != 7
         {
             return None;
         }
         let descriptor = unsafe { &*pointer };
-        (descriptor.capability == *b"rptadv.prod6\0\0\0\0"
+        (descriptor.capability == *b"rptadv.prod7\0\0\0\0"
             && descriptor.start.is_some()
             && descriptor.reload.is_some()
             && descriptor.stop.is_some()
@@ -46,7 +46,7 @@ impl Product {
     /// remains loaded until a successful product stop.
     pub unsafe fn start(
         &self,
-        host: *const ffi::rptadv_host_services_v8,
+        host: *const ffi::rptadv_host_services_v9,
         control: *const ffi::rptadv_control_descriptor_v1,
         file: *const ffi::rptadv_file_descriptor,
         speech: *const ffi::rptadv_speech_descriptor,
@@ -75,12 +75,8 @@ impl Product {
     pub fn authorize_incoming(&self, local: &str, remote: &str, source: &str) -> bool {
         unsafe {
             self.0.authorize_incoming.unwrap()(
-                local.as_ptr().cast(),
-                local.len(),
-                remote.as_ptr().cast(),
-                remote.len(),
-                source.as_ptr().cast(),
-                source.len(),
+                &incoming_request(local, remote, source),
+                std::ptr::null_mut(),
             ) == 0
         }
     }
@@ -95,17 +91,7 @@ impl Product {
         source: &str,
         peer: *mut c_void,
     ) -> i32 {
-        unsafe {
-            self.0.incoming.unwrap()(
-                local.as_ptr().cast(),
-                local.len(),
-                remote.as_ptr().cast(),
-                remote.len(),
-                source.as_ptr().cast(),
-                source.len(),
-                peer,
-            )
-        }
+        unsafe { self.0.incoming.unwrap()(&incoming_request(local, remote, source), peer) }
     }
     /// Apply one stable link action number.
     pub fn link_command(&self, local: &str, remote: &str, action: u32) -> bool {
@@ -160,5 +146,25 @@ impl Product {
         (code == 0)
             .then_some(completed != 0)
             .ok_or(crate::Error::Admission)
+    }
+}
+
+fn incoming_request(local: &str, remote: &str, source: &str) -> ffi::rptadv_incoming_peer_v1 {
+    ffi::rptadv_incoming_peer_v1 {
+        struct_size: std::mem::size_of::<ffi::rptadv_incoming_peer_v1>() as u32,
+        abi_version: 1,
+        protocol: 1,
+        local: ffi::rptadv_peer_bytes_v1 {
+            data: local.as_ptr(),
+            length: local.len(),
+        },
+        remote: ffi::rptadv_peer_bytes_v1 {
+            data: remote.as_ptr(),
+            length: remote.len(),
+        },
+        source: ffi::rptadv_peer_bytes_v1 {
+            data: source.as_ptr(),
+            length: source.len(),
+        },
     }
 }

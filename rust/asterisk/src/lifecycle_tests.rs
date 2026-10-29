@@ -48,7 +48,7 @@ unsafe extern "C" fn site_command(
 }
 
 unsafe extern "C" fn start(
-    _: *const ffi::rptadv_host_services_v8,
+    _: *const ffi::rptadv_host_services_v9,
     _: *const ffi::rptadv_control_descriptor_v1,
     _: *const ffi::rptadv_file_descriptor,
     _: *const ffi::rptadv_speech_descriptor,
@@ -67,29 +67,18 @@ unsafe extern "C" fn stop() -> i32 {
 }
 
 unsafe extern "C" fn authorize_incoming(
-    local: *const std::ffi::c_char,
-    local_length: usize,
-    _: *const std::ffi::c_char,
-    _: usize,
-    _: *const std::ffi::c_char,
-    _: usize,
+    request: *const ffi::rptadv_incoming_peer_v1,
+    _: *mut c_void,
 ) -> i32 {
-    if local.is_null() {
+    if request.is_null() || unsafe { (*request).local.data.is_null() } {
         return -1;
     }
-    let local = unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) };
+    let local =
+        unsafe { std::slice::from_raw_parts((*request).local.data, (*request).local.length) };
     -i32::from(local == b"missing")
 }
 
-unsafe extern "C" fn incoming(
-    _: *const std::ffi::c_char,
-    _: usize,
-    _: *const std::ffi::c_char,
-    _: usize,
-    _: *const std::ffi::c_char,
-    _: usize,
-    peer: *mut c_void,
-) -> i32 {
+unsafe extern "C" fn incoming(_: *const ffi::rptadv_incoming_peer_v1, peer: *mut c_void) -> i32 {
     if peer.is_null() || INCOMING_RESULT.get() == 1 {
         1
     } else {
@@ -181,8 +170,8 @@ unsafe extern "C" fn digit(
 
 static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<ffi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 6,
-    capability: *b"rptadv.prod6\0\0\0\0",
+    abi_version: 7,
+    capability: *b"rptadv.prod7\0\0\0\0",
     start: Some(start),
     reload: Some(reload),
     stop: Some(stop),

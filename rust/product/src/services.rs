@@ -4,6 +4,7 @@ use crate::{
     Error, abi,
     directory::{Backend, BackendError, DirectoryResolver},
 };
+use rpt_advanced_core::link::{PeerIdentity, ProtocolId};
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
@@ -30,7 +31,7 @@ pub enum PeerInput<'a> {
 
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(abi::rptadv_host_services_v8);
+pub struct HostServices(abi::rptadv_host_services_v9);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
@@ -151,7 +152,7 @@ impl Backend for HostServices {
     }
 }
 
-fn complete(api: &abi::rptadv_host_services_v8) -> bool {
+fn complete(api: &abi::rptadv_host_services_v9) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -176,6 +177,7 @@ fn complete(api: &abi::rptadv_host_services_v8) -> bool {
         api.peer_send_text.is_some(),
         api.peer_send_digit.is_some(),
         api.peer_destroy.is_some(),
+        api.peer_info.is_some(),
     ]
     .into_iter()
     .all(|present| present)
@@ -190,15 +192,15 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v8) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v9) -> Result<Self, Error> {
         if pointer.is_null() {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        if size < size_of::<abi::rptadv_host_services_v8>() {
+        if size < size_of::<abi::rptadv_host_services_v9>() {
             return Err(Error::Admission);
         }
-        // ABI 8 requires the complete table, including stateful codec preparation.
+        // ABI 9 requires the complete table, including stateful codec preparation.
         let api = unsafe { pointer.read() };
         let async_count = [
             api.peer_step_attach.is_some(),
@@ -219,8 +221,8 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
-        if api.abi_version != 8
-            || api.capability != *b"rptadv.hst8\0"
+        if api.abi_version != 9
+            || api.capability != *b"rptadv.hst9\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 6)
@@ -396,14 +398,73 @@ impl HostServices {
             handle: NonNull::new(handle).ok_or(Error::Operation)?,
         })
     }
-    /// Wrap one peer whose ownership has transferred from the host callback.
+    /// Validate copied metadata, then adopt one peer from the host callback.
+    /// On error ownership stays with the caller; outbound dial destroys its own rejected handle.
     ///
     /// # Safety
     /// `handle` must be a unique live peer created by this same services table.
     pub unsafe fn peer(&self, handle: *mut c_void) -> Result<PeerIo, Error> {
+        let handle = NonNull::new(handle).ok_or(Error::Admission)?;
+        let mut raw: abi::rptadv_peer_info_v1 = unsafe { std::mem::zeroed() };
+        raw.struct_size = size_of_val(&raw) as u32;
+        raw.abi_version = 1;
+        if unsafe { self.0.peer_info.unwrap()(self.0.context, handle.as_ptr(), &mut raw) } != 0
+            || raw.struct_size < size_of_val(&raw) as u32
+            || raw.abi_version != 1
+        {
+            return Err(Error::Admission);
+        }
+        let protocol = match raw.protocol {
+            1 => ProtocolId::AllStarLink,
+            2 => ProtocolId::EchoLink,
+            _ => return Err(Error::Admission),
+        };
+        let bytes = |span: abi::rptadv_peer_bytes_v1, maximum: usize| {
+            if span.length > maximum || (span.data.is_null() && span.length != 0) {
+                return Err(Error::Admission);
+            }
+            let data = if span.length == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(span.data, span.length) }
+            };
+            std::str::from_utf8(data)
+                .map(str::to_owned)
+                .map_err(|_| Error::Admission)
+        };
+        let remote = bytes(raw.remote, 32)?;
+        let identity = PeerIdentity::parse(protocol, &remote).map_err(|_| Error::Admission)?;
+        let local = bytes(raw.local, 32)?;
+        let callsign = bytes(raw.callsign, 64)?;
+        let capabilities = raw.capabilities;
+        if identity.node() != remote
+            || local.is_empty()
+            || !local.bytes().all(|b| b.is_ascii_digit())
+            || capabilities & !15 != 0
+            || (capabilities & 1 != 0 && !self.peer_step_available())
+            || (capabilities & 2 != 0
+                && (capabilities & 1 == 0 || self.0.peer_prepare_audio.is_none()))
+            || (capabilities & 2 == 0 && self.0.peer_write.is_none())
+            || !callsign
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-/*_".contains(&byte))
+            || (protocol == ProtocolId::EchoLink
+                && (raw.account_generation == 0
+                    || raw.qso_generation == 0
+                    || callsign.is_empty()
+                    || capabilities & 8 != 0))
+        {
+            return Err(Error::Admission);
+        }
         Ok(PeerIo {
             services: *self,
-            handle: NonNull::new(handle).ok_or(Error::Admission)?,
+            handle,
+            identity,
+            local,
+            callsign,
+            capabilities,
+            account_generation: raw.account_generation,
+            qso_generation: raw.qso_generation,
         })
     }
     /// Dial one peer while the supplied generation remains current.
@@ -440,7 +501,15 @@ impl HostServices {
         if code != 0 {
             return Err(Error::Operation);
         }
-        unsafe { self.peer(handle) }
+        match unsafe { self.peer(handle) } {
+            Ok(peer) => Ok(peer),
+            Err(error) => {
+                if !handle.is_null() {
+                    unsafe { self.0.peer_destroy.unwrap()(self.0.context, handle) };
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -545,15 +614,35 @@ impl Drop for Radio {
 pub struct PeerIo {
     services: HostServices,
     handle: NonNull<c_void>,
+    identity: PeerIdentity,
+    local: String,
+    callsign: String,
+    capabilities: u32,
+    account_generation: u64,
+    qso_generation: u64,
 }
 // SAFETY: the handle is uniquely moved to one owner thread.
 unsafe impl Send for PeerIo {}
 impl PeerIo {
+    /// Canonical protocol-qualified identity copied before taking ownership.
+    pub fn identity(&self) -> &PeerIdentity {
+        &self.identity
+    }
+    /// Owning local controller node, copied before the host callback returns.
+    pub fn local(&self) -> &str {
+        &self.local
+    }
+    /// Validated callsign, empty when the IAX transport has no callsign metadata.
+    pub fn callsign(&self) -> &str {
+        &self.callsign
+    }
+    /// Admission generations copied from the provider-bound pending QSO.
+    pub fn generations(&self) -> (u64, u64) {
+        (self.account_generation, self.qso_generation)
+    }
     /// Copy async registration inputs before callbacks can begin touching this peer.
     pub fn async_owner(&self) -> Option<(HostServices, *mut c_void)> {
-        self.services
-            .peer_step_available()
-            .then_some((self.services, self.handle.as_ptr()))
+        (self.capabilities & 1 != 0).then_some((self.services, self.handle.as_ptr()))
     }
     /// Observe on the same exclusive owner that performs peer I/O.
     pub fn observe(&self) -> Option<abi::rptadv_peer_observation_v1> {
@@ -695,7 +784,7 @@ impl PeerIo {
     }
     /// Whether this host supports source-timed prepared media and readiness deadlines.
     pub(crate) fn prepared_media(&self) -> bool {
-        self.services.0.peer_prepare_audio.is_some()
+        self.capabilities & 2 != 0
     }
     /// Feed one retained encoder, reporting consumption and output independently.
     pub(crate) fn prepare_audio(
@@ -772,6 +861,9 @@ impl PeerIo {
     }
     /// Publish the next relative wake; MAX clears the timer. PCM-only hosts ignore it.
     pub(crate) fn set_deadline(&mut self, after_ns: u64) -> Result<(), Error> {
+        if self.capabilities & 1 == 0 {
+            return Ok(());
+        }
         let Some(set) = self.services.0.peer_set_deadline else {
             return Ok(());
         };

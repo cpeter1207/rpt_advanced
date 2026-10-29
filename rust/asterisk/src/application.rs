@@ -20,7 +20,7 @@ pub(crate) unsafe extern "C" fn callback(
             return Err(Error::Admission);
         }
         let peer = unsafe { identity.handoff(channel.cast(), 4096) }?;
-        let peer = crate::services::into_raw(peer);
+        let peer = crate::services::into_raw(peer, &identity.local, &identity.remote);
         match unsafe {
             product.incoming(&identity.local, &identity.remote, &identity.address, peer)
         } {

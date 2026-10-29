@@ -362,10 +362,66 @@ unsafe extern "C" fn site_snapshot(
     -1
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v8 = crate::abi::rptadv_host_services_v8 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v8>() as u32,
-    abi_version: 8,
-    capability: *b"rptadv.hst8\0",
+pub fn incoming_request(
+    local: *const c_char,
+    local_length: usize,
+    remote: *const c_char,
+    remote_length: usize,
+    source: *const c_char,
+    source_length: usize,
+) -> crate::abi::rptadv_incoming_peer_v1 {
+    crate::abi::rptadv_incoming_peer_v1 {
+        struct_size: size_of::<crate::abi::rptadv_incoming_peer_v1>() as u32,
+        abi_version: 1,
+        protocol: 1,
+        local: crate::abi::rptadv_peer_bytes_v1 {
+            data: local.cast(),
+            length: local_length,
+        },
+        remote: crate::abi::rptadv_peer_bytes_v1 {
+            data: remote.cast(),
+            length: remote_length,
+        },
+        source: crate::abi::rptadv_peer_bytes_v1 {
+            data: source.cast(),
+            length: source_length,
+        },
+    }
+}
+
+pub unsafe extern "C" fn peer_info(
+    _: *mut c_void,
+    _: *const c_void,
+    output: *mut crate::abi::rptadv_peer_info_v1,
+) -> i32 {
+    let output = unsafe { &mut *output };
+    *output = crate::abi::rptadv_peer_info_v1 {
+        struct_size: size_of::<crate::abi::rptadv_peer_info_v1>() as u32,
+        abi_version: 1,
+        protocol: 1,
+        capabilities: 12,
+        account_generation: 0,
+        qso_generation: 0,
+        remote: crate::abi::rptadv_peer_bytes_v1 {
+            data: b"2000".as_ptr(),
+            length: 4,
+        },
+        callsign: crate::abi::rptadv_peer_bytes_v1 {
+            data: ptr::null(),
+            length: 0,
+        },
+        local: crate::abi::rptadv_peer_bytes_v1 {
+            data: b"1000".as_ptr(),
+            length: 4,
+        },
+    };
+    0
+}
+
+static mut HOST: crate::abi::rptadv_host_services_v9 = crate::abi::rptadv_host_services_v9 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v9>() as u32,
+    abi_version: 9,
+    capability: *b"rptadv.hst9\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -401,9 +457,10 @@ static mut HOST: crate::abi::rptadv_host_services_v8 = crate::abi::rptadv_host_s
     peer_step_wake: None,
     peer_set_deadline: None,
     scheduler_notice: Some(scheduler_notice),
+    peer_info: Some(peer_info),
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v8 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v9 {
     &raw const HOST
 }
 

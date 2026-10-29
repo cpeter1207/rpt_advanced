@@ -13,6 +13,57 @@ static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
 static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
 
 #[test]
+fn mixed_protocol_host_dispatch_uses_each_peers_copied_capabilities() {
+    unsafe extern "C" fn info(
+        _: *mut c_void,
+        _: *const c_void,
+        output: *mut abi::rptadv_peer_info_v1,
+    ) -> i32 {
+        let output = unsafe { &mut *output };
+        *output = abi::rptadv_peer_info_v1 {
+            struct_size: size_of::<abi::rptadv_peer_info_v1>() as u32,
+            abi_version: 1,
+            protocol: 1,
+            capabilities: 0,
+            account_generation: 0,
+            qso_generation: 0,
+            remote: abi::rptadv_peer_bytes_v1 {
+                data: b"2000".as_ptr(),
+                length: 4,
+            },
+            callsign: abi::rptadv_peer_bytes_v1 {
+                data: ptr::null(),
+                length: 0,
+            },
+            local: abi::rptadv_peer_bytes_v1 {
+                data: b"1000".as_ptr(),
+                length: 4,
+            },
+        };
+        0
+    }
+    let (prepared, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    assert!(prepared.async_owner().is_some());
+    assert!(prepared.prepared_media());
+    let services = host_services(|table| {
+        *table = prepared.services.0;
+        table.peer_info = Some(info);
+        table.peer_write = unsafe { (*crate::fixture::host_descriptor()).peer_write };
+        table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
+    });
+    let peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
+    assert!(
+        peer.async_owner().is_none(),
+        "a PCM peer must not inherit another protocol's async callbacks"
+    );
+    assert!(
+        !peer.prepared_media(),
+        "a PCM peer must not use globally present codec callbacks"
+    );
+    assert_eq!(peer.identity().node(), "2000");
+}
+
+#[test]
 fn scheduler_notice_preserves_borrowed_utf8() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -48,9 +99,9 @@ fn site_bridge_rejects_a_host_without_the_site_contract() {
     ));
     table = unsafe { crate::fixture::host_descriptor().read() };
     for length in [
-        std::mem::offset_of!(abi::rptadv_host_services_v8, radio_site_bind),
-        std::mem::offset_of!(abi::rptadv_host_services_v8, radio_site_publish),
-        std::mem::offset_of!(abi::rptadv_host_services_v8, radio_site_snapshot),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_bind),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_publish),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_snapshot),
     ] {
         table.struct_size = length as u32;
         assert!(matches!(
@@ -333,7 +384,7 @@ fn direct_table_requires_both_activation_and_destroy() {
     ));
 }
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v8)) -> HostServices {
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v9)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -631,7 +682,7 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v8, peer_step_attach) as u32;
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_step_attach) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
@@ -641,7 +692,7 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v8, peer_observe) as u32;
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_observe) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
@@ -651,13 +702,13 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v8, peer_destroy)
+    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v9, peer_destroy)
         + size_of::<usize>() * 2) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v8>() as u32;
+    table.struct_size = size_of::<abi::rptadv_host_services_v9>() as u32;
     table.peer_step_stop = Some(stop_only);
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -669,13 +720,13 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 8;
+    table.abi_version = 9;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.hst8\0";
+    table.capability = *b"rptadv.hst9\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },

@@ -129,7 +129,7 @@ operations without supplying Asterisk services. Neither consumer statically
 embeds the radio product implementation. Native calls retain the existing
 callback topology and introduce no program queue or extra audio conversion.
 
-`librptadv_product.so.1` owns controller configuration parsing and inheritance
+`librptadv_product.so.2` owns controller configuration parsing and inheritance
 once. Product ABI 5 (`rptadv.prod5`) provides synchronous configuration and secrets
 inspection and a typed, already-authorized site-control operation. Visitors receive typed resolved records and borrowed UTF-8 spans,
 valid only during the call. Standalone copies those records; no Rust parser

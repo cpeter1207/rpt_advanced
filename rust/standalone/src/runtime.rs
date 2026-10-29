@@ -72,8 +72,8 @@ impl ProductRuntime {
             return Err(RuntimeError::InvalidDescriptor);
         };
         if product.struct_size < size_of::<abi::rptadv_product_descriptor_v1>() as u32
-            || product.abi_version != 6
-            || product.capability != *b"rptadv.prod6\0\0\0\0"
+            || product.abi_version != 7
+            || product.capability != *b"rptadv.prod7\0\0\0\0"
         {
             return Err(RuntimeError::InvalidDescriptor);
         }
@@ -174,21 +174,16 @@ impl ProductRuntime {
         let Some(authorize) = self.product.authorize_incoming else {
             return false;
         };
-        let (Ok(local), Ok(remote), Ok(source)) = (
-            std::ffi::CString::new(local),
-            std::ffi::CString::new(remote),
-            std::ffi::CString::new(source),
-        ) else {
+        if [local, remote, source]
+            .iter()
+            .any(|value| value.as_bytes().contains(&0))
+        {
             return false;
-        };
+        }
         unsafe {
             authorize(
-                local.as_ptr(),
-                local.as_bytes().len(),
-                remote.as_ptr(),
-                remote.as_bytes().len(),
-                source.as_ptr(),
-                source.as_bytes().len(),
+                &incoming_request(local, remote, source),
+                std::ptr::null_mut(),
             ) == 0
         }
     }
@@ -204,28 +199,17 @@ impl ProductRuntime {
         let Some(incoming) = self.product.incoming else {
             return false;
         };
-        let (Ok(local), Ok(remote), Ok(source)) = (
-            std::ffi::CString::new(local),
-            std::ffi::CString::new(remote),
-            std::ffi::CString::new(source),
-        ) else {
+        if [local, remote, source]
+            .iter()
+            .any(|value| value.as_bytes().contains(&0))
+        {
             return false;
-        };
+        }
         let Some(host) = self.host.as_ref() else {
             return false;
         };
-        let handle = host.peer_handle(peer);
-        let result = unsafe {
-            incoming(
-                local.as_ptr(),
-                local.as_bytes().len(),
-                remote.as_ptr(),
-                remote.as_bytes().len(),
-                source.as_ptr(),
-                source.as_bytes().len(),
-                handle,
-            )
-        };
+        let handle = host.peer_handle(peer, local, remote);
+        let result = unsafe { incoming(&incoming_request(local, remote, source), handle) };
         if result == 0 || result == -1 {
             true
         } else {
@@ -242,6 +226,30 @@ impl ProductRuntime {
         self.host.take();
         self.providers.take();
         Ok(())
+    }
+}
+
+fn incoming_request(
+    local: &str,
+    remote: &str,
+    source: &str,
+) -> crate::abi::rptadv_incoming_peer_v1 {
+    crate::abi::rptadv_incoming_peer_v1 {
+        struct_size: std::mem::size_of::<crate::abi::rptadv_incoming_peer_v1>() as u32,
+        abi_version: 1,
+        protocol: 1,
+        local: crate::abi::rptadv_peer_bytes_v1 {
+            data: local.as_ptr(),
+            length: local.len(),
+        },
+        remote: crate::abi::rptadv_peer_bytes_v1 {
+            data: remote.as_ptr(),
+            length: remote.len(),
+        },
+        source: crate::abi::rptadv_peer_bytes_v1 {
+            data: source.as_ptr(),
+            length: source.len(),
+        },
     }
 }
 
@@ -266,7 +274,7 @@ mod tests {
     use super::{ProductRuntime, RuntimeError};
     use crate::{abi, host_services::HostServicesOwner, secrets::SecretsFile};
     use std::{
-        ffi::c_char,
+        ffi::{c_char, c_void},
         mem::size_of,
         sync::atomic::{AtomicU32, AtomicUsize, Ordering},
     };
@@ -281,7 +289,7 @@ mod tests {
     static ACCEPTED_PEER: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn start_without_counts(
-        _: *const abi::rptadv_host_services_v8,
+        _: *const abi::rptadv_host_services_v9,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -297,7 +305,7 @@ mod tests {
     static AUTHORIZED: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" fn start(
-        _: *const abi::rptadv_host_services_v8,
+        _: *const abi::rptadv_host_services_v9,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -310,7 +318,7 @@ mod tests {
     }
 
     unsafe extern "C" fn fail_start(
-        _: *const abi::rptadv_host_services_v8,
+        _: *const abi::rptadv_host_services_v9,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -350,12 +358,7 @@ mod tests {
     }
 
     unsafe extern "C" fn incoming(
-        _: *const c_char,
-        _: usize,
-        _: *const c_char,
-        _: usize,
-        _: *const c_char,
-        _: usize,
+        _: *const abi::rptadv_incoming_peer_v1,
         peer: *mut std::ffi::c_void,
     ) -> i32 {
         let result = INCOMING_RESULT.load(Ordering::Relaxed) as i32;
@@ -366,16 +369,15 @@ mod tests {
     }
 
     unsafe extern "C" fn authorize(
-        local: *const c_char,
-        local_length: usize,
-        remote: *const c_char,
-        remote_length: usize,
-        source: *const c_char,
-        source_length: usize,
+        request: *const abi::rptadv_incoming_peer_v1,
+        _: *mut c_void,
     ) -> i32 {
-        let local = unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) };
-        let remote = unsafe { std::slice::from_raw_parts(remote.cast::<u8>(), remote_length) };
-        let source = unsafe { std::slice::from_raw_parts(source.cast::<u8>(), source_length) };
+        let request = unsafe { &*request };
+        let local = unsafe { std::slice::from_raw_parts(request.local.data, request.local.length) };
+        let remote =
+            unsafe { std::slice::from_raw_parts(request.remote.data, request.remote.length) };
+        let source =
+            unsafe { std::slice::from_raw_parts(request.source.data, request.source.length) };
         let allowed = local == b"524950" && remote == b"506315" && source == b"192.0.2.5";
         AUTHORIZED.store(u32::from(allowed), Ordering::Relaxed);
         if allowed { 0 } else { -1 }
@@ -383,7 +385,7 @@ mod tests {
 
     fn descriptor(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v8,
+            *const abi::rptadv_host_services_v9,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -392,14 +394,7 @@ mod tests {
         ) -> i32,
         stop: extern "C" fn() -> i32,
         authorize: Option<
-            unsafe extern "C" fn(
-                *const c_char,
-                usize,
-                *const c_char,
-                usize,
-                *const c_char,
-                usize,
-            ) -> i32,
+            unsafe extern "C" fn(*const abi::rptadv_incoming_peer_v1, *mut c_void) -> i32,
         >,
     ) -> &'static abi::rptadv_product_descriptor_v1 {
         descriptor_with_reload(start, reload, stop, authorize)
@@ -407,7 +402,7 @@ mod tests {
 
     fn descriptor_with_reload(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v8,
+            *const abi::rptadv_host_services_v9,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -417,20 +412,13 @@ mod tests {
         reload: unsafe extern "C" fn(*const c_char, usize) -> i32,
         stop: extern "C" fn() -> i32,
         authorize: Option<
-            unsafe extern "C" fn(
-                *const c_char,
-                usize,
-                *const c_char,
-                usize,
-                *const c_char,
-                usize,
-            ) -> i32,
+            unsafe extern "C" fn(*const abi::rptadv_incoming_peer_v1, *mut c_void) -> i32,
         >,
     ) -> &'static abi::rptadv_product_descriptor_v1 {
         Box::leak(Box::new(abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 6,
-            capability: *b"rptadv.prod6\0\0\0\0",
+            abi_version: 7,
+            capability: *b"rptadv.prod7\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),
@@ -617,7 +605,7 @@ mod tests {
         for (providers, expected) in [
             (
                 tests::empty_provider_set(),
-                ProviderError::MissingDescriptor("librptadv_product.so.1"),
+                ProviderError::MissingDescriptor("librptadv_product.so.2"),
             ),
             (
                 providers,

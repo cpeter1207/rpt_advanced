@@ -14,6 +14,7 @@ pub(crate) enum Input {
 #[derive(Default)]
 pub(crate) struct State {
     pub(crate) rate: u32,
+    capabilities: u32,
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
     pub(crate) digits: Vec<u8>,
@@ -625,10 +626,12 @@ pub(crate) fn peer_with_egress(
 ) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
+        capabilities: 12 | u32::from(async_enabled) | (u32::from(egress) << 1),
         ..State::default()
     }));
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_rate = Some(rate);
+    table.peer_info = Some(peer_info);
     table.peer_bind_radio = Some(bind_radio);
     table.peer_ready = Some(ready);
     table.peer_read = Some(read);
@@ -653,6 +656,16 @@ pub(crate) fn peer_with_egress(
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let handle = Box::into_raw(Box::new(state.clone())).cast();
     (unsafe { services.peer(handle) }.unwrap(), state)
+}
+
+unsafe extern "C" fn peer_info(
+    context: *mut c_void,
+    peer: *const c_void,
+    output: *mut abi::rptadv_peer_info_v1,
+) -> i32 {
+    unsafe { crate::fixture::peer_info(context, peer, output) };
+    unsafe { (*output).capabilities = state(peer.cast_mut()).lock().unwrap().capabilities };
+    0
 }
 
 unsafe extern "C" fn prepare_audio(
@@ -959,7 +972,7 @@ fn egress_host_contract_and_asterisk_pcm() {
     table.peer_step_detach = None;
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
-    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v8, peer_prepare_audio);
+    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_prepare_audio);
     for length in boundary..std::mem::size_of_val(&table) {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];

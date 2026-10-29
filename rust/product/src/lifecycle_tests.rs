@@ -313,12 +313,14 @@ fn descriptor_rejects_bad_composition_and_preserves_reload_state() {
     assert_eq!(
         unsafe {
             descriptor().incoming.unwrap()(
-                c"missing".as_ptr(),
-                7,
-                c"2000".as_ptr(),
-                4,
-                ptr::null(),
-                0,
+                &crate::fixture::incoming_request(
+                    c"missing".as_ptr(),
+                    7,
+                    c"2000".as_ptr(),
+                    4,
+                    ptr::null(),
+                    0,
+                ),
                 peer,
             )
         },
@@ -368,12 +370,15 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
     assert_eq!(
         unsafe {
             descriptor().authorize_incoming.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                c"2000".as_ptr(),
-                4,
-                c"127.0.0.1".as_ptr(),
-                9,
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    c"127.0.0.1".as_ptr(),
+                    9,
+                ),
+                ptr::null_mut(),
             )
         },
         0
@@ -382,12 +387,14 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
     assert_eq!(
         unsafe {
             descriptor().incoming.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                c"2000".as_ptr(),
-                4,
-                c"127.0.0.1".as_ptr(),
-                9,
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    c"127.0.0.1".as_ptr(),
+                    9,
+                ),
                 peer,
             )
         },
@@ -427,12 +434,14 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
     assert_eq!(
         unsafe {
             descriptor().incoming.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                c"2001".as_ptr(),
-                4,
-                c"192.0.2.2".as_ptr(),
-                9,
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2001".as_ptr(),
+                    4,
+                    c"192.0.2.2".as_ptr(),
+                    9,
+                ),
                 rejected,
             )
         },
@@ -453,12 +462,14 @@ fn active_host_owns_radio_and_incoming_peer_until_quiescent_stop() {
     assert_eq!(
         unsafe {
             descriptor().incoming.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                c"2000".as_ptr(),
-                4,
-                ptr::null(),
-                0,
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    ptr::null(),
+                    0,
+                ),
                 peer,
             )
         },
@@ -480,12 +491,15 @@ fn incoming_peer_is_rejected_and_released_when_refresh_cannot_prepare_audio() {
     assert_eq!(
         unsafe {
             descriptor().authorize_incoming.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                c"2000".as_ptr(),
-                4,
-                c"127.0.0.1".as_ptr(),
-                9,
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    c"127.0.0.1".as_ptr(),
+                    9,
+                ),
+                ptr::null_mut(),
             )
         },
         0
@@ -494,12 +508,14 @@ fn incoming_peer_is_rejected_and_released_when_refresh_cannot_prepare_audio() {
     assert_eq!(
         unsafe {
             descriptor().incoming.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                c"2000".as_ptr(),
-                4,
-                c"127.0.0.1".as_ptr(),
-                9,
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    c"127.0.0.1".as_ptr(),
+                    9,
+                ),
                 peer,
             )
         },
@@ -729,7 +745,17 @@ fn helpers_reject_malformed_inputs_and_capture_bounded_wall_time() {
     let invalid = [0xff_u8];
     assert!(unsafe { input(invalid.as_ptr().cast(), invalid.len()) }.is_err());
     assert!(
-        unsafe { incoming_identity(ptr::null(), 1, c"2".as_ptr(), 1, ptr::null(), 0) }.is_err()
+        unsafe {
+            incoming_identity(&crate::fixture::incoming_request(
+                ptr::null(),
+                1,
+                c"2".as_ptr(),
+                1,
+                ptr::null(),
+                0,
+            ))
+        }
+        .is_err()
     );
     assert!(document("invalid").is_err());
 }
@@ -1016,12 +1042,15 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
     assert_eq!(
         unsafe {
             descriptor().authorize_incoming.unwrap()(
-                ptr::null(),
-                1,
-                c"2000".as_ptr(),
-                4,
-                ptr::null(),
-                0,
+                &crate::fixture::incoming_request(
+                    ptr::null(),
+                    1,
+                    c"2000".as_ptr(),
+                    4,
+                    ptr::null(),
+                    0,
+                ),
+                ptr::null_mut(),
             )
         },
         -1
@@ -1029,12 +1058,15 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
     assert_eq!(
         unsafe {
             descriptor().authorize_incoming.unwrap()(
-                c"missing".as_ptr(),
-                7,
-                c"2000".as_ptr(),
-                4,
-                ptr::null(),
-                0,
+                &crate::fixture::incoming_request(
+                    c"missing".as_ptr(),
+                    7,
+                    c"2000".as_ptr(),
+                    4,
+                    ptr::null(),
+                    0,
+                ),
+                ptr::null_mut(),
             )
         },
         -1
@@ -1043,12 +1075,14 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
     assert_eq!(
         unsafe {
             descriptor().incoming.unwrap()(
-                ptr::null(),
-                1,
-                c"2000".as_ptr(),
-                4,
-                ptr::null(),
-                0,
+                &crate::fixture::incoming_request(
+                    ptr::null(),
+                    1,
+                    c"2000".as_ptr(),
+                    4,
+                    ptr::null(),
+                    0,
+                ),
                 peer,
             )
         },
@@ -1058,12 +1092,14 @@ fn public_commands_cover_link_modes_status_digits_and_admission_failures() {
     assert_eq!(
         unsafe {
             descriptor().incoming.unwrap()(
-                c"1000".as_ptr(),
-                4,
-                c"2000".as_ptr(),
-                4,
-                ptr::null(),
-                0,
+                &crate::fixture::incoming_request(
+                    c"1000".as_ptr(),
+                    4,
+                    c"2000".as_ptr(),
+                    4,
+                    ptr::null(),
+                    0,
+                ),
                 ptr::null_mut(),
             )
         },

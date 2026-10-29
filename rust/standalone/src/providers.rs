@@ -11,10 +11,10 @@ use std::{
 
 const PROVIDERS: [ProviderSpec; 12] = [
     inline(
-        "librptadv_product.so.1",
+        "librptadv_product.so.2",
         "rptadv_product_descriptor_v1",
-        6,
-        b"rptadv.prod6",
+        7,
+        b"rptadv.prod7",
     ),
     private(pointer(
         "librptadv_control_standalone_adapter.so.1",
@@ -384,11 +384,11 @@ impl ProviderSet {
             }
         }
         let product = self.typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>(
-            "librptadv_product.so.1",
+            "librptadv_product.so.2",
         )?;
         if !product_functions_complete(product) {
             return Err(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.1",
+                "librptadv_product.so.2",
             ));
         }
         let control = self.typed_descriptor::<crate::abi::rptadv_control_descriptor_v1>(
@@ -540,11 +540,11 @@ impl ProviderSet {
         &'static self,
     ) -> Result<ProductRuntimeDescriptors, ProviderError> {
         let product = self.typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>(
-            "librptadv_product.so.1",
+            "librptadv_product.so.2",
         )?;
         if !product_functions_complete(product) {
             return Err(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.1",
+                "librptadv_product.so.2",
             ));
         }
         let control = self.typed_descriptor::<crate::abi::rptadv_control_descriptor_v1>(
@@ -881,7 +881,7 @@ pub(crate) mod tests {
             empty.iax_executor().err(),
             Some(ProviderError::MissingDescriptor(NAME))
         );
-        let directory = ProviderFixture::new(6, false, false);
+        let directory = ProviderFixture::new(7, false, false);
         let providers = Box::leak(Box::new(
             super::ProviderSet::load_from_directory(directory.path()).unwrap(),
         ));
@@ -898,7 +898,7 @@ pub(crate) mod tests {
             (2, ProviderError::IncompatibleDescriptor(NAME)),
             (1, ProviderError::Initialize(NAME)),
         ] {
-            let fixture = ProviderFixture::new(6, false, false);
+            let fixture = ProviderFixture::new(7, false, false);
             let source = fixture.path().join("iax-async.c");
             std::fs::write(
                 &source,
@@ -1021,7 +1021,7 @@ pub(crate) mod tests {
                 ProviderError::IncompatibleDescriptor(NAME),
             ),
         ] {
-            let fixture = ProviderFixture::new(6, false, false);
+            let fixture = ProviderFixture::new(7, false, false);
             let library = fixture.path().join(NAME);
             std::fs::remove_file(&library).unwrap();
             if let Some(source) = source {
@@ -1072,14 +1072,14 @@ pub(crate) mod tests {
     fn runtime_validation_rechecks_descriptor_identity() {
         let mut providers = super::ProviderSet::load().unwrap();
         let mut descriptor = *providers
-            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.1")
+            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.2")
             .unwrap();
         descriptor.abi_version += 1;
-        replace_descriptor(&mut providers, "librptadv_product.so.1", descriptor);
+        replace_descriptor(&mut providers, "librptadv_product.so.2", descriptor);
         assert_eq!(
             providers.validate_runtime(),
             Err(ProviderError::IncompatibleDescriptor(
-                "librptadv_product.so.1"
+                "librptadv_product.so.2"
             ))
         );
     }
@@ -1265,17 +1265,17 @@ pub(crate) mod tests {
 
     #[test]
     fn descriptor_contract_checks_abi_and_capability() {
-        let capability = b"rptadv.prod6\0\0\0\0";
+        let capability = b"rptadv.prod7\0\0\0\0";
         let descriptor = InlineDescriptor {
             struct_size: std::mem::size_of::<InlineDescriptor>() as u32,
-            abi_version: 6,
+            abi_version: 7,
             capability: *capability,
         };
         let provider = ProviderSpec {
             library: "test",
             symbol: "test",
-            abi_version: 6,
-            capability: b"rptadv.prod6",
+            abi_version: 7,
+            capability: b"rptadv.prod7",
             layout: DescriptorLayout::Inline,
             location: super::LibraryLocation::Private,
         };
@@ -1426,8 +1426,8 @@ pub(crate) mod tests {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 6;
-        descriptor.capability = *b"rptadv.prod6\0\0\0\0";
+        descriptor.abi_version = 7;
+        descriptor.capability = *b"rptadv.prod7\0\0\0\0";
         assert!(!super::product_functions_complete(&descriptor));
     }
 
@@ -1438,8 +1438,8 @@ pub(crate) mod tests {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 6;
-        descriptor.capability = *b"rptadv.prod6\0\0\0\0";
+        descriptor.abi_version = 7;
+        descriptor.capability = *b"rptadv.prod7\0\0\0\0";
         let pointer = (&descriptor as *const crate::abi::rptadv_product_descriptor_v1).cast();
         assert_eq!(
             super::inspection_api(pointer, spec).err(),
@@ -1450,7 +1450,7 @@ pub(crate) mod tests {
             super::inspection_api(pointer, spec).err(),
             Some(ProviderError::IncompleteDescriptor(spec.library))
         );
-        descriptor.abi_version = 7;
+        descriptor.abi_version = 8;
         assert_eq!(
             super::inspection_api(pointer, spec).err(),
             Some(ProviderError::IncompatibleDescriptor(spec.library))
@@ -1460,14 +1460,14 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[test]
     fn product_runtime_descriptors_reject_incomplete_product_tables() {
-        let directory = ProviderFixture::new(6, false, false);
+        let directory = ProviderFixture::new(7, false, false);
         let providers = Box::leak(Box::new(
             super::ProviderSet::load_from_directory(directory.path()).unwrap(),
         ));
         assert_eq!(
             providers.product_runtime_descriptors().err(),
             Some(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.1"
+                "librptadv_product.so.2"
             ))
         );
     }
@@ -1479,15 +1479,15 @@ pub(crate) mod tests {
         let mut descriptor: crate::abi::rptadv_product_descriptor_v1 =
             unsafe { std::mem::zeroed() };
         descriptor.struct_size = std::mem::size_of_val(&descriptor) as u32;
-        descriptor.abi_version = 6;
-        descriptor.capability = *b"rptadv.prod6\0\0\0\0";
-        replace_descriptor(&mut providers, "librptadv_product.so.1", descriptor);
+        descriptor.abi_version = 7;
+        descriptor.capability = *b"rptadv.prod7\0\0\0\0";
+        replace_descriptor(&mut providers, "librptadv_product.so.2", descriptor);
         let providers = Box::leak(Box::new(providers));
 
         assert_eq!(
             providers.product_runtime_descriptors().err(),
             Some(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.1"
+                "librptadv_product.so.2"
             ))
         );
     }
@@ -1495,9 +1495,9 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[test]
     fn provider_set_loads_only_matching_native_descriptors() {
-        let directory = ProviderFixture::new(6, false, false);
+        let directory = ProviderFixture::new(7, false, false);
         let providers = super::ProviderSet::load_from_directory(directory.path()).unwrap();
-        assert!(providers.descriptor("librptadv_product.so.1").is_some());
+        assert!(providers.descriptor("librptadv_product.so.2").is_some());
         assert!(providers.descriptor("librptadviax2.so.2").is_some());
         assert!(
             providers
@@ -1508,28 +1508,28 @@ pub(crate) mod tests {
         assert_eq!(
             providers.validate_runtime(),
             Err(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.1"
+                "librptadv_product.so.2"
             ))
         );
 
-        let missing = ProviderFixture::new(6, true, false);
+        let missing = ProviderFixture::new(7, true, false);
         assert_eq!(
             super::ProviderSet::load_from_directory(missing.path()).err(),
-            Some(ProviderError::MissingDescriptor("librptadv_product.so.1"))
+            Some(ProviderError::MissingDescriptor("librptadv_product.so.2"))
         );
 
-        let incompatible = ProviderFixture::new(7, false, false);
+        let incompatible = ProviderFixture::new(8, false, false);
         assert_eq!(
             super::ProviderSet::load_from_directory(incompatible.path()).err(),
             Some(ProviderError::IncompatibleDescriptor(
-                "librptadv_product.so.1"
+                "librptadv_product.so.2"
             ))
         );
 
-        let null = ProviderFixture::new(6, false, true);
+        let null = ProviderFixture::new(7, false, true);
         assert_eq!(
             super::ProviderSet::load_from_directory(null.path()).err(),
-            Some(ProviderError::MissingDescriptor("librptadv_product.so.1"))
+            Some(ProviderError::MissingDescriptor("librptadv_product.so.2"))
         );
     }
 
@@ -1550,7 +1550,7 @@ pub(crate) mod tests {
     fn runtime_function_tables_reject_each_missing_operation() {
         let providers = super::ProviderSet::load().unwrap();
         let mut product = *providers
-            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.1")
+            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.2")
             .unwrap();
         assert!(super::product_functions_complete(&product));
         missing_fields!(product, super::product_functions_complete, start reload stop authorize_incoming incoming link_command link_status digit inspect_configuration inspect_secrets site_command);
@@ -1561,7 +1561,7 @@ pub(crate) mod tests {
     fn runtime_validation_reports_each_incomplete_provider_table() {
         let mut providers = super::ProviderSet::load().unwrap();
         let valid_product = *providers
-            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.1")
+            .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.2")
             .unwrap();
         let valid_control = *providers
             .typed_descriptor::<crate::abi::rptadv_control_descriptor_v1>(
@@ -1582,14 +1582,14 @@ pub(crate) mod tests {
 
         let mut incomplete = valid_product;
         incomplete.start = None;
-        replace_descriptor(&mut providers, "librptadv_product.so.1", incomplete);
+        replace_descriptor(&mut providers, "librptadv_product.so.2", incomplete);
         assert_eq!(
             providers.validate_runtime(),
             Err(ProviderError::IncompleteDescriptor(
-                "librptadv_product.so.1"
+                "librptadv_product.so.2"
             ))
         );
-        replace_descriptor(&mut providers, "librptadv_product.so.1", valid_product);
+        replace_descriptor(&mut providers, "librptadv_product.so.2", valid_product);
 
         let control_library = "librptadv_control_standalone_adapter.so.1";
         for operation in 0..4 {
@@ -1750,7 +1750,7 @@ pub(crate) mod tests {
             #include <stddef.h>
             #include <stdint.h>
             #ifndef PRODUCT_VERSION
-            #define PRODUCT_VERSION 6
+            #define PRODUCT_VERSION 7
             #endif
             typedef struct { uint32_t size, version; char capability[16]; } Inline;
             typedef struct { uint32_t size, version; const char *capability; } Named;
@@ -1764,7 +1764,7 @@ pub(crate) mod tests {
             #ifdef NULL_PRODUCT
             void *rptadv_product_descriptor_v1(void) { return NULL; }
             #elif !defined(OMIT_PRODUCT)
-            INLINE(product, rptadv_product_descriptor_v1, PRODUCT_VERSION, "rptadv.prod6")
+            INLINE(product, rptadv_product_descriptor_v1, PRODUCT_VERSION, "rptadv.prod7")
             #endif
             static Control control = { 1, sizeof(Control), "rptadv.control" };
             void *rptadv_control_standalone_descriptor_v1(void) { return &control; }

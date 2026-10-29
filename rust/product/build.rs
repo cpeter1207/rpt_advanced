@@ -16,7 +16,7 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_product.so.1");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_product.so.2");
     println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
     println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
     let radio_include =

@@ -54,7 +54,7 @@ The nine existing-function components are released runtime dependencies. Direct
 dynamic links are `librptadvradio.so.4` to `librptadvsquelch.so.2`,
 `librptadvctcss.so.2`, and `librptadvdcs.so.1`;
 `librptadv_gpio_adapter.so.1` to `librptadvsignaling.so.1`;
-`librptadv_product.so.1` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
+`librptadv_product.so.2` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
 `librptadvdtmf.so.1`, `librptadvtemplate.so.1`, and
 `librptadvschedule.so.1`; and `librptadvmorse.so.1` to
 `librptadvtone.so.1`. DTMF detection and PCM generation share
@@ -120,7 +120,7 @@ Rust's private ABI.
 
 | Artifact | Ownership |
 | --- | --- |
-| `librptadv_product.so.1` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
+| `librptadv_product.so.2` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
 | `rpt-advanced` | Standalone service executable; loads the product and standalone providers without loading Asterisk |
 | `librptadv_control_standalone_adapter.so.1` | Lock-free standalone control-task executor |
 | `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |

@@ -82,7 +82,12 @@ add a WebRTC stack for anticipated protocols. Reuse across adapters is a goal,
 not a requirement to reject a useful dependency. The
 [implementation plan](../../../docs/superpowers/plans/2026-10-28-echolink-interoperability.md)
 records codec-client moves, packet-library fit tests and coordinated host/DTMF
-contracts. These are planned, not implemented ABI changes.
+contracts. Host-services ABI 9 and product ABI 7 introduce typed incoming
+requests and copied per-peer protocol/capability metadata. Both IAX hosts
+preserve their existing transport/media behavior and populate real local and
+remote identities. Product SONAME 2 rejects the older host/product pair.
+EchoLink host attachment, account reload and finite source-read integration
+remain in progress; the provider does not yet advertise its network/media groups.
 
 ## Consequences
 

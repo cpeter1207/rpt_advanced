@@ -737,17 +737,32 @@ pub(crate) unsafe fn input<'a>(
 }
 
 unsafe fn incoming_identity(
-    local: *const std::ffi::c_char,
-    local_length: usize,
-    remote: *const std::ffi::c_char,
-    remote_length: usize,
-    source: *const std::ffi::c_char,
-    source_length: usize,
-) -> Result<(String, String, String), RuntimeError> {
+    request: *const abi::rptadv_incoming_peer_v1,
+) -> Result<(rpt_advanced_core::link::ProtocolId, String, String, String), RuntimeError> {
+    if request.is_null()
+        || unsafe { std::ptr::addr_of!((*request).struct_size).read() }
+            < size_of::<abi::rptadv_incoming_peer_v1>() as u32
+    {
+        return Err(RuntimeError::Rejected);
+    }
+    let request = unsafe { &*request };
+    if request.abi_version != 1
+        || request.local.length > 32
+        || request.remote.length > 32
+        || request.source.length > 64
+    {
+        return Err(RuntimeError::Rejected);
+    }
+    let protocol = match request.protocol {
+        1 => rpt_advanced_core::link::ProtocolId::AllStarLink,
+        2 => rpt_advanced_core::link::ProtocolId::EchoLink,
+        _ => return Err(RuntimeError::Rejected),
+    };
     Ok((
-        unsafe { input(local, local_length) }?.to_owned(),
-        unsafe { input(remote, remote_length) }?.to_owned(),
-        unsafe { input(source, source_length) }?.to_owned(),
+        protocol,
+        unsafe { input(request.local.data.cast(), request.local.length) }?.to_owned(),
+        unsafe { input(request.remote.data.cast(), request.remote.length) }?.to_owned(),
+        unsafe { input(request.source.data.cast(), request.source.length) }?.to_owned(),
     ))
 }
 
@@ -756,7 +771,7 @@ unsafe fn incoming_identity(
 /// # Safety
 /// The complete descriptor/code allocations must remain live through successful stop.
 unsafe extern "C" fn rptadv_product_start(
-    host: *const abi::rptadv_host_services_v8,
+    host: *const abi::rptadv_host_services_v9,
     control: *const ControlDescriptor,
     file: *const FileDescriptor,
     speech: *const SpeechDescriptor,
@@ -899,25 +914,17 @@ extern "C" fn rptadv_product_stop() -> i32 {
 
 /// Check current policy and topology before the adapter answers an incoming channel.
 unsafe extern "C" fn rptadv_product_authorize_incoming(
-    local: *const std::ffi::c_char,
-    local_length: usize,
-    remote: *const std::ffi::c_char,
-    remote_length: usize,
-    source: *const std::ffi::c_char,
-    source_length: usize,
+    request: *const abi::rptadv_incoming_peer_v1,
+    peer: *mut c_void,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| -> Result<(), RuntimeError> {
         let (engine, _call) = selected()?;
-        let (local, remote, source) = unsafe {
-            incoming_identity(
-                local,
-                local_length,
-                remote,
-                remote_length,
-                source,
-                source_length,
-            )
-        }?;
+        let (protocol, local, remote, source) = unsafe { incoming_identity(request) }?;
+        // Echo admission must inspect the live provider QSO. A null/pre-answer
+        // authorization path is available only for conventional IAX channels.
+        if protocol != rpt_advanced_core::link::ProtocolId::AllStarLink || !peer.is_null() {
+            return Err(RuntimeError::Rejected);
+        }
         engine.run(move |host| {
             host.lookup(&local, &remote, Some(&source))?;
             host.runtime.authorize_incoming(&local, &remote, true)
@@ -930,29 +937,21 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
 
 /// Admit one already-inspected and answered peer. Peer ownership always transfers.
 unsafe extern "C" fn rptadv_product_incoming(
-    local: *const std::ffi::c_char,
-    local_length: usize,
-    remote: *const std::ffi::c_char,
-    remote_length: usize,
-    source: *const std::ffi::c_char,
-    source_length: usize,
+    request: *const abi::rptadv_incoming_peer_v1,
     peer: *mut c_void,
 ) -> i32 {
     let consumed = std::cell::Cell::new(false);
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), RuntimeError> {
         let (engine, _call) = selected()?;
-        let (local, remote, source) = unsafe {
-            incoming_identity(
-                local,
-                local_length,
-                remote,
-                remote_length,
-                source,
-                source_length,
-            )
-        }?;
+        let (protocol, local, remote, source) = unsafe { incoming_identity(request) }?;
         let peer = unsafe { engine.services.peer(peer) }.map_err(|_| RuntimeError::Rejected)?;
         consumed.set(true);
+        if peer.identity().protocol() != protocol
+            || peer.identity().node() != remote
+            || peer.local() != local
+        {
+            return Err(RuntimeError::Rejected);
+        }
         let clock = engine.clock();
         engine.run(move |host| {
             host.lookup(&local, &remote, Some(&source))?;
@@ -1070,8 +1069,8 @@ unsafe extern "C" fn rptadv_product_digit(
 
 static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descriptor_v1 {
     struct_size: size_of::<abi::rptadv_product_descriptor_v1>() as u32,
-    abi_version: 6,
-    capability: *b"rptadv.prod6\0\0\0\0",
+    abi_version: 7,
+    capability: *b"rptadv.prod7\0\0\0\0",
     start: Some(rptadv_product_start),
     reload: Some(rptadv_product_reload),
     stop: Some(rptadv_product_stop),

@@ -35,7 +35,7 @@ struct PeerIngress {
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
-    descriptor: Box<abi::rptadv_host_services_v8>,
+    descriptor: Box<abi::rptadv_host_services_v9>,
 }
 
 impl HostServicesOwner {
@@ -64,10 +64,10 @@ impl HostServicesOwner {
             secrets,
             ingress,
         });
-        let descriptor = Box::new(abi::rptadv_host_services_v8 {
-            struct_size: size_of::<abi::rptadv_host_services_v8>() as u32,
-            abi_version: 8,
-            capability: *b"rptadv.hst8\0",
+        let descriptor = Box::new(abi::rptadv_host_services_v9 {
+            struct_size: size_of::<abi::rptadv_host_services_v9>() as u32,
+            abi_version: 9,
+            capability: *b"rptadv.hst9\0",
             context: ptr::from_mut(context.as_mut()).cast(),
             local_time: Some(local_time),
             command_notice: Some(command_notice),
@@ -103,6 +103,7 @@ impl HostServicesOwner {
             peer_step_wake: asynchronous.then_some(peer_step_wake),
             peer_set_deadline: asynchronous.then_some(peer_set_deadline),
             scheduler_notice: Some(scheduler_notice),
+            peer_info: Some(peer_info),
         });
         Ok(Self {
             context,
@@ -111,14 +112,14 @@ impl HostServicesOwner {
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
-    pub fn descriptor(&self) -> &abi::rptadv_host_services_v8 {
+    pub fn descriptor(&self) -> &abi::rptadv_host_services_v9 {
         let _keep_context_alive = &self.context;
         self.descriptor.as_ref()
     }
 
     /// Put one peer handle into the representation used by the host-services callbacks.
-    pub fn peer_handle(&self, peer: IaxPeer) -> *mut c_void {
-        Box::into_raw(Box::new(PeerHandle::new(peer))).cast()
+    pub fn peer_handle(&self, peer: IaxPeer, local: &str, remote: &str) -> *mut c_void {
+        Box::into_raw(Box::new(PeerHandle::new(peer, local, remote))).cast()
     }
 
     /// Destroy an unconsumed peer handle with the host's normal ownership rule.
@@ -155,11 +156,53 @@ impl HostServicesOwner {
     }
 }
 
-struct PeerHandle(IaxPeer, Vec<f32>);
+struct PeerHandle(IaxPeer, Vec<f32>, String, String);
 impl PeerHandle {
-    fn new(peer: IaxPeer) -> Self {
-        Self(peer, vec![0.0; 4096])
+    fn new(peer: IaxPeer, local: &str, remote: &str) -> Self {
+        Self(peer, vec![0.0; 4096], local.into(), remote.into())
     }
+}
+
+unsafe extern "C" fn peer_info(
+    context: *mut c_void,
+    peer: *const c_void,
+    output: *mut abi::rptadv_peer_info_v1,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(context), Some(peer), Some(output)) = (
+            unsafe { context.cast::<StandaloneHostContext>().as_ref() },
+            unsafe { peer.cast::<PeerHandle>().as_ref() },
+            unsafe { output.as_mut() },
+        ) else {
+            return -1;
+        };
+        if output.struct_size < size_of::<abi::rptadv_peer_info_v1>() as u32
+            || output.abi_version != 1
+        {
+            return -1;
+        }
+        *output = abi::rptadv_peer_info_v1 {
+            struct_size: size_of::<abi::rptadv_peer_info_v1>() as u32,
+            abi_version: 1,
+            protocol: 1,
+            capabilities: if context.ingress.is_some() { 15 } else { 12 },
+            account_generation: 0,
+            qso_generation: 0,
+            remote: abi::rptadv_peer_bytes_v1 {
+                data: peer.3.as_ptr(),
+                length: peer.3.len(),
+            },
+            callsign: abi::rptadv_peer_bytes_v1 {
+                data: ptr::null(),
+                length: 0,
+            },
+            local: abi::rptadv_peer_bytes_v1 {
+                data: peer.2.as_ptr(),
+                length: peer.2.len(),
+            },
+        };
+        0
+    })
 }
 
 unsafe extern "C" fn peer_step_attach(
@@ -428,7 +471,7 @@ unsafe extern "C" fn peer_dial(
             drop(peer);
             return -1;
         }
-        *output = Box::into_raw(Box::new(PeerHandle::new(peer))).cast();
+        *output = Box::into_raw(Box::new(PeerHandle::new(peer, local, &remote))).cast();
         0
     })
 }
@@ -848,10 +891,10 @@ mod tests {
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
-            size_of::<crate::abi::rptadv_host_services_v8>() as u32
+            size_of::<crate::abi::rptadv_host_services_v9>() as u32
         );
-        assert_eq!(api.abi_version, 8);
-        assert_eq!(api.capability, *b"rptadv.hst8\0");
+        assert_eq!(api.abi_version, 9);
+        assert_eq!(api.capability, *b"rptadv.hst9\0");
         assert!(!api.context.is_null());
         assert!(api.local_time.is_some());
         assert!(api.peer_dial.is_some());
@@ -894,7 +937,11 @@ mod tests {
             unsafe { super::peer_set_deadline(ptr::null_mut(), ptr::null_mut(), u64::MAX) },
             -1
         );
-        let peer = owner.peer_handle(crate::iax::tests::peer_for_host_callback(0, false, false));
+        let peer = owner.peer_handle(
+            crate::iax::tests::peer_for_host_callback(0, false, false),
+            "1000",
+            "2000",
+        );
         assert_eq!(
             unsafe { super::peer_set_deadline(api.context, peer, 0) },
             -1
@@ -1368,7 +1415,11 @@ mod tests {
     fn prepared_media_rejects_invalid_buffers_without_touching_output() {
         let owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
-        let peer = owner.peer_handle(crate::iax::tests::peer_for_host_callback(0, false, false));
+        let peer = owner.peer_handle(
+            crate::iax::tests::peer_for_host_callback(0, false, false),
+            "1000",
+            "2000",
+        );
         let pcm = [0.0_f32];
         let mut output = [0xa5];
         let mut result: crate::abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
@@ -1475,7 +1526,11 @@ mod tests {
             (2, 1, 4096),
             (1, 0, isize::MAX as usize / size_of::<f32>()),
         ] {
-            let peer = owner.peer_handle(crate::iax::tests::peer_for_capacity(input, length));
+            let peer = owner.peer_handle(
+                crate::iax::tests::peer_for_capacity(input, length),
+                "1000",
+                "2000",
+            );
             let mut observed = (0, 0);
             assert_eq!(
                 unsafe {
@@ -1509,7 +1564,7 @@ mod tests {
         ];
         for (event, result, forwarded) in events {
             let peer = crate::iax::tests::peer_for_host_callback(event, false, false);
-            let handle = owner.peer_handle(peer);
+            let handle = owner.peer_handle(peer, "1000", "2000");
             let mut observed = Vec::new();
             assert_eq!(
                 unsafe {
@@ -1527,7 +1582,7 @@ mod tests {
         }
 
         let peer = crate::iax::tests::peer_for_host_callback(0, false, false);
-        let handle = owner.peer_handle(peer);
+        let handle = owner.peer_handle(peer, "1000", "2000");
         assert_eq!(unsafe { super::peer_rate(ptr::null_mut(), handle) }, 8000);
         assert_eq!(unsafe { super::peer_ready(ptr::null_mut(), handle) }, 1);
         let mut encoded = [0; 160];
@@ -1616,7 +1671,7 @@ mod tests {
         owner.destroy_peer(handle);
 
         let peer = crate::iax::tests::peer_for_host_callback(0, true, true);
-        let handle = owner.peer_handle(peer);
+        let handle = owner.peer_handle(peer, "1000", "2000");
         assert_eq!(
             unsafe {
                 super::peer_send_prepared(ptr::null_mut(), handle, encoded.as_ptr(), 160, 160, 1234)
@@ -1865,7 +1920,7 @@ mod tests {
             panic!("rejected attachment must not publish a callback");
         }
         let context = host.descriptor().context;
-        let handle = host.peer_handle(inbound);
+        let handle = host.peer_handle(inbound, "1000", "2000");
         let mut token = 1_usize as *mut c_void;
         assert_eq!(
             unsafe {

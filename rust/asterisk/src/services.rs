@@ -307,7 +307,13 @@ unsafe extern "C" fn peer_dial(
             current(current_context) != 0
         }) {
             Ok(peer) => {
-                *output = Box::into_raw(Box::new(peer)).cast();
+                let remote = destination
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.rsplit_once('/'))
+                    .map(|(_, node)| node)
+                    .unwrap_or("");
+                *output = into_raw(peer, local.to_str().unwrap_or(""), remote);
                 0
             }
             Err(_) => -1,
@@ -316,7 +322,7 @@ unsafe extern "C" fn peer_dial(
 }
 unsafe extern "C" fn peer_rate(_context: *mut c_void, peer: *const c_void) -> u32 {
     boundary(0, || {
-        unsafe { peer.cast::<PeerIo>().as_ref() }.map_or(0, PeerIo::rate)
+        unsafe { peer.cast::<PeerHandle>().as_ref() }.map_or(0, |peer| peer.io.rate())
     })
 }
 unsafe extern "C" fn peer_bind_radio(
@@ -328,7 +334,7 @@ unsafe extern "C" fn peer_bind_radio(
         // SAFETY: the product lends uniquely owned peer/radio handles on control.
         let (Some(peer), Some(reserved)) = (unsafe {
             (
-                peer.cast::<PeerIo>().as_mut(),
+                peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io),
                 radio.cast::<ReservedRadio>().as_ref(),
             )
         }) else {
@@ -342,7 +348,8 @@ unsafe extern "C" fn peer_bind_radio(
 }
 unsafe extern "C" fn peer_ready(_context: *mut c_void, peer: *mut c_void) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerIo>().as_mut() }) else {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) })
+        else {
             return -1;
         };
         peer.ready().map_or(-1, i32::from)
@@ -355,7 +362,10 @@ unsafe extern "C" fn peer_read(
     event_context: *mut c_void,
 ) -> i32 {
     boundary(-1, || {
-        let (Some(peer), Some(event)) = (unsafe { peer.cast::<PeerIo>().as_mut() }, event) else {
+        let (Some(peer), Some(event)) = (
+            unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) },
+            event,
+        ) else {
             return -1;
         };
         peer.read(|input| unsafe {
@@ -380,7 +390,8 @@ unsafe extern "C" fn peer_send_text(
     length: usize,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerIo>().as_mut() }) else {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) })
+        else {
             return -1;
         };
         let Some(text) = (unsafe { text(text_pointer, length) }) else {
@@ -394,7 +405,7 @@ unsafe extern "C" fn peer_send_text(
 }
 unsafe extern "C" fn peer_send_digit(_context: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
     boundary(-1, || {
-        unsafe { peer.cast::<PeerIo>().as_mut() }
+        unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) }
             .ok_or(())
             .and_then(|peer| peer.send_digit(digit as char).map_err(|_| ()))
             .map_or(-1, |()| 0)
@@ -407,7 +418,8 @@ unsafe extern "C" fn peer_write(
     count: usize,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerIo>().as_mut() }) else {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) })
+        else {
             return -1;
         };
         if samples.is_null() && count != 0 {
@@ -424,19 +436,19 @@ unsafe extern "C" fn peer_write(
 unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     boundary((), || {
         if !peer.is_null() {
-            unsafe { drop(Box::from_raw(peer.cast::<PeerIo>())) };
+            unsafe { drop(Box::from_raw(peer.cast::<PeerHandle>())) };
         }
     });
 }
 
-struct Services(ffi::rptadv_host_services_v8);
+struct Services(ffi::rptadv_host_services_v9);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v8 {
-    struct_size: size_of::<ffi::rptadv_host_services_v8>() as u32,
-    abi_version: 8,
-    capability: *b"rptadv.hst8\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
+    struct_size: size_of::<ffi::rptadv_host_services_v9>() as u32,
+    abi_version: 9,
+    capability: *b"rptadv.hst9\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -472,16 +484,68 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v8 {
     peer_step_wake: None,
     peer_set_deadline: None,
     scheduler_notice: Some(scheduler_notice),
+    peer_info: Some(peer_info),
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v8 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v9 {
     &SERVICES.0
 }
 
 /// Transfer one raw peer owner to the portable product.
-pub fn into_raw(peer: PeerIo) -> *mut c_void {
-    Box::into_raw(Box::new(peer)).cast()
+pub fn into_raw(peer: PeerIo, local: &str, remote: &str) -> *mut c_void {
+    Box::into_raw(Box::new(PeerHandle {
+        io: peer,
+        local: local.into(),
+        remote: remote.into(),
+    }))
+    .cast()
+}
+
+struct PeerHandle {
+    io: PeerIo,
+    local: String,
+    remote: String,
+}
+
+unsafe extern "C" fn peer_info(
+    _: *mut c_void,
+    peer: *const c_void,
+    output: *mut ffi::rptadv_peer_info_v1,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(peer), Some(output)) = (unsafe { peer.cast::<PeerHandle>().as_ref() }, unsafe {
+            output.as_mut()
+        }) else {
+            return -1;
+        };
+        if output.struct_size < size_of::<ffi::rptadv_peer_info_v1>() as u32
+            || output.abi_version != 1
+        {
+            return -1;
+        }
+        *output = ffi::rptadv_peer_info_v1 {
+            struct_size: size_of::<ffi::rptadv_peer_info_v1>() as u32,
+            abi_version: 1,
+            protocol: 1,
+            capabilities: 12,
+            account_generation: 0,
+            qso_generation: 0,
+            remote: ffi::rptadv_peer_bytes_v1 {
+                data: peer.remote.as_ptr(),
+                length: peer.remote.len(),
+            },
+            callsign: ffi::rptadv_peer_bytes_v1 {
+                data: ptr::null(),
+                length: 0,
+            },
+            local: ffi::rptadv_peer_bytes_v1 {
+                data: peer.local.as_ptr(),
+                length: peer.local.len(),
+            },
+        };
+        0
+    })
 }
 
 /// Release a peer retained by the adapter after product admission declined ownership.
