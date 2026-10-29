@@ -239,6 +239,12 @@ courtesy tones, hang time and synthesized human chat remain excluded from peers.
 Runtime selection uses the existing typed command/admin path and optional
 `link_command_echo_telemetry` mapping with no default prefix. Modes are 0 off,
 1 on, 2 follow and 3 demand; a fixed account policy rejects runtime changes.
+Echo operator spellings are canonicalized before command admission, configured
+group/schedule duplicate checks and storage, direct typed scheduler construction,
+access-list comparisons and courtesy assignment. The shared identity parser is
+the only alias parser at these boundaries. Retries and status inherit that same
+key; leading-zero AllStar identities are not rewritten. Alternate Echo spellings
+cannot establish a second connection or bypass a configured deny rule.
 
 ## Consequences
 

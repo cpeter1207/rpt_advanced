@@ -186,10 +186,14 @@ impl LinkScheduler {
     /// Validate all endpoint/window references before constructing candidate state.
     pub fn new(
         generation: u64,
-        routes: Vec<RouteSpec>,
+        mut routes: Vec<RouteSpec>,
         windows: Vec<ReplacementSpec>,
         previous: Option<&Self>,
     ) -> Result<Self, SchedulerError> {
+        for route in &mut routes {
+            route.remote = crate::link::PeerIdentity::canonical_operator(&route.remote)
+                .map_err(|_| SchedulerError::Invalid)?;
+        }
         if generation == 0
             || previous.is_some_and(|old| generation <= old.generation)
             || duplicate_routes_overlap(&routes, &windows)

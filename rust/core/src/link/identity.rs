@@ -47,6 +47,11 @@ impl PeerIdentity {
             Self::parse(ProtocolId::AllStarLink, alias)
         }
     }
+    /// Canonical control/configuration key before duplicate, access or retry
+    /// comparisons. AllStar spellings are retained; Echo aliases are reversible.
+    pub fn canonical_operator(alias: &str) -> Result<String, IdentityError> {
+        Self::from_operator(alias).map(|identity| identity.operator_alias())
+    }
     /// The protocol namespace, independent of numeric collisions.
     pub fn protocol(&self) -> ProtocolId {
         self.protocol

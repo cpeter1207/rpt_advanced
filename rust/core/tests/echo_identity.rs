@@ -2,6 +2,83 @@ use rpt_advanced_core::command::DtmfCommandMap;
 use rpt_advanced_core::link::{EchoAlias, PeerIdentity, ProtocolId};
 
 #[test]
+fn echo_aliases_are_canonical_before_configuration_and_access_comparisons() {
+    use rpt_advanced_core::{
+        access::AccessPolicy,
+        config::{
+            ConfigDocument, NodeId, ResolvedPermanentLinkSettings, ResolvedScheduleSettings, Schema,
+        },
+    };
+    let doc = ConfigDocument::parse("[1000]\nradio_channel=usb\n[permanent 1000 home]\nremote_node=4000\n[permanent 1000 echo]\nremote_node=30123456\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    assert_eq!(
+        ResolvedPermanentLinkSettings::resolve(&doc, &node, "echo")
+            .unwrap()
+            .value
+            .remote_nodes,
+        ["3123456"]
+    );
+    let schedule = "[1000]\nradio_channel=usb\n[permanent 1000 home]\nremote_node=4000\n[schedule 1000 one]\nremote_node=30123456\nreplace_permanent=home\ndays=monday\nstart_time=09:00\nend_time=10:00\n";
+    let doc = ConfigDocument::parse(schedule).unwrap();
+    assert_eq!(
+        ResolvedScheduleSettings::resolve(&doc, &node, "one")
+            .unwrap()
+            .value
+            .remote_nodes,
+        ["3123456"]
+    );
+    for input in [
+        "[1000]\n[permanent 1000 group]\nremote_node=30123456,3123456\n".to_owned(),
+        "[1000]\n[permanent 1000 one]\nremote_node=30123456\n[permanent 1000 two]\nremote_node=3123456\n".to_owned(),
+        format!("{schedule}[schedule 1000 two]\nremote_node=3123456\nreplace_permanent=home\ndays=monday\nstart_time=09:00\nend_time=10:00\n"),
+    ] {
+        assert!(Schema::validate(&ConfigDocument::parse(&input).unwrap()).is_err());
+    }
+    let deny = AccessPolicy::new("", "30123456").unwrap();
+    assert!(!deny.allows("3123456", true));
+    let allow = AccessPolicy::new("30123456", "").unwrap();
+    assert!(allow.allows("3123456", true));
+    assert!(allow.allows("30123456", true));
+    assert!(
+        AccessPolicy::new("00123456", "")
+            .unwrap()
+            .allows("00123456", true)
+    );
+    let doc = ConfigDocument::parse(
+        "[1000]\n[courtesy 1000 echo]\ninput=link\nremote_node=30123456\nmorse_text=E\n",
+    )
+    .unwrap();
+    assert_eq!(
+        rpt_advanced_core::config::ResolvedCourtesySettings::resolve(&doc, &node, "echo")
+            .unwrap()
+            .value
+            .remote_node,
+        "3123456"
+    );
+    let duplicated = ConfigDocument::parse("[1000]\n[courtesy 1000 one]\ninput=link\nremote_node=30123456\nmorse_text=E\n[courtesy 1000 two]\ninput=link\nremote_node=3123456\nmorse_text=F\n").unwrap();
+    assert!(Schema::validate(&duplicated).is_err());
+    use rpt_advanced_core::runtime::link_schedule::{LinkScheduler, RouteSpec};
+    let route = |remote: &str| RouteSpec {
+        local: "1000".into(),
+        remote: remote.into(),
+        permanent: true,
+        group_label: None,
+        group_name: None,
+        group_priority: None,
+    };
+    assert_eq!(
+        LinkScheduler::new(1, vec![route("30123456")], vec![], None)
+            .unwrap()
+            .route_specs()[0]
+            .remote,
+        "3123456"
+    );
+    assert!(
+        LinkScheduler::new(1, vec![route("30123456"), route("3123456")], vec![], None).is_err()
+    );
+}
+
+#[test]
 fn echo_telemetry_has_no_default_dtmf_prefix_and_reuses_mapping_validation() {
     use rpt_advanced_core::{
         command::{CommandMapping, LinkAction},
@@ -182,6 +259,23 @@ fn echo_remote_commands_never_create_asl_control_envelopes() {
     )
     .unwrap();
     links.accept("3123456", true).unwrap();
+    assert!(
+        links
+            .command(
+                DigitOperation::new(
+                    Command {
+                        action: LinkAction::Transceive,
+                        node: "30123456".into()
+                    },
+                    None
+                ),
+                host.control().work().unwrap(),
+                0,
+                true
+            )
+            .is_err(),
+        "alternate spelling must not create a second connection"
+    );
     for digit in [None, Some('5')] {
         let mut command = DigitOperation::new(
             Command {

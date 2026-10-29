@@ -381,21 +381,25 @@ impl NodeLinkControl {
         if !self.admitting {
             return Err(AdmissionError::Stale);
         }
+        let remote =
+            PeerIdentity::canonical_operator(remote).map_err(|_| AdmissionError::Identity)?;
         self.manager.authorize_incoming_member(
-            remote,
+            &remote,
             verified,
             &self.policy,
-            self.group_member(remote).as_ref(),
+            self.group_member(&remote).as_ref(),
         )
     }
     /// Recheck and publish a directory-verified incoming peer.
     pub fn accept(&mut self, remote: &str, verified: bool) -> Result<(), AdmissionError> {
-        self.authorize(remote, verified)?;
+        let remote =
+            PeerIdentity::canonical_operator(remote).map_err(|_| AdmissionError::Identity)?;
+        self.authorize(&remote, verified)?;
         self.manager.admit_incoming_member(
-            remote,
+            &remote,
             verified,
             &self.policy,
-            self.group_member(remote),
+            self.group_member(&remote),
         )
     }
     pub(super) fn schedule(&self) -> Option<&LinkScheduler> {
@@ -516,7 +520,23 @@ impl NodeLinkControl {
         if operation.reply.as_ref().is_some_and(PeerReply::ended) {
             return Err(AdmissionError::Stale);
         }
-        let remote = operation.command.node;
+        let remote = if matches!(
+            operation.command.action,
+            LinkAction::Monitor
+                | LinkAction::LocalMonitor
+                | LinkAction::Transceive
+                | LinkAction::PermanentMonitor
+                | LinkAction::PermanentLocalMonitor
+                | LinkAction::PermanentTransceive
+                | LinkAction::Disconnect
+                | LinkAction::DisconnectPermanent
+                | LinkAction::Command
+        ) {
+            PeerIdentity::canonical_operator(&operation.command.node)
+                .map_err(|_| AdmissionError::Identity)?
+        } else {
+            operation.command.node
+        };
         let effect = match operation.command.action {
             LinkAction::CancelMessage => LinkEffect::CancelMessage,
             action @ (LinkAction::Message | LinkAction::SiteStatus) => {

@@ -1167,6 +1167,8 @@ impl ResolvedCourtesySettings {
             .to_owned();
         let remote_node = lookup_valid_scopes(document, "remote_node", &named_scopes, node_value)
             .unwrap_or_default();
+        let remote_node =
+            crate::link::PeerIdentity::canonical_operator(&remote_node).unwrap_or(remote_node);
         if !matches!(input.as_str(), "receiver" | "link") {
             return Err(ConfigError::structure(
                 &section,
@@ -1417,7 +1419,10 @@ impl ResolvedPermanentLinkSettings {
                 remote_nodes: remote_nodes
                     .split(',')
                     .map(str::trim)
-                    .map(str::to_owned)
+                    .map(|node| {
+                        crate::link::PeerIdentity::canonical_operator(node)
+                            .expect("validated configured node")
+                    })
                     .collect(),
                 group_name: document
                     .lookup("group_name", &[section.as_str()])
@@ -1449,7 +1454,10 @@ impl ResolvedScheduleSettings {
             remote_nodes: get("remote_node")
                 .split(',')
                 .map(str::trim)
-                .map(str::to_owned)
+                .map(|node| {
+                    crate::link::PeerIdentity::canonical_operator(node)
+                        .expect("validated configured node")
+                })
                 .collect(),
             group_name: document
                 .lookup("group_name", &[section.as_str()])
