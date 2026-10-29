@@ -70,6 +70,41 @@ fn host() -> Host {
 }
 
 #[test]
+fn echo_alias_routing_precedes_allstar_directory_lookup() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    for (alias, destination) in [
+        ("3123456", "EchoLink/123456"),
+        ("31002775", "EchoLink/1002775"),
+        ("34294967295", "EchoLink/4294967295"),
+    ] {
+        assert_eq!(host.lookup("1000", alias, None).unwrap(), destination);
+        assert_eq!(
+            host.lookup("1000", alias, Some("127.0.0.1")),
+            Err(RuntimeError::Rejected),
+            "a directory address is not Echo QSO admission proof"
+        );
+    }
+    for alias in ["3000000", "34294967296", "300012x"] {
+        assert_eq!(
+            host.lookup("1000", alias, None),
+            Err(RuntimeError::Rejected)
+        );
+    }
+    assert_eq!(
+        host.lookup("1000", "2000", None).unwrap(),
+        "radio@fixture/2000"
+    );
+    assert_eq!(
+        host.lookup("missing", "3123456", None),
+        Err(RuntimeError::MissingNode)
+    );
+    assert!(host.stop(20));
+}
+
+#[test]
 fn echo_ring_policy_survives_prepared_generation() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
