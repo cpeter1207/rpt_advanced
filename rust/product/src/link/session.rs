@@ -110,6 +110,7 @@ pub type PeerObservation = crate::abi::rptadv_peer_observation_v1;
 
 mod observation;
 use observation::PeerObservationCache;
+pub(crate) use observation::describe as describe_peer_observation;
 /// Single control producer/event consumer; never borrowed by audio callbacks.
 pub struct PeerControl {
     callsign: String,
@@ -1068,8 +1069,13 @@ impl PeerSession {
         let first = !self.stop.swap(true, Ordering::AcqRel);
         self.inbound.signals().end();
         if first {
+            let detail = self
+                .peer_observation
+                .load()
+                .and_then(|peer| describe_peer_observation(&peer))
+                .map_or(String::new(), |text| format!("; {text}"));
             let message = format!(
-                "rpt_advanced {} peer {}: unexpected termination during {cause}: {error:?}",
+                "rpt_advanced {} peer {}: unexpected termination during {cause}: {error:?}{detail}",
                 self.local, self.remote
             );
             #[cfg(test)]

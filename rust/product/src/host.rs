@@ -889,6 +889,11 @@ impl Host {
                     peer_observation.egress_reliable_pending,
                     peer_observation.egress_reply_pending
                 );
+                if let Some(description) =
+                    crate::link::session::describe_peer_observation(peer_observation)
+                {
+                    let _ = writeln!(result, "    {description}");
+                }
             }
             if let Some(snapshot) = snapshot {
                 let egress = snapshot.egress;

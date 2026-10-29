@@ -609,6 +609,69 @@ unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
         .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32)
 }
 
+unsafe extern "C" fn peer_observe(
+    _: *mut c_void,
+    peer: *mut c_void,
+    output: *mut ffi::rptadv_peer_observation_v1,
+) -> i32 {
+    boundary(-1, || {
+        if output.is_null()
+            || unsafe { ptr::addr_of!((*output).struct_size).read() }
+                < size_of::<ffi::rptadv_peer_observation_v1>() as u32
+            || unsafe { ptr::addr_of!((*output).abi_version).read() } != 1
+        {
+            return -1;
+        }
+        let Some(peer) = (unsafe { echo_peer(peer) }) else {
+            return -1;
+        };
+        let raw = match unsafe { peer.observe() } {
+            Ok(raw) => raw,
+            Err(_) => return -1,
+        };
+        let mut result: ffi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of::<ffi::rptadv_peer_observation_v1>() as u32;
+        result.abi_version = 1;
+        result.echo_valid = 1;
+        result.jitter_queued_packets = raw.jitter.queued_packets;
+        result.jitter_delay_samples = raw.jitter.delay_samples;
+        result.jitter_buffered_span_samples = raw.jitter.buffered_samples;
+        result.jitter_duplicate_drops = raw.jitter.duplicate_drops;
+        result.jitter_late_drops = raw.jitter.late_drops;
+        result.jitter_full_drops = raw.jitter.full_drops;
+        result.jitter_missing_samples = raw.jitter.missing_samples;
+        result.jitter_insertion_samples = raw.jitter.insertion_samples;
+        result.jitter_skipped_samples = raw.jitter.skipped_samples;
+        result.jitter_limit_resets = raw.jitter.limit_resets;
+        result.jitter_overload_drops = raw.jitter.overload_drops;
+        result.jitter_overload_span_samples = raw.jitter.overload_samples;
+        result.egress_datagrams = raw.direct_datagrams;
+        result.egress_would_block = raw.blocked_sends;
+        result.echo_state = raw.state;
+        result.echo_first_cause = raw.first_cause;
+        result.echo_codec = raw.codec;
+        result.echo_raw_receiving = raw.raw_receiving;
+        result.echo_selected = raw.selected;
+        result.echo_transport = raw.transport;
+        result.echo_last_valid_age_ms = raw.last_valid_age_ms;
+        result.echo_heartbeat_due_ms = raw.heartbeat_due_ms;
+        result.echo_liveness_due_ms = raw.liveness_due_ms;
+        result.echo_retained_age_ms = raw.retained_age_ms;
+        result.echo_stale_packets = raw.stale_packets;
+        result.echo_malformed_packets = raw.malformed_packets;
+        result.echo_out_of_order_packets = raw.out_of_order_packets;
+        result.echo_codec_plc_samples = raw.codec_plc_samples;
+        result.echo_fallback_gap_samples = raw.fallback_gap_samples;
+        result.echo_proxy_admitted = raw.proxy_admitted;
+        result.echo_text_admitted = raw.text_admitted;
+        result.echo_text_rejected = raw.text_rejected;
+        result.echo_cause_detail = raw.cause_detail;
+        // A zero ingress capacity marks unavailable per-QSO ingress metrics, not an empty queue.
+        unsafe { ptr::write(output, result) };
+        0
+    })
+}
+
 unsafe extern "C" fn peer_read_source(
     _: *mut c_void,
     peer: *mut c_void,
@@ -941,7 +1004,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     peer_step_attach: Some(peer_step_attach),
     peer_step_stop: Some(peer_step_stop),
     peer_step_detach: Some(peer_step_detach),
-    peer_observe: None,
+    peer_observe: Some(peer_observe),
     peer_prepare_audio: Some(peer_prepare_audio),
     peer_reset_encoder: Some(peer_reset_encoder),
     peer_send_prepared: Some(peer_send_prepared),

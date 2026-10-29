@@ -148,6 +148,26 @@ struct rptadv_peer_observation_v1 {
     uint64_t egress_reliable_retries;      /**< Successful reliable retransmissions. */
     uint32_t egress_reliable_pending;      /**< Retained reliable frames. */
     uint32_t egress_reply_pending;         /**< Staged protocol replies. */
+    uint32_t echo_valid;                   /**< Nonzero only for the copied Echo metadata below. */
+    uint32_t echo_state;                   /**< Connecting0/connected1/closing2/closed3. */
+    uint32_t echo_first_cause;       /**< None0/local1/BYE2/connect3/liveness4/transport5/owner6. */
+    uint32_t echo_codec;             /**< Negotiated GSM0 or narrowband Speex1. */
+    uint32_t echo_raw_receiving;     /**< Valid session-bound packet activity. */
+    uint32_t echo_selected;          /**< Selected/draining RF activity. */
+    uint32_t echo_transport;         /**< Direct UDP0 or standard TCP Proxy1. */
+    uint64_t echo_last_valid_age_ms; /**< Age of valid voice/control. */
+    uint64_t echo_heartbeat_due_ms;  /**< Remaining heartbeat deadline, UINT64_MAX if inactive. */
+    uint64_t echo_liveness_due_ms;   /**< Remaining setup/liveness deadline, or inactive. */
+    uint64_t echo_retained_age_ms;   /**< Retained original datagram age; zero if none. */
+    uint64_t echo_stale_packets;     /**< Retired generation packets ignored. */
+    uint64_t echo_malformed_packets; /**< Invalid wire/media framing. */
+    uint64_t echo_out_of_order_packets; /**< Lower RTP sequences, excluding equal duplicates. */
+    uint64_t echo_codec_plc_samples;    /**< Native codec PLC accepted by product,8kHz samples. */
+    uint64_t echo_fallback_gap_samples; /**< Ordered spans accepted for shared-ring fallback PLC. */
+    uint64_t echo_proxy_admitted;       /**< Proxy queue admissions, not actual TCP sends. */
+    uint64_t echo_text_admitted;        /**< Human-text transport admissions. */
+    uint64_t echo_text_rejected;        /**< Human-text send attempts not admitted. */
+    uint8_t echo_cause_detail[32];      /**< NUL-padded content-free error category, max31bytes. */
 };
 
 /** Copied local civil time. Valid is zero when conversion failed. */

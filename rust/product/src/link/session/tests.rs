@@ -980,6 +980,8 @@ unsafe extern "C" fn observe_peer(
             egress_reliable_retries: 1,
             egress_reliable_pending: 3,
             egress_reply_pending: 0,
+            // This fixture's legacy observer supplies no Echo metadata.
+            ..std::mem::zeroed()
         };
         if state.bad_observe_size {
             (*output).struct_size -= 1;

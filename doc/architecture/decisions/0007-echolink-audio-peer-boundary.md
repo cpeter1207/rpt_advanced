@@ -258,6 +258,14 @@ advance together. Jitter/PLC spans use the 8 kHz source clock. Queue admission,
 complete local socket sends and unproven remote receipt are separate concepts.
 Proxy output counters include active/retired head-of-line stalls; a canceled
 partial write retains its cursor, and retirement cannot claim a successful send.
+The product's sized peer-observation tail carries copied EchoLink metadata.
+Both hosts map their native observation records explicitly; an IAX record is
+never cast to the larger product record. The serial owner captures the first
+failure before cleanup, then publishes atomic copies for status and one error
+log. Bounded category details are escaped when formatted; human text and
+credentials are excluded. An unavailable ingress capacity is not evidence of
+an empty queue. The current pre-release host/product extent checks advance
+together, without changing their descriptor versions or SONAMEs.
 
 ## Consequences
 

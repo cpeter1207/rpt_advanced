@@ -510,15 +510,99 @@ unsafe extern "C" fn peer_observe(
     output: *mut abi::rptadv_peer_observation_v1,
 ) -> i32 {
     boundary(-1, || {
+        if output.is_null()
+            || unsafe { ptr::addr_of!((*output).struct_size).read() }
+                < size_of::<abi::rptadv_peer_observation_v1>() as u32
+            || unsafe { ptr::addr_of!((*output).abi_version).read() } != 1
+        {
+            return -1;
+        }
+        if let Some(HostPeer::Echo(peer)) = unsafe { peer.cast::<PeerHandle>().as_ref() } {
+            let raw = match unsafe { peer.observe() } {
+                Ok(raw) => raw,
+                Err(_) => return -1,
+            };
+            let mut result: abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
+            result.struct_size = size_of::<abi::rptadv_peer_observation_v1>() as u32;
+            result.abi_version = 1;
+            result.echo_valid = 1;
+            result.jitter_queued_packets = raw.jitter.queued_packets;
+            result.jitter_delay_samples = raw.jitter.delay_samples;
+            result.jitter_buffered_span_samples = raw.jitter.buffered_samples;
+            result.jitter_duplicate_drops = raw.jitter.duplicate_drops;
+            result.jitter_late_drops = raw.jitter.late_drops;
+            result.jitter_full_drops = raw.jitter.full_drops;
+            result.jitter_missing_samples = raw.jitter.missing_samples;
+            result.jitter_insertion_samples = raw.jitter.insertion_samples;
+            result.jitter_skipped_samples = raw.jitter.skipped_samples;
+            result.jitter_limit_resets = raw.jitter.limit_resets;
+            result.jitter_overload_drops = raw.jitter.overload_drops;
+            result.jitter_overload_span_samples = raw.jitter.overload_samples;
+            result.egress_datagrams = raw.direct_datagrams;
+            result.egress_would_block = raw.blocked_sends;
+            result.echo_state = raw.state;
+            result.echo_first_cause = raw.first_cause;
+            result.echo_codec = raw.codec;
+            result.echo_raw_receiving = raw.raw_receiving;
+            result.echo_selected = raw.selected;
+            result.echo_transport = raw.transport;
+            result.echo_last_valid_age_ms = raw.last_valid_age_ms;
+            result.echo_heartbeat_due_ms = raw.heartbeat_due_ms;
+            result.echo_liveness_due_ms = raw.liveness_due_ms;
+            result.echo_retained_age_ms = raw.retained_age_ms;
+            result.echo_stale_packets = raw.stale_packets;
+            result.echo_malformed_packets = raw.malformed_packets;
+            result.echo_out_of_order_packets = raw.out_of_order_packets;
+            result.echo_codec_plc_samples = raw.codec_plc_samples;
+            result.echo_fallback_gap_samples = raw.fallback_gap_samples;
+            result.echo_proxy_admitted = raw.proxy_admitted;
+            result.echo_text_admitted = raw.text_admitted;
+            result.echo_text_rejected = raw.text_rejected;
+            result.echo_cause_detail = raw.cause_detail;
+            // A zero ingress capacity marks unavailable per-QSO ingress metrics, not an empty queue.
+            unsafe { ptr::write(output, result) };
+            return 0;
+        }
         let executor = unsafe { context.cast::<StandaloneHostContext>().as_ref() }
             .and_then(|context| context.ingress.as_ref().map(|ingress| &ingress.executor));
-        let peer = unsafe { iax_peer_ref(peer) };
-        match (executor, peer) {
-            (Some(executor), Some(peer)) => unsafe {
-                executor.observe(peer.0.raw_handle(), output.cast())
-            },
-            _ => -1,
+        let (Some(executor), Some(peer)) = (executor, unsafe { iax_peer_ref(peer) }) else {
+            return -1;
+        };
+        let mut raw: abi::rptadv_iax2_peer_observation_v1 = unsafe { std::mem::zeroed() };
+        raw.struct_size = size_of::<abi::rptadv_iax2_peer_observation_v1>() as u32;
+        raw.abi_version = 1;
+        if unsafe { executor.observe(peer.0.raw_handle(), ptr::from_mut(&mut raw).cast()) } != 0
+            || raw.struct_size as usize != size_of::<abi::rptadv_iax2_peer_observation_v1>()
+            || raw.abi_version != 1
+        {
+            return -1;
         }
+        // Translate the IAX record; its smaller storage is never cast to the extended product record.
+        let mut result: abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of::<abi::rptadv_peer_observation_v1>() as u32;
+        result.abi_version = 1;
+        result.jitter_queued_packets = raw.jitter_queued_packets;
+        result.jitter_delay_samples = raw.jitter_delay_samples;
+        result.jitter_buffered_span_samples = raw.jitter_buffered_span_samples;
+        result.jitter_duplicate_drops = raw.jitter_duplicate_drops;
+        result.jitter_late_drops = raw.jitter_late_drops;
+        result.jitter_full_drops = raw.jitter_full_drops;
+        result.jitter_missing_samples = raw.jitter_missing_samples;
+        result.jitter_insertion_samples = raw.jitter_insertion_samples;
+        result.jitter_skipped_samples = raw.jitter_skipped_samples;
+        result.jitter_limit_resets = raw.jitter_limit_resets;
+        result.jitter_overload_drops = raw.jitter_overload_drops;
+        result.jitter_overload_span_samples = raw.jitter_overload_span_samples;
+        result.ingress_overflow_drops = raw.ingress_overflow_drops;
+        result.ingress_queued_packets = raw.ingress_queued_packets;
+        result.ingress_capacity_packets = raw.ingress_capacity_packets;
+        result.egress_datagrams = raw.egress_datagrams;
+        result.egress_would_block = raw.egress_would_block;
+        result.egress_reliable_retries = raw.egress_reliable_retries;
+        result.egress_reliable_pending = raw.egress_reliable_pending;
+        result.egress_reply_pending = raw.egress_reply_pending;
+        unsafe { ptr::write(output, result) };
+        0
     })
 }
 

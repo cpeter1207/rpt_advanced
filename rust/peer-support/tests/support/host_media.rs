@@ -51,6 +51,19 @@ unsafe extern "C" fn step(context: *mut c_void) -> i32 {
 pub unsafe fn check(context: *mut c_void) {
     let fixture = support::Fixture::new("network");
     let handle = Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast();
+    let mut observed: abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
+    observed.struct_size = size_of::<abi::rptadv_peer_observation_v1>() as u32;
+    observed.abi_version = 1;
+    assert_eq!(unsafe { peer_observe(context, handle, &mut observed) }, 0);
+    assert_eq!(
+        (
+            observed.echo_valid,
+            observed.echo_state,
+            observed.echo_first_cause,
+            observed.echo_codec_plc_samples
+        ),
+        (1, 2, 4, 640)
+    );
     let mut result: abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
     result.struct_size = size_of::<abi::rptadv_codec_encode_result_v1>() as u32;
     let mut packet = [0; 4];
