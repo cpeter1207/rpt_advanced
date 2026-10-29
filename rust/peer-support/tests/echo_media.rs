@@ -131,10 +131,12 @@ fn earlier_network_prefix_is_rejected_without_prepared_account_commit() {
 
 #[test]
 fn read_result_has_explicit_activity_and_finite_completion_without_external_types() {
-    assert_eq!(size_of::<abi::ReadResult>(), 24);
+    assert_eq!(size_of::<abi::ReadResult>(), 28);
     assert_eq!(offset_of!(abi::ReadResult, finish_pending), 16);
     let result = abi::ReadResult::default();
-    assert_eq!(result.struct_size, 24);
+    assert_eq!(result.struct_size, 28);
+    assert_eq!(offset_of!(abi::ReadResult, represented_node_number), 24);
+    assert_eq!(result.represented_node_number, 0);
     assert_eq!(result.abi_version, 1);
     assert_eq!(result.activity, 0);
     assert_eq!(result.finish_pending, 0);

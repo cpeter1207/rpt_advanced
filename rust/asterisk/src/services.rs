@@ -619,15 +619,17 @@ unsafe extern "C" fn peer_read_source(
     output: *mut ffi::rptadv_peer_source_result_v1,
 ) -> i32 {
     boundary(-1, || {
-        let (Some(peer), Some(output)) = (unsafe { echo_peer(peer) }, unsafe { output.as_mut() })
-        else {
-            return -1;
-        };
-        if output.struct_size < size_of::<ffi::rptadv_peer_source_result_v1>() as u32
-            || output.abi_version != 1
+        if output.is_null()
+            || unsafe { ptr::addr_of!((*output).struct_size).read() }
+                < size_of::<ffi::rptadv_peer_source_result_v1>() as u32
+            || unsafe { ptr::addr_of!((*output).abi_version).read() } != 1
         {
             return -1;
         }
+        let Some(peer) = (unsafe { echo_peer(peer) }) else {
+            return -1;
+        };
+        let output = unsafe { &mut *output };
         let sink = unsafe { sink.as_ref() };
         if sink.is_some_and(|sink| {
             sink.struct_size < size_of::<ffi::rptadv_peer_source_sink_v1>() as u32
@@ -685,6 +687,7 @@ unsafe extern "C" fn peer_read_source(
                 output.activity = result.activity;
                 output.finish_pending = result.finish_pending;
                 output.state = result.state;
+                output.represented_node_number = result.represented_node_number;
                 0
             }
             Err(_) => -1,

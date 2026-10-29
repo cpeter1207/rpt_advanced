@@ -333,6 +333,9 @@ pub struct ReadResult {
     pub finish_pending: u32,
     /// Connecting=0, connected=1, closing=2, closed=3.
     pub state: u32,
+    /// Fresh directory identity of this turn's single human-text sender. Zero
+    /// means unresolved; representation never grants QSO/command authority.
+    pub represented_node_number: u32,
 }
 impl Default for ReadResult {
     fn default() -> Self {
@@ -343,6 +346,7 @@ impl Default for ReadResult {
             activity: 0,
             finish_pending: 0,
             state: 0,
+            represented_node_number: 0,
         }
     }
 }

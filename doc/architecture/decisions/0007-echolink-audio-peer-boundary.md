@@ -203,6 +203,14 @@ Remote-command selection rejects EchoLink aliases before creating ASL digit
 envelopes or changing the source collector's destination. A completed DTMF
 request receives a localized unsupported-route explanation through the normal
 source-addressed, polite telemetry path. No EchoLink chat command is invented.
+The sized peer-source read result carries a fresh, protocol-scoped numeric
+identity for its single human-text callback. Zero means unresolved. This tail
+does not change the sender/body callback or authenticated QSO identity; hosts
+copy it only after validating the complete result extent. EchoLink resolves a
+represented callsign from the current directory snapshot, without using that
+claim for authorization. Both host bridges require the new result extent in
+this coordinated pre-release host9/product7 transition; descriptor versions and
+SONAMEs remain unchanged. An incomplete record fails closed before any write.
 
 ## Consequences
 

@@ -115,6 +115,9 @@ struct rptadv_peer_source_result_v1 {
     uint32_t activity;       /**< 0 unchanged, 1 selected key, 2 selected unkey. */
     uint32_t finish_pending; /**< Publish one finite token and await its exact result. */
     uint32_t state;          /**< 0 connecting, 1 connected, 2 closing, 3 closed. */
+    /** Fresh protocol-scoped numeric identity for the one human-text callback
+     * in this turn; zero is unresolved. Never authentication or command authority. */
+    uint32_t represented_node_number;
 };
 
 /** Non-transactional peer ingress/jitter counters. Durations are negotiated

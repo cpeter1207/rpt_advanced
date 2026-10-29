@@ -121,12 +121,13 @@ pub unsafe fn check(context: *mut c_void) {
                     output.progress,
                     output.activity,
                     output.finish_pending,
-                    output.state
+                    output.state,
+                    output.represented_node_number,
                 ),
                 if completion == 0 {
-                    (2, 1, 1, 1)
+                    (2, 1, 1, 1, 123456)
                 } else {
-                    (3, 2, 0, 1)
+                    (3, 2, 0, 1, 123456)
                 }
             );
         }

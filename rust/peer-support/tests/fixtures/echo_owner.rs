@@ -163,6 +163,7 @@ unsafe extern "C" fn read(
         }
     }
     if let Some(text) = text {
+        result.represented_node_number = 123456;
         unsafe { text(context, span(b"W1ABC"), span(b"hello")) };
     }
     unsafe { out.write(result) };
