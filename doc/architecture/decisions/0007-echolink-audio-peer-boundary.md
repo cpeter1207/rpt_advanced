@@ -153,6 +153,14 @@ driver records do not keep disabled accounts or peer owners active. Failed open
 restores the prior configuration and attempts reconnect, never claiming online
 status without a successful directory operation. Disabled activation retains its
 host callback for later enable; permanent stop cannot be reversed.
+Both host adapters use one shared account set for private-credential preparation
+and stable notification contexts. Disabled records do not read credentials or
+create foreign accounts. Incoming notifications transfer through the selected
+host-admission control owner without waiting on provider Tokio work. A full
+queue leaves the provider's QSO untouched. Stop gates notifications, joins account
+callbacks, then drains accepted host work before the product can be released.
+This is one host-lifetime admission executor using the existing backend, never
+an executor per account/peer or a second packet/audio queue.
 
 ## Consequences
 

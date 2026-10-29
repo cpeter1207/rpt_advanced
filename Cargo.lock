@@ -635,6 +635,7 @@ version = "0.1.0-alpha17"
 dependencies = [
  "libc",
  "libloading",
+ "rptadv-control-standalone-adapter",
 ]
 
 [[package]]

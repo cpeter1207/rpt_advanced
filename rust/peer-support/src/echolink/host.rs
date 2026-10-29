@@ -1,6 +1,8 @@
 //! Shared non-audio host ownership. Accounts retain their context and provider DSO.
 use super::{Api, abi};
 use libloading::Library;
+mod accounts;
+pub use accounts::Accounts;
 use std::{
     net::SocketAddrV4,
     path::Path,
@@ -20,6 +22,10 @@ pub enum Error {
     Contract,
     /// Provider rejected the operation.
     Status(abi::Status),
+    /// Private account credentials could not be loaded safely.
+    Secrets,
+    /// The selected control owner could not quiesce off executor.
+    Control,
 }
 
 fn completed(status: abi::Status) -> Result<(), Error> {
