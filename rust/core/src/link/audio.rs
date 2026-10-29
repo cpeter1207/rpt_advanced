@@ -458,13 +458,29 @@ impl<P: PeerInput> LinkAudio<P> {
                 let signal = peer.input.signals();
                 (signal.pcm_epoch(), peer.input.available(), signal.ended())
             };
-            let audio_active = peer
-                .receive
-                .should_render(pcm_epoch, available, ended, count);
-            let audio_active = audio_active
-                && peer
-                    .receive
-                    .rendered(peer.input.render(&mut peer.audio[..count]), count);
+            let audio_active = match peer.input.finite_playout() {
+                Some(pending) => {
+                    // An explicit finite boundary bypasses ordinary startup and
+                    // PLC grace. Preserve the last real block even when rendering
+                    // it also publishes the consumer's drained acknowledgement.
+                    peer.receive.rendered(None, count);
+                    !ended
+                        && pending
+                        && peer
+                            .input
+                            .render(&mut peer.audio[..count])
+                            .is_some_and(|real| {
+                                real != 0 || peer.input.finite_playout() == Some(true)
+                            })
+                }
+                None => {
+                    peer.receive
+                        .should_render(pcm_epoch, available, ended, count)
+                        && peer
+                            .receive
+                            .rendered(peer.input.render(&mut peer.audio[..count]), count)
+                }
+            };
             if !audio_active {
                 peer.audio[..count].fill(0.0);
             }
