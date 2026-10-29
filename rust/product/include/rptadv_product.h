@@ -437,6 +437,11 @@ struct rptadv_host_services_v9 {
      * Zero admits one message, nonzero rejects only that message. Serial owner only. */
     int (*peer_send_human_text)(void *context, void *peer, struct rptadv_peer_bytes_v1 sender,
                                 struct rptadv_peer_bytes_v1 body);
+    /** Optional EchoLink account diagnostics, including when there are no QSOs.
+     * Control only, off provider/audio executors. Emit borrowed metadata text;
+     * zero with no text means no account, negative means unavailable, never offline. */
+    int (*echo_account_status)(void *context, const char *local, size_t local_length,
+                               rptadv_text_sink_v1 sink, void *sink_context);
 };
 
 /** Exact revision of a typed site control request. */

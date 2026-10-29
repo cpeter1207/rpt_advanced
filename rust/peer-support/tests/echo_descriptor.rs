@@ -6,6 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CALLS: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn account_snapshot_has_space_for_the_complete_callsign_without_a_qso() {
+    assert_eq!(size_of::<abi::AccountObservation>(), 280);
+}
+
 unsafe extern "C" fn create(
     _: *const abi::RuntimeConfig,
     _: *mut *mut abi::Context,

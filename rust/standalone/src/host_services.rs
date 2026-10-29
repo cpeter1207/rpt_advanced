@@ -119,6 +119,7 @@ impl HostServicesOwner {
             peer_info: Some(peer_info),
             peer_read_source: Some(peer_read_source),
             peer_send_human_text: Some(peer_send_human_text),
+            echo_account_status: Some(echo_account_status),
         });
         Ok(Self {
             context,
@@ -253,6 +254,37 @@ impl StandaloneHostContext {
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
+}
+
+// Host control only: release host/account maps before waiting for the owner.
+unsafe extern "C" fn echo_account_status(
+    context: *mut c_void,
+    local: *const c_char,
+    length: usize,
+    sink: abi::rptadv_text_sink_v1,
+    sink_context: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(context), Some(local), Some(sink)) = (
+            unsafe { context.cast::<StandaloneHostContext>().as_ref() },
+            unsafe { input(local, length) },
+            sink,
+        ) else {
+            return -1;
+        };
+        if let Some(accounts) = context.echo_accounts() {
+            match accounts.observe(local) {
+                Ok(Some(record)) => {
+                    let line =
+                        rptadv_peer_support::echolink::host::describe_account(local, &record);
+                    unsafe { sink(sink_context, line.as_ptr().cast(), line.len()) };
+                }
+                Ok(None) => {}
+                Err(_) => return -1,
+            }
+        }
+        0
+    })
 }
 
 unsafe fn visit_accounts(

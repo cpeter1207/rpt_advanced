@@ -789,6 +789,37 @@ impl HostContext {
     }
 }
 
+// Host control only: release host/account maps before waiting for the owner.
+unsafe extern "C" fn echo_account_status(
+    context: *mut c_void,
+    local: *const c_char,
+    length: usize,
+    sink: ffi::rptadv_text_sink_v1,
+    sink_context: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(context), Some(local), Some(sink)) = (
+            unsafe { context.cast::<HostContext>().as_ref() },
+            unsafe { text(local, length) },
+            sink,
+        ) else {
+            return -1;
+        };
+        if let Some(accounts) = context.echo_accounts() {
+            match accounts.observe(local) {
+                Ok(Some(record)) => {
+                    let line =
+                        rptadv_peer_support::echolink::host::describe_account(local, &record);
+                    unsafe { sink(sink_context, line.as_ptr().cast(), line.len()) };
+                }
+                Ok(None) => {}
+                Err(_) => return -1,
+            }
+        }
+        0
+    })
+}
+
 /// Owned immutable host table retained until all product/account callbacks stop.
 pub(crate) struct HostServicesOwner {
     context: Box<HostContext>,
@@ -1015,6 +1046,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     peer_info: Some(peer_info),
     peer_read_source: Some(peer_read_source),
     peer_send_human_text: Some(peer_send_human_text),
+    echo_account_status: Some(echo_account_status),
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.

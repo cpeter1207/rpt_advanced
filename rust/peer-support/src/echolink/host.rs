@@ -2,9 +2,11 @@
 use super::{Api, abi};
 use libloading::Library;
 mod accounts;
+mod observation;
 pub use accounts::{
     AccountVisitor, Accounts, Preparation, PreparedUpdate, UpdateError, UpdateOutcome,
 };
+pub use observation::describe_account;
 use std::{
     net::SocketAddrV4,
     path::Path,

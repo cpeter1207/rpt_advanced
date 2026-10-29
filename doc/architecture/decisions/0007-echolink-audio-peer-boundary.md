@@ -266,6 +266,12 @@ log. Bounded category details are escaped when formatted; human text and
 credentials are excluded. An unavailable ingress capacity is not evidence of
 an empty queue. The current pre-release host/product extent checks advance
 together, without changing their descriptor versions or SONAMEs.
+Account observations include the complete configured callsign without requiring
+a QSO. Both hosts expose one optional control-only status text callback at the
+current host table tail. It uses the existing borrowed text sink, not a second
+copy of the provider record. Missing accounts emit no text; query failure is
+unavailable, not an offline assertion. The paired current host table extent
+changes; the descriptor versions and SONAMEs remain unchanged.
 
 ## Consequences
 

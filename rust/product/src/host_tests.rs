@@ -144,6 +144,18 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
 }
 
 #[test]
+fn echo_account_status_is_visible_without_active_links() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let text = host.status_text("1000").unwrap();
+    assert!(text.contains("no active links"), "{text}");
+    assert!(text.contains("echo-account fixture-state=online"), "{text}");
+    assert!(host.stop(20));
+}
+
+#[test]
 fn echo_ring_policy_survives_prepared_generation() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

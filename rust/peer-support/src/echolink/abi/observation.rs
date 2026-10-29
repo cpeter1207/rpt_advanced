@@ -113,6 +113,9 @@ pub struct AccountObservation {
     pub ingress_full_packets: u64,
     /// Selected Proxy output; all zero for direct mode.
     pub proxy: ProxyObservation,
+    /// Complete NUL-padded configured station callsign, at most15 ASCII bytes.
+    /// Available without a connected QSO; empty for an unconfigured account.
+    pub callsign: [u8; 16],
 }
 
 /// Sole-serial-owner peer snapshot; never query from control/audio directly.

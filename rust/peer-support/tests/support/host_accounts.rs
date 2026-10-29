@@ -56,11 +56,34 @@ pub fn check(mut host: HostServicesOwner) {
     assert!(notifications.try_recv().is_err());
     unsafe { host.activate_echo() }.unwrap();
     notifications.recv_timeout(Duration::from_secs(5)).unwrap();
+    unsafe extern "C" fn status_sink(context: *mut c_void, text: *const c_char, length: usize) {
+        let result = unsafe { &mut *context.cast::<String>() };
+        result.push_str(
+            std::str::from_utf8(unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) })
+                .unwrap(),
+        );
+    }
+    let context = host.descriptor().context;
+    let mut status = String::new();
+    assert_eq!(
+        unsafe {
+            echo_account_status(
+                context,
+                c"524950".as_ptr(),
+                6,
+                Some(status_sink),
+                ptr::from_mut(&mut status).cast(),
+            )
+        },
+        0
+    );
+    assert!(status.contains("echo-account local=524950"), "{status}");
+    assert!(status.contains("state=online"), "{status}");
+    assert!(status.contains("directory-failures=7"), "{status}");
     unsafe extern "C" fn current(_: *mut c_void) -> u32 {
         1
     }
     let mut peer = ptr::null_mut();
-    let context = host.descriptor().context;
     assert_eq!(
         unsafe {
             peer_dial(

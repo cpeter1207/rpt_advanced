@@ -121,6 +121,17 @@ unsafe extern "C" fn scheduler_notice(_: *mut c_void, text: *const c_char, lengt
             .push(text.to_owned());
     }
 }
+unsafe extern "C" fn echo_account_status(
+    _: *mut c_void,
+    _: *const c_char,
+    _: usize,
+    sink: crate::abi::rptadv_text_sink_v1,
+    context: *mut c_void,
+) -> i32 {
+    let text = "echo-account fixture-state=online";
+    unsafe { sink.unwrap()(context, text.as_ptr().cast(), text.len()) };
+    0
+}
 unsafe extern "C" fn reaper() {}
 unsafe extern "C" fn directory_record(
     _: *mut c_void,
@@ -460,6 +471,7 @@ static mut HOST: crate::abi::rptadv_host_services_v9 = crate::abi::rptadv_host_s
     peer_info: Some(peer_info),
     peer_read_source: None,
     peer_send_human_text: None,
+    echo_account_status: Some(echo_account_status),
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v9 {
