@@ -54,8 +54,109 @@ pub(crate) struct State {
     pub(crate) prepared_result: i32,
     call_elapsed: u32,
     deadlines: Vec<u64>,
+    source_position: u64,
+    source_keyed: bool,
+    source_finish: bool,
+    source_acknowledgements: usize,
+    source_credits: Vec<(u64, usize)>,
 }
 type Shared = Arc<Mutex<State>>;
+
+#[test]
+fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    assert!(state.lock().unwrap().texts.is_empty());
+    assert_eq!(control.bind_text_generation(7).protocol, 2);
+    assert!(matches!(control.observer.policy(), InboundPolicy::Echo));
+    let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    control
+        .send(Command::Redirect { inbound, outbound })
+        .ok()
+        .unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.25; 640]));
+    session.step(0).unwrap();
+    assert_eq!(state.lock().unwrap().source_credits, [(0, 640)]);
+    assert!(session.pending_input.is_none());
+    assert!(consumer.signals().radio_keyed());
+    assert_eq!(consumer.finite_playout(), Some(true));
+    session.step(10).unwrap();
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+    let mut heard = false;
+    for _ in 0..10 {
+        let mut output = [0.0; 960];
+        consumer.render(&mut output).unwrap();
+        heard |= output.iter().any(|sample| sample.abs() > 0.1);
+        if consumer.finite_playout() == Some(false) {
+            break;
+        }
+    }
+    assert!(heard);
+    assert_eq!(consumer.finite_playout(), Some(false));
+    session.step(20).unwrap();
+    session.step(30).unwrap();
+    assert!(!consumer.signals().radio_keyed());
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
+    assert!(
+        state.lock().unwrap().texts.is_empty(),
+        "Echo must never send ASL queries"
+    );
+}
+
+#[test]
+fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    control
+        .send(Command::Redirect { inbound, outbound })
+        .ok()
+        .unwrap();
+    state.lock().unwrap().input.extend([
+        Input::Audio(vec![0.25; 4096]),
+        Input::Audio(vec![0.5; 4096]),
+        Input::Gap(160),
+        Input::Audio(vec![0.75; 640]),
+    ]);
+    session.step(0).unwrap();
+    assert_eq!(
+        state.lock().unwrap().source_credits,
+        [(0, 4096), (4096, 2080)]
+    );
+    assert_eq!(state.lock().unwrap().input.len(), 3);
+    assert!(
+        session.pending_input.is_none(),
+        "provider, not Session, owns the rejected suffix"
+    );
+    for now in 1..100 {
+        consumer.render(&mut [0.0; 960]).unwrap();
+        session.step(now * 20).unwrap();
+        if state.lock().unwrap().source_acknowledgements == 1 {
+            break;
+        }
+    }
+    let state = state.lock().unwrap();
+    assert!(state.input.is_empty());
+    assert_eq!(state.source_position, 8992);
+    assert_eq!(state.source_acknowledgements, 1);
+    assert!(!consumer.signals().radio_keyed());
+}
 
 #[test]
 fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
@@ -624,9 +725,20 @@ pub(crate) fn peer_with_egress(
     async_enabled: bool,
     egress: bool,
 ) -> (PeerIo, Shared) {
+    make_peer(rate_hz, async_enabled, egress, false)
+}
+fn source_peer() -> (PeerIo, Shared) {
+    make_peer(8000, true, true, true)
+}
+fn make_peer(rate_hz: u32, async_enabled: bool, egress: bool, source: bool) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
-        capabilities: 12 | u32::from(async_enabled) | (u32::from(egress) << 1),
+        capabilities: if source {
+            23
+        } else {
+            12 | u32::from(async_enabled) | (u32::from(egress) << 1)
+        },
+        fail_ready: source,
         ..State::default()
     }));
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
@@ -653,6 +765,9 @@ pub(crate) fn peer_with_egress(
         table.peer_step_wake = Some(wake_only);
         table.peer_set_deadline = Some(deadline);
     }
+    if source {
+        table.peer_read_source = Some(read_source);
+    }
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let handle = Box::into_raw(Box::new(state.clone())).cast();
     (unsafe { services.peer(handle) }.unwrap(), state)
@@ -664,7 +779,80 @@ unsafe extern "C" fn peer_info(
     output: *mut abi::rptadv_peer_info_v1,
 ) -> i32 {
     unsafe { crate::fixture::peer_info(context, peer, output) };
-    unsafe { (*output).capabilities = state(peer.cast_mut()).lock().unwrap().capabilities };
+    let capabilities = unsafe { state(peer.cast_mut()) }
+        .lock()
+        .unwrap()
+        .capabilities;
+    unsafe {
+        (*output).capabilities = capabilities;
+        if capabilities & 16 != 0 {
+            (*output).protocol = 2;
+            (*output).account_generation = 1;
+            (*output).qso_generation = 2;
+            (*output).callsign = abi::rptadv_peer_bytes_v1 {
+                data: b"W1XYZ-R".as_ptr(),
+                length: 7,
+            };
+        }
+    }
+    0
+}
+
+unsafe extern "C" fn read_source(
+    _: *mut c_void,
+    peer: *mut c_void,
+    drained: u32,
+    sink: *const abi::rptadv_peer_source_sink_v1,
+    _: abi::rptadv_peer_source_text_v1,
+    _: *mut c_void,
+    result: *mut abi::rptadv_peer_source_result_v1,
+) -> i32 {
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    let sink = unsafe { &*sink };
+    let result = unsafe { &mut *result };
+    result.state = 1;
+    if drained != 0 {
+        assert!(state.source_finish);
+        state.source_acknowledgements += 1;
+        state.source_finish = false;
+        state.source_keyed = false;
+        result.activity = 2;
+        result.progress = 3;
+    } else if state.source_finish {
+        result.finish_pending = 1;
+        result.progress = 2;
+    } else if let Some(input) = state.input.pop_front() {
+        if !state.source_keyed {
+            result.activity = 1;
+            state.source_keyed = true;
+        }
+        let start = state.source_position;
+        let (accepted, offered, remaining) = match input {
+            Input::Audio(mut pcm) => {
+                let offered = pcm.len();
+                let accepted =
+                    unsafe { sink.audio.unwrap()(sink.context, start, pcm.as_ptr(), offered, 0) };
+                pcm.drain(..accepted);
+                (accepted, offered, Input::Audio(pcm))
+            }
+            Input::Gap(count) => {
+                let accepted =
+                    unsafe { sink.gap.unwrap()(sink.context, start, count as u32) } as usize;
+                (accepted, count, Input::Gap(count - accepted))
+            }
+            _ => panic!("not a source fixture"),
+        };
+        state.source_position += accepted as u64;
+        state.source_credits.push((start, accepted));
+        if accepted < offered {
+            state.input.push_front(remaining);
+        }
+        result.progress = if accepted == offered { 1 } else { 2 };
+    } else if state.source_keyed {
+        state.source_finish = true;
+        result.finish_pending = 1;
+        result.progress = 2;
+    }
     0
 }
 
