@@ -14,3 +14,6 @@ rptadv-peer-support = { path = "../peer-support" }
 
 [build-dependencies]
 bindgen = "0.72.1"
+
+[dev-dependencies]
+libloading = "0.8"

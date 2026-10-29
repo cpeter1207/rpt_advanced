@@ -105,6 +105,9 @@ per-peer scratch block holds only derived processing state during a partial
 admission; it is not another audio delay queue or a second raw-input owner.
 
 Both hosts share provider/context/account lifetime owners in peer-support.
+Their tagged peer handles keep the existing native IAX payload separate from
+the shared EchoLink QSO. IAX-only callbacks reject Echo handles before casting;
+Echo metadata retains the real decimal station number, not its dial alias.
 The prepared account retains its context and dynamically loaded provider; a
 failed stop retains foreign state rather than unload code beneath notifications.
 The provider's sized PeerInfo includes the observed incoming SDES endpoint,

@@ -1,5 +1,9 @@
 //! Public-Asterisk implementation of the portable product host-services table.
 
+#[cfg(test)]
+#[path = "services/echo_tests.rs"]
+mod echo_tests;
+
 use crate::{
     bindings as ffi,
     connection::Connection,
@@ -9,6 +13,7 @@ use crate::{
     },
     radio::Radio,
 };
+use rptadv_peer_support::echolink::host::HostPeer;
 use std::{
     ffi::{CString, c_char, c_void},
     mem::size_of,
@@ -321,8 +326,10 @@ unsafe extern "C" fn peer_dial(
     })
 }
 unsafe extern "C" fn peer_rate(_context: *mut c_void, peer: *const c_void) -> u32 {
-    boundary(0, || {
-        unsafe { peer.cast::<PeerHandle>().as_ref() }.map_or(0, |peer| peer.io.rate())
+    boundary(0, || match unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        Some(HostPeer::Echo(_)) => 8000,
+        Some(HostPeer::Iax(peer)) => peer.io.rate(),
+        None => 0,
     })
 }
 unsafe extern "C" fn peer_bind_radio(
@@ -331,10 +338,17 @@ unsafe extern "C" fn peer_bind_radio(
     radio: *mut c_void,
 ) -> i32 {
     boundary(-1, || {
+        if matches!(
+            unsafe { peer.cast::<PeerHandle>().as_ref() },
+            Some(HostPeer::Echo(_))
+        ) {
+            return unsafe { radio.cast::<ReservedRadio>().as_ref() }
+                .map_or(-1, |radio| if radio.radio.is_some() { 0 } else { -1 });
+        }
         // SAFETY: the product lends uniquely owned peer/radio handles on control.
         let (Some(peer), Some(reserved)) = (unsafe {
             (
-                peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io),
+                iax_peer_mut(peer).map(|peer| &mut peer.io),
                 radio.cast::<ReservedRadio>().as_ref(),
             )
         }) else {
@@ -348,8 +362,7 @@ unsafe extern "C" fn peer_bind_radio(
 }
 unsafe extern "C" fn peer_ready(_context: *mut c_void, peer: *mut c_void) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) })
-        else {
+        let Some(peer) = (unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }) else {
             return -1;
         };
         peer.ready().map_or(-1, i32::from)
@@ -363,7 +376,7 @@ unsafe extern "C" fn peer_read(
 ) -> i32 {
     boundary(-1, || {
         let (Some(peer), Some(event)) = (
-            unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) },
+            unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) },
             event,
         ) else {
             return -1;
@@ -390,8 +403,7 @@ unsafe extern "C" fn peer_send_text(
     length: usize,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) })
-        else {
+        let Some(peer) = (unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }) else {
             return -1;
         };
         let Some(text) = (unsafe { text(text_pointer, length) }) else {
@@ -405,7 +417,7 @@ unsafe extern "C" fn peer_send_text(
 }
 unsafe extern "C" fn peer_send_digit(_context: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
     boundary(-1, || {
-        unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) }
+        unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }
             .ok_or(())
             .and_then(|peer| peer.send_digit(digit as char).map_err(|_| ()))
             .map_or(-1, |()| 0)
@@ -418,8 +430,7 @@ unsafe extern "C" fn peer_write(
     count: usize,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_mut().map(|peer| &mut peer.io) })
-        else {
+        let Some(peer) = (unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }) else {
             return -1;
         };
         if samples.is_null() && count != 0 {
@@ -495,18 +506,28 @@ pub fn descriptor() -> &'static ffi::rptadv_host_services_v9 {
 
 /// Transfer one raw peer owner to the portable product.
 pub fn into_raw(peer: PeerIo, local: &str, remote: &str) -> *mut c_void {
-    Box::into_raw(Box::new(PeerHandle {
+    Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle {
         io: peer,
         local: local.into(),
         remote: remote.into(),
-    }))
+    })))
     .cast()
 }
 
-struct PeerHandle {
+type PeerHandle = HostPeer<IaxHandle>;
+struct IaxHandle {
     io: PeerIo,
     local: String,
     remote: String,
+}
+
+// Native channel operations lend only their original uniquely owned IAX payload.
+// Echo uses the product mix and must never be cast to an Asterisk channel owner.
+unsafe fn iax_peer_mut<'a>(peer: *mut c_void) -> Option<&'a mut IaxHandle> {
+    match unsafe { peer.cast::<PeerHandle>().as_mut() }? {
+        HostPeer::Iax(peer) => Some(peer),
+        HostPeer::Echo(_) => None,
+    }
 }
 
 unsafe extern "C" fn peer_info(
@@ -525,25 +546,40 @@ unsafe extern "C" fn peer_info(
         {
             return -1;
         }
+        let (protocol, capabilities, account_generation, qso_generation, remote, local, callsign) =
+            match peer {
+                HostPeer::Iax(peer) => (1, 12, 0, 0, peer.remote.as_str(), peer.local.as_str(), ""),
+                HostPeer::Echo(peer) => {
+                    let identity = peer.identity();
+                    (
+                        2,
+                        identity.host_capabilities(),
+                        identity.account_generation,
+                        identity.qso_generation,
+                        peer.remote(),
+                        identity.local.as_str(),
+                        identity.callsign.as_str(),
+                    )
+                }
+            };
+        let bytes = |text: &str| ffi::rptadv_peer_bytes_v1 {
+            data: if text.is_empty() {
+                ptr::null()
+            } else {
+                text.as_ptr()
+            },
+            length: text.len(),
+        };
         *output = ffi::rptadv_peer_info_v1 {
             struct_size: size_of::<ffi::rptadv_peer_info_v1>() as u32,
             abi_version: 1,
-            protocol: 1,
-            capabilities: 12,
-            account_generation: 0,
-            qso_generation: 0,
-            remote: ffi::rptadv_peer_bytes_v1 {
-                data: peer.remote.as_ptr(),
-                length: peer.remote.len(),
-            },
-            callsign: ffi::rptadv_peer_bytes_v1 {
-                data: ptr::null(),
-                length: 0,
-            },
-            local: ffi::rptadv_peer_bytes_v1 {
-                data: peer.local.as_ptr(),
-                length: peer.local.len(),
-            },
+            protocol,
+            capabilities,
+            account_generation,
+            qso_generation,
+            remote: bytes(remote),
+            callsign: bytes(callsign),
+            local: bytes(local),
         };
         0
     })

@@ -578,6 +578,7 @@ name = "rptadv-asterisk-adapter"
 version = "0.1.0-alpha17"
 dependencies = [
  "bindgen",
+ "libloading",
  "rptadv-peer-support",
 ]
 

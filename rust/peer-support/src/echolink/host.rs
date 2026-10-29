@@ -166,6 +166,7 @@ impl Account {
         let peer = Arc::new(Peer {
             handle,
             account: Arc::clone(self),
+            remote: identity.node_number.to_string(),
             identity,
         });
         unsafe { event.taken.write(1) };
@@ -267,6 +268,7 @@ pub struct Peer {
     handle: NonNull<abi::Qso>,
     account: Arc<Account>,
     identity: Identity,
+    remote: String,
 }
 // Immutable metadata is copied; mutable provider media is accessed only by its serial owner.
 unsafe impl Send for Peer {}
@@ -275,6 +277,10 @@ impl Peer {
     /// Borrow the copied identity; fresh admission still uses provider revalidation.
     pub fn identity(&self) -> &Identity {
         &self.identity
+    }
+    /// Borrow the canonical real decimal ID for host ABI metadata.
+    pub fn remote(&self) -> &str {
+        &self.remote
     }
 
     /// Recheck directory/account/QSO state at final admission, not as a live-call
@@ -355,4 +361,13 @@ impl Drop for Registration {
             self.peer.account.provider.api.table().peer_detach.unwrap()(self.handle.as_ptr())
         };
     }
+}
+
+/// Host-specific native payloads retain their existing implementation. Echo
+/// peers share this owner without creating an Asterisk channel or PCM workspace.
+pub enum HostPeer<Iax> {
+    /// Existing host-native IAX/channel owner.
+    Iax(Iax),
+    /// Verified EchoLink QSO retained through its serial registration.
+    Echo(Arc<Peer>),
 }
