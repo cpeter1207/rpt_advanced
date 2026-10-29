@@ -257,7 +257,8 @@ pub struct PeerInfo {
     pub abi_version: u32,
     /// Complete real EchoLink station ID.
     pub node_number: u32,
-    /// Available operations for this connection.
+    /// Supported descriptor subset: network=2, source/prepared media=4, human text=8.
+    /// Lifecycle bit1 is not a peer capability; hosts intersect complete advertised groups.
     pub capabilities: u32,
     /// Owning account generation.
     pub account_generation: u64,
@@ -268,7 +269,7 @@ pub struct PeerInfo {
     /// Owning controller node, stable until QSO destruction.
     pub local_node: ByteSpan,
     /// Observed incoming SDES endpoint as IPv4:port, stable until QSO destruction.
-    /// Proxy framing supplies port zero. Empty for a dial with no incoming handshake.
+    /// Proxy framing supplies port zero. Empty for outbound calls.
     pub source: ByteSpan,
 }
 
@@ -281,7 +282,7 @@ pub struct Event {
     pub kind: u32,
     /// Provider-created QSO or null for account status.
     pub qso: *mut Qso,
-    /// Account/QSO generation appropriate to kind.
+    /// Account generation for kind0; QSO generation for kinds1/2.
     pub generation: u64,
     /// Value-free operation/termination status.
     pub status: Status,
