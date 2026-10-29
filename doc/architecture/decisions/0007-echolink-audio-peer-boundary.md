@@ -124,6 +124,10 @@ failed stop retains foreign state rather than unload code beneath notifications.
 The provider's sized PeerInfo includes the observed incoming SDES endpoint,
 including port zero for Proxy framing. This supplies the typed incoming request
 without substituting a directory address or assumed port for an observation.
+Outgoing calls have no observed incoming endpoint. Shared owners retain that
+absence explicitly; incoming handoffs require the real observation. Dial adopts
+only the requested real station ID and owning local account, retiring mismatched
+returned QSOs before reporting failure.
 The network/media operation group remains unpublished while this record and
 the shared host glue are integrated; lifecycle-only users do not consume it.
 The product's existing configuration visitor carries a borrowed provider account

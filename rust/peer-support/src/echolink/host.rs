@@ -131,6 +131,44 @@ pub struct Account {
 unsafe impl Send for Account {}
 unsafe impl Sync for Account {}
 impl Account {
+    /// Dial one real EchoLink ID on host control/dial work, never on a provider
+    /// or audio callback. Outbound calls have no observed incoming endpoint.
+    pub fn dial(self: &Arc<Self>, node: u32) -> Result<Arc<Peer>, Error> {
+        if node == 0 {
+            return Err(Error::Status(abi::Status::Invalid));
+        }
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Status(abi::Status::Closed));
+        }
+        if !self.provider.api.network_available() {
+            return Err(Error::Status(abi::Status::Unsupported));
+        }
+        let mut handle = std::ptr::null_mut();
+        completed(unsafe {
+            self.provider.api.table().dial.unwrap()(self.handle.as_ptr(), node, &mut handle)
+        })?;
+        let handle = NonNull::new(handle).ok_or(Error::Contract)?;
+        let identity = unsafe { Identity::read(&self.provider.api, handle) }.and_then(|identity| {
+            if identity.local == self.local && identity.node_number == node {
+                Ok(identity)
+            } else {
+                Err(Error::Contract)
+            }
+        });
+        match identity {
+            Ok(identity) => Ok(Arc::new(Peer {
+                handle,
+                account: Arc::clone(self),
+                remote: node.to_string(),
+                identity,
+            })),
+            Err(error) => {
+                unsafe { self.provider.api.table().peer_destroy.unwrap()(handle.as_ptr()) };
+                Err(error)
+            }
+        }
+    }
+
     /// Gate incoming work and join account notifications before releasing host state.
     /// Repeated stop is harmless. Never call from a provider executor or audio callback.
     pub fn stop(&self) -> Result<(), Error> {
@@ -149,7 +187,10 @@ impl Account {
     pub unsafe fn take_pending(self: &Arc<Self>, event: &abi::Event) -> Result<Arc<Peer>, Error> {
         let handle = unsafe { self.pending_handle(event) }?;
         let identity = unsafe { Identity::read(&self.provider.api, handle) }?;
-        if identity.local != self.local || identity.qso_generation != event.generation {
+        if identity.local != self.local
+            || identity.qso_generation != event.generation
+            || identity.source.is_none()
+        {
             return Err(Error::Contract);
         }
         let peer = Arc::new(Peer {
@@ -273,8 +314,9 @@ pub struct Identity {
     pub callsign: String,
     /// Owning controller node.
     pub local: String,
-    /// Original observed incoming SDES endpoint, with port zero for Proxy framing.
-    pub source: SocketAddrV4,
+    /// Observed incoming SDES endpoint, with port zero for Proxy framing. None
+    /// for outbound QSOs; pending incoming admission always requires Some.
+    pub source: Option<SocketAddrV4>,
 }
 impl Identity {
     /// Translate to host-services bits without granting ASL remote commands.
@@ -315,9 +357,12 @@ impl Identity {
         }
         let callsign = unsafe { text(output.callsign, 15) }?;
         let local = unsafe { text(output.local_node, 32) }?;
-        let source = unsafe { text(output.source, 64) }?
-            .parse()
-            .map_err(|_| Error::Contract)?;
+        let source = unsafe { text(output.source, 64) }?;
+        let source = if source.is_empty() {
+            None
+        } else {
+            Some(source.parse().map_err(|_| Error::Contract)?)
+        };
         if callsign.is_empty()
             || local.is_empty()
             || !local.bytes().all(|byte| byte.is_ascii_digit())

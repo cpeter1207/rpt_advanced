@@ -11,6 +11,89 @@ fn prepared_peer_retains_its_account_without_an_external_owner() {
     drop(peer);
 }
 
+#[test]
+fn outgoing_dial_accepts_absent_observed_source_but_incoming_admission_does_not() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let account = unsafe {
+        provider.prepare(
+            &abi::AccountConfig {
+                enabled: 1,
+                local_node: abi::ByteSpan {
+                    data: b"524950".as_ptr(),
+                    length: 6,
+                },
+                ..abi::AccountConfig::default()
+            },
+            &abi::AccountSecrets {
+                struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+                abi_version: 1,
+                directory_password: abi::ByteSpan::default(),
+                proxy_password: abi::ByteSpan::default(),
+            },
+        )
+    }
+    .unwrap();
+    assert!(matches!(
+        account.dial(1),
+        Err(Error::Status(abi::Status::Failed))
+    ));
+    assert!(matches!(
+        account.dial(0),
+        Err(Error::Status(abi::Status::Invalid))
+    ));
+    assert!(
+        matches!(account.dial(42), Err(Error::Contract)),
+        "a wrong returned station must not be adopted"
+    );
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_peers\0") }.unwrap();
+    assert_eq!(
+        unsafe { count() },
+        0,
+        "a failed owned dial must destroy its QSO"
+    );
+    let peer = account.dial(u32::MAX).unwrap();
+    assert_eq!(peer.remote(), "4294967295");
+    assert!(
+        peer.identity().source.is_none(),
+        "never fabricate an observed endpoint for an outbound call"
+    );
+    assert_eq!(peer.revalidate(), Ok(()));
+    drop(peer);
+    let create = unsafe {
+        library.get::<unsafe extern "C" fn() -> *mut abi::Qso>(b"fixture_outbound_peer\0")
+    }
+    .unwrap();
+    let destroy =
+        unsafe { library.get::<unsafe extern "C" fn(*mut abi::Qso)>(b"fixture_peer_destroy\0") }
+            .unwrap();
+    let qso = unsafe { create() };
+    let mut taken = 0;
+    assert!(
+        unsafe {
+            account.take_pending(&abi::Event {
+                struct_size: std::mem::size_of::<abi::Event>() as u32,
+                kind: 1,
+                qso,
+                generation: 9,
+                status: abi::Status::Pending,
+                taken: &mut taken,
+            })
+        }
+        .is_err()
+    );
+    assert_eq!(taken, 0);
+    unsafe { destroy(qso) };
+    account.stop().unwrap();
+    assert!(matches!(
+        account.dial(u32::MAX),
+        Err(Error::Status(abi::Status::Closed))
+    ));
+}
+
 use support::Fixture;
 
 #[test]
@@ -66,7 +149,10 @@ fn pending_handoff_handles_rejection_and_execution_before_submit_returns() {
                 let claimed = std::thread::spawn(move || pending.claim()).join().unwrap();
                 if generation == 9 {
                     let peer = claimed.unwrap();
-                    assert_eq!(peer.identity().source.to_string(), "127.0.0.2:49152");
+                    assert_eq!(
+                        peer.identity().source.unwrap().to_string(),
+                        "127.0.0.2:49152"
+                    );
                     drop(peer);
                 } else {
                     assert!(
@@ -114,6 +200,12 @@ fn account_retains_context_after_the_host_releases_its_provider() {
     }
     .unwrap();
     drop(provider);
+    assert!(matches!(
+        account.dial(1),
+        Err(rptadv_peer_support::echolink::host::Error::Status(
+            abi::Status::Unsupported
+        ))
+    ));
     assert_eq!(account.stop(), Ok(()));
     drop(account);
     // A second open also verifies balanced context/account destruction in the fixture.
@@ -257,7 +349,10 @@ fn incoming_ownership_is_claimed_only_after_fresh_provider_validation() {
         } else {
             let peer = peer.unwrap();
             assert_eq!(taken, 1);
-            assert_eq!(peer.identity().source.to_string(), "127.0.0.2:49152");
+            assert_eq!(
+                peer.identity().source.unwrap().to_string(),
+                "127.0.0.2:49152"
+            );
             assert_eq!(peer.identity().callsign, "W1XYZ-R");
             assert_eq!(peer.identity().node_number, u32::MAX);
             assert_eq!(
