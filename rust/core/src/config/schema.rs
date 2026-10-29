@@ -366,6 +366,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_admin_lock"
                 | "link_command_parrot_enable"
                 | "link_command_parrot_disable"
+                | "link_command_echo_telemetry"
         ),
         KnownScope::Identifier => {
             super::messages::content_key(key)
@@ -871,6 +872,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_message" => "77",
         "link_command_site_status" => "76",
         "link_command_cancel_message" => "78",
+        "link_command_echo_telemetry" => "",
         _ => return None,
     })
 }

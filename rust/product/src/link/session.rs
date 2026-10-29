@@ -183,6 +183,7 @@ impl PeerObservationCache {
 }
 /// Single control producer/event consumer; never borrowed by audio callbacks.
 pub struct PeerControl {
+    callsign: String,
     can_forward_text: bool,
     text_identity: Arc<TextIdentity>,
     egress: Arc<EgressStatistics>,
@@ -210,6 +211,14 @@ impl PeerControl {
     /// Copied per-connection capability; does not borrow the serial I/O owner.
     pub fn can_forward_text(&self) -> bool {
         self.can_forward_text
+    }
+    /// Immutable authenticated callsign for protocol-specific announcements.
+    pub fn callsign(&self) -> &str {
+        &self.callsign
+    }
+    /// Publish a control-resolved eligibility bit; the audio owner reads no timers.
+    pub fn set_telemetry_allowed(&self, allowed: bool) {
+        self.observer.signals().set_telemetry_allowed(allowed);
     }
     /// Capture this exact inbound endpoint for source-addressed command replies.
     pub fn reply_target(&self) -> rpt_advanced_core::link::PeerReply {
@@ -625,6 +634,7 @@ impl PeerSession {
         #[cfg(test)]
         let owner_thread = Arc::new(std::sync::Mutex::new(None));
         let control = PeerControl {
+            callsign: io.callsign().to_owned(),
             can_forward_text: io.can_forward_text(),
             text_identity: Arc::clone(&text_identity),
             egress: outbound.statistics.clone(),

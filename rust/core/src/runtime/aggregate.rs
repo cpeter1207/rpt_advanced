@@ -159,6 +159,7 @@ pub struct RuntimeNode<A: Send, C: Send = ()> {
     status: ResolvedIdentifierSettings,
     time_format: u64,
     group_announcements: Vec<GroupAnnouncement>,
+    echo_telemetry: crate::link::EchoTelemetryPolicy,
 }
 impl<A: Send, C: Send> RuntimeNode<A, C> {
     /// Station-owned site policy; callers deliver observations/effects off audio.
@@ -717,6 +718,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
         // No fallible preparation remains: external registration is still gated to these stable hosts.
         let mut next = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
+            let identity = NodeId::new(&candidate.name).expect("configured station");
+            let echo = crate::config::EchoLinkSettings::resolve(&document, &identity)
+                .expect("validated account settings")
+                .value;
+            let echo_telemetry =
+                crate::link::EchoTelemetryPolicy::new(echo.telemetry, echo.telemetry_dynamic);
             let policy = AccessPolicy::new(
                 &candidate.settings.link_allow_nodes,
                 &candidate.settings.link_deny_nodes,
@@ -774,6 +781,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
                 old.time_format = candidate.time_format;
+                old.echo_telemetry = echo_telemetry;
                 next.push(old);
             } else {
                 let mut links =
@@ -799,6 +807,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     status: candidate.status,
                     time_format: candidate.time_format,
                     group_announcements: Vec::new(),
+                    echo_telemetry,
                 });
             }
         }
@@ -1467,6 +1476,29 @@ impl<A: Send, C: Send> Runtime<A, C> {
         second: &str,
         connected: bool,
     ) -> Result<(), RuntimeError> {
+        self.queue_link_event_with_echo(first, second, connected, None)
+    }
+    /// Use the owning QSO's validated callsign and full real ID, while retaining
+    /// ordinary local/third-party wording, politeness and reconnect cancellation.
+    pub fn queue_echo_link_event(
+        &mut self,
+        first: &str,
+        second: &str,
+        callsign: &str,
+        connected: bool,
+    ) -> Result<(), RuntimeError> {
+        let node = crate::link::EchoAlias::parse(second)
+            .map_err(|_| RuntimeError::Rejected)?
+            .to_string();
+        self.queue_link_event_with_echo(first, second, connected, Some((&node, callsign)))
+    }
+    fn queue_link_event_with_echo(
+        &mut self,
+        first: &str,
+        second: &str,
+        connected: bool,
+        echo: Option<(&str, &str)>,
+    ) -> Result<(), RuntimeError> {
         let (lower, upper) = if first <= second {
             (first, second)
         } else {
@@ -1515,12 +1547,24 @@ impl<A: Send, C: Send> Runtime<A, C> {
             } else {
                 Message::PeerDisconnectedThirdParty { first, second }
             };
-            let queued = node
-                .control
-                .catalog
-                .format(&message)
+            let forms = if let Some((number, callsign)) = echo {
+                let identity = NodeId::new(&node.name).expect("configured station");
+                let account = crate::config::EchoLinkSettings::resolve(&self.document, &identity)
+                    .expect("validated account settings")
+                    .value;
+                node.control.catalog.format_echo_peer(
+                    account.announcement,
+                    number,
+                    callsign,
+                    &message,
+                )
+            } else {
+                node.control.catalog.format(&message).map(Some)
+            };
+            let queued = forms
                 .map_err(|_| RuntimeError::Preparation)
                 .and_then(|forms| {
+                    let Some(forms) = forms else { return Ok(()) };
                     let spoken = render::telemetry_speech(&forms.tts, &[first, second]);
                     queue_status_media(
                         &mut node.control.telemetry,
@@ -1656,10 +1700,30 @@ impl<A: Send, C: Send> Runtime<A, C> {
         let work = node.work().ok_or(RuntimeError::Rejected)?;
         let reply = operation.reply.clone();
         let origin = operation.origin.clone();
-        let effect = node
+        let mut effect = node
             .links
             .command(operation, work, clock.now_ms, directory_verified)
             .map_err(RuntimeError::Link)?;
+        if let LinkEffect::EchoTelemetry(mode) = &effect {
+            if !node.echo_telemetry.select(*mode, clock.now_ms) {
+                return Err(RuntimeError::Rejected);
+            }
+            if let Some(reply) = &reply {
+                node.links
+                    .confirm_peer_parrot_command(origin.as_deref(), reply, clock.now_ms);
+            } else {
+                node.links.confirm_parrot_command(clock.now_ms);
+            }
+            effect = LinkEffect::None;
+        }
+        if matches!(
+            &effect,
+            LinkEffect::Telemetry(..) | LinkEffect::Message { .. } | LinkEffect::SiteStatus { .. }
+        ) {
+            if let Some(reply) = &reply {
+                node.echo_telemetry.requested(reply, clock.now_ms);
+            }
+        }
         if let LinkEffect::ParrotEnabled(enabled) = &effect {
             if !node.control.telemetry.set_parrot_enabled(*enabled) {
                 return Err(RuntimeError::Rejected);
@@ -1686,6 +1750,43 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .links
             .accept(remote, verified)
             .map_err(RuntimeError::Link)
+    }
+    /// Trusted typed control selection; DTMF reaches this policy only after the
+    /// source collector's administrative grant and mapping checks have passed.
+    pub fn set_echo_telemetry(
+        &mut self,
+        local: &str,
+        mode: crate::config::EchoLinkTelemetry,
+        now_ms: u64,
+    ) -> Result<(), RuntimeError> {
+        self.node(local)
+            .ok_or(RuntimeError::MissingNode)?
+            .echo_telemetry
+            .select(mode, now_ms)
+            .then_some(())
+            .ok_or(RuntimeError::Rejected)
+    }
+    /// Open only an explicitly prepared command-response window for this QSO.
+    pub fn echo_response_requested(
+        &mut self,
+        local: &str,
+        reply: &crate::link::PeerReply,
+        now_ms: u64,
+    ) {
+        if let Some(node) = self.node(local) {
+            node.echo_telemetry.requested(reply, now_ms);
+        }
+    }
+    /// Additional eligibility beneath existing source/audience and polite rules.
+    /// Local telemetry is enabled in this controller; follow cannot broaden it.
+    pub fn echo_telemetry_allows(
+        &mut self,
+        local: &str,
+        reply: &crate::link::PeerReply,
+        now_ms: u64,
+    ) -> bool {
+        self.node(local)
+            .is_some_and(|node| node.echo_telemetry.allows(reply, now_ms, true))
     }
     /// Check current inbound policy and topology without publishing a peer.
     pub fn authorize_incoming(

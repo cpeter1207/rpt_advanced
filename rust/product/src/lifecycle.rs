@@ -181,12 +181,22 @@ impl Engine {
             Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::Loop))
                 if dtmf_source =>
             {
-                self.run(move |host| host.runtime.queue_loop_rejected(&local, &peer, reply))
+                let now_ms = self.clock().now_ms;
+                self.run(move |host| {
+                    if let Some(reply) = &reply {
+                        host.runtime.echo_response_requested(&local, reply, now_ms);
+                    }
+                    host.runtime.queue_loop_rejected(&local, &peer, reply)
+                })
             }
             Err(RuntimeError::Link(rpt_advanced_core::link::AdmissionError::UnsupportedRoute))
                 if dtmf_source =>
             {
+                let now_ms = self.clock().now_ms;
                 self.run(move |host| {
+                    if let Some(reply) = &reply {
+                        host.runtime.echo_response_requested(&local, reply, now_ms);
+                    }
                     host.runtime
                         .queue_remote_command_unsupported(&local, &peer, reply)
                 })

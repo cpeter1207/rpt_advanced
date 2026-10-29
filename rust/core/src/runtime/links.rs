@@ -95,6 +95,8 @@ pub enum LinkEffect {
     },
     /// Change the live node's parrot state; apply buffer lifecycle work on control.
     ParrotEnabled(bool),
+    /// Already-authorized account telemetry selection; runtime applies the policy.
+    EchoTelemetry(crate::config::EchoLinkTelemetry),
     /// Cancel only the currently admitted message attempt on the audio owner.
     CancelMessage,
     /// No physical operation is needed (for example resumed retry intent).
@@ -696,7 +698,9 @@ impl NodeLinkControl {
             | LinkAction::LastKeyed
             | LinkAction::FullStatus
             | LinkAction::Time) => LinkEffect::Telemetry(action, operation.reply),
-            action @ (LinkAction::ParrotEnable | LinkAction::ParrotDisable) => {
+            action @ (LinkAction::ParrotEnable
+            | LinkAction::ParrotDisable
+            | LinkAction::EchoTelemetry) => {
                 let commands = if let Some(reply) = &operation.reply {
                     self.peer_commands
                         .iter_mut()
@@ -712,7 +716,18 @@ impl NodeLinkControl {
                 }) {
                     return Err(AdmissionError::Denied);
                 }
-                LinkEffect::ParrotEnabled(action == LinkAction::ParrotEnable)
+                if action == LinkAction::EchoTelemetry {
+                    use crate::config::EchoLinkTelemetry as Mode;
+                    LinkEffect::EchoTelemetry(match remote.as_str() {
+                        "0" => Mode::Off,
+                        "1" => Mode::On,
+                        "2" => Mode::Follow,
+                        "3" => Mode::Demand,
+                        _ => return Err(AdmissionError::Invalid),
+                    })
+                } else {
+                    LinkEffect::ParrotEnabled(action == LinkAction::ParrotEnable)
+                }
             }
             LinkAction::AdminUnlock | LinkAction::AdminLock | LinkAction::PadTest => {
                 return Err(AdmissionError::Denied);

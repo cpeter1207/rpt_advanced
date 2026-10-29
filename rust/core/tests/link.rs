@@ -597,7 +597,7 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
 }
 
 #[test]
-fn generated_status_stays_local_and_never_reaches_a_link() {
+fn generated_status_obeys_exact_audience_and_per_peer_telemetry_gate() {
     use rpt_advanced_core::{
         audio::{LinkAudioQueue, PcmRead, PcmStreamReader},
         controller::{ControllerSettings, CourtesySettings, NodeController, PreparedMedia},
@@ -632,49 +632,68 @@ fn generated_status_stays_local_and_never_reaches_a_link() {
             Some(0)
         }
     }
-    let (producer, mut consumer) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-    let peer = AudioPeer::new(
-        "200",
-        Mode::TRANSCEIVE,
-        Quiet(PeerSignals::new()),
-        producer,
-        960,
-        100,
-    )
-    .unwrap();
-    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
-    let (mut controller, mut control) = NodeController::new(
-        ControllerSettings::default(),
-        vec![],
-        vec![],
-        CourtesySettings::default(),
-    )
-    .unwrap();
-    assert!(
-        control
-            .queue_prepared_status(PreparedMedia::new_stream(Box::new(StatusStream(240))).unwrap())
-    );
-    let mut found_local = false;
-    for _ in 0..14 {
-        let mut rf = [0.0; 960];
+    for (targeted, allowed) in [(false, true), (false, false), (true, true), (true, false)] {
+        let signals = PeerSignals::new();
+        signals.set_telemetry_allowed(allowed);
+        let reply = signals.reply_target();
+        let (producer, mut consumer) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+        let peer =
+            AudioPeer::new("200", Mode::TRANSCEIVE, Quiet(signals), producer, 960, 100).unwrap();
+        let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
+        let (mut controller, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        assert!(
+            control.queue_prepared_status(
+                PreparedMedia::new_stream(Box::new(StatusStream(240)))
+                    .unwrap()
+                    .reply_to(targeted.then_some(reply))
+            )
+        );
+        let mut found_local = false;
+        let mut found_peer = false;
+        for _ in 0..14 {
+            let mut rf = [0.0; 960];
+            links
+                .process(
+                    &mut controller,
+                    false,
+                    &mut rf,
+                    rpt_advanced_core::link::SourcePosition::default(),
+                )
+                .unwrap();
+            assert_eq!(dispatcher.dispatch(1), 1);
+            let mut output = [0.0; 960];
+            consumer.read(&mut output);
+            found_peer |= output.iter().any(|sample| *sample > 0.0);
+            if rf.iter().any(|sample| *sample > 0.0) {
+                found_local = true;
+            }
+        }
+        assert_eq!(found_local, !targeted);
+        assert_eq!(found_peer, targeted && allowed);
+        // This gate filters only telemetry; it never suppresses ordinary local RF.
+        let mut rf = [0.25; 960];
         links
             .process(
                 &mut controller,
-                false,
+                true,
                 &mut rf,
                 rpt_advanced_core::link::SourcePosition::default(),
             )
             .unwrap();
-        assert_eq!(dispatcher.dispatch(1), 1);
+        dispatcher.dispatch(1);
         let mut output = [0.0; 960];
-        let shortfall = consumer.read(&mut output);
-        assert_eq!(shortfall, 960);
-        assert!(output.iter().all(|sample| *sample == 0.0));
-        if rf.iter().any(|sample| *sample > 0.0) {
-            found_local = true;
-        }
+        assert_eq!(consumer.read(&mut output), 0);
+        assert_eq!(output, [0.25; 960]);
     }
-    assert!(found_local);
 }
 
 #[test]

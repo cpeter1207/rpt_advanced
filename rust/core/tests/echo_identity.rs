@@ -2,6 +2,139 @@ use rpt_advanced_core::command::DtmfCommandMap;
 use rpt_advanced_core::link::{EchoAlias, PeerIdentity, ProtocolId};
 
 #[test]
+fn echo_telemetry_has_no_default_dtmf_prefix_and_reuses_mapping_validation() {
+    use rpt_advanced_core::{
+        command::{CommandMapping, LinkAction},
+        config::{ConfigDocument, NodeId, ResolvedNodeSettings},
+    };
+    assert!(DtmfCommandMap::standard().mappings().iter().any(|mapping| mapping.action == LinkAction::EchoTelemetry && mapping.digits.is_empty()));
+    let doc = ConfigDocument::parse("[1000]\nradio_channel=usb\nlink_command_echo_telemetry=83\n")
+        .unwrap();
+    let settings = ResolvedNodeSettings::resolve(&doc, &NodeId::new("1000").unwrap())
+        .unwrap()
+        .value;
+    let map = settings.command_map().unwrap();
+    let command = map.parse("833").unwrap();
+    assert_eq!(
+        (command.action, command.node.as_str()),
+        (LinkAction::EchoTelemetry, "3")
+    );
+    assert!(
+        DtmfCommandMap::new(vec![
+            CommandMapping::new("83", LinkAction::EchoTelemetry),
+            CommandMapping::new("83", LinkAction::Status)
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn echo_telemetry_demand_is_command_scoped_and_fenced_by_connection() {
+    use rpt_advanced_core::{
+        config::EchoLinkTelemetry as Mode,
+        link::{EchoTelemetryPolicy, PeerSignals},
+    };
+    let first = PeerSignals::new();
+    let reply = first.reply_target();
+    let second = PeerSignals::new().reply_target();
+    let mut policy = EchoTelemetryPolicy::new(Mode::Demand, true);
+    assert!(!policy.allows(&reply, 0, true));
+    policy.requested(&reply, 10);
+    assert!(policy.allows(&reply, 120009, true));
+    assert!(!policy.allows(&reply, 120010, true));
+    assert!(!policy.allows(&second, 11, true));
+    first.end();
+    assert!(!policy.allows(&reply, 11, true));
+    assert!(policy.select(Mode::Demand, 20));
+    assert!(policy.allows(&second, 120019, true));
+    assert!(!policy.allows(&second, 120020, true));
+    for (mode, local, expected) in [
+        (Mode::Off, true, false),
+        (Mode::On, false, true),
+        (Mode::Follow, false, false),
+        (Mode::Follow, true, true),
+    ] {
+        assert!(policy.select(mode, 0));
+        assert_eq!(policy.allows(&second, 1, local), expected);
+    }
+    let mut fixed = EchoTelemetryPolicy::new(Mode::Demand, false);
+    assert!(!fixed.select(Mode::On, 0));
+    fixed.requested(&second, 0);
+    assert!(!fixed.allows(&second, 1, true));
+}
+
+#[test]
+fn echo_announcements_use_configured_identity_and_localized_connection_wording() {
+    use rpt_advanced_core::{
+        config::EchoLinkAnnouncement as Mode,
+        messages::{Message, MessageCatalog},
+    };
+    let catalog =
+        MessageCatalog::from_sources("en-US", include_str!("../../../messages/en-US.ftl"), None)
+            .unwrap();
+    for (mode, raw, spoken) in [
+        (Mode::Node, "node 123456", "node 1,2,3,4,5,6"),
+        (Mode::Callsign, "W1XYZ-R", "W,1,X,Y,Z,-,R"),
+        (
+            Mode::Both,
+            "node 123456 W1XYZ-R",
+            "node 1,2,3,4,5,6 W,1,X,Y,Z,-,R",
+        ),
+    ] {
+        for connected in [false, true] {
+            let message = if connected {
+                Message::PeerConnectedLocal { peer: "3123456" }
+            } else {
+                Message::PeerDisconnectedLocal { peer: "3123456" }
+            };
+            let forms = catalog
+                .format_echo_peer(mode, "123456", "W1XYZ-R", &message)
+                .unwrap()
+                .unwrap();
+            let verb = if connected {
+                "connected"
+            } else {
+                "disconnected"
+            };
+            assert_eq!(forms.text, format!("{raw} {verb}"));
+            assert_eq!(forms.tts, format!("{spoken} {verb}"));
+            assert_eq!(
+                forms.morse.to_ascii_lowercase(),
+                format!("{} {verb}", raw.to_ascii_lowercase())
+            );
+        }
+    }
+    assert!(
+        catalog
+            .format_echo_peer(
+                Mode::Off,
+                "123456",
+                "W1XYZ-R",
+                &Message::PeerConnectedLocal { peer: "3123456" }
+            )
+            .unwrap()
+            .is_none()
+    );
+    let third = catalog
+        .format_echo_peer(
+            Mode::Both,
+            "123456",
+            "W1XYZ-R",
+            &Message::PeerDisconnectedThirdParty {
+                first: "2000",
+                second: "30123456",
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(third.text, "2000 DISCONNECTED FROM node 123456 W1XYZ-R");
+    assert_eq!(
+        third.tts,
+        "2000 disconnected from node 1,2,3,4,5,6 W,1,X,Y,Z,-,R"
+    );
+}
+
+#[test]
 fn unsupported_remote_command_catalog_validates_and_renders_every_form() {
     use rpt_advanced_core::messages::{Message, MessageCatalog};
     let catalog =
@@ -74,6 +207,72 @@ fn echo_remote_commands_never_create_asl_control_envelopes() {
             .is_none(),
         "unsupported selection changed the local collector's remote destination"
     );
+    // Reuse the same controller/grant path: a verified directory entry is not
+    // administrative authorization, and this operation has no default prefix.
+    use rpt_advanced_core::{
+        config::EchoLinkTelemetry,
+        runtime::{dtmf::DigitOutcome, links::LinkEffect},
+    };
+    assert!(
+        links
+            .command(
+                DigitOperation::new(
+                    Command {
+                        action: LinkAction::EchoTelemetry,
+                        node: "3".into()
+                    },
+                    None
+                ),
+                host.control().work().unwrap(),
+                2,
+                true
+            )
+            .is_err()
+    );
+    let mut mappings = DtmfCommandMap::standard().mappings().to_vec();
+    mappings
+        .iter_mut()
+        .find(|mapping| mapping.action == LinkAction::EchoTelemetry)
+        .unwrap()
+        .digits = "83".into();
+    links.reconfigure(
+        AccessPolicy::new("", "").unwrap(),
+        DtmfCommandMap::new(mappings).unwrap(),
+        None,
+    );
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    links.configure_admin(&digest, &digest, 1000);
+    for digit in "*833#".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 3 })
+                .is_none()
+        );
+    }
+    for digit in "*8001234#".chars() {
+        assert!(
+            links
+                .digit(DigitEvent::Digit { digit, now_ms: 4 })
+                .is_none()
+        );
+    }
+    let mut selected = None;
+    for digit in "*833#".chars() {
+        selected = links
+            .digit(DigitEvent::Digit { digit, now_ms: 5 })
+            .or(selected);
+    }
+    let Some(DigitOutcome::Operation(selected)) = selected else {
+        panic!("authorized typed operation")
+    };
+    assert!(matches!(
+        links.command(selected, host.control().work().unwrap(), 6, false),
+        Ok(LinkEffect::EchoTelemetry(EchoLinkTelemetry::Demand))
+    ));
 }
 
 #[test]

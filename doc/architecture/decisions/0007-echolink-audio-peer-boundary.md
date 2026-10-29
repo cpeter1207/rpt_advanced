@@ -224,6 +224,21 @@ passes structured spans to the existing provider serializer on its serial owner;
 it is not another ASL envelope, codec or speech path. Chat rejection drops only
 that message, not the audio connection. Both hosts update together under the
 coordinated pre-release host9/product7 descriptor-extent check, with SONAME2 unchanged.
+EchoLink connection notices use the configured off/node/callsign/both identity
+style, a validated QSO callsign and full real node number. Both says the node
+before the callsign. Catalog fragments retain separate text, speech and Morse;
+ordinary local/third-party wording and reconnect cancellation remain shared.
+The account's telemetry mode is an additional per-QSO eligibility filter, never
+an audience expansion. Off suppresses routed telemetry; on permits it; follow
+follows local telemetry eligibility; demand opens ASL's two-minute window only
+at typed command-response boundaries. Voice, chat, refreshes and heartbeats do
+not extend it. An authorized runtime demand selection opens its initial window.
+Windows live with exact reply tokens, not reusable node numbers. Control publishes
+an atomic permission bit; audio reads no timer, account map or lock. IDs,
+courtesy tones, hang time and synthesized human chat remain excluded from peers.
+Runtime selection uses the existing typed command/admin path and optional
+`link_command_echo_telemetry` mapping with no default prefix. Modes are 0 off,
+1 on, 2 follow and 3 demand; a fixed account policy rejects runtime changes.
 
 ## Consequences
 

@@ -1,5 +1,6 @@
 //! AllStarLink protocol and control-owned link policy, independent of transport.
 mod audio;
+mod echo_telemetry;
 mod hub;
 mod identity;
 mod peer;
@@ -15,6 +16,7 @@ pub use audio::{
     AudioPeer, DispatchProgress, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus,
     LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, SourcePosition,
 };
+pub use echo_telemetry::EchoTelemetryPolicy;
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use identity::{EchoAlias, IdentityError, PeerIdentity, ProtocolId};
 pub use peer::{Peer, ReceiveState};

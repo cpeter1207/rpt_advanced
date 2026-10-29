@@ -36,6 +36,7 @@ const REQUIRED_IDS: &[&str] = &[
     "time-announcement",
     "loop-rejected",
     "remote-command-unsupported",
+    "echo-peer-identity",
     "priority-group-selected",
     "priority-group-unavailable",
     "scheduled-link-change",
@@ -378,6 +379,76 @@ impl MessageCatalog {
     /// Format three RF variants, falling back independently to English per attribute.
     pub fn format(&self, message: &Message<'_>) -> Result<MessageForms, CatalogError> {
         self.format_attributes(message.id(), |_| message.args())
+    }
+
+    /// Format the configured EchoLink identity in the normal local connection
+    /// notice. Both uses the real node number followed by the callsign; speech
+    /// spells identity characters without changing text/Morse or command identity.
+    pub fn format_echo_peer(
+        &self,
+        mode: crate::config::EchoLinkAnnouncement,
+        node: &str,
+        callsign: &str,
+        message: &Message<'_>,
+    ) -> Result<Option<MessageForms>, CatalogError> {
+        use crate::config::EchoLinkAnnouncement as Mode;
+        let mode = match mode {
+            Mode::Off => return Ok(None),
+            Mode::Node => "node",
+            Mode::Callsign => "callsign",
+            Mode::Both => "both",
+        };
+        let spell = |text: &str| {
+            text.chars()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let spoken_node = spell(node);
+        let spoken_callsign = spell(callsign);
+        let identity = self.format_attributes("echo-peer-identity", |attribute| {
+            let mut args = FluentArgs::new();
+            args.set("mode", mode);
+            args.set(
+                "node",
+                if attribute == "tts" {
+                    &spoken_node
+                } else {
+                    node
+                },
+            );
+            args.set(
+                "callsign",
+                if attribute == "tts" {
+                    &spoken_callsign
+                } else {
+                    callsign
+                },
+            );
+            args
+        })?;
+        let fields = match message {
+            Message::PeerConnectedLocal { peer } | Message::PeerDisconnectedLocal { peer } => {
+                vec![("peer", *peer)]
+            }
+            Message::PeerConnectedThirdParty { first, second }
+            | Message::PeerDisconnectedThirdParty { first, second } => {
+                vec![("first", *first), ("second", *second)]
+            }
+            _ => return Err(CatalogError::InvalidMessage),
+        };
+        self.format_attributes(message.id(), |attribute| {
+            let mut args = message.args();
+            for (key, value) in &fields {
+                if crate::link::PeerIdentity::from_operator(value).is_ok_and(|id| {
+                    id.protocol() == crate::link::ProtocolId::EchoLink && id.node() == node
+                }) {
+                    args.set(*key, identity.attribute(attribute));
+                }
+            }
+            args
+        })
+        .map(Some)
     }
 
     /// Attribute incoming human text without interpreting its body as a template.
@@ -846,6 +917,11 @@ fn validate_translation(bundle: &Bundle, require_builtin_attributes: bool) -> Ve
 fn required_sample_args(id: &str) -> FluentArgs<'static> {
     let mut args = FluentArgs::new();
     match id {
+        "echo-peer-identity" => {
+            args.set("mode", "both");
+            args.set("node", "123456");
+            args.set("callsign", "W1XYZ-R");
+        }
         "incoming-text" => {
             args.set("source", "2000");
             args.set("kind", "node");

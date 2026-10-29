@@ -660,7 +660,12 @@ impl Host {
             .find(|peer| peer.local == local && peer.remote == remote)
         {
             peer.announced = true;
-            let _ = self.runtime.queue_link_event(local, remote, true);
+            let _ = if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
+                self.runtime
+                    .queue_echo_link_event(local, remote, peer.control.callsign(), true)
+            } else {
+                self.runtime.queue_link_event(local, remote, true)
+            };
         }
         Ok(())
     }
@@ -705,19 +710,29 @@ impl Host {
         {
             let peer = self.peers.remove(index);
             self.text.cancel(&peer.control.text_origin());
-            let announced = peer.announced;
+            let announced = peer.announced.then(|| {
+                (
+                    peer.control.text_origin().protocol,
+                    peer.control.callsign().to_owned(),
+                )
+            });
             peer.control.stop();
             self.peer_io.reap();
             announced
         } else {
-            false
+            None
         };
         if let Some(node) = self.runtime.node(local) {
             node.links().ended(remote);
         }
         self.runtime.peer_detached(local, remote, now_ms);
-        if announced {
-            let _ = self.runtime.queue_link_event(local, remote, false);
+        if let Some((protocol, callsign)) = announced {
+            let _ = if protocol == ProtocolId::EchoLink as u32 {
+                self.runtime
+                    .queue_echo_link_event(local, remote, &callsign, false)
+            } else {
+                self.runtime.queue_link_event(local, remote, false)
+            };
         }
     }
     pub(crate) fn reject_peer(&mut self, local: &str, remote: &str, now_ms: u64) {
@@ -954,7 +969,10 @@ impl Host {
             LinkEffect::SiteStatus { selector, reply } => {
                 self.runtime.queue_site_report(local, &selector, reply)
             }
-            LinkEffect::SelectedRemote | LinkEffect::ParrotEnabled(_) | LinkEffect::None => Ok(()),
+            LinkEffect::SelectedRemote
+            | LinkEffect::ParrotEnabled(_)
+            | LinkEffect::EchoTelemetry(_)
+            | LinkEffect::None => Ok(()),
         }
     }
     fn text(
@@ -1107,6 +1125,14 @@ impl Host {
         let mut events = Vec::new();
         let mut ended = Vec::new();
         for peer in &mut self.peers {
+            if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
+                peer.control
+                    .set_telemetry_allowed(self.runtime.echo_telemetry_allows(
+                        &peer.local,
+                        &peer.control.reply_target(),
+                        clock.now_ms,
+                    ));
+            }
             while let Some(event) = peer.control.event() {
                 events.push((
                     peer.local.clone(),

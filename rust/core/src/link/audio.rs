@@ -234,6 +234,7 @@ pub struct SourcePosition {
 struct Destination {
     enabled: bool,
     broadcast: bool,
+    telemetry: bool,
     eligible: bool,
     target: usize,
     span: AudioSpan,
@@ -307,10 +308,10 @@ impl LinkDispatcher {
                     } else {
                         0.0
                     };
-                    if destination.broadcast {
+                    if destination.telemetry && destination.broadcast {
                         *sample += block.replies[frame].broadcast.unwrap_or(0.0);
                     }
-                    if block.replies[frame].target == destination.target {
+                    if destination.telemetry && block.replies[frame].target == destination.target {
                         *sample += block.replies[frame].sample;
                     }
                 }
@@ -620,15 +621,18 @@ impl<P: PeerInput> LinkAudio<P> {
                         && selected
                         && (receiving || forwarding_sources > own_source)));
             route.broadcast = !ended && peer.mode.transmits() && selected;
+            route.telemetry = peer.input.signals().telemetry_allowed();
             let eligible = route.target != 0
                 && (route.enabled
-                    || (route.broadcast
+                    || (route.telemetry
+                        && route.broadcast
                         && self.reply_output[..count]
                             .iter()
                             .any(|sample| sample.broadcast.is_some()))
-                    || self.reply_output[..count]
-                        .iter()
-                        .any(|reply| reply.target == route.target));
+                    || route.telemetry
+                        && self.reply_output[..count]
+                            .iter()
+                            .any(|reply| reply.target == route.target));
             if eligible && !route.eligible {
                 route.span.burst = route.span.burst.wrapping_add(1);
             }

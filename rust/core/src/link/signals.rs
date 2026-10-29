@@ -9,6 +9,8 @@ struct ReplyState {
     ended: AtomicBool,
     radio_keyed: AtomicBool,
     edge: AtomicU64,
+    telemetry_allowed: AtomicBool,
+    telemetry_until_ms: AtomicU64,
 }
 
 /// Exact peer connection retained by control-prepared responses until off-audio reclamation.
@@ -32,6 +34,12 @@ impl PeerReply {
     /// Ended connections cannot receive a delayed response.
     pub fn ended(&self) -> bool {
         self.0.ended.load(Ordering::Acquire)
+    }
+    pub(crate) fn set_telemetry_window(&self, until_ms: u64) {
+        self.0.telemetry_until_ms.store(until_ms, Ordering::Release);
+    }
+    pub(crate) fn telemetry_window(&self) -> u64 {
+        self.0.telemetry_until_ms.load(Ordering::Acquire)
     }
 }
 
@@ -60,6 +68,8 @@ impl PeerSignals {
                 ended: AtomicBool::new(false),
                 radio_keyed: AtomicBool::new(false),
                 edge: AtomicU64::new(0),
+                telemetry_allowed: AtomicBool::new(true),
+                telemetry_until_ms: AtomicU64::new(0),
             })),
             source_version: AtomicU64::new(0),
             source_edge: AtomicU64::new(0),
@@ -81,6 +91,17 @@ impl PeerSignals {
     /// Current source detector/command state, without waiting for its serial owner.
     pub fn dtmf_muted(&self) -> bool {
         self.dtmf_muted.load(Ordering::Acquire)
+    }
+    /// Control publishes protocol telemetry eligibility independently of voice.
+    pub fn set_telemetry_allowed(&self, allowed: bool) {
+        self.reply
+            .0
+            .telemetry_allowed
+            .store(allowed, Ordering::Release);
+    }
+    /// Audio reads only this atomic gate, never a command timer or account lock.
+    pub fn telemetry_allowed(&self) -> bool {
+        self.reply.0.telemetry_allowed.load(Ordering::Acquire)
     }
     /// Mark terminal transport failure before detachment or reclaim.
     pub fn end(&self) {
