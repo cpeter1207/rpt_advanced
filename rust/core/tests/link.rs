@@ -809,7 +809,9 @@ fn topology_publication_preserves_mode_and_excludes_nonforwarding_sources() {
 #[test]
 fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
     let mut peer = Peer::new("200").unwrap();
+    assert_eq!(peer.deadline_ms(), None);
     let epoch = peer.activity(true, 0).unwrap();
+    assert_eq!(peer.deadline_ms(), Some(1000));
     assert_eq!(peer.query(epoch, "100").unwrap(), "K? * 100 0 0");
     assert!(!peer.accept_key(epoch, "100", "200", true));
     assert!(peer.accept_key(epoch, "100", "300", true));
@@ -817,9 +819,11 @@ fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
     assert_eq!(peer.selected_source(), "300");
     assert!(peer.activity(true, 999).is_none());
     let next = peer.activity(true, 1000).unwrap();
+    assert_eq!(peer.deadline_ms(), Some(2000));
     peer.query(next, "100").unwrap();
     assert!(!peer.accept_key(epoch, "100", "400", true));
     peer.activity(false, 1001);
+    assert_eq!(peer.deadline_ms(), None);
     assert!(!peer.accept_key(next, "100", "400", true));
     assert_eq!(peer.selected_source(), "300");
     assert!(peer.query(next, "100").is_none());
@@ -829,11 +833,15 @@ fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
 fn digits_expire_outside_audio_and_hash_cancels_timeout() {
     let mut peer = Peer::new("200").unwrap();
     assert!(peer.digit('*', 10));
+    assert_eq!(peer.deadline_ms(), Some(3010));
     assert!(!peer.expire_digit(3009));
     assert!(peer.expire_digit(3010));
+    assert_eq!(peer.deadline_ms(), None);
     assert!(!peer.expire_digit(3011));
     peer.digit('1', 4000);
+    assert_eq!(peer.deadline_ms(), Some(7000));
     peer.digit('#', 4001);
+    assert_eq!(peer.deadline_ms(), None);
     assert!(!peer.expire_digit(8000));
 }
 
