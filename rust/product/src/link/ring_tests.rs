@@ -128,7 +128,11 @@ fn ordinary_ring_accepts_pre_finite_prefix_but_echo_rejects_it_before_creation()
         );
         let pointer = prefix.as_mut_ptr().cast::<ffi::rpcr3_descriptor>();
         ptr::addr_of_mut!((*pointer).struct_size).write(size as u32);
-        assert!(InboundRing::from_descriptor(8000, InboundPolicy::Peer, pointer).is_ok());
+        let (mut producer, _) =
+            InboundRing::from_descriptor(8000, InboundPolicy::Peer, pointer).unwrap();
+        assert_eq!(producer.finish_status(1), Err(RingError));
+        assert_eq!(producer.write_tagged(&[0.25], 1, 0, &[]), Err(RingError));
+        assert_eq!(producer.mute(1, &[]), Err(RingError));
         assert!(InboundRing::from_descriptor(8000, InboundPolicy::Echo, pointer).is_err());
     }
 }
@@ -160,6 +164,7 @@ fn peer_gap_accepts_only_the_available_source_prefix() {
     }
     assert_eq!(producer.gap(4096), Ok(192));
     assert_eq!(consumer.observe().unwrap().available_samples, 16576);
+    assert_eq!(producer.gap(1), Ok(0));
     assert_eq!(producer.gap(4097), Err(RingError));
     let mut output = [0.0; 4096];
     assert_eq!(consumer.render(&mut output), Ok(3916));
@@ -472,6 +477,9 @@ unsafe extern "C" fn failed_observe(
 unsafe extern "C" fn failed_output_delay(_: *const ffi::rpcr3_ring, _: *mut u64) -> i32 {
     -1
 }
+unsafe extern "C" fn failed_reset(_: *mut ffi::rpcr3_ring) -> i32 {
+    -1
+}
 unsafe extern "C" fn scripted_push(
     ring: *mut ffi::rpcr3_ring,
     samples: *const f32,
@@ -594,6 +602,8 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
         api.ring_producer_push = Some(failed_push);
         api.ring_consumer_render = Some(failed_render);
         api.ring_observe = Some(failed_observe);
+        api.ring_output_delay = Some(failed_output_delay);
+        api.ring_consumer_reset = Some(failed_reset);
         let (mut producer, mut consumer) =
             InboundRing::from_descriptor(8000, InboundPolicy::Peer, Box::leak(Box::new(api)))
                 .unwrap();
@@ -610,6 +620,8 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
             producer.signals()
         ));
         assert!(producer.observer().observe().is_err());
+        assert_eq!(producer.output_delay_samples(), Err(RingError));
+        assert_eq!(consumer.reset(), Err(RingError));
         let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Peer).unwrap();
         assert_eq!(producer.write(&[]), Ok(0));
         assert_eq!(producer.finish(), Err(RingError));
@@ -767,12 +779,16 @@ fn released_ring_endpoints_publish_render_and_report_their_generation() {
     assert!(observer.same_generation(&same));
     assert!(!observer.same_generation(&other.observer()));
     assert_eq!(observer.rate(), 8000);
+    assert!(matches!(observer.policy(), InboundPolicy::Peer));
     assert_eq!(producer.rate(), 8000);
     assert!(std::ptr::eq(observer.signals(), producer.signals()));
 
     assert_eq!(producer.write(&[0.25; 160]), Ok(160));
+    assert!(producer.output_delay_samples().is_ok());
     let mut output = [0.0; 960];
     assert!(consumer.render(&mut output).is_ok());
+    assert_eq!(consumer.reset(), Ok(()));
+    assert_eq!(observer.observe().unwrap().available_samples, 0);
 }
 
 #[test]
