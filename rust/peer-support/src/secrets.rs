@@ -196,6 +196,7 @@ mod tests {
             "directory_password=private value",
             "[invalid]\ndirectory_password=private value",
             "[524950]\ndirectory_password=private value\ndirectory_password=private value",
+            "[524950]\ndirectory_password=private value\nproxy_password=one\nproxy_password=two",
             "[524950]\ndirectory_password=private value\n[524950]\ndirectory_password=private value",
             "[524950]\ndirectory_password=private value\n[508422]\nproxy_password=private value",
             "[524950]\ndirectory_password=private\0value",
