@@ -96,7 +96,7 @@ fn media_and_text_require_their_complete_sized_operation_groups() {
     let api = unsafe { Api::open(&complete()) }.unwrap();
     assert!(api.network_available());
     assert!(api.prepared_media_available());
-    assert!(api.text_available());
+    assert!(std::hint::black_box(Api::text_available)(&api));
     for missing in 0..14 {
         let mut table = complete();
         match missing {

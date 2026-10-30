@@ -808,6 +808,7 @@ fn topology_publication_preserves_mode_and_excludes_nonforwarding_sources() {
 
 #[test]
 fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
+    let selected_source = std::hint::black_box(Peer::selected_source);
     let mut peer = Peer::new("200").unwrap();
     assert_eq!(peer.deadline_ms(), None);
     let epoch = peer.activity(true, 0).unwrap();
@@ -816,7 +817,7 @@ fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
     assert!(!peer.accept_key(epoch, "100", "200", true));
     assert!(peer.accept_key(epoch, "100", "300", true));
     assert!(!peer.accept_key(epoch, "100", "400", true));
-    assert_eq!(peer.selected_source(), "300");
+    assert_eq!(selected_source(&peer), "300");
     assert!(peer.activity(true, 999).is_none());
     let next = peer.activity(true, 1000).unwrap();
     assert_eq!(peer.deadline_ms(), Some(2000));
@@ -825,7 +826,7 @@ fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
     peer.activity(false, 1001);
     assert_eq!(peer.deadline_ms(), None);
     assert!(!peer.accept_key(next, "100", "400", true));
-    assert_eq!(peer.selected_source(), "300");
+    assert_eq!(selected_source(&peer), "300");
     assert!(peer.query(next, "100").is_none());
 }
 
@@ -930,8 +931,12 @@ fn receive_activity_primes_conceals_brief_gaps_drains_and_honors_eof() {
     assert!(receive.rendered(Some(10), 960));
     assert!(!receive.should_render(3, 2080, true, 960));
     assert!(!receive.rendered(None, 960));
-    assert!(ReceiveState::new(0).is_err());
-    assert!(ReceiveState::new(48001).is_err());
+    // Invoke the public constructor, rather than optimizing constant-invalid
+    // inputs away in release-profile coverage.
+    let construct = std::hint::black_box(ReceiveState::new);
+    for rate in [0, 48001] {
+        assert!(construct(rate).is_err());
+    }
 }
 
 #[test]

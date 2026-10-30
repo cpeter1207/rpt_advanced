@@ -599,7 +599,9 @@ fn incoming_ownership_is_claimed_only_after_fresh_provider_validation() {
                 peer.identity().source.unwrap().to_string(),
                 "127.0.0.2:49152"
             );
-            assert_eq!(peer.identity().callsign, "W1XYZ-R");
+            let identity =
+                std::hint::black_box(rptadv_peer_support::echolink::host::Peer::identity);
+            assert_eq!(identity(&peer).callsign, "W1XYZ-R");
             assert_eq!(peer.identity().node_number, u32::MAX);
             assert_eq!(
                 peer.identity().host_capabilities(),

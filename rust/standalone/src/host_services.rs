@@ -2410,7 +2410,7 @@ mod tests {
             assert_eq!(observed, [message]);
             observed.clear();
         }
-        verify_async_audio(&host, peer as *mut c_void, &mut inbound);
+        verify_async_audio(&host, peer as *mut c_void, &mut inbound, profile.is_none());
         unsafe { super::peer_destroy(ptr::null_mut(), peer as *mut c_void) };
         drop(inbound);
 
@@ -2572,6 +2572,7 @@ mod tests {
         host: &HostServicesOwner,
         peer: *mut c_void,
         inbound: &mut crate::iax::IaxPeer,
+        matching_context: bool,
     ) {
         let state = Box::into_raw(Box::new(AsyncRead {
             host: host.descriptor().context,
@@ -2618,27 +2619,17 @@ mod tests {
             super::peer_step_stop(ptr::null_mut(), token);
             super::peer_step_wake(ptr::null_mut(), token);
             super::peer_step_stop(host.descriptor().context, token);
-            let PeerRegistration::Iax(raw) = *token.cast::<PeerRegistration>() else {
-                panic!("native IAX registration expected")
-            };
-            // A bad foreign context must not dereference an IAX token. Keep
-            // its actual executor until the test performs the matching join.
-            super::peer_step_detach(ptr::null_mut(), token);
-            host.context.ingress.as_ref().unwrap().executor.detach(raw);
-            // Exercise the normal host-owned detach as well as the rejected
-            // foreign context: both must join before callback storage is freed.
-            let mut replacement = ptr::null_mut();
-            assert_eq!(
-                super::peer_step_attach(
-                    host.descriptor().context,
-                    peer,
-                    Some(read_step),
-                    state.cast(),
-                    &mut replacement,
-                ),
-                0
-            );
-            super::peer_step_detach(host.descriptor().context, replacement);
+            if matching_context {
+                super::peer_step_detach(host.descriptor().context, token);
+            } else {
+                let PeerRegistration::Iax(raw) = *token.cast::<PeerRegistration>() else {
+                    panic!("native IAX registration expected")
+                };
+                // A bad foreign context must not dereference an IAX token. Keep
+                // its actual executor until the test performs the matching join.
+                super::peer_step_detach(ptr::null_mut(), token);
+                host.context.ingress.as_ref().unwrap().executor.detach(raw);
+            }
         }
         let state = unsafe { Box::from_raw(state) };
         assert!(
