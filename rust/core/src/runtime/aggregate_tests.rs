@@ -3697,18 +3697,22 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
         } else {
             assert!(matches!(result, Err(RuntimeError::Rejected)));
         }
-        let mut status = super::dtmf::DigitOperation::new(
-            crate::command::Command {
-                action: LinkAction::Status,
-                node: String::new(),
-            },
-            None,
-        );
-        status.reply = Some(reply.clone());
-        assert!(matches!(
-            runtime.command("1000", status, now, false),
-            Ok(LinkEffect::Telemetry(LinkAction::Status, Some(_)))
-        ));
+        for source in [None, Some(reply.clone())] {
+            let mut status = super::dtmf::DigitOperation::new(
+                crate::command::Command {
+                    action: LinkAction::Status,
+                    node: String::new(),
+                },
+                None,
+            );
+            status.reply = source.clone();
+            let Ok(LinkEffect::Telemetry(LinkAction::Status, actual)) =
+                runtime.command("1000", status, now, false)
+            else {
+                panic!("status response missing")
+            };
+            assert_eq!(actual, source);
+        }
         runtime.node("1000").unwrap().links().ended("2000");
         runtime.peer_detached("1000", "2000", now.now_ms);
         assert!(runtime.stop(now.now_ms));

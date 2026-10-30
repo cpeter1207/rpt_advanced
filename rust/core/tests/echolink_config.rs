@@ -157,6 +157,7 @@ fn malformed_account_values_warn_and_resolve_without_crossing_account_boundaries
         ),
         ("allow", "N0CALL,,W1*".into(), ""),
         ("deny", "N".repeat(65), ""),
+        ("callsign", "".into(), ""),
         ("callsign", "N0CALL01234567890".into(), ""),
         ("callsign", "**".into(), ""),
         ("callsign", "*BAD!*".into(), ""),
@@ -197,6 +198,9 @@ fn malformed_account_values_warn_and_resolve_without_crossing_account_boundaries
         assert!(resolved.warnings.is_empty(), "{callsign}");
         assert_eq!(resolved.value.callsign, callsign);
     }
+    let empty_proxy = resolve("[524950]\n[echolink 524950]\nproxy_host=\n").unwrap();
+    assert!(empty_proxy.warnings.is_empty());
+    assert!(empty_proxy.value.proxy_host.is_empty());
 }
 
 #[test]

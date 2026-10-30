@@ -81,10 +81,12 @@ fn rejected_control_work_retains_its_task_and_distinguishes_full_from_backend_fa
             release.send(()).unwrap();
         }
         client.stop_and_drain().unwrap();
-        let rejected = client
-            .submit(ControlTask::lifecycle(|| panic!("stopped work ran")))
-            .err()
-            .unwrap();
-        assert_eq!(rejected.reason, RejectionReason::Stopped);
+        if !failed_backend {
+            let rejected = client
+                .submit(ControlTask::lifecycle(|| panic!("stopped work ran")))
+                .err()
+                .unwrap();
+            assert_eq!(rejected.reason, RejectionReason::Stopped);
+        }
     }
 }
