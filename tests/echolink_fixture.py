@@ -63,6 +63,12 @@ class EchoProxy:
         """Send one independent, four-frame GSM packet on its source clock."""
         self.send(5, struct.pack("!BBHII", 0xC0, 3, sequence, 0, 0) + self.GSM * 4)
 
+    def drop_transport(self):
+        """Inject account TCP EOF without unloading the host or its radio owner."""
+        assert self.ready.wait(5), "Echo fixture did not authenticate"
+        self.stopping.set()
+        self.connection.shutdown(socket.SHUT_RDWR)
+
     def _run(self):
         try:
             self.connection, _ = self.listener.accept()

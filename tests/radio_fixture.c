@@ -231,10 +231,15 @@ static void *clock_run(void *context) {
                                        &keyed, &ctcss_enabled)) {
             break;
         }
+        bool changed = (keyed != 0) != device->keyed;
         device->keys += keyed && !device->keyed;
         device->unkeys += !keyed && device->keyed;
         device->keyed = keyed != 0;
         inspect_audio(device);
+        if (changed && device->phase == 100) {
+            ast_log(LOG_NOTICE, "rpt_fixture echo ptt=%u remote=%u\n", keyed,
+                    device->remote_blocks);
+        }
         if (device->media && device->file_blocks != 0 && device->media_receive_start == 0) {
             device->media_receive_start = device->ticks;
         }

@@ -187,8 +187,33 @@ def main() -> None:
                     )
                     cli("module reload app_rpt_advanced.so")
                     assert b"\rAfter\r" in echo.requests.get(timeout=5)
+                    echo.voice(20)
+                    deadline = time.monotonic() + 5
+                    while True:
+                        edges = re.findall(
+                            r"rpt_fixture echo ptt=(\d+) remote=(\d+)",
+                            logfile.read_text(encoding="utf-8", errors="replace"),
+                        )
+                        if edges and edges[-1][0] == "1":
+                            break
+                        assert time.monotonic() < deadline, edges
+                        time.sleep(0.02)
+                    echo.drop_transport()
+                    deadline = time.monotonic() + 5
+                    while True:
+                        edges = re.findall(
+                            r"rpt_fixture echo ptt=(\d+) remote=(\d+)",
+                            logfile.read_text(encoding="utf-8", errors="replace"),
+                        )
+                        status = cli("rpt_advanced link status 1000")
+                        if edges[-1][0] == "0" and "3123456" not in status:
+                            break
+                        assert time.monotonic() < deadline, (edges, status)
+                        time.sleep(0.02)
+                    assert int(edges[-1][1]) > 0, edges
+                    assert "available=0" in status and "cause=2" in status, status
+                    assert "Running" in cli("module show like app_rpt_advanced")
                     cli("module unload app_rpt_advanced.so")
-                    assert b"OFF-V3.40" in echo.requests.get(timeout=5)
                     assert process.pid == original_pid and process.poll() is None
                     assert "RadioPlusAdvanced/" not in cli("core show channels concise")
                     echo_records = re.findall(

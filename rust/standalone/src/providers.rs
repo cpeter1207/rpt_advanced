@@ -1285,7 +1285,7 @@ pub(crate) mod tests {
             provider
         ));
         let mut incompatible = descriptor;
-        incompatible.abi_version = 7;
+        incompatible.abi_version = 8;
         assert!(!valid_descriptor(
             (&incompatible as *const InlineDescriptor).cast(),
             provider
