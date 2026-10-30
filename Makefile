@@ -127,6 +127,7 @@ rust-check: rust-quality check
 COVERAGE_TOOLCHAIN ?= nightly-2025-02-20
 rust-coverage: | build
 	mkdir -p build/coverage
+	python3 tests/test_coverage_export.py
 	+@set -e; export RUSTUP_TOOLCHAIN=$(COVERAGE_TOOLCHAIN); \
 		export CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))/llvm-cov-target"; \
 		eval "$$($(CARGO) llvm-cov show-env --branch --export-prefix)"; \
@@ -137,7 +138,7 @@ rust-coverage: | build
 		export RPT_ADVANCED_LIBDIR="$(CURDIR)/build"; \
 		$(CARGO) test --locked --release --workspace --all-targets; \
 		$(MAKE) -o rust-build CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" integration; \
-		$(CARGO) llvm-cov report --release \
+		python3 tests/export_rust_coverage.py $(CARGO) llvm-cov report --release \
 			--ignore-filename-regex '(/tests[/.]|_tests\.rs$$|/fixture\.rs$$|/build\.rs$$)' \
 			--json --output-path build/coverage/rust.json
 	python3 tests/test_rust_product_surface.py --coverage build/coverage/rust.json
