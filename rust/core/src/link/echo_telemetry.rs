@@ -37,8 +37,9 @@ impl EchoTelemetryPolicy {
     }
     /// Refresh only at a telemetry-producing command/result boundary. No audio,
     /// directory, chat, heartbeat or arbitrary received digit calls this method.
+    /// A fixed demand policy still answers commands; dynamic gates mode selection only.
     pub fn requested(&self, reply: &PeerReply, now_ms: u64) {
-        if self.dynamic && self.mode == EchoLinkTelemetry::Demand && !reply.ended() {
+        if self.mode == EchoLinkTelemetry::Demand && !reply.ended() {
             reply.set_telemetry_window(now_ms.saturating_add(DEMAND_MS));
         }
     }

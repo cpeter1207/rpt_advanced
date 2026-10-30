@@ -41,6 +41,13 @@ fn echolink_defaults_are_disabled_and_have_no_identity_or_secrets() {
 }
 
 #[test]
+fn echolink_omnidirectional_antenna_keeps_the_explicit_sentinel() {
+    let resolved = resolve("[524950]\n[echolink 524950]\nantenna_direction_deg=-1\n").unwrap();
+    assert!(resolved.warnings.is_empty());
+    assert_eq!(resolved.value.antenna_direction_deg, -1.0);
+}
+
+#[test]
 fn echolink_node_values_override_valid_global_defaults_without_identity_inheritance() {
     let source = "[524950]\n[508422]\n[echolink]\nmax_stations=30\nreceive_gain_db=-4\nannouncement=callsign\ntelemetry=follow\ncallsign=N0WRONG-R\nnode_number=123456\n[echolink 524950]\nenabled=yes\ncallsign=n0call-r\nnode_number=1002775\nmax_stations=bad\ntransmit_gain_db=2.5\n";
     let settings = resolve(source).unwrap();

@@ -263,7 +263,7 @@ pub(super) fn value_valid(key: &str, value: &str) -> bool {
         "latitude" => finite(value).is_some_and(|number| (-90.0..=90.0).contains(&number)),
         "longitude" => finite(value).is_some_and(|number| (-180.0..=180.0).contains(&number)),
         "antenna_direction_deg" => {
-            finite(value).is_some_and(|number| (0.0..=360.0).contains(&number))
+            finite(value).is_some_and(|number| number == -1.0 || (0.0..=360.0).contains(&number))
         }
         "receive_gain_db" | "transmit_gain_db" => {
             finite(value).is_some_and(|number| (-60.0..=60.0).contains(&number))

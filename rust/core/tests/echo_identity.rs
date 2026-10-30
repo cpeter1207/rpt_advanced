@@ -151,7 +151,8 @@ fn echo_telemetry_demand_is_command_scoped_and_fenced_by_connection() {
     let mut fixed = EchoTelemetryPolicy::new(Mode::Demand, false);
     assert!(!fixed.select(Mode::On, 0));
     fixed.requested(&second, 0);
-    assert!(!fixed.allows(&second, 1, true));
+    assert!(fixed.allows(&second, 1, true));
+    assert!(!fixed.allows(&second, 120000, true));
 }
 
 #[test]

@@ -2625,6 +2625,20 @@ mod tests {
             // its actual executor until the test performs the matching join.
             super::peer_step_detach(ptr::null_mut(), token);
             host.context.ingress.as_ref().unwrap().executor.detach(raw);
+            // Exercise the normal host-owned detach as well as the rejected
+            // foreign context: both must join before callback storage is freed.
+            let mut replacement = ptr::null_mut();
+            assert_eq!(
+                super::peer_step_attach(
+                    host.descriptor().context,
+                    peer,
+                    Some(read_step),
+                    state.cast(),
+                    &mut replacement,
+                ),
+                0
+            );
+            super::peer_step_detach(host.descriptor().context, replacement);
         }
         let state = unsafe { Box::from_raw(state) };
         assert!(
