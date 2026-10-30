@@ -673,6 +673,16 @@ pub(crate) fn failed_endpoints() -> (InboundProducer, InboundConsumer) {
     }
 }
 
+pub(crate) fn failed_finish_status_endpoints() -> (InboundProducer, InboundConsumer) {
+    // Retain real allocation, publication and finite tokens; fail only status.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        PUSH_SCRIPT.with(|mode| mode.set(3));
+        api.ring_finish_status = Some(scripted_finish_status);
+        InboundRing::from_descriptor(8000, InboundPolicy::Echo, Box::leak(Box::new(api))).unwrap()
+    }
+}
+
 pub(crate) fn invalid_ingress_endpoints(
     gap: bool,
     overreported: bool,

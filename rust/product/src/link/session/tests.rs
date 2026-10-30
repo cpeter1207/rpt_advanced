@@ -62,6 +62,7 @@ pub(crate) struct State {
     source_acknowledgements: usize,
     source_completions: Vec<u32>,
     source_credits: Vec<(u64, usize)>,
+    source_text: VecDeque<(&'static [u8], &'static [u8], u32)>,
 }
 type Shared = Arc<Mutex<State>>;
 
@@ -82,6 +83,7 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
         .into_endpoints();
     let (mut session, mut control) =
         PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    let origin = control.bind_text_generation(42);
     let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
@@ -106,9 +108,28 @@ fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retire
     {
         let mut state = state.lock().unwrap();
         state.source_interleave = true;
+        state
+            .source_text
+            .push_back((b"W1XYZ-R", b"tail chat", 123456));
         state.input.push_back(Input::Audio(tone));
     }
     session.step(10).unwrap();
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("chat must not wait for audio drain")
+    };
+    assert_eq!(message.origin, origin);
+    assert_eq!(&*message.body, "tail chat");
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .source_credits
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<usize>(),
+        640
+    );
     assert!(
         !consumer.signals().dtmf_muted(),
         "future unaccepted audio must not mute the previous burst"
@@ -254,6 +275,15 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     assert!(state.lock().unwrap().texts.is_empty());
     assert_eq!(control.bind_text_generation(7).protocol, 2);
     assert!(matches!(control.observer.policy(), InboundPolicy::Echo));
+    for text in [c"!NEWKEY1!", c"literal text"] {
+        control
+            .send(Command::Text {
+                text: text.into(),
+                advisory: false,
+            })
+            .ok()
+            .unwrap();
+    }
     let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
@@ -293,9 +323,10 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     session.step(30).unwrap();
     assert!(!consumer.signals().radio_keyed());
     assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
-    assert!(
-        state.lock().unwrap().texts.is_empty(),
-        "Echo must never send ASL queries"
+    assert_eq!(
+        state.lock().unwrap().texts,
+        [b"literal text".to_vec()],
+        "only non-protocol text may pass through"
     );
 }
 
@@ -351,14 +382,18 @@ fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
 
 #[test]
 fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
-    for redirect in [false, true] {
+    for (redirect, failed_status) in [(false, false), (true, false), (false, true)] {
         let (io, state) = source_peer();
         let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
             .unwrap()
             .into_endpoints();
         let (mut session, mut control) =
             PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
-        let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let (inbound, mut consumer) = if failed_status {
+            crate::link::ring::tests::failed_finish_status_endpoints()
+        } else {
+            InboundRing::open(8000, InboundPolicy::Echo).unwrap()
+        };
         let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
             .unwrap()
             .into_endpoints();
@@ -376,6 +411,13 @@ fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
             .input
             .push_back(Input::Audio(vec![0.25; 640]));
         session.step(0).unwrap();
+        if failed_status {
+            assert!(session.source_finish.is_some());
+            assert_eq!(session.step(10), Err(Error::Write));
+            assert!(control.ended());
+            assert!(state.lock().unwrap().source_completions.is_empty());
+            continue;
+        }
         assert_eq!(consumer.finite_playout(), Some(true));
         if redirect {
             let (inbound, next) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
@@ -439,6 +481,58 @@ fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
         panic!("missing queued old-generation message");
     };
     assert_eq!(message.origin, first, "reload must retain the old fence");
+
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    let mut first = None;
+    for (number, expected) in [
+        (0, None),
+        (123456, Some("123456")),
+        (u32::MAX, Some("4294967295")),
+    ] {
+        state
+            .lock()
+            .unwrap()
+            .source_text
+            .push_back((b"W1XYZ-R", b"literal body", number));
+        session.step(0).unwrap();
+        if first.is_none() {
+            assert!(control.event().is_none());
+            first = Some(control.bind_text_generation(42));
+        } else {
+            control.bind_text_generation(43);
+        }
+        let Some(Event::HumanText(message)) = control.event() else {
+            panic!("source chat missing")
+        };
+        assert_eq!(
+            message.origin,
+            if number == u32::MAX {
+                control.bind_text_generation(43)
+            } else {
+                first.clone().unwrap()
+            }
+        );
+        assert_eq!(message.source, "W1XYZ-R");
+        assert_eq!(&*message.body, "literal body");
+        assert!(matches!(message.audience, TextAudience::Broadcast));
+        assert_eq!(
+            message
+                .represented_source
+                .as_ref()
+                .map(|identity| identity.node()),
+            expected
+        );
+        if let Some(identity) = &message.represented_source {
+            assert_eq!(identity.protocol(), ProtocolId::EchoLink);
+        }
+        assert!(state.lock().unwrap().source_credits.is_empty());
+        assert!(!session.inbound.signals().radio_keyed());
+    }
 }
 
 #[test]
@@ -496,7 +590,149 @@ fn human_text_send_failure_is_rate_limited_without_ending_the_audio_peer() {
         assert!(!message.contains("private body"));
         assert!(!message.contains("W1XYZ"));
     }
+    state.lock().unwrap().fail_text = false;
+    control
+        .send(Command::HumanText {
+            sender: "W1XYZ".into(),
+            body: "recovered body".into(),
+        })
+        .ok()
+        .unwrap();
+    session.step(30011).unwrap();
+    assert_eq!(
+        state.lock().unwrap().texts,
+        [b"W1XYZ>recovered body".to_vec()]
+    );
+    assert_eq!(crate::fixture::ERROR_LOGS.with_borrow(Vec::len), 2);
+    assert!(!control.ended());
     session.stop();
+}
+
+#[test]
+fn echo_source_command_timeout_runs_while_a_bounded_read_turn_still_has_pcm() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend([Input::Audio(five_tone(640)), Input::Audio(vec![0.0; 640])]);
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend((0..130).map(|_| Input::Audio(vec![0.0])));
+    session.step(0).unwrap();
+    assert!(matches!(control.event(), Some(Event::Digit('5'))));
+    assert!(session.inbound.signals().dtmf_muted());
+    assert_eq!(state.lock().unwrap().source_position, 1342);
+    session.step(3000).unwrap();
+    assert!(matches!(control.event(), Some(Event::Digit('#'))));
+    assert!(control.event().is_none());
+    assert!(!session.inbound.signals().dtmf_muted());
+    assert_eq!(state.lock().unwrap().input.len(), 4);
+    assert!(session.source_finish.is_none());
+    assert!(!control.ended());
+}
+
+#[test]
+fn echo_source_event_overflow_is_fatal_for_commands_but_drops_only_chat() {
+    for row in 0..5 {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+        for _ in 0..if row == 3 { 63 } else { 64 } {
+            session.event(Event::Digit('1')).unwrap();
+        }
+        let input = match row {
+            0 => vec![Input::Audio(five_tone(640)), Input::Audio(vec![0.0; 640])],
+            1 => vec![Input::Audio(five_tone(256)), Input::Gap(160)],
+            2 | 3 => vec![Input::Audio(five_tone(256))],
+            _ => {
+                state
+                    .lock()
+                    .unwrap()
+                    .source_text
+                    .push_back((b"W1XYZ-R", b"dropped chat", 0));
+                vec![]
+            }
+        };
+        state.lock().unwrap().input.extend(input);
+        if row == 4 {
+            assert_eq!(session.step(0), Ok(()));
+            assert!(!control.ended());
+        } else {
+            assert_eq!(session.step(0), Err(Error::Write), "overflow row {row}");
+            assert!(control.ended());
+        }
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+    }
+}
+
+#[test]
+fn echo_source_metadata_backpressure_delays_finish_and_errors_do_not_acknowledge() {
+    for fail in [false, true] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+        let (inbound, mut consumer) = crate::link::ring::tests::delayed_mute_endpoints(fail);
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect {
+                inbound,
+                outbound,
+                dtmf_muting: true,
+            })
+            .ok()
+            .unwrap();
+        session.step(0).unwrap();
+        while control.event().is_some() {}
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend([Input::Audio(five_tone(256)), Input::Gap(160)]);
+        if fail {
+            assert_eq!(session.step(1), Err(Error::Write));
+            assert!(control.ended());
+            assert!(state.lock().unwrap().source_completions.is_empty());
+            continue;
+        }
+        session.step(1).unwrap();
+        assert!(
+            session.source_finish.is_none(),
+            "unpublished mute metadata is not finite completion"
+        );
+        session.step(2).unwrap();
+        assert!(session.source_finish.is_some());
+        let mut digits = Vec::new();
+        for now in 3..30 {
+            while let Some(event) = control.event() {
+                if let Event::Digit(digit) = event {
+                    digits.push(digit);
+                }
+            }
+            consumer.render(&mut [0.0; 960]).unwrap();
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        assert_eq!(digits, ['5', '#']);
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
+    }
 }
 
 #[test]
@@ -1117,14 +1353,30 @@ unsafe extern "C" fn read_source(
     peer: *mut c_void,
     drained: u32,
     sink: *const abi::rptadv_peer_source_sink_v1,
-    _: abi::rptadv_peer_source_text_v1,
-    _: *mut c_void,
+    text: abi::rptadv_peer_source_text_v1,
+    text_context: *mut c_void,
     result: *mut abi::rptadv_peer_source_result_v1,
 ) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
     let sink = unsafe { &*sink };
     let result = unsafe { &mut *result };
     result.state = 1;
+    if let Some((sender, body, represented)) = state.source_text.pop_front() {
+        result.represented_node_number = represented;
+        unsafe {
+            text.unwrap()(
+                text_context,
+                abi::rptadv_peer_bytes_v1 {
+                    data: sender.as_ptr(),
+                    length: sender.len(),
+                },
+                abi::rptadv_peer_bytes_v1 {
+                    data: body.as_ptr(),
+                    length: body.len(),
+                },
+            )
+        };
+    }
     if drained != 0 {
         assert!(state.source_finish);
         state.source_completions.push(drained);
@@ -2863,6 +3115,15 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
         assert!(PeerSession::prepare(io, outbound, local, remote, true).is_err());
         assert_eq!(state.lock().unwrap().drops, 1);
     }
+    let (io, state) = make_peer(16000, true, true, true);
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    assert!(matches!(
+        PeerSession::prepare(io, outbound, "1000", "2000", true),
+        Err(Error::UnsupportedFormat)
+    ));
+    assert_eq!(state.lock().unwrap().drops, 1);
 }
 
 #[test]
