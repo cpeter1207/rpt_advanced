@@ -66,6 +66,13 @@ def test_standalone_package_declares_its_native_runtime_providers() -> None:
         assert package in runtime
 
 
+def test_either_host_installs_the_dynamically_loaded_echolink_runtime() -> None:
+    stanzas = package_stanzas()
+    for host in ("rpt-advanced", "app-rpt-advanced"):
+        assert "librptadvecholink1 (>= 0.1.0~alpha1)" in depends(stanzas[host])
+    assert "librptadvecholink" not in depends(stanzas["librptadv-product2"])
+
+
 def test_radio_product_dependency_does_not_require_the_asterisk_integration() -> None:
     stanzas = package_stanzas()
     source = (ROOT / "debian/control").read_text().split("\n\n", 1)[0]
@@ -165,6 +172,7 @@ if __name__ == "__main__":
         test_standalone_package_is_independent_from_asterisk_adapter,
         test_each_install_set_contains_only_its_entrypoint,
         test_standalone_package_declares_its_native_runtime_providers,
+        test_either_host_installs_the_dynamically_loaded_echolink_runtime,
         test_radio_product_dependency_does_not_require_the_asterisk_integration,
         test_standalone_package_declares_its_service_account_provisioner,
         test_standalone_build_profile_excludes_asterisk_adapter_packages,
