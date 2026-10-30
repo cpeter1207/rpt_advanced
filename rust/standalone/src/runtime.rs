@@ -1015,7 +1015,9 @@ mod tests {
             }
             .unwrap();
             unsafe { fail(1) };
-            process.reload("[524950]\nnode_enabled=no\n").unwrap();
+            // A disabled node still owns its disabled Echo account. Remove the
+            // node itself to exercise retirement, not just final shutdown.
+            process.reload("[general]\nenabled=no\n").unwrap();
             assert!(matches!(process.stop(), Err(RuntimeError::Echo(_))));
             unsafe { fail(0) };
             process.stop().unwrap();
@@ -1038,6 +1040,11 @@ mod tests {
             "{}\n{}",
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("EchoLink retired account remains retained"),
+            "removal must report its retained account, not merely fail final shutdown"
         );
     }
 
