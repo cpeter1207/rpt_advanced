@@ -57,6 +57,7 @@ pub(crate) struct State {
     deadlines: Vec<u64>,
     source_position: u64,
     source_keyed: bool,
+    source_closed: bool,
     source_finish: bool,
     source_interleave: bool,
     source_acknowledgements: usize,
@@ -601,11 +602,88 @@ fn human_text_send_failure_is_rate_limited_without_ending_the_audio_peer() {
     session.step(30011).unwrap();
     assert_eq!(
         state.lock().unwrap().texts,
-        [b"W1XYZ>recovered body".to_vec()]
+        [
+            b"W1XYZ>private body".to_vec(),
+            b"W1XYZ>private body".to_vec(),
+            b"W1XYZ>private body".to_vec(),
+            b"W1XYZ>recovered body".to_vec(),
+        ]
     );
     assert_eq!(crate::fixture::ERROR_LOGS.with_borrow(Vec::len), 2);
     assert!(!control.ended());
     session.stop();
+}
+
+#[test]
+fn peer_control_keeps_protocol_identity_reply_and_telemetry_on_its_own_source() {
+    let (io, _) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    assert!(control.can_forward_text());
+    assert_eq!(control.callsign(), "W1XYZ-R");
+    assert!(matches!(control.inbound_policy(), InboundPolicy::Echo));
+    let signal = session.inbound.signals();
+    assert_eq!(control.reply_target(), signal.reply_target());
+    for allowed in [false, true] {
+        control.set_telemetry_allowed(allowed);
+        assert_eq!(signal.telemetry_allowed(), allowed);
+    }
+    control.wake().notify();
+    assert!(!control.ended());
+}
+
+#[test]
+fn closed_echo_source_ends_the_peer_without_acknowledging_unplayed_audio() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state.lock().unwrap().source_closed = true;
+    assert!(matches!(session.step(0), Err(Error::Hangup)));
+    assert!(control.ended());
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+}
+
+#[test]
+fn command_arriving_during_a_read_gets_an_immediate_next_turn() {
+    let (mut session, mut control, state, _) = timed_session();
+    let pause = Arc::new(std::sync::Barrier::new(2));
+    state.lock().unwrap().pause = Some(Arc::clone(&pause));
+    let owner = thread::spawn(move || {
+        session.step(0).unwrap();
+        session
+    });
+    pause.wait();
+    control
+        .send(Command::HumanText {
+            sender: "W1XYZ".into(),
+            body: "queued during read".into(),
+        })
+        .ok()
+        .unwrap();
+    pause.wait();
+    let mut session = owner.join().unwrap();
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&0));
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"W1XYZ>queued during read")
+    );
+    session.step(1).unwrap();
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"W1XYZ>queued during read")
+    );
 }
 
 #[test]
@@ -1360,6 +1438,10 @@ unsafe extern "C" fn read_source(
     let mut state = unsafe { state(peer) }.lock().unwrap();
     let sink = unsafe { &*sink };
     let result = unsafe { &mut *result };
+    if state.source_closed {
+        result.state = 3;
+        return 0;
+    }
     result.state = 1;
     if let Some((sender, body, represented)) = state.source_text.pop_front() {
         result.represented_node_number = represented;
@@ -2276,6 +2358,29 @@ fn idle_peer_io_worker_does_not_start_a_poll_thread() {
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
     assert!(worker.thread.is_none());
     worker.stop();
+}
+
+#[test]
+fn synchronous_owner_retires_a_failed_peer_and_rejects_attach_after_stop() {
+    let (session, control, state, _) = make_session("1000");
+    state.lock().unwrap().fail_ready = true;
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.attach(session).ok().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while state.lock().unwrap().drops == 0 {
+        assert!(Instant::now() < deadline, "failed peer was not reclaimed");
+        thread::yield_now();
+    }
+    assert!(control.ended());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    worker.stop();
+    let (session, _control, state, _) = make_session("1000");
+    let rejected = worker
+        .attach(session)
+        .expect_err("stopped owner must reject");
+    assert_eq!(state.lock().unwrap().drops, 0);
+    drop(rejected);
+    assert_eq!(state.lock().unwrap().drops, 1);
 }
 
 #[test]
