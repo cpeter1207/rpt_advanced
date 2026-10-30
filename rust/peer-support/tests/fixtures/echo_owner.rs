@@ -15,6 +15,10 @@ static UPDATES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_CALLBACKS: std::sync::Mutex<Vec<(usize, abi::EventFn, usize)>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_STATE: AtomicUsize = AtomicUsize::new(2);
 static DISABLED_STOP_FAILURE: AtomicUsize = AtomicUsize::new(0);
+static RECORD_FAULT: AtomicUsize = AtomicUsize::new(0);
+/// Mutate one copied foreign record while retaining every real fixture owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_record_fault(selected: usize) { RECORD_FAULT.store(selected, Ordering::Release); }
 static ACCOUNT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(4);
 thread_local! { static NOTIFYING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -112,6 +116,23 @@ unsafe extern "C" fn info(peer: *const abi::Qso, output: *mut abi::PeerInfo) -> 
             },
         })
     };
+    let out = unsafe { &mut *output };
+    match RECORD_FAULT.load(Ordering::Acquire) {
+        1 => out.struct_size = 0, 2 => out.abi_version = 0,
+        3 => out.node_number = 0, 4 => out.account_generation = 0,
+        5 => out.qso_generation = 0, 6 => out.capabilities = 16,
+        7 => out.capabilities = 2, 8 => out.callsign.length = 16,
+        9 => out.callsign.data = ptr::null(),
+        10 => out.callsign = bytes(&[0xff]), 11 => out.callsign.length = 0,
+        12 => out.local_node.length = 0, 13 => out.local_node = bytes(b"bad"),
+        14 => out.source.length = 65,
+        15 => out.source = abi::ByteSpan { data: ptr::null(), length: 1 },
+        16 => out.source = bytes(b"not-an-endpoint"),
+        17 => out.local_node.length = 33, 18 => out.local_node = bytes(&[0xff]),
+        19 => out.qso_generation = 10, 21 => out.capabilities = 6,
+        22 => out.callsign = bytes(b"bad\x07call"), 23 => out.local_node = bytes(b"508422"),
+        _ => (),
+    }
     abi::Status::Ok
 }
 unsafe extern "C" fn activate(account: *mut abi::Account, callback: Option<abi::EventFn>, context: *mut c_void) -> abi::Status {
@@ -143,6 +164,13 @@ unsafe extern "C" fn account_observe(_: *const abi::Account, out: *mut abi::Acco
     unsafe { out.write(abi::AccountObservation { struct_size: size_of::<abi::AccountObservation>() as u32,
         abi_version: 1, state: ACCOUNT_STATE.load(Ordering::Acquire) as u32,
         generation: ACCOUNT_GENERATION.load(Ordering::Acquire), directory_failures: 7, ..Default::default() }) };
+    let out = unsafe { &mut *out };
+    match RECORD_FAULT.load(Ordering::Acquire) {
+        32 => out.struct_size = 0, 33 => out.abi_version = 0,
+        34 => out.state = 8, 35 => out.transport = 2,
+        36 => out.fresh = 2, 37 => out.registered = 2, 38 => out.available = 2,
+        39 => return abi::Status::Failed, _ => (),
+    }
     abi::Status::Ok
 }
 unsafe extern "C" fn peer_observe(_: *const abi::Qso, out: *mut abi::PeerObservation) -> abi::Status {
@@ -150,6 +178,14 @@ unsafe extern "C" fn peer_observe(_: *const abi::Qso, out: *mut abi::PeerObserva
         abi_version: 1, state: 2, first_cause: 4, codec_plc_samples: 640,
         ingress_full_packets: 12, ingress_queued_packets: 3, ingress_capacity_packets: 64,
         ingress_retained_bytes: 123, ..Default::default() }) };
+    let out = unsafe { &mut *out };
+    match RECORD_FAULT.load(Ordering::Acquire) {
+        48 => out.struct_size = 0, 49 => out.abi_version = 0,
+        50 => out.state = 4, 51 => out.first_cause = 7,
+        52 => out.codec = 2, 53 => out.transport = 2,
+        54 => out.raw_receiving = 2, 55 => out.selected = 2,
+        56 => return abi::Status::Failed, _ => (),
+    }
     abi::Status::Ok
 }
 unsafe extern "C" fn dial(

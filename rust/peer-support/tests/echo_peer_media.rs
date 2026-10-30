@@ -17,6 +17,51 @@ struct EncodeResult {
 }
 
 #[test]
+fn observer_rejects_malformed_foreign_metadata_inside_the_registered_owner() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    type Checked = (Arc<rptadv_peer_support::echolink::host::Peer>, AtomicUsize);
+    unsafe extern "C" fn step(context: *mut c_void) -> i32 {
+        let checked = unsafe { &*context.cast::<Checked>() };
+        let status = match unsafe { checked.0.observe() } {
+            Ok(_) => 0,
+            Err(Error::Contract) => 1,
+            Err(Error::Status(abi::Status::Failed)) => 2,
+            Err(_) => 3,
+        };
+        checked.1.store(status, Ordering::Release);
+        0
+    }
+    let fixture = support::Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let fault =
+        unsafe { library.get::<unsafe extern "C" fn(usize)>(b"fixture_record_fault\0") }.unwrap();
+    let peer = fixture.peer();
+    let checked = Box::new((Arc::clone(&peer), AtomicUsize::new(usize::MAX)));
+    let registration = unsafe {
+        peer.attach(
+            Some(step),
+            ptr::from_ref(checked.as_ref()).cast_mut().cast(),
+        )
+    }
+    .unwrap();
+    assert_eq!(checked.1.load(Ordering::Acquire), 0);
+    for mode in 48..=56 {
+        unsafe { fault(mode) };
+        registration.wake();
+        assert_eq!(
+            checked.1.load(Ordering::Acquire),
+            if mode == 56 { 2 } else { 1 },
+            "peer case {mode}"
+        );
+    }
+    unsafe { fault(0) };
+    drop(registration);
+}
+
+#[test]
 fn shared_media_preserves_provider_status_and_original_pacing_arguments() {
     let fixture = support::Fixture::new("network");
     let peer = fixture.peer();
@@ -64,6 +109,42 @@ fn shared_media_preserves_provider_status_and_original_pacing_arguments() {
         assert_eq!(unsafe { peer.send_prepared(packet, 160, 4567) }, expected);
     }
     assert_eq!(unsafe { peer.send_text(b"W1ABC", b"hello") }, Ok(()));
+    use rptadv_peer_support::echolink::host::HostPeer;
+    let span = |value: &[u8]| abi::ByteSpan {
+        data: value.as_ptr(),
+        length: value.len(),
+    };
+    let echo = HostPeer::<()>::Echo(peer);
+    let iax = HostPeer::Iax(());
+    assert_eq!(
+        unsafe { iax.send_human_text(span(b"W1ABC"), span(b"hello")) },
+        Err(Error::Contract)
+    );
+    for (sender, body) in [
+        (abi::ByteSpan::default(), span(b"hello")),
+        (span(b"W1ABC"), abi::ByteSpan::default()),
+        (
+            abi::ByteSpan {
+                data: b"W1ABC".as_ptr(),
+                length: 65,
+            },
+            span(b"hello"),
+        ),
+        (
+            abi::ByteSpan {
+                data: ptr::null(),
+                length: 1,
+            },
+            span(b"hello"),
+        ),
+        (span(&[0xff]), span(b"hello")),
+        (span(b"W1ABC"), span(b"bad\x07body")),
+    ] {
+        assert_eq!(
+            unsafe { echo.send_human_text(sender, body) },
+            Err(Error::Contract)
+        );
+    }
 }
 
 #[derive(Default)]
