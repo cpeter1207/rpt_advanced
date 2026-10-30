@@ -2,7 +2,7 @@
 use super::*;
 use rptadv_peer_support::echolink::{abi as echo, host::Provider};
 #[path = "../../../peer-support/tests/support/mod.rs"]
-mod support;
+pub(crate) mod support;
 use crate::bindings as host_abi;
 #[path = "../../../peer-support/tests/support/host_media.rs"]
 mod media;
@@ -18,6 +18,27 @@ fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
 #[test]
 fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
     unsafe { media::check(ptr::null_mut()) };
+}
+
+#[test]
+fn echo_binding_rejects_a_quiesced_radio_reservation() {
+    let fixture = support::Fixture::new("network");
+    let peer = Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast();
+    let mut reservation = ReservedRadio {
+        radio: None,
+        name: CString::new("quiesced fixture").unwrap(),
+    };
+    assert_eq!(
+        unsafe {
+            peer_bind_radio(
+                ptr::null_mut(),
+                peer,
+                ptr::from_mut(&mut reservation).cast(),
+            )
+        },
+        -1
+    );
+    unsafe { peer_destroy(ptr::null_mut(), peer) };
 }
 
 #[test]

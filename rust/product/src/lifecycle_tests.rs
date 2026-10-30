@@ -604,6 +604,12 @@ fn rejected_dtmf_routes_keep_local_or_originating_peer_telemetry() {
     SKIP_TICKER_THREAD.store(true, Ordering::Release);
     assert_eq!(unsafe { start(&active_configuration("")) }, 0);
     let (engine, call) = selected().unwrap();
+    assert!(matches!(
+        engine.execute("1000".into(), operation(LinkAction::Command, "3002000")),
+        Err(RuntimeError::Link(
+            rpt_advanced_core::link::AdmissionError::UnsupportedRoute
+        ))
+    ));
     for (action, remote) in [
         (LinkAction::Transceive, "1000"),
         (LinkAction::Command, "3002000"),

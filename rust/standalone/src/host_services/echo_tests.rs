@@ -2,7 +2,7 @@
 use super::*;
 use rptadv_peer_support::echolink::{abi as echo, host::Provider};
 #[path = "../../../peer-support/tests/support/mod.rs"]
-mod support;
+pub(crate) mod support;
 use crate::abi as host_abi;
 #[path = "../../../peer-support/tests/support/host_media.rs"]
 mod media;

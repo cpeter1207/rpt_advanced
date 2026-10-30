@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 #[path = "services/echo_tests.rs"]
-mod echo_tests;
+pub(crate) mod echo_tests;
 
 use crate::{
     bindings as ffi,

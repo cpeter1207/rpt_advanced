@@ -9,8 +9,11 @@ unsafe extern "C" fn inspect_accounts(
     _: host_abi::rptadv_text_sink_v1,
     _: *mut c_void,
 ) -> i32 {
-    let disabled =
-        unsafe { std::slice::from_raw_parts(configuration.cast::<u8>(), length) } == b"disabled";
+    let configuration = unsafe { std::slice::from_raw_parts(configuration.cast::<u8>(), length) };
+    if configuration == b"inspection-failure" {
+        return -1;
+    }
+    let disabled = configuration == b"disabled";
     let config = echo::AccountConfig {
         enabled: u32::from(!disabled),
         node_number: 7,
@@ -57,6 +60,17 @@ pub fn check(mut host: HostServicesOwner) {
     let mut visitor = |_: &echo::AccountConfig, _: Option<&std::path::Path>| Ok(());
     assert!(unsafe { visit_accounts(&product, "fixture", &mut visitor) }.is_err());
     product.inspect_configuration = Some(inspect_accounts);
+    assert!(unsafe { visit_accounts(&product, "inspection-failure", &mut visitor) }.is_err());
+    let failed = unsafe {
+        Preparation::new(
+            &configuration,
+            &fixture.0,
+            &resources,
+            backend.cast(),
+            |_| {},
+        )
+    };
+    assert!(unsafe { host.prepare_echo(&product, "inspection-failure", failed) }.is_err());
     unsafe { rejected_account_records(&mut visitor) };
     let context = host.descriptor().context;
     let mut status = String::new();
@@ -146,6 +160,19 @@ pub fn check(mut host: HostServicesOwner) {
         -1
     );
     unsafe { fault(0) };
+    let failed = unsafe {
+        Preparation::new(
+            &configuration,
+            &fixture.0,
+            &resources,
+            backend.cast(),
+            |_| {},
+        )
+    };
+    assert!(
+        unsafe { host.reload_echo(&product, "inspection-failure", failed, || true, || true) }
+            .is_err()
+    );
     unsafe extern "C" fn current(context: *mut c_void) -> u32 {
         if context.is_null() {
             return 1;
@@ -183,6 +210,22 @@ pub fn check(mut host: HostServicesOwner) {
         assert!(rejected.is_null(), "stale dial leaked its acquired QSO");
     }
     let mut peer = ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            peer_dial(
+                ptr::null_mut(),
+                c"EchoLink/4294967295".as_ptr(),
+                19,
+                c"524950".as_ptr(),
+                6,
+                960,
+                Some(current),
+                ptr::null_mut(),
+                &mut peer,
+            )
+        },
+        -1
+    );
     assert_eq!(
         unsafe {
             peer_dial(

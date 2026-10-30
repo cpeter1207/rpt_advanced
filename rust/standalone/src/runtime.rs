@@ -986,6 +986,62 @@ mod tests {
     }
 
     #[test]
+    fn fixture_echo_retirement_retains_failed_owner_until_a_successful_stop() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        const CHILD: &str = "RPTADV_TEST_ECHO_RUNTIME_FIXTURE";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            let directory = std::path::PathBuf::from(directory);
+            let secrets = directory.join("echolink-secrets.conf");
+            std::fs::write(&secrets, "[524950]\ndirectory_password=fixture-value\n").unwrap();
+            std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let providers = crate::providers::ProviderSet::load().unwrap();
+            let active = "[524950]\nnode_enabled=no\n[echolink 524950]\nenabled=yes\ncallsign=K1ABC-R\nnode_number=7\n";
+            let mut process = ProductRuntime::start_with_providers(
+                &directory.join("rpt_advanced.conf"),
+                active,
+                Vec::new(),
+                SecretsFile::parse("").unwrap(),
+                providers,
+            )
+            .unwrap();
+            process
+                .reload("[524950]\nnode_enabled=no\n[echolink 524950]\nenabled=no\n")
+                .unwrap();
+            let library =
+                unsafe { libloading::Library::new(directory.join("librptadv_echolink.so.1")) }
+                    .unwrap();
+            let fail = unsafe {
+                library.get::<unsafe extern "C" fn(u32)>(b"fixture_disabled_stop_failure\0")
+            }
+            .unwrap();
+            unsafe { fail(1) };
+            process.reload("[524950]\nnode_enabled=no\n").unwrap();
+            assert!(matches!(process.stop(), Err(RuntimeError::Echo(_))));
+            unsafe { fail(0) };
+            process.stop().unwrap();
+            return;
+        }
+        let fixture = crate::host_services::echo_tests::support::Fixture::new("network");
+        let directory = fixture.0.parent().unwrap();
+        symlink(&fixture.0, directory.join("librptadv_echolink.so.1")).unwrap();
+        let mut search = vec![directory.to_owned()];
+        search.extend(std::env::split_paths(
+            &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+        ));
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "runtime::tests::fixture_echo_retirement_retains_failed_owner_until_a_successful_stop", "--nocapture", "--test-threads=1"])
+            .env(CHILD, directory)
+            .env("LD_LIBRARY_PATH", std::env::join_paths(search).unwrap())
+            .output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
     fn start_rejects_each_invalid_lifecycle_descriptor_field() {
         let valid = *descriptor(start_without_counts, stop_without_counts, None);
         let mut invalid = Vec::new();

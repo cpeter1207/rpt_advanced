@@ -53,7 +53,15 @@ pub unsafe fn check(context: *mut c_void) {
     let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
     let fault =
         unsafe { library.get::<unsafe extern "C" fn(usize)>(b"fixture_record_fault\0") }.unwrap();
-    let handle = Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast();
+    let handle: *mut c_void = Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast();
+    unsafe extern "C" fn consume(_: *const abi::rptadv_incoming_peer_v1, peer: *mut c_void) -> i32 {
+        unsafe { peer_destroy(ptr::null_mut(), peer) };
+        0
+    }
+    let PeerHandle::Echo(peer) = (unsafe { &*handle.cast::<PeerHandle>() }) else {
+        unreachable!();
+    };
+    unsafe { incoming_echo(consume, std::sync::Arc::clone(peer)) };
     unsafe { rejected_records(context, handle) };
     let mut observed: abi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
     observed.struct_size = size_of::<abi::rptadv_peer_observation_v1>() as u32;
