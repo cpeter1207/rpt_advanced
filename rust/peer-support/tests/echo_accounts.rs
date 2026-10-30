@@ -302,6 +302,10 @@ fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner
 #[test]
 fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
     let fixture = support::Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let event =
+        unsafe { library.get::<unsafe extern "C" fn(u32, u64, u64)>(b"fixture_account_event\0") }
+            .unwrap();
     let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
     let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
     let control = Arc::new(unsafe { Client::open(backend.cast(), "echo-gated-test", 8) }.unwrap());
@@ -317,11 +321,17 @@ fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
     );
     ready.recv_timeout(Duration::from_secs(5)).unwrap();
     let (incoming, received) = mpsc::channel();
+    let (notice, notices) = mpsc::channel();
     let mut accounts = Accounts::new(provider, control.clone(), move |_| {
         incoming.send(()).unwrap();
-    });
+    })
+    .with_notice(move |line| notice.send(line.to_owned()).unwrap());
     let path = fixture.0.parent().unwrap().join("credentials.conf");
-    std::fs::write(&path, "[524950]\ndirectory_password=fixture-first\n").unwrap();
+    std::fs::write(
+        &path,
+        "[524950]\ndirectory_password=fixture-first\n[508422]\ndirectory_password=fixture-second\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut config = abi::AccountConfig {
         enabled: 1,
@@ -333,7 +343,23 @@ fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
         ..Default::default()
     };
     unsafe { accounts.prepare(&config, &path) }.unwrap();
+    unsafe {
+        accounts.prepare(
+            &abi::AccountConfig {
+                enabled: 1,
+                node_number: 1,
+                local_node: abi::ByteSpan {
+                    data: b"508422".as_ptr(),
+                    length: 6,
+                },
+                ..Default::default()
+            },
+            &path,
+        )
+    }
+    .unwrap();
     unsafe { accounts.activate() }.unwrap(); // Queued behind the held control task.
+    unsafe { event(3, 4, 4) }; // Queued notices would log if reload gating failed.
     config.node_number = 8;
     let mut update = accounts.prepare_update().unwrap();
     unsafe { update.prepare(&config, &path) }.unwrap();
@@ -353,6 +379,10 @@ fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
                 assert!(
                     received.try_recv().is_err(),
                     "queued QSO entered a half-reloaded product"
+                );
+                assert!(
+                    notices.try_recv().is_err(),
+                    "queued notice entered a half-reloaded product"
                 );
                 true
             },
@@ -693,17 +723,31 @@ fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
 
 #[test]
 fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking() {
-    for rejected in [false, true] {
+    unsafe extern "C" fn reject_backend(
+        _: *mut std::ffi::c_void,
+        _: rptadv_peer_support::control::Task,
+    ) -> i32 {
+        -1
+    }
+    for mode in 0..4 {
+        let rejected = mode != 0;
         let fixture = support::Fixture::new("network");
         let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
         let provider =
             unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
         let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+        let mut backend = unsafe { *backend.cast::<rptadv_peer_support::control::Descriptor>() };
+        if mode == 3 {
+            backend.submit = Some(reject_backend);
+        }
         let control =
-            Arc::new(unsafe { Client::open(backend.cast(), "echo-admission-test", 1) }.unwrap());
+            Arc::new(unsafe { Client::open(&backend, "echo-admission-test", 1) }.unwrap());
+        if mode == 2 {
+            control.stop_and_drain().unwrap();
+        }
         let (entered, ready) = mpsc::channel();
         let (release, held) = mpsc::channel();
-        if rejected {
+        if mode == 1 {
             assert!(
                 control
                     .submit((entered, held), |(entered, held)| {
@@ -719,6 +763,9 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
             send.send((peer.identity().local.clone(), peer.remote().to_owned()))
                 .unwrap();
         });
+        if rejected {
+            accounts = accounts.with_notice(|_| {});
+        }
         let path = fixture.0.parent().unwrap().join("credentials.conf");
         let mut config = abi::AccountConfig {
             node_number: 7,
@@ -771,9 +818,9 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
             unsafe { accounts.prepare(&config, &path) },
             Err(Error::Status(abi::Status::Closed))
         );
-        if rejected {
+        if mode == 1 {
             release.send(()).unwrap();
-        } else {
+        } else if !rejected {
             assert_eq!(
                 receive.recv_timeout(Duration::from_secs(5)).unwrap(),
                 ("524950".into(), "4294967295".into())
