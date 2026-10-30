@@ -52,6 +52,9 @@ fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored
     unsafe { event(3, 4, 3) }; // A retired-generation event is not current evidence.
     drain();
     assert!(received.try_recv().is_err());
+    unsafe { event(8, 4, 4) }; // Invalid foreign status cannot become a notice.
+    drain();
+    assert!(received.try_recv().is_err());
     unsafe { event(3, 4, 4) };
     drain();
     let line = received.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -351,6 +354,10 @@ fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
     {
         let mut discarded = accounts.prepare_update().unwrap();
         unsafe { discarded.prepare(&config("1000", 2), &path) }.unwrap();
+        assert_eq!(
+            unsafe { discarded.prepare(&config("1000", 2), &path) },
+            Err(Error::Contract)
+        );
     }
     let (sent, received) = mpsc::channel();
     assert!(
@@ -429,7 +436,17 @@ fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
         )
         .unwrap_err();
     assert_eq!(error.cause, Error::Contract);
+    write_keys();
+    let mut stopped = accounts.prepare_update().unwrap();
+    unsafe { stopped.prepare(&config("1000", 4), &path) }.unwrap();
     accounts.stop().unwrap();
+    let error = stopped
+        .commit(
+            || panic!("stopped accounts cannot change product"),
+            || panic!("stopped accounts did not change product"),
+        )
+        .unwrap_err();
+    assert_eq!(error.cause, Error::Status(abi::Status::Closed));
 }
 
 #[test]
@@ -530,6 +547,17 @@ fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
         },
         ..Default::default()
     };
+    config.node_number = 42; // The existing provider fixture rejects activation.
+    for restored in [true, false] {
+        let error = unsafe {
+            preparation().reload(None, |visit| visit(&config, None), || true, || restored)
+        }
+        .err()
+        .unwrap();
+        assert_eq!(error.cause, Error::Status(abi::Status::Full));
+        assert_eq!(error.rollback, (!restored).then_some(Error::Product));
+    }
+    config.node_number = 1;
     let owner =
         unsafe { preparation().reload(None, |visit| visit(&config, None), || true, || true) }
             .unwrap()
@@ -591,6 +619,24 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
             },
             ..abi::AccountConfig::default()
         };
+        assert!(matches!(
+            accounts.prepare_update(),
+            Err(Error::Status(abi::Status::Closed))
+        ));
+        let saved = config.local_node;
+        for (enabled, local) in [(2, "524950"), (1, ""), (1, "52x")] {
+            config.enabled = enabled;
+            config.local_node = abi::ByteSpan {
+                data: local.as_ptr(),
+                length: local.len(),
+            };
+            assert_eq!(
+                unsafe { accounts.prepare(&config, &path) },
+                Err(Error::Contract)
+            );
+        }
+        config.enabled = 0;
+        config.local_node = saved;
         assert_eq!(
             unsafe { accounts.prepare(&config, &path) },
             Ok(()),
@@ -611,6 +657,11 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
         assert!(accounts.account("524950").is_some());
         assert!(accounts.account("508422").is_none());
         assert_eq!(unsafe { accounts.activate() }, Ok(()));
+        assert_eq!(unsafe { accounts.activate() }, Err(Error::Contract));
+        assert_eq!(
+            unsafe { accounts.prepare(&config, &path) },
+            Err(Error::Status(abi::Status::Closed))
+        );
         if rejected {
             release.send(()).unwrap();
         } else {
@@ -620,6 +671,10 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
             );
         }
         accounts.stop().unwrap();
+        assert!(matches!(
+            accounts.prepare_update(),
+            Err(Error::Status(abi::Status::Closed))
+        ));
         assert_eq!(
             unsafe { accounts.activate() },
             Err(Error::Status(abi::Status::Closed))
