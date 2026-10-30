@@ -28,7 +28,7 @@ struct fixture {
     bool network;       /**< Repeat phased receive bursts during network tests. */
     bool dtmf;          /**< Generate an on-air connect command, then a disconnect command. */
     bool ready_logged;  /**< Emit the readiness marker once after required observations. */
-    unsigned int phase; /**< Receive phase in a 100-frame network test cycle. */
+    unsigned int phase; /**< Receive window in a100-frame cycle;100 keeps local COR inactive. */
     unsigned int media_receive_start; /**< Begin media interruption after first file PCM. */
     unsigned int remote_blocks; /**< Nonzero transmit blocks while local reception is inactive. */
     unsigned int file_blocks;   /**< Recognizable prepared-file blocks before reception. */
@@ -82,7 +82,7 @@ static struct ast_channel *request(const char *type, struct ast_format_cap *cap,
     device->media = !strcmp(data, "media");
     device->network = !strncmp(data, "network-", 8);
     device->dtmf = !strcmp(data, "network-dtmf");
-    device->phase = !strcmp(data, "network-b") ? 50 : 0;
+    device->phase = !strcmp(data, "network-echo") ? 100 : !strcmp(data, "network-b") ? 50 : 0;
     struct ast_channel *channel = ast_channel_alloc(1, AST_STATE_DOWN, NULL, NULL, "", "", "", ids,
                                                     requestor, 0, "RadioPlusAdvanced/%s", data);
     if (!channel) {

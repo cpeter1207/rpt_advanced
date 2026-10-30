@@ -845,17 +845,86 @@ mod tests {
 
     #[test]
     fn released_provider_composition_starts_and_stops_without_radio_hardware() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            os::unix::fs::PermissionsExt,
+            time::Duration,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (requests, observed) = std::sync::mpsc::channel();
+        let directory = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket.write_all(b"12345678").unwrap();
+            socket.read_exact(&mut [0; 24]).unwrap();
+            let receive = |socket: &mut std::net::TcpStream| {
+                let mut header = [0; 9];
+                socket.read_exact(&mut header).unwrap();
+                let mut payload =
+                    vec![0; u32::from_le_bytes(header[5..].try_into().unwrap()) as usize];
+                socket.read_exact(&mut payload).unwrap();
+                (header[0], payload)
+            };
+            let send = |socket: &mut std::net::TcpStream, kind, payload: &[u8]| {
+                let mut packet = vec![kind, 0, 0, 0, 0];
+                packet.extend((payload.len() as u32).to_le_bytes());
+                packet.extend(payload);
+                socket.write_all(&packet).unwrap();
+            };
+            for response in [b"OK".as_slice(), b"@@@\n0\n+++\n", b"OK", b"OK"] {
+                assert_eq!(receive(&mut socket).0, 1);
+                send(&mut socket, 4, &[0; 4]);
+                let (kind, request) = receive(&mut socket);
+                assert_eq!(kind, 2);
+                send(&mut socket, 2, response);
+                assert_eq!(receive(&mut socket).0, 3);
+                send(&mut socket, 3, &[]);
+                requests.send(request).unwrap();
+            }
+        });
+        let root =
+            std::env::temp_dir().join(format!("rpt-echo-host-{}-{}", std::process::id(), port));
+        std::fs::create_dir(&root).unwrap();
+        let secrets_path = root.join("echolink-secrets.conf");
+        std::fs::write(
+            &secrets_path,
+            "[1000]\ndirectory_password=fixture-value\nproxy_password=fixture-proxy\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let configuration = format!(
+            "[1000]\nnode_enabled=no\n[echolink 1000]\nenabled=yes\ncallsign=K1ABC-R\nnode_number=123456\nname=Before\ntransport=proxy\nproxy_host=127.0.0.1\nproxy_port={port}\ndirectory_servers=127.0.0.1\n"
+        );
         let providers = crate::providers::ProviderSet::load().unwrap();
         let mut process = ProductRuntime::start_with_providers(
-            std::path::Path::new("rpt_advanced.conf"),
-            "[general]\nenabled=no\n",
+            &root.join("rpt_advanced.conf"),
+            &configuration,
             Vec::new(),
             SecretsFile::parse("").unwrap(),
             providers,
         )
         .unwrap();
-
+        let login = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        let snapshot = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        process
+            .reload(&configuration.replace("name=Before", "name=After"))
+            .unwrap();
+        let renewed = observed.recv_timeout(Duration::from_secs(5)).unwrap();
         process.stop().unwrap();
+        let logout = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        directory.join().unwrap();
+        std::fs::remove_file(secrets_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+        assert!(login.starts_with(b"lK1ABC-R\xac\xacfixture-value\rONLINE"));
+        assert!(login.windows(8).any(|part| part == b"\rBefore\r"));
+        assert_eq!(snapshot, b"F0\r");
+        assert!(renewed.windows(7).any(|part| part == b"\rAfter\r"));
+        assert!(logout.windows(9).any(|part| part == b"OFF-V3.40"));
     }
 
     #[test]

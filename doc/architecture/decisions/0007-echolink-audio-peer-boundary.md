@@ -87,7 +87,8 @@ requests and copied per-peer protocol/capability metadata. Both IAX hosts
 preserve their existing transport/media behavior and populate real local and
 remote identities. Product SONAME 2 rejects the older host/product pair.
 EchoLink host attachment, account reload and finite source-read integration
-remain in progress; the provider does not yet advertise its network/media groups.
+are implemented on the feature branch. The provider advertises its complete
+network, prepared-media and text groups; installed-host validation remains open.
 
 Source reads return exact accepted-prefix credit; the provider retains rejected
 PCM and missing spans. The product holds one finite-ring token and acknowledges
@@ -128,8 +129,8 @@ Outgoing calls have no observed incoming endpoint. Shared owners retain that
 absence explicitly; incoming handoffs require the real observation. Dial adopts
 only the requested real station ID and owning local account, retiring mismatched
 returned QSOs before reporting failure.
-The network/media operation group remains unpublished while this record and
-the shared host glue are integrated; lifecycle-only users do not consume it.
+The complete network/media operation group is published alongside the shared
+host glue; lifecycle-only users do not consume it.
 The product's existing configuration visitor carries a borrowed provider account
 record and its configured secrets-file path. Product code resolves every account
 before any host visit; hosts prepare or copy the public record synchronously and
@@ -174,7 +175,7 @@ callback captures the validated product directly rather than reacquiring the
 host lifecycle lock. Outbound Echo destinations use that local account and
 check cancellation before and after dial. No Asterisk channel is constructed.
 These startup/stop and transactional host-reload paths are implemented on the
-feature branch; complete provider capability publication remains pending.
+feature branch, including complete provider capability publication.
 The sized descriptor's prepared-apply tail uses an inactive account handle as
 the provider-owned validated configuration/credential snapshot. Applying it
 exchanges that snapshot with the target's old settings, retaining both handles
@@ -284,6 +285,12 @@ The sized peer snapshot includes actual full-credit drops and retained bytes;
 both hosts copy those values instead of fabricating empty ingress counters.
 Human-text submission rejection remains separate from audio health and emits
 only a rate-limited metadata error, never the sender/body or a hangup.
+Unexpected account transport failure wakes every attached serial peer even
+when its ingress credit is exhausted. It is not an explicit stop: source reads
+and downstream drain deadlines remain valid until detach. Each selected failed
+peer retains its accepted finite media and publishes its final unkey only after
+the exact downstream token completes. Requested stop/reload still joins the
+driver before releasing callback storage.
 
 ## Consequences
 
@@ -295,7 +302,8 @@ forwarding never depends on speech admission or synthesis success. Disconnect,
 reload and unload cancel the exact source generation and join workers before
 releasing speech contexts. Metadata-only counters and rate-limited failures use
 the shared product's existing status/logging ports in both hosts. The EchoLink
-transport itself remains planned. Its absence of topology advertisements means
+transport implementation remains subject to installed-host and live validation.
+Its absence of topology advertisements means
 the existing advertised-topology loop prevention cannot infer EchoLink-only
 transitive paths. A generic HTTP proxy is not a valid EchoLink transport
 proxy; the selected standard TCP Proxy tunnels directory and peer traffic.

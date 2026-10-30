@@ -10,6 +10,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from echolink_fixture import EchoProxy
+
 
 def main() -> None:
     """Load, reject an enabled replacement, reload, unload, and load again."""
@@ -144,6 +146,60 @@ def main() -> None:
                     )
                     cli("module unload app_rpt_advanced.so")
                     assert "RadioPlusAdvanced/" not in cli("core show channels concise")
+                with EchoProxy() as echo:
+                    (root / "echolink-secrets.conf").write_text(
+                        "[1000]\ndirectory_password=fixture-value\nproxy_password=fixture-proxy\n",
+                        encoding="utf-8",
+                    )
+                    (root / "echolink-secrets.conf").chmod(0o600)
+                    echo_config = (
+                        "[1000]\nradio_channel=network-echo\nfull_duplex=yes\n"
+                        "[echolink 1000]\nenabled=yes\ncallsign=K1ABC-R\n"
+                        "node_number=654321\nname=Before\ntransport=proxy\n"
+                        "announcement=off\ntelemetry=off\n"
+                        f"proxy_host=127.0.0.1\nproxy_port={echo.port}\n"
+                        "directory_servers=127.0.0.1\n"
+                    )
+                    node.write_text(echo_config, encoding="utf-8")
+                    cli("module load app_rpt_advanced.so")
+                    login = echo.requests.get(timeout=5)
+                    assert login.startswith(b"lK1ABC-R\xac\xacfixture-value\rONLINE")
+                    assert echo.requests.get(timeout=5) == b"F0\r"
+                    deadline = time.monotonic() + 5
+                    while "fresh=1" not in cli("rpt_advanced link status 1000"):
+                        assert time.monotonic() < deadline, (
+                            "Echo directory was not published"
+                        )
+                        time.sleep(0.02)
+                    echo.send(6, echo.SDES)
+                    deadline = time.monotonic() + 5
+                    while "3123456" not in cli("rpt_advanced link status 1000"):
+                        assert time.monotonic() < deadline, cli(
+                            "rpt_advanced link status 1000"
+                        )
+                        time.sleep(0.02)
+                    for sequence in range(20):
+                        echo.voice(sequence)
+                        time.sleep(0.08)
+                    node.write_text(
+                        echo_config.replace("name=Before", "name=After"),
+                        encoding="utf-8",
+                    )
+                    cli("module reload app_rpt_advanced.so")
+                    assert b"\rAfter\r" in echo.requests.get(timeout=5)
+                    cli("module unload app_rpt_advanced.so")
+                    assert b"OFF-V3.40" in echo.requests.get(timeout=5)
+                    assert process.pid == original_pid and process.poll() is None
+                    assert "RadioPlusAdvanced/" not in cli("core show channels concise")
+                    echo_records = re.findall(
+                        r"rpt_fixture RadioPlusAdvanced/network-echo ticks=(\d+) writes=(\d+) "
+                        r"nonzero=(\d+) early=(\d+) keys=(\d+) unkeys=(\d+)",
+                        logfile.read_text(encoding="utf-8", errors="replace"),
+                    )
+                    assert len(echo_records) == 1, echo_records
+                    assert (
+                        int(echo_records[0][2]) > 0 and int(echo_records[0][4]) > 0
+                    ), echo_records
                 cli("module unload chan_rpt_fixture.so")
                 print(f"Rust module same-PID lifecycle passed: pid={original_pid}")
             except BaseException:
