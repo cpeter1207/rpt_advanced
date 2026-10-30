@@ -241,6 +241,10 @@ fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() 
     let mut host = host();
     let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let (io, audio_only) = crate::link::session::tests::peer_without_text(48000);
+    host.runtime.incoming("1000", "6000", true).unwrap();
+    host.attach_peer("1000", "6000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
     ingress
         .lock()
         .unwrap()
@@ -271,6 +275,15 @@ fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() 
             .filter(|text| text.starts_with(b"M "))
             .count(),
         1
+    );
+    assert!(
+        !audio_only
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text.starts_with(b"M ")),
+        "audio-only peers must not inherit globally available text callbacks"
     );
     assert!(host.stop(20));
 }

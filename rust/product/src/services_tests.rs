@@ -11,6 +11,30 @@ static LOOKUP_MODE: AtomicU8 = AtomicU8::new(0);
 static RADIO_OPEN_MODE: AtomicU8 = AtomicU8::new(0);
 static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
 static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
+#[path = "services_echo_tests.rs"]
+mod echo;
+
+unsafe extern "C" fn echo_info(
+    _: *mut c_void,
+    _: *const c_void,
+    output: *mut abi::rptadv_peer_info_v1,
+) -> i32 {
+    unsafe { crate::fixture::peer_info(ptr::null_mut(), ptr::null(), output) };
+    let output = unsafe { &mut *output };
+    output.protocol = 2;
+    output.capabilities = 23;
+    output.account_generation = 3;
+    output.qso_generation = 4;
+    output.remote = abi::rptadv_peer_bytes_v1 {
+        data: b"123456".as_ptr(),
+        length: 6,
+    };
+    output.callsign = abi::rptadv_peer_bytes_v1 {
+        data: b"W1XYZ-R".as_ptr(),
+        length: 7,
+    };
+    0
+}
 
 #[test]
 fn mixed_protocol_host_dispatch_uses_each_peers_copied_capabilities() {
@@ -51,7 +75,7 @@ fn mixed_protocol_host_dispatch_uses_each_peers_copied_capabilities() {
         table.peer_write = unsafe { (*crate::fixture::host_descriptor()).peer_write };
         table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
     });
-    let peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
+    let mut peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
     assert!(
         peer.async_owner().is_none(),
         "a PCM peer must not inherit another protocol's async callbacks"
@@ -61,31 +85,20 @@ fn mixed_protocol_host_dispatch_uses_each_peers_copied_capabilities() {
         "a PCM peer must not use globally present codec callbacks"
     );
     assert_eq!(peer.identity().node(), "2000");
+    assert_eq!(peer.callsign(), "");
+    assert_eq!(peer.generations(), (0, 0));
+    assert!(matches!(
+        peer.read_source(SourceCompletion::Pending, |_| 0),
+        Err(Error::Operation)
+    ));
+    assert!(matches!(
+        peer.send_human_text("W1XYZ", "Hello"),
+        Err(Error::Operation)
+    ));
 }
 
 #[test]
 fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
-    unsafe extern "C" fn info(
-        _: *mut c_void,
-        _: *const c_void,
-        output: *mut abi::rptadv_peer_info_v1,
-    ) -> i32 {
-        unsafe { crate::fixture::peer_info(ptr::null_mut(), ptr::null(), output) };
-        let output = unsafe { &mut *output };
-        output.protocol = 2;
-        output.capabilities = 23;
-        output.account_generation = 3;
-        output.qso_generation = 4;
-        output.remote = abi::rptadv_peer_bytes_v1 {
-            data: b"123456".as_ptr(),
-            length: 6,
-        };
-        output.callsign = abi::rptadv_peer_bytes_v1 {
-            data: b"W1XYZ-R".as_ptr(),
-            length: 7,
-        };
-        0
-    }
     unsafe extern "C" fn read(
         _: *mut c_void,
         _: *mut c_void,
@@ -131,7 +144,7 @@ fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
     let (prepared, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
     let services = host_services(|table| {
         *table = prepared.services.0;
-        table.peer_info = Some(info);
+        table.peer_info = Some(echo_info);
         table.peer_read_source = Some(read);
         table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
     });

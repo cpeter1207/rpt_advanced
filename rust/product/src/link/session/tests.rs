@@ -1352,18 +1352,27 @@ pub(crate) fn peer_with_egress(
     async_enabled: bool,
     egress: bool,
 ) -> (PeerIo, Shared) {
-    make_peer(rate_hz, async_enabled, egress, false)
+    make_peer(rate_hz, async_enabled, egress, false, true)
 }
 pub(crate) fn source_peer() -> (PeerIo, Shared) {
-    make_peer(8000, true, true, true)
+    make_peer(8000, true, true, true, true)
 }
-fn make_peer(rate_hz: u32, async_enabled: bool, egress: bool, source: bool) -> (PeerIo, Shared) {
+pub(crate) fn peer_without_text(rate_hz: u32) -> (PeerIo, Shared) {
+    make_peer(rate_hz, false, false, false, false)
+}
+fn make_peer(
+    rate_hz: u32,
+    async_enabled: bool,
+    egress: bool,
+    source: bool,
+    forward_text: bool,
+) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
         capabilities: if source {
             23
         } else {
-            12 | u32::from(async_enabled) | (u32::from(egress) << 1)
+            8 | (u32::from(forward_text) << 2) | u32::from(async_enabled) | (u32::from(egress) << 1)
         },
         fail_ready: source,
         ..State::default()
@@ -3220,7 +3229,7 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
         assert!(PeerSession::prepare(io, outbound, local, remote, true).is_err());
         assert_eq!(state.lock().unwrap().drops, 1);
     }
-    let (io, state) = make_peer(16000, true, true, true);
+    let (io, state) = make_peer(16000, true, true, true, true);
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
