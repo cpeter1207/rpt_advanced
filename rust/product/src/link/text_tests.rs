@@ -133,7 +133,7 @@ fn text_forwarding_large_body_is_not_limited_by_local_synthesis_quota_or_failure
         true
     });
     assert_eq!(result.destinations_admitted, 1);
-    for (represented, admitted, rejected) in [(None, 0, 2), (Some("654321"), 2, 0)] {
+    for (represented, admitted, rejected) in [(None, 0, 3), (Some("654321"), 3, 0)] {
         message.represented_source = represented.map(|node| {
             rpt_advanced_core::link::PeerIdentity::parse(ProtocolId::EchoLink, node).unwrap()
         });
