@@ -651,6 +651,10 @@ unsafe extern "C" fn peer_observe(
         result.struct_size = size_of::<ffi::rptadv_peer_observation_v1>() as u32;
         result.abi_version = 1;
         result.echo_valid = 1;
+        result.ingress_overflow_drops = raw.ingress_full_packets;
+        result.ingress_queued_packets = raw.ingress_queued_packets;
+        result.ingress_capacity_packets = raw.ingress_capacity_packets;
+        result.echo_ingress_bytes = raw.ingress_retained_bytes;
         result.jitter_queued_packets = raw.jitter.queued_packets;
         result.jitter_delay_samples = raw.jitter.delay_samples;
         result.jitter_buffered_span_samples = raw.jitter.buffered_samples;
@@ -684,7 +688,6 @@ unsafe extern "C" fn peer_observe(
         result.echo_text_admitted = raw.text_admitted;
         result.echo_text_rejected = raw.text_rejected;
         result.echo_cause_detail = raw.cause_detail;
-        // A zero ingress capacity marks unavailable per-QSO ingress metrics, not an empty queue.
         unsafe { ptr::write(output, result) };
         0
     })

@@ -121,7 +121,9 @@ unsafe extern "C" fn account_observe(_: *const abi::Account, out: *mut abi::Acco
 }
 unsafe extern "C" fn peer_observe(_: *const abi::Qso, out: *mut abi::PeerObservation) -> abi::Status {
     unsafe { out.write(abi::PeerObservation { struct_size: size_of::<abi::PeerObservation>() as u32,
-        abi_version: 1, state: 2, first_cause: 4, codec_plc_samples: 640, ..Default::default() }) };
+        abi_version: 1, state: 2, first_cause: 4, codec_plc_samples: 640,
+        ingress_full_packets: 12, ingress_queued_packets: 3, ingress_capacity_packets: 64,
+        ingress_retained_bytes: 123, ..Default::default() }) };
     abi::Status::Ok
 }
 unsafe extern "C" fn dial(

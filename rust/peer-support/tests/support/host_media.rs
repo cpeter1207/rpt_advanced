@@ -64,6 +64,16 @@ pub unsafe fn check(context: *mut c_void) {
         ),
         (1, 2, 4, 640)
     );
+    assert_eq!(
+        (
+            observed.ingress_overflow_drops,
+            observed.ingress_queued_packets,
+            observed.ingress_capacity_packets
+        ),
+        (12, 3, 64),
+        "the host must copy real per-peer ingress credit"
+    );
+    assert_eq!(observed.echo_ingress_bytes, 123);
     let mut result: abi::rptadv_codec_encode_result_v1 = unsafe { std::mem::zeroed() };
     result.struct_size = size_of::<abi::rptadv_codec_encode_result_v1>() as u32;
     let mut packet = [0; 4];

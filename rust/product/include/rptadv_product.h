@@ -168,6 +168,7 @@ struct rptadv_peer_observation_v1 {
     uint64_t echo_text_admitted;        /**< Human-text transport admissions. */
     uint64_t echo_text_rejected;        /**< Human-text send attempts not admitted. */
     uint8_t echo_cause_detail[32];      /**< NUL-padded content-free error category, max31bytes. */
+    uint64_t echo_ingress_bytes;        /**< Queued and currently borrowed ingress payload bytes. */
 };
 
 /** Copied local civil time. Valid is zero when conversion failed. */

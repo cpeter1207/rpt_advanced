@@ -84,11 +84,13 @@ fn copied_observations_preserve_every_counter_without_borrowing_a_peer() {
         echo_proxy_admitted: 110,
         echo_text_admitted: 111,
         echo_text_rejected: 112,
+        echo_ingress_bytes: 113,
         echo_cause_detail: [0; 32],
     };
     input.echo_cause_detail[..8].copy_from_slice(b"TimedOut");
     cache.store(input);
     let got = cache.load().unwrap();
+    assert_eq!(got.echo_ingress_bytes, 113);
     assert_eq!(
         got.struct_size as usize,
         std::mem::size_of::<PeerObservation>()

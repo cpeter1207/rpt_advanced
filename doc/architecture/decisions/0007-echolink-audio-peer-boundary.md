@@ -278,6 +278,12 @@ Execution rechecks admission/reload gates and the exact account generation.
 Repeated failures log at most once per30seconds; online recovery or a new
 generation resets that episode. Shutdown gates producers, joins callbacks and
 drains accepted control work before releasing logger/backend storage.
+Per-QSO ingress observations use weak route handles: querying reserved/queued
+slots and charged bytes cannot keep a producer open or borrow its consumer.
+The sized peer snapshot includes actual full-credit drops and retained bytes;
+both hosts copy those values instead of fabricating empty ingress counters.
+Human-text submission rejection remains separate from audio health and emits
+only a rate-limited metadata error, never the sender/body or a hangup.
 
 ## Consequences
 

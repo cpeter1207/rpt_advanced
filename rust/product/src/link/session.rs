@@ -266,6 +266,7 @@ pub struct PeerSession {
     replied_newkey: bool,
     radio_control: RadioControlState,
     async_epoch: Option<Instant>,
+    last_text_failure_ms: Option<u64>,
     #[cfg(test)]
     owner_thread: Arc<std::sync::Mutex<Option<thread::ThreadId>>>,
 }
@@ -610,6 +611,7 @@ impl PeerSession {
                     RadioControlState::Negotiating(None)
                 },
                 async_epoch: None,
+                last_text_failure_ms: None,
                 #[cfg(test)]
                 owner_thread,
             },
@@ -892,7 +894,18 @@ impl PeerSession {
             match command {
                 Command::HumanText { sender, body } => {
                     // Chat queue failure is independent of media/session health.
-                    let _ = self.io.send_human_text(&sender, &body);
+                    if let Err(error) = self.io.send_human_text(&sender, &body) {
+                        if self
+                            .last_text_failure_ms
+                            .is_none_or(|last| now_ms.saturating_sub(last) >= 30_000)
+                        {
+                            self.last_text_failure_ms = Some(now_ms);
+                            log_error(&format!(
+                                "rpt_advanced {} peer {}: human-text send rejected: {error:?}",
+                                self.local, self.remote
+                            ));
+                        }
+                    }
                 }
                 Command::Text { text, advisory } => {
                     if self.io.identity().protocol() == ProtocolId::EchoLink
@@ -1078,22 +1091,21 @@ impl PeerSession {
                 "rpt_advanced {} peer {}: unexpected termination during {cause}: {error:?}{detail}",
                 self.local, self.remote
             );
-            #[cfg(test)]
-            crate::fixture::error_log(3, &message);
-            {
-                // Preparation rejects NUL identities; causes and Error names are literals.
-                let message = CString::new(message).expect("peer failure text contains no NUL");
-                unsafe extern "C" {
-                    fn syslog(priority: std::ffi::c_int, format: *const std::ffi::c_char, ...);
-                }
-                // SAFETY: the constant format receives one live NUL-terminated string.
-                // Priority 3 is LOG_ERR, matching existing product syslog reporting.
-                unsafe {
-                    syslog(3, c"%s".as_ptr(), message.as_ptr());
-                }
-            }
+            log_error(&message);
         }
     }
+}
+
+/// Off-audio metadata only; identities are validated and error names are typed.
+fn log_error(message: &str) {
+    #[cfg(test)]
+    crate::fixture::error_log(3, message);
+    let message = CString::new(message).expect("peer failure text contains no NUL");
+    unsafe extern "C" {
+        fn syslog(priority: std::ffi::c_int, format: *const std::ffi::c_char, ...);
+    }
+    // Constant format, LOG_ERR; no human payload or provider-owned error body.
+    unsafe { syslog(3, c"%s".as_ptr(), message.as_ptr()) };
 }
 
 impl Drop for PeerSession {

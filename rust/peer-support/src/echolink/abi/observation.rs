@@ -172,4 +172,12 @@ pub struct PeerObservation {
     pub text_admitted: u64,
     /// Human-text messages rejected before transport admission.
     pub text_rejected: u64,
+    /// Per-QSO slot/media/byte-credit rejections, never a hangup.
+    pub ingress_full_packets: u64,
+    /// Reserved/queued ingress slots, excluding an already borrowed packet.
+    pub ingress_queued_packets: u32,
+    /// Route slot capacity; zero when its producer is no longer available.
+    pub ingress_capacity_packets: u32,
+    /// Payload bytes retained by queued and currently borrowed packets.
+    pub ingress_retained_bytes: u64,
 }

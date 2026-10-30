@@ -30,7 +30,7 @@ pub(crate) fn describe(peer: &PeerObservation) -> Option<String> {
     // provider returns a malformed category; it can never inject a log line.
     let detail = String::from_utf8_lossy(&peer.echo_cause_detail[..end]);
     Some(format!(
-        "echo state={} cause={} detail={detail:?} codec={} transport={} raw-receiving={} selected={} last-valid-age={}ms heartbeat-in={} liveness-in={} retained-age={}ms stale={} malformed={} reordered={} codec-plc-samples={} ring-gap-admitted={} proxy-admitted={} text-admitted={} text-rejected={}",
+        "echo state={} cause={} detail={detail:?} codec={} transport={} raw-receiving={} selected={} last-valid-age={}ms heartbeat-in={} liveness-in={} retained-age={}ms stale={} malformed={} reordered={} codec-plc-samples={} ring-gap-admitted={} proxy-admitted={} text-admitted={} text-rejected={} ingress-retained-bytes={}",
         label(
             &["connecting", "connected", "closing", "closed"],
             peer.echo_state
@@ -63,12 +63,13 @@ pub(crate) fn describe(peer: &PeerObservation) -> Option<String> {
         peer.echo_proxy_admitted,
         peer.echo_text_admitted,
         peer.echo_text_rejected,
+        peer.echo_ingress_bytes,
     ))
 }
 
 pub(super) struct PeerObservationCache {
     valid: AtomicBool,
-    fields: [AtomicU64; 39],
+    fields: [AtomicU64; 40],
     detail: [AtomicU64; 4],
 }
 impl PeerObservationCache {
@@ -120,6 +121,7 @@ impl PeerObservationCache {
             peer.echo_proxy_admitted,
             peer.echo_text_admitted,
             peer.echo_text_rejected,
+            peer.echo_ingress_bytes,
         ];
         for (slot, value) in self.fields.iter().zip(fields) {
             slot.store(value, Ordering::Relaxed);
@@ -190,6 +192,7 @@ impl PeerObservationCache {
             echo_proxy_admitted: values[36],
             echo_text_admitted: values[37],
             echo_text_rejected: values[38],
+            echo_ingress_bytes: values[39],
             echo_cause_detail: detail,
         })
     }

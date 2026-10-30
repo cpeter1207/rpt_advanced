@@ -11,6 +11,11 @@ fn account_snapshot_has_space_for_the_complete_callsign_without_a_qso() {
     assert_eq!(size_of::<abi::AccountObservation>(), 280);
 }
 
+#[test]
+fn peer_snapshot_has_space_for_the_ingress_credit_observation() {
+    assert_eq!(size_of::<abi::PeerObservation>(), 288);
+}
+
 unsafe extern "C" fn create(
     _: *const abi::RuntimeConfig,
     _: *mut *mut abi::Context,

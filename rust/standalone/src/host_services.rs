@@ -558,6 +558,10 @@ unsafe extern "C" fn peer_observe(
             result.struct_size = size_of::<abi::rptadv_peer_observation_v1>() as u32;
             result.abi_version = 1;
             result.echo_valid = 1;
+            result.ingress_overflow_drops = raw.ingress_full_packets;
+            result.ingress_queued_packets = raw.ingress_queued_packets;
+            result.ingress_capacity_packets = raw.ingress_capacity_packets;
+            result.echo_ingress_bytes = raw.ingress_retained_bytes;
             result.jitter_queued_packets = raw.jitter.queued_packets;
             result.jitter_delay_samples = raw.jitter.delay_samples;
             result.jitter_buffered_span_samples = raw.jitter.buffered_samples;
