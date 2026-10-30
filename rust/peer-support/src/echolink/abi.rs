@@ -221,6 +221,9 @@ pub struct AccountConfig {
     pub transport: TransportConfig,
     /// Controller-resolved policy and timings.
     pub policy: AccountPolicy,
+    /// Optional IPv4/DNS APRS endpoint with UDP port; empty disables publication.
+    /// Appended in the coordinated unreleased account-record extension.
+    pub aprs_server: ByteSpan,
 }
 impl Default for AccountConfig {
     fn default() -> Self {
@@ -234,6 +237,7 @@ impl Default for AccountConfig {
             station: StationMetadata::default(),
             transport: TransportConfig::default(),
             policy: AccountPolicy::default(),
+            aprs_server: ByteSpan::default(),
         }
     }
 }

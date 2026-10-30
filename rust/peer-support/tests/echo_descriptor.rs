@@ -4,6 +4,12 @@ use rptadv_peer_support::echolink::{Api, abi};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn account_record_appends_the_owned_aprs_endpoint_without_moving_the_policy() {
+    assert_eq!(std::mem::offset_of!(abi::AccountConfig, aprs_server), 344);
+    assert_eq!(size_of::<abi::AccountConfig>(), 360);
+}
+
 static CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[test]

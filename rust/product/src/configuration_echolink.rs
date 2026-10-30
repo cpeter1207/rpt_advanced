@@ -35,6 +35,7 @@ pub(super) fn visit<T>(
         enabled: u32::from(settings.enabled),
         node_number: settings.node_number,
         callsign: bytes(&settings.callsign),
+        aprs_server: bytes(&settings.aprs_server),
         station: echo::StationMetadata {
             name: bytes(&settings.name),
             location: bytes(&settings.location),

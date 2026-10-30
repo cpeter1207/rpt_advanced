@@ -48,6 +48,54 @@ fn echolink_omnidirectional_antenna_keeps_the_explicit_sentinel() {
 }
 
 #[test]
+fn echolink_aprs_endpoint_inherits_and_can_be_explicitly_disabled() {
+    assert_eq!(
+        resolve("[524950]\n").unwrap().value.aprs_server,
+        "aprs.echolink.org:5199"
+    );
+    for (global, local, expected) in [
+        ("127.0.0.1:40000", None, "127.0.0.1:40000"),
+        ("127.0.0.1:40000", Some(""), ""),
+        ("", Some("local.example:5199"), "local.example:5199"),
+    ] {
+        let mut source = format!("[524950]\n[echolink]\naprs_server={global}\n");
+        if let Some(local) = local {
+            source.push_str(&format!("[echolink 524950]\naprs_server={local}\n"));
+        }
+        let resolved = resolve(&source).unwrap();
+        assert!(resolved.warnings.is_empty());
+        assert_eq!(resolved.value.aprs_server, expected);
+    }
+    for endpoint in [
+        "host",
+        "host:0",
+        "host:65536",
+        "http://host:5199",
+        "[::1]:5199",
+    ] {
+        let resolved = resolve(&format!(
+            "[524950]\n[echolink 524950]\naprs_server={endpoint}\n"
+        ))
+        .unwrap();
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|warning| warning.key == "aprs_server")
+        );
+        assert_eq!(resolved.value.aprs_server, "aprs.echolink.org:5199");
+    }
+    let resolved = resolve("[524950]\n[echolink]\naprs_server=local.example:5199\n[echolink 524950]\ntransport=proxy\naprs_server=local.example:40000\n").unwrap();
+    assert_eq!(resolved.value.aprs_server, "local.example:5199");
+    assert!(
+        resolved
+            .warnings
+            .iter()
+            .any(|warning| warning.key == "aprs_server")
+    );
+}
+
+#[test]
 fn echolink_node_values_override_valid_global_defaults_without_identity_inheritance() {
     let source = "[524950]\n[508422]\n[echolink]\nmax_stations=30\nreceive_gain_db=-4\nannouncement=callsign\ntelemetry=follow\ncallsign=N0WRONG-R\nnode_number=123456\n[echolink 524950]\nenabled=yes\ncallsign=n0call-r\nnode_number=1002775\nmax_stations=bad\ntransmit_gain_db=2.5\n";
     let settings = resolve(source).unwrap();

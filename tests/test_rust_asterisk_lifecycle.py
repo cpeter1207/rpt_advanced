@@ -157,6 +157,7 @@ def main() -> None:
                         "[echolink 1000]\nenabled=yes\ncallsign=K1ABC-R\n"
                         "node_number=654321\nname=Before\ntransport=proxy\n"
                         "announcement=off\ntelemetry=off\n"
+                        "aprs_server=\n"
                         f"proxy_host=127.0.0.1\nproxy_port={echo.port}\n"
                         "directory_servers=127.0.0.1\n"
                     )

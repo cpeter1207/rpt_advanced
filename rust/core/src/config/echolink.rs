@@ -1,5 +1,5 @@
 //! Off-audio EchoLink account resolution. Identity never inherits across accounts.
-use super::{ConfigDocument, ConfigError, NodeId, Resolution, Schema, parse};
+use super::{ConfigDocument, ConfigError, ConfigWarning, NodeId, Resolution, Schema, parse};
 use std::{collections::BTreeSet, net::Ipv4Addr, path::PathBuf};
 
 /// Account transport; a Proxy is the EchoLink TCP protocol, not HTTP.
@@ -69,6 +69,8 @@ impl EchoLinkTelemetry {
 /// Fully resolved public account settings. Passwords never belong in this record.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EchoLinkSettings {
+    /// IPv4/DNS APRS destination with UDP port; empty explicitly disables publication.
+    pub aprs_server: String,
     /// Disabled accounts do not require a provider or credentials.
     pub enabled: bool,
     /// Node-specific normalized account callsign.
@@ -163,6 +165,7 @@ pub(super) fn default_value(key: &str) -> Option<&'static str> {
         | "antenna_gain_db"
         | "antenna_direction_deg" => "0",
         "directory_servers" => "servers.echolink.org,backup.echolink.org",
+        "aprs_server" => "aprs.echolink.org:5199",
         "max_stations" | "max_pending_handshakes" => "20",
         "heartbeat_interval_ms" | "directory_timeout_ms" => "10000",
         "heartbeat_timeout_ms" => "100000",
@@ -258,6 +261,16 @@ pub(super) fn value_valid(key: &str, value: &str) -> bool {
         "telemetry" => EchoLinkTelemetry::parse(value).is_some(),
         "bind_address" => value.parse::<Ipv4Addr>().is_ok(),
         "proxy_host" => value.is_empty() || host(value).is_some(),
+        "aprs_server" => {
+            value.is_empty()
+                || value.rsplit_once(':').is_some_and(|(name, port)| {
+                    name.is_ascii()
+                        && !name.contains(':')
+                        && !name.is_empty()
+                        && host(name).is_some()
+                        && parse::unsigned(port, 1, 65535).is_some()
+                })
+        }
         "directory_servers" => hosts(value).is_some(),
         "allow" | "deny" => patterns(value).is_some(),
         "latitude" => finite(value).is_some_and(|number| (-90.0..=90.0).contains(&number)),
@@ -283,11 +296,24 @@ fn raw<'a>(document: &'a ConfigDocument, node: &NodeId, key: &str) -> &'a str {
         .into_iter()
         .take(if identity { 1 } else { 2 })
         .find_map(|scope| {
-            document
-                .lookup(key, &[scope])
-                .filter(|value| value_valid(key, value))
+            document.lookup(key, &[scope]).filter(|value| {
+                value_valid(key, value)
+                    && (key != "aprs_server"
+                        || aprs_supported(value, raw(document, node, "transport")))
+            })
         })
         .unwrap_or_else(|| default_value(key).expect("known account option"))
+}
+
+fn aprs_supported(value: &str, transport: &str) -> bool {
+    transport != "proxy"
+        || value.is_empty()
+        || value
+            .rsplit_once(':')
+            .expect("validated endpoint")
+            .1
+            .parse::<u16>()
+            == Ok(5199)
 }
 impl EchoLinkSettings {
     /// Resolve shared defaults and node overrides, retaining all schema warnings.
@@ -295,17 +321,33 @@ impl EchoLinkSettings {
         document: &ConfigDocument,
         node: &NodeId,
     ) -> Result<Resolution<Self>, ConfigError> {
-        let warnings = Schema::validate(document)?.warnings;
-        Ok(Resolution {
-            value: Self::from_document(document, node)?,
-            warnings,
-        })
+        let mut warnings = Schema::validate(document)?.warnings;
+        let value = Self::from_document(document, node)?;
+        let local = format!("echolink {}", node.as_str());
+        for entry in document.entries().iter().filter(|entry| {
+            entry.key == "aprs_server" && (entry.section == "echolink" || entry.section == local)
+        }) {
+            if value_valid("aprs_server", &entry.value)
+                && !aprs_supported(&entry.value, raw(document, node, "transport"))
+            {
+                warnings.push(ConfigWarning::new(
+                    entry.line,
+                    &entry.section,
+                    &entry.key,
+                    &entry.value,
+                    "EchoLink Proxy control requires UDP port 5199",
+                    &value.aprs_server,
+                ));
+            }
+        }
+        Ok(Resolution { value, warnings })
     }
     fn from_document(document: &ConfigDocument, node: &NodeId) -> Result<Self, ConfigError> {
         let text = |key| raw(document, node, key);
         let number = |key| text(key).parse::<u32>().expect("validated account number");
         let scalar = |key| finite(text(key)).expect("validated account scalar");
         let settings = Self {
+            aprs_server: text("aprs_server").into(),
             enabled: parse::boolean(text("enabled")).unwrap(),
             callsign: text("callsign").to_ascii_uppercase(),
             node_number: text("node_number").parse().unwrap_or(0),

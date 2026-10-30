@@ -1,6 +1,6 @@
 # ADR 0007: EchoLink audio-peer boundary
 
-Status: Planned; decision accepted
+Status: Partially implemented on the feature branch; final gate and live-client validation pending
 
 ## Context
 
@@ -88,7 +88,9 @@ preserve their existing transport/media behavior and populate real local and
 remote identities. Product SONAME 2 rejects the older host/product pair.
 EchoLink host attachment, account reload and finite source-read integration
 are implemented on the feature branch. The provider advertises its complete
-network, prepared-media and text groups; installed-host validation remains open.
+network, prepared-media and text groups. Isolated installed-host composition,
+reload and same-process Asterisk unload pass; public-network/client validation
+remains open.
 
 Source reads return exact accepted-prefix credit; the provider retains rejected
 PCM and missing spans. The product holds one finite-ring token and acknowledges
@@ -294,6 +296,22 @@ driver before releasing callback storage.
 
 ## Consequences
 
+The coordinated, unreleased account record appends an owned APRS endpoint span
+without moving existing fields. Its complete 64-bit extent is360bytes; older
+short records fail preparation before access. Descriptor, functions and SONAME1
+remain unchanged before the first provider release; consumers and staged test
+artifacts must use matching source revisions.
+
+`aprs_server` inherits per account and defaults to
+`aprs.echolink.org:5199`. An explicit blank disables publication. Direct mode
+can select an IPv4/DNS destination and UDP port; the standard Proxy control
+record can select only port5199. Unsupported Proxy ports warn and fall back
+through the normal configuration defaults. The existing account owner publishes
+the existing APRS RR/SDES builder after10seconds and every600seconds, outside
+audio callbacks. At most one bounded publication operation exists per account;
+its failure does not terminate a QSO. Loopback composition fixtures explicitly
+disable or redirect APRS and never publish test stations externally.
+
 No EchoLink protocol, directory, socket, control work or speech synthesis occurs
 in an audio callback. The shared incoming-text path uses two bounded ordinary
 workers, finite-media rings and generation-tagged SPSC endpoints. The transmit
@@ -302,7 +320,7 @@ forwarding never depends on speech admission or synthesis success. Disconnect,
 reload and unload cancel the exact source generation and join workers before
 releasing speech contexts. Metadata-only counters and rate-limited failures use
 the shared product's existing status/logging ports in both hosts. The EchoLink
-transport implementation remains subject to installed-host and live validation.
+transport implementation remains subject to final full-gate and live-client validation.
 Its absence of topology advertisements means
 the existing advertised-topology loop prevention cannot infer EchoLink-only
 transitive paths. A generic HTTP proxy is not a valid EchoLink transport

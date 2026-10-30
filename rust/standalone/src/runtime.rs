@@ -904,7 +904,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let configuration = format!(
-            "[1000]\nnode_enabled=no\n[echolink 1000]\nenabled=yes\ncallsign=K1ABC-R\nnode_number=123456\nname=Before\ntransport=proxy\nproxy_host=127.0.0.1\nproxy_port={port}\ndirectory_servers=127.0.0.1\n"
+            "[1000]\nnode_enabled=no\n[echolink 1000]\nenabled=yes\ncallsign=K1ABC-R\nnode_number=123456\nname=Before\ntransport=proxy\nproxy_host=127.0.0.1\nproxy_port={port}\ndirectory_servers=127.0.0.1\naprs_server=\n"
         );
         let providers = crate::providers::ProviderSet::load().unwrap();
         let mut process = ProductRuntime::start_with_providers(

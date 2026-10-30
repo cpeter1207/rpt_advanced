@@ -16,6 +16,7 @@ struct Collected {
 
 #[derive(Debug, PartialEq)]
 struct CapturedEcho {
+    aprs_server: String,
     local: String,
     callsign: String,
     number: u32,
@@ -67,6 +68,7 @@ unsafe extern "C" fn node(
         }
     };
     output.echoes.push(CapturedEcho {
+        aprs_server: unsafe { text(echo.aprs_server.data.cast(), echo.aprs_server.length) },
         local: unsafe { text(echo.local_node.data.cast(), echo.local_node.length) },
         callsign: unsafe { text(echo.callsign.data.cast(), echo.callsign.length) },
         number: echo.node_number,
@@ -184,6 +186,7 @@ fn resolved_echo_accounts_cross_the_visitor_without_identity_inheritance_or_secr
         output.echoes,
         [
             CapturedEcho {
+                aprs_server: "aprs.echolink.org:5199".into(),
                 local: "1000".into(),
                 callsign: "KG0BP-R".into(),
                 number: u32::MAX,
@@ -198,6 +201,7 @@ fn resolved_echo_accounts_cross_the_visitor_without_identity_inheritance_or_secr
                 secrets_file: "private/echo.conf".into()
             },
             CapturedEcho {
+                aprs_server: "aprs.echolink.org:5199".into(),
                 local: "2000".into(),
                 callsign: "".into(),
                 number: 0,
@@ -230,6 +234,23 @@ fn resolved_echo_accounts_cross_the_visitor_without_identity_inheritance_or_secr
             expected
         );
     }
+}
+
+#[test]
+fn aprs_endpoint_and_explicit_disable_reach_the_provider_visitor() {
+    let (result, output) = inspect(
+        "[echolink]\naprs_server=local.example:5199\n[1000]\n[echolink 1000]\naprs_server=\n[2000]\n",
+        false,
+    );
+    assert_eq!(result, 0, "{output:?}");
+    assert_eq!(
+        output
+            .echoes
+            .iter()
+            .map(|echo| echo.aprs_server.as_str())
+            .collect::<Vec<_>>(),
+        ["", "local.example:5199"]
+    );
 }
 
 #[test]
