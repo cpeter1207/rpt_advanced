@@ -301,95 +301,121 @@ fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner
 
 #[test]
 fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
-    let fixture = support::Fixture::new("network");
-    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
-    let event =
-        unsafe { library.get::<unsafe extern "C" fn(u32, u64, u64)>(b"fixture_account_event\0") }
-            .unwrap();
-    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
-    let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
-    let control = Arc::new(unsafe { Client::open(backend.cast(), "echo-gated-test", 8) }.unwrap());
-    let (entered, ready) = mpsc::channel();
-    let (release, held) = mpsc::channel();
-    assert!(
-        control
-            .submit((entered, held), |(entered, held)| {
-                entered.send(()).unwrap();
-                held.recv_timeout(Duration::from_secs(5)).unwrap();
-            })
-            .is_ok()
-    );
-    ready.recv_timeout(Duration::from_secs(5)).unwrap();
-    let (incoming, received) = mpsc::channel();
-    let (notice, notices) = mpsc::channel();
-    let mut accounts = Accounts::new(provider, control.clone(), move |_| {
-        incoming.send(()).unwrap();
-    })
-    .with_notice(move |line| notice.send(line.to_owned()).unwrap());
-    let path = fixture.0.parent().unwrap().join("credentials.conf");
-    std::fs::write(
+    for reloading in [false, true] {
+        let fixture = support::Fixture::new("network");
+        let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+        let event = unsafe {
+            library.get::<unsafe extern "C" fn(u32, u64, u64)>(b"fixture_account_event\0")
+        }
+        .unwrap();
+        let provider =
+            unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+        let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
+        let control =
+            Arc::new(unsafe { Client::open(backend.cast(), "echo-gated-test", 8) }.unwrap());
+        let (entered, ready) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        assert!(
+            control
+                .submit((entered, held), |(entered, held)| {
+                    entered.send(()).unwrap();
+                    held.recv_timeout(Duration::from_secs(5)).unwrap();
+                })
+                .is_ok()
+        );
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (incoming, received) = mpsc::channel();
+        let (notice, notices) = mpsc::channel();
+        let mut accounts = Accounts::new(provider, control.clone(), move |_| {
+            incoming.send(()).unwrap();
+        })
+        .with_notice(move |line| notice.send(line.to_owned()).unwrap());
+        let path = fixture.0.parent().unwrap().join("credentials.conf");
+        std::fs::write(
         &path,
         "[524950]\ndirectory_password=fixture-first\n[508422]\ndirectory_password=fixture-second\n",
     )
     .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let mut config = abi::AccountConfig {
-        enabled: 1,
-        node_number: 7,
-        local_node: abi::ByteSpan {
-            data: b"524950".as_ptr(),
-            length: 6,
-        },
-        ..Default::default()
-    };
-    unsafe { accounts.prepare(&config, &path) }.unwrap();
-    unsafe {
-        accounts.prepare(
-            &abi::AccountConfig {
-                enabled: 1,
-                node_number: 1,
-                local_node: abi::ByteSpan {
-                    data: b"508422".as_ptr(),
-                    length: 6,
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut config = abi::AccountConfig {
+            enabled: 1,
+            node_number: 7,
+            local_node: abi::ByteSpan {
+                data: b"524950".as_ptr(),
+                length: 6,
+            },
+            ..Default::default()
+        };
+        unsafe { accounts.prepare(&config, &path) }.unwrap();
+        unsafe {
+            accounts.prepare(
+                &abi::AccountConfig {
+                    enabled: 1,
+                    node_number: 1,
+                    local_node: abi::ByteSpan {
+                        data: b"508422".as_ptr(),
+                        length: 6,
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-            &path,
-        )
-    }
-    .unwrap();
-    unsafe { accounts.activate() }.unwrap(); // Queued behind the held control task.
-    unsafe { event(3, 4, 4) }; // Queued notices would log if reload gating failed.
-    config.node_number = 8;
-    let mut update = accounts.prepare_update().unwrap();
-    unsafe { update.prepare(&config, &path) }.unwrap();
-    update
-        .commit(
-            || {
-                release.send(()).unwrap();
-                let (barrier, joined) = mpsc::channel();
-                assert!(
-                    control
-                        .submit(barrier, |barrier| {
-                            barrier.send(()).unwrap();
-                        })
-                        .is_ok()
-                );
-                joined.recv_timeout(Duration::from_secs(5)).unwrap();
-                assert!(
-                    received.try_recv().is_err(),
-                    "queued QSO entered a half-reloaded product"
-                );
-                assert!(
-                    notices.try_recv().is_err(),
-                    "queued notice entered a half-reloaded product"
-                );
-                true
-            },
-            || true,
-        )
+                &path,
+            )
+        }
         .unwrap();
-    accounts.stop().unwrap();
+        unsafe { accounts.activate() }.unwrap(); // Queued behind the held control task.
+        if !reloading {
+            accounts.account("524950").unwrap().stop().unwrap();
+            release.send(()).unwrap();
+            let (barrier, joined) = mpsc::channel();
+            assert!(
+                control
+                    .submit(barrier, |barrier| barrier.send(()).unwrap())
+                    .is_ok()
+            );
+            joined.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                received.try_recv().is_err(),
+                "retired account admitted a queued QSO"
+            );
+            let count =
+                unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_peers\0") }
+                    .unwrap();
+            assert_eq!(unsafe { count() }, 0, "failed pending claim leaked its QSO");
+            accounts.stop().unwrap();
+            continue;
+        }
+        unsafe { event(3, 4, 4) }; // Queued notices would log if reload gating failed.
+        config.node_number = 8;
+        let mut update = accounts.prepare_update().unwrap();
+        unsafe { update.prepare(&config, &path) }.unwrap();
+        update
+            .commit(
+                || {
+                    release.send(()).unwrap();
+                    let (barrier, joined) = mpsc::channel();
+                    assert!(
+                        control
+                            .submit(barrier, |barrier| {
+                                barrier.send(()).unwrap();
+                            })
+                            .is_ok()
+                    );
+                    joined.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert!(
+                        received.try_recv().is_err(),
+                        "queued QSO entered a half-reloaded product"
+                    );
+                    assert!(
+                        notices.try_recv().is_err(),
+                        "queued notice entered a half-reloaded product"
+                    );
+                    true
+                },
+                || true,
+            )
+            .unwrap();
+        accounts.stop().unwrap();
+    }
 }
 
 #[test]
@@ -674,6 +700,20 @@ fn reload_preparation_lazily_adds_the_first_account_and_reuses_its_owner() {
     }
     .unwrap();
     assert!(disabled.0.is_none());
+    for restored in [true, false] {
+        let failure = unsafe {
+            preparation().reload(
+                None,
+                |visit| visit(&abi::AccountConfig::default(), None),
+                || false,
+                || restored,
+            )
+        }
+        .err()
+        .unwrap();
+        assert_eq!(failure.cause, Error::Product);
+        assert_eq!(failure.rollback, (!restored).then_some(Error::Product));
+    }
     let path = directory.join("echolink-secrets.conf");
     std::fs::write(&path, "[524950]\ndirectory_password=fixture-value\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -729,7 +769,7 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
     ) -> i32 {
         -1
     }
-    for mode in 0..4 {
+    for mode in 0..5 {
         let rejected = mode != 0;
         let fixture = support::Fixture::new("network");
         let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
@@ -775,6 +815,15 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
             },
             ..abi::AccountConfig::default()
         };
+        if mode == 4 {
+            accounts.stop().unwrap();
+            assert_eq!(
+                unsafe { accounts.prepare(&config, &path) },
+                Err(Error::Status(abi::Status::Closed)),
+                "stop before activation must also prevent preparation"
+            );
+            continue;
+        }
         assert!(matches!(
             accounts.prepare_update(),
             Err(Error::Status(abi::Status::Closed))

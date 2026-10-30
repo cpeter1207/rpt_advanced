@@ -695,9 +695,12 @@ unsafe extern "C" fn notify(context: *mut c_void, event: *const abi::Event) {
     {
         return;
     }
-    let Some(account) = notifications.account.upgrade() else {
-        return;
-    };
+    // Entry retains the account alongside this callback context. Retirement
+    // gates callbacks before release; failed quiescence retains the whole Entry.
+    let account = notifications
+        .account
+        .upgrade()
+        .expect("enabled callback context retains its account");
     if event.kind == 0 {
         let Some(notices) = &notifications.notices else {
             return;
