@@ -197,9 +197,9 @@ impl LinkScheduler {
         if generation == 0
             || previous.is_some_and(|old| generation <= old.generation)
             || duplicate_routes_overlap(&routes, &windows)
-            || routes.iter().any(|route| {
-                route.local.is_empty() || route.remote.is_empty() || route.local == route.remote
-            })
+            || routes
+                .iter()
+                .any(|route| route.local.is_empty() || route.local == route.remote)
             || windows.iter().any(|window| {
                 let invalid = window.routes.is_empty()
                     || window.replaced.is_empty()

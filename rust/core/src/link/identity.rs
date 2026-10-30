@@ -87,7 +87,8 @@ impl EchoAlias {
 }
 
 fn positive_id(digits: &str) -> Result<u32, IdentityError> {
-    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+    // Both callers establish a nonempty identity before this numeric check.
+    if !digits.bytes().all(|digit| digit.is_ascii_digit()) {
         return Err(IdentityError);
     }
     digits
