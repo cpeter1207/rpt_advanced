@@ -365,6 +365,46 @@ unsafe extern "C" fn failed_push(
 unsafe extern "C" fn failed_gap(_: *mut ffi::rpcr3_ring, _: u64, _: *mut u64) -> i32 {
     -1
 }
+unsafe extern "C" fn rejected_tagged(
+    _: *mut ffi::rpcr3_ring,
+    _: *const f32,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: *const ffi::rpcr3_mute_span,
+    _: u32,
+    accepted: *mut u64,
+) -> i32 {
+    unsafe {
+        *accepted = 0;
+    }
+    if PUSH_SCRIPT.with(|mode| mode.get()) == 0 {
+        -1
+    } else {
+        0
+    }
+}
+unsafe extern "C" fn rejected_finish(_: *mut ffi::rpcr3_ring, token: *mut u64) -> i32 {
+    unsafe {
+        *token = 0;
+    }
+    if PUSH_SCRIPT.with(|mode| mode.get()) == 0 {
+        -1
+    } else {
+        0
+    }
+}
+unsafe extern "C" fn scripted_finish_status(
+    _: *const ffi::rpcr3_ring,
+    _: u64,
+    status: *mut u32,
+) -> i32 {
+    let mode = PUSH_SCRIPT.with(|mode| mode.get()) as u32;
+    unsafe {
+        *status = mode;
+    }
+    if mode == 4 { -1 } else { 0 }
+}
 unsafe extern "C" fn overreported_push(
     _: *mut ffi::rpcr3_ring,
     _: *const f32,
@@ -521,7 +561,7 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
             assert!(InboundRing::open(48000, InboundPolicy::Local { squelch_delay_ms }).is_err());
         }
         let original = *ffi::rpcr3_descriptor();
-        for case in 0..15 {
+        for case in 0..18 {
             let mut api = original;
             match case {
                 0 => api.struct_size = 8,
@@ -538,12 +578,17 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
                 11 => api.ring_consumer_reset = None,
                 12 => api.ring_consumer_render_sample = None,
                 13 => api.ring_output_delay = None,
-                _ => api.ring_producer_gap = None,
+                14 => api.ring_producer_gap = None,
+                15 => api.ring_finish_status = None,
+                16 => api.ring_producer_push_tagged = None,
+                _ => api.ring_producer_mute = None,
             }
-            assert!(
-                InboundRing::from_descriptor(8000, InboundPolicy::Peer, Box::leak(Box::new(api)))
-                    .is_err()
-            );
+            let policy = if case < 15 {
+                InboundPolicy::Peer
+            } else {
+                InboundPolicy::Echo
+            };
+            assert!(InboundRing::from_descriptor(8000, policy, Box::leak(Box::new(api))).is_err());
         }
         let mut api = original;
         api.ring_producer_push = Some(failed_push);
@@ -567,7 +612,39 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
         assert!(producer.observer().observe().is_err());
         let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Peer).unwrap();
         assert_eq!(producer.write(&[]), Ok(0));
+        assert_eq!(producer.finish(), Err(RingError));
         assert_eq!(PeerInput::available(&consumer), 0);
+    }
+}
+
+#[test]
+fn finite_and_tagged_ring_failures_do_not_publish_success_or_played_audio() {
+    // SAFETY: copied descriptors retain the real provider allocation lifecycle;
+    // only the returned operation status/metadata is controlled in this test.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_producer_push_tagged = Some(rejected_tagged);
+        api.ring_producer_finish = Some(rejected_finish);
+        api.ring_finish_status = Some(scripted_finish_status);
+        let (mut producer, _) =
+            InboundRing::from_descriptor(8000, InboundPolicy::Echo, Box::leak(Box::new(api)))
+                .unwrap();
+        for (mode, expected) in [(0, Err(RingError)), (1, Ok(0))] {
+            PUSH_SCRIPT.with(|script| script.set(mode));
+            assert_eq!(producer.write_tagged(&[0.25], 1, 0, &[]), expected);
+            assert_eq!(producer.finish(), Err(RingError));
+        }
+        for (mode, expected) in [
+            (0, Ok(FinishState::Pending)),
+            (1, Ok(FinishState::Drained)),
+            (2, Ok(FinishState::Cancelled)),
+            (3, Ok(FinishState::Failed)),
+            (4, Err(RingError)),
+            (5, Err(RingError)),
+        ] {
+            PUSH_SCRIPT.with(|script| script.set(mode));
+            assert_eq!(producer.finish_status(1), expected);
+        }
     }
 }
 
@@ -716,4 +793,23 @@ fn peer_input_single_sample_maps_real_pcm_and_provider_error() {
     let mut consumer = sample_then_fail_consumer();
     assert_eq!(PeerInput::render_sample(&mut consumer), Some(0.25));
     assert_eq!(PeerInput::render_sample(&mut consumer), None);
+    unsafe extern "C" fn rendered(
+        _: *mut ffi::rpcr3_ring,
+        sample: *mut f32,
+        real: *mut bool,
+    ) -> i32 {
+        unsafe {
+            *sample = 0.25;
+            *real = true;
+        }
+        0
+    }
+    // SAFETY: retain the released create/destroy pair around one successful render.
+    let (producer, mut consumer) = unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.ring_consumer_render_sample = Some(rendered);
+        InboundRing::from_descriptor(48000, InboundPolicy::Peer, Box::leak(Box::new(api))).unwrap()
+    };
+    producer.signals().set_dtmf_muted(true);
+    assert_eq!(PeerInput::render_sample(&mut consumer), Some(0.0));
 }
