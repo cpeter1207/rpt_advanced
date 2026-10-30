@@ -120,9 +120,8 @@ fn parse(source: &str, account: &str) -> Result<AccountSecrets, SecretError> {
         if value.is_empty() || value.chars().any(char::is_control) {
             return Err(invalid());
         }
-        let secrets = accounts
-            .get_mut(current.ok_or_else(invalid)?)
-            .ok_or_else(invalid)?;
+        // Only a section already inserted above becomes current.
+        let secrets = accounts.get_mut(current.ok_or_else(invalid)?).unwrap();
         match key.trim() {
             "directory_password" if secrets.directory_password.is_empty() => {
                 secrets.directory_password = value.to_owned()
@@ -188,6 +187,8 @@ mod tests {
     #[test]
     fn secrets_reject_malformed_or_ambiguous_records_without_content_in_errors() {
         for source in [
+            "\n# private credentials\n[]\ndirectory_password=private value",
+            "[1234567890123456789012345678901234567890123456789012345678901234]\ndirectory_password=private value",
             "[general]\ndirectory_password=private value",
             "[524950]\ndirectory_password=",
             "[524950]\ndirectory_password=private value\nproxy_password=",
