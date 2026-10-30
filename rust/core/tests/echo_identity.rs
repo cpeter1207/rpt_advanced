@@ -2,6 +2,18 @@ use rpt_advanced_core::command::DtmfCommandMap;
 use rpt_advanced_core::link::{EchoAlias, PeerIdentity, ProtocolId};
 
 #[test]
+fn absent_schedule_is_a_configuration_error_not_an_identity_panic() {
+    use rpt_advanced_core::config::{
+        ConfigDocument, ConfigError, NodeId, ResolvedScheduleSettings,
+    };
+    let document = ConfigDocument::parse("[1000]\n").unwrap();
+    let error =
+        ResolvedScheduleSettings::resolve(&document, &NodeId::new("1000").unwrap(), "missing")
+            .unwrap_err();
+    assert!(matches!(error, ConfigError::Structure { .. }));
+}
+
+#[test]
 fn echo_aliases_are_canonical_before_configuration_and_access_comparisons() {
     use rpt_advanced_core::{
         access::AccessPolicy,

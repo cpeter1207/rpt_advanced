@@ -1435,7 +1435,8 @@ impl ResolvedPermanentLinkSettings {
 }
 
 impl ResolvedScheduleSettings {
-    /// Resolve a required same-node replacement window.
+    /// Resolve a required same-node replacement window. An absent definition
+    /// fails before canonicalizing the schema-validated remote identities.
     pub fn resolve(
         document: &ConfigDocument,
         node: &NodeId,
@@ -1449,9 +1450,16 @@ impl ResolvedScheduleSettings {
                 .unwrap_or("")
                 .to_owned()
         };
+        let remote_nodes = get("remote_node");
+        if remote_nodes.trim().is_empty() {
+            return Err(ConfigError::structure(
+                &section,
+                "schedule remote node, replacement, start time, and end time are required",
+            ));
+        }
         let value = Self {
             name: label.to_owned(),
-            remote_nodes: get("remote_node")
+            remote_nodes: remote_nodes
                 .split(',')
                 .map(str::trim)
                 .map(|node| {
@@ -1493,12 +1501,6 @@ impl ResolvedScheduleSettings {
                 .filter(|value| *value == "scheduled-link-change")
                 .map(str::to_owned),
         };
-        if value.remote_nodes.iter().any(String::is_empty) {
-            return Err(ConfigError::structure(
-                &section,
-                "schedule remote node, replacement, start time, and end time are required",
-            ));
-        }
         Ok(Resolution { value, warnings })
     }
 }
