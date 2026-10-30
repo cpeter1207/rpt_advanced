@@ -147,6 +147,12 @@ fn descriptor() -> Descriptor {
 fn composed_context_uses_approved_bounds_and_destroys_once() {
     let descriptor = descriptor();
     let mut jitter = unsafe { Jitter::new(ptr::from_ref(&descriptor).cast()) }.unwrap();
+    assert_eq!(jitter.release_span(), 160);
+    let packet_unit =
+        unsafe { Jitter::new_at_rate(ptr::from_ref(&descriptor).cast(), 8000, 640, MAX_PAYLOAD) }
+            .unwrap();
+    assert_eq!(packet_unit.release_span(), 640);
+    drop(packet_unit);
     let config = unsafe { &*jitter.context.as_ptr().cast::<State>() }.config;
     assert_eq!(
         (

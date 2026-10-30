@@ -133,6 +133,7 @@ fn echo_telemetry_demand_is_command_scoped_and_fenced_by_connection() {
     assert!(!policy.allows(&reply, 120010, true));
     assert!(!policy.allows(&second, 11, true));
     first.end();
+    policy.requested(&reply, 11);
     assert!(!policy.allows(&reply, 11, true));
     assert!(policy.select(Mode::Demand, 20));
     assert!(policy.allows(&second, 120019, true));
@@ -144,6 +145,7 @@ fn echo_telemetry_demand_is_command_scoped_and_fenced_by_connection() {
         (Mode::Follow, true, true),
     ] {
         assert!(policy.select(mode, 0));
+        policy.requested(&second, 0);
         assert_eq!(policy.allows(&second, 1, local), expected);
     }
     let mut fixed = EchoTelemetryPolicy::new(Mode::Demand, false);
@@ -220,6 +222,25 @@ fn echo_announcements_use_configured_identity_and_localized_connection_wording()
     assert_eq!(
         third.tts,
         "2000 disconnected from node 1,2,3,4,5,6 W,1,X,Y,Z,-,R"
+    );
+    let third = catalog
+        .format_echo_peer(
+            Mode::Node,
+            "123456",
+            "W1XYZ-R",
+            &Message::PeerConnectedThirdParty {
+                first: "2000",
+                second: "30123456",
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(third.text, "2000 CONNECTED TO node 123456");
+    assert_eq!(third.tts, "2000 connected to node 1,2,3,4,5,6");
+    assert!(
+        catalog
+            .format_echo_peer(Mode::Node, "123456", "W1XYZ-R", &Message::NoLinks)
+            .is_err()
     );
 }
 
@@ -379,10 +400,27 @@ fn echo_remote_commands_never_create_asl_control_envelopes() {
         links.command(selected, host.control().work().unwrap(), 6, false),
         Ok(LinkEffect::EchoTelemetry(EchoLinkTelemetry::Demand))
     ));
+    let mut invalid = None;
+    for digit in "*839#".chars() {
+        invalid = links
+            .digit(DigitEvent::Digit { digit, now_ms: 7 })
+            .or(invalid);
+    }
+    let Some(DigitOutcome::Operation(invalid)) = invalid else {
+        panic!("authorized invalid selection")
+    };
+    assert!(matches!(
+        links.command(invalid, host.control().work().unwrap(), 8, false),
+        Err(rpt_advanced_core::link::AdmissionError::Invalid)
+    ));
 }
 
 #[test]
 fn protocol_identity_does_not_collide() {
+    assert_eq!(
+        PeerIdentity::from_operator("3").unwrap().protocol(),
+        ProtocolId::AllStarLink
+    );
     let asl = PeerIdentity::parse(ProtocolId::AllStarLink, "123456").unwrap();
     let echo = PeerIdentity::parse(ProtocolId::EchoLink, "123456").unwrap();
     assert_ne!(asl, echo);

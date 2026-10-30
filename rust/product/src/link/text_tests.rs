@@ -72,6 +72,16 @@ fn text_forwarding_preserves_asl_flood_exclusions_and_independent_destination_ad
     });
     assert!(!result.locally_eligible);
     assert_eq!(result.destinations_admitted, 0);
+    let router = TextRouter::new(vec!["3001000".into()]);
+    local.source = "K1ABC-R".into();
+    local.origin.protocol = 2;
+    local.represented_source =
+        Some(rpt_advanced_core::link::PeerIdentity::parse(ProtocolId::EchoLink, "1000").unwrap());
+    let result = router.route(&local, &peers, |_, _| {
+        panic!("represented local identity must not loop")
+    });
+    assert!(!result.locally_eligible);
+    assert_eq!(result.destinations_admitted, 0);
 }
 
 #[test]
@@ -102,4 +112,14 @@ fn text_forwarding_large_body_is_not_limited_by_local_synthesis_quota_or_failure
         panic!("no serializer for this protocol")
     });
     assert_eq!(result.destinations_rejected, 1);
+    let mut echo = destinations().remove(1);
+    echo.protocol = 2;
+    for (sender, body) in [("bad\0sender", "normal"), ("K1ABC-R", "bad\0body")] {
+        message.source = sender.into();
+        message.body = Arc::from(body);
+        let result = router.route(&message, std::slice::from_ref(&echo), |_, _| {
+            panic!("NUL cannot reach EchoLink wire")
+        });
+        assert_eq!(result.destinations_rejected, 1);
+    }
 }

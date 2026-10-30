@@ -25,6 +25,8 @@ struct CapturedEcho {
     receive_gain: f64,
     transmit_gain: f64,
     max_stations: u32,
+    announcement: u32,
+    telemetry: u32,
     secrets_file: String,
 }
 
@@ -77,6 +79,8 @@ unsafe extern "C" fn node(
         receive_gain: echo.policy.receive_gain_db,
         transmit_gain: echo.policy.transmit_gain_db,
         max_stations: echo.policy.max_stations,
+        announcement: echo.policy.announcement,
+        telemetry: echo.policy.telemetry,
         secrets_file: unsafe {
             text(
                 record.echolink_secrets_file.cast(),
@@ -189,6 +193,8 @@ fn resolved_echo_accounts_cross_the_visitor_without_identity_inheritance_or_secr
                 receive_gain: -6.0,
                 transmit_gain: 2.0,
                 max_stations: 44,
+                announcement: 1,
+                telemetry: 3,
                 secrets_file: "private/echo.conf".into()
             },
             CapturedEcho {
@@ -201,10 +207,29 @@ fn resolved_echo_accounts_cross_the_visitor_without_identity_inheritance_or_secr
                 receive_gain: -6.0,
                 transmit_gain: 2.0,
                 max_stations: 44,
+                announcement: 1,
+                telemetry: 3,
                 secrets_file: "".into()
             },
         ]
     );
+    for (announcement, telemetry, expected) in [
+        ("off", "off", (0, 0)),
+        ("callsign", "on", (2, 1)),
+        ("both", "follow", (3, 2)),
+    ] {
+        let (result, output) = inspect(
+            &format!(
+                "[1000]\n[echolink 1000]\nannouncement={announcement}\ntelemetry={telemetry}\n"
+            ),
+            false,
+        );
+        assert_eq!(result, 0, "{output:?}");
+        assert_eq!(
+            (output.echoes[0].announcement, output.echoes[0].telemetry),
+            expected
+        );
+    }
 }
 
 #[test]

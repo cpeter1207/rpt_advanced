@@ -34,7 +34,6 @@ pub(super) struct SourceIngress {
     spans: [MuteSpan; 64],
     span_count: usize,
     pending_mute: Option<MuteSpan>,
-    finishing: bool,
 }
 
 fn span(spans: &mut [MuteSpan; 64], count: &mut usize, start: u64, end: u64) -> Result<(), Error> {
@@ -66,7 +65,6 @@ impl SourceIngress {
             spans: [EMPTY; 64],
             span_count: 0,
             pending_mute: None,
-            finishing: false,
         })
     }
 
@@ -80,7 +78,6 @@ impl SourceIngress {
         self.cached = None;
         self.span_count = 0;
         self.pending_mute = None;
-        self.finishing = false;
         Ok(())
     }
     pub(super) fn set_muting(&mut self, muting: bool) {
@@ -131,9 +128,8 @@ impl SourceIngress {
             return Ok(0);
         }
         if self.cached.is_none() {
-            if block.pcm.len() > scratch.len() {
-                return Err(Error::InvalidFrame);
-            }
+            // PeerIo bounds input to 4096 samples before entering this method;
+            // the sole caller supplies its equally sized, preallocated scratch.
             let burst_start = *self.burst_start.get_or_insert(block.start);
             let concealed_muted =
                 block.concealed && (self.command_muted || self.detector.suppressing());
@@ -150,10 +146,7 @@ impl SourceIngress {
                 let was_muted = self.command_muted;
                 let mut digit = None;
                 let mut first = None;
-                let mut failure = None;
                 if !block.concealed {
-                    let spans = &mut self.spans;
-                    let count = &mut self.span_count;
                     self.detector
                         .process_spans(
                             true,
@@ -169,20 +162,16 @@ impl SourceIngress {
                                 if from < to {
                                     first = Some(first.map_or(from, |old: u64| old.min(from)));
                                     inbound.signals().set_dtmf_muted(true);
-                                    if let Err(error) = span(spans, count, from, to) {
-                                        failure = Some(error);
-                                    }
                                 }
                             },
                         )
                         .map_err(|_| Error::InvalidFrame)?;
                 }
-                if let Some(error) = failure {
-                    return Err(error);
-                }
                 let muted = self.muting
                     && (was_muted || first.is_some() || digit.is_some() || concealed_muted);
                 if muted {
+                    // The complete muted suffix already covers every detector
+                    // interval in this partition; publish their union once.
                     span(
                         &mut self.spans,
                         &mut self.span_count,
@@ -280,10 +269,9 @@ impl SourceIngress {
         if !self.flush_mute(inbound)? {
             return Ok(false);
         }
-        if !self.finishing {
-            self.discontinuity(&mut emit)?;
-            self.finishing = true;
-        }
+        // A successful finish immediately installs PeerSession's finite token;
+        // further polls use that token rather than finishing the source again.
+        self.discontinuity(&mut emit)?;
         self.command_muted = false;
         inbound.signals().set_dtmf_muted(false);
         Ok(true)
@@ -306,13 +294,50 @@ mod tests {
     use crate::link::ring::{InboundPolicy, InboundRing, tests::delayed_mute_endpoints};
 
     #[test]
+    fn clipped_empty_spans_are_ignored_and_disjoint_metadata_is_bounded() {
+        let mut spans = [EMPTY; 64];
+        let mut count = 0;
+        assert_eq!(span(&mut spans, &mut count, 10, 10), Ok(()));
+        assert_eq!(span(&mut spans, &mut count, 10, 9), Ok(()));
+        assert_eq!(count, 0);
+        for index in 0..64 {
+            assert_eq!(
+                span(&mut spans, &mut count, index * 2, index * 2 + 1),
+                Ok(())
+            );
+        }
+        assert_eq!(count, 64);
+        assert_eq!(
+            span(&mut spans, &mut count, 128, 129),
+            Err(Error::InvalidFrame)
+        );
+        assert_eq!(count, 64);
+    }
+
+    #[test]
     fn qualified_digits_end_at_loss_and_concealment_remains_muted_without_redecoding() {
-        for concealed in [false, true] {
+        for (concealed, muting, digit) in [
+            (false, true, '5'),
+            (true, true, '5'),
+            (false, false, '5'),
+            (true, false, '5'),
+            (false, true, '#'),
+            (true, true, '#'),
+        ] {
             let (mut inbound, _) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
-            let mut source = SourceIngress::new(true).unwrap();
+            let mut source = SourceIngress::new(muting).unwrap();
             let mut scratch = [0.0; 4096];
             let mut digits = Vec::new();
-            let tone = five_tone(256);
+            let tone = if digit == '#' {
+                (0..256)
+                    .map(|n| {
+                        let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+                        0.25 * ((phase * 941.0).sin() + (phase * 1477.0).sin())
+                    })
+                    .collect()
+            } else {
+                five_tone(256)
+            };
             assert_eq!(
                 source.audio(
                     &mut inbound,
@@ -346,15 +371,15 @@ mod tests {
                     Ok(160)
                 );
             }
-            assert_eq!(digits, ['5']);
-            assert!(inbound.signals().dtmf_muted());
+            assert_eq!(digits, [digit]);
+            assert_eq!(inbound.signals().dtmf_muted(), muting && digit != '#');
             source.timeout(&inbound);
             assert!(!inbound.signals().dtmf_muted());
             assert_eq!(
                 source.finish(&mut inbound, |digit| digits.push(digit)),
                 Ok(true)
             );
-            assert_eq!(digits, ['5']);
+            assert_eq!(digits, [digit]);
         }
     }
 

@@ -923,6 +923,7 @@ fn receive_activity_primes_conceals_brief_gaps_drains_and_honors_eof() {
     assert!(!receive.should_render(3, 2080, true, 960));
     assert!(!receive.rendered(None, 960));
     assert!(ReceiveState::new(0).is_err());
+    assert!(ReceiveState::new(48001).is_err());
 }
 
 #[test]
