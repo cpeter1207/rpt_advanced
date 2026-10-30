@@ -3654,10 +3654,10 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
         assert!(!runtime.echo_telemetry_allows("missing", &reply, 0));
         assert!(!runtime.echo_telemetry_allows("1000", &reply, 200000));
         runtime.echo_response_requested("1000", &reply, 200001);
-        assert_eq!(
-            runtime.echo_telemetry_allows("1000", &reply, 200001),
-            dynamic
-        );
+        // Fixed demand still answers commands; dynamic controls mode changes,
+        // not the response window of the configured policy.
+        assert!(runtime.echo_telemetry_allows("1000", &reply, 200001));
+        assert!(!runtime.echo_telemetry_allows("1000", &reply, 320001));
         assert!(!runtime.echo_telemetry_allows("1000", &other, 200001));
         assert_eq!(
             runtime
