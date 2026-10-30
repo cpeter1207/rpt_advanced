@@ -14,6 +14,7 @@ static PEERS: AtomicUsize = AtomicUsize::new(0);
 static UPDATES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_CALLBACKS: std::sync::Mutex<Vec<(usize, abi::EventFn, usize)>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_STATE: AtomicUsize = AtomicUsize::new(2);
+static DISABLED_STOP_FAILURE: AtomicUsize = AtomicUsize::new(0);
 static ACCOUNT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(4);
 thread_local! { static NOTIFYING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -31,8 +32,33 @@ pub extern "C" fn fixture_account_event(state: u32, snapshot_generation: u64, ev
     NOTIFYING.set(false);
 }
 
+/// Malformed/unknown notifications retain no borrowed payload or QSO owner.
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_account_event_kind(kind: u32) {
+    let callbacks = ACCOUNT_CALLBACKS.lock().unwrap().clone();
+    for (_, callback, context) in callbacks {
+        let event = abi::Event { struct_size: size_of::<abi::Event>() as u32,
+            kind, qso: ptr::null_mut(), generation: 4, status: abi::Status::Ok,
+            taken: ptr::null_mut() };
+        unsafe { callback(context as *mut c_void,
+            if kind == u32::MAX { ptr::null() } else { &event }) };
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn fixture_update_count() -> usize { UPDATES.lock().unwrap().len() }
+/// Reversible foreign teardown failure; a retry can later establish quiescence.
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_disabled_stop_failure(enabled: u32) {
+    // Fail the activated owner only, not an inactive prepared snapshot that
+    // happens to carry the same disabled node value after snapshot exchange.
+    let owner = if enabled == 0 { 0 } else {
+        ACCOUNT_CALLBACKS.lock().unwrap().iter()
+            .find(|(owner, _, _)| unsafe { *(*owner as *const u32) } == 0)
+            .expect("an activated disabled fixture owner").0
+    };
+    DISABLED_STOP_FAILURE.store(owner, Ordering::Release);
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn fixture_update(index: usize) -> u64 {
     UPDATES.lock().unwrap().get(index).copied().unwrap_or(u64::MAX)
@@ -318,6 +344,9 @@ unsafe extern "C" fn prepare(
     abi::Status::Ok
 }
 unsafe extern "C" fn stop(account: *mut abi::Account) -> abi::Status {
+    if account as usize == DISABLED_STOP_FAILURE.load(Ordering::Acquire) {
+        return abi::Status::Failed;
+    }
     if CONTEXTS.load(Ordering::SeqCst) == 1 && unsafe { *account.cast::<u32>() } != 99 {
         abi::Status::Ok
     } else {

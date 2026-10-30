@@ -22,6 +22,8 @@ fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored
     let event =
         unsafe { library.get::<unsafe extern "C" fn(u32, u64, u64)>(b"fixture_account_event\0") }
             .unwrap();
+    let raw = unsafe { library.get::<unsafe extern "C" fn(u32)>(b"fixture_account_event_kind\0") }
+        .unwrap();
     let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
     let backend = rptadv_control_standalone_adapter::rptadv_control_standalone_descriptor_v1();
     let control = Arc::new(unsafe { Client::open(backend.cast(), "echo-notices", 8) }.unwrap());
@@ -49,13 +51,32 @@ fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored
         done.recv_timeout(Duration::from_secs(5)).unwrap();
     };
     drain();
+    for kind in [u32::MAX, 2] {
+        unsafe { raw(kind) };
+        drain();
+        assert!(received.try_recv().is_err());
+    }
     unsafe { event(3, 4, 3) }; // A retired-generation event is not current evidence.
     drain();
     assert!(received.try_recv().is_err());
     unsafe { event(8, 4, 4) }; // Invalid foreign status cannot become a notice.
     drain();
     assert!(received.try_recv().is_err());
-    unsafe { event(3, 4, 4) };
+    let (entered, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    assert!(
+        control
+            .submit((entered, held), |(entered, held)| {
+                entered.send(()).unwrap();
+                held.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+            .is_ok()
+    );
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..3 {
+        unsafe { event(3, 4, 4) };
+    }
+    release.send(()).unwrap();
     drain();
     let line = received.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(line.contains("state=retrying"), "{line}");
@@ -83,7 +104,9 @@ fn account_failures_are_logged_off_callback_once_and_old_generations_are_ignored
 
 #[test]
 fn failed_replacement_retires_only_new_accounts_and_restores_the_product() {
-    for failure_in_new_account in [false, true] {
+    for (new_node, existing_node, rollback_failure) in
+        [(3, 42, false), (42, 1, false), (99, 42, true)]
+    {
         let fixture = support::Fixture::new("network");
         let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
         let count =
@@ -115,20 +138,8 @@ fn failed_replacement_retires_only_new_accounts_and_restores_the_product() {
         unsafe { accounts.activate() }.unwrap();
         let original = accounts.account("2000").unwrap();
         let mut update = accounts.prepare_update().unwrap();
-        unsafe {
-            update.prepare(
-                &config("1000", if failure_in_new_account { 42 } else { 3 }),
-                &path,
-            )
-        }
-        .unwrap();
-        unsafe {
-            update.prepare(
-                &config("2000", if failure_in_new_account { 1 } else { 42 }),
-                &path,
-            )
-        }
-        .unwrap();
+        unsafe { update.prepare(&config("1000", new_node), &path) }.unwrap();
+        unsafe { update.prepare(&config("2000", existing_node), &path) }.unwrap();
         let mut restored = false;
         let error = update
             .commit(
@@ -140,16 +151,38 @@ fn failed_replacement_retires_only_new_accounts_and_restores_the_product() {
             )
             .unwrap_err();
         assert_eq!(error.cause, Error::Status(abi::Status::Full));
-        assert!(error.rollback.is_none());
+        assert_eq!(
+            error.rollback,
+            rollback_failure.then_some(Error::Status(abi::Status::Failed))
+        );
         assert!(restored);
         assert!(accounts.account("1000").is_none());
-        assert!(Arc::ptr_eq(&original, &accounts.account("2000").unwrap()));
+        if rollback_failure {
+            assert!(
+                accounts.account("2000").is_none(),
+                "failed rollback must gate admission"
+            );
+            assert!(accounts.observe("2000").unwrap().is_some());
+        } else {
+            assert!(Arc::ptr_eq(&original, &accounts.account("2000").unwrap()));
+        }
         assert_eq!(
             unsafe { count() },
-            1,
+            if rollback_failure { 2 } else { 1 },
             "new callback owner survived rolled-back addition"
         );
-        accounts.stop().unwrap();
+        if rollback_failure {
+            assert_eq!(accounts.stop(), Err(Error::Status(abi::Status::Failed)));
+            drop(accounts);
+            drop(original);
+            assert_eq!(
+                unsafe { count() },
+                2,
+                "failed quiescence must retain the whole callback set"
+            );
+        } else {
+            accounts.stop().unwrap();
+        }
     }
 }
 
@@ -241,15 +274,29 @@ fn reload_adds_disables_and_removes_accounts_without_replacing_the_control_owner
     received.recv_timeout(Duration::from_secs(5)).unwrap();
     let mut remove_all = accounts.prepare_update().unwrap();
     remove_all.remove_unlisted().unwrap();
-    assert!(
-        remove_all
-            .commit(|| true, || true)
-            .unwrap()
-            .retirement
-            .is_none()
+    let fault =
+        unsafe { library.get::<unsafe extern "C" fn(u32)>(b"fixture_disabled_stop_failure\0") }
+            .unwrap();
+    unsafe { fault(1) };
+    assert_eq!(
+        remove_all.commit(|| true, || true).unwrap().retirement,
+        Some(Error::Status(abi::Status::Failed))
     );
-    assert_eq!(unsafe { count() }, 0);
+    assert!(accounts.account("2000").is_none());
+    assert!(accounts.observe("2000").unwrap().is_none());
+    assert_eq!(
+        unsafe { count() },
+        1,
+        "failed retirement must retain callback storage"
+    );
+    unsafe { fault(0) };
     accounts.stop().unwrap();
+    drop(accounts);
+    assert_eq!(
+        unsafe { count() },
+        0,
+        "successful retry must release the retained owner"
+    );
 }
 
 #[test]
@@ -437,6 +484,30 @@ fn prepared_updates_do_not_stop_admission_and_roll_back_before_reopening_it() {
         .unwrap_err();
     assert_eq!(error.cause, Error::Contract);
     write_keys();
+    for foreign_failure in [false, true] {
+        let mut rejected = accounts.prepare_update().unwrap();
+        unsafe { rejected.prepare(&config("1000", 2), &path) }.unwrap();
+        unsafe { rejected.prepare(&config("2000", if foreign_failure { 42 } else { 3 }), &path) }
+            .unwrap();
+        let error = rejected.commit(|| foreign_failure, || false).unwrap_err();
+        assert_eq!(
+            error.cause,
+            if foreign_failure {
+                Error::Status(abi::Status::Full)
+            } else {
+                Error::Product
+            }
+        );
+        assert_eq!(error.rollback, Some(Error::Product));
+        assert!(accounts.account("1000").is_none());
+        assert!(accounts.observe("1000").unwrap().is_some());
+        // An explicit successful reload can recover a previously gated owner.
+        let mut recovered = accounts.prepare_update().unwrap();
+        unsafe { recovered.prepare(&config("1000", 2), &path) }.unwrap();
+        unsafe { recovered.prepare(&config("2000", 3), &path) }.unwrap();
+        recovered.commit(|| true, || true).unwrap();
+        assert!(accounts.account("1000").is_some());
+    }
     let mut stopped = accounts.prepare_update().unwrap();
     unsafe { stopped.prepare(&config("1000", 4), &path) }.unwrap();
     accounts.stop().unwrap();
@@ -471,7 +542,11 @@ fn preparation_is_lazy_and_uses_the_real_configuration_directory() {
         "disabled accounts must open nothing"
     );
     let path = directory.join("echolink-secrets.conf");
-    std::fs::write(&path, "[524950]\ndirectory_password=fixture-value\n").unwrap();
+    std::fs::write(
+        &path,
+        "[524950]\ndirectory_password=fixture-value\n[508422]\ndirectory_password=fixture-second\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (send, receive) = mpsc::channel();
     let mut candidate = unsafe {
@@ -495,6 +570,15 @@ fn preparation_is_lazy_and_uses_the_real_configuration_directory() {
         ..abi::AccountConfig::default()
     };
     unsafe { candidate.prepare(&config, None) }.unwrap();
+    let second = abi::AccountConfig {
+        node_number: 1,
+        local_node: abi::ByteSpan {
+            data: b"508422".as_ptr(),
+            length: 6,
+        },
+        ..config
+    };
+    unsafe { candidate.prepare(&second, None) }.unwrap();
     let accounts = candidate.finish().unwrap();
     assert!(
         receive.try_recv().is_err(),
@@ -506,6 +590,31 @@ fn preparation_is_lazy_and_uses_the_real_configuration_directory() {
         "4294967295"
     );
     accounts.stop().unwrap();
+    drop(accounts);
+    for account_builder in [false, true] {
+        let mut candidate = unsafe {
+            Preparation::new(
+                &configuration,
+                &fixture.0,
+                &resources,
+                backend.cast(),
+                |_| {},
+            )
+        }
+        .with_notice(|_| {});
+        unsafe { candidate.prepare(&second, None) }.unwrap();
+        let late_logger = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if account_builder {
+                drop(candidate.finish().unwrap().with_notice(|_| {}));
+            } else {
+                drop(candidate.with_notice(|_| {}));
+            }
+        }));
+        assert!(
+            late_logger.is_err(),
+            "logger replacement cannot bypass prepared callback ownership"
+        );
+    }
     std::fs::remove_file(path).unwrap();
 }
 
