@@ -658,9 +658,9 @@ fn command_arriving_during_a_read_gets_an_immediate_next_turn() {
     });
     pause.wait();
     control
-        .send(Command::HumanText {
-            sender: "W1XYZ".into(),
-            body: "queued during read".into(),
+        .send(Command::Text {
+            text: CString::new("queued during read").unwrap(),
+            advisory: false,
         })
         .ok()
         .unwrap();
@@ -673,7 +673,7 @@ fn command_arriving_during_a_read_gets_an_immediate_next_turn() {
             .unwrap()
             .texts
             .iter()
-            .any(|text| text == b"W1XYZ>queued during read")
+            .any(|text| text == b"queued during read")
     );
     session.step(1).unwrap();
     assert!(
@@ -682,7 +682,7 @@ fn command_arriving_during_a_read_gets_an_immediate_next_turn() {
             .unwrap()
             .texts
             .iter()
-            .any(|text| text == b"W1XYZ>queued during read")
+            .any(|text| text == b"queued during read")
     );
 }
 

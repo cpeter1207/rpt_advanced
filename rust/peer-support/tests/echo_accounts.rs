@@ -351,7 +351,7 @@ fn queued_incoming_is_revalidated_against_the_reload_admission_gate() {
             accounts.prepare(
                 &abi::AccountConfig {
                     enabled: 1,
-                    node_number: 1,
+                    node_number: if reloading { 7 } else { 1 },
                     local_node: abi::ByteSpan {
                         data: b"508422".as_ptr(),
                         length: 6,
@@ -876,6 +876,7 @@ fn accounts_prepare_private_credentials_then_handoff_or_reject_without_leaking()
             );
         }
         accounts.stop().unwrap();
+        assert!(accounts.account("524950").is_none());
         assert!(matches!(
             accounts.prepare_update(),
             Err(Error::Status(abi::Status::Closed))
