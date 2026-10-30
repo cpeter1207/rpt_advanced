@@ -995,13 +995,12 @@ unsafe extern "C" fn prepare_account(
 /// Transfer an already claimed incoming QSO using this host's actual enum layout.
 /// # Safety
 /// Product code remains callable through the account's admission-drain barrier.
+/// The peer was claimed through incoming admission, which requires its source.
 pub(crate) unsafe fn incoming_echo(
     incoming: unsafe extern "C" fn(*const ffi::rptadv_incoming_peer_v1, *mut c_void) -> i32,
     peer: Arc<rptadv_peer_support::echolink::host::Peer>,
 ) {
-    let Some(source) = peer.identity().source else {
-        return;
-    };
+    let source = peer.identity().source.expect("claimed incoming source");
     let source = source.ip().to_string();
     let bytes = |text: &str| ffi::rptadv_peer_bytes_v1 {
         data: text.as_ptr(),

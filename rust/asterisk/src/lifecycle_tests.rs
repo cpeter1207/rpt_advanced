@@ -200,14 +200,16 @@ static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descr
 };
 
 unsafe extern "C" fn inspect_configuration(
-    _: *const std::ffi::c_char,
-    _: usize,
+    text: *const std::ffi::c_char,
+    length: usize,
     _: ffi::rptadv_configuration_sink,
     _: *mut std::ffi::c_void,
     _: ffi::rptadv_text_sink_v1,
     _: *mut std::ffi::c_void,
 ) -> i32 {
-    0
+    i32::from(
+        unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) } == b"inspection-failure",
+    )
 }
 
 unsafe extern "C" fn inspect_secrets(
@@ -302,6 +304,9 @@ fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
     assert!(configuration().is_none());
     unsafe { ast_config_AST_CONFIG_DIR = directory.as_ptr() };
     assert!(configuration().is_none());
+    std::fs::write(root.join("rpt_advanced.conf"), "inspection-failure").unwrap();
+    assert_eq!(load_selected(&DESCRIPTOR), 1);
+    assert!(STATE.lock().unwrap().is_none());
     std::fs::write(root.join("rpt_advanced.conf"), "[1000]\nnode_enabled=no\n").unwrap();
     START_RESULT.set(-1);
     assert_eq!(load_selected(&DESCRIPTOR), 1);
@@ -326,6 +331,10 @@ fn lifecycle_retains_live_product_on_failed_stop_and_rolls_back_registration() {
     crate::module::tests::fail_registration(0);
     assert_eq!(load_selected(&DESCRIPTOR), 0);
     assert_eq!(super::reload(), 0);
+    std::fs::rename(root.join("rpt_advanced.conf"), root.join("saved.conf")).unwrap();
+    assert_eq!(super::reload(), -1);
+    assert!(STATE.lock().unwrap().is_some());
+    std::fs::rename(root.join("saved.conf"), root.join("rpt_advanced.conf")).unwrap();
     std::fs::write(root.join("rpt_advanced.conf"), "accepted-candidate").unwrap();
     assert_eq!(super::reload(), 0);
     std::fs::write(root.join("rpt_advanced.conf"), "rejected-candidate").unwrap();

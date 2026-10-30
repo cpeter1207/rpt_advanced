@@ -29,7 +29,7 @@ fn malformed_foreign_identity_and_account_observations_do_not_publish_owned_peer
         proxy_password: abi::ByteSpan::default(),
     };
     let account = unsafe { provider.prepare(&config, &keys) }.unwrap();
-    for mode in (1..=18).chain([22]) {
+    for mode in (1..=18).chain([22, 23]) {
         unsafe { fault(mode) };
         assert!(
             matches!(account.dial(u32::MAX), Err(Error::Contract)),

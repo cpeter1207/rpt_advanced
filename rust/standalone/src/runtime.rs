@@ -310,13 +310,17 @@ fn with_echo_preparation<T>(
     let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
         gsm_library: span("librptadv_codec_gsm.so.1"),
         speex_library: span("librptadv_codec_speex.so.1"),
-        jitter_library: span(jitter.to_str().ok_or(RuntimeError::InvalidDescriptor)?),
+        jitter_library: span(
+            jitter
+                .to_str()
+                .expect("UTF-8 build path with an ASCII filename"),
+        ),
         ..Default::default()
     };
     let incoming = descriptors
         .product
         .incoming
-        .ok_or(RuntimeError::InvalidDescriptor)?;
+        .expect("validated product composition retains incoming admission");
     operation(unsafe {
         rptadv_peer_support::echolink::host::Preparation::new(
             path,
@@ -841,6 +845,8 @@ mod tests {
         assert_eq!(RELOADS.load(Ordering::Relaxed), 1);
         process.stop().unwrap();
         assert_eq!(STOPS.load(Ordering::Relaxed), 1);
+        process.stop().unwrap();
+        assert_eq!(STOPS.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -963,6 +969,17 @@ mod tests {
                 "standalone configuration reload failed",
             ),
             (RuntimeError::Stop, "standalone product shutdown failed"),
+            (
+                RuntimeError::Echo(rptadv_peer_support::echolink::host::Error::Control),
+                "EchoLink account operation failed: Control",
+            ),
+            (
+                RuntimeError::EchoUpdate(rptadv_peer_support::echolink::host::UpdateError {
+                    cause: rptadv_peer_support::echolink::host::Error::Product,
+                    rollback: None,
+                }),
+                "EchoLink reload failed: UpdateError { cause: Product, rollback: None }",
+            ),
         ] {
             assert_eq!(error.to_string(), expected);
         }

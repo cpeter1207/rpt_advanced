@@ -238,6 +238,7 @@ unsafe extern "C" fn read(
     context: *mut c_void,
     out: *mut abi::ReadResult,
 ) -> abi::Status {
+    if completion == 3 { return abi::Status::Failed; }
     let mut result = abi::ReadResult::default();
     if let Some(sink) = unsafe { sink.as_ref() } {
         assert!(completion <= 2);
@@ -285,11 +286,13 @@ unsafe extern "C" fn encode(
     flush: u32,
     result: *mut c_void,
 ) -> abi::Status {
-    assert_eq!(
-        unsafe { std::slice::from_raw_parts(pcm, count) },
-        [0.25, -0.25]
-    );
-    assert_eq!((capacity, flush), (4, 7));
+    if flush == 8 { return abi::Status::Failed; }
+    if count == 0 {
+        assert_eq!((capacity, flush), (0, 7));
+    } else {
+        assert_eq!(unsafe { std::slice::from_raw_parts(pcm, count) }, [0.25, -0.25]);
+        assert_eq!((capacity, flush), (4, 7));
+    }
     let result = unsafe { &mut *result.cast::<EncodeResult>() };
     assert_eq!(result.size, size_of::<EncodeResult>() as u32);
     result.status = 2;
@@ -299,6 +302,7 @@ unsafe extern "C" fn encode(
     abi::Status::Ok
 }
 unsafe extern "C" fn reset(_: *mut abi::Qso) -> abi::Status {
+    if RECORD_FAULT.load(Ordering::Acquire) == 57 { return abi::Status::Failed; }
     abi::Status::Ok
 }
 unsafe extern "C" fn send(
@@ -316,6 +320,7 @@ unsafe extern "C" fn send(
     }
 }
 unsafe extern "C" fn elapsed(_: *const abi::Qso, out: *mut u64) -> abi::Status {
+    if RECORD_FAULT.load(Ordering::Acquire) == 57 { return abi::Status::Failed; }
     unsafe { out.write(0x1_0000_0007) };
     abi::Status::Ok
 }

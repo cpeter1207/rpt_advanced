@@ -30,6 +30,9 @@ pub fn check(mut host: HostServicesOwner) {
     use rptadv_peer_support::echolink::host::Preparation;
     use std::{os::unix::fs::PermissionsExt, sync::mpsc, time::Duration};
     let fixture = support::Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let fault =
+        unsafe { library.get::<unsafe extern "C" fn(usize)>(b"fixture_record_fault\0") }.unwrap();
     let directory = fixture.0.parent().unwrap();
     let configuration = directory.join("rpt_advanced.conf");
     let path = directory.join("echolink-secrets.conf");
@@ -51,7 +54,44 @@ pub fn check(mut host: HostServicesOwner) {
         )
     };
     let mut product: host_abi::rptadv_product_descriptor_v1 = unsafe { std::mem::zeroed() };
+    let mut visitor = |_: &echo::AccountConfig, _: Option<&std::path::Path>| Ok(());
+    assert!(unsafe { visit_accounts(&product, "fixture", &mut visitor) }.is_err());
     product.inspect_configuration = Some(inspect_accounts);
+    unsafe { rejected_account_records(&mut visitor) };
+    let context = host.descriptor().context;
+    let mut status = String::new();
+    for (context, local, length, sink, expected) in [
+        (
+            context,
+            c"524950".as_ptr(),
+            6,
+            Some(status_sink as unsafe extern "C" fn(_, _, _)),
+            0,
+        ),
+        (
+            ptr::null_mut(),
+            c"524950".as_ptr(),
+            6,
+            Some(status_sink),
+            -1,
+        ),
+        (context, ptr::null(), 1, Some(status_sink), -1),
+        (context, c"524950".as_ptr(), 6, None, -1),
+    ] {
+        assert_eq!(
+            unsafe {
+                echo_account_status(
+                    context,
+                    local,
+                    length,
+                    sink,
+                    ptr::from_mut(&mut status).cast(),
+                )
+            },
+            expected
+        );
+    }
+    assert!(status.is_empty());
     unsafe { host.prepare_echo(&product, "fixture", preparation) }.unwrap();
     assert!(notifications.try_recv().is_err());
     unsafe { host.activate_echo() }.unwrap();
@@ -80,8 +120,67 @@ pub fn check(mut host: HostServicesOwner) {
     assert!(status.contains("echo-account local=524950"), "{status}");
     assert!(status.contains("state=online"), "{status}");
     assert!(status.contains("directory-failures=7"), "{status}");
-    unsafe extern "C" fn current(_: *mut c_void) -> u32 {
-        1
+    assert_eq!(
+        unsafe {
+            echo_account_status(
+                context,
+                c"missing".as_ptr(),
+                7,
+                Some(status_sink),
+                ptr::from_mut(&mut status).cast(),
+            )
+        },
+        0
+    );
+    unsafe { fault(39) };
+    assert_eq!(
+        unsafe {
+            echo_account_status(
+                context,
+                c"524950".as_ptr(),
+                6,
+                Some(status_sink),
+                ptr::from_mut(&mut status).cast(),
+            )
+        },
+        -1
+    );
+    unsafe { fault(0) };
+    unsafe extern "C" fn current(context: *mut c_void) -> u32 {
+        if context.is_null() {
+            return 1;
+        }
+        let remaining = unsafe { &*context.cast::<std::sync::atomic::AtomicUsize>() };
+        u32::from(
+            remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |value| value.checked_sub(1),
+                )
+                .is_ok(),
+        )
+    }
+    for credit in [0, 1] {
+        let remaining = std::sync::atomic::AtomicUsize::new(credit);
+        let mut rejected = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                peer_dial(
+                    context,
+                    c"EchoLink/4294967295".as_ptr(),
+                    19,
+                    c"524950".as_ptr(),
+                    6,
+                    960,
+                    Some(current),
+                    ptr::from_ref(&remaining).cast_mut().cast(),
+                    &mut rejected,
+                )
+            },
+            -1
+        );
+        assert!(rejected.is_null(), "stale dial leaked its acquired QSO");
     }
     let mut peer = ptr::null_mut();
     assert_eq!(
@@ -160,6 +259,32 @@ pub fn check(mut host: HostServicesOwner) {
     );
     assert!(peer.is_null());
     std::fs::remove_file(path).unwrap();
+}
+
+/// Check the real visitor boundary before any provider/account is prepared.
+unsafe fn rejected_account_records(visit: &mut AccountVisitor<'_>) {
+    let mut visit = visit;
+    let context = ptr::from_mut(&mut visit).cast();
+    assert_eq!(unsafe { prepare_account(context, ptr::null()) }, -1);
+    for field in 0..=3 {
+        let config = echo::AccountConfig::default();
+        let mut node: host_abi::rptadv_node_host_configuration = unsafe { std::mem::zeroed() };
+        node.struct_size = size_of::<host_abi::rptadv_node_host_configuration>() as u32;
+        node.echolink = ptr::from_ref(&config).cast();
+        match field {
+            0 => node.struct_size = 0,
+            1 => node.echolink = ptr::null(),
+            2 => node.echolink_secrets_file_length = 1,
+            _ => {
+                node.echolink_secrets_file = c"fixture".as_ptr().cast();
+                node.echolink_secrets_file_length = 7;
+            }
+        }
+        assert_eq!(
+            unsafe { prepare_account(context, &node) },
+            if field == 3 { 0 } else { -1 }
+        );
+    }
 }
 
 unsafe extern "C" fn inspect_incoming(

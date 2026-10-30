@@ -595,6 +595,89 @@ fn local_rf_loop_rejection_is_a_completed_command_with_queued_telemetry() {
 }
 
 #[test]
+fn rejected_dtmf_routes_keep_local_or_originating_peer_telemetry() {
+    use rpt_advanced_core::{link::PeerSignals, runtime::dtmf::DigitOutcome};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    let (engine, call) = selected().unwrap();
+    for (action, remote) in [
+        (LinkAction::Transceive, "1000"),
+        (LinkAction::Command, "3002000"),
+    ] {
+        for linked_source in [false, true] {
+            let source = PeerSignals::new();
+            let mut operation = operation(action, remote);
+            operation.reply = linked_source.then(|| source.reply_target());
+            assert_eq!(
+                engine.execute_digit("1000".into(), DigitOutcome::Operation(operation)),
+                Ok(())
+            );
+        }
+    }
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
+fn incoming_preauthorization_never_adopts_a_foreign_or_already_owned_peer() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    for protocol in [1, 2] {
+        let peer = crate::fixture::peer();
+        let mut request = crate::fixture::incoming_request(
+            c"1000".as_ptr(),
+            4,
+            c"2000".as_ptr(),
+            4,
+            c"127.0.0.1".as_ptr(),
+            9,
+        );
+        request.protocol = protocol;
+        assert_eq!(
+            unsafe { descriptor().authorize_incoming.unwrap()(&request, peer) },
+            -1
+        );
+        unsafe { crate::fixture::release_peer(peer) };
+    }
+    for wrong_protocol in [false, true] {
+        let before = crate::fixture::PEER_DROPS.load(Ordering::Acquire);
+        let peer = crate::fixture::peer();
+        let mut request = crate::fixture::incoming_request(
+            if wrong_protocol {
+                c"1000".as_ptr()
+            } else {
+                c"9999".as_ptr()
+            },
+            4,
+            c"2000".as_ptr(),
+            4,
+            c"127.0.0.1".as_ptr(),
+            9,
+        );
+        if wrong_protocol {
+            request.protocol = 2;
+        }
+        assert_eq!(
+            unsafe { descriptor().incoming.unwrap()(&request, peer) },
+            -1
+        );
+        assert_eq!(
+            crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+            before + 1
+        );
+    }
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
 fn pad_test_dispatch_queues_local_telemetry() {
     use rpt_advanced_core::runtime::dtmf::{DigitOutcome, PadTestResult};
     let _serial = crate::fixture::LIFECYCLE
@@ -758,6 +841,33 @@ fn helpers_reject_malformed_inputs_and_capture_bounded_wall_time() {
         .is_err()
     );
     assert!(document("invalid").is_err());
+}
+
+#[test]
+fn incoming_identity_rejects_foreign_headers_and_limits_before_borrowing_spans() {
+    assert!(unsafe { incoming_identity(ptr::null()) }.is_err());
+    for mode in 0..=5 {
+        let mut request = crate::fixture::incoming_request(
+            c"1000".as_ptr(),
+            4,
+            c"2000".as_ptr(),
+            4,
+            c"127.0.0.1".as_ptr(),
+            9,
+        );
+        match mode {
+            0 => request.struct_size = 0,
+            1 => request.abi_version = 0,
+            2 => request.local.length = 33,
+            3 => request.remote.length = 33,
+            4 => request.source.length = 65,
+            _ => request.protocol = 3,
+        }
+        assert!(
+            unsafe { incoming_identity(&request) }.is_err(),
+            "case {mode}"
+        );
+    }
 }
 
 #[test]

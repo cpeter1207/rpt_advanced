@@ -235,7 +235,7 @@ fn callsign(raw: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'/')
 }
-/// The schema checks its known-key list first; resolution supplies fixed keys.
+/// The schema checks known keys first; remaining string settings share one bound.
 pub(super) fn value_valid(key: &str, value: &str) -> bool {
     match key {
         "enabled" | "telemetry_dynamic" => parse::boolean(value).is_some(),
@@ -273,11 +273,7 @@ pub(super) fn value_valid(key: &str, value: &str) -> bool {
         }
         "antenna_gain_db" => finite(value).is_some(),
         "name" => value.len() <= 240 && !value.chars().any(char::is_control),
-        "location" | "email" | "status_message" => {
-            value.len() <= 4096 && !value.chars().any(char::is_control)
-        }
-        "secrets_file" => value.len() <= 4096 && !value.chars().any(char::is_control),
-        _ => unreachable!("known EchoLink configuration parameter"),
+        _ => value.len() <= 4096 && !value.chars().any(char::is_control),
     }
 }
 fn raw<'a>(document: &'a ConfigDocument, node: &NodeId, key: &str) -> &'a str {

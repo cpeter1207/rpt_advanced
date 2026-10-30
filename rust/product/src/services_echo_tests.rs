@@ -126,6 +126,19 @@ fn copied_peer_identity_requires_canonical_names_and_complete_per_peer_capabilit
         matches!(unsafe { HostServices::open(&table) }, Err(Error::Admission)),
         "complete codec egress still requires its serial owner"
     );
+    let mut table = prepared.services.0;
+    table.peer_prepare_audio = None;
+    table.peer_reset_encoder = None;
+    table.peer_send_prepared = None;
+    table.peer_elapsed_ms = None;
+    table.peer_step_wake = None;
+    table.peer_set_deadline = None;
+    assert!(table.peer_write.is_some());
+    table.peer_read_source = Some(read_fault);
+    assert!(
+        matches!(unsafe { HostServices::open(&table) }, Err(Error::Admission)),
+        "source reads require the complete codec egress group"
+    );
     let services = host_services(|table| table.echo_account_status = None);
     assert_eq!(services.echo_account_status("1000"), Ok(None));
 }

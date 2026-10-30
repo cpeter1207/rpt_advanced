@@ -112,6 +112,7 @@ thread_local! {
 fn echo_notice_uses_error_logger_and_never_a_foreign_format_string() {
     SCHEDULER_LOGS.with(|logs| logs.borrow_mut().clear());
     echo_notice("echo account failure 50% %n");
+    echo_notice("invalid\0notice");
     SCHEDULER_LOGS.with(|logs| {
         assert_eq!(
             *logs.borrow(),

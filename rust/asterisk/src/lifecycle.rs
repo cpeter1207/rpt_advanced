@@ -60,8 +60,11 @@ fn configuration_path() -> Option<PathBuf> {
     Some(Path::new(directory).join("rpt_advanced.conf"))
 }
 
-fn configuration() -> Option<String> {
-    std::fs::read_to_string(configuration_path()?).ok()
+/// Retain the resolved path with the document read from it for one load transaction.
+fn configuration() -> Option<(PathBuf, String)> {
+    let path = configuration_path()?;
+    let document = std::fs::read_to_string(&path).ok()?;
+    Some((path, document))
 }
 
 fn with_echo_preparation<T>(
@@ -69,7 +72,7 @@ fn with_echo_preparation<T>(
     product: Product,
     control: EchoBackend,
     operation: impl FnOnce(rptadv_peer_support::echolink::host::Preparation<'_>) -> T,
-) -> Option<T> {
+) -> T {
     let jitter = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
     let bytes = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
         data: value.as_ptr(),
@@ -78,10 +81,14 @@ fn with_echo_preparation<T>(
     let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
         gsm_library: bytes("librptadv_codec_gsm.so.1"),
         speex_library: bytes("librptadv_codec_speex.so.1"),
-        jitter_library: bytes(jitter.to_str()?),
+        jitter_library: bytes(
+            jitter
+                .to_str()
+                .expect("UTF-8 build path with an ASCII filename"),
+        ),
         ..Default::default()
     };
-    Some(operation(unsafe {
+    operation(unsafe {
         rptadv_peer_support::echolink::host::Preparation::new(
             path,
             Path::new("librptadv_echolink.so.1"),
@@ -90,7 +97,7 @@ fn with_echo_preparation<T>(
             move |peer| product.incoming_echo(peer),
         )
         .with_notice(crate::services::echo_notice)
-    }))
+    })
 }
 
 fn echo_reload_error(error: impl std::fmt::Debug) {
@@ -139,10 +146,7 @@ unsafe extern "C" fn load(
         let Some(product) = (unsafe { Product::open(product) }) else {
             return 1;
         };
-        let Some(configuration) = configuration() else {
-            return 1;
-        };
-        let Some(path) = configuration_path() else {
+        let Some((path, configuration)) = configuration() else {
             return 1;
         };
         let mut services = crate::services::HostServicesOwner::new();
@@ -150,7 +154,7 @@ unsafe extern "C" fn load(
             with_echo_preparation(&path, product, EchoBackend(control), |preparation| unsafe {
                 services.prepare_echo(product.descriptor(), &configuration, preparation)
             });
-        if !matches!(prepared, Some(Ok(()))) {
+        if prepared.is_err() {
             return 1;
         }
         if !unsafe { product.start(services.descriptor(), control, file, speech, &configuration) } {
@@ -229,18 +233,17 @@ extern "C" fn reload() -> i32 {
             },
         );
         match result {
-            Some(Ok(outcome)) => {
+            Ok(outcome) => {
                 if let Some(error) = outcome.retirement {
                     echo_reload_error(error);
                 }
                 state.configuration = configuration;
                 0
             }
-            Some(Err(error)) => {
+            Err(error) => {
                 echo_reload_error(error);
                 -1
             }
-            None => -1,
         }
     }))
     .unwrap_or(-1)
