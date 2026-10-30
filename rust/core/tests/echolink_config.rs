@@ -72,6 +72,9 @@ fn echolink_aprs_endpoint_inherits_and_can_be_explicitly_disabled() {
         "host:65536",
         "http://host:5199",
         "[::1]:5199",
+        "é.example:5199",
+        ":5199",
+        "bad host:5199",
     ] {
         let resolved = resolve(&format!(
             "[524950]\n[echolink 524950]\naprs_server={endpoint}\n"
@@ -93,6 +96,10 @@ fn echolink_aprs_endpoint_inherits_and_can_be_explicitly_disabled() {
             .iter()
             .any(|warning| warning.key == "aprs_server")
     );
+    let disabled_proxy =
+        resolve("[524950]\n[echolink 524950]\ntransport=proxy\naprs_server=\n").unwrap();
+    assert!(disabled_proxy.warnings.is_empty());
+    assert!(disabled_proxy.value.aprs_server.is_empty());
 }
 
 #[test]
