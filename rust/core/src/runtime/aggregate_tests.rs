@@ -3620,6 +3620,102 @@ fn accepted_peer_parrot_command_confirms_only_its_source() {
 }
 
 #[test]
+fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_source() {
+    use super::{
+        dtmf::{DigitEvent, DigitOutcome},
+        links::LinkEffect,
+    };
+    use crate::{config::EchoLinkTelemetry as Mode, link::PeerSignals};
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    for (dynamic, peer_source) in [(false, false), (false, true), (true, false), (true, true)] {
+        let source = format!(
+            "[1000]\nlink_command_echo_telemetry=83\n[echolink]\ntelemetry=demand\ntelemetry_dynamic={}\n",
+            if dynamic { "yes" } else { "no" }
+        );
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&source).unwrap(),
+            &Media,
+            adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        let reply = PeerSignals::new().reply_target();
+        let other = PeerSignals::new().reply_target();
+        assert!(matches!(
+            runtime.set_echo_telemetry("missing", Mode::On, 0),
+            Err(RuntimeError::MissingNode)
+        ));
+        runtime.echo_response_requested("missing", &reply, 0);
+        assert!(!runtime.echo_telemetry_allows("missing", &reply, 0));
+        assert!(!runtime.echo_telemetry_allows("1000", &reply, 200000));
+        runtime.echo_response_requested("1000", &reply, 200001);
+        assert_eq!(
+            runtime.echo_telemetry_allows("1000", &reply, 200001),
+            dynamic
+        );
+        assert!(!runtime.echo_telemetry_allows("1000", &other, 200001));
+        assert_eq!(
+            runtime
+                .set_echo_telemetry("1000", Mode::Off, 200002)
+                .is_ok(),
+            dynamic
+        );
+        runtime.incoming("1000", "2000", true).unwrap();
+        runtime
+            .node("1000")
+            .unwrap()
+            .links()
+            .configure_admin(&digest, &digest, 60000);
+        let feed = |runtime: &mut Runtime, sequence: &str, now_ms| {
+            let links = runtime.node("1000").unwrap().links();
+            let mut operation = None;
+            for digit in sequence.chars() {
+                let next = if peer_source {
+                    links.peer_digit("2000", digit, now_ms, reply.clone())
+                } else {
+                    links.digit(DigitEvent::Digit { digit, now_ms })
+                };
+                operation = next.or(operation);
+            }
+            operation
+        };
+        assert!(feed(&mut runtime, "*8001234#", 200002).is_none());
+        let Some(DigitOutcome::Operation(operation)) = feed(&mut runtime, "*831#", 200003) else {
+            panic!("authorized mapped telemetry command missing")
+        };
+        let mut now = clock();
+        now.now_ms = 200004;
+        let result = runtime.command("1000", operation, now, false);
+        if dynamic {
+            assert!(matches!(result, Ok(LinkEffect::None)));
+            assert!(runtime.echo_telemetry_allows("1000", &reply, now.now_ms));
+        } else {
+            assert!(matches!(result, Err(RuntimeError::Rejected)));
+        }
+        let mut status = super::dtmf::DigitOperation::new(
+            crate::command::Command {
+                action: LinkAction::Status,
+                node: String::new(),
+            },
+            None,
+        );
+        status.reply = Some(reply.clone());
+        assert!(matches!(
+            runtime.command("1000", status, now, false),
+            Ok(LinkEffect::Telemetry(LinkAction::Status, Some(_)))
+        ));
+        runtime.node("1000").unwrap().links().ended("2000");
+        runtime.peer_detached("1000", "2000", now.now_ms);
+        assert!(runtime.stop(now.now_ms));
+    }
+}
+
+#[test]
 fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct PausingDevice(Arc<AtomicBool>);

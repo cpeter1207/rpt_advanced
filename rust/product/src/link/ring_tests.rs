@@ -83,6 +83,18 @@ fn finite_echo_peer_drains_a_subtarget_burst_without_changing_ordinary_peer_poli
         CourtesySettings::default(),
     )
     .unwrap();
+    // Codec PLC lookahead may produce no real PCM in a tiny callback, but the
+    // retained finite tail still owns receive activity until it actually drains.
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut [0.0; 1],
+            rpt_advanced_core::link::SourcePosition::default(),
+        )
+        .unwrap();
+    assert_eq!(links.active_count(), 1);
+    assert_eq!(producer.finish_status(token), Ok(FinishState::Pending));
     let mut heard = false;
     let mut output = [0.0; 960];
     for _ in 0..10 {

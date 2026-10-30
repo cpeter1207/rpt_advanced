@@ -143,3 +143,128 @@ fn echolink_enabled_accounts_need_unique_identity_and_unambiguous_endpoints() {
             .is_ok()
     );
 }
+
+#[test]
+fn malformed_account_values_warn_and_resolve_without_crossing_account_boundaries() {
+    for (key, value, fallback) in [
+        ("proxy_host", "x".repeat(254), ""),
+        ("proxy_host", "bad host".into(), ""),
+        ("proxy_host", "[invalid".into(), ""),
+        (
+            "directory_servers",
+            "valid.example,,other.example".into(),
+            "servers.echolink.org,backup.echolink.org",
+        ),
+        ("allow", "N0CALL,,W1*".into(), ""),
+        ("deny", "N".repeat(65), ""),
+        ("callsign", "N0CALL01234567890".into(), ""),
+        ("callsign", "**".into(), ""),
+        ("callsign", "*BAD!*".into(), ""),
+        ("callsign", "NOCALL".into(), ""),
+        ("callsign", "12345".into(), ""),
+        ("callsign", "N0!CALL".into(), ""),
+        ("latitude", "91".into(), "0"),
+        ("antenna_direction_deg", "361".into(), "0"),
+        ("power_w", "-1".into(), "0"),
+        ("antenna_gain_db", "inf".into(), "0"),
+        ("name", "N".repeat(241), ""),
+        ("name", "bad\u{7}name".into(), ""),
+        ("location", "L".repeat(4097), ""),
+        ("status_message", "bad\u{7}status".into(), ""),
+        ("secrets_file", "S".repeat(4097), ""),
+    ] {
+        let resolved = resolve(&format!("[524950]\n[echolink 524950]\n{key}={value}\n")).unwrap();
+        assert!(
+            resolved.warnings.iter().any(|warning| warning.key == key
+                && warning.fallback
+                    == if fallback.is_empty() {
+                        "not configured"
+                    } else {
+                        fallback
+                    }),
+            "{key}: {:?}",
+            resolved.warnings
+        );
+        assert!(!resolved.value.enabled);
+        assert_eq!(resolved.value.node_number, 0);
+        assert!(resolved.value.callsign.is_empty());
+    }
+    for callsign in ["N0CALL", "N0CALL-L", "N0CALL-R", "W1/N0CALL", "*TEST_NET*"] {
+        let resolved = resolve(&format!(
+            "[524950]\n[echolink 524950]\ncallsign={callsign}\n"
+        ))
+        .unwrap();
+        assert!(resolved.warnings.is_empty(), "{callsign}");
+        assert_eq!(resolved.value.callsign, callsign);
+    }
+}
+
+#[test]
+fn separate_accounts_reject_only_ambiguous_identities_or_transport_endpoints() {
+    for (first, second, valid) in [
+        (
+            "bind_address=127.0.0.1\naudio_port=5198",
+            "bind_address=127.0.0.2\naudio_port=5198",
+            true,
+        ),
+        (
+            "bind_address=127.0.0.1\naudio_port=5198",
+            "bind_address=127.0.0.1\naudio_port=5200",
+            true,
+        ),
+        (
+            "bind_address=127.0.0.1\naudio_port=5200",
+            "bind_address=127.0.0.1\naudio_port=5198",
+            true,
+        ),
+        (
+            "bind_address=127.0.0.1\naudio_port=5198",
+            "bind_address=127.0.0.1\naudio_port=5198",
+            false,
+        ),
+        (
+            "bind_address=0.0.0.0\naudio_port=5198",
+            "bind_address=127.0.0.1\naudio_port=5198",
+            false,
+        ),
+        (
+            "bind_address=127.0.0.1\naudio_port=5198",
+            "bind_address=0.0.0.0\naudio_port=5198",
+            false,
+        ),
+        (
+            "transport=proxy\nproxy_host=one.example\nproxy_port=8100",
+            "transport=proxy\nproxy_host=one.example\nproxy_port=8100",
+            false,
+        ),
+        (
+            "transport=proxy\nproxy_host=one.example\nproxy_port=8100",
+            "transport=proxy\nproxy_host=one.example\nproxy_port=8101",
+            true,
+        ),
+        (
+            "transport=proxy\nproxy_host=one.example\nproxy_port=8100",
+            "transport=proxy\nproxy_host=two.example\nproxy_port=8100",
+            true,
+        ),
+        (
+            "transport=proxy\nproxy_host=one.example",
+            "transport=direct",
+            true,
+        ),
+        (
+            "transport=direct",
+            "transport=proxy\nproxy_host=one.example",
+            true,
+        ),
+        ("", "node_number=123456\naudio_port=5200", false),
+    ] {
+        let document = ConfigDocument::parse(&format!("[524950]\n[508422]\n[echolink 524950]\nenabled=yes\ncallsign=N0CALL-R\nnode_number=123456\n{first}\n[echolink 508422]\nenabled=yes\ncallsign=W1OTHER-L\nnode_number=654321\n{second}\n")).unwrap();
+        assert_eq!(
+            Schema::validate(&document).is_ok(),
+            valid,
+            "{first} / {second}"
+        );
+    }
+    assert!(resolve("[524950]\n[echolink 524950]\nenabled=yes\ncallsign=N0CALL-R\nnode_number=123456\nmax_stations=4294967295\nmax_pending_handshakes=1\n").is_err());
+}

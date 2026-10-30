@@ -138,13 +138,45 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     host.incoming_peer(iax, "127.0.0.1", clock()).unwrap();
     assert_eq!(host.peers.len(), 2);
     assert!(host.peers.iter().any(|peer| peer.remote == "2000"));
+    let origin = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .text_origin();
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin,
+            source: "2000".into(),
+            represented_source: None,
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("literal crossover text"),
+        },
+    );
+    pump_until(&mut host, |_| {
+        state.lock().unwrap().texts == [b"2000>literal crossover text".to_vec()]
+    });
     assert!(host.stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);
-    assert!(state.lock().unwrap().texts.is_empty());
+    assert_eq!(
+        state.lock().unwrap().texts,
+        [b"2000>literal crossover text".to_vec()]
+    );
 }
 
 #[test]
 fn echo_account_status_is_visible_without_active_links() {
+    unsafe extern "C" fn failed_status(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: abi::rptadv_text_sink_v1,
+        _: *mut c_void,
+    ) -> i32 {
+        -1
+    }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -152,6 +184,12 @@ fn echo_account_status_is_visible_without_active_links() {
     let text = host.status_text("1000").unwrap();
     assert!(text.contains("no active links"), "{text}");
     assert!(text.contains("echo-account fixture-state=online"), "{text}");
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.echo_account_status = Some(failed_status);
+    host.services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let text = host.status_text("1000").unwrap();
+    assert!(text.contains("no active links"), "{text}");
+    assert!(text.contains("echo-account status-unavailable"), "{text}");
     assert!(host.stop(20));
 }
 
@@ -245,7 +283,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
     let mut host = Host::start(
         document(
             "usb",
-            "[1001]\nradio_channel=usb2\nduplex=full\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n",
+            "[1001]\nradio_channel=usb2\nduplex=full\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n[echolink 1001]\nenabled=yes\ncallsign=N0CALL-R\nnode_number=123456\n",
         ),
         crate::media::text::tests::preparer(Arc::default()),
         services(),
@@ -289,7 +327,9 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
                 .any(|text| text.starts_with(b"M "))
         );
     }
-    for (destination, expected_admitted) in [("9000", 0), ("1000", 1)] {
+    for (destination, expected_admitted) in
+        [("3123456", 0), ("N0CALL-R", 0), ("9000", 0), ("1000", 1)]
+    {
         host.human_text(
             "1000",
             rpt_advanced_core::link::HumanMessage {
