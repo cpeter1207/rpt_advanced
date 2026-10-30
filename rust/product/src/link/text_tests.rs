@@ -122,4 +122,44 @@ fn text_forwarding_large_body_is_not_limited_by_local_synthesis_quota_or_failure
         });
         assert_eq!(result.destinations_rejected, 1);
     }
+    message.source = "K1ABC-R".into();
+    message.body = Arc::from("normal text");
+    message.origin.protocol = 2;
+    let result = router.route(&message, std::slice::from_ref(&echo), |_, payload| {
+        let TextPayload::EchoLink { sender, body } = payload else {
+            panic!("EchoLink destination")
+        };
+        assert_eq!((sender, body), ("K1ABC-R", "normal text"));
+        true
+    });
+    assert_eq!(result.destinations_admitted, 1);
+    for (represented, admitted, rejected) in [(None, 0, 2), (Some("654321"), 2, 0)] {
+        message.represented_source = represented.map(|node| {
+            rpt_advanced_core::link::PeerIdentity::parse(ProtocolId::EchoLink, node).unwrap()
+        });
+        let mut peers = destinations();
+        if represented.is_some() {
+            peers.push(TextDestination {
+                connection_generation: 100,
+                protocol: 1,
+                node: "3654321".into(),
+                can_forward_text: true,
+            });
+        }
+        let result = router.route(&message, &peers, |peer, payload| {
+            assert_ne!(
+                peer.node, "3654321",
+                "represented sender cannot receive its own text"
+            );
+            let TextPayload::AllStarLink(wire) = payload else {
+                panic!("ASL destination")
+            };
+            assert_eq!(wire.to_str().unwrap(), "M 3654321 0 normal text");
+            true
+        });
+        assert_eq!(
+            (result.destinations_admitted, result.destinations_rejected),
+            (admitted, rejected)
+        );
+    }
 }

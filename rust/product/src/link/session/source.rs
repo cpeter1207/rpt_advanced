@@ -3,9 +3,26 @@ use crate::{
     Error,
     link::ring::{InboundProducer, MuteSpan},
 };
-use rpt_advanced_core::audio::DtmfDetector;
+use rpt_advanced_core::{audio::DtmfDetector, link::PeerSignals};
 
 const EMPTY: MuteSpan = MuteSpan { start: 0, end: 0 };
+
+/// Collect valid lookback in this burst's half-open window before opening mute.
+fn collect_mute_start(
+    first: &mut Option<u64>,
+    signals: &PeerSignals,
+    start: u64,
+    end: u64,
+    burst_start: u64,
+    range: std::ops::Range<i64>,
+) {
+    let from = start.saturating_add_signed(range.start).max(burst_start);
+    let to = start.saturating_add_signed(range.end).min(end);
+    if from < to {
+        *first = Some(first.map_or(from, |old| old.min(from)));
+        signals.set_dtmf_muted(true);
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Cached {
@@ -156,13 +173,14 @@ impl SourceIngress {
                                 emit(decoded);
                             },
                             |range| {
-                                let from =
-                                    start.saturating_add_signed(range.start).max(burst_start);
-                                let to = start.saturating_add_signed(range.end).min(end);
-                                if from < to {
-                                    first = Some(first.map_or(from, |old: u64| old.min(from)));
-                                    inbound.signals().set_dtmf_muted(true);
-                                }
+                                collect_mute_start(
+                                    &mut first,
+                                    inbound.signals(),
+                                    start,
+                                    end,
+                                    burst_start,
+                                    range,
+                                );
                             },
                         )
                         .map_err(|_| Error::InvalidFrame)?;
@@ -295,6 +313,16 @@ mod tests {
 
     #[test]
     fn clipped_empty_spans_are_ignored_and_disjoint_metadata_is_bounded() {
+        let signals = PeerSignals::new();
+        let mut first = None;
+        collect_mute_start(&mut first, &signals, 100, 164, 100, -64..0);
+        assert_eq!(first, None);
+        assert!(!signals.dtmf_muted());
+        collect_mute_start(&mut first, &signals, 100, 164, 100, 32..100);
+        assert_eq!(first, Some(132));
+        assert!(signals.dtmf_muted());
+        collect_mute_start(&mut first, &signals, 100, 164, 100, -32..16);
+        assert_eq!(first, Some(100));
         let mut spans = [EMPTY; 64];
         let mut count = 0;
         assert_eq!(span(&mut spans, &mut count, 10, 10), Ok(()));
@@ -328,6 +356,19 @@ mod tests {
             let mut source = SourceIngress::new(muting).unwrap();
             let mut scratch = [0.0; 4096];
             let mut digits = Vec::new();
+            assert_eq!(
+                source.audio(
+                    &mut inbound,
+                    &mut scratch,
+                    Decoded {
+                        start: 0,
+                        pcm: &[],
+                        concealed: false
+                    },
+                    |_| {}
+                ),
+                Ok(0)
+            );
             let tone = if digit == '#' {
                 (0..256)
                     .map(|n| {
@@ -381,6 +422,82 @@ mod tests {
             );
             assert_eq!(digits, [digit]);
         }
+    }
+
+    #[test]
+    fn enabling_muting_during_digit_completion_preserves_the_completed_command() {
+        let (mut inbound, _) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let mut source = SourceIngress::new(false).unwrap();
+        let mut scratch = [0.0; 4096];
+        let mut digits = Vec::new();
+        // Two 12.75-ms analysis windows qualify the tone; two quiet windows
+        // leave its completion pending until the third quiet window below.
+        for (start, pcm) in [(0, five_tone(204)), (204, vec![0.0; 204])] {
+            assert_eq!(
+                source.audio(
+                    &mut inbound,
+                    &mut scratch,
+                    Decoded {
+                        start,
+                        pcm: &pcm,
+                        concealed: false
+                    },
+                    |digit| digits.push(digit)
+                ),
+                Ok(pcm.len())
+            );
+        }
+        assert!(digits.is_empty());
+        source.set_muting(true);
+        assert_eq!(
+            source.audio(
+                &mut inbound,
+                &mut scratch,
+                Decoded {
+                    start: 408,
+                    pcm: &[0.0; 102],
+                    concealed: false
+                },
+                |digit| digits.push(digit)
+            ),
+            Ok(102)
+        );
+        assert_eq!(digits, ['5']);
+        assert!(inbound.signals().dtmf_muted());
+    }
+
+    #[test]
+    fn full_ring_gap_keeps_command_muting_without_fabricating_sample_credit() {
+        let (mut inbound, _) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let mut source = SourceIngress::new(true).unwrap();
+        let mut scratch = [0.0; 4096];
+        let mut digits = Vec::new();
+        for (start, pcm) in [
+            (0, five_tone(256)),
+            (256, vec![0.0; 4096]),
+            (4352, vec![0.0; 1824]),
+        ] {
+            assert_eq!(
+                source.audio(
+                    &mut inbound,
+                    &mut scratch,
+                    Decoded {
+                        start,
+                        pcm: &pcm,
+                        concealed: false
+                    },
+                    |digit| digits.push(digit)
+                ),
+                Ok(pcm.len())
+            );
+        }
+        assert_eq!(digits, ['5']);
+        assert_eq!(source.gap(&mut inbound, 6176, 1, |_| {}), Ok(0));
+        assert!(inbound.signals().dtmf_muted());
+        assert_eq!(
+            inbound.observer().observe().unwrap().available_samples,
+            6176
+        );
     }
 
     #[test]
