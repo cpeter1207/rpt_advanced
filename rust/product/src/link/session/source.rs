@@ -298,3 +298,212 @@ impl SourceIngress {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::five_tone;
+    use super::*;
+    use crate::link::ring::{InboundPolicy, InboundRing, tests::delayed_mute_endpoints};
+
+    #[test]
+    fn qualified_digits_end_at_loss_and_concealment_remains_muted_without_redecoding() {
+        for concealed in [false, true] {
+            let (mut inbound, _) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+            let mut source = SourceIngress::new(true).unwrap();
+            let mut scratch = [0.0; 4096];
+            let mut digits = Vec::new();
+            let tone = five_tone(256);
+            assert_eq!(
+                source.audio(
+                    &mut inbound,
+                    &mut scratch,
+                    Decoded {
+                        start: 0,
+                        pcm: &tone,
+                        concealed: false
+                    },
+                    |digit| digits.push(digit)
+                ),
+                Ok(256)
+            );
+            if concealed {
+                assert_eq!(
+                    source.audio(
+                        &mut inbound,
+                        &mut scratch,
+                        Decoded {
+                            start: 256,
+                            pcm: &tone[..160],
+                            concealed: true
+                        },
+                        |digit| digits.push(digit)
+                    ),
+                    Ok(160)
+                );
+            } else {
+                assert_eq!(
+                    source.gap(&mut inbound, 256, 160, |digit| digits.push(digit)),
+                    Ok(160)
+                );
+            }
+            assert_eq!(digits, ['5']);
+            assert!(inbound.signals().dtmf_muted());
+            source.timeout(&inbound);
+            assert!(!inbound.signals().dtmf_muted());
+            assert_eq!(
+                source.finish(&mut inbound, |digit| digits.push(digit)),
+                Ok(true)
+            );
+            assert_eq!(digits, ['5']);
+        }
+    }
+
+    #[test]
+    fn rejected_pcm_suffix_must_keep_position_length_and_concealment_identity() {
+        let (mut inbound, _) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        assert_eq!(inbound.write(&[0.1; 4096]), Ok(4096));
+        let mut source = SourceIngress::new(true).unwrap();
+        let mut scratch = [0.0; 4096];
+        let pcm = five_tone(4096);
+        assert_eq!(
+            source.audio(
+                &mut inbound,
+                &mut scratch,
+                Decoded {
+                    start: 4096,
+                    pcm: &pcm,
+                    concealed: false
+                },
+                |_| {}
+            ),
+            Ok(2080)
+        );
+        let remaining = &pcm[2080..];
+        for (start, samples, concealed) in [
+            (6177, remaining, false),
+            (6176, &pcm[..2017], false),
+            (6176, remaining, true),
+        ] {
+            assert_eq!(
+                source.audio(
+                    &mut inbound,
+                    &mut scratch,
+                    Decoded {
+                        start,
+                        pcm: samples,
+                        concealed
+                    },
+                    |_| {}
+                ),
+                Err(Error::InvalidFrame)
+            );
+        }
+        assert_eq!(
+            source.gap(&mut inbound, 6176, 1, |_| {}),
+            Err(Error::InvalidFrame)
+        );
+        assert_eq!(
+            source.finish(&mut inbound, |_| {}),
+            Err(Error::InvalidFrame)
+        );
+        assert_eq!(
+            source.audio(
+                &mut inbound,
+                &mut scratch,
+                Decoded {
+                    start: 6176,
+                    pcm: remaining,
+                    concealed: false
+                },
+                |_| {}
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            inbound.observer().observe().unwrap().available_samples,
+            6176
+        );
+        source.timeout(&inbound);
+        assert!(inbound.signals().dtmf_muted());
+    }
+
+    #[test]
+    fn pending_mute_metadata_stalls_audio_gap_and_finish_without_replaying_digits() {
+        for operation in 0..3 {
+            let (mut inbound, _) = delayed_mute_endpoints(false);
+            let mut source = SourceIngress::new(true).unwrap();
+            let mut scratch = [0.0; 4096];
+            let mut digits = Vec::new();
+            assert_eq!(
+                source.audio(
+                    &mut inbound,
+                    &mut scratch,
+                    Decoded {
+                        start: 0,
+                        pcm: &five_tone(256),
+                        concealed: false
+                    },
+                    |digit| digits.push(digit)
+                ),
+                Ok(256)
+            );
+            assert_eq!(
+                source.gap(&mut inbound, 256, 160, |digit| digits.push(digit)),
+                Ok(160)
+            );
+            source.timeout(&inbound);
+            assert!(inbound.signals().dtmf_muted());
+            match operation {
+                0 => assert_eq!(
+                    source.audio(
+                        &mut inbound,
+                        &mut scratch,
+                        Decoded {
+                            start: 416,
+                            pcm: &[],
+                            concealed: false
+                        },
+                        |digit| digits.push(digit)
+                    ),
+                    Ok(0)
+                ),
+                1 => assert_eq!(
+                    source.gap(&mut inbound, 416, 1, |digit| digits.push(digit)),
+                    Ok(0)
+                ),
+                _ => assert_eq!(
+                    source.finish(&mut inbound, |digit| digits.push(digit)),
+                    Ok(false)
+                ),
+            }
+            assert_eq!(inbound.observer().observe().unwrap().available_samples, 416);
+            assert_eq!(
+                source.finish(&mut inbound, |digit| digits.push(digit)),
+                Ok(true)
+            );
+            assert_eq!(digits, ['5']);
+            assert!(!inbound.signals().dtmf_muted());
+        }
+        let (mut inbound, _) = delayed_mute_endpoints(true);
+        let mut source = SourceIngress::new(true).unwrap();
+        let mut scratch = [0.0; 4096];
+        assert_eq!(
+            source.audio(
+                &mut inbound,
+                &mut scratch,
+                Decoded {
+                    start: 0,
+                    pcm: &five_tone(256),
+                    concealed: false
+                },
+                |_| {}
+            ),
+            Ok(256)
+        );
+        assert_eq!(
+            source.gap(&mut inbound, 256, 160, |_| {}),
+            Err(Error::Write)
+        );
+        assert_eq!(source.finish(&mut inbound, |_| {}), Err(Error::Write));
+    }
+}

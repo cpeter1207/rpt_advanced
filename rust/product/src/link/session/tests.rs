@@ -65,7 +65,7 @@ pub(crate) struct State {
 }
 type Shared = Arc<Mutex<State>>;
 
-fn five_tone(count: usize) -> Vec<f32> {
+pub(super) fn five_tone(count: usize) -> Vec<f32> {
     (0..count)
         .map(|n| {
             let phase = n as f32 * std::f32::consts::TAU / 8000.0;

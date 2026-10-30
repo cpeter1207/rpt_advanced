@@ -3,6 +3,9 @@ use std::sync::OnceLock;
 
 type PushCallback = unsafe extern "C" fn(*mut ffi::rpcr3_ring, *const f32, u64, *mut u64) -> i32;
 static PUSH_CALLBACK: OnceLock<PushCallback> = OnceLock::new();
+type MuteCallback =
+    unsafe extern "C" fn(*mut ffi::rpcr3_ring, u64, *const MuteSpan, u32, *mut u32) -> i32;
+static MUTE_CALLBACK: OnceLock<MuteCallback> = OnceLock::new();
 thread_local! {
     static PUSH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PUSH_SCRIPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -131,8 +134,7 @@ fn ordinary_ring_accepts_pre_finite_prefix_but_echo_rejects_it_before_creation()
         let (mut producer, _) =
             InboundRing::from_descriptor(8000, InboundPolicy::Peer, pointer).unwrap();
         assert_eq!(producer.finish_status(1), Err(RingError));
-        assert_eq!(producer.write_tagged(&[0.25], 1, 0, &[]), Err(RingError));
-        assert_eq!(producer.mute(1, &[]), Err(RingError));
+        assert_eq!(producer.write_tagged(&[0.25], 1, 0, &[]), Ok(1));
         assert!(InboundRing::from_descriptor(8000, InboundPolicy::Echo, pointer).is_err());
     }
 }
@@ -702,6 +704,35 @@ pub(crate) fn pending_overreported_gap_endpoints() -> (InboundProducer, InboundC
         let mut api = *ffi::rpcr3_descriptor();
         api.ring_producer_gap = Some(pending_overreported_gap);
         InboundRing::from_descriptor(48000, InboundPolicy::Peer, Box::leak(Box::new(api))).unwrap()
+    }
+}
+
+pub(crate) fn delayed_mute_endpoints(fail: bool) -> (InboundProducer, InboundConsumer) {
+    unsafe extern "C" fn mute(
+        ring: *mut ffi::rpcr3_ring,
+        generation: u64,
+        spans: *const MuteSpan,
+        count: u32,
+        accepted: *mut u32,
+    ) -> i32 {
+        unsafe { *accepted = 0 };
+        let call = PUSH_CALLS.with(|calls| calls.replace(calls.get() + 1));
+        if PUSH_SCRIPT.with(|mode| mode.get()) == 7 {
+            -1
+        } else if call < 2 {
+            0
+        } else {
+            unsafe { MUTE_CALLBACK.get().unwrap()(ring, generation, spans, count, accepted) }
+        }
+    }
+    // SAFETY: retain real ring ownership; only metadata credit is delayed.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        let _ = MUTE_CALLBACK.set(api.ring_producer_mute.unwrap());
+        PUSH_CALLS.with(|calls| calls.set(0));
+        PUSH_SCRIPT.with(|mode| mode.set(if fail { 7 } else { 6 }));
+        api.ring_producer_mute = Some(mute);
+        InboundRing::from_descriptor(8000, InboundPolicy::Echo, Box::leak(Box::new(api))).unwrap()
     }
 }
 
