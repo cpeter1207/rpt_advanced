@@ -11,7 +11,7 @@
   },
   {
     "repository": "librptadvdtmf",
-    "sha": "0630d837e4d1ce522b8f6f58245fdb6b950b68fb",
+    "sha": "35ecdc48b850305ee912a19f75407cb30b847785",
     "packages": ["librptadvdtmf1", "librptadvdtmf-dev"]
   },
   {

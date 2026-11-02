@@ -1,3 +1,13 @@
+rpt-advanced (0.1.0~alpha18-1) unstable; urgency=medium
+
+  * Add EchoLink accounts, direct and Proxy connections, audio, and text speech.
+  * Share codec providers and protocol-qualified peer identity across hosts.
+  * Preserve finite audio tails and release ended peers from transmit activity.
+  * Support transactional account reload and same-process adapter cleanup.
+  * Require the source-rate DTMF package used by the EchoLink receive path.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Mon, 02 Nov 2026 13:25:00 -0600
+
 rpt-advanced (0.1.0~alpha17-1) unstable; urgency=medium
 
   * Schedule composed file, speech and Morse messages at local clock times.
