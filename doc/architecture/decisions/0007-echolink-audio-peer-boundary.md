@@ -1,6 +1,6 @@
 # ADR 0007: EchoLink audio-peer boundary
 
-Status: Implemented on the feature branch; final PR gates and broader live acceptance pending
+Status: Implemented; broader live acceptance pending
 
 ## Context
 
@@ -22,11 +22,11 @@ canonical normalized `f32` audio at its source rate to the peer's inbound PCM
 ring. Under the 2026-09-13 amendment in ADR 0025, that ring alone converts and
 corrects drift into the native transmit mix; outbound codec conversion remains
 at egress. EchoLink's transport representation converts only at its external
-boundary. The two-worker media path and EchoLink adapter are implemented on
-the feature branch. Standalone direct-mode receive and transmit audio are
-confirmed, including receive audio from W6EK-R. Final pull-request gates and
-live acceptance with official clients, public incoming calls, conferences,
-a user-provided Proxy, and the Asterisk host remain open.
+boundary. The two-worker media path and EchoLink adapter are implemented.
+Standalone direct-mode receive and transmit audio are confirmed, including
+receive audio from W6EK-R. Live acceptance with official clients, public
+incoming calls, conferences, a user-provided Proxy, and the Asterisk host
+remains open.
 
 The adapter identifies incoming human text and submits it to the shared,
 protocol-neutral text-message codec under ADR 0022. Speech synthesis stays
@@ -90,7 +90,7 @@ requests and copied per-peer protocol/capability metadata. Both IAX hosts
 preserve their existing transport/media behavior and populate real local and
 remote identities. Product SONAME 2 rejects the older host/product pair.
 EchoLink host attachment, account reload and finite source-read integration
-are implemented on the feature branch. The provider advertises its complete
+are implemented. The provider advertises its complete
 network, prepared-media and text groups. Isolated installed-host composition,
 reload and same-process Asterisk unload pass; public-network/client validation
 remains open.
@@ -179,8 +179,8 @@ account stop plus admission drainage precedes product shutdown. An accepted
 callback captures the validated product directly rather than reacquiring the
 host lifecycle lock. Outbound Echo destinations use that local account and
 check cancellation before and after dial. No Asterisk channel is constructed.
-These startup/stop and transactional host-reload paths are implemented on the
-feature branch, including complete provider capability publication.
+These startup/stop and transactional host-reload paths are implemented,
+including complete provider capability publication.
 The sized descriptor's prepared-apply tail uses an inactive account handle as
 the provider-owned validated configuration/credential snapshot. Applying it
 exchanges that snapshot with the target's old settings, retaining both handles

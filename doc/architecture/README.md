@@ -457,11 +457,11 @@ defines the full reload, hardware-handoff, and failure policy.
   fallback. The unkey edge cancels unsent locally originated queries and
   rejects late replies. This work never tags PCM frames or runs an IAX write in
   an audio callback.
-  The EchoLink feature branch supplies registration, direct/Proxy transport,
+  The EchoLink adapter supplies registration, direct/Proxy transport,
   callsign access control, and source media through the same controller audio
   boundary. Isolated composition passes in both hosts. Standalone direct-mode
-  receive and transmit audio are confirmed. Final pull-request gates and the
-  broader live-client/Proxy checks remain open under ADR 0007.
+  receive and transmit audio are confirmed. Broader live-client/Proxy checks
+  remain open under ADR 0007.
 - `rust/core/src/config/` parses, validates, and inherits configuration.
 
 ## Core invariants

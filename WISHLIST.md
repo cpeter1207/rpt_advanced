@@ -81,7 +81,7 @@ resume the three explicitly deferred formats.
 
 ### Incoming text-message speech codec
 
-**Status: Implemented in the candidate; final verification in progress (2026-10-27).** Treat human text
+**Status: Implemented; broader protocol-client acceptance pending.** Treat human text
 messages from text-capable protocols as a protocol-neutral codec input that
 produces local-only spoken incoming media, not controller telemetry. This is
 separate from the 19 Asterisk IAX audio-format identifiers above.
@@ -91,9 +91,10 @@ describes local speech and independent text forwarding. Its
 [implementation plan](docs/superpowers/plans/2026-10-27-protocol-neutral-codecs-and-text-media.md)
 is approved. A real directed IAX loopback message was heard locally on 524950.
 The initial-attachment race, sender attribution, and interruption of ordinary
-voice telemetry are covered by focused regressions; their live retest and the
-controller's final gate remain pending. EchoLink's protocol adapter is implemented
-on its feature branch; its remaining checks are listed below.
+voice telemetry are covered by focused regressions. The live directed-text
+retest confirmed sender attribution and the overlapping announcement switching
+to Morse. EchoLink's protocol adapter is implemented; its remaining client
+acceptance checks are listed below.
 
 **Requirements and decisions recorded**
 
@@ -186,13 +187,12 @@ None.
 
 ### EchoLink audio interoperability
 
-**Status: Implemented on the feature branch; final verification pending.**
+**Status: Implemented; broader live acceptance pending.**
 Isolated tests cover both controller hosts, direct and Proxy service, audio,
 text, and account lifecycle. Direct-mode receive and transmit audio are confirmed
-on the standalone node, including receive audio from W6EK-R. Final pull-request
-gates and broader live checks remain open. Official clients, public incoming
-calls, conferences, a user-provided Proxy, and the Asterisk host still need live
-acceptance checks.
+on the standalone node, including receive audio from W6EK-R. Official clients,
+public incoming calls, conferences, a user-provided Proxy, and the Asterisk host
+still need live acceptance checks.
 
 **Requirements**
 
@@ -262,8 +262,8 @@ acceptance checks.
   on 2026-10-28. The [implementation plan](docs/superpowers/plans/2026-10-28-echolink-interoperability.md)
   starts with a released Rust RTP/RTCP library compatibility gate, keeps legacy
   adaptation narrow and excludes implementation of other protocols or WebRTC.
-  Release and field acceptance remain open until the final gates and authorized
-  client/Proxy checks are complete.
+  Release and broader field acceptance require the authorized client/Proxy
+  checks to be complete.
 
 **Material decisions needed before implementation**
 
