@@ -441,6 +441,7 @@ impl<P: PeerInput> LinkAudio<P> {
         self.peers.iter().filter(|peer| peer.active).count()
     }
     /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
+    /// Terminal peers contribute neither PCM nor key state, even before reclamation.
     pub fn process(
         &mut self,
         controller: &mut NodeController,
@@ -485,7 +486,7 @@ impl<P: PeerInput> LinkAudio<P> {
             if !audio_active {
                 peer.audio[..count].fill(0.0);
             }
-            let active = audio_active || peer.input.signals().radio_keyed();
+            let active = !ended && (audio_active || peer.input.signals().radio_keyed());
             peer.active = active;
             peer.input.signals().set_active(active);
         }
