@@ -52,6 +52,22 @@ unsafe extern "C" fn info_fault(
 
 #[test]
 fn copied_peer_identity_requires_canonical_names_and_complete_per_peer_capabilities() {
+    static OWNED_PEER_DROPS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    unsafe extern "C" fn destroy_owned(context: *mut c_void, handle: *mut c_void) {
+        assert!(
+            !handle.is_null(),
+            "owned dial destruction requires its handle"
+        );
+        unsafe { crate::fixture::release_peer(handle) };
+        OWNED_PEER_DROPS.fetch_add(1, Ordering::Relaxed);
+        if context.addr() == 2 {
+            // An unrelated owner can finish after this test takes the lifecycle lock.
+            std::thread::spawn(|| unsafe { crate::fixture::release_peer(crate::fixture::peer()) })
+                .join()
+                .unwrap();
+        }
+    }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -62,7 +78,7 @@ fn copied_peer_identity_requires_canonical_names_and_complete_per_peer_capabilit
             table.context = ptr::without_provenance_mut(mode);
             table.peer_info = Some(info_fault);
             table.peer_read_source = Some(read_fault);
-            table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
+            table.peer_destroy = Some(destroy_owned);
             table.peer_dial = Some(peer_dial_mode);
             match mode {
                 27 | 28 => {
@@ -104,15 +120,15 @@ fn copied_peer_identity_requires_canonical_names_and_complete_per_peer_capabilit
                 assert!(!matches!(mode, 0 | 19), "valid record rejected: {mode}");
                 assert!(matches!(error, Error::Admission));
                 unsafe { services.0.peer_destroy.unwrap()(services.0.context, handle) };
-                let before = crate::fixture::PEER_DROPS.load(Ordering::Acquire);
+                let before = OWNED_PEER_DROPS.load(Ordering::Acquire);
                 assert!(matches!(
                     services.dial("EchoLink/123456", "1000", 960, || true),
                     Err(Error::Admission)
                 ));
                 assert_eq!(
-                    crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+                    OWNED_PEER_DROPS.load(Ordering::Acquire),
                     before + 1,
-                    "rejected owned dial leaked its handle: {mode}"
+                    "rejected owned dial must destroy its handle exactly once: {mode}"
                 );
             }
         }

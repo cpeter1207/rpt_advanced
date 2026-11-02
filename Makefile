@@ -132,10 +132,10 @@ rust-coverage: | build
 		export CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))/llvm-cov-target"; \
 		eval "$$($(CARGO) llvm-cov show-env --branch --export-prefix)"; \
 		$(CARGO) llvm-cov clean --workspace; \
+		export RPT_ADVANCED_LIBDIR="$(CURDIR)/build"; \
 		$(MAKE) CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" all; \
 		export LIBRARY_PATH="$$CARGO_TARGET_DIR/release:$$LIBRARY_PATH"; \
 		export LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH"; \
-		export RPT_ADVANCED_LIBDIR="$(CURDIR)/build"; \
 		$(CARGO) test --locked --release --workspace --all-targets; \
 		$(MAKE) -o rust-build CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" integration; \
 		python3 tests/export_rust_coverage.py $(CARGO) llvm-cov report --release \
@@ -270,6 +270,9 @@ install-check: artifacts
 build/chan_rpt_fixture.so: tests/radio_fixture.c rust/product/include/rptadv_product.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@
 
+# Test hosts must select the same source-built private adapters they exercise.
+integration platform-verify: export RPT_ADVANCED_LIBDIR = $(CURDIR)/build
+
 integration: install-check build/chan_rpt_fixture.so site-gpio-check site-hwmon-check
 	install -m 0755 build/chan_rpt_fixture.so build/stage$(asteriskmoddir)/
 	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_rust_asterisk_lifecycle.py
@@ -286,7 +289,8 @@ distcheck: dist
 	+@set -e; stage=$$(mktemp -d "$(CURDIR)/build/dist-check.XXXXXX"); \
 		trap 'rm -rf -- "$$stage"' EXIT HUP INT TERM; \
 		tar -xzf build/$(DIST_NAME).tar.gz -C "$$stage"; \
-		$(MAKE) -C "$$stage/$(DIST_NAME)" CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))" all install-check product-surface
+		RPT_ADVANCED_LIBDIR="$$stage/$(DIST_NAME)/build" \
+			$(MAKE) -C "$$stage/$(DIST_NAME)" CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))" all install-check product-surface
 
 platform-verify: check install-check integration distcheck
 
