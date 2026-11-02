@@ -11,12 +11,12 @@
   },
   {
     "repository": "librptadvdtmf",
-    "sha": "e09e02fbf62f01e415dae74283fdfd73951c030f",
+    "sha": "79124bda1c5960ad3650eb1c7cfc462bdc68b198",
     "packages": ["librptadvdtmf1", "librptadvdtmf-dev"]
   },
   {
     "repository": "rptadv-codec-adapters",
-    "sha": "c284e0cf4d2e3f400cba47c0ac8819d17fa8dfaf",
+    "sha": "5ed83bb4d52985e68a455fce4a3145ee6907c107",
     "packages": [
       "librptadv-codec-dev", "librptadv-codec-g7111", "librptadv-codec-pcm1",
       "librptadv-codec-gsm1", "librptadv-codec-speex1", "librptadv-codec-opus1",
@@ -27,7 +27,7 @@
   },
   {
     "repository": "librptadviax2",
-    "sha": "3e77301944fd99e7a8e49ad63f6a488c98064e7f",
+    "sha": "c9a6b67b7cba73d39916b68fa7da2a718f274f75",
     "packages": ["librptadv-iax2-client2", "librptadv-iax2-client-dev"]
   },
   {
@@ -57,5 +57,10 @@
     "repository": "librptadvschedule",
     "sha": "9f4c39c2f1f0956c2c8ae3afbb34edf9dd30edc9",
     "packages": ["librptadvschedule1", "librptadvschedule-dev"]
+  },
+  {
+    "repository": "librptadvecholink",
+    "sha": "7cf55e4f19ba88ffc780de305bdfa96dea66aa7b",
+    "packages": ["librptadvecholink1", "librptadvecholink-dev"]
   }
 ]
