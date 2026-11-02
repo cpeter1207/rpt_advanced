@@ -462,6 +462,12 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
 
 #[test]
 fn text_forwarding_backpressure_does_not_block_local_speech() {
+    struct Resume(Arc<Barrier>);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            self.0.wait();
+        }
+    }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -469,7 +475,11 @@ fn text_forwarding_backpressure_does_not_block_local_speech() {
     attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let origin = host.peers[0].control.text_origin();
-    let blocked = egress.lock().unwrap();
+    // Park the owner before filling: the text callback locks after the queue pop.
+    let pause = Arc::new(Barrier::new(2));
+    egress.lock().unwrap().pause = Some(pause.clone());
+    pause.wait();
+    let resume = Resume(pause);
     let control = &mut host.peers[1].control;
     while control
         .send(PeerCommand::Text {
@@ -490,7 +500,7 @@ fn text_forwarding_backpressure_does_not_block_local_speech() {
     );
     assert_eq!(host.text.observation().forwarding_rejected, 1);
     assert_eq!(host.text.observation().admitted, 1);
-    drop(blocked);
+    drop(resume);
     assert!(host.stop(20));
 }
 
