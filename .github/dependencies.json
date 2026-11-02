@@ -60,7 +60,7 @@
   },
   {
     "repository": "librptadvecholink",
-    "sha": "b63b043e0127f45c6151e9f3a92b7db59a05763c",
+    "sha": "cb57a9f25591ffb3e8a48c82fad3ea5fe0bbad0c",
     "packages": ["librptadvecholink1", "librptadvecholink-dev"]
   }
 ]
