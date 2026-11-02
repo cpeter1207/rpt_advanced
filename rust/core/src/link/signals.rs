@@ -9,6 +9,8 @@ struct ReplyState {
     ended: AtomicBool,
     radio_keyed: AtomicBool,
     edge: AtomicU64,
+    telemetry_allowed: AtomicBool,
+    telemetry_until_ms: AtomicU64,
 }
 
 /// Exact peer connection retained by control-prepared responses until off-audio reclamation.
@@ -33,12 +35,19 @@ impl PeerReply {
     pub fn ended(&self) -> bool {
         self.0.ended.load(Ordering::Acquire)
     }
+    pub(crate) fn set_telemetry_window(&self, until_ms: u64) {
+        self.0.telemetry_until_ms.store(until_ms, Ordering::Release);
+    }
+    pub(crate) fn telemetry_window(&self) -> u64 {
+        self.0.telemetry_until_ms.load(Ordering::Acquire)
+    }
 }
 
 /// PCM publication, terminal EOF, activity edges and advisory selected source.
 /// Audio is the sole activity writer; the channel owner is the sole source writer.
 pub struct PeerSignals {
     pcm: AtomicU64,
+    dtmf_muted: AtomicBool,
     reply: PeerReply,
     source_version: AtomicU64,
     source_edge: AtomicU64,
@@ -54,10 +63,13 @@ impl PeerSignals {
     pub fn new() -> Self {
         Self {
             pcm: AtomicU64::new(0),
+            dtmf_muted: AtomicBool::new(false),
             reply: PeerReply(Arc::new(ReplyState {
                 ended: AtomicBool::new(false),
                 radio_keyed: AtomicBool::new(false),
                 edge: AtomicU64::new(0),
+                telemetry_allowed: AtomicBool::new(true),
+                telemetry_until_ms: AtomicU64::new(0),
             })),
             source_version: AtomicU64::new(0),
             source_edge: AtomicU64::new(0),
@@ -71,6 +83,25 @@ impl PeerSignals {
     /// Observe the last completed PCM publication.
     pub fn pcm_epoch(&self) -> u64 {
         self.pcm.load(Ordering::Acquire)
+    }
+    /// Immediately suppress delayed source output; retained ring tags cover its tail.
+    pub fn set_dtmf_muted(&self, muted: bool) {
+        self.dtmf_muted.store(muted, Ordering::Release);
+    }
+    /// Current source detector/command state, without waiting for its serial owner.
+    pub fn dtmf_muted(&self) -> bool {
+        self.dtmf_muted.load(Ordering::Acquire)
+    }
+    /// Control publishes protocol telemetry eligibility independently of voice.
+    pub fn set_telemetry_allowed(&self, allowed: bool) {
+        self.reply
+            .0
+            .telemetry_allowed
+            .store(allowed, Ordering::Release);
+    }
+    /// Audio reads only this atomic gate, never a command timer or account lock.
+    pub fn telemetry_allowed(&self) -> bool {
+        self.reply.0.telemetry_allowed.load(Ordering::Acquire)
     }
     /// Mark terminal transport failure before detachment or reclaim.
     pub fn end(&self) {

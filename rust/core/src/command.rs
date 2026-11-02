@@ -57,10 +57,12 @@ pub enum LinkAction {
     SiteStatus,
     /// Cancel the current configured message without changing future triggers.
     CancelMessage,
+    /// Set this node's EchoLink telemetry mode (0 off, 1 on, 2 follow, 3 demand).
+    EchoTelemetry,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 24;
+pub const ACTION_COUNT: usize = 25;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,7 +220,7 @@ impl DtmfCommandMap {
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78",
+            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78", "",
         ];
         let mappings = prefixes
             .into_iter()
@@ -326,6 +328,7 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::Message,
         LinkAction::SiteStatus,
         LinkAction::CancelMessage,
+        LinkAction::EchoTelemetry,
     ]
 }
 

@@ -85,7 +85,8 @@ unsafe extern "C" fn ast_log(
     format: *const c_char,
     text: *const c_char,
 ) {
-    if unsafe { std::ffi::CStr::from_ptr(function) } == c"scheduler" {
+    if matches!(unsafe { std::ffi::CStr::from_ptr(function) }, name if name == c"scheduler" || name == c"echolink")
+    {
         SCHEDULER_LOGS.with(|logs| {
             logs.borrow_mut().push((
                 level,
@@ -105,6 +106,23 @@ unsafe extern "C" fn ast_log(
 thread_local! {
     static SCHEDULER_LOGS: std::cell::RefCell<Vec<(i32, String, String)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[test]
+fn echo_notice_uses_error_logger_and_never_a_foreign_format_string() {
+    SCHEDULER_LOGS.with(|logs| logs.borrow_mut().clear());
+    echo_notice("echo account failure 50% %n");
+    echo_notice("invalid\0notice");
+    SCHEDULER_LOGS.with(|logs| {
+        assert_eq!(
+            *logs.borrow(),
+            [(
+                4,
+                "rpt_advanced: EchoLink: %s\n".into(),
+                "echo account failure 50% %n".into()
+            )]
+        )
+    });
 }
 
 #[test]
@@ -355,7 +373,7 @@ fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
         command_notice(null, c"100".as_ptr(), 3, 0);
     }
     assert_eq!(boundary(-1, || panic!("callback fault")), -1);
-    assert_eq!(descriptor().abi_version, 8);
+    assert_eq!(descriptor().abi_version, 9);
 }
 
 #[test]
@@ -372,7 +390,7 @@ fn peer_binding_requires_radio_option_acknowledgment_and_preserves_owners() {
                 peer.rate(),
                 "the hook must see the already negotiated decoded rate"
             );
-            let peer = into_raw(peer);
+            let peer = into_raw(peer, "1000", "2000");
             host(|state| state.failure = failure);
             assert_eq!(
                 peer_bind_radio(null, peer, radio),
@@ -401,7 +419,7 @@ fn destroy_raw_releases_a_peer_retained_by_the_adapter() {
     // SAFETY: the fixture owns the fake channel, and the raw peer is destroyed once.
     unsafe {
         let peer = PeerIo::dial(c"radio@host/200", c"100", 8, || true).unwrap();
-        let peer = into_raw(peer);
+        let peer = into_raw(peer, "1000", "2000");
         destroy_raw(peer);
     }
     host(|state| state.clean());

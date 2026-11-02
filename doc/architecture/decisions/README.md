@@ -21,7 +21,7 @@ completion does not imply hardware qualification, release, or deployment.
 | [0004](0004-hamlib-remote-base-boundary.md) | Planned; decision accepted | Hamlib owns rig control; audio uses an explicit source adapter. |
 | [0005](0005-standalone-core-and-optional-asterisk-adapters.md) | Implemented | A shared lock-free core serves standalone operation and optional Asterisk adapters. |
 | [0006](0006-appliance-control-plane-ingress.md) | Planned; decision accepted | The appliance hosts its OIDC, proxy, and WAF ingress layer. |
-| [0007](0007-echolink-audio-peer-boundary.md) | Planned; decision accepted | EchoLink is an audio-only external-peer adapter. |
+| [0007](0007-echolink-audio-peer-boundary.md) | Implemented on feature branch; final gates and broader live acceptance pending | EchoLink is a separate external-peer provider with local-only spoken human text. |
 | [0008](0008-transmitter-protection.md) | Implemented | Per-node watchdogs and source-specific kerchunk handling protect transmitters. |
 | [0009](0009-scheduled-actions-and-macros.md) | Implemented | Scheduled actions and macros are validated control-plane work. |
 | [0010](0010-configured-permanent-links-and-replacement-windows.md) | Implemented | Configuration owns permanent direct links and bounded local-time replacement windows. |

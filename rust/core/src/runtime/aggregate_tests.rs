@@ -2805,6 +2805,13 @@ fn loop_rejection_queues_localized_rf_speech_to_the_local_transmitter() {
         *media.0.lock().unwrap(),
         ["Connection to node,2,0,0,0 rejected because it would create a link loop"]
     );
+    runtime
+        .queue_remote_command_unsupported("1000", "3123456", None)
+        .unwrap();
+    assert_eq!(
+        media.0.lock().unwrap().last().unwrap(),
+        "Remote commands are not supported for node,3,1,2,3,4,5,6"
+    );
     assert!(runtime.stop(0));
 }
 
@@ -3610,6 +3617,106 @@ fn accepted_peer_parrot_command_confirms_only_its_source() {
     runtime.node("1000").unwrap().links().ended("2000");
     runtime.peer_detached("1000", "2000", now.now_ms);
     assert!(runtime.stop(now.now_ms));
+}
+
+#[test]
+fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_source() {
+    use super::{
+        dtmf::{DigitEvent, DigitOutcome},
+        links::LinkEffect,
+    };
+    use crate::{config::EchoLinkTelemetry as Mode, link::PeerSignals};
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    for (dynamic, peer_source) in [(false, false), (false, true), (true, false), (true, true)] {
+        let source = format!(
+            "[1000]\nlink_command_echo_telemetry=83\n[echolink]\ntelemetry=demand\ntelemetry_dynamic={}\n",
+            if dynamic { "yes" } else { "no" }
+        );
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&source).unwrap(),
+            &Media,
+            adapter,
+            |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+            clock(),
+        )
+        .unwrap();
+        let reply = PeerSignals::new().reply_target();
+        let other = PeerSignals::new().reply_target();
+        assert!(matches!(
+            runtime.set_echo_telemetry("missing", Mode::On, 0),
+            Err(RuntimeError::MissingNode)
+        ));
+        runtime.echo_response_requested("missing", &reply, 0);
+        assert!(!runtime.echo_telemetry_allows("missing", &reply, 0));
+        assert!(!runtime.echo_telemetry_allows("1000", &reply, 200000));
+        runtime.echo_response_requested("1000", &reply, 200001);
+        // Fixed demand still answers commands; dynamic controls mode changes,
+        // not the response window of the configured policy.
+        assert!(runtime.echo_telemetry_allows("1000", &reply, 200001));
+        assert!(!runtime.echo_telemetry_allows("1000", &reply, 320001));
+        assert!(!runtime.echo_telemetry_allows("1000", &other, 200001));
+        assert_eq!(
+            runtime
+                .set_echo_telemetry("1000", Mode::Off, 200002)
+                .is_ok(),
+            dynamic
+        );
+        runtime.incoming("1000", "2000", true).unwrap();
+        runtime
+            .node("1000")
+            .unwrap()
+            .links()
+            .configure_admin(&digest, &digest, 60000);
+        let feed = |runtime: &mut Runtime, sequence: &str, now_ms| {
+            let links = runtime.node("1000").unwrap().links();
+            let mut operation = None;
+            for digit in sequence.chars() {
+                let next = if peer_source {
+                    links.peer_digit("2000", digit, now_ms, reply.clone())
+                } else {
+                    links.digit(DigitEvent::Digit { digit, now_ms })
+                };
+                operation = next.or(operation);
+            }
+            operation
+        };
+        assert!(feed(&mut runtime, "*8001234#", 200002).is_none());
+        let Some(DigitOutcome::Operation(operation)) = feed(&mut runtime, "*831#", 200003) else {
+            panic!("authorized mapped telemetry command missing")
+        };
+        let mut now = clock();
+        now.now_ms = 200004;
+        let result = runtime.command("1000", operation, now, false);
+        if dynamic {
+            assert!(matches!(result, Ok(LinkEffect::None)));
+            assert!(runtime.echo_telemetry_allows("1000", &reply, now.now_ms));
+        } else {
+            assert!(matches!(result, Err(RuntimeError::Rejected)));
+        }
+        for source in [None, Some(reply.clone())] {
+            let mut status = super::dtmf::DigitOperation::new(
+                crate::command::Command {
+                    action: LinkAction::Status,
+                    node: String::new(),
+                },
+                None,
+            );
+            status.reply = source.clone();
+            let Ok(LinkEffect::Telemetry(LinkAction::Status, actual)) =
+                runtime.command("1000", status, now, false)
+            else {
+                panic!("status response missing")
+            };
+            assert_eq!(actual, source);
+        }
+        runtime.node("1000").unwrap().links().ended("2000");
+        runtime.peer_detached("1000", "2000", now.now_ms);
+        assert!(runtime.stop(now.now_ms));
+    }
 }
 
 #[test]

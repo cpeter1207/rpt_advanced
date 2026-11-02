@@ -5,14 +5,23 @@ use std::{
     ffi::{CStr, c_void},
     mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
 };
 
 struct State {
     product: Product,
     registration: Option<Registration>,
+    services: crate::services::HostServicesOwner,
+    configuration: String,
+    path: PathBuf,
+    control: EchoBackend,
 }
+
+#[derive(Clone, Copy)]
+struct EchoBackend(*const ffi::rptadv_control_descriptor_v1);
+// Immutable selected table/code is retained by the loader through product stop.
+unsafe impl Send for EchoBackend {}
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 #[cfg(test)]
 static TEST_PRODUCT: Mutex<Option<Product>> = Mutex::new(None);
@@ -42,13 +51,68 @@ pub struct Descriptor {
     pub unload: Option<extern "C" fn() -> i32>,
 }
 
-fn configuration() -> Option<String> {
+fn configuration_path() -> Option<PathBuf> {
     let directory = unsafe { ffi::ast_config_AST_CONFIG_DIR };
     if directory.is_null() {
         return None;
     }
     let directory = unsafe { CStr::from_ptr(directory) }.to_str().ok()?;
-    std::fs::read_to_string(Path::new(directory).join("rpt_advanced.conf")).ok()
+    Some(Path::new(directory).join("rpt_advanced.conf"))
+}
+
+/// Retain the resolved path with the document read from it for one load transaction.
+fn configuration() -> Option<(PathBuf, String)> {
+    let path = configuration_path()?;
+    let document = std::fs::read_to_string(&path).ok()?;
+    Some((path, document))
+}
+
+fn with_echo_preparation<T>(
+    path: &Path,
+    product: Product,
+    control: EchoBackend,
+    operation: impl FnOnce(rptadv_peer_support::echolink::host::Preparation<'_>) -> T,
+) -> T {
+    let jitter = Path::new(env!("RPT_ADVANCED_LIBDIR")).join("librptadv_jitter_adapter.so.1");
+    let bytes = |value: &str| rptadv_peer_support::echolink::abi::ByteSpan {
+        data: value.as_ptr(),
+        length: value.len(),
+    };
+    let resources = rptadv_peer_support::echolink::abi::RuntimeConfig {
+        gsm_library: bytes("librptadv_codec_gsm.so.1"),
+        speex_library: bytes("librptadv_codec_speex.so.1"),
+        jitter_library: bytes(
+            jitter
+                .to_str()
+                .expect("UTF-8 build path with an ASCII filename"),
+        ),
+        ..Default::default()
+    };
+    operation(unsafe {
+        rptadv_peer_support::echolink::host::Preparation::new(
+            path,
+            Path::new("librptadv_echolink.so.1"),
+            &resources,
+            control.0.cast(),
+            move |peer| product.incoming_echo(peer),
+        )
+        .with_notice(crate::services::echo_notice)
+    })
+}
+
+fn echo_reload_error(error: impl std::fmt::Debug) {
+    let text =
+        std::ffi::CString::new(format!("{error:?}")).expect("typed Echo errors contain no NUL");
+    unsafe {
+        ffi::ast_log(
+            ffi::__LOG_ERROR as i32,
+            c"rust/asterisk/lifecycle.rs".as_ptr(),
+            0,
+            c"reload".as_ptr(),
+            c"rpt_advanced: EchoLink reload: %s\n".as_ptr(),
+            text.as_ptr(),
+        )
+    };
 }
 
 /// Return the selected product while registrations retain its callback code.
@@ -82,48 +146,60 @@ unsafe extern "C" fn load(
         let Some(product) = (unsafe { Product::open(product) }) else {
             return 1;
         };
-        let Some(configuration) = configuration() else {
+        let Some((path, configuration)) = configuration() else {
             return 1;
         };
-        if !unsafe {
-            product.start(
-                crate::services::descriptor(),
-                control,
-                file,
-                speech,
-                &configuration,
-            )
-        } {
+        let mut services = crate::services::HostServicesOwner::new();
+        let prepared =
+            with_echo_preparation(&path, product, EchoBackend(control), |preparation| unsafe {
+                services.prepare_echo(product.descriptor(), &configuration, preparation)
+            });
+        if prepared.is_err() {
             return 1;
         }
-        let registration = unsafe {
-            Registration::register(
-                module.cast(),
-                crate::application::callback,
-                [
-                    crate::cli::link_callback,
-                    crate::cli::alias_callback,
-                    crate::cli::command_callback,
-                    crate::cli::site_callback,
-                ],
-            )
+        if !unsafe { product.start(services.descriptor(), control, file, speech, &configuration) } {
+            return 1;
+        }
+        let registration = if unsafe { services.activate_echo() }.is_ok() {
+            unsafe {
+                Registration::register(
+                    module.cast(),
+                    crate::application::callback,
+                    [
+                        crate::cli::link_callback,
+                        crate::cli::alias_callback,
+                        crate::cli::command_callback,
+                        crate::cli::site_callback,
+                    ],
+                )
+            }
+        } else {
+            Err(crate::Error::Admission)
         };
         match registration {
             Ok(registration) => {
                 *selected = Some(State {
                     product,
                     registration: Some(registration),
+                    services,
+                    configuration,
+                    path,
+                    control: EchoBackend(control),
                 });
                 0
             }
             Err(_) => {
-                if product.stop() {
+                if services.stop_echo().is_ok() && product.stop() {
                     1
                 } else {
                     // A live product cannot be abandoned while its callback code unloads.
                     *selected = Some(State {
                         product,
                         registration: None,
+                        services,
+                        configuration,
+                        path,
+                        control: EchoBackend(control),
                     });
                     0
                 }
@@ -135,13 +211,39 @@ unsafe extern "C" fn load(
 
 extern "C" fn reload() -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let Some(configuration) = configuration() else {
+        let mut selected = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(state) = selected.as_mut() else {
             return -1;
         };
-        if product().is_some_and(|product| product.reload(&configuration)) {
-            0
-        } else {
-            -1
+        let Ok(configuration) = std::fs::read_to_string(&state.path) else {
+            return -1;
+        };
+        let result = with_echo_preparation(
+            &state.path,
+            state.product,
+            state.control,
+            |preparation| unsafe {
+                state.services.reload_echo(
+                    state.product.descriptor(),
+                    &configuration,
+                    preparation,
+                    || state.product.reload(&configuration),
+                    || state.product.reload(&state.configuration),
+                )
+            },
+        );
+        match result {
+            Ok(outcome) => {
+                if let Some(error) = outcome.retirement {
+                    echo_reload_error(error);
+                }
+                state.configuration = configuration;
+                0
+            }
+            Err(error) => {
+                echo_reload_error(error);
+                -1
+            }
         }
     }))
     .unwrap_or(-1)
@@ -153,7 +255,7 @@ extern "C" fn unload() -> i32 {
         let Some(state) = selected.as_ref() else {
             return 0;
         };
-        if !state.product.stop() {
+        if state.services.stop_echo().is_err() || !state.product.stop() {
             return -1;
         }
         let state = selected.take().expect("selected lifecycle remains owned");

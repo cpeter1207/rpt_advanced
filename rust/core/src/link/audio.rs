@@ -110,6 +110,12 @@ pub trait PeerInput: Send {
     fn signals(&self) -> &PeerSignals;
     /// Queued source-rate samples, excluding converter and PLC lookahead.
     fn available(&self) -> u64;
+    /// An explicit finite source boundary: true retains a bounded tail, false
+    /// means it finished or was cancelled. None preserves normal peer priming
+    /// and shortfall grace; this is not terminal transport EOF.
+    fn finite_playout(&self) -> Option<bool> {
+        None
+    }
     /// Render native F32, returning real samples (not concealment), or None on failure.
     fn render(&mut self, output: &mut [f32]) -> Option<usize>;
     /// One real media sample; unlike PCM zero, absence cannot demand PTT.
@@ -228,6 +234,7 @@ pub struct SourcePosition {
 struct Destination {
     enabled: bool,
     broadcast: bool,
+    telemetry: bool,
     eligible: bool,
     target: usize,
     span: AudioSpan,
@@ -301,10 +308,10 @@ impl LinkDispatcher {
                     } else {
                         0.0
                     };
-                    if destination.broadcast {
+                    if destination.telemetry && destination.broadcast {
                         *sample += block.replies[frame].broadcast.unwrap_or(0.0);
                     }
-                    if block.replies[frame].target == destination.target {
+                    if destination.telemetry && block.replies[frame].target == destination.target {
                         *sample += block.replies[frame].sample;
                     }
                 }
@@ -434,6 +441,7 @@ impl<P: PeerInput> LinkAudio<P> {
         self.peers.iter().filter(|peer| peer.active).count()
     }
     /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
+    /// Terminal peers contribute neither PCM nor key state, even before reclamation.
     pub fn process(
         &mut self,
         controller: &mut NodeController,
@@ -452,17 +460,33 @@ impl<P: PeerInput> LinkAudio<P> {
                 let signal = peer.input.signals();
                 (signal.pcm_epoch(), peer.input.available(), signal.ended())
             };
-            let audio_active = peer
-                .receive
-                .should_render(pcm_epoch, available, ended, count);
-            let audio_active = audio_active
-                && peer
-                    .receive
-                    .rendered(peer.input.render(&mut peer.audio[..count]), count);
+            let audio_active = match peer.input.finite_playout() {
+                Some(pending) => {
+                    // An explicit finite boundary bypasses ordinary startup and
+                    // PLC grace. Preserve the last real block even when rendering
+                    // it also publishes the consumer's drained acknowledgement.
+                    peer.receive.rendered(None, count);
+                    !ended
+                        && pending
+                        && peer
+                            .input
+                            .render(&mut peer.audio[..count])
+                            .is_some_and(|real| {
+                                real != 0 || peer.input.finite_playout() == Some(true)
+                            })
+                }
+                None => {
+                    peer.receive
+                        .should_render(pcm_epoch, available, ended, count)
+                        && peer
+                            .receive
+                            .rendered(peer.input.render(&mut peer.audio[..count]), count)
+                }
+            };
             if !audio_active {
                 peer.audio[..count].fill(0.0);
             }
-            let active = audio_active || peer.input.signals().radio_keyed();
+            let active = !ended && (audio_active || peer.input.signals().radio_keyed());
             peer.active = active;
             peer.input.signals().set_active(active);
         }
@@ -598,15 +622,18 @@ impl<P: PeerInput> LinkAudio<P> {
                         && selected
                         && (receiving || forwarding_sources > own_source)));
             route.broadcast = !ended && peer.mode.transmits() && selected;
+            route.telemetry = peer.input.signals().telemetry_allowed();
             let eligible = route.target != 0
                 && (route.enabled
-                    || (route.broadcast
+                    || (route.telemetry
+                        && route.broadcast
                         && self.reply_output[..count]
                             .iter()
                             .any(|sample| sample.broadcast.is_some()))
-                    || self.reply_output[..count]
-                        .iter()
-                        .any(|reply| reply.target == route.target));
+                    || route.telemetry
+                        && self.reply_output[..count]
+                            .iter()
+                            .any(|reply| reply.target == route.target));
             if eligible && !route.eligible {
                 route.span.burst = route.span.burst.wrapping_add(1);
             }

@@ -4,7 +4,7 @@ use crate::{
         dispatcher::{MediaWorker, PreparedDispatch},
         ring::{InboundPolicy, InboundRing},
         session::{Command as PeerCommand, Event, PeerControl, PeerIoWorker, PeerSession},
-        text::{TextDestination, TextRouter},
+        text::{TextDestination, TextPayload, TextRouter},
     },
     media::{
         NativeMediaPreparer,
@@ -21,7 +21,7 @@ use rpt_advanced_core::{
     },
     link::{
         AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, LocalTextInput,
-        Mode, TextAudience, TextOrigin,
+        Mode, PeerIdentity, ProtocolId, TextAudience, TextOrigin,
     },
     media::SpeechSource,
     runtime::{
@@ -204,8 +204,9 @@ fn prepared(
                 .map_err(|_| RuntimeError::Preparation)?,
         );
         text_origins.push((peer.remote.clone(), origin));
-        let (inbound, input) = InboundRing::open(snapshot.input_rate, InboundPolicy::Peer)
-            .map_err(|_| RuntimeError::Preparation)?;
+        let (inbound, input) =
+            InboundRing::open(snapshot.input_rate, peer.control.inbound_policy())
+                .map_err(|_| RuntimeError::Preparation)?;
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
@@ -226,7 +227,11 @@ fn prepared(
         wakes.push(peer.control.wake());
         redirects.push((
             peer.remote.clone(),
-            PeerCommand::Redirect { inbound, outbound },
+            PeerCommand::Redirect {
+                inbound,
+                outbound,
+                dtmf_muting: settings.dtmf_muting,
+            },
         ));
     }
     let (mut audio, dispatcher) =
@@ -528,7 +533,7 @@ impl Host {
         }
         self.pump(clock)
     }
-    /// Resolve a destination and optionally authenticate the numeric incoming source address.
+    /// Route reserved Echo aliases before ASL lookup; an address alone cannot admit an Echo QSO.
     pub fn lookup(
         &self,
         local: &str,
@@ -539,6 +544,14 @@ impl Host {
             .runtime
             .settings(local)
             .ok_or(RuntimeError::MissingNode)?;
+        let identity = PeerIdentity::from_operator(remote).map_err(|_| RuntimeError::Rejected)?;
+        if identity.protocol() == ProtocolId::EchoLink {
+            return if source.is_none() {
+                Ok(format!("EchoLink/{}", identity.node()))
+            } else {
+                Err(RuntimeError::Rejected)
+            };
+        }
         let method = match settings.link_lookup_method {
             LinkLookupMethod::Both => 0,
             LinkLookupMethod::Dns => 1,
@@ -553,6 +566,26 @@ impl Host {
                 source,
             )
             .map_err(|_| RuntimeError::Rejected)
+    }
+    /// Admit an inspected peer through common policy. Echo's fresh provider QSO
+    /// supplies authentication; only IAX uses an ASL directory/source lookup.
+    pub fn incoming_peer(
+        &mut self,
+        io: PeerIo,
+        source: &str,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
+        let local = io.local().to_owned();
+        let remote = io.identity().operator_alias();
+        if io.identity().protocol() == ProtocolId::AllStarLink {
+            self.lookup(&local, &remote, Some(source))?;
+        }
+        self.runtime.incoming(&local, &remote, true)?;
+        let result = self.attach_peer(&local, &remote, Mode::TRANSCEIVE, io, clock);
+        if result.is_err() {
+            self.reject_peer(&local, &remote, clock.now_ms);
+        }
+        result
     }
     /// Bind an authorized peer to its exact radio before media starts, then publish its peer set.
     pub fn attach_peer(
@@ -593,8 +626,17 @@ impl Host {
         let (_, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
-        let (mut session, control) = PeerSession::prepare(io, outbound, local, remote)
-            .map_err(|_| RuntimeError::Preparation)?;
+        let (mut session, control) = PeerSession::prepare(
+            io,
+            outbound,
+            local,
+            remote,
+            self.runtime
+                .settings(local)
+                .ok_or(RuntimeError::MissingNode)?
+                .dtmf_muting,
+        )
+        .map_err(|_| RuntimeError::Preparation)?;
         session.bind_clock(source_clock);
         if let Err(session) = self.peer_io.attach(session) {
             session.stop();
@@ -618,7 +660,12 @@ impl Host {
             .find(|peer| peer.local == local && peer.remote == remote)
         {
             peer.announced = true;
-            let _ = self.runtime.queue_link_event(local, remote, true);
+            let _ = if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
+                self.runtime
+                    .queue_echo_link_event(local, remote, peer.control.callsign(), true)
+            } else {
+                self.runtime.queue_link_event(local, remote, true)
+            };
         }
         Ok(())
     }
@@ -663,19 +710,29 @@ impl Host {
         {
             let peer = self.peers.remove(index);
             self.text.cancel(&peer.control.text_origin());
-            let announced = peer.announced;
+            let announced = peer.announced.then(|| {
+                (
+                    peer.control.text_origin().protocol,
+                    peer.control.callsign().to_owned(),
+                )
+            });
             peer.control.stop();
             self.peer_io.reap();
             announced
         } else {
-            false
+            None
         };
         if let Some(node) = self.runtime.node(local) {
             node.links().ended(remote);
         }
         self.runtime.peer_detached(local, remote, now_ms);
-        if announced {
-            let _ = self.runtime.queue_link_event(local, remote, false);
+        if let Some((protocol, callsign)) = announced {
+            let _ = if protocol == ProtocolId::EchoLink as u32 {
+                self.runtime
+                    .queue_echo_link_event(local, remote, &callsign, false)
+            } else {
+                self.runtime.queue_link_event(local, remote, false)
+            };
         }
     }
     pub(crate) fn reject_peer(&mut self, local: &str, remote: &str, now_ms: u64) {
@@ -698,6 +755,15 @@ impl Host {
                 if peers.len() == 1 { "link" } else { "links" }
             )
         };
+        match self.services.echo_account_status(local) {
+            Ok(Some(account)) => {
+                let _ = writeln!(result, "  {account}");
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = writeln!(result, "  echo-account status-unavailable");
+            }
+        }
         let (_, lease) = self
             .leases
             .iter()
@@ -832,6 +898,11 @@ impl Host {
                     peer_observation.egress_reliable_pending,
                     peer_observation.egress_reply_pending
                 );
+                if let Some(description) =
+                    crate::link::session::describe_peer_observation(peer_observation)
+                {
+                    let _ = writeln!(result, "    {description}");
+                }
             }
             if let Some(snapshot) = snapshot {
                 let egress = snapshot.egress;
@@ -912,7 +983,10 @@ impl Host {
             LinkEffect::SiteStatus { selector, reply } => {
                 self.runtime.queue_site_report(local, &selector, reply)
             }
-            LinkEffect::SelectedRemote | LinkEffect::ParrotEnabled(_) | LinkEffect::None => Ok(()),
+            LinkEffect::SelectedRemote
+            | LinkEffect::ParrotEnabled(_)
+            | LinkEffect::EchoTelemetry(_)
+            | LinkEffect::None => Ok(()),
         }
     }
     fn text(
@@ -969,22 +1043,33 @@ impl Host {
         }) {
             return;
         }
-        let router = TextRouter::new(
-            self.runtime
-                .node_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        );
+        let mut locals = Vec::new();
+        for local in self.runtime.node_names() {
+            locals.push(local.to_owned());
+            let node = NodeId::new(local).expect("admitted station");
+            let account = rpt_advanced_core::config::EchoLinkSettings::resolve(
+                self.runtime.document(),
+                &node,
+            )
+            .expect("validated account settings")
+            .value;
+            if account.enabled {
+                locals.push(rpt_advanced_core::link::EchoAlias::format(
+                    account.node_number,
+                ));
+                locals.push(account.callsign);
+            }
+        }
+        let router = TextRouter::new(locals);
         let destinations = self
             .peers
             .iter()
             .filter(|peer| peer.local == local)
             .map(|peer| TextDestination {
                 connection_generation: peer.control.text_origin().connection_generation,
-                protocol: 1,
+                protocol: peer.control.text_origin().protocol,
                 node: peer.remote.clone(),
-                can_forward_text: !peer.control.ended(),
+                can_forward_text: peer.control.can_forward_text() && !peer.control.ended(),
             })
             .collect::<Vec<_>>();
         let disposition = router.route(&message, &destinations, |destination, text| {
@@ -998,9 +1083,15 @@ impl Host {
                 })
                 .expect("current text route snapshot")
                 .control
-                .send(PeerCommand::Text {
-                    text: text.to_owned(),
-                    advisory: false,
+                .send(match text {
+                    TextPayload::AllStarLink(text) => PeerCommand::Text {
+                        text: text.to_owned(),
+                        advisory: false,
+                    },
+                    TextPayload::EchoLink { sender, body } => PeerCommand::HumanText {
+                        sender: sender.to_owned(),
+                        body: Arc::from(body),
+                    },
                 })
                 .is_ok()
         });
@@ -1048,6 +1139,14 @@ impl Host {
         let mut events = Vec::new();
         let mut ended = Vec::new();
         for peer in &mut self.peers {
+            if peer.control.text_origin().protocol == ProtocolId::EchoLink as u32 {
+                peer.control
+                    .set_telemetry_allowed(self.runtime.echo_telemetry_allows(
+                        &peer.local,
+                        &peer.control.reply_target(),
+                        clock.now_ms,
+                    ));
+            }
             while let Some(event) = peer.control.event() {
                 events.push((
                     peer.local.clone(),

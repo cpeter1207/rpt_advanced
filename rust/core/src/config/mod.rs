@@ -1,6 +1,7 @@
 //! Owned configuration parsing, schema validation, and inherited settings.
 
 mod document;
+mod echolink;
 mod messages;
 mod parse;
 mod schema;
@@ -26,6 +27,7 @@ mod scope_tests;
 mod tests;
 
 pub use document::{ConfigDocument, ConfigEntry};
+pub use echolink::{EchoLinkAnnouncement, EchoLinkSettings, EchoLinkTelemetry, EchoLinkTransport};
 pub(crate) use messages::selector_valid as message_selector_valid;
 pub use messages::{BindingSource, ResolvedMessageSettings};
 pub use schema::Schema;
@@ -71,7 +73,9 @@ impl ConfigWarning {
             section: section.to_owned(),
             key: key.to_owned(),
             // URLs may carry private query parameters; never echo them in diagnostics.
-            value: if matches!(key, "statpost_url" | "iax_registration_url") {
+            value: if matches!(key, "directory_password" | "proxy_password") {
+                "<redacted secret>".to_owned()
+            } else if matches!(key, "statpost_url" | "iax_registration_url") {
                 "<redacted URL>".to_owned()
             } else {
                 value.to_owned()

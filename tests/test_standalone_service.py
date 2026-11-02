@@ -97,7 +97,7 @@ def test_standalone_check_builds_the_product_before_loading_it() -> None:
         text=True,
     )
     build = plan.find("build --locked --release -p rpt-advanced-standalone")
-    stage = plan.find('"build/librptadv_product.so.1"')
+    stage = plan.find('"build/librptadv_product.so.2"')
     test = plan.find("test --locked -p rpt-advanced-standalone")
     assert 0 <= build < stage < test, "standalone tests need the current shared product"
     assert "-p rptadv-resolver-adapter" in plan[:test]
@@ -116,7 +116,7 @@ def test_shlibdeps_searches_every_private_adapter_library_directory() -> None:
     assert not any(character.isspace() for character in search_path)
     assert all(path.startswith("$(CURDIR)/debian/") for path in search_path.split(":"))
     for package in (
-        "librptadv-product1",
+        "librptadv-product2",
         "librptadv-file-adapter1",
         "librptadv-speech-adapter1",
         "librptadv-resolver-adapter1",

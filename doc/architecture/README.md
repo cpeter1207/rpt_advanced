@@ -54,7 +54,7 @@ The nine existing-function components are released runtime dependencies. Direct
 dynamic links are `librptadvradio.so.4` to `librptadvsquelch.so.2`,
 `librptadvctcss.so.2`, and `librptadvdcs.so.1`;
 `librptadv_gpio_adapter.so.1` to `librptadvsignaling.so.1`;
-`librptadv_product.so.1` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
+`librptadv_product.so.2` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
 `librptadvdtmf.so.1`, `librptadvtemplate.so.1`, and
 `librptadvschedule.so.1`; and `librptadvmorse.so.1` to
 `librptadvtone.so.1`. DTMF detection and PCM generation share
@@ -120,7 +120,7 @@ Rust's private ABI.
 
 | Artifact | Ownership |
 | --- | --- |
-| `librptadv_product.so.1` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
+| `librptadv_product.so.2` | Product lifecycle, configuration, controller policy, workers, and descriptor clients; embeds `rust/core` once |
 | `rpt-advanced` | Standalone service executable; loads the product and standalone providers without loading Asterisk |
 | `librptadv_control_standalone_adapter.so.1` | Lock-free standalone control-task executor |
 | `librptadv_portaudio_alsa_adapter.so.2` | Native 48 kHz PortAudio audio callbacks over ALSA |
@@ -196,8 +196,8 @@ as defined by ADRs 0005, 0011, and 0012.
 The approved codec expansion uses protocol-neutral, replaceable shared adapters
 under ADR 0022. Other protocol adapters can reuse them without an IAX2 dependency;
 protocol-specific format IDs, negotiation and transport framing stay with each
-protocol adapter. This codec boundary is planned, not implemented support for
-additional protocols.
+protocol adapter. The implemented codec boundary does not itself add another
+protocol.
 The approved human-text codec converts supported messages to speech that mixes
 with live peer audio, including audio from the text sender, only at the local
 transmitter. This is incoming media, not polite controller telemetry, and never
@@ -207,7 +207,8 @@ remains non-audible.
 This applies to EchoLink and every other current or future text-capable protocol
 adapter. Failed synthesis skips only the local spoken rendition and logs an
 error, without Morse fallback, interruption of other audio, or suppression of
-supported text forwarding. These protocol and codec additions remain planned.
+supported text forwarding. The shared text path and EchoLink provider are
+implemented; each protocol still needs its own adapter and acceptance checks.
 
 ## Runtime structure
 
@@ -456,9 +457,11 @@ defines the full reload, hardware-handoff, and failure policy.
   fallback. The unkey edge cancels unsent locally originated queries and
   rejects late replies. This work never tags PCM frames or runs an IAX write in
   an audio callback.
-  EchoLink remains planned: a dedicated external-peer adapter will own its
-  registration, UDP transport, and callsign access control while using the
-  same controller audio boundary.
+  The EchoLink adapter supplies registration, direct/Proxy transport,
+  callsign access control, and source media through the same controller audio
+  boundary. Isolated composition passes in both hosts. Standalone direct-mode
+  receive and transmit audio are confirmed. Broader live-client/Proxy checks
+  remain open under ADR 0007.
 - `rust/core/src/config/` parses, validates, and inherits configuration.
 
 ## Core invariants

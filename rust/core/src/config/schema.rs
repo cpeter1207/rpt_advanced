@@ -22,6 +22,7 @@ pub struct Schema;
 enum KnownScope {
     General,
     Radio,
+    EchoLink,
     Identifier,
     Announcement,
     Tail,
@@ -48,6 +49,7 @@ impl KnownScope {
         Some(match kind {
             ScopeKind::General | ScopeKind::Node => Self::General,
             ScopeKind::RadioDefault | ScopeKind::RadioNode => Self::Radio,
+            ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode => Self::EchoLink,
             ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet => {
                 Self::Identifier
             }
@@ -122,6 +124,19 @@ impl Schema {
                 continue;
             };
             for entry in document.section_entries(section) {
+                if parsed.kind == ScopeKind::EchoLinkDefault
+                    && matches!(entry.key.as_str(), "callsign" | "node_number")
+                {
+                    warnings.push(ConfigWarning::new(
+                        entry.line,
+                        section,
+                        &entry.key,
+                        &entry.value,
+                        "account identity must be configured per node",
+                        "not configured",
+                    ));
+                    continue;
+                }
                 if parsed.kind == ScopeKind::EventNode
                     && matches!(entry.key.as_str(), "message" | "template")
                     && !entry.value.trim().is_empty()
@@ -198,6 +213,7 @@ impl Schema {
         validate_templates_and_macros(document)?;
         validate_events(document)?;
         validate_links(document)?;
+        super::echolink::validate_all(document)?;
         let mut site_outputs = BTreeSet::new();
         for node in document.nodes() {
             let site = super::site::resolve_definitions(document, &super::NodeId::new(node)?)?;
@@ -236,6 +252,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         return true;
     }
     match kind {
+        KnownScope::EchoLink => super::echolink::default_value(key).is_some(),
         KnownScope::Site { kind, named } => super::site::key_known(kind, named, key),
         KnownScope::Radio => {
             matches!(
@@ -349,6 +366,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_admin_lock"
                 | "link_command_parrot_enable"
                 | "link_command_parrot_disable"
+                | "link_command_echo_telemetry"
         ),
         KnownScope::Identifier => {
             super::messages::content_key(key)
@@ -439,6 +457,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if matches!(kind, ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode) {
+        return super::echolink::value_valid(key, value);
+    }
     if let ScopeKind::SiteDefault(site) | ScopeKind::SiteNode(site) | ScopeKind::SiteSet(site) =
         kind
     {
@@ -661,16 +682,27 @@ fn cm119_gpio_mode_index(key: &str) -> Option<usize> {
     (index < 8).then_some(index)
 }
 
-fn configured_node_list(value: &str) -> Option<Vec<&str>> {
-    let nodes: Vec<_> = value.split(',').map(str::trim).collect();
-    (nodes
-        .iter()
-        .all(|node| !node.is_empty() && node_value_valid(node))
-        && nodes.iter().copied().collect::<BTreeSet<_>>().len() == nodes.len())
-    .then_some(nodes)
+fn configured_node_list(value: &str) -> Option<Vec<String>> {
+    let nodes: Vec<_> = value
+        .split(',')
+        .map(str::trim)
+        .map(|node| {
+            if node.is_empty() || !node_value_valid(node) {
+                return None;
+            }
+            crate::link::PeerIdentity::canonical_operator(node).ok()
+        })
+        .collect::<Option<_>>()?;
+    (nodes.iter().collect::<BTreeSet<_>>().len() == nodes.len()).then_some(nodes)
 }
 
 fn default_value(kind: ScopeKind, key: &str) -> String {
+    if matches!(kind, ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode) {
+        return super::echolink::default_value(key)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("not configured")
+            .to_owned();
+    }
     if matches!(
         kind,
         ScopeKind::SiteDefault(_) | ScopeKind::SiteNode(_) | ScopeKind::SiteSet(_)
@@ -845,6 +877,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_message" => "77",
         "link_command_site_status" => "76",
         "link_command_cancel_message" => "78",
+        "link_command_echo_telemetry" => "",
         _ => return None,
     })
 }
@@ -860,6 +893,9 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
             candidates.push((kind.name().to_owned(), key));
         }
         ScopeKind::RadioNode => candidates.push(("radio".to_owned(), key)),
+        ScopeKind::EchoLinkNode if !matches!(key, "callsign" | "node_number") => {
+            candidates.push(("echolink".to_owned(), key))
+        }
         ScopeKind::Node => candidates.push(("general".to_owned(), key)),
         ScopeKind::IdentifierNode => candidates.push(("identifier".to_owned(), key)),
         ScopeKind::IdentifierSet => {
@@ -947,6 +983,8 @@ fn validate_courtesies(document: &ConfigDocument) -> Result<(), ConfigError> {
             ));
         }
         let remote = valid_value(document, section, parsed.kind, "remote_node").unwrap_or_default();
+        let remote = crate::link::PeerIdentity::canonical_operator(remote)
+            .unwrap_or_else(|_| remote.to_owned());
         if input != "link" && !remote.is_empty() {
             return Err(ConfigError::structure(
                 section,
@@ -956,7 +994,7 @@ fn validate_courtesies(document: &ConfigDocument) -> Result<(), ConfigError> {
         let identity = if input == "receiver" {
             ("receiver".to_owned(), String::new())
         } else {
-            ("link".to_owned(), remote.to_owned())
+            ("link".to_owned(), remote)
         };
         let node_assignments = assignments.entry(parsed.node.unwrap()).or_default();
         if node_assignments.contains(&identity) {
@@ -1111,8 +1149,8 @@ fn named_visible(document: &ConfigDocument, family: &str, node: &str, label: &st
 }
 
 fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
-    let mut permanent: BTreeMap<&str, BTreeMap<&str, BTreeSet<&str>>> = BTreeMap::new();
-    let mut permanent_remotes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut permanent: BTreeMap<&str, BTreeMap<&str, BTreeSet<String>>> = BTreeMap::new();
+    let mut permanent_remotes: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut scheduled_remotes: BTreeMap<&str, Vec<(String, ScheduledWindow)>> = BTreeMap::new();
     for section in unique_sections(document) {
         let parsed = scope::parse_scope(section).expect("section grammar checked");
@@ -1140,7 +1178,11 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
                     "configured link cannot target its local node",
                 ));
             }
-            if !permanent_remotes.entry(node).or_default().insert(remote) {
+            if !permanent_remotes
+                .entry(node)
+                .or_default()
+                .insert(remote.clone())
+            {
                 return Err(ConfigError::structure(
                     section,
                     "duplicate configured link remote node",
@@ -1211,9 +1253,9 @@ fn validate_links(document: &ConfigDocument) -> Result<(), ConfigError> {
         for remote in schedule_nodes {
             if permanent_remotes
                 .get(node)
-                .is_some_and(|configured| configured.contains(remote))
+                .is_some_and(|configured| configured.contains(&remote))
                 || scheduled_for_node.iter().any(|(configured, previous)| {
-                    configured == remote && previous.overlaps(&window)
+                    configured == &remote && previous.overlaps(&window)
                 })
             {
                 return Err(ConfigError::structure(

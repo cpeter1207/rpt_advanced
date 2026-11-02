@@ -52,6 +52,10 @@ sudo apt-get install app-rpt-advanced usbradioplus
 APT installs the required shared libraries. Do not copy library files from a
 different release over the installed files.
 
+EchoLink uses `librptadvecholink1` with its GSM, Speex, and jitter providers.
+Both controller packages install them. Set up a validated account and private
+password file before enabling it; see [EchoLink links](echolink.md).
+
 For optional site hardware, install the matching provider package:
 
 ```sh
@@ -73,7 +77,7 @@ Put the runtime packages from that release in an empty directory, then run:
 sudo apt-get install ./*.deb
 ```
 
-For standalone, include `rpt-advanced`, `librptadv-product1`, the file and speech
+For standalone, include `rpt-advanced`, `librptadv-product2`, the file and speech
 adapter packages, and the standalone control, resolver, and jitter adapter
 packages. Include `librptadv-iax2-client2` and the codec-provider runtime
 packages required by that release. Packages ending in `-dev` are not needed to run the node.

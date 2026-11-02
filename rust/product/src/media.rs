@@ -418,16 +418,8 @@ unsafe fn native_with_descriptor(
         .checked_mul(48000)
         .ok_or(MediaError::InvalidOutput)?
         .div_ceil(u64::from(rate));
-    if pointer.is_null() {
-        return Err(MediaError::IncompatibleAdapter);
-    }
-    if unsafe { ptr::addr_of!((*pointer).struct_size).read() }
-        < size_of::<ffi::rpcr3_descriptor>() as u32
-        || unsafe { ptr::addr_of!((*pointer).abi_version).read() } != ffi::RPCR3_ABI_VERSION
-    {
-        return Err(MediaError::IncompatibleAdapter);
-    }
-    let api = unsafe { &*pointer };
+    let api = unsafe { crate::link::ring::checked_descriptor(pointer) }
+        .map_err(|_| MediaError::IncompatibleAdapter)?;
     if api.capability_name.is_null()
         || unsafe { CStr::from_ptr(api.capability_name) } != c"rptadv.rate-adjusting-pcm-ring.f32"
         || api.ring_create.is_none()
@@ -438,7 +430,7 @@ unsafe fn native_with_descriptor(
     {
         return Err(MediaError::IncompatibleAdapter);
     }
-    struct Ring(&'static ffi::rpcr3_descriptor, NonNull<ffi::rpcr3_ring>);
+    struct Ring(ffi::rpcr3_descriptor, NonNull<ffi::rpcr3_ring>);
     impl Drop for Ring {
         fn drop(&mut self) {
             // SAFETY: stopped local ring has no other endpoint owner.

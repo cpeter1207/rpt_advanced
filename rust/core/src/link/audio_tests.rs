@@ -754,28 +754,50 @@ fn short_and_long_link_bursts_apply_kerchunk_limit() {
 }
 
 #[test]
-fn ended_peer_is_not_enabled_as_a_dispatch_destination() {
-    let (prepared, signals, mut outbound) = peer_with_kerchunk("201", 1, 0);
-    let (mut links, mut dispatcher) = LinkAudio::new(vec![prepared], 1).unwrap();
-    let (mut controller, _) = NodeController::new(
-        ControllerSettings::default(),
-        vec![],
-        vec![],
-        CourtesySettings::default(),
-    )
-    .unwrap();
-    signals.set_radio_keyed(true);
-    signals.end();
-    links
-        .process(
-            &mut controller,
-            false,
-            &mut [0.0],
-            crate::link::SourcePosition::default(),
+fn ended_peer_cannot_hold_ptt_or_remain_a_dispatch_destination() {
+    for was_active in [false, true] {
+        let (prepared, signals, mut outbound) = peer_with_kerchunk("201", 1, 0);
+        let (mut links, mut dispatcher) = LinkAudio::new(vec![prepared], 1).unwrap();
+        let (mut controller, _) = NodeController::new(
+            ControllerSettings {
+                hang_ms: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
         )
         .unwrap();
-    assert_eq!(dispatcher.dispatch(1), 1);
-    let mut output = [1.0];
-    assert_eq!(outbound.read(&mut output), 1);
-    assert_eq!(output, [0.0]);
+        signals.set_radio_keyed(true);
+        if was_active {
+            assert!(
+                links
+                    .process(
+                        &mut controller,
+                        false,
+                        &mut [0.0],
+                        SourcePosition::default()
+                    )
+                    .unwrap()
+            );
+            assert_eq!(links.active_count(), 1);
+        }
+        signals.end();
+        // An in-flight source read may publish its old key after control ends it.
+        signals.set_radio_keyed(true);
+        let keyed = links
+            .process(
+                &mut controller,
+                false,
+                &mut [0.0],
+                SourcePosition::default(),
+            )
+            .unwrap();
+        assert_eq!(links.active_count(), 0);
+        assert!(!keyed, "an ended peer must not hold a silent carrier");
+        assert_eq!(dispatcher.dispatch(1), 1);
+        let mut output = [1.0];
+        assert_eq!(outbound.read(&mut output), 1);
+        assert_eq!(output, [0.0]);
+    }
 }

@@ -258,7 +258,7 @@ fn egress_full_path_load() {
         HostServicesOwner::new(vec![], Some(retained), SecretsFile::parse("").unwrap()).unwrap();
     let mut table = Box::new(unsafe {
         ptr::from_ref(owner.descriptor())
-            .cast::<abi::rptadv_host_services_v8>()
+            .cast::<abi::rptadv_host_services_v9>()
             .read()
     });
     table.radio_open = Some(radio_open);
@@ -310,7 +310,7 @@ fn egress_full_path_load() {
         // repeatedly rebuilding N rings would time setup, not sustained egress.
         let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
         let (mut session, control) =
-            PeerSession::prepare(io.unwrap(), outbound, "1000", &remote).unwrap();
+            PeerSession::prepare(io.unwrap(), outbound, "1000", &remote, true).unwrap();
         session.bind_clock(source_clock.clone());
         assert!(host.peer_io.attach(session).is_ok());
         host.peers.push(PeerOwner {

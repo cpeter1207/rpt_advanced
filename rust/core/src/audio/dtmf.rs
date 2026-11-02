@@ -1,6 +1,7 @@
 //! Borrowed DTMF events and finite PCM generation from the released ABI 1 provider.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
@@ -88,10 +89,11 @@ unsafe fn validate_descriptor(pointer: *const DtmfDescriptor) -> Result<DtmfApi,
     })
 }
 
-/// Fixed-state detector for one 48 kHz receive stream; state lives in the provider.
+/// Fixed-state detector for one receive stream at its setup rate; state lives in the provider.
 pub struct DtmfDetector {
     handle: NonNull<c_void>,
     api: DtmfApi,
+    process_spans: Option<ProcessSpans>,
 }
 
 // One receive worker uniquely owns the handle. Ownership may move between
@@ -106,12 +108,30 @@ impl DtmfDetector {
 
     /// Allocate the detector before audio starts; a failed provider is a setup error.
     pub fn new(muting: bool) -> Result<Self, DtmfError> {
-        Self::from_api(provider_api()?, muting)
+        let mut detector = Self::from_api(provider_api()?, muting)?;
+        detector.process_spans = provider_rate_api().ok().map(|api| api.process);
+        Ok(detector)
+    }
+
+    /// Allocate an 8 or 48 kHz detector and require source-interval support.
+    /// Validate the extension before publishing the peer's media worker.
+    pub fn at_rate(muting: bool, sample_rate: u32) -> Result<Self, DtmfError> {
+        let api = provider_api()?;
+        let rate = provider_rate_api()?;
+        let mut raw = std::ptr::null_mut();
+        let status = unsafe { (rate.create)(u32::from(muting), sample_rate, &mut raw) };
+        let mut detector = Self::from_handle(api, status, raw)?;
+        detector.process_spans = Some(rate.process);
+        Ok(detector)
     }
 
     fn from_api(api: DtmfApi, muting: bool) -> Result<Self, DtmfError> {
         let mut raw = std::ptr::null_mut();
         let status = unsafe { (api.create)(u32::from(muting), &mut raw) };
+        Self::from_handle(api, status, raw)
+    }
+
+    fn from_handle(api: DtmfApi, status: i32, raw: *mut c_void) -> Result<Self, DtmfError> {
         if status != 0 {
             if let Some(handle) = NonNull::new(raw) {
                 unsafe { (api.destroy)(handle.as_ptr()) };
@@ -119,7 +139,11 @@ impl DtmfDetector {
             return Err(DtmfError);
         }
         let handle = NonNull::new(raw).ok_or(DtmfError)?;
-        Ok(Self { handle, api })
+        Ok(Self {
+            handle,
+            api,
+            process_spans: None,
+        })
     }
 
     /// Change qualified-tone muting without resetting detector state.
@@ -171,6 +195,76 @@ impl DtmfDetector {
             };
         }
     }
+
+    /// Report half-open source mute intervals relative to this PCM partition.
+    /// Negative starts cover qualifying audio buffered before this call. Callbacks
+    /// are borrowed synchronously and must not unwind, allocate, lock, block or do I/O.
+    /// An old provider without this extension returns an error without consuming PCM.
+    pub fn process_spans(
+        &mut self,
+        receiving: bool,
+        audio: &mut [f32],
+        mut emit: impl FnMut(char),
+        mut mute: impl FnMut(Range<i64>),
+    ) -> Result<(), DtmfError> {
+        let process = self.process_spans.ok_or(DtmfError)?;
+        struct Callbacks<'a> {
+            emit: &'a mut dyn FnMut(char),
+            mute: &'a mut dyn FnMut(Range<i64>),
+            offset: i64,
+        }
+        extern "C" fn digit(context: *mut c_void, digit: u8) {
+            // SAFETY: callbacks borrow one stack-owned record until process returns.
+            let callbacks = unsafe { &mut *context.cast::<Callbacks<'_>>() };
+            (callbacks.emit)(char::from(digit));
+        }
+        extern "C" fn span(context: *mut c_void, start: i64, end: i64) {
+            // SAFETY: same exclusive stack borrow as the digit callback.
+            let callbacks = unsafe { &mut *context.cast::<Callbacks<'_>>() };
+            (callbacks.mute)(
+                start.saturating_add(callbacks.offset)..end.saturating_add(callbacks.offset),
+            );
+        }
+        let mut callbacks = Callbacks {
+            emit: &mut emit,
+            mute: &mut mute,
+            offset: 0,
+        };
+        // Carrier loss must reach the provider even with an empty partition.
+        if !receiving {
+            let context = std::ptr::from_mut(&mut callbacks).cast();
+            unsafe {
+                process(
+                    self.handle.as_ptr(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    Some(digit),
+                    context,
+                    Some(span),
+                    context,
+                );
+            }
+        } else {
+            for chunk in audio.chunks_mut(u32::MAX as usize) {
+                let context = std::ptr::from_mut(&mut callbacks).cast();
+                unsafe {
+                    process(
+                        self.handle.as_ptr(),
+                        1,
+                        chunk.as_mut_ptr(),
+                        chunk.len() as u32,
+                        Some(digit),
+                        context,
+                        Some(span),
+                        context,
+                    );
+                }
+                callbacks.offset += chunk.len() as i64;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for DtmfDetector {
@@ -191,6 +285,52 @@ struct GeneratorDescriptor {
     create: Option<GeneratorCreate>,
     render: Option<GeneratorRender>,
     destroy: Option<GeneratorDestroy>,
+}
+
+type CreateAtRate = unsafe extern "C" fn(u32, u32, *mut *mut c_void) -> i32;
+type ProcessSpans = unsafe extern "C" fn(
+    *mut c_void,
+    u32,
+    *mut f32,
+    u32,
+    Option<extern "C" fn(*mut c_void, u8)>,
+    *mut c_void,
+    Option<extern "C" fn(*mut c_void, i64, i64)>,
+    *mut c_void,
+);
+
+/// Sized ABI-1 tail; the existing detector and generator offsets stay unchanged.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RateDescriptor {
+    generator: GeneratorDescriptor,
+    create: Option<CreateAtRate>,
+    process: Option<ProcessSpans>,
+}
+
+#[derive(Clone, Copy)]
+struct RateApi {
+    create: CreateAtRate,
+    process: ProcessSpans,
+}
+
+static RATE_API: OnceLock<Result<RateApi, DtmfError>> = OnceLock::new();
+
+fn provider_rate_api() -> Result<RateApi, DtmfError> {
+    *RATE_API.get_or_init(|| unsafe { rate_api(rptadv_dtmf_descriptor()) })
+}
+
+unsafe fn rate_api(pointer: *const DtmfDescriptor) -> Result<RateApi, DtmfError> {
+    unsafe { validate_descriptor(pointer)? };
+    if unsafe { (*pointer).struct_size } < std::mem::size_of::<RateDescriptor>() as u32 {
+        return Err(DtmfError);
+    }
+    // SAFETY: the checked size covers this immutable extension.
+    let descriptor = unsafe { &*pointer.cast::<RateDescriptor>() };
+    Ok(RateApi {
+        create: descriptor.create.ok_or(DtmfError)?,
+        process: descriptor.process.ok_or(DtmfError)?,
+    })
 }
 
 unsafe fn generator_api(
@@ -285,6 +425,31 @@ impl Drop for DtmfGenerator {
 mod lifecycle_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn source_rate_extension_rejects_partial_or_missing_operations() {
+        let descriptor = unsafe { &*rptadv_dtmf_descriptor().cast::<RateDescriptor>() };
+        assert!(unsafe { rate_api(std::ptr::null()) }.is_err());
+        let mut short = *descriptor;
+        short.generator.detector.struct_size = std::mem::size_of::<GeneratorDescriptor>() as u32;
+        assert!(unsafe { rate_api(&short.generator.detector) }.is_err());
+        for operation in 0..2 {
+            let mut bad = *descriptor;
+            if operation == 0 {
+                bad.create = None;
+            } else {
+                bad.process = None;
+            }
+            assert!(unsafe { rate_api(&bad.generator.detector) }.is_err());
+        }
+        let mut old = DtmfDetector::from_api(provider_api().unwrap(), true).unwrap();
+        let mut audio = [0.1; 16];
+        assert_eq!(
+            old.process_spans(true, &mut audio, |_| {}, |_| {}),
+            Err(DtmfError)
+        );
+        assert_eq!(audio, [0.1; 16]);
+    }
 
     #[test]
     fn generator_rejects_provider_errors_and_oversized_sample_counts() {

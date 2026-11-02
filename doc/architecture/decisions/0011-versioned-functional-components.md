@@ -82,11 +82,11 @@ released SONAMEs, and direct consumers are:
 | [CTCSS v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvctcss/releases/tag/v0.1.0-alpha.2) | `librptadvctcss.so.2` | `librptadvctcss2` / `librptadvctcss-dev` | `librptadvradio.so.4` |
 | [DCS v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvdcs/releases/tag/v0.1.0-alpha.1) | `librptadvdcs.so.1` | `librptadvdcs1` / `librptadvdcs-dev` | `librptadvradio.so.4` |
 | [signaling v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvsignaling/releases/tag/v0.1.0-alpha.1) | `librptadvsignaling.so.1` | `librptadvsignaling1` / `librptadvsignaling-dev` | `librptadv_gpio_adapter.so.1` |
-| [tone v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvtone/releases/tag/v0.1.0-alpha.1) | `librptadvtone.so.1` | `librptadvtone1` / `librptadvtone-dev` | `librptadv_product.so.1`, `librptadvmorse.so.1`, `librptadvdtmf.so.1` |
-| [Morse v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvmorse/releases/tag/v0.1.0-alpha.1) | `librptadvmorse.so.1` | `librptadvmorse1` / `librptadvmorse-dev` | `librptadv_product.so.1` |
-| [DTMF v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvdtmf/releases/tag/v0.1.0-alpha.2) | `librptadvdtmf.so.1` | `librptadvdtmf1` / `librptadvdtmf-dev` | `librptadv_product.so.1` |
-| [template v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvtemplate/releases/tag/v0.1.0-alpha.1) | `librptadvtemplate.so.1` | `librptadvtemplate1` / `librptadvtemplate-dev` | `librptadv_product.so.1` |
-| [schedule v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvschedule/releases/tag/v0.1.0-alpha.1) | `librptadvschedule.so.1` | `librptadvschedule1` / `librptadvschedule-dev` | `librptadv_product.so.1` |
+| [tone v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvtone/releases/tag/v0.1.0-alpha.1) | `librptadvtone.so.1` | `librptadvtone1` / `librptadvtone-dev` | `librptadv_product.so.2`, `librptadvmorse.so.1`, `librptadvdtmf.so.1` |
+| [Morse v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvmorse/releases/tag/v0.1.0-alpha.1) | `librptadvmorse.so.1` | `librptadvmorse1` / `librptadvmorse-dev` | `librptadv_product.so.2` |
+| [DTMF v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvdtmf/releases/tag/v0.1.0-alpha.2) | `librptadvdtmf.so.1` | `librptadvdtmf1` / `librptadvdtmf-dev` | `librptadv_product.so.2` |
+| [template v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvtemplate/releases/tag/v0.1.0-alpha.1) | `librptadvtemplate.so.1` | `librptadvtemplate1` / `librptadvtemplate-dev` | `librptadv_product.so.2` |
+| [schedule v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvschedule/releases/tag/v0.1.0-alpha.1) | `librptadvschedule.so.1` | `librptadvschedule1` / `librptadvschedule-dev` | `librptadv_product.so.2` |
 
 Radio adopted the ABI-2 squelch and CTCSS packages and ABI-1 DCS in
 [v0.1.0-alpha.8](https://github.com/cpeter1207/librptadvradio/releases/tag/v0.1.0-alpha.8);

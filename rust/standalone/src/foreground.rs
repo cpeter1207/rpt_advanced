@@ -74,9 +74,14 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let providers = crate::providers::ProviderSet::load().map_err(ForegroundError::Provider)?;
         let client = providers.iax_client().map_err(ForegroundError::Provider)?;
         let mut iax_listeners = bind_iax_listeners(&client, &radios)?;
-        let mut runtime =
-            crate::runtime::ProductRuntime::start_with_providers(&text, radios, secrets, providers)
-                .map_err(ForegroundError::Runtime)?;
+        let mut runtime = crate::runtime::ProductRuntime::start_with_providers(
+            configuration,
+            &text,
+            radios,
+            secrets,
+            providers,
+        )
+        .map_err(ForegroundError::Runtime)?;
         enable_iax_listeners(&mut iax_listeners, &runtime)?;
         let mut registration = crate::registration::RegistrationWorker::start(registrations)
             .map_err(ForegroundError::Registration)?;
@@ -583,7 +588,7 @@ mod tests {
         };
 
         unsafe extern "C" fn start(
-            _: *const crate::abi::rptadv_host_services_v8,
+            _: *const crate::abi::rptadv_host_services_v9,
             _: *const crate::abi::rptadv_control_descriptor_v1,
             _: *const crate::abi::rptadv_file_descriptor,
             _: *const crate::abi::rptadv_speech_descriptor,
@@ -599,23 +604,16 @@ mod tests {
             0
         }
         unsafe extern "C" fn authorize(
-            _: *const c_char,
-            _: usize,
-            remote: *const c_char,
-            remote_length: usize,
-            _: *const c_char,
-            _: usize,
+            request: *const crate::abi::rptadv_incoming_peer_v1,
+            _: *mut c_void,
         ) -> i32 {
-            let remote = unsafe { std::slice::from_raw_parts(remote.cast::<u8>(), remote_length) };
+            let remote = unsafe {
+                std::slice::from_raw_parts((*request).remote.data, (*request).remote.length)
+            };
             i32::from(remote != b"506315")
         }
         unsafe extern "C" fn incoming(
-            _: *const c_char,
-            _: usize,
-            _: *const c_char,
-            _: usize,
-            _: *const c_char,
-            _: usize,
+            _: *const crate::abi::rptadv_incoming_peer_v1,
             _: *mut c_void,
         ) -> i32 {
             1
@@ -623,8 +621,8 @@ mod tests {
 
         let descriptor = Box::leak(Box::new(crate::abi::rptadv_product_descriptor_v1 {
             struct_size: size_of::<crate::abi::rptadv_product_descriptor_v1>() as u32,
-            abi_version: 6,
-            capability: *b"rptadv.prod6\0\0\0\0",
+            abi_version: 7,
+            capability: *b"rptadv.prod7\0\0\0\0",
             start: Some(start),
             reload: Some(reload),
             stop: Some(stop),

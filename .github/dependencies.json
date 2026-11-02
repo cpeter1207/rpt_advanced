@@ -11,12 +11,12 @@
   },
   {
     "repository": "librptadvdtmf",
-    "sha": "e09e02fbf62f01e415dae74283fdfd73951c030f",
+    "sha": "0630d837e4d1ce522b8f6f58245fdb6b950b68fb",
     "packages": ["librptadvdtmf1", "librptadvdtmf-dev"]
   },
   {
     "repository": "rptadv-codec-adapters",
-    "sha": "c284e0cf4d2e3f400cba47c0ac8819d17fa8dfaf",
+    "sha": "5ed83bb4d52985e68a455fce4a3145ee6907c107",
     "packages": [
       "librptadv-codec-dev", "librptadv-codec-g7111", "librptadv-codec-pcm1",
       "librptadv-codec-gsm1", "librptadv-codec-speex1", "librptadv-codec-opus1",
@@ -27,7 +27,7 @@
   },
   {
     "repository": "librptadviax2",
-    "sha": "3e77301944fd99e7a8e49ad63f6a488c98064e7f",
+    "sha": "c9a6b67b7cba73d39916b68fa7da2a718f274f75",
     "packages": ["librptadv-iax2-client2", "librptadv-iax2-client-dev"]
   },
   {
@@ -50,12 +50,17 @@
   },
   {
     "repository": "rate_adjusting_pcm_ring",
-    "sha": "99c2d4f1e6b5927e562b7fcd09a6a2676f653e14",
+    "sha": "ec582ca7c9424963b8ab032d219b37acb0311f70",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
   },
   {
     "repository": "librptadvschedule",
     "sha": "9f4c39c2f1f0956c2c8ae3afbb34edf9dd30edc9",
     "packages": ["librptadvschedule1", "librptadvschedule-dev"]
+  },
+  {
+    "repository": "librptadvecholink",
+    "sha": "cb57a9f25591ffb3e8a48c82fad3ea5fe0bbad0c",
+    "packages": ["librptadvecholink1", "librptadvecholink-dev"]
   }
 ]

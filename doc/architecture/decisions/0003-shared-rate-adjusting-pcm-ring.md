@@ -134,3 +134,27 @@ Filter delay is distinct from jitter reserve and PLC delay. Tests cover startup,
 burst reset, callback partitioning, drift direction, backlog bounds and media
 duration. Adapter ABI/SONAME 2 and all descriptor clients are upgraded together;
 the ring's public ABI remains 3.
+
+## Source-tagged intentional silence (2026-10-28)
+
+The compatible ABI-3 descriptor tail accepts generation-scoped, absolute source
+mute intervals. The sole producer publishes bounded metadata before the matching
+PCM prefix. Partial admission preserves source positions; interval-only updates
+cover already accepted PCM. Metadata backpressure returns explicit zero credit,
+never overwrites buffered records or waits for the audio worker.
+
+The consumer retains intervals until their source positions have actually played.
+Storage reclamation, occupancy and callback counts are not playout cursors.
+Positions in a converted cache use the adapter's measured source-consumption
+positions before and after that bounded fixed-ratio conversion. Fractional source
+boundaries conservatively include their adjacent source samples. The same position
+metadata follows the separate PLC lookahead, so a late detector update reaches
+both caches. Intentional silence is valid PCM, not a missing interval or a PLC
+request; it adds no loss counters. Metadata is preallocated and uses SPSC
+Release/Acquire publication without editing consumer-owned PCM or retrying on
+audio. Source-generation changes require a completed reset and the previous
+producer's quiescence; reset discards old tags and decoder/converter history.
+
+Implementation status: shared-ring and detector extensions are under focused
+feature-branch validation. Controller ownership and EchoLink integration remain
+pending; no deployed component or existing IAX DTMF behavior changes yet.

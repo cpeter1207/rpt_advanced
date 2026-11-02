@@ -24,7 +24,7 @@ ADAPTERS := asterisk control_asterisk file speech
 STANDALONE_ADAPTERS := control_standalone resolver jitter
 SITE_ADAPTERS := gpiod hwmon
 LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(ADAPTERS)))
-LIBRARIES += build/librptadv_product.so.1
+LIBRARIES += build/librptadv_product.so.2
 STANDALONE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(STANDALONE_ADAPTERS)))
 SITE_LIBRARIES := $(addprefix build/librptadv_,$(addsuffix _adapter.so.1,$(SITE_ADAPTERS)))
 INSTALL_LIBRARIES := $(LIBRARIES) $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES)
@@ -54,13 +54,13 @@ rust-build: | build
 	@set -e; for name in $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" "build/librptadv_$${name}_adapter.so.1"; \
 	done
-	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
+	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.2"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
 
 standalone-build: | build
 	$(CARGO) build --locked --release -p rpt-advanced-standalone -p rptadv-product \
 		-p rptadv-file-adapter -p rptadv-speech-adapter -p rptadv-control-standalone-adapter -p rptadv-resolver-adapter -p rptadv-jitter-adapter -p rptadv-gpiod-adapter -p rptadv-hwmon-adapter
-	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.1"
+	install -p -m 0755 "$(RUST_OUTPUT)/librptadv_product.so" "build/librptadv_product.so.2"
 	install -p -m 0755 "$(RUST_OUTPUT)/rpt-advanced" "build/rpt-advanced"
 	@set -e; for name in file speech $(STANDALONE_ADAPTERS) $(SITE_ADAPTERS); do \
 		install -p -m 0755 "$(RUST_OUTPUT)/librptadv_$${name}_adapter.so" \
@@ -127,17 +127,18 @@ rust-check: rust-quality check
 COVERAGE_TOOLCHAIN ?= nightly-2025-02-20
 rust-coverage: | build
 	mkdir -p build/coverage
+	python3 tests/test_coverage_export.py
 	+@set -e; export RUSTUP_TOOLCHAIN=$(COVERAGE_TOOLCHAIN); \
 		export CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))/llvm-cov-target"; \
 		eval "$$($(CARGO) llvm-cov show-env --branch --export-prefix)"; \
 		$(CARGO) llvm-cov clean --workspace; \
+		export RPT_ADVANCED_LIBDIR="$(CURDIR)/build"; \
 		$(MAKE) CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" all; \
 		export LIBRARY_PATH="$$CARGO_TARGET_DIR/release:$$LIBRARY_PATH"; \
 		export LD_LIBRARY_PATH="$(CURDIR)/build:$$LD_LIBRARY_PATH"; \
-		export RPT_ADVANCED_LIBDIR="$(CURDIR)/build"; \
 		$(CARGO) test --locked --release --workspace --all-targets; \
 		$(MAKE) -o rust-build CARGO_TARGET_DIR="$$CARGO_TARGET_DIR" integration; \
-		$(CARGO) llvm-cov report --release \
+		python3 tests/export_rust_coverage.py $(CARGO) llvm-cov report --release \
 			--ignore-filename-regex '(/tests[/.]|_tests\.rs$$|/fixture\.rs$$|/build\.rs$$)' \
 			--json --output-path build/coverage/rust.json
 	python3 tests/test_rust_product_surface.py --coverage build/coverage/rust.json
@@ -154,8 +155,8 @@ build/test_loader: build/test_loader.o build/loader-coverage.o
 build/test_product_abi: tests/test_product_abi.c rust/product/include/rptadv_product.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror $< -ldl -o $@
 
-product-abi-check: build/test_product_abi build/librptadv_product.so.1
-	./build/test_product_abi "$(CURDIR)/build/librptadv_product.so.1"
+product-abi-check: build/test_product_abi build/librptadv_product.so.2
+	./build/test_product_abi "$(CURDIR)/build/librptadv_product.so.2"
 
 build/test_jitter_ring: tests/test_jitter_ring.c $(HEADERS) build/librptadv_jitter_adapter.so.1 | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 -Wall -Wextra -Werror -UNDEBUG $< \
@@ -216,7 +217,7 @@ install: all install-jitter-development install-site-development
 	install -m 0755 $(INSTALL_LIBRARIES) $(DESTDIR)$(libdir)/
 	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
 	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
-	ln -sfn librptadv_product.so.1 $(DESTDIR)$(libdir)/librptadv_product.so
+	ln -sfn librptadv_product.so.2 $(DESTDIR)$(libdir)/librptadv_product.so
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
 	ln -sfn librptadv_control_asterisk_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_asterisk_adapter.so
@@ -237,12 +238,12 @@ install: all install-jitter-development install-site-development
 standalone-install: standalone-build install-jitter-development install-site-development
 	install -d $(DESTDIR)$(prefix)/bin $(DESTDIR)$(libdir) $(DESTDIR)$(prefix)/include
 	install -m 0755 $(RUST_OUTPUT)/rpt-advanced $(DESTDIR)$(prefix)/bin/rpt-advanced
-	install -m 0755 build/librptadv_product.so.1 build/librptadv_file_adapter.so.1 \
+	install -m 0755 build/librptadv_product.so.2 build/librptadv_file_adapter.so.1 \
 		build/librptadv_speech_adapter.so.1 $(STANDALONE_LIBRARIES) $(SITE_LIBRARIES) \
 		$(DESTDIR)$(libdir)/
 	ln -sfn librptadv_resolver_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_resolver_adapter.so
 	install -D -m 0644 rust/resolver-adapter/include/rptadv_resolver_adapter.h $(DESTDIR)$(prefix)/include/rpt_advanced/resolver/rptadv_resolver_adapter.h
-	ln -sfn librptadv_product.so.1 $(DESTDIR)$(libdir)/librptadv_product.so
+	ln -sfn librptadv_product.so.2 $(DESTDIR)$(libdir)/librptadv_product.so
 	ln -sfn librptadv_file_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_file_adapter.so
 	ln -sfn librptadv_speech_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_speech_adapter.so
 	ln -sfn librptadv_control_standalone_adapter.so.1 $(DESTDIR)$(libdir)/librptadv_control_standalone_adapter.so
@@ -269,6 +270,9 @@ install-check: artifacts
 build/chan_rpt_fixture.so: tests/radio_fixture.c rust/product/include/rptadv_product.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(MODULE_FLAGS) -fPIC -shared $< $(LDFLAGS) -pthread -lm -o $@
 
+# Test hosts must select the same source-built private adapters they exercise.
+integration platform-verify: export RPT_ADVANCED_LIBDIR = $(CURDIR)/build
+
 integration: install-check build/chan_rpt_fixture.so site-gpio-check site-hwmon-check
 	install -m 0755 build/chan_rpt_fixture.so build/stage$(asteriskmoddir)/
 	RPT_TEST_MODULE_DIR="$(CURDIR)/build/stage$(asteriskmoddir)" python3 tests/test_rust_asterisk_lifecycle.py
@@ -285,7 +289,8 @@ distcheck: dist
 	+@set -e; stage=$$(mktemp -d "$(CURDIR)/build/dist-check.XXXXXX"); \
 		trap 'rm -rf -- "$$stage"' EXIT HUP INT TERM; \
 		tar -xzf build/$(DIST_NAME).tar.gz -C "$$stage"; \
-		$(MAKE) -C "$$stage/$(DIST_NAME)" CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))" all install-check product-surface
+		RPT_ADVANCED_LIBDIR="$$stage/$(DIST_NAME)/build" \
+			$(MAKE) -C "$$stage/$(DIST_NAME)" CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))" all install-check product-surface
 
 platform-verify: check install-check integration distcheck
 

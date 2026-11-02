@@ -126,6 +126,7 @@ fn message(peer: usize, body: String) -> HumanMessage {
             protocol: 1,
         },
         source: peer.to_string(),
+        represented_source: None,
         audience: TextAudience::Broadcast,
         body: Arc::from(body),
     }

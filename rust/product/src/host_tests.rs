@@ -28,7 +28,7 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v8 =
+    let mut table: abi::rptadv_host_services_v9 =
         unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -70,6 +70,170 @@ fn host() -> Host {
 }
 
 #[test]
+fn echo_alias_routing_precedes_allstar_directory_lookup() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    for (alias, destination) in [
+        ("3123456", "EchoLink/123456"),
+        ("31002775", "EchoLink/1002775"),
+        ("34294967295", "EchoLink/4294967295"),
+    ] {
+        assert_eq!(host.lookup("1000", alias, None).unwrap(), destination);
+        assert_eq!(
+            host.lookup("1000", alias, Some("127.0.0.1")),
+            Err(RuntimeError::Rejected),
+            "a directory address is not Echo QSO admission proof"
+        );
+    }
+    for alias in ["3000000", "34294967296", "300012x"] {
+        assert_eq!(
+            host.lookup("1000", alias, None),
+            Err(RuntimeError::Rejected)
+        );
+    }
+    assert_eq!(
+        host.lookup("1000", "2000", None).unwrap(),
+        "radio@fixture/2000"
+    );
+    assert_eq!(
+        host.lookup("missing", "3123456", None),
+        Err(RuntimeError::MissingNode)
+    );
+    assert!(host.stop(20));
+}
+
+#[test]
+fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let (echo, state) = crate::link::session::tests::source_peer();
+    state.lock().unwrap().continuous_async = true;
+    assert_eq!(echo.identity().node(), "2000");
+    host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        named_peer_ready(host, "3002000")
+            && host
+                .runtime
+                .status(clock().now_ms)
+                .iter()
+                .all(|(_, status)| status.retiring.is_none())
+    });
+    assert!(host.peers.iter().any(|peer| peer.remote == "3002000"));
+    let bound = state.lock().unwrap().bound_radio.clone();
+    assert_eq!(bound.as_deref(), Some("1000\0usb"));
+    let (duplicate, rejected) = crate::link::session::tests::source_peer();
+    assert!(host.incoming_peer(duplicate, "192.0.2.2", clock()).is_err());
+    assert_eq!(rejected.lock().unwrap().drops, 1);
+    assert!(rejected.lock().unwrap().bound_radio.is_none());
+    // A numeric collision is a different protocol, but IAX still needs its own
+    // source authentication before the controller's common admission policy.
+    let (iax, rejected) = peer(8000);
+    assert!(host.incoming_peer(iax, "192.0.2.2", clock()).is_err());
+    assert_eq!(rejected.lock().unwrap().drops, 1);
+    let (iax, _) = peer(8000);
+    host.incoming_peer(iax, "127.0.0.1", clock()).unwrap();
+    assert_eq!(host.peers.len(), 2);
+    assert!(host.peers.iter().any(|peer| peer.remote == "2000"));
+    let origin = host
+        .peers
+        .iter()
+        .find(|peer| peer.remote == "2000")
+        .unwrap()
+        .control
+        .text_origin();
+    host.human_text(
+        "1000",
+        rpt_advanced_core::link::HumanMessage {
+            origin,
+            source: "2000".into(),
+            represented_source: None,
+            audience: rpt_advanced_core::link::TextAudience::Broadcast,
+            body: Arc::from("literal crossover text"),
+        },
+    );
+    pump_until(&mut host, |_| {
+        state.lock().unwrap().texts == [b"2000>literal crossover text".to_vec()]
+    });
+    assert!(host.stop(20));
+    assert_eq!(state.lock().unwrap().drops, 1);
+    assert_eq!(
+        state.lock().unwrap().texts,
+        [b"2000>literal crossover text".to_vec()]
+    );
+}
+
+#[test]
+fn echo_account_status_is_visible_without_active_links() {
+    unsafe extern "C" fn failed_status(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: abi::rptadv_text_sink_v1,
+        _: *mut c_void,
+    ) -> i32 {
+        -1
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let text = host.status_text("1000").unwrap();
+    assert!(text.contains("no active links"), "{text}");
+    assert!(text.contains("echo-account fixture-state=online"), "{text}");
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.echo_account_status = Some(failed_status);
+    host.services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let text = host.status_text("1000").unwrap();
+    assert!(text.contains("no active links"), "{text}");
+    assert!(text.contains("echo-account status-unavailable"), "{text}");
+    assert!(host.stop(20));
+}
+
+#[test]
+fn echo_ring_policy_survives_prepared_generation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    let (io, _) = crate::link::session::tests::source_peer();
+    let (_, outbound) = LinkAudioQueue::new(9600, 64).unwrap().into_endpoints();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    host.peers.push(PeerOwner {
+        local: "1000".into(),
+        remote: "2000".into(),
+        mode: Mode::TRANSCEIVE,
+        group: None,
+        announced: false,
+        control,
+    });
+    let candidate = prepared(
+        "1000",
+        host.runtime.settings("1000").unwrap(),
+        &host.peers,
+        media_worker(&mut host.media_workers, "1000").unwrap(),
+        &mut host.text,
+    )
+    .unwrap();
+    assert_eq!(candidate.control.redirects.len(), 1);
+    let PeerCommand::Redirect {
+        inbound,
+        dtmf_muting: true,
+        ..
+    } = &candidate.control.redirects[0].1
+    else {
+        panic!("missing replacement ring");
+    };
+    assert!(matches!(inbound.observer().policy(), InboundPolicy::Echo));
+    session.stop();
+    drop(candidate);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -77,6 +241,10 @@ fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() 
     let mut host = host();
     let ingress = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     let egress = attach(&mut host, "3000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    let (io, audio_only) = crate::link::session::tests::peer_without_text(48000);
+    host.runtime.incoming("1000", "6000", true).unwrap();
+    host.attach_peer("1000", "6000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
     ingress
         .lock()
         .unwrap()
@@ -108,6 +276,15 @@ fn text_forwarding_host_uses_current_connection_and_never_reflects_to_ingress() 
             .count(),
         1
     );
+    assert!(
+        !audio_only
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text.starts_with(b"M ")),
+        "audio-only peers must not inherit globally available text callbacks"
+    );
     assert!(host.stop(20));
 }
 
@@ -119,7 +296,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
     let mut host = Host::start(
         document(
             "usb",
-            "[1001]\nradio_channel=usb2\nduplex=full\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n",
+            "[1001]\nradio_channel=usb2\nduplex=full\n[speech]\nvoice=voice.onnx\nlevel_db=-6\n[echolink 1001]\nenabled=yes\ncallsign=N0CALL-R\nnode_number=123456\n",
         ),
         crate::media::text::tests::preparer(Arc::default()),
         services(),
@@ -147,6 +324,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         rpt_advanced_core::link::HumanMessage {
             origin: origin.clone(),
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Node("1001".into()),
             body: Arc::from("B for the other station"),
         },
@@ -162,12 +340,15 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
                 .any(|text| text.starts_with(b"M "))
         );
     }
-    for (destination, expected_admitted) in [("9000", 0), ("1000", 1)] {
+    for (destination, expected_admitted) in
+        [("3123456", 0), ("N0CALL-R", 0), ("9000", 0), ("1000", 1)]
+    {
         host.human_text(
             "1000",
             rpt_advanced_core::link::HumanMessage {
                 origin: origin.clone(),
                 source: "4000".into(),
+                represented_source: None,
                 audience: rpt_advanced_core::link::TextAudience::Node(destination.into()),
                 body: Arc::from("B directed speech"),
             },
@@ -179,6 +360,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         rpt_advanced_core::link::HumanMessage {
             origin: origin.clone(),
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B for this station and its peers"),
         },
@@ -195,6 +377,7 @@ fn text_lifecycle_directed_message_never_plays_at_another_local_station() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B from an ended connection"),
         },
@@ -247,6 +430,7 @@ fn text_forwarding_distinguishes_replacement_from_retiring_connection() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("one copy per connection"),
         },
@@ -299,6 +483,7 @@ fn text_forwarding_backpressure_does_not_block_local_speech() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "2000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B still local"),
         },
@@ -426,6 +611,7 @@ fn text_lifecycle_host_admits_local_speech_and_fences_same_device_reload() {
         rpt_advanced_core::link::HumanMessage {
             origin: old,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("B stale speech"),
         },
@@ -491,6 +677,7 @@ fn text_lifecycle_speech_failure_keeps_forwarding_and_logs_no_human_body() {
         rpt_advanced_core::link::HumanMessage {
             origin,
             source: "4000".into(),
+            represented_source: None,
             audience: rpt_advanced_core::link::TextAudience::Broadcast,
             body: Arc::from("F failure second body"),
         },
@@ -2006,7 +2193,11 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     let (_, outbound) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
     host.peers[0]
         .control
-        .send(PeerCommand::Redirect { inbound, outbound })
+        .send(PeerCommand::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
         .ok()
         .unwrap();
     std::thread::sleep(Duration::from_millis(2));

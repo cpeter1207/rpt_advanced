@@ -21,13 +21,13 @@ struct UrpAstSiteRequest;
 struct UrpAstSiteSnapshot;
 
 /** Exact incompatible product ABI revision. */
-#define RPTADV_PRODUCT_ABI_VERSION 6U
+#define RPTADV_PRODUCT_ABI_VERSION 7U
 /** Product capability name stored in its fixed-width descriptor field. */
-#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod6"
+#define RPTADV_PRODUCT_CAPABILITY "rptadv.prod7"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 8U
+#define RPTADV_HOST_ABI_VERSION 9U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst8"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst9"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -43,6 +43,82 @@ struct UrpAstSiteSnapshot;
 #define RPTADV_PEER_EVENT_GAP 6U
 /** Compatible copied peer-observation record revision. */
 #define RPTADV_PEER_OBSERVATION_ABI_VERSION 1U
+
+/** Immutable protocol namespace, independent of a numeric node alias. */
+#define RPTADV_PEER_ALLSTARLINK 1U
+/** EchoLink's full real node number, without the operator's leading 3. */
+#define RPTADV_PEER_ECHOLINK 2U
+/** This peer supports the complete serial-owner group. */
+#define RPTADV_PEER_ASYNC 1U
+/** This peer supports complete source-timed prepared egress. */
+#define RPTADV_PEER_PREPARED 2U
+/** This peer can carry human text. */
+#define RPTADV_PEER_TEXT 4U
+/** This peer supports the existing AllStar remote-command envelopes. */
+#define RPTADV_PEER_REMOTE_COMMANDS 8U
+/** This peer uses accepted-prefix source reads and explicit finite drainage. */
+#define RPTADV_PEER_SOURCE_MEDIA 16U
+
+/** Borrowed immutable bytes. Null is valid only with zero length. */
+struct rptadv_peer_bytes_v1 {
+    const uint8_t *data; /**< Retained by its peer until destruction. */
+    size_t length;       /**< Exact byte count, excluding a terminator. */
+};
+
+/** Copy before returning to other work. EchoLink metadata is freshly validated
+ * against its owning account/QSO and directory during pending admission. */
+struct rptadv_peer_info_v1 {
+    uint32_t struct_size;        /**< Complete caller-provided size. */
+    uint32_t abi_version;        /**< Exactly 1. */
+    uint32_t protocol;           /**< RPTADV_PEER_ALLSTARLINK or ECHOLINK. */
+    uint32_t capabilities;       /**< Operations supported by this handle, not the host table. */
+    uint64_t account_generation; /**< Echo account generation; zero for channel-backed IAX. */
+    uint64_t qso_generation;     /**< Echo QSO generation; zero for channel-backed IAX. */
+    struct rptadv_peer_bytes_v1 remote;   /**< Canonical real decimal node ID. */
+    struct rptadv_peer_bytes_v1 callsign; /**< Validated Echo identity; may be empty for IAX. */
+    struct rptadv_peer_bytes_v1 local;    /**< Owning controller node. */
+};
+
+/** Incoming request bound to one protocol, local account and observed endpoint.
+ * EchoLink requires a provider-owned pending peer, never a caller-supplied proof flag. */
+struct rptadv_incoming_peer_v1 {
+    uint32_t struct_size;               /**< Complete readable size. */
+    uint32_t abi_version;               /**< Exactly 1. */
+    uint32_t protocol;                  /**< RPTADV_PEER_ALLSTARLINK or ECHOLINK. */
+    struct rptadv_peer_bytes_v1 local;  /**< Owning controller node. */
+    struct rptadv_peer_bytes_v1 remote; /**< Complete real remote ID, not a dial alias. */
+    struct rptadv_peer_bytes_v1 source; /**< Observed numeric network source. */
+};
+
+/** Accepted-prefix source PCM. Concealed is 1 only for codec-native PLC;
+ * it must bypass in-band detection. Returned credit never exceeds count. */
+typedef size_t (*rptadv_peer_source_audio_v1)(void *context, uint64_t source_start,
+                                              const float *pcm, size_t count, uint32_t concealed);
+/** Counted unresolved source loss, retained by the provider until accepted. */
+typedef uint32_t (*rptadv_peer_source_gap_v1)(void *context, uint64_t source_start, uint32_t count);
+/** Borrowed human text, separate from protocol control and claimed sender authority. */
+typedef void (*rptadv_peer_source_text_v1)(void *context, struct rptadv_peer_bytes_v1 sender,
+                                           struct rptadv_peer_bytes_v1 body);
+/** Synchronous source sink; callbacks cannot reenter the same peer. */
+struct rptadv_peer_source_sink_v1 {
+    uint32_t struct_size;              /**< Complete readable size. */
+    uint32_t abi_version;              /**< Exactly 1. */
+    void *context;                     /**< Borrowed during one source-read call. */
+    rptadv_peer_source_audio_v1 audio; /**< Accept a leading PCM prefix. */
+    rptadv_peer_source_gap_v1 gap;     /**< Accept a leading missing-sample prefix. */
+};
+/** Copied bounded source turn, not raw packet or heartbeat receive state. */
+struct rptadv_peer_source_result_v1 {
+    uint32_t struct_size;    /**< Complete caller-provided size. */
+    uint32_t abi_version;    /**< Exactly 1. */
+    uint32_t progress;       /**< 0 idle, 1 advanced, 2 blocked, 3 provider drained. */
+    uint32_t activity;       /**< 0 unchanged, 1 selected key, 2 selected unkey. */
+    uint32_t finish_pending; /**< Publish one finite token and await its exact result. */
+    uint32_t state;          /**< 0 connecting, 1 connected, 2 closing, 3 closed. */
+    /** Fresh protocol-scoped numeric identity for the one human-text callback
+     * in this turn; zero is unresolved. Never authentication or command authority. */
+    uint32_t represented_node_number;
+};
 
 /** Non-transactional peer ingress/jitter counters. Durations are negotiated
  * source-rate samples, never native 48 kHz ring samples. Buffered span is the
@@ -72,6 +148,27 @@ struct rptadv_peer_observation_v1 {
     uint64_t egress_reliable_retries;      /**< Successful reliable retransmissions. */
     uint32_t egress_reliable_pending;      /**< Retained reliable frames. */
     uint32_t egress_reply_pending;         /**< Staged protocol replies. */
+    uint32_t echo_valid;                   /**< Nonzero only for the copied Echo metadata below. */
+    uint32_t echo_state;                   /**< Connecting0/connected1/closing2/closed3. */
+    uint32_t echo_first_cause;       /**< None0/local1/BYE2/connect3/liveness4/transport5/owner6. */
+    uint32_t echo_codec;             /**< Negotiated GSM0 or narrowband Speex1. */
+    uint32_t echo_raw_receiving;     /**< Valid session-bound packet activity. */
+    uint32_t echo_selected;          /**< Selected/draining RF activity. */
+    uint32_t echo_transport;         /**< Direct UDP0 or standard TCP Proxy1. */
+    uint64_t echo_last_valid_age_ms; /**< Age of valid voice/control. */
+    uint64_t echo_heartbeat_due_ms;  /**< Remaining heartbeat deadline, UINT64_MAX if inactive. */
+    uint64_t echo_liveness_due_ms;   /**< Remaining setup/liveness deadline, or inactive. */
+    uint64_t echo_retained_age_ms;   /**< Retained original datagram age; zero if none. */
+    uint64_t echo_stale_packets;     /**< Retired generation packets ignored. */
+    uint64_t echo_malformed_packets; /**< Invalid wire/media framing. */
+    uint64_t echo_out_of_order_packets; /**< Lower RTP sequences, excluding equal duplicates. */
+    uint64_t echo_codec_plc_samples;    /**< Native codec PLC accepted by product,8kHz samples. */
+    uint64_t echo_fallback_gap_samples; /**< Ordered spans accepted for shared-ring fallback PLC. */
+    uint64_t echo_proxy_admitted;       /**< Proxy queue admissions, not actual TCP sends. */
+    uint64_t echo_text_admitted;        /**< Human-text transport admissions. */
+    uint64_t echo_text_rejected;        /**< Human-text send attempts not admitted. */
+    uint8_t echo_cause_detail[32];      /**< NUL-padded content-free error category, max31bytes. */
+    uint64_t echo_ingress_bytes;        /**< Queued and currently borrowed ingress payload bytes. */
 };
 
 /** Copied local civil time. Valid is zero when conversion failed. */
@@ -140,6 +237,7 @@ typedef int32_t (*rptadv_peer_step_v1)(void *step_context);
 /** Borrowed status text sink. */
 typedef void (*rptadv_text_sink_v1)(void *context, const char *text, size_t length);
 struct UrpNativeStationConfig;
+struct rptadv_echolink_account_config_v1;
 /** Resolved host requirements, borrowed only during the configuration visitor. */
 struct rptadv_node_host_configuration {
     uint32_t struct_size;           /**< Complete readable record size. */
@@ -153,6 +251,12 @@ struct rptadv_node_host_configuration {
     size_t registration_url_length; /**< Endpoint byte count. */
     uint64_t registration_interval_seconds;     /**< Effective registration interval. */
     const struct UrpNativeStationConfig *radio; /**< Borrowed native station request. */
+    /** Resolved public EchoLink settings, including disabled accounts. No passwords.
+     * The provider ABI record and its nested spans/lists live only during this visit. */
+    const struct rptadv_echolink_account_config_v1 *echolink;
+    const uint8_t
+        *echolink_secrets_file; /**< Configured host-relative path, or empty for default. */
+    size_t echolink_secrets_file_length; /**< Path byte count; not NUL terminated. */
 };
 /** Copy one node's requirements; return nonzero to abort inspection. */
 typedef int (*rptadv_configuration_sink)(void *context,
@@ -186,7 +290,7 @@ typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, si
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v8 {
+struct rptadv_host_services_v9 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
     uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
@@ -316,6 +420,29 @@ struct rptadv_host_services_v8 {
      * Text is borrowed UTF-8 for this synchronous call only. Never retain it
      * or unwind across the callback boundary. Never called by audio workers. */
     void (*scheduler_notice)(void *context, const char *text, size_t length);
+
+    /** Copy this handle's immutable identity and capabilities before media starts.
+     * Failure does not transfer ownership or retain the caller's result buffer. */
+    int (*peer_info)(void *context, const void *peer, struct rptadv_peer_info_v1 *out);
+    /** Optional accepted-prefix source group, selected by this peer capability.
+     * Unaccepted PCM/gap suffixes remain with the provider. Completion is 0 while
+     * pending, 1 only after the exact finite token plays, or 2 on explicit
+     * generation discard. A completing turn must reject new PCM/gap credit.
+     * A null sink queries state without consuming input or advancing media. */
+    int (*peer_read_source)(void *context, void *peer, uint32_t product_completion,
+                            const struct rptadv_peer_source_sink_v1 *sink,
+                            rptadv_peer_source_text_v1 text, void *text_context,
+                            struct rptadv_peer_source_result_v1 *out);
+    /** Structured human text for a capable protocol peer. Borrowed literal spans;
+     * never reinterpret as commands or send synthesized speech to the peer.
+     * Zero admits one message, nonzero rejects only that message. Serial owner only. */
+    int (*peer_send_human_text)(void *context, void *peer, struct rptadv_peer_bytes_v1 sender,
+                                struct rptadv_peer_bytes_v1 body);
+    /** Optional EchoLink account diagnostics, including when there are no QSOs.
+     * Control only, off provider/audio executors. Emit borrowed metadata text;
+     * zero with no text means no account, negative means unavailable, never offline. */
+    int (*echo_account_status)(void *context, const char *local, size_t local_length,
+                               rptadv_text_sink_v1 sink, void *sink_context);
 };
 
 /** Exact revision of a typed site control request. */
@@ -369,7 +496,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v8 *host,
+    int (*start)(const struct rptadv_host_services_v9 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,
@@ -378,11 +505,9 @@ struct rptadv_product_descriptor_v1 {
                   size_t configuration_length); /**< Replace configuration. */
     int (*stop)(void);                          /**< Stop and quiesce every product owner. */
     /** Check current incoming policy before answering a channel. */
-    int (*authorize_incoming)(const char *local, size_t local_length, const char *remote,
-                              size_t remote_length, const char *source, size_t source_length);
+    int (*authorize_incoming)(const struct rptadv_incoming_peer_v1 *request, void *peer);
     /** Admit one transferred peer. */
-    int (*incoming)(const char *local, size_t local_length, const char *remote,
-                    size_t remote_length, const char *source, size_t source_length, void *peer);
+    int (*incoming)(const struct rptadv_incoming_peer_v1 *request, void *peer);
     /** Apply one stable link action. */
     int (*link_command)(const char *local, size_t local_length, const char *remote,
                         size_t remote_length, uint32_t action);

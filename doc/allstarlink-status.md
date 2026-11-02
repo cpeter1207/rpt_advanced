@@ -74,6 +74,12 @@ node's `link_command_*` settings can change or disable them.
 For ordinary commands with a node number, `#`, local receiver unkey, or a
 three-second pause ends the entry. Node `0` means the last link destination.
 
+For an EchoLink destination, use its full `3`-prefixed dial alias and end with
+`#` or unkey. For example, `*33123456#` calls EchoLink station `123456`.
+EchoLink also supports the monitor, permanent, schedule, and disconnect
+operations. It does not support `*4` remote-command forwarding. See
+[EchoLink links](echolink.md).
+
 For remote commands, send `*4` followed by a valid destination node number.
 Selection finishes as soon as the node is recognized and passes access checks.
 The prefix and node number stay local. Your next digits travel directly to that

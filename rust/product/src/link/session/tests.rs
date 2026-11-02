@@ -7,6 +7,7 @@ pub(crate) enum Input {
     Text(&'static [u8]),
     Digit(u8),
     Audio(Vec<f32>),
+    Concealed(Vec<f32>),
     Gap(usize),
     RadioKey,
     RadioUnkey,
@@ -14,6 +15,7 @@ pub(crate) enum Input {
 #[derive(Default)]
 pub(crate) struct State {
     pub(crate) rate: u32,
+    capabilities: u32,
     pub(crate) input: VecDeque<Input>,
     pub(crate) texts: Vec<Vec<u8>>,
     pub(crate) digits: Vec<u8>,
@@ -53,8 +55,411 @@ pub(crate) struct State {
     pub(crate) prepared_result: i32,
     call_elapsed: u32,
     deadlines: Vec<u64>,
+    source_position: u64,
+    source_keyed: bool,
+    source_closed: bool,
+    source_finish: bool,
+    source_interleave: bool,
+    source_acknowledgements: usize,
+    source_completions: Vec<u32>,
+    source_credits: Vec<(u64, usize)>,
+    source_text: VecDeque<(&'static [u8], &'static [u8], u32)>,
 }
 type Shared = Arc<Mutex<State>>;
+
+pub(super) fn five_tone(count: usize) -> Vec<f32> {
+    (0..count)
+        .map(|n| {
+            let phase = n as f32 * std::f32::consts::TAU / 8000.0;
+            0.25 * ((phase * 770.0).sin() + (phase * 1336.0).sin())
+        })
+        .collect()
+}
+
+#[test]
+fn echo_source_never_detects_a_new_burst_before_the_previous_finite_token_retires() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    let origin = control.bind_text_generation(42);
+    let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            outbound,
+            dtmf_muting: true,
+        })
+        .ok()
+        .unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.25; 640]));
+    session.step(0).unwrap();
+    while control.event().is_some() {}
+    let mut tone = five_tone(256);
+    tone.extend_from_slice(&[0.0; 384]);
+    {
+        let mut state = state.lock().unwrap();
+        state.source_interleave = true;
+        state
+            .source_text
+            .push_back((b"W1XYZ-R", b"tail chat", 123456));
+        state.input.push_back(Input::Audio(tone));
+    }
+    session.step(10).unwrap();
+    let Some(Event::HumanText(message)) = control.event() else {
+        panic!("chat must not wait for audio drain")
+    };
+    assert_eq!(message.origin, origin);
+    assert_eq!(&*message.body, "tail chat");
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .source_credits
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<usize>(),
+        640
+    );
+    assert!(
+        !consumer.signals().dtmf_muted(),
+        "future unaccepted audio must not mute the previous burst"
+    );
+    assert!(
+        !matches!(control.event(), Some(Event::Digit(_))),
+        "unaccepted next-generation PCM must not issue a command"
+    );
+    let mut digits = Vec::new();
+    for now in 1..30 {
+        consumer.render(&mut [0.0; 960]).unwrap();
+        session.step(now * 20).unwrap();
+        while let Some(event) = control.event() {
+            if let Event::Digit(digit) = event {
+                digits.push(digit);
+            }
+        }
+        if state.lock().unwrap().source_acknowledgements == 2 {
+            break;
+        }
+    }
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 2);
+    assert_eq!(digits, ['5', '#']);
+}
+
+#[test]
+fn echo_source_never_joins_detector_qualification_across_loss_or_codec_plc() {
+    for concealed in [false, true] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+        let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect {
+                inbound,
+                outbound,
+                dtmf_muting: true,
+            })
+            .ok()
+            .unwrap();
+        state.lock().unwrap().input.extend([
+            Input::Audio(five_tone(100)),
+            if concealed {
+                Input::Concealed(five_tone(160))
+            } else {
+                Input::Gap(160)
+            },
+            Input::Audio(five_tone(100)),
+            Input::Audio(vec![0.0; 640]),
+        ]);
+        session.step(0).unwrap();
+        let mut digits = Vec::new();
+        while let Some(event) = control.event() {
+            if let Event::Digit(digit) = event {
+                digits.push(digit);
+            }
+        }
+        assert!(
+            digits.is_empty(),
+            "neither 12.5-ms real fragment qualifies: {digits:?}, concealed={concealed}"
+        );
+        for now in 1..20 {
+            consumer.render(&mut [0.0; 960]).unwrap();
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn echo_source_decodes_dtmf_and_retains_mute_spans_but_never_decodes_codec_plc() {
+    for (muting, concealed, audible, digits) in [
+        (true, false, false, 1),
+        (false, false, true, 1),
+        (true, true, true, 0),
+    ] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", muting).unwrap();
+        let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect {
+                inbound,
+                dtmf_muting: muting,
+                outbound,
+            })
+            .ok()
+            .unwrap();
+        let tone = five_tone(640);
+        state.lock().unwrap().input.extend([
+            if concealed {
+                Input::Concealed(tone)
+            } else {
+                Input::Audio(tone)
+            },
+            Input::Audio(vec![0.0; 640]),
+        ]);
+        session.step(0).unwrap();
+        let mut decoded = Vec::new();
+        while let Some(event) = control.event() {
+            if let Event::Digit(digit) = event {
+                decoded.push(digit);
+            }
+        }
+        assert_eq!(decoded, if digits == 0 { vec![] } else { vec!['5', '#'] });
+        let mut heard = false;
+        for now in 1..20 {
+            let mut pcm = [0.0; 960];
+            consumer.render(&mut pcm).unwrap();
+            heard |= pcm.iter().any(|sample| sample.abs() > 0.05);
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        assert_eq!(heard, audible, "muting={muting}, concealed={concealed}");
+        assert_eq!(consumer.observe().unwrap().missing_samples, 0);
+    }
+}
+
+#[test]
+fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    assert!(state.lock().unwrap().texts.is_empty());
+    assert_eq!(control.bind_text_generation(7).protocol, 2);
+    assert!(matches!(control.observer.policy(), InboundPolicy::Echo));
+    for text in [c"!NEWKEY1!", c"literal text"] {
+        control
+            .send(Command::Text {
+                text: text.into(),
+                advisory: false,
+            })
+            .ok()
+            .unwrap();
+    }
+    let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
+        .ok()
+        .unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Audio(vec![0.25; 640]));
+    session.step(0).unwrap();
+    assert_eq!(state.lock().unwrap().source_credits, [(0, 640)]);
+    assert!(session.pending_input.is_none());
+    assert!(consumer.signals().radio_keyed());
+    assert_eq!(consumer.finite_playout(), Some(true));
+    session.step(10).unwrap();
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+    let mut heard = false;
+    for _ in 0..10 {
+        let mut output = [0.0; 960];
+        consumer.render(&mut output).unwrap();
+        heard |= output.iter().any(|sample| sample.abs() > 0.1);
+        if consumer.finite_playout() == Some(false) {
+            break;
+        }
+    }
+    assert!(heard);
+    assert_eq!(consumer.finite_playout(), Some(false));
+    session.step(20).unwrap();
+    session.step(30).unwrap();
+    assert!(!consumer.signals().radio_keyed());
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
+    assert_eq!(
+        state.lock().unwrap().texts,
+        [b"literal text".to_vec()],
+        "only non-protocol text may pass through"
+    );
+}
+
+#[test]
+fn echo_source_returns_ring_credit_without_copying_the_provider_owned_suffix() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    let (inbound, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    control
+        .send(Command::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
+        .ok()
+        .unwrap();
+    state.lock().unwrap().input.extend([
+        Input::Audio(vec![0.25; 4096]),
+        Input::Audio(vec![0.5; 4096]),
+        Input::Gap(160),
+        Input::Audio(vec![0.75; 640]),
+    ]);
+    session.step(0).unwrap();
+    assert_eq!(
+        state.lock().unwrap().source_credits,
+        [(0, 4096), (4096, 2080)]
+    );
+    assert_eq!(state.lock().unwrap().input.len(), 3);
+    assert!(
+        session.pending_input.is_none(),
+        "provider, not Session, owns the rejected suffix"
+    );
+    for now in 1..100 {
+        consumer.render(&mut [0.0; 960]).unwrap();
+        session.step(now * 20).unwrap();
+        if state.lock().unwrap().source_acknowledgements == 1 {
+            break;
+        }
+    }
+    let state = state.lock().unwrap();
+    assert!(state.input.is_empty());
+    assert_eq!(state.source_position, 8992);
+    assert_eq!(state.source_acknowledgements, 1);
+    assert!(!consumer.signals().radio_keyed());
+}
+
+#[test]
+fn echo_source_retirement_never_reports_a_cancelled_tail_as_played() {
+    for (redirect, failed_status) in [(false, false), (true, false), (false, true)] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+        let (inbound, mut consumer) = if failed_status {
+            crate::link::ring::tests::failed_finish_status_endpoints()
+        } else {
+            InboundRing::open(8000, InboundPolicy::Echo).unwrap()
+        };
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect {
+                inbound,
+                dtmf_muting: true,
+                outbound,
+            })
+            .ok()
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.25; 640]));
+        session.step(0).unwrap();
+        if failed_status {
+            assert!(session.source_finish.is_some());
+            assert_eq!(session.step(10), Err(Error::Write));
+            assert!(control.ended());
+            assert!(state.lock().unwrap().source_completions.is_empty());
+            continue;
+        }
+        assert_eq!(consumer.finite_playout(), Some(true));
+        if redirect {
+            let (inbound, next) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+            let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+                .unwrap()
+                .into_endpoints();
+            control
+                .send(Command::Redirect {
+                    inbound,
+                    dtmf_muting: true,
+                    outbound,
+                })
+                .ok()
+                .unwrap();
+            consumer = next;
+        } else {
+            consumer.reset().unwrap();
+        }
+        session.step(10).unwrap();
+        assert_eq!(state.lock().unwrap().source_completions, [2]);
+        assert!(!consumer.signals().radio_keyed());
+        state
+            .lock()
+            .unwrap()
+            .input
+            .push_back(Input::Audio(vec![0.5; 640]));
+        session.step(20).unwrap();
+        let mut heard = false;
+        for now in 2..12 {
+            let mut output = [0.0; 960];
+            consumer.render(&mut output).unwrap();
+            heard |= output.iter().any(|sample| sample.abs() > 0.3);
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_completions.len() == 2 {
+                break;
+            }
+        }
+        assert!(heard);
+        assert_eq!(state.lock().unwrap().source_completions, [2, 1]);
+    }
+}
 
 #[test]
 fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
@@ -77,6 +482,58 @@ fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
         panic!("missing queued old-generation message");
     };
     assert_eq!(message.origin, first, "reload must retain the old fence");
+
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    let mut first = None;
+    for (number, expected) in [
+        (0, None),
+        (123456, Some("123456")),
+        (u32::MAX, Some("4294967295")),
+    ] {
+        state
+            .lock()
+            .unwrap()
+            .source_text
+            .push_back((b"W1XYZ-R", b"literal body", number));
+        session.step(0).unwrap();
+        if first.is_none() {
+            assert!(control.event().is_none());
+            first = Some(control.bind_text_generation(42));
+        } else {
+            control.bind_text_generation(43);
+        }
+        let Some(Event::HumanText(message)) = control.event() else {
+            panic!("source chat missing")
+        };
+        assert_eq!(
+            message.origin,
+            if number == u32::MAX {
+                control.bind_text_generation(43)
+            } else {
+                first.clone().unwrap()
+            }
+        );
+        assert_eq!(message.source, "W1XYZ-R");
+        assert_eq!(&*message.body, "literal body");
+        assert!(matches!(message.audience, TextAudience::Broadcast));
+        assert_eq!(
+            message
+                .represented_source
+                .as_ref()
+                .map(|identity| identity.node()),
+            expected
+        );
+        if let Some(identity) = &message.represented_source {
+            assert_eq!(identity.protocol(), ProtocolId::EchoLink);
+        }
+        assert!(state.lock().unwrap().source_credits.is_empty());
+        assert!(!session.inbound.signals().radio_keyed());
+    }
 }
 
 #[test]
@@ -103,9 +560,263 @@ fn text_forwarding_classification_binds_authenticated_origin_and_drops_overflow_
 }
 
 #[test]
+fn human_text_send_failure_is_rate_limited_without_ending_the_audio_peer() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state.lock().unwrap().fail_text = true;
+    crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
+    for now in [10, 11, 30010] {
+        assert!(
+            control
+                .send(Command::HumanText {
+                    sender: "W1XYZ".into(),
+                    body: "private body".into()
+                })
+                .is_ok()
+        );
+        assert!(
+            session.step(now).is_ok(),
+            "chat failure cannot terminate audio"
+        );
+        assert!(!control.ended());
+    }
+    let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
+    assert_eq!(logs.len(), 2, "first failure and next30second window only");
+    for (_, message) in logs {
+        assert!(message.contains("human-text send rejected"), "{message}");
+        assert!(!message.contains("private body"));
+        assert!(!message.contains("W1XYZ"));
+    }
+    state.lock().unwrap().fail_text = false;
+    control
+        .send(Command::HumanText {
+            sender: "W1XYZ".into(),
+            body: "recovered body".into(),
+        })
+        .ok()
+        .unwrap();
+    session.step(30011).unwrap();
+    assert_eq!(
+        state.lock().unwrap().texts,
+        [
+            b"W1XYZ>private body".to_vec(),
+            b"W1XYZ>private body".to_vec(),
+            b"W1XYZ>private body".to_vec(),
+            b"W1XYZ>recovered body".to_vec(),
+        ]
+    );
+    assert_eq!(crate::fixture::ERROR_LOGS.with_borrow(Vec::len), 2);
+    assert!(!control.ended());
+    session.stop();
+}
+
+#[test]
+fn peer_control_keeps_protocol_identity_reply_and_telemetry_on_its_own_source() {
+    let (io, _) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    assert!(control.can_forward_text());
+    assert_eq!(control.callsign(), "W1XYZ-R");
+    assert!(matches!(control.inbound_policy(), InboundPolicy::Echo));
+    let signal = session.inbound.signals();
+    assert_eq!(control.reply_target(), signal.reply_target());
+    for allowed in [false, true] {
+        control.set_telemetry_allowed(allowed);
+        assert_eq!(signal.telemetry_allowed(), allowed);
+    }
+    control.wake().notify();
+    assert!(!control.ended());
+}
+
+#[test]
+fn closed_echo_source_ends_the_peer_without_acknowledging_unplayed_audio() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state.lock().unwrap().source_closed = true;
+    assert!(matches!(session.step(0), Err(Error::Hangup)));
+    assert!(control.ended());
+    assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+}
+
+#[test]
+fn command_arriving_during_a_read_gets_an_immediate_next_turn() {
+    let (mut session, mut control, state, _) = timed_session();
+    let pause = Arc::new(std::sync::Barrier::new(2));
+    state.lock().unwrap().pause = Some(Arc::clone(&pause));
+    let owner = thread::spawn(move || {
+        session.step(0).unwrap();
+        session
+    });
+    pause.wait();
+    control
+        .send(Command::Text {
+            text: CString::new("queued during read").unwrap(),
+            advisory: false,
+        })
+        .ok()
+        .unwrap();
+    pause.wait();
+    let mut session = owner.join().unwrap();
+    assert_eq!(state.lock().unwrap().deadlines.last(), Some(&0));
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"queued during read")
+    );
+    session.step(1).unwrap();
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .texts
+            .iter()
+            .any(|text| text == b"queued during read")
+    );
+}
+
+#[test]
+fn echo_source_command_timeout_runs_while_a_bounded_read_turn_still_has_pcm() {
+    let (io, state) = source_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+        .unwrap()
+        .into_endpoints();
+    let (mut session, mut control) =
+        PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend([Input::Audio(five_tone(640)), Input::Audio(vec![0.0; 640])]);
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend((0..130).map(|_| Input::Audio(vec![0.0])));
+    session.step(0).unwrap();
+    assert!(matches!(control.event(), Some(Event::Digit('5'))));
+    assert!(session.inbound.signals().dtmf_muted());
+    assert_eq!(state.lock().unwrap().source_position, 1342);
+    session.step(3000).unwrap();
+    assert!(matches!(control.event(), Some(Event::Digit('#'))));
+    assert!(control.event().is_none());
+    assert!(!session.inbound.signals().dtmf_muted());
+    assert_eq!(state.lock().unwrap().input.len(), 4);
+    assert!(session.source_finish.is_none());
+    assert!(!control.ended());
+}
+
+#[test]
+fn echo_source_event_overflow_is_fatal_for_commands_but_drops_only_chat() {
+    for row in 0..5 {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+        for _ in 0..if row == 3 { 63 } else { 64 } {
+            session.event(Event::Digit('1')).unwrap();
+        }
+        let input = match row {
+            0 => vec![Input::Audio(five_tone(640)), Input::Audio(vec![0.0; 640])],
+            1 => vec![Input::Audio(five_tone(256)), Input::Gap(160)],
+            2 | 3 => vec![Input::Audio(five_tone(256))],
+            _ => {
+                state
+                    .lock()
+                    .unwrap()
+                    .source_text
+                    .push_back((b"W1XYZ-R", b"dropped chat", 0));
+                vec![]
+            }
+        };
+        state.lock().unwrap().input.extend(input);
+        if row == 4 {
+            assert_eq!(session.step(0), Ok(()));
+            assert!(!control.ended());
+        } else {
+            assert_eq!(session.step(0), Err(Error::Write), "overflow row {row}");
+            assert!(control.ended());
+        }
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 0);
+    }
+}
+
+#[test]
+fn echo_source_metadata_backpressure_delays_finish_and_errors_do_not_acknowledge() {
+    for fail in [false, true] {
+        let (io, state) = source_peer();
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        let (mut session, mut control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
+        let (inbound, mut consumer) = crate::link::ring::tests::delayed_mute_endpoints(fail);
+        let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
+            .unwrap()
+            .into_endpoints();
+        control
+            .send(Command::Redirect {
+                inbound,
+                outbound,
+                dtmf_muting: true,
+            })
+            .ok()
+            .unwrap();
+        session.step(0).unwrap();
+        while control.event().is_some() {}
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend([Input::Audio(five_tone(256)), Input::Gap(160)]);
+        if fail {
+            assert_eq!(session.step(1), Err(Error::Write));
+            assert!(control.ended());
+            assert!(state.lock().unwrap().source_completions.is_empty());
+            continue;
+        }
+        session.step(1).unwrap();
+        assert!(
+            session.source_finish.is_none(),
+            "unpublished mute metadata is not finite completion"
+        );
+        session.step(2).unwrap();
+        assert!(session.source_finish.is_some());
+        let mut digits = Vec::new();
+        for now in 3..30 {
+            while let Some(event) = control.event() {
+                if let Event::Digit(digit) = event {
+                    digits.push(digit);
+                }
+            }
+            consumer.render(&mut [0.0; 960]).unwrap();
+            session.step(now * 20).unwrap();
+            if state.lock().unwrap().source_acknowledgements == 1 {
+                break;
+            }
+        }
+        assert_eq!(digits, ['5', '#']);
+        assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
+    }
+}
+
+#[test]
 fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
     for requested in [false, true] {
-        let (mut session, control, state, _) = make_session("1000");
+        let (mut session, control, state, _) = make_async_session("1000");
         crate::fixture::ERROR_LOGS.with_borrow_mut(Vec::clear);
         if requested {
             control.stop();
@@ -113,6 +824,11 @@ fn unexpected_hangup_is_logged_once_but_requested_stop_is_not_an_error() {
             state.lock().unwrap().fail_ready = true;
         }
         assert!(session.step(20).is_err());
+        assert_eq!(
+            state.lock().unwrap().observe_calls,
+            1,
+            "the first failing turn must preserve its protocol evidence before cleanup"
+        );
         assert!(session.step(21).is_err());
         drop(session);
         let logs = crate::fixture::ERROR_LOGS.with_borrow(|logs| logs.clone());
@@ -194,7 +910,7 @@ unsafe extern "C" fn read(
                     event.unwrap()(context, 1, bytes.as_ptr().cast(), bytes.len())
                 }
                 Input::Digit(digit) => event.unwrap()(context, 2, ptr::from_ref(&digit).cast(), 1),
-                Input::Audio(samples) => {
+                Input::Audio(samples) | Input::Concealed(samples) => {
                     event.unwrap()(context, 3, samples.as_ptr().cast(), samples.len())
                 }
                 Input::Gap(samples) => event.unwrap()(context, 6, ptr::null(), samples),
@@ -220,6 +936,17 @@ unsafe extern "C" fn text(
 unsafe extern "C" fn digit(_: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
     unsafe { state(peer) }.lock().unwrap().digits.push(digit);
     0
+}
+unsafe extern "C" fn human_text(
+    context: *mut c_void,
+    peer: *mut c_void,
+    sender: abi::rptadv_peer_bytes_v1,
+    body: abi::rptadv_peer_bytes_v1,
+) -> i32 {
+    let mut value = unsafe { std::slice::from_raw_parts(sender.data, sender.length) }.to_vec();
+    value.push(b'>');
+    value.extend_from_slice(unsafe { std::slice::from_raw_parts(body.data, body.length) });
+    unsafe { text(context, peer, value.as_ptr().cast(), value.len()) }
 }
 unsafe extern "C" fn write(
     _: *mut c_void,
@@ -602,6 +1329,8 @@ unsafe extern "C" fn observe_peer(
             egress_reliable_retries: 1,
             egress_reliable_pending: 3,
             egress_reply_pending: 0,
+            // This fixture's legacy observer supplies no Echo metadata.
+            ..std::mem::zeroed()
         };
         if state.bad_observe_size {
             (*output).struct_size -= 1;
@@ -623,16 +1352,39 @@ pub(crate) fn peer_with_egress(
     async_enabled: bool,
     egress: bool,
 ) -> (PeerIo, Shared) {
+    make_peer(rate_hz, async_enabled, egress, false, true)
+}
+pub(crate) fn source_peer() -> (PeerIo, Shared) {
+    make_peer(8000, true, true, true, true)
+}
+pub(crate) fn peer_without_text(rate_hz: u32) -> (PeerIo, Shared) {
+    make_peer(rate_hz, false, false, false, false)
+}
+fn make_peer(
+    rate_hz: u32,
+    async_enabled: bool,
+    egress: bool,
+    source: bool,
+    forward_text: bool,
+) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
+        capabilities: if source {
+            23
+        } else {
+            8 | (u32::from(forward_text) << 2) | u32::from(async_enabled) | (u32::from(egress) << 1)
+        },
+        fail_ready: source,
         ..State::default()
     }));
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.peer_rate = Some(rate);
+    table.peer_info = Some(peer_info);
     table.peer_bind_radio = Some(bind_radio);
     table.peer_ready = Some(ready);
     table.peer_read = Some(read);
     table.peer_send_text = Some(text);
+    table.peer_send_human_text = Some(human_text);
     table.peer_send_digit = Some(digit);
     table.peer_write = Some(write);
     table.peer_destroy = Some(destroy);
@@ -650,9 +1402,132 @@ pub(crate) fn peer_with_egress(
         table.peer_step_wake = Some(wake_only);
         table.peer_set_deadline = Some(deadline);
     }
+    if source {
+        table.peer_read_source = Some(read_source);
+    }
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let handle = Box::into_raw(Box::new(state.clone())).cast();
     (unsafe { services.peer(handle) }.unwrap(), state)
+}
+
+unsafe extern "C" fn peer_info(
+    context: *mut c_void,
+    peer: *const c_void,
+    output: *mut abi::rptadv_peer_info_v1,
+) -> i32 {
+    unsafe { crate::fixture::peer_info(context, peer, output) };
+    let capabilities = unsafe { state(peer.cast_mut()) }
+        .lock()
+        .unwrap()
+        .capabilities;
+    unsafe {
+        (*output).capabilities = capabilities;
+        if capabilities & 16 != 0 {
+            (*output).protocol = 2;
+            (*output).account_generation = 1;
+            (*output).qso_generation = 2;
+            (*output).callsign = abi::rptadv_peer_bytes_v1 {
+                data: b"W1XYZ-R".as_ptr(),
+                length: 7,
+            };
+        }
+    }
+    0
+}
+
+unsafe extern "C" fn read_source(
+    _: *mut c_void,
+    peer: *mut c_void,
+    drained: u32,
+    sink: *const abi::rptadv_peer_source_sink_v1,
+    text: abi::rptadv_peer_source_text_v1,
+    text_context: *mut c_void,
+    result: *mut abi::rptadv_peer_source_result_v1,
+) -> i32 {
+    let mut state = unsafe { state(peer) }.lock().unwrap();
+    let sink = unsafe { &*sink };
+    let result = unsafe { &mut *result };
+    if state.source_closed {
+        result.state = 3;
+        return 0;
+    }
+    result.state = 1;
+    if let Some((sender, body, represented)) = state.source_text.pop_front() {
+        result.represented_node_number = represented;
+        unsafe {
+            text.unwrap()(
+                text_context,
+                abi::rptadv_peer_bytes_v1 {
+                    data: sender.as_ptr(),
+                    length: sender.len(),
+                },
+                abi::rptadv_peer_bytes_v1 {
+                    data: body.as_ptr(),
+                    length: body.len(),
+                },
+            )
+        };
+    }
+    if drained != 0 {
+        assert!(state.source_finish);
+        state.source_completions.push(drained);
+        state.source_acknowledgements += 1;
+        state.source_finish = false;
+        state.source_keyed = false;
+        result.activity = 2;
+        result.progress = 3;
+    } else if state.source_finish && (!state.source_interleave || state.input.is_empty()) {
+        result.finish_pending = 1;
+        result.progress = 2;
+    } else if let Some(input) = state.input.pop_front() {
+        if !state.source_keyed {
+            result.activity = 1;
+            state.source_keyed = true;
+        }
+        let start = state.source_position;
+        let concealed = matches!(&input, Input::Concealed(_));
+        let (accepted, offered, remaining) = match input {
+            Input::Audio(mut pcm) | Input::Concealed(mut pcm) => {
+                let offered = pcm.len();
+                let accepted = unsafe {
+                    sink.audio.unwrap()(
+                        sink.context,
+                        start,
+                        pcm.as_ptr(),
+                        offered,
+                        u32::from(concealed),
+                    )
+                };
+                pcm.drain(..accepted);
+                (
+                    accepted,
+                    offered,
+                    if concealed {
+                        Input::Concealed(pcm)
+                    } else {
+                        Input::Audio(pcm)
+                    },
+                )
+            }
+            Input::Gap(count) => {
+                let accepted =
+                    unsafe { sink.gap.unwrap()(sink.context, start, count as u32) } as usize;
+                (accepted, count, Input::Gap(count - accepted))
+            }
+            _ => panic!("not a source fixture"),
+        };
+        state.source_position += accepted as u64;
+        state.source_credits.push((start, accepted));
+        if accepted < offered {
+            state.input.push_front(remaining);
+        }
+        result.progress = if accepted == offered { 1 } else { 2 };
+    } else if state.source_keyed {
+        state.source_finish = true;
+        result.finish_pending = 1;
+        result.progress = 2;
+    }
+    0
 }
 
 unsafe extern "C" fn prepare_audio(
@@ -763,7 +1638,7 @@ fn timed_session() -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
     let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     (session, control, state, output)
 }
 
@@ -843,7 +1718,8 @@ fn outbound_lower_rate_pcm_and_prepared_paths_drain_before_unkey() {
         let (mut output, inbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
             .unwrap()
             .into_endpoints();
-        let (mut session, _control) = PeerSession::prepare(io, inbound, "1000", "2000").unwrap();
+        let (mut session, _control) =
+            PeerSession::prepare(io, inbound, "1000", "2000", true).unwrap();
         output.write(timed_span(0, 0), &[0.25; 960]);
         for now in 0..180 {
             session.step(now).unwrap();
@@ -959,7 +1835,7 @@ fn egress_host_contract_and_asterisk_pcm() {
     table.peer_step_detach = None;
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
-    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v8, peer_prepare_audio);
+    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_prepare_audio);
     for length in boundary..std::mem::size_of_val(&table) {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];
@@ -1194,7 +2070,7 @@ fn egress_fir_output_keeps_sample_time_across_small_partitions_and_a_gap() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     let mut position = 48_000;
     for count in [1, 2, 17, 600, 1, 1, 1, 337] {
         let mut span = timed_span(position, 1_000);
@@ -1233,7 +2109,7 @@ fn egress_fractional_fir_phase_keeps_retained_audio_age_across_clock_remap() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     // The real adapter preserves fractional phase through reset. These complete
     // bursts leave the third burst's output behind its input at sample 622.
     for burst in 0..3 {
@@ -1273,7 +2149,7 @@ fn egress_clock_remap_does_not_renew_hidden_fir_history() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     output.write(timed_span(48_000, 1_000), &[0.9; 600]);
     session.step(1_000).unwrap();
     output.write(timed_span(48_600, 1_300), &[0.0; 960]);
@@ -1294,7 +2170,8 @@ fn egress_discontinuities_reset_filter_history_without_splicing_old_audio() {
         let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
             .unwrap()
             .into_endpoints();
-        let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+        let (mut session, _control) =
+            PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
         output.write(timed_span(48_000, 1_000), &[0.9; 960]);
         session.step(1_000).unwrap();
         let mut next = timed_span(48_960, 1_020);
@@ -1403,7 +2280,11 @@ fn egress_future_reopen_and_redirect_discard_uncommitted_media() {
     let (inbound, _) = InboundRing::open(48000, InboundPolicy::Peer).unwrap();
     assert!(
         control
-            .send(Command::Redirect { inbound, outbound })
+            .send(Command::Redirect {
+                inbound,
+                dtmf_muting: true,
+                outbound
+            })
             .is_ok()
     );
     span.generation += 1;
@@ -1445,7 +2326,7 @@ fn make_async_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAud
     let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
+    let (session, control) = PeerSession::prepare(io, outbound, local, "2000", true).unwrap();
     (session, control, state, output)
 }
 fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProducer) {
@@ -1453,7 +2334,7 @@ fn make_session(local: &str) -> (PeerSession, PeerControl, Shared, LinkAudioProd
     let (output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(9600, 64)
         .unwrap()
         .into_endpoints();
-    let (session, control) = PeerSession::prepare(io, outbound, local, "2000").unwrap();
+    let (session, control) = PeerSession::prepare(io, outbound, local, "2000", true).unwrap();
     (session, control, state, output)
 }
 
@@ -1486,6 +2367,29 @@ fn idle_peer_io_worker_does_not_start_a_poll_thread() {
     let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
     assert!(worker.thread.is_none());
     worker.stop();
+}
+
+#[test]
+fn synchronous_owner_retires_a_failed_peer_and_rejects_attach_after_stop() {
+    let (session, control, state, _) = make_session("1000");
+    state.lock().unwrap().fail_ready = true;
+    let mut worker = PeerIoWorker::start(Instant::now()).unwrap();
+    worker.attach(session).ok().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while state.lock().unwrap().drops == 0 {
+        assert!(Instant::now() < deadline, "failed peer was not reclaimed");
+        thread::yield_now();
+    }
+    assert!(control.ended());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    worker.stop();
+    let (session, _control, state, _) = make_session("1000");
+    let rejected = worker
+        .attach(session)
+        .expect_err("stopped owner must reject");
+    assert_eq!(state.lock().unwrap().drops, 0);
+    drop(rejected);
+    assert_eq!(state.lock().unwrap().drops, 1);
 }
 
 #[test]
@@ -1991,7 +2895,11 @@ fn serial_reader_routes_protocol_digits_audio_and_exact_redirect_ack() {
         .unwrap()
         .into_endpoints();
     control
-        .send(Command::Redirect { inbound, outbound })
+        .send(Command::Redirect {
+            inbound,
+            dtmf_muting: true,
+            outbound,
+        })
         .ok()
         .unwrap();
     session.step(3022).unwrap();
@@ -2037,6 +2945,7 @@ fn failed_or_overreported_ring_admission_ends_audio_and_gap_ingress() {
             control
                 .send(Command::Redirect {
                     inbound,
+                    dtmf_muting: true,
                     outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                         .unwrap()
                         .into_endpoints()
@@ -2063,6 +2972,7 @@ fn pending_gap_rejects_a_ring_that_overreports_its_next_acceptance() {
     control
         .send(Command::Redirect {
             inbound,
+            dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
@@ -2085,6 +2995,7 @@ fn counted_gap_is_staged_before_following_peer_events_when_ring_is_full() {
     control
         .send(Command::Redirect {
             inbound,
+            dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
@@ -2139,6 +3050,7 @@ fn partial_pcm_is_staged_before_a_following_counted_gap() {
     control
         .send(Command::Redirect {
             inbound,
+            dtmf_muting: true,
             outbound: rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
                 .unwrap()
                 .into_endpoints()
@@ -2314,9 +3226,18 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
         let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
             .unwrap()
             .into_endpoints();
-        assert!(PeerSession::prepare(io, outbound, local, remote).is_err());
+        assert!(PeerSession::prepare(io, outbound, local, remote, true).is_err());
         assert_eq!(state.lock().unwrap().drops, 1);
     }
+    let (io, state) = make_peer(16000, true, true, true, true);
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    assert!(matches!(
+        PeerSession::prepare(io, outbound, "1000", "2000", true),
+        Err(Error::UnsupportedFormat)
+    ));
+    assert_eq!(state.lock().unwrap().drops, 1);
 }
 
 #[test]
@@ -2336,7 +3257,7 @@ fn sub_codec_frame_does_not_send_empty_conversion_output() {
     let (mut output, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();
-    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000").unwrap();
+    let (mut session, _control) = PeerSession::prepare(io, outbound, "1000", "2000", true).unwrap();
     assert_eq!(
         output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.5]),
         0

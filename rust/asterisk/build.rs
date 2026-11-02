@@ -1,6 +1,18 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=RPT_ADVANCED_LIBDIR");
+    println!("cargo:rerun-if-env-changed=DEB_HOST_MULTIARCH");
+    let multiarch = env::var("DEB_HOST_MULTIARCH").unwrap_or_else(|_| {
+        match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+            Ok("x86_64") => "x86_64-linux-gnu".into(),
+            Ok("aarch64") => "aarch64-linux-gnu".into(),
+            other => panic!("unsupported Debian architecture: {other:?}"),
+        }
+    });
+    let directory = env::var("RPT_ADVANCED_LIBDIR")
+        .unwrap_or_else(|_| format!("/usr/lib/{multiarch}/rpt_advanced"));
+    println!("cargo:rustc-env=RPT_ADVANCED_LIBDIR={directory}");
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
@@ -31,7 +43,7 @@ fn main() {
         .allowlist_function("(__ast_cli_register_multiple|__ast_channel_alloc|__ao2_unlock)")
         .allowlist_function("localtime_r")
         .allowlist_function("ast_log")
-        .allowlist_var("__LOG_(NOTICE|WARNING)")
+        .allowlist_var("__LOG_(NOTICE|WARNING|ERROR)")
         .allowlist_type("ast_(cli_entry|cli_args|cli_command|module)")
         .allowlist_var("(RESULT_.*|AST_MODULE_LOAD_.*|AST_AMA_NONE|ast_config_AST_CONFIG_DIR)")
         .allowlist_type("ast_channel_state")

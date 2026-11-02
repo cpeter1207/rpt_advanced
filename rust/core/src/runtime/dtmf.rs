@@ -397,7 +397,7 @@ impl DtmfCommands {
                 }
                 return None;
             }
-            LinkAction::ParrotEnable | LinkAction::ParrotDisable => {
+            LinkAction::ParrotEnable | LinkAction::ParrotDisable | LinkAction::EchoTelemetry => {
                 if self.admin_until_ms == 0 {
                     return None;
                 }
@@ -446,7 +446,7 @@ impl DtmfCommands {
         }
     }
 
-    /// Consume the one DTMF authorization issued for a parrot action before link control applies it.
+    /// Check the one DTMF grant before an administrative action is applied.
     pub(crate) fn consume_parrot_authorization(&mut self, authorized: bool, now_ms: u64) -> bool {
         let authorized = authorized && self.admin_until_ms != 0 && now_ms < self.admin_until_ms;
         if !authorized && now_ms >= self.admin_until_ms {

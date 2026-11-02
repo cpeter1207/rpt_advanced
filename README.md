@@ -15,6 +15,7 @@ source installation, setup, checks, upgrades, and switching controllers.
 - [Configuration reference](doc/configuration.md): settings and examples.
 - [Radio operation](doc/implementation-status.md): IDs, tones, and announcements.
 - [AllStarLink operation](doc/allstarlink-status.md): links and DTMF commands.
+- [EchoLink operation](doc/echolink.md): accounts, direct or Proxy service, and calls.
 
 This is alpha software. Test receive audio, transmit audio, PTT, IDs, and links
 before placing a repeater in service.

@@ -14,8 +14,12 @@ path = "src/main.rs"
 crossbeam-queue = "0.3.12"
 libc = "0.2"
 libloading = "0.8"
+rptadv-peer-support = { path = "../peer-support" }
 serde_json = "1"
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 
 [build-dependencies]
 bindgen = "0.72.1"
+
+[dev-dependencies]
+rptadv-control-standalone-adapter = { path = "../control-standalone-adapter" }

@@ -597,7 +597,7 @@ fn prepared_audio_drives_receive_edges_and_bounded_mix_minus() {
 }
 
 #[test]
-fn generated_status_stays_local_and_never_reaches_a_link() {
+fn generated_status_obeys_exact_audience_and_per_peer_telemetry_gate() {
     use rpt_advanced_core::{
         audio::{LinkAudioQueue, PcmRead, PcmStreamReader},
         controller::{ControllerSettings, CourtesySettings, NodeController, PreparedMedia},
@@ -632,49 +632,68 @@ fn generated_status_stays_local_and_never_reaches_a_link() {
             Some(0)
         }
     }
-    let (producer, mut consumer) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
-    let peer = AudioPeer::new(
-        "200",
-        Mode::TRANSCEIVE,
-        Quiet(PeerSignals::new()),
-        producer,
-        960,
-        100,
-    )
-    .unwrap();
-    let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
-    let (mut controller, mut control) = NodeController::new(
-        ControllerSettings::default(),
-        vec![],
-        vec![],
-        CourtesySettings::default(),
-    )
-    .unwrap();
-    assert!(
-        control
-            .queue_prepared_status(PreparedMedia::new_stream(Box::new(StatusStream(240))).unwrap())
-    );
-    let mut found_local = false;
-    for _ in 0..14 {
-        let mut rf = [0.0; 960];
+    for (targeted, allowed) in [(false, true), (false, false), (true, true), (true, false)] {
+        let signals = PeerSignals::new();
+        signals.set_telemetry_allowed(allowed);
+        let reply = signals.reply_target();
+        let (producer, mut consumer) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+        let peer =
+            AudioPeer::new("200", Mode::TRANSCEIVE, Quiet(signals), producer, 960, 100).unwrap();
+        let (mut links, mut dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
+        let (mut controller, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        assert!(
+            control.queue_prepared_status(
+                PreparedMedia::new_stream(Box::new(StatusStream(240)))
+                    .unwrap()
+                    .reply_to(targeted.then_some(reply))
+            )
+        );
+        let mut found_local = false;
+        let mut found_peer = false;
+        for _ in 0..14 {
+            let mut rf = [0.0; 960];
+            links
+                .process(
+                    &mut controller,
+                    false,
+                    &mut rf,
+                    rpt_advanced_core::link::SourcePosition::default(),
+                )
+                .unwrap();
+            assert_eq!(dispatcher.dispatch(1), 1);
+            let mut output = [0.0; 960];
+            consumer.read(&mut output);
+            found_peer |= output.iter().any(|sample| *sample > 0.0);
+            if rf.iter().any(|sample| *sample > 0.0) {
+                found_local = true;
+            }
+        }
+        assert_eq!(found_local, !targeted);
+        assert_eq!(found_peer, targeted && allowed);
+        // This gate filters only telemetry; it never suppresses ordinary local RF.
+        let mut rf = [0.25; 960];
         links
             .process(
                 &mut controller,
-                false,
+                true,
                 &mut rf,
                 rpt_advanced_core::link::SourcePosition::default(),
             )
             .unwrap();
-        assert_eq!(dispatcher.dispatch(1), 1);
+        dispatcher.dispatch(1);
         let mut output = [0.0; 960];
-        let shortfall = consumer.read(&mut output);
-        assert_eq!(shortfall, 960);
-        assert!(output.iter().all(|sample| *sample == 0.0));
-        if rf.iter().any(|sample| *sample > 0.0) {
-            found_local = true;
-        }
+        assert_eq!(consumer.read(&mut output), 0);
+        assert_eq!(output, [0.25; 960]);
     }
-    assert!(found_local);
 }
 
 #[test]
@@ -789,20 +808,25 @@ fn topology_publication_preserves_mode_and_excludes_nonforwarding_sources() {
 
 #[test]
 fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
+    let selected_source = std::hint::black_box(Peer::selected_source);
     let mut peer = Peer::new("200").unwrap();
+    assert_eq!(peer.deadline_ms(), None);
     let epoch = peer.activity(true, 0).unwrap();
+    assert_eq!(peer.deadline_ms(), Some(1000));
     assert_eq!(peer.query(epoch, "100").unwrap(), "K? * 100 0 0");
     assert!(!peer.accept_key(epoch, "100", "200", true));
     assert!(peer.accept_key(epoch, "100", "300", true));
     assert!(!peer.accept_key(epoch, "100", "400", true));
-    assert_eq!(peer.selected_source(), "300");
+    assert_eq!(selected_source(&peer), "300");
     assert!(peer.activity(true, 999).is_none());
     let next = peer.activity(true, 1000).unwrap();
+    assert_eq!(peer.deadline_ms(), Some(2000));
     peer.query(next, "100").unwrap();
     assert!(!peer.accept_key(epoch, "100", "400", true));
     peer.activity(false, 1001);
+    assert_eq!(peer.deadline_ms(), None);
     assert!(!peer.accept_key(next, "100", "400", true));
-    assert_eq!(peer.selected_source(), "300");
+    assert_eq!(selected_source(&peer), "300");
     assert!(peer.query(next, "100").is_none());
 }
 
@@ -810,11 +834,15 @@ fn keyed_source_first_downstream_reply_wins_only_during_active_epoch() {
 fn digits_expire_outside_audio_and_hash_cancels_timeout() {
     let mut peer = Peer::new("200").unwrap();
     assert!(peer.digit('*', 10));
+    assert_eq!(peer.deadline_ms(), Some(3010));
     assert!(!peer.expire_digit(3009));
     assert!(peer.expire_digit(3010));
+    assert_eq!(peer.deadline_ms(), None);
     assert!(!peer.expire_digit(3011));
     peer.digit('1', 4000);
+    assert_eq!(peer.deadline_ms(), Some(7000));
     peer.digit('#', 4001);
+    assert_eq!(peer.deadline_ms(), None);
     assert!(!peer.expire_digit(8000));
 }
 
@@ -903,7 +931,12 @@ fn receive_activity_primes_conceals_brief_gaps_drains_and_honors_eof() {
     assert!(receive.rendered(Some(10), 960));
     assert!(!receive.should_render(3, 2080, true, 960));
     assert!(!receive.rendered(None, 960));
-    assert!(ReceiveState::new(0).is_err());
+    // Invoke the public constructor, rather than optimizing constant-invalid
+    // inputs away in release-profile coverage.
+    let construct = std::hint::black_box(ReceiveState::new);
+    for rate in [0, 48001] {
+        assert!(construct(rate).is_err());
+    }
 }
 
 #[test]

@@ -37,9 +37,11 @@ impl AccessPolicy {
 
     /// Return whether an authenticated node is permitted by this policy.
     pub fn allows(&self, node: &str, verified: bool) -> bool {
+        let node =
+            crate::link::PeerIdentity::canonical_operator(node).unwrap_or_else(|_| node.to_owned());
         verified
-            && !self.deny.iter().any(|entry| entry == node)
-            && (self.allow.is_empty() || self.allow.iter().any(|entry| entry == node))
+            && !self.deny.iter().any(|entry| entry == &node)
+            && (self.allow.is_empty() || self.allow.iter().any(|entry| entry == &node))
     }
 
     /// Borrow the validated allowlist entries.
@@ -70,7 +72,10 @@ fn parse_list(list: &str) -> Result<Vec<String>, AccessListError> {
         if start == cursor {
             return Err(AccessListError);
         }
-        entries.push(list[start..cursor].to_owned());
+        let node = &list[start..cursor];
+        entries.push(
+            crate::link::PeerIdentity::canonical_operator(node).unwrap_or_else(|_| node.to_owned()),
+        );
         skip_spaces(bytes, &mut cursor);
         if cursor == bytes.len() {
             return Ok(entries);

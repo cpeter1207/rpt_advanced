@@ -11,6 +11,197 @@ static LOOKUP_MODE: AtomicU8 = AtomicU8::new(0);
 static RADIO_OPEN_MODE: AtomicU8 = AtomicU8::new(0);
 static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
 static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
+#[path = "services_echo_tests.rs"]
+mod echo;
+
+unsafe extern "C" fn echo_info(
+    _: *mut c_void,
+    _: *const c_void,
+    output: *mut abi::rptadv_peer_info_v1,
+) -> i32 {
+    unsafe { crate::fixture::peer_info(ptr::null_mut(), ptr::null(), output) };
+    let output = unsafe { &mut *output };
+    output.protocol = 2;
+    output.capabilities = 23;
+    output.account_generation = 3;
+    output.qso_generation = 4;
+    output.remote = abi::rptadv_peer_bytes_v1 {
+        data: b"123456".as_ptr(),
+        length: 6,
+    };
+    output.callsign = abi::rptadv_peer_bytes_v1 {
+        data: b"W1XYZ-R".as_ptr(),
+        length: 7,
+    };
+    0
+}
+
+#[test]
+fn mixed_protocol_host_dispatch_uses_each_peers_copied_capabilities() {
+    unsafe extern "C" fn info(
+        _: *mut c_void,
+        _: *const c_void,
+        output: *mut abi::rptadv_peer_info_v1,
+    ) -> i32 {
+        let output = unsafe { &mut *output };
+        *output = abi::rptadv_peer_info_v1 {
+            struct_size: size_of::<abi::rptadv_peer_info_v1>() as u32,
+            abi_version: 1,
+            protocol: 1,
+            capabilities: 0,
+            account_generation: 0,
+            qso_generation: 0,
+            remote: abi::rptadv_peer_bytes_v1 {
+                data: b"2000".as_ptr(),
+                length: 4,
+            },
+            callsign: abi::rptadv_peer_bytes_v1 {
+                data: ptr::null(),
+                length: 0,
+            },
+            local: abi::rptadv_peer_bytes_v1 {
+                data: b"1000".as_ptr(),
+                length: 4,
+            },
+        };
+        0
+    }
+    let (prepared, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    assert!(prepared.async_owner().is_some());
+    assert!(prepared.prepared_media());
+    let services = host_services(|table| {
+        *table = prepared.services.0;
+        table.peer_info = Some(info);
+        table.peer_write = unsafe { (*crate::fixture::host_descriptor()).peer_write };
+        table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
+    });
+    let mut peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
+    assert!(
+        peer.async_owner().is_none(),
+        "a PCM peer must not inherit another protocol's async callbacks"
+    );
+    assert!(
+        !peer.prepared_media(),
+        "a PCM peer must not use globally present codec callbacks"
+    );
+    assert_eq!(peer.identity().node(), "2000");
+    assert_eq!(peer.callsign(), "");
+    assert_eq!(peer.generations(), (0, 0));
+    assert!(matches!(
+        peer.read_source(SourceCompletion::Pending, |_| 0),
+        Err(Error::Operation)
+    ));
+    assert!(matches!(
+        peer.send_human_text("W1XYZ", "Hello"),
+        Err(Error::Operation)
+    ));
+}
+
+#[test]
+fn source_read_preserves_prefix_credit_provenance_and_finite_acknowledgement() {
+    unsafe extern "C" fn read(
+        _: *mut c_void,
+        _: *mut c_void,
+        drained: u32,
+        sink: *const abi::rptadv_peer_source_sink_v1,
+        text: abi::rptadv_peer_source_text_v1,
+        context: *mut c_void,
+        output: *mut abi::rptadv_peer_source_result_v1,
+    ) -> i32 {
+        assert!(drained <= 2);
+        let credit = if drained == 0 { 2 } else { 0 };
+        let sink = unsafe { &*sink };
+        let pcm = [0.25; 4];
+        assert_eq!(
+            unsafe { sink.audio.unwrap()(sink.context, 12, pcm.as_ptr(), pcm.len(), 1) },
+            credit
+        );
+        assert_eq!(
+            unsafe { sink.gap.unwrap()(sink.context, 16, 3) },
+            credit as u32
+        );
+        unsafe {
+            text.unwrap()(
+                context,
+                abi::rptadv_peer_bytes_v1 {
+                    data: b"W1XYZ-R".as_ptr(),
+                    length: 7,
+                },
+                abi::rptadv_peer_bytes_v1 {
+                    data: b"Hello".as_ptr(),
+                    length: 5,
+                },
+            )
+        };
+        let output = unsafe { &mut *output };
+        output.progress = drained;
+        output.activity = 1;
+        output.finish_pending = 1;
+        output.state = 1;
+        output.represented_node_number = 123456;
+        0
+    }
+    let (prepared, _) = crate::link::session::tests::peer_with_egress(8000, true, true);
+    let services = host_services(|table| {
+        *table = prepared.services.0;
+        table.peer_info = Some(echo_info);
+        table.peer_read_source = Some(read);
+        table.peer_destroy = unsafe { (*crate::fixture::host_descriptor()).peer_destroy };
+    });
+    let mut peer = unsafe { services.peer(crate::fixture::peer()) }.unwrap();
+    for (completion, code) in [
+        (SourceCompletion::Pending, 0),
+        (SourceCompletion::Drained, 1),
+        (SourceCompletion::Cancelled, 2),
+    ] {
+        let mut seen = Vec::new();
+        let result = peer
+            .read_source(completion, |input| {
+                match input {
+                    SourceInput::Audio {
+                        start,
+                        samples,
+                        concealed,
+                    } => {
+                        assert_eq!((start, samples, concealed), (12, &[0.25; 4][..], true));
+                        seen.push("audio");
+                    }
+                    SourceInput::Gap { start, count } => {
+                        assert_eq!((start, count), (16, 3));
+                        seen.push("gap");
+                    }
+                    SourceInput::Text {
+                        sender,
+                        body,
+                        represented_node_number,
+                    } => {
+                        assert_eq!((sender, body), ("W1XYZ-R", "Hello"));
+                        assert_eq!(represented_node_number, 123456);
+                        seen.push("text");
+                    }
+                }
+                2
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            if code == 0 {
+                vec!["audio", "gap", "text"]
+            } else {
+                vec!["text"]
+            }
+        );
+        assert_eq!(
+            (
+                result.progress,
+                result.activity,
+                result.finish_pending,
+                result.closed
+            ),
+            (code, Some(true), true, false)
+        );
+    }
+}
 
 #[test]
 fn scheduler_notice_preserves_borrowed_utf8() {
@@ -48,9 +239,9 @@ fn site_bridge_rejects_a_host_without_the_site_contract() {
     ));
     table = unsafe { crate::fixture::host_descriptor().read() };
     for length in [
-        std::mem::offset_of!(abi::rptadv_host_services_v8, radio_site_bind),
-        std::mem::offset_of!(abi::rptadv_host_services_v8, radio_site_publish),
-        std::mem::offset_of!(abi::rptadv_host_services_v8, radio_site_snapshot),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_bind),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_publish),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_snapshot),
     ] {
         table.struct_size = length as u32;
         assert!(matches!(
@@ -333,7 +524,7 @@ fn direct_table_requires_both_activation_and_destroy() {
     ));
 }
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v8)) -> HostServices {
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v9)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -631,7 +822,7 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v8, peer_step_attach) as u32;
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_step_attach) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
@@ -641,7 +832,7 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v8, peer_observe) as u32;
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_observe) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
@@ -651,13 +842,13 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v8, peer_destroy)
+    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v9, peer_destroy)
         + size_of::<usize>() * 2) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v8>() as u32;
+    table.struct_size = size_of::<abi::rptadv_host_services_v9>() as u32;
     table.peer_step_stop = Some(stop_only);
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -669,13 +860,13 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 8;
+    table.abi_version = 9;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.hst8\0";
+    table.capability = *b"rptadv.hst9\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },

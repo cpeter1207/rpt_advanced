@@ -9,8 +9,8 @@ use crate::{
     access::AccessPolicy,
     command::{DtmfCommandMap, LinkAction},
     link::{
-        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, PeerReply,
-        Protocol, RetryAttempt, TopologyManager,
+        AdmissionError, GroupMemberSelection, GroupSelection, LinkManager, Mode, PeerIdentity,
+        PeerReply, Protocol, ProtocolId, RetryAttempt, TopologyManager,
     },
     schedule::CivilTime,
 };
@@ -95,6 +95,8 @@ pub enum LinkEffect {
     },
     /// Change the live node's parrot state; apply buffer lifecycle work on control.
     ParrotEnabled(bool),
+    /// Already-authorized account telemetry selection; runtime applies the policy.
+    EchoTelemetry(crate::config::EchoLinkTelemetry),
     /// Cancel only the currently admitted message attempt on the audio owner.
     CancelMessage,
     /// No physical operation is needed (for example resumed retry intent).
@@ -379,21 +381,25 @@ impl NodeLinkControl {
         if !self.admitting {
             return Err(AdmissionError::Stale);
         }
+        let remote =
+            PeerIdentity::canonical_operator(remote).map_err(|_| AdmissionError::Identity)?;
         self.manager.authorize_incoming_member(
-            remote,
+            &remote,
             verified,
             &self.policy,
-            self.group_member(remote).as_ref(),
+            self.group_member(&remote).as_ref(),
         )
     }
     /// Recheck and publish a directory-verified incoming peer.
     pub fn accept(&mut self, remote: &str, verified: bool) -> Result<(), AdmissionError> {
-        self.authorize(remote, verified)?;
+        let remote =
+            PeerIdentity::canonical_operator(remote).map_err(|_| AdmissionError::Identity)?;
+        self.authorize(&remote, verified)?;
         self.manager.admit_incoming_member(
-            remote,
+            &remote,
             verified,
             &self.policy,
-            self.group_member(remote),
+            self.group_member(&remote),
         )
     }
     pub(super) fn schedule(&self) -> Option<&LinkScheduler> {
@@ -514,7 +520,23 @@ impl NodeLinkControl {
         if operation.reply.as_ref().is_some_and(PeerReply::ended) {
             return Err(AdmissionError::Stale);
         }
-        let remote = operation.command.node;
+        let remote = if matches!(
+            operation.command.action,
+            LinkAction::Monitor
+                | LinkAction::LocalMonitor
+                | LinkAction::Transceive
+                | LinkAction::PermanentMonitor
+                | LinkAction::PermanentLocalMonitor
+                | LinkAction::PermanentTransceive
+                | LinkAction::Disconnect
+                | LinkAction::DisconnectPermanent
+                | LinkAction::Command
+        ) {
+            PeerIdentity::canonical_operator(&operation.command.node)
+                .map_err(|_| AdmissionError::Identity)?
+        } else {
+            operation.command.node
+        };
         let effect = match operation.command.action {
             LinkAction::CancelMessage => LinkEffect::CancelMessage,
             action @ (LinkAction::Message | LinkAction::SiteStatus) => {
@@ -649,6 +671,11 @@ impl NodeLinkControl {
                 }
             }
             LinkAction::Command => {
+                if PeerIdentity::from_operator(&remote)
+                    .is_ok_and(|identity| identity.protocol() == ProtocolId::EchoLink)
+                {
+                    return Err(AdmissionError::UnsupportedRoute);
+                }
                 if remote == self.local
                     || !self.policy.allows(&remote, true)
                     || (operation.digit.is_none() && !directory_verified)
@@ -691,7 +718,9 @@ impl NodeLinkControl {
             | LinkAction::LastKeyed
             | LinkAction::FullStatus
             | LinkAction::Time) => LinkEffect::Telemetry(action, operation.reply),
-            action @ (LinkAction::ParrotEnable | LinkAction::ParrotDisable) => {
+            action @ (LinkAction::ParrotEnable
+            | LinkAction::ParrotDisable
+            | LinkAction::EchoTelemetry) => {
                 let commands = if let Some(reply) = &operation.reply {
                     self.peer_commands
                         .iter_mut()
@@ -707,7 +736,18 @@ impl NodeLinkControl {
                 }) {
                     return Err(AdmissionError::Denied);
                 }
-                LinkEffect::ParrotEnabled(action == LinkAction::ParrotEnable)
+                if action == LinkAction::EchoTelemetry {
+                    use crate::config::EchoLinkTelemetry as Mode;
+                    LinkEffect::EchoTelemetry(match remote.as_str() {
+                        "0" => Mode::Off,
+                        "1" => Mode::On,
+                        "2" => Mode::Follow,
+                        "3" => Mode::Demand,
+                        _ => return Err(AdmissionError::Invalid),
+                    })
+                } else {
+                    LinkEffect::ParrotEnabled(action == LinkAction::ParrotEnable)
+                }
             }
             LinkAction::AdminUnlock | LinkAction::AdminLock | LinkAction::PadTest => {
                 return Err(AdmissionError::Denied);

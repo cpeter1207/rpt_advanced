@@ -4,6 +4,7 @@ use crate::{
     Error, abi,
     directory::{Backend, BackendError, DirectoryResolver},
 };
+use rpt_advanced_core::link::{PeerIdentity, ProtocolId};
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
@@ -28,9 +29,63 @@ pub enum PeerInput<'a> {
     RadioUnkey,
 }
 
+/// Borrowed provider-owned source input. Only the accepted prefix transfers.
+pub enum SourceInput<'a> {
+    /// Codec-rate PCM and its original position; codec PLC bypasses detection.
+    Audio {
+        /// Original source-rate position of the offered prefix.
+        start: u64,
+        /// Borrowed decoded PCM, retained by the provider until accepted.
+        samples: &'a [f32],
+        /// Codec-native PLC, never fresh in-band detector input.
+        concealed: bool,
+    },
+    /// Unresolved counted loss in the same source timeline.
+    Gap {
+        /// Original source position of the missing prefix.
+        start: u64,
+        /// Offered source samples, not native output frames.
+        count: usize,
+    },
+    /// Represented sender and literal body; never an ASL control envelope.
+    Text {
+        /// Represented sender; admission identity remains with the peer.
+        sender: &'a str,
+        /// Literal UTF-8 body, not a command or message template.
+        body: &'a str,
+        /// Fresh represented identity from the same read turn, zero if unresolved.
+        represented_node_number: u32,
+    },
+}
+
+/// Exact disposition of the previously accepted product-ring prefix.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SourceCompletion {
+    /// The product still owns accepted audio.
+    #[default]
+    Pending = 0,
+    /// The exact finite token reached successful playout.
+    Drained = 1,
+    /// An explicit generation retirement discarded the accepted prefix.
+    Cancelled = 2,
+}
+
+/// Copied provider progress and selected activity, separate from PCM occupancy.
+pub struct SourceRead {
+    /// 0 idle, 1 advanced, 2 blocked, 3 provider media drained.
+    pub progress: u32,
+    /// Selected key/unkey only; heartbeats and contenders are not activity.
+    pub activity: Option<bool>,
+    /// The provider needs a finite product-ring token, not an implicit flush.
+    pub finish_pending: bool,
+    /// Terminal state after both provider and product media drained.
+    pub closed: bool,
+}
+
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(abi::rptadv_host_services_v8);
+pub struct HostServices(abi::rptadv_host_services_v9);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
@@ -151,7 +206,7 @@ impl Backend for HostServices {
     }
 }
 
-fn complete(api: &abi::rptadv_host_services_v8) -> bool {
+fn complete(api: &abi::rptadv_host_services_v9) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -176,6 +231,7 @@ fn complete(api: &abi::rptadv_host_services_v8) -> bool {
         api.peer_send_text.is_some(),
         api.peer_send_digit.is_some(),
         api.peer_destroy.is_some(),
+        api.peer_info.is_some(),
     ]
     .into_iter()
     .all(|present| present)
@@ -190,15 +246,15 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v8) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v9) -> Result<Self, Error> {
         if pointer.is_null() {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        if size < size_of::<abi::rptadv_host_services_v8>() {
+        if size < size_of::<abi::rptadv_host_services_v9>() {
             return Err(Error::Admission);
         }
-        // ABI 8 requires the complete table, including stateful codec preparation.
+        // ABI 9 requires the complete table, including stateful codec preparation.
         let api = unsafe { pointer.read() };
         let async_count = [
             api.peer_step_attach.is_some(),
@@ -219,13 +275,14 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
-        if api.abi_version != 8
-            || api.capability != *b"rptadv.hst8\0"
+        if api.abi_version != 9
+            || api.capability != *b"rptadv.hst9\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 6)
             || (egress_count == 6 && async_count != 3)
             || (egress_count == 0 && api.peer_write.is_none())
+            || (api.peer_read_source.is_some() && egress_count != 6)
         {
             return Err(Error::Admission);
         }
@@ -345,6 +402,24 @@ impl HostServices {
             self.0.scheduler_notice.unwrap()(self.0.context, text.as_ptr().cast(), text.len());
         }
     }
+    /// Query optional account diagnostics on control, even with no live peers.
+    /// A failed query is unavailable evidence, not proof that an account is offline.
+    pub fn echo_account_status(&self, local: &str) -> Result<Option<String>, BackendError> {
+        let Some(call) = self.0.echo_account_status else {
+            return Ok(None);
+        };
+        let mut result = DirectoryResults::new();
+        let code = unsafe {
+            call(
+                self.0.context,
+                local.as_ptr().cast(),
+                local.len(),
+                Some(directory_text),
+                ptr::from_mut(&mut result).cast(),
+            )
+        };
+        result.finish(code)?.single()
+    }
     /// Child-reaper acquisition callback for process-backed media providers.
     pub fn reaper_acquire(&self) -> unsafe extern "C" fn() {
         self.0.reaper_acquire.unwrap()
@@ -396,14 +471,81 @@ impl HostServices {
             handle: NonNull::new(handle).ok_or(Error::Operation)?,
         })
     }
-    /// Wrap one peer whose ownership has transferred from the host callback.
+    /// Validate copied metadata, then adopt one peer from the host callback.
+    /// On error ownership stays with the caller; outbound dial destroys its own rejected handle.
     ///
     /// # Safety
     /// `handle` must be a unique live peer created by this same services table.
     pub unsafe fn peer(&self, handle: *mut c_void) -> Result<PeerIo, Error> {
+        let handle = NonNull::new(handle).ok_or(Error::Admission)?;
+        let mut raw: abi::rptadv_peer_info_v1 = unsafe { std::mem::zeroed() };
+        raw.struct_size = size_of_val(&raw) as u32;
+        raw.abi_version = 1;
+        if unsafe { self.0.peer_info.unwrap()(self.0.context, handle.as_ptr(), &mut raw) } != 0
+            || raw.struct_size < size_of_val(&raw) as u32
+            || raw.abi_version != 1
+        {
+            return Err(Error::Admission);
+        }
+        let protocol = match raw.protocol {
+            1 => ProtocolId::AllStarLink,
+            2 => ProtocolId::EchoLink,
+            _ => return Err(Error::Admission),
+        };
+        let bytes = |span: abi::rptadv_peer_bytes_v1, maximum: usize| {
+            if span.length > maximum || (span.data.is_null() && span.length != 0) {
+                return Err(Error::Admission);
+            }
+            let data = if span.length == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(span.data, span.length) }
+            };
+            std::str::from_utf8(data)
+                .map(str::to_owned)
+                .map_err(|_| Error::Admission)
+        };
+        let remote = bytes(raw.remote, 32)?;
+        let identity = PeerIdentity::parse(protocol, &remote).map_err(|_| Error::Admission)?;
+        let local = bytes(raw.local, 32)?;
+        let callsign = bytes(raw.callsign, 64)?;
+        let capabilities = raw.capabilities;
+        if identity.node() != remote
+            || local.is_empty()
+            || !local.bytes().all(|b| b.is_ascii_digit())
+            || capabilities & !31 != 0
+            || (capabilities & 1 != 0 && !self.peer_step_available())
+            || (capabilities & 2 != 0
+                && (capabilities & 1 == 0 || self.0.peer_prepare_audio.is_none()))
+            || (capabilities & 2 == 0 && self.0.peer_write.is_none())
+            || (capabilities & 16 != 0
+                && (protocol != ProtocolId::EchoLink
+                    || self.0.peer_read_source.is_none()
+                    || capabilities & 3 != 3))
+            || (protocol == ProtocolId::EchoLink
+                && capabilities & 4 != 0
+                && self.0.peer_send_human_text.is_none())
+            || !callsign
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-/*_".contains(&byte))
+            || (protocol == ProtocolId::EchoLink
+                && (raw.account_generation == 0
+                    || raw.qso_generation == 0
+                    || callsign.is_empty()
+                    || capabilities & 8 != 0
+                    || capabilities & 19 != 19))
+        {
+            return Err(Error::Admission);
+        }
         Ok(PeerIo {
             services: *self,
-            handle: NonNull::new(handle).ok_or(Error::Admission)?,
+            handle,
+            identity,
+            local,
+            callsign,
+            capabilities,
+            account_generation: raw.account_generation,
+            qso_generation: raw.qso_generation,
         })
     }
     /// Dial one peer while the supplied generation remains current.
@@ -440,7 +582,15 @@ impl HostServices {
         if code != 0 {
             return Err(Error::Operation);
         }
-        unsafe { self.peer(handle) }
+        match unsafe { self.peer(handle) } {
+            Ok(peer) => Ok(peer),
+            Err(error) => {
+                if !handle.is_null() {
+                    unsafe { self.0.peer_destroy.unwrap()(self.0.context, handle) };
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -545,15 +695,39 @@ impl Drop for Radio {
 pub struct PeerIo {
     services: HostServices,
     handle: NonNull<c_void>,
+    identity: PeerIdentity,
+    local: String,
+    callsign: String,
+    capabilities: u32,
+    account_generation: u64,
+    qso_generation: u64,
 }
 // SAFETY: the handle is uniquely moved to one owner thread.
 unsafe impl Send for PeerIo {}
 impl PeerIo {
+    /// Canonical protocol-qualified identity copied before taking ownership.
+    pub fn identity(&self) -> &PeerIdentity {
+        &self.identity
+    }
+    /// Owning local controller node, copied before the host callback returns.
+    pub fn local(&self) -> &str {
+        &self.local
+    }
+    /// Validated callsign, empty when the IAX transport has no callsign metadata.
+    pub fn callsign(&self) -> &str {
+        &self.callsign
+    }
+    /// Admission generations copied from the provider-bound pending QSO.
+    pub fn generations(&self) -> (u64, u64) {
+        (self.account_generation, self.qso_generation)
+    }
+    /// Human-text routing support belongs to this connection, not the host table.
+    pub fn can_forward_text(&self) -> bool {
+        self.capabilities & 4 != 0
+    }
     /// Copy async registration inputs before callbacks can begin touching this peer.
     pub fn async_owner(&self) -> Option<(HostServices, *mut c_void)> {
-        self.services
-            .peer_step_available()
-            .then_some((self.services, self.handle.as_ptr()))
+        (self.capabilities & 1 != 0).then_some((self.services, self.handle.as_ptr()))
     }
     /// Observe on the same exclusive owner that performs peer I/O.
     pub fn observe(&self) -> Option<abi::rptadv_peer_observation_v1> {
@@ -657,6 +831,186 @@ impl PeerIo {
             .then_some(state.seen)
             .ok_or(Error::Hangup)
     }
+    /// Whether this peer retains unaccepted source prefixes and finite-boundary state.
+    pub fn source_media(&self) -> bool {
+        self.capabilities & 16 != 0
+    }
+
+    /// Read bounded provider-owned input; never copy or consume its rejected suffix.
+    pub fn read_source<F>(
+        &mut self,
+        completion: SourceCompletion,
+        dispatch: F,
+    ) -> Result<SourceRead, Error>
+    where
+        F: FnMut(SourceInput<'_>) -> usize,
+    {
+        if !self.source_media() {
+            return Err(Error::Operation);
+        }
+        struct State<F> {
+            dispatch: F,
+            failed: bool,
+            completing: bool,
+            text: Option<(String, String)>,
+        }
+        fn accept<F: FnMut(SourceInput<'_>) -> usize>(
+            state: &mut State<F>,
+            input: SourceInput<'_>,
+            maximum: usize,
+        ) -> usize {
+            // A prior burst's completion cannot acknowledge samples offered in
+            // this same turn. The provider retains them for the next read.
+            if state.completing && !matches!(&input, SourceInput::Text { .. }) {
+                return 0;
+            }
+            match catch_unwind(AssertUnwindSafe(|| (state.dispatch)(input))) {
+                Ok(count) if count <= maximum => count,
+                _ => {
+                    state.failed = true;
+                    0
+                }
+            }
+        }
+        unsafe extern "C" fn audio<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            start: u64,
+            data: *const f32,
+            count: usize,
+            concealed: u32,
+        ) -> usize {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            if count > 4096
+                || (data.is_null() && count != 0)
+                || concealed > 1
+                || start.checked_add(count as u64).is_none()
+            {
+                state.failed = true;
+                return 0;
+            }
+            let samples = if count == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(data, count) }
+            };
+            accept(
+                state,
+                SourceInput::Audio {
+                    start,
+                    samples,
+                    concealed: concealed == 1,
+                },
+                count,
+            )
+        }
+        unsafe extern "C" fn gap<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            start: u64,
+            count: u32,
+        ) -> u32 {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            if start.checked_add(u64::from(count)).is_none() {
+                state.failed = true;
+                return 0;
+            }
+            accept(
+                state,
+                SourceInput::Gap {
+                    start,
+                    count: count as usize,
+                },
+                count as usize,
+            ) as u32
+        }
+        unsafe extern "C" fn text<F: FnMut(SourceInput<'_>) -> usize>(
+            context: *mut c_void,
+            sender: abi::rptadv_peer_bytes_v1,
+            body: abi::rptadv_peer_bytes_v1,
+        ) {
+            let state = unsafe { &mut *context.cast::<State<F>>() };
+            let bytes = |span: abi::rptadv_peer_bytes_v1, maximum: usize| {
+                if span.length > maximum || span.length == 0 || span.data.is_null() {
+                    return None;
+                }
+                std::str::from_utf8(unsafe { std::slice::from_raw_parts(span.data, span.length) })
+                    .ok()
+            };
+            let (Some(sender), Some(body)) = (bytes(sender, 64), bytes(body, 4096)) else {
+                state.failed = true;
+                return;
+            };
+            if state.text.is_some() {
+                state.failed = true;
+            } else {
+                state.text = Some((sender.to_owned(), body.to_owned()));
+            }
+        }
+        let mut state = State {
+            dispatch,
+            failed: false,
+            completing: completion != SourceCompletion::Pending,
+            text: None,
+        };
+        let context = ptr::from_mut(&mut state).cast();
+        let sink = abi::rptadv_peer_source_sink_v1 {
+            struct_size: size_of::<abi::rptadv_peer_source_sink_v1>() as u32,
+            abi_version: 1,
+            context,
+            audio: Some(audio::<F>),
+            gap: Some(gap::<F>),
+        };
+        let mut result: abi::rptadv_peer_source_result_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of_val(&result) as u32;
+        result.abi_version = 1;
+        let code = unsafe {
+            self.services.0.peer_read_source.unwrap()(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                completion as u32,
+                &sink,
+                Some(text::<F>),
+                context,
+                &mut result,
+            )
+        };
+        if code != 0
+            || state.failed
+            || result.struct_size < size_of_val(&result) as u32
+            || result.abi_version != 1
+            || result.progress > 3
+            || result.activity > 2
+            || result.finish_pending > 1
+            || result.state > 3
+            || (result.represented_node_number != 0 && state.text.is_none())
+        {
+            return Err(Error::InvalidFrame);
+        }
+        if let Some((sender, body)) = state.text.take() {
+            accept(
+                &mut state,
+                SourceInput::Text {
+                    sender: &sender,
+                    body: &body,
+                    represented_node_number: result.represented_node_number,
+                },
+                usize::MAX,
+            );
+        }
+        if state.failed {
+            return Err(Error::InvalidFrame);
+        }
+        Ok(SourceRead {
+            progress: result.progress,
+            activity: match result.activity {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            },
+            finish_pending: result.finish_pending == 1,
+            closed: result.state == 3,
+        })
+    }
+
     /// Send one NUL-free text payload.
     pub fn send_text(&mut self, text: &CStr) -> Result<(), Error> {
         let bytes = text.to_bytes();
@@ -666,6 +1020,28 @@ impl PeerIo {
                 self.handle.as_ptr(),
                 bytes.as_ptr().cast(),
                 bytes.len(),
+            )
+        };
+        (code == 0).then_some(()).ok_or(Error::Write)
+    }
+    /// Send structured human content only through a capable EchoLink connection.
+    pub fn send_human_text(&mut self, sender: &str, body: &str) -> Result<(), Error> {
+        let operation = self
+            .services
+            .0
+            .peer_send_human_text
+            .filter(|_| self.identity.protocol() == ProtocolId::EchoLink && self.can_forward_text())
+            .ok_or(Error::Operation)?;
+        let bytes = |value: &str| abi::rptadv_peer_bytes_v1 {
+            data: value.as_ptr(),
+            length: value.len(),
+        };
+        let code = unsafe {
+            operation(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                bytes(sender),
+                bytes(body),
             )
         };
         (code == 0).then_some(()).ok_or(Error::Write)
@@ -695,7 +1071,7 @@ impl PeerIo {
     }
     /// Whether this host supports source-timed prepared media and readiness deadlines.
     pub(crate) fn prepared_media(&self) -> bool {
-        self.services.0.peer_prepare_audio.is_some()
+        self.capabilities & 2 != 0
     }
     /// Feed one retained encoder, reporting consumption and output independently.
     pub(crate) fn prepare_audio(
@@ -772,6 +1148,9 @@ impl PeerIo {
     }
     /// Publish the next relative wake; MAX clears the timer. PCM-only hosts ignore it.
     pub(crate) fn set_deadline(&mut self, after_ns: u64) -> Result<(), Error> {
+        if self.capabilities & 1 == 0 {
+            return Ok(());
+        }
         let Some(set) = self.services.0.peer_set_deadline else {
             return Ok(());
         };

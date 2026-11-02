@@ -568,6 +568,8 @@ dependencies = [
  "crossbeam-queue",
  "libc",
  "libloading",
+ "rptadv-control-standalone-adapter",
+ "rptadv-peer-support",
  "serde_json",
  "ureq",
 ]
@@ -577,6 +579,9 @@ name = "rptadv-asterisk-adapter"
 version = "0.1.0-alpha17"
 dependencies = [
  "bindgen",
+ "libloading",
+ "rptadv-control-standalone-adapter",
+ "rptadv-peer-support",
 ]
 
 [[package]]
@@ -623,6 +628,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rptadv-jitter-client"
+version = "0.1.0-alpha17"
+
+[[package]]
+name = "rptadv-peer-support"
+version = "0.1.0-alpha17"
+dependencies = [
+ "libc",
+ "libloading",
+ "rptadv-control-standalone-adapter",
+]
+
+[[package]]
 name = "rptadv-product"
 version = "0.1.0-alpha17"
 dependencies = [
@@ -634,6 +652,7 @@ dependencies = [
  "rpt-advanced-standalone",
  "rptadv-control-standalone-adapter",
  "rptadv-file-adapter",
+ "rptadv-peer-support",
  "rptadv-speech-adapter",
  "rtrb",
  "serde_json",

@@ -1,5 +1,9 @@
 //! Public-Asterisk implementation of the portable product host-services table.
 
+#[cfg(test)]
+#[path = "services/echo_tests.rs"]
+pub(crate) mod echo_tests;
+
 use crate::{
     bindings as ffi,
     connection::Connection,
@@ -9,11 +13,19 @@ use crate::{
     },
     radio::Radio,
 };
+use rptadv_peer_support::echolink::{
+    abi as echo,
+    host::{
+        AccountVisitor, Accounts, Error as EchoError, HostPeer, Preparation, Registration,
+        UpdateError, UpdateOutcome,
+    },
+};
 use std::{
     ffi::{CString, c_char, c_void},
     mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
     ptr,
+    sync::{Arc, Mutex},
 };
 
 pub(crate) unsafe fn text<'a>(pointer: *const c_char, length: usize) -> Option<&'a str> {
@@ -113,6 +125,24 @@ unsafe extern "C" fn scheduler_notice(_: *mut c_void, pointer: *const c_char, le
                 text.as_ptr(),
             );
         }
+    });
+}
+/// Metadata-only account failures on the existing host control owner.
+pub(crate) fn echo_notice(message: &str) {
+    boundary((), || {
+        let Ok(message) = CString::new(message) else {
+            return;
+        };
+        unsafe {
+            ffi::ast_log(
+                ffi::__LOG_ERROR as i32,
+                c"rust/asterisk/services.rs".as_ptr(),
+                0,
+                c"echolink".as_ptr(),
+                c"rpt_advanced: EchoLink: %s\n".as_ptr(),
+                message.as_ptr(),
+            )
+        };
     });
 }
 struct ReservedRadio {
@@ -286,7 +316,6 @@ unsafe extern "C" fn peer_dial(
     output: *mut *mut c_void,
 ) -> i32 {
     boundary(-1, || {
-        let _ = context;
         let Some(output) = (unsafe { output.as_mut() }) else {
             return -1;
         };
@@ -300,6 +329,26 @@ unsafe extern "C" fn peer_dial(
         let (Some(destination), Some(local), Some(current)) = (values.0, values.1, current) else {
             return -1;
         };
+        if let Some(remote) = destination.strip_prefix("EchoLink/") {
+            if unsafe { current(current_context) } == 0 {
+                return -1;
+            }
+            let Some(context) = (unsafe { context.cast::<HostContext>().as_ref() }) else {
+                return -1;
+            };
+            let peer = remote
+                .parse::<u32>()
+                .ok()
+                .and_then(|node| context.echo_accounts()?.account(local)?.dial(node).ok());
+            let Some(peer) = peer else {
+                return -1;
+            };
+            if unsafe { current(current_context) } == 0 {
+                return -1;
+            }
+            *output = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
+            return 0;
+        }
         let (Ok(destination), Ok(local)) = (CString::new(destination), CString::new(local)) else {
             return -1;
         };
@@ -307,7 +356,13 @@ unsafe extern "C" fn peer_dial(
             current(current_context) != 0
         }) {
             Ok(peer) => {
-                *output = Box::into_raw(Box::new(peer)).cast();
+                let remote = destination
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.rsplit_once('/'))
+                    .map(|(_, node)| node)
+                    .unwrap_or("");
+                *output = into_raw(peer, local.to_str().unwrap_or(""), remote);
                 0
             }
             Err(_) => -1,
@@ -315,8 +370,10 @@ unsafe extern "C" fn peer_dial(
     })
 }
 unsafe extern "C" fn peer_rate(_context: *mut c_void, peer: *const c_void) -> u32 {
-    boundary(0, || {
-        unsafe { peer.cast::<PeerIo>().as_ref() }.map_or(0, PeerIo::rate)
+    boundary(0, || match unsafe { peer.cast::<PeerHandle>().as_ref() } {
+        Some(HostPeer::Echo(_)) => 8000,
+        Some(HostPeer::Iax(peer)) => peer.io.rate(),
+        None => 0,
     })
 }
 unsafe extern "C" fn peer_bind_radio(
@@ -325,10 +382,17 @@ unsafe extern "C" fn peer_bind_radio(
     radio: *mut c_void,
 ) -> i32 {
     boundary(-1, || {
+        if matches!(
+            unsafe { peer.cast::<PeerHandle>().as_ref() },
+            Some(HostPeer::Echo(_))
+        ) {
+            return unsafe { radio.cast::<ReservedRadio>().as_ref() }
+                .map_or(-1, |radio| if radio.radio.is_some() { 0 } else { -1 });
+        }
         // SAFETY: the product lends uniquely owned peer/radio handles on control.
         let (Some(peer), Some(reserved)) = (unsafe {
             (
-                peer.cast::<PeerIo>().as_mut(),
+                iax_peer_mut(peer).map(|peer| &mut peer.io),
                 radio.cast::<ReservedRadio>().as_ref(),
             )
         }) else {
@@ -342,7 +406,7 @@ unsafe extern "C" fn peer_bind_radio(
 }
 unsafe extern "C" fn peer_ready(_context: *mut c_void, peer: *mut c_void) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerIo>().as_mut() }) else {
+        let Some(peer) = (unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }) else {
             return -1;
         };
         peer.ready().map_or(-1, i32::from)
@@ -355,7 +419,10 @@ unsafe extern "C" fn peer_read(
     event_context: *mut c_void,
 ) -> i32 {
     boundary(-1, || {
-        let (Some(peer), Some(event)) = (unsafe { peer.cast::<PeerIo>().as_mut() }, event) else {
+        let (Some(peer), Some(event)) = (
+            unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) },
+            event,
+        ) else {
             return -1;
         };
         peer.read(|input| unsafe {
@@ -380,7 +447,7 @@ unsafe extern "C" fn peer_send_text(
     length: usize,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerIo>().as_mut() }) else {
+        let Some(peer) = (unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }) else {
             return -1;
         };
         let Some(text) = (unsafe { text(text_pointer, length) }) else {
@@ -394,7 +461,7 @@ unsafe extern "C" fn peer_send_text(
 }
 unsafe extern "C" fn peer_send_digit(_context: *mut c_void, peer: *mut c_void, digit: u8) -> i32 {
     boundary(-1, || {
-        unsafe { peer.cast::<PeerIo>().as_mut() }
+        unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }
             .ok_or(())
             .and_then(|peer| peer.send_digit(digit as char).map_err(|_| ()))
             .map_or(-1, |()| 0)
@@ -407,7 +474,7 @@ unsafe extern "C" fn peer_write(
     count: usize,
 ) -> i32 {
     boundary(-1, || {
-        let Some(peer) = (unsafe { peer.cast::<PeerIo>().as_mut() }) else {
+        let Some(peer) = (unsafe { iax_peer_mut(peer).map(|peer| &mut peer.io) }) else {
             return -1;
         };
         if samples.is_null() && count != 0 {
@@ -424,19 +491,543 @@ unsafe extern "C" fn peer_write(
 unsafe extern "C" fn peer_destroy(_context: *mut c_void, peer: *mut c_void) {
     boundary((), || {
         if !peer.is_null() {
-            unsafe { drop(Box::from_raw(peer.cast::<PeerIo>())) };
+            unsafe { drop(Box::from_raw(peer.cast::<PeerHandle>())) };
         }
     });
 }
 
-struct Services(ffi::rptadv_host_services_v8);
+// Only Echo QSOs use provider serial/prepared callbacks here. Native Asterisk
+// channels retain their existing PCM worker and never receive these capabilities.
+unsafe fn echo_peer<'a>(
+    peer: *const c_void,
+) -> Option<&'a std::sync::Arc<rptadv_peer_support::echolink::host::Peer>> {
+    match unsafe { peer.cast::<PeerHandle>().as_ref() }? {
+        HostPeer::Echo(peer) => Some(peer),
+        HostPeer::Iax(_) => None,
+    }
+}
+
+unsafe extern "C" fn peer_step_attach(
+    _: *mut c_void,
+    peer: *mut c_void,
+    step: ffi::rptadv_peer_step_v1,
+    step_context: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let Some(output) = (unsafe { output.as_mut() }) else {
+            return -1;
+        };
+        *output = ptr::null_mut();
+        let Some(peer) = (unsafe { echo_peer(peer) }).cloned() else {
+            return -1;
+        };
+        match unsafe { peer.attach(step, step_context) } {
+            Ok(token) => {
+                *output = Box::into_raw(Box::new(token)).cast();
+                0
+            }
+            Err(_) => -1,
+        }
+    })
+}
+unsafe extern "C" fn peer_step_stop(_: *mut c_void, token: *mut c_void) {
+    if let Some(token) = unsafe { token.cast::<Registration>().as_ref() } {
+        token.stop();
+    }
+}
+unsafe extern "C" fn peer_step_wake(_: *mut c_void, token: *mut c_void) {
+    if let Some(token) = unsafe { token.cast::<Registration>().as_ref() } {
+        token.wake();
+    }
+}
+unsafe extern "C" fn peer_step_detach(_: *mut c_void, token: *mut c_void) {
+    if !token.is_null() {
+        unsafe { drop(Box::from_raw(token.cast::<Registration>())) };
+    }
+}
+unsafe extern "C" fn peer_set_deadline(_: *mut c_void, peer: *mut c_void, after: u64) -> i32 {
+    unsafe { echo_peer(peer) }.map_or(-1, |peer| {
+        unsafe { peer.set_deadline(after) }.map_or(-1, |()| 0)
+    })
+}
+unsafe extern "C" fn peer_prepare_audio(
+    _: *mut c_void,
+    peer: *mut c_void,
+    pcm: *const f32,
+    count: usize,
+    output: *mut u8,
+    capacity: usize,
+    flush: u32,
+    result: *mut ffi::rptadv_codec_encode_result_v1,
+) -> i32 {
+    boundary(-1, || {
+        let Some(peer) = (unsafe { echo_peer(peer) }) else {
+            return -1;
+        };
+        if result.is_null()
+            || unsafe { ptr::addr_of!((*result).struct_size).read() }
+                < size_of::<ffi::rptadv_codec_encode_result_v1>() as u32
+            || count > isize::MAX as usize / size_of::<f32>()
+            || capacity > isize::MAX as usize
+            || (count != 0 && pcm.is_null())
+            || (capacity != 0 && output.is_null())
+        {
+            return -1;
+        }
+        let pcm = if count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(pcm, count) }
+        };
+        let output = if capacity == 0 {
+            &mut []
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(output, capacity) }
+        };
+        unsafe { peer.prepare_audio(pcm, output, flush, result.cast()) }
+            .map_or(-1, |()| unsafe { (*result).status as i32 })
+    })
+}
+unsafe extern "C" fn peer_reset_encoder(_: *mut c_void, peer: *mut c_void) -> i32 {
+    unsafe { echo_peer(peer) }.map_or(-1, |peer| {
+        unsafe { peer.reset_encoder() }.map_or(-1, |()| 0)
+    })
+}
+unsafe extern "C" fn peer_send_prepared(
+    _: *mut c_void,
+    peer: *mut c_void,
+    bytes: *const u8,
+    count: usize,
+    frames: u32,
+    timestamp: u32,
+) -> i32 {
+    boundary(-1, || {
+        let Some(peer) = (unsafe { echo_peer(peer) }) else {
+            return -1;
+        };
+        if count > isize::MAX as usize || (bytes.is_null() && count != 0) {
+            return -1;
+        }
+        let bytes = if count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(bytes, count) }
+        };
+        match unsafe { peer.send_prepared(bytes, frames, timestamp) } {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(_) => -1,
+        }
+    })
+}
+unsafe extern "C" fn peer_elapsed_ms(_: *mut c_void, peer: *mut c_void) -> u32 {
+    unsafe { echo_peer(peer) }
+        .and_then(|peer| peer.elapsed_ms().ok())
+        .map_or(0, |value| value.min(u64::from(u32::MAX)) as u32)
+}
+
+unsafe extern "C" fn peer_observe(
+    _: *mut c_void,
+    peer: *mut c_void,
+    output: *mut ffi::rptadv_peer_observation_v1,
+) -> i32 {
+    boundary(-1, || {
+        if output.is_null()
+            || unsafe { ptr::addr_of!((*output).struct_size).read() }
+                < size_of::<ffi::rptadv_peer_observation_v1>() as u32
+            || unsafe { ptr::addr_of!((*output).abi_version).read() } != 1
+        {
+            return -1;
+        }
+        let Some(peer) = (unsafe { echo_peer(peer) }) else {
+            return -1;
+        };
+        let raw = match unsafe { peer.observe() } {
+            Ok(raw) => raw,
+            Err(_) => return -1,
+        };
+        let mut result: ffi::rptadv_peer_observation_v1 = unsafe { std::mem::zeroed() };
+        result.struct_size = size_of::<ffi::rptadv_peer_observation_v1>() as u32;
+        result.abi_version = 1;
+        result.echo_valid = 1;
+        result.ingress_overflow_drops = raw.ingress_full_packets;
+        result.ingress_queued_packets = raw.ingress_queued_packets;
+        result.ingress_capacity_packets = raw.ingress_capacity_packets;
+        result.echo_ingress_bytes = raw.ingress_retained_bytes;
+        result.jitter_queued_packets = raw.jitter.queued_packets;
+        result.jitter_delay_samples = raw.jitter.delay_samples;
+        result.jitter_buffered_span_samples = raw.jitter.buffered_samples;
+        result.jitter_duplicate_drops = raw.jitter.duplicate_drops;
+        result.jitter_late_drops = raw.jitter.late_drops;
+        result.jitter_full_drops = raw.jitter.full_drops;
+        result.jitter_missing_samples = raw.jitter.missing_samples;
+        result.jitter_insertion_samples = raw.jitter.insertion_samples;
+        result.jitter_skipped_samples = raw.jitter.skipped_samples;
+        result.jitter_limit_resets = raw.jitter.limit_resets;
+        result.jitter_overload_drops = raw.jitter.overload_drops;
+        result.jitter_overload_span_samples = raw.jitter.overload_samples;
+        result.egress_datagrams = raw.direct_datagrams;
+        result.egress_would_block = raw.blocked_sends;
+        result.echo_state = raw.state;
+        result.echo_first_cause = raw.first_cause;
+        result.echo_codec = raw.codec;
+        result.echo_raw_receiving = raw.raw_receiving;
+        result.echo_selected = raw.selected;
+        result.echo_transport = raw.transport;
+        result.echo_last_valid_age_ms = raw.last_valid_age_ms;
+        result.echo_heartbeat_due_ms = raw.heartbeat_due_ms;
+        result.echo_liveness_due_ms = raw.liveness_due_ms;
+        result.echo_retained_age_ms = raw.retained_age_ms;
+        result.echo_stale_packets = raw.stale_packets;
+        result.echo_malformed_packets = raw.malformed_packets;
+        result.echo_out_of_order_packets = raw.out_of_order_packets;
+        result.echo_codec_plc_samples = raw.codec_plc_samples;
+        result.echo_fallback_gap_samples = raw.fallback_gap_samples;
+        result.echo_proxy_admitted = raw.proxy_admitted;
+        result.echo_text_admitted = raw.text_admitted;
+        result.echo_text_rejected = raw.text_rejected;
+        result.echo_cause_detail = raw.cause_detail;
+        unsafe { ptr::write(output, result) };
+        0
+    })
+}
+
+unsafe extern "C" fn peer_read_source(
+    _: *mut c_void,
+    peer: *mut c_void,
+    completion: u32,
+    sink: *const ffi::rptadv_peer_source_sink_v1,
+    text: ffi::rptadv_peer_source_text_v1,
+    text_context: *mut c_void,
+    output: *mut ffi::rptadv_peer_source_result_v1,
+) -> i32 {
+    boundary(-1, || {
+        if output.is_null()
+            || unsafe { ptr::addr_of!((*output).struct_size).read() }
+                < size_of::<ffi::rptadv_peer_source_result_v1>() as u32
+            || unsafe { ptr::addr_of!((*output).abi_version).read() } != 1
+        {
+            return -1;
+        }
+        let Some(peer) = (unsafe { echo_peer(peer) }) else {
+            return -1;
+        };
+        let output = unsafe { &mut *output };
+        let sink = unsafe { sink.as_ref() };
+        if sink.is_some_and(|sink| {
+            sink.struct_size < size_of::<ffi::rptadv_peer_source_sink_v1>() as u32
+                || sink.abi_version != 1
+        }) {
+            return -1;
+        }
+        let sink = sink.map(|sink| echo::PcmSink {
+            struct_size: size_of::<echo::PcmSink>() as u32,
+            abi_version: 1,
+            context: sink.context,
+            audio: sink.audio,
+            gap: sink.gap,
+        });
+        struct Text {
+            callback: ffi::rptadv_peer_source_text_v1,
+            context: *mut c_void,
+        }
+        unsafe extern "C" fn forward(
+            context: *mut c_void,
+            sender: echo::ByteSpan,
+            body: echo::ByteSpan,
+        ) {
+            let text = unsafe { &*context.cast::<Text>() };
+            if let Some(callback) = text.callback {
+                unsafe {
+                    callback(
+                        text.context,
+                        ffi::rptadv_peer_bytes_v1 {
+                            data: sender.data,
+                            length: sender.length,
+                        },
+                        ffi::rptadv_peer_bytes_v1 {
+                            data: body.data,
+                            length: body.length,
+                        },
+                    )
+                };
+            }
+        }
+        let mut text = Text {
+            callback: text,
+            context: text_context,
+        };
+        match unsafe {
+            peer.read(
+                completion,
+                sink.as_ref(),
+                Some(forward),
+                ptr::from_mut(&mut text).cast(),
+            )
+        } {
+            Ok(result) => {
+                output.progress = result.progress;
+                output.activity = result.activity;
+                output.finish_pending = result.finish_pending;
+                output.state = result.state;
+                output.represented_node_number = result.represented_node_number;
+                0
+            }
+            Err(_) => -1,
+        }
+    })
+}
+
+unsafe extern "C" fn peer_send_human_text(
+    _: *mut c_void,
+    peer: *mut c_void,
+    sender: ffi::rptadv_peer_bytes_v1,
+    body: ffi::rptadv_peer_bytes_v1,
+) -> i32 {
+    boundary(-1, || {
+        let Some(peer) = (unsafe { peer.cast::<PeerHandle>().as_ref() }) else {
+            return -1;
+        };
+        let span = |value: ffi::rptadv_peer_bytes_v1| echo::ByteSpan {
+            data: value.data,
+            length: value.length,
+        };
+        unsafe { peer.send_human_text(span(sender), span(body)) }.map_or(-1, |()| 0)
+    })
+}
+
+/// Stable account context; only control/lifecycle calls inspect this map.
+struct HostContext {
+    echo: Mutex<Option<Arc<Accounts>>>,
+}
+impl HostContext {
+    fn echo_accounts(&self) -> Option<Arc<Accounts>> {
+        self.echo
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+// Host control only: release host/account maps before waiting for the owner.
+unsafe extern "C" fn echo_account_status(
+    context: *mut c_void,
+    local: *const c_char,
+    length: usize,
+    sink: ffi::rptadv_text_sink_v1,
+    sink_context: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(context), Some(local), Some(sink)) = (
+            unsafe { context.cast::<HostContext>().as_ref() },
+            unsafe { text(local, length) },
+            sink,
+        ) else {
+            return -1;
+        };
+        if let Some(accounts) = context.echo_accounts() {
+            match accounts.observe(local) {
+                Ok(Some(record)) => {
+                    let line =
+                        rptadv_peer_support::echolink::host::describe_account(local, &record);
+                    unsafe { sink(sink_context, line.as_ptr().cast(), line.len()) };
+                }
+                Ok(None) => {}
+                Err(_) => return -1,
+            }
+        }
+        0
+    })
+}
+
+/// Owned immutable host table retained until all product/account callbacks stop.
+pub(crate) struct HostServicesOwner {
+    context: Box<HostContext>,
+    descriptor: Box<ffi::rptadv_host_services_v9>,
+}
+// The table/context allocations remain stable, and accounts are thread-safe.
+unsafe impl Send for HostServicesOwner {}
+impl HostServicesOwner {
+    /// Allocate the callback context before exposing its immutable table.
+    pub(crate) fn new() -> Self {
+        let mut context = Box::new(HostContext {
+            echo: Mutex::new(None),
+        });
+        let mut descriptor = Box::new(SERVICES.0);
+        descriptor.context = ptr::from_mut(context.as_mut()).cast();
+        Self {
+            context,
+            descriptor,
+        }
+    }
+    /// Borrow the immutable table through successful account/product stop.
+    pub(crate) fn descriptor(&self) -> &ffi::rptadv_host_services_v9 {
+        &self.descriptor
+    }
+    /// Prepare resolved accounts while their record spans are borrowed. Store
+    /// stable owners before product startup; activation is a separate phase.
+    /// # Safety
+    /// Product inspection and the preparation's backend code remain loaded
+    /// through successful product/account shutdown.
+    pub(crate) unsafe fn prepare_echo(
+        &mut self,
+        product: &ffi::rptadv_product_descriptor_v1,
+        configuration: &str,
+        mut preparation: Preparation<'_>,
+    ) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        unsafe {
+            visit_accounts(product, configuration, &mut |config, path| {
+                preparation.prepare(config, path)
+            })
+        }?;
+        *self
+            .context
+            .echo
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner()) = preparation.finish().map(Arc::new);
+        Ok(())
+    }
+
+    /// Apply the shared account/product transaction without retaining a host
+    /// context lock over a provider callback or product reload.
+    /// # Safety
+    /// Same lifetime/off-executor contract as preparation and account stop.
+    pub(crate) unsafe fn reload_echo(
+        &self,
+        product: &ffi::rptadv_product_descriptor_v1,
+        configuration: &str,
+        preparation: Preparation<'_>,
+        apply: impl FnOnce() -> bool,
+        restore: impl FnOnce() -> bool,
+    ) -> Result<UpdateOutcome, UpdateError> {
+        let (accounts, outcome) = unsafe {
+            preparation.reload(
+                self.context.echo_accounts(),
+                |visit| visit_accounts(product, configuration, visit),
+                apply,
+                restore,
+            )
+        }?;
+        *self
+            .context
+            .echo
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = accounts;
+        Ok(outcome)
+    }
+
+    /// Start accounts only after their captured product target is callable.
+    /// # Safety
+    /// Call off executors; retain product/backend code through stop and drain.
+    pub(crate) unsafe fn activate_echo(
+        &self,
+    ) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        if let Some(accounts) = self.context.echo_accounts() {
+            unsafe { accounts.activate() }?;
+        }
+        Ok(())
+    }
+
+    /// Gate producers and drain accepted admissions before stopping the product.
+    pub(crate) fn stop_echo(&self) -> Result<(), rptadv_peer_support::echolink::host::Error> {
+        if let Some(accounts) = self.context.echo_accounts() {
+            accounts.stop()?;
+        }
+        Ok(())
+    }
+}
+
+unsafe fn visit_accounts(
+    product: &ffi::rptadv_product_descriptor_v1,
+    configuration: &str,
+    mut visit: &mut AccountVisitor<'_>,
+) -> Result<(), EchoError> {
+    let inspect = product.inspect_configuration.ok_or(EchoError::Contract)?;
+    let result = unsafe {
+        inspect(
+            configuration.as_ptr().cast(),
+            configuration.len(),
+            Some(prepare_account),
+            ptr::from_mut(&mut visit).cast(),
+            None,
+            ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(EchoError::Contract)
+    }
+}
+
+unsafe extern "C" fn prepare_account(
+    context: *mut c_void,
+    node: *const ffi::rptadv_node_host_configuration,
+) -> i32 {
+    boundary(-1, || {
+        let Some(node) = (unsafe { node.as_ref() }) else {
+            return -1;
+        };
+        if node.struct_size as usize != size_of::<ffi::rptadv_node_host_configuration>() {
+            return -1;
+        }
+        let Some(config) = (unsafe { node.echolink.cast::<echo::AccountConfig>().as_ref() }) else {
+            return -1;
+        };
+        let Some(path) = (unsafe {
+            text(
+                node.echolink_secrets_file.cast(),
+                node.echolink_secrets_file_length,
+            )
+        }) else {
+            return -1;
+        };
+        let visit = unsafe { &mut *context.cast::<&mut AccountVisitor<'_>>() };
+        visit(
+            config,
+            (!path.is_empty()).then(|| std::path::Path::new(path)),
+        )
+        .map_or(-1, |()| 0)
+    })
+}
+
+/// Transfer an already claimed incoming QSO using this host's actual enum layout.
+/// # Safety
+/// Product code remains callable through the account's admission-drain barrier.
+/// The peer was claimed through incoming admission, which requires its source.
+pub(crate) unsafe fn incoming_echo(
+    incoming: unsafe extern "C" fn(*const ffi::rptadv_incoming_peer_v1, *mut c_void) -> i32,
+    peer: Arc<rptadv_peer_support::echolink::host::Peer>,
+) {
+    let source = peer.identity().source.expect("claimed incoming source");
+    let source = source.ip().to_string();
+    let bytes = |text: &str| ffi::rptadv_peer_bytes_v1 {
+        data: text.as_ptr(),
+        length: text.len(),
+    };
+    let request = ffi::rptadv_incoming_peer_v1 {
+        struct_size: size_of::<ffi::rptadv_incoming_peer_v1>() as u32,
+        abi_version: 1,
+        protocol: 2,
+        local: bytes(&peer.identity().local),
+        remote: bytes(peer.remote()),
+        source: bytes(&source),
+    };
+    let handle = Box::into_raw(Box::new(PeerHandle::Echo(peer))).cast();
+    if unsafe { incoming(&request, handle) } > 0 {
+        unsafe { drop(Box::from_raw(handle.cast::<PeerHandle>())) };
+    }
+}
+
+struct Services(ffi::rptadv_host_services_v9);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v8 {
-    struct_size: size_of::<ffi::rptadv_host_services_v8>() as u32,
-    abi_version: 8,
-    capability: *b"rptadv.hst8\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
+    struct_size: size_of::<ffi::rptadv_host_services_v9>() as u32,
+    abi_version: 9,
+    capability: *b"rptadv.hst9\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -461,27 +1052,108 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v8 {
     peer_send_digit: Some(peer_send_digit),
     peer_write: Some(peer_write),
     peer_destroy: Some(peer_destroy),
-    peer_step_attach: None,
-    peer_step_stop: None,
-    peer_step_detach: None,
-    peer_observe: None,
-    peer_prepare_audio: None,
-    peer_reset_encoder: None,
-    peer_send_prepared: None,
-    peer_elapsed_ms: None,
-    peer_step_wake: None,
-    peer_set_deadline: None,
+    peer_step_attach: Some(peer_step_attach),
+    peer_step_stop: Some(peer_step_stop),
+    peer_step_detach: Some(peer_step_detach),
+    peer_observe: Some(peer_observe),
+    peer_prepare_audio: Some(peer_prepare_audio),
+    peer_reset_encoder: Some(peer_reset_encoder),
+    peer_send_prepared: Some(peer_send_prepared),
+    peer_elapsed_ms: Some(peer_elapsed_ms),
+    peer_step_wake: Some(peer_step_wake),
+    peer_set_deadline: Some(peer_set_deadline),
     scheduler_notice: Some(scheduler_notice),
+    peer_info: Some(peer_info),
+    peer_read_source: Some(peer_read_source),
+    peer_send_human_text: Some(peer_send_human_text),
+    echo_account_status: Some(echo_account_status),
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v8 {
+#[cfg(test)]
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v9 {
     &SERVICES.0
 }
 
 /// Transfer one raw peer owner to the portable product.
-pub fn into_raw(peer: PeerIo) -> *mut c_void {
-    Box::into_raw(Box::new(peer)).cast()
+pub fn into_raw(peer: PeerIo, local: &str, remote: &str) -> *mut c_void {
+    Box::into_raw(Box::new(PeerHandle::Iax(IaxHandle {
+        io: peer,
+        local: local.into(),
+        remote: remote.into(),
+    })))
+    .cast()
+}
+
+type PeerHandle = HostPeer<IaxHandle>;
+struct IaxHandle {
+    io: PeerIo,
+    local: String,
+    remote: String,
+}
+
+// Native channel operations lend only their original uniquely owned IAX payload.
+// Echo uses the product mix and must never be cast to an Asterisk channel owner.
+unsafe fn iax_peer_mut<'a>(peer: *mut c_void) -> Option<&'a mut IaxHandle> {
+    match unsafe { peer.cast::<PeerHandle>().as_mut() }? {
+        HostPeer::Iax(peer) => Some(peer),
+        HostPeer::Echo(_) => None,
+    }
+}
+
+unsafe extern "C" fn peer_info(
+    _: *mut c_void,
+    peer: *const c_void,
+    output: *mut ffi::rptadv_peer_info_v1,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(peer), Some(output)) = (unsafe { peer.cast::<PeerHandle>().as_ref() }, unsafe {
+            output.as_mut()
+        }) else {
+            return -1;
+        };
+        if output.struct_size < size_of::<ffi::rptadv_peer_info_v1>() as u32
+            || output.abi_version != 1
+        {
+            return -1;
+        }
+        let (protocol, capabilities, account_generation, qso_generation, remote, local, callsign) =
+            match peer {
+                HostPeer::Iax(peer) => (1, 12, 0, 0, peer.remote.as_str(), peer.local.as_str(), ""),
+                HostPeer::Echo(peer) => {
+                    let identity = peer.identity();
+                    (
+                        2,
+                        identity.host_capabilities(),
+                        identity.account_generation,
+                        identity.qso_generation,
+                        peer.remote(),
+                        identity.local.as_str(),
+                        identity.callsign.as_str(),
+                    )
+                }
+            };
+        let bytes = |text: &str| ffi::rptadv_peer_bytes_v1 {
+            data: if text.is_empty() {
+                ptr::null()
+            } else {
+                text.as_ptr()
+            },
+            length: text.len(),
+        };
+        *output = ffi::rptadv_peer_info_v1 {
+            struct_size: size_of::<ffi::rptadv_peer_info_v1>() as u32,
+            abi_version: 1,
+            protocol,
+            capabilities,
+            account_generation,
+            qso_generation,
+            remote: bytes(remote),
+            callsign: bytes(callsign),
+            local: bytes(local),
+        };
+        0
+    })
 }
 
 /// Release a peer retained by the adapter after product admission declined ownership.

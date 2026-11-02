@@ -1,0 +1,663 @@
+//! Shared host owners keep the provider/context alive until accounts are retired.
+#![cfg(unix)]
+use rptadv_peer_support::echolink::{abi, host::Provider};
+use std::sync::atomic::{AtomicUsize, Ordering};
+mod support;
+
+#[test]
+fn malformed_foreign_identity_and_account_observations_do_not_publish_owned_peers() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = support::Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let fault =
+        unsafe { library.get::<unsafe extern "C" fn(usize)>(b"fixture_record_fault\0") }.unwrap();
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_peers\0") }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let config = abi::AccountConfig {
+        enabled: 1,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..Default::default()
+    };
+    let keys = abi::AccountSecrets {
+        struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+        abi_version: 1,
+        directory_password: abi::ByteSpan::default(),
+        proxy_password: abi::ByteSpan::default(),
+    };
+    let account = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    for mode in (1..=18).chain([22, 23]) {
+        unsafe { fault(mode) };
+        assert!(
+            matches!(account.dial(u32::MAX), Err(Error::Contract)),
+            "identity case {mode}"
+        );
+        assert_eq!(
+            unsafe { count() },
+            0,
+            "invalid identity retained an owned QSO"
+        );
+    }
+    for mode in 32..=39 {
+        unsafe { fault(mode) };
+        assert_eq!(
+            account.observe().map(|_| ()),
+            Err(if mode == 39 {
+                Error::Status(abi::Status::Failed)
+            } else {
+                Error::Contract
+            }),
+            "account case {mode}"
+        );
+    }
+    unsafe { fault(0) };
+    let peer = account.dial(u32::MAX).unwrap();
+    assert!(matches!(
+        unsafe { peer.attach(None, std::ptr::null_mut()) },
+        Err(Error::Contract)
+    ));
+    unsafe { fault(19) };
+    assert_eq!(peer.revalidate(), Err(Error::Contract));
+    unsafe { fault(0) };
+    for (capabilities, expected) in [(0, 0), (2, 1), (4, 18), (6, 19), (8, 4), (14, 23)] {
+        let mut identity = peer.identity().clone();
+        identity.capabilities = capabilities;
+        assert_eq!(identity.host_capabilities(), expected);
+    }
+    account.stop().unwrap();
+    assert_eq!(peer.revalidate(), Err(Error::Status(abi::Status::Closed)));
+}
+
+#[test]
+fn prepared_account_commit_keeps_handles_owned_and_rejects_cross_account_sources() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = support::Fixture::new("network");
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let mut config = abi::AccountConfig {
+        enabled: 1,
+        node_number: 1,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..Default::default()
+    };
+    let keys = abi::AccountSecrets {
+        struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+        abi_version: 1,
+        directory_password: abi::ByteSpan::default(),
+        proxy_password: abi::ByteSpan::default(),
+    };
+    let target = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    config.node_number = 42;
+    let failed = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(
+        target.apply_prepared(&failed),
+        Err(Error::Status(abi::Status::Full))
+    );
+    config.node_number = 2;
+    let prepared = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(target.apply_prepared(&target), Err(Error::Contract));
+    assert_eq!(target.apply_prepared(&prepared), Ok(()));
+    assert_eq!(
+        target.apply_prepared(&prepared),
+        Ok(()),
+        "retained snapshot can roll back"
+    );
+    config.local_node = abi::ByteSpan {
+        data: b"508422".as_ptr(),
+        length: 6,
+    };
+    let other_local = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(target.apply_prepared(&other_local), Err(Error::Contract));
+    let other_fixture = support::Fixture::new("network");
+    let other_provider =
+        unsafe { Provider::load(&other_fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    config.local_node = abi::ByteSpan {
+        data: b"524950".as_ptr(),
+        length: 6,
+    };
+    let other_context = unsafe { other_provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(target.apply_prepared(&other_context), Err(Error::Contract));
+    prepared.stop().unwrap();
+    assert_eq!(
+        target.apply_prepared(&prepared),
+        Err(Error::Status(abi::Status::Closed))
+    );
+    target.stop().unwrap();
+    assert_eq!(
+        target.apply_prepared(&failed),
+        Err(Error::Status(abi::Status::Closed))
+    );
+}
+
+#[test]
+fn account_activation_and_reload_keep_callback_and_local_ownership() {
+    use rptadv_peer_support::echolink::host::Error;
+    unsafe extern "C" fn notify(context: *mut std::ffi::c_void, event: *const abi::Event) {
+        let event = unsafe { &*event };
+        assert_eq!(event.status, abi::Status::Ok);
+        assert_eq!(event.generation, 4);
+        unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::Release);
+    }
+    let fixture = support::Fixture::new("network");
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let mut config = abi::AccountConfig {
+        enabled: 1,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..abi::AccountConfig::default()
+    };
+    let keys = abi::AccountSecrets {
+        struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+        abi_version: 1,
+        directory_password: abi::ByteSpan::default(),
+        proxy_password: abi::ByteSpan::default(),
+    };
+    let account = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    drop(provider);
+    let observed = account.observe().unwrap();
+    assert_eq!(
+        (
+            observed.state,
+            observed.generation,
+            observed.directory_failures
+        ),
+        (2, 4, 7)
+    );
+    let calls = AtomicUsize::new(0);
+    assert_eq!(
+        unsafe { account.activate(Some(notify), std::ptr::from_ref(&calls).cast_mut().cast()) },
+        Ok(())
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert_eq!(unsafe { account.reconfigure(&config, &keys) }, Ok(()));
+    config.node_number = 42;
+    assert_eq!(
+        unsafe { account.reconfigure(&config, &keys) },
+        Err(Error::Status(abi::Status::Full))
+    );
+    config.local_node = abi::ByteSpan {
+        data: b"508422".as_ptr(),
+        length: 6,
+    };
+    assert_eq!(
+        unsafe { account.reconfigure(&config, &keys) },
+        Err(Error::Contract)
+    );
+    account.stop().unwrap();
+    assert_eq!(
+        unsafe { account.activate(Some(notify), std::ptr::from_ref(&calls).cast_mut().cast()) },
+        Err(Error::Status(abi::Status::Closed))
+    );
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn prepared_peer_retains_its_account_without_an_external_owner() {
+    let fixture = support::Fixture::new("network");
+    let peer = fixture.peer();
+    assert_eq!(peer.revalidate(), Ok(()));
+    drop(peer);
+}
+
+#[test]
+fn outgoing_dial_accepts_absent_observed_source_but_incoming_admission_does_not() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let account = unsafe {
+        provider.prepare(
+            &abi::AccountConfig {
+                enabled: 1,
+                local_node: abi::ByteSpan {
+                    data: b"524950".as_ptr(),
+                    length: 6,
+                },
+                ..abi::AccountConfig::default()
+            },
+            &abi::AccountSecrets {
+                struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+                abi_version: 1,
+                directory_password: abi::ByteSpan::default(),
+                proxy_password: abi::ByteSpan::default(),
+            },
+        )
+    }
+    .unwrap();
+    assert!(matches!(
+        account.dial(1),
+        Err(Error::Status(abi::Status::Failed))
+    ));
+    assert!(matches!(
+        account.dial(0),
+        Err(Error::Status(abi::Status::Invalid))
+    ));
+    assert!(
+        matches!(account.dial(42), Err(Error::Contract)),
+        "a wrong returned station must not be adopted"
+    );
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_peers\0") }.unwrap();
+    assert_eq!(
+        unsafe { count() },
+        0,
+        "a failed owned dial must destroy its QSO"
+    );
+    let peer = account.dial(u32::MAX).unwrap();
+    assert_eq!(peer.remote(), "4294967295");
+    assert!(
+        peer.identity().source.is_none(),
+        "never fabricate an observed endpoint for an outbound call"
+    );
+    assert_eq!(peer.revalidate(), Ok(()));
+    drop(peer);
+    let create = unsafe {
+        library.get::<unsafe extern "C" fn() -> *mut abi::Qso>(b"fixture_outbound_peer\0")
+    }
+    .unwrap();
+    let destroy =
+        unsafe { library.get::<unsafe extern "C" fn(*mut abi::Qso)>(b"fixture_peer_destroy\0") }
+            .unwrap();
+    let qso = unsafe { create() };
+    let mut taken = 0;
+    assert!(
+        unsafe {
+            account.take_pending(&abi::Event {
+                struct_size: std::mem::size_of::<abi::Event>() as u32,
+                kind: 1,
+                qso,
+                generation: 9,
+                status: abi::Status::Pending,
+                taken: &mut taken,
+            })
+        }
+        .is_err()
+    );
+    assert_eq!(taken, 0);
+    unsafe { destroy(qso) };
+    account.stop().unwrap();
+    assert!(matches!(
+        account.dial(u32::MAX),
+        Err(Error::Status(abi::Status::Closed))
+    ));
+}
+
+use support::Fixture;
+
+#[test]
+fn pending_handoff_handles_rejection_and_execution_before_submit_returns() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let account = unsafe {
+        provider.prepare(
+            &abi::AccountConfig {
+                enabled: 1,
+                local_node: abi::ByteSpan {
+                    data: b"524950".as_ptr(),
+                    length: 6,
+                },
+                ..abi::AccountConfig::default()
+            },
+            &abi::AccountSecrets {
+                struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+                abi_version: 1,
+                directory_password: abi::ByteSpan::default(),
+                proxy_password: abi::ByteSpan::default(),
+            },
+        )
+    }
+    .unwrap();
+    let create =
+        unsafe { library.get::<unsafe extern "C" fn() -> *mut abi::Qso>(b"fixture_peer\0") }
+            .unwrap();
+    let destroy =
+        unsafe { library.get::<unsafe extern "C" fn(*mut abi::Qso)>(b"fixture_peer_destroy\0") }
+            .unwrap();
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_peers\0") }.unwrap();
+    for (accept, generation) in [(false, 9), (true, 8), (true, 9)] {
+        let qso = unsafe { create() };
+        let mut taken = 0;
+        let event = abi::Event {
+            struct_size: std::mem::size_of::<abi::Event>() as u32,
+            kind: 1,
+            qso,
+            generation,
+            status: abi::Status::Pending,
+            taken: &mut taken,
+        };
+        let result = unsafe {
+            account.dispatch_pending(&event, |pending| {
+                if !accept {
+                    return Err((Error::Status(abi::Status::Full), pending));
+                }
+                // Accepted control work may finish and release its payload before submit returns.
+                let claimed = std::thread::spawn(move || pending.claim()).join().unwrap();
+                if generation == 9 {
+                    let peer = claimed.unwrap();
+                    assert_eq!(
+                        peer.identity().source.unwrap().to_string(),
+                        "127.0.0.2:49152"
+                    );
+                    drop(peer);
+                } else {
+                    assert!(
+                        claimed.is_err(),
+                        "the off-executor task must revalidate the exact generation"
+                    );
+                }
+                Ok(())
+            })
+        };
+        assert_eq!(taken, u32::from(accept));
+        if accept {
+            assert_eq!(result, Ok(()));
+            assert_eq!(
+                unsafe { count() },
+                0,
+                "accepted failure must retire its owned QSO"
+            );
+        } else {
+            assert_eq!(result, Err(Error::Status(abi::Status::Full)));
+            assert_eq!(
+                unsafe { count() },
+                1,
+                "rejection must leave provider ownership intact"
+            );
+            unsafe { destroy(qso) };
+        }
+    }
+}
+
+#[test]
+fn account_retains_context_after_the_host_releases_its_provider() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = Fixture::new("lifecycle");
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let config = abi::AccountConfig::default();
+    let keys = abi::AccountSecrets {
+        struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+        abi_version: 1,
+        directory_password: abi::ByteSpan::default(),
+        proxy_password: abi::ByteSpan::default(),
+    };
+    let account = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    let prepared = unsafe { provider.prepare(&config, &keys) }.unwrap();
+    assert_eq!(
+        unsafe { account.activate(None, std::ptr::null_mut()) },
+        Err(Error::Status(abi::Status::Unsupported))
+    );
+    assert_eq!(
+        unsafe { account.reconfigure(&config, &keys) },
+        Err(Error::Status(abi::Status::Unsupported))
+    );
+    assert_eq!(
+        account.apply_prepared(&prepared),
+        Err(Error::Status(abi::Status::Unsupported))
+    );
+    assert!(matches!(
+        account.observe(),
+        Err(Error::Status(abi::Status::Unsupported))
+    ));
+    drop(prepared);
+    drop(provider);
+    assert!(matches!(
+        account.dial(1),
+        Err(rptadv_peer_support::echolink::host::Error::Status(
+            abi::Status::Unsupported
+        ))
+    ));
+    assert_eq!(account.stop(), Ok(()));
+    assert_eq!(
+        unsafe { account.reconfigure(&config, &keys) },
+        Err(Error::Status(abi::Status::Closed))
+    );
+    drop(account);
+    // A second open also verifies balanced context/account destruction in the fixture.
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    drop(provider);
+}
+
+#[test]
+fn incomplete_network_group_never_creates_a_context() {
+    let fixture = Fixture::new("partial");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    assert!(matches!(
+        unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) },
+        Err(rptadv_peer_support::echolink::host::Error::Contract)
+    ));
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_contexts\0") }.unwrap();
+    assert_eq!(unsafe { count() }, 0);
+}
+
+#[test]
+fn enabled_account_requires_complete_network_and_media_before_preparation() {
+    let fixture = Fixture::new("lifecycle");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    assert!(matches!(
+        unsafe {
+            provider.prepare(
+                &abi::AccountConfig {
+                    enabled: 1,
+                    ..abi::AccountConfig::default()
+                },
+                &abi::AccountSecrets {
+                    struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+                    abi_version: 1,
+                    directory_password: abi::ByteSpan::default(),
+                    proxy_password: abi::ByteSpan::default(),
+                },
+            )
+        },
+        Err(rptadv_peer_support::echolink::host::Error::Status(
+            abi::Status::Unsupported
+        ))
+    ));
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_accounts\0") }.unwrap();
+    assert_eq!(unsafe { count() }, 0);
+}
+
+#[test]
+fn failed_account_stop_keeps_its_foreign_state_and_provider_alive() {
+    let fixture = Fixture::new("lifecycle");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let account = unsafe {
+        provider.prepare(
+            &abi::AccountConfig {
+                node_number: 99,
+                ..abi::AccountConfig::default()
+            },
+            &abi::AccountSecrets {
+                struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+                abi_version: 1,
+                directory_password: abi::ByteSpan::default(),
+                proxy_password: abi::ByteSpan::default(),
+            },
+        )
+    }
+    .unwrap();
+    drop(provider);
+    assert!(account.stop().is_err());
+    drop(account);
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_contexts\0") }.unwrap();
+    assert_eq!(
+        unsafe { count() },
+        1,
+        "failed cleanup must retain the DSO/context owner"
+    );
+    let count =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_accounts\0") }.unwrap();
+    assert_eq!(
+        unsafe { count() },
+        1,
+        "failed cleanup must not destroy the foreign account"
+    );
+}
+
+#[test]
+fn incoming_ownership_is_claimed_only_after_fresh_provider_validation() {
+    let fixture = Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let account = unsafe {
+        provider.prepare(
+            &abi::AccountConfig {
+                enabled: 1,
+                local_node: abi::ByteSpan {
+                    data: b"524950".as_ptr(),
+                    length: 6,
+                },
+                ..abi::AccountConfig::default()
+            },
+            &abi::AccountSecrets {
+                struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+                abi_version: 1,
+                directory_password: abi::ByteSpan::default(),
+                proxy_password: abi::ByteSpan::default(),
+            },
+        )
+    }
+    .unwrap();
+    let create =
+        unsafe { library.get::<unsafe extern "C" fn() -> *mut abi::Qso>(b"fixture_peer\0") }
+            .unwrap();
+    let destroy =
+        unsafe { library.get::<unsafe extern "C" fn(*mut abi::Qso)>(b"fixture_peer_destroy\0") }
+            .unwrap();
+    let expire =
+        unsafe { library.get::<unsafe extern "C" fn(*mut abi::Qso)>(b"fixture_expire\0") }.unwrap();
+    let fault =
+        unsafe { library.get::<unsafe extern "C" fn(usize)>(b"fixture_record_fault\0") }.unwrap();
+    for mode in 0..=6 {
+        let qso = unsafe { create() };
+        let mut taken = 0;
+        let mut event = abi::Event {
+            struct_size: std::mem::size_of::<abi::Event>() as u32,
+            kind: 1,
+            qso,
+            generation: 9,
+            status: abi::Status::Pending,
+            taken: &mut taken,
+        };
+        match mode {
+            0 => event.struct_size = 0,
+            1 => event.kind = 0,
+            2 => event.status = abi::Status::Ok,
+            3 => event.taken = std::ptr::null_mut(),
+            4 => taken = 1,
+            5 => event.qso = std::ptr::null_mut(),
+            _ => unsafe { fault(23) },
+        }
+        assert!(
+            unsafe { account.take_pending(&event) }.is_err(),
+            "invalid event claimed: {mode}"
+        );
+        assert_eq!(taken, u32::from(mode == 4));
+        unsafe {
+            fault(0);
+            destroy(qso);
+        }
+    }
+    let mut claimed = None;
+    for (generation, expired) in [(8, false), (9, true), (9, false)] {
+        let qso = unsafe { create() };
+        if expired {
+            unsafe { expire(qso) };
+        }
+        let mut taken = 0;
+        let event = abi::Event {
+            struct_size: std::mem::size_of::<abi::Event>() as u32,
+            kind: 1,
+            qso,
+            generation,
+            status: abi::Status::Pending,
+            taken: &mut taken,
+        };
+        let peer = unsafe { account.take_pending(&event) };
+        if generation == 8 || expired {
+            assert!(peer.is_err());
+            assert_eq!(taken, 0, "rejected ownership remains with the provider");
+            unsafe { destroy(qso) };
+        } else {
+            let peer = peer.unwrap();
+            assert_eq!(taken, 1);
+            assert_eq!(
+                peer.identity().source.unwrap().to_string(),
+                "127.0.0.2:49152"
+            );
+            let identity =
+                std::hint::black_box(rptadv_peer_support::echolink::host::Peer::identity);
+            assert_eq!(identity(&peer).callsign, "W1XYZ-R");
+            assert_eq!(peer.identity().node_number, u32::MAX);
+            assert_eq!(
+                peer.identity().host_capabilities(),
+                23,
+                "Echo must never gain ASL remote commands"
+            );
+            struct Trace {
+                peer: std::sync::Arc<rptadv_peer_support::echolink::host::Peer>,
+                calls: AtomicUsize,
+                failures: AtomicUsize,
+            }
+            unsafe extern "C" fn step(context: *mut std::ffi::c_void) -> i32 {
+                let trace = unsafe { &*context.cast::<Trace>() };
+                if trace.peer.revalidate().is_err() {
+                    trace.failures.fetch_add(1, Ordering::Relaxed);
+                }
+                trace.calls.fetch_add(1, Ordering::Relaxed);
+                0
+            }
+            {
+                let trace = Trace {
+                    peer: std::sync::Arc::clone(&peer),
+                    calls: AtomicUsize::new(0),
+                    failures: AtomicUsize::new(0),
+                };
+                let registration = unsafe {
+                    peer.attach(Some(step), std::ptr::from_ref(&trace).cast_mut().cast())
+                }
+                .unwrap();
+                registration.wake();
+                registration.stop();
+                registration.wake();
+                assert_eq!(trace.calls.load(Ordering::Relaxed), 2);
+                assert_eq!(trace.failures.load(Ordering::Relaxed), 0);
+                drop(registration);
+                unsafe { expire(qso) };
+                assert!(
+                    unsafe {
+                        peer.attach(Some(step), std::ptr::from_ref(&trace).cast_mut().cast())
+                    }
+                    .is_err(),
+                    "final attach must revalidate, not trust the cached admission"
+                );
+            }
+            claimed = Some(peer);
+        }
+    }
+    drop(account);
+    drop(provider);
+    let contexts =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_contexts\0") }.unwrap();
+    assert_eq!(
+        unsafe { contexts() },
+        1,
+        "claimed QSO retains account/context/DSO"
+    );
+    drop(claimed);
+    assert_eq!(unsafe { contexts() }, 0);
+}

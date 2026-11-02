@@ -159,15 +159,16 @@ or package dependency check.
 
 ### Codec host cutover (2026-10-27, integration in progress)
 
-Product ABI 6 (`rptadv.prod6`) requires host-services ABI 8 (`rptadv.hst8`).
+Product ABI 7 (`rptadv.prod7`) requires host-services ABI 9 (`rptadv.hst9`).
 Prepared media carries encoder consumption, encoded bytes, real source span,
 wire-frame duration and timestamps independently. The standalone host delegates
 preparation/reset/send to IAX client ABI 2 and retains its codec catalog across
 calls and configuration reloads. Its listener uses server ABI 2 from the same
 IAX SONAME 2. The optional Asterisk host keeps its public PCM-only channel path;
 it does not load these codec providers or expose prepared-media operations.
-Both hosts require coordinated rebuilds. Product SONAME 1 and the existing
-control, radio and media-provider ABIs remain unchanged. Earlier ABI numbers
+Both hosts require coordinated rebuilds. Product SONAME 2 changes with this
+host/product boundary; the existing control, radio and media-provider ABIs
+remain unchanged. Earlier ABI numbers
 below describe their original changes, not compatible current host tables.
 
 Audit imports, undefined symbols, module requirements, package dependencies,
@@ -185,7 +186,7 @@ The standalone application still has no Asterisk dependency.
 
 At acceptance, the C module directly used Asterisk's taskprocessor and thread
 helper. The Rust migration has replaced that implementation: the metadata-only
-C loader selects versioned descriptors; `librptadv_product.so.1` owns lifecycle,
+C loader selects versioned descriptors; `librptadv_product.so.2` owns lifecycle,
 workers, and the single embedded controller core. It has no Asterisk imports.
 `librptadv_asterisk_adapter.so.1` supplies public host services through a C table,
 and `librptadv_control_asterisk_adapter.so.1` alone owns taskprocessor resources.

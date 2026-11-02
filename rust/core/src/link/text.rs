@@ -1,5 +1,5 @@
 //! Protocol-neutral human text, separated from authenticated protocol control.
-use super::{Protocol, identity};
+use super::{PeerIdentity, Protocol, identity};
 use std::sync::Arc;
 
 /// Authenticated transport/generation identity. A message's claimed sender is not authority.
@@ -29,6 +29,9 @@ pub struct HumanMessage {
     pub origin: TextOrigin,
     /// Claimed original station, for attribution/ASL flood exclusions only.
     pub source: String,
+    /// Protocol-qualified represented station, when the protocol can resolve it.
+    /// This is attribution/routing metadata, never authenticated command authority.
+    pub represented_source: Option<PeerIdentity>,
     /// Original destination, independent of ingress.
     pub audience: TextAudience,
     /// Literal UTF-8 body. Local synthesis bounds do not limit forwarding.
@@ -71,6 +74,7 @@ pub fn classify_asl(origin: TextOrigin, bytes: &[u8]) -> ClassifiedText {
         Some(HumanMessage {
             origin,
             source: source.to_owned(),
+            represented_source: PeerIdentity::from_operator(source).ok(),
             audience: if destination == "0" {
                 TextAudience::Broadcast
             } else {
