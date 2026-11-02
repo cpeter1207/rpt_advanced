@@ -5,6 +5,9 @@ announcements, and courtesy tones over the local transmitter. It can use the
 standalone radio service or the Asterisk adapter. This guide lists the settings
 for both. Use only the sections that apply to your station.
 
+For EchoLink accounts, ports, passwords, and dialing, see
+[EchoLink links](echolink.md).
+
 The installed example is `share/doc/rpt-advanced/examples/rpt_advanced.conf`
 under the installation prefix. Its example node is disabled and its ID text is
 empty. Installation does not replace an active configuration or activate a node.
@@ -44,7 +47,7 @@ Remote node numbers are decimal and limited to 63 digits. Scoped headers use
 one space between components. `general`,
 `identifier`, `announcement`, `courtesy`, `speech`, `morse`, `time`, `template`,
 `macro`, `event`, `permanent`, `schedule`, `message`, `tail`, `sensor`, `input`,
-`output`, `alarm`, and `fan` are reserved section names. Scoped identifier,
+`output`, `alarm`, `fan`, and `echolink` are reserved section names. Scoped identifier,
 announcement, courtesy, speech, Morse, time, template, macro, event, permanent, and schedule
 headers must name an existing node where their syntax includes a node name, which may be
 declared later in the file.
@@ -341,6 +344,7 @@ up to 63 DTMF digits from `0` through `9` and uppercase `A` through `D`.
 | `link_command_monitor` | `2` | Connect in monitor mode: receive from the peer without sending program audio. |
 | `link_command_transceive` | `3` | Connect in transceive mode. |
 | `link_command_remote` | `4` | Select a destination for remote commands. `#` exits this mode locally. |
+| `link_command_echo_telemetry` | empty | Set EchoLink telemetry mode: append `0` for off, `1` for on, `2` for follow, or `3` for demand. Requires admin unlock and `telemetry_dynamic = yes`. |
 | `link_command_status` | `70` | Report direct-link status. |
 | `link_command_disconnect_all` | `806` | Disconnect and pause permanent links, including configured links. Temporary links stay connected. New manual links remain allowed. |
 | `link_command_last_keyed` | `72` | Report the most recently active direct linked node. |

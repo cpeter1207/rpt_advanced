@@ -69,6 +69,37 @@ Synthetic-radio results do not establish USB hardware performance, radio
 deviation, or on-air audio quality. Those require separately approved hardware
 testing. No test command here activates the module on a running radio node.
 
+## EchoLink checks
+
+Use the clients and direct or Proxy service you plan to use on the air.
+Repeat these checks for each controller host you will run.
+
+1. Check local receive audio, transmit audio, PTT release, the station ID, and
+   `*722` time speech with links disconnected.
+2. Enable the account and check its log for login or directory errors. For
+   direct service, check the router's UDP port forwarding. A successful login
+   alone does not prove that incoming calls can reach the node.
+3. Call a test station with the normal EchoLink dial number. Confirm voice in
+   both directions. End the call and confirm PTT releases. Confirm a temporary
+   call stays disconnected.
+4. Have a test station call this node. Confirm the station identity, voice in
+   both directions, and normal disconnect. Leave a connected call silent long
+   enough to check that connection checks keep it open without holding PTT.
+5. Send a short chat message from the test station during voice audio. Hear the
+   sender and message on local RF. Confirm the spoken message is not sent back
+   as audio to EchoLink. Station information must not be spoken as chat.
+6. Reload a small gain or station-name change. Check that other accounts keep
+   working. Check account errors after a rejected change before assuming the
+   previous account is online. Restore the working settings when done.
+7. If using a Proxy, repeat the call checks through that Proxy. Interrupt its
+   connection and restore it. Check that the account logs in again and gets a
+   fresh station list. Confirm temporary calls stay ended and configured links
+   follow their normal retry rules.
+
+Record the controller and client versions, transport, codec, and result.
+Passing one station or transport does not verify the others. See the
+[EchoLink guide](echolink.md) for setup, ports, and dialing.
+
 ## Hardware acceptance procedure
 
 Run this only with the station owner's approval. Save the installed modules and

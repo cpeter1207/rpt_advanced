@@ -49,6 +49,11 @@ after startup. The controller can also run local-time events and configured
 link macros. See [AllStarLink links](allstarlink-status.md) for operating
 commands and [configuration](configuration.md) for settings.
 
+EchoLink uses a separate validated account for each local node. It supports
+direct IPv4 or a user-provided EchoLink Proxy, GSM voice, optional narrowband
+Speex, and incoming text spoken on local RF. Use the normal link commands with
+an EchoLink dial alias. See [EchoLink links](echolink.md) for setup and limits.
+
 The local `*82` keypad test reads back captured keys after unkey. Remote-command
 mode (`*4`) sends addressed digits directly or through relays and stays selected
 until `#`. Optional DTMF regeneration plays eligible incoming link digits only

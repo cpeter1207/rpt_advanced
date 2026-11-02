@@ -196,8 +196,8 @@ as defined by ADRs 0005, 0011, and 0012.
 The approved codec expansion uses protocol-neutral, replaceable shared adapters
 under ADR 0022. Other protocol adapters can reuse them without an IAX2 dependency;
 protocol-specific format IDs, negotiation and transport framing stay with each
-protocol adapter. This codec boundary is planned, not implemented support for
-additional protocols.
+protocol adapter. The implemented codec boundary does not itself add another
+protocol.
 The approved human-text codec converts supported messages to speech that mixes
 with live peer audio, including audio from the text sender, only at the local
 transmitter. This is incoming media, not polite controller telemetry, and never
@@ -207,7 +207,8 @@ remains non-audible.
 This applies to EchoLink and every other current or future text-capable protocol
 adapter. Failed synthesis skips only the local spoken rendition and logs an
 error, without Morse fallback, interruption of other audio, or suppression of
-supported text forwarding. These protocol and codec additions remain planned.
+supported text forwarding. The shared text path and EchoLink provider are
+implemented; each protocol still needs its own adapter and acceptance checks.
 
 ## Runtime structure
 
@@ -456,9 +457,11 @@ defines the full reload, hardware-handoff, and failure policy.
   fallback. The unkey edge cancels unsent locally originated queries and
   rejects late replies. This work never tags PCM frames or runs an IAX write in
   an audio callback.
-  EchoLink remains planned: a dedicated external-peer adapter will own its
-  registration, UDP transport, and callsign access control while using the
-  same controller audio boundary.
+  The EchoLink feature branch supplies registration, direct/Proxy transport,
+  callsign access control, and source media through the same controller audio
+  boundary. Isolated composition passes in both hosts. Standalone direct-mode
+  receive and transmit audio are confirmed. Final pull-request gates and the
+  broader live-client/Proxy checks remain open under ADR 0007.
 - `rust/core/src/config/` parses, validates, and inherits configuration.
 
 ## Core invariants

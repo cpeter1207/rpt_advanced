@@ -92,14 +92,15 @@ describes local speech and independent text forwarding. Its
 is approved. A real directed IAX loopback message was heard locally on 524950.
 The initial-attachment race, sender attribution, and interruption of ordinary
 voice telemetry are covered by focused regressions; their live retest and the
-controller's final gate remain pending. EchoLink's protocol adapter remains planned.
+controller's final gate remain pending. EchoLink's protocol adapter is implemented
+on its feature branch; its remaining checks are listed below.
 
 **Requirements and decisions recorded**
 
 - Include incoming EchoLink human text and messages from every other
   text-capable protocol supported now or added later. This supersedes the
-  prior EchoLink incoming-text exclusion, not the planned status of EchoLink
-  or any other unimplemented protocol adapter.
+  prior EchoLink incoming-text exclusion. It does not require implementing any
+  other protocol adapter.
 - Convert incoming human messages to speech through a replaceable codec
   adapter, reusing the existing speech-synthesis capability outside audio
   callbacks. Keep protocol parsing and message identification in the protocol
@@ -185,7 +186,13 @@ None.
 
 ### EchoLink audio interoperability
 
-**Status: Planned.** No EchoLink adapter is implemented.
+**Status: Implemented on the feature branch; final verification pending.**
+Isolated tests cover both controller hosts, direct and Proxy service, audio,
+text, and account lifecycle. Direct-mode receive and transmit audio are confirmed
+on the standalone node, including receive audio from W6EK-R. Final pull-request
+gates and broader live checks remain open. Official clients, public incoming
+calls, conferences, a user-provided Proxy, and the Asterisk host still need live
+acceptance checks.
 
 **Requirements**
 
@@ -255,7 +262,8 @@ None.
   on 2026-10-28. The [implementation plan](docs/superpowers/plans/2026-10-28-echolink-interoperability.md)
   starts with a released Rust RTP/RTCP library compatibility gate, keeps legacy
   adaptation narrow and excludes implementation of other protocols or WebRTC.
-  EchoLink remains planned until implemented and verified.
+  Release and field acceptance remain open until the final gates and authorized
+  client/Proxy checks are complete.
 
 **Material decisions needed before implementation**
 

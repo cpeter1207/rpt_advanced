@@ -1,6 +1,6 @@
 # ADR 0007: EchoLink audio-peer boundary
 
-Status: Partially implemented on the feature branch; final gate and live-client validation pending
+Status: Implemented on the feature branch; final PR gates and broader live acceptance pending
 
 ## Context
 
@@ -22,8 +22,11 @@ canonical normalized `f32` audio at its source rate to the peer's inbound PCM
 ring. Under the 2026-09-13 amendment in ADR 0025, that ring alone converts and
 corrects drift into the native transmit mix; outbound codec conversion remains
 at egress. EchoLink's transport representation converts only at its external
-boundary. The two-worker media path is implemented; the EchoLink adapter
-described here remains planned.
+boundary. The two-worker media path and EchoLink adapter are implemented on
+the feature branch. Standalone direct-mode receive and transmit audio are
+confirmed, including receive audio from W6EK-R. Final pull-request gates and
+live acceptance with official clients, public incoming calls, conferences,
+a user-provided Proxy, and the Asterisk host remain open.
 
 The adapter identifies incoming human text and submits it to the shared,
 protocol-neutral text-message codec under ADR 0022. Speech synthesis stays
@@ -299,8 +302,8 @@ driver before releasing callback storage.
 The coordinated, unreleased account record appends an owned APRS endpoint span
 without moving existing fields. Its complete 64-bit extent is360bytes; older
 short records fail preparation before access. Descriptor, functions and SONAME1
-remain unchanged before the first provider release; consumers and staged test
-artifacts must use matching source revisions.
+remain unchanged before the complete network/media provider release; consumers
+and staged test artifacts must use matching source revisions.
 
 `aprs_server` inherits per account and defaults to
 `aprs.echolink.org:5199`. An explicit blank disables publication. Direct mode
@@ -320,7 +323,8 @@ forwarding never depends on speech admission or synthesis success. Disconnect,
 reload and unload cancel the exact source generation and join workers before
 releasing speech contexts. Metadata-only counters and rate-limited failures use
 the shared product's existing status/logging ports in both hosts. The EchoLink
-transport implementation remains subject to final full-gate and live-client validation.
+transport implementation remains subject to final pull-request gates and the
+broader live acceptance checks above.
 Its absence of topology advertisements means
 the existing advertised-topology loop prevention cannot infer EchoLink-only
 transitive paths. A generic HTTP proxy is not a valid EchoLink transport
