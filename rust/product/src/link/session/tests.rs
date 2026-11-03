@@ -1836,7 +1836,12 @@ fn egress_host_contract_and_asterisk_pcm() {
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
     let boundary = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_prepare_audio);
-    for length in boundary..std::mem::size_of_val(&table) {
+    // The published complete prefix is valid without its optional processor tail.
+    let complete_prefix =
+        std::mem::offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare);
+    for length in
+        (boundary..std::mem::size_of_val(&table)).filter(|length| *length != complete_prefix)
+    {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];
         unsafe {
