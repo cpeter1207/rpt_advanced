@@ -1,3 +1,11 @@
+rpt-advanced (0.1.0~alpha19-1) unstable; urgency=medium
+
+  * Configure shared local, link and voice/telemetry processing in rpt_advanced.conf.
+  * Process native-rate peer audio through its own shared link chain after buffering.
+  * Require USBRadioPlus alpha26 and native station configuration ABI 3.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Tue, 03 Nov 2026 10:00:00 -0600
+
 rpt-advanced (0.1.0~alpha18-1) unstable; urgency=medium
 
   * Add EchoLink accounts, direct and Proxy connections, audio, and text speech.

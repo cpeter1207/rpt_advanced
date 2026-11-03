@@ -12,6 +12,8 @@ pub struct NativeRadioConfiguration {
     usb_serial: String,
     receive_graph: String,
     transmit_graph: String,
+    processing_configuration: String,
+    processing_node: String,
 }
 
 // SAFETY: all stored request pointers are cleared after copying; the immutable
@@ -53,12 +55,24 @@ impl NativeRadioConfiguration {
             return Err("incompatible native radio session template".to_owned());
         }
         // SAFETY: the caller guarantees each advertised span for this call.
-        let (device_identifier, usb_serial, receive_graph, transmit_graph) = unsafe {
+        let (
+            device_identifier,
+            usb_serial,
+            receive_graph,
+            transmit_graph,
+            processing_configuration,
+            processing_node,
+        ) = unsafe {
             (
                 copy_text(config.device_identifier, config.device_identifier_length)?,
                 copy_text(config.usb_serial, config.usb_serial_length)?,
                 copy_text(config.receive_graph, config.receive_graph_length)?,
                 copy_text(config.transmit_graph, config.transmit_graph_length)?,
+                copy_text(
+                    config.processing_configuration,
+                    config.processing_configuration_length,
+                )?,
+                copy_text(config.processing_node, config.processing_node_length)?,
             )
         };
         config.radio = std::ptr::null();
@@ -66,6 +80,8 @@ impl NativeRadioConfiguration {
         config.usb_serial = std::ptr::null();
         config.receive_graph = std::ptr::null();
         config.transmit_graph = std::ptr::null();
+        config.processing_configuration = std::ptr::null();
+        config.processing_node = std::ptr::null();
         Ok(Self {
             config,
             radio,
@@ -73,6 +89,8 @@ impl NativeRadioConfiguration {
             usb_serial,
             receive_graph,
             transmit_graph,
+            processing_configuration,
+            processing_node,
         })
     }
 
@@ -84,7 +102,21 @@ impl NativeRadioConfiguration {
             usb_serial: self.usb_serial.as_ptr(),
             receive_graph: self.receive_graph.as_ptr(),
             transmit_graph: self.transmit_graph.as_ptr(),
+            processing_configuration: self.processing_configuration.as_ptr(),
+            processing_node: self.processing_node.as_ptr(),
             ..self.config
+        }
+    }
+
+    /// Borrow the processing request while its copied configuration spans remain live.
+    pub(crate) fn processing_request(&self) -> abi::UrpNativeProcessingArgs {
+        abi::UrpNativeProcessingArgs {
+            struct_size: std::mem::size_of::<abi::UrpNativeProcessingArgs>() as u32,
+            abi_version: 1,
+            configuration: self.processing_configuration.as_ptr(),
+            configuration_length: self.processing_configuration.len() as u32,
+            node: self.processing_node.as_ptr(),
+            node_length: self.processing_node.len() as u32,
         }
     }
 }
@@ -133,12 +165,21 @@ mod tests {
         request.hardware_input_gain_db = 0.0;
         request.hardware_output_a_gain_db = 6.012;
         request.hardware_output_b_gain_db = 3.0;
+        let processing = String::from("[1000]\n[link 1000]\nlimiter_enabled=yes\n");
+        let node = String::from("1000");
+        request.processing_configuration = processing.as_ptr();
+        request.processing_configuration_length = processing.len() as u32;
+        request.processing_node = node.as_ptr();
+        request.processing_node_length = node.len() as u32;
+        request.transmit_preemphasis = 1;
+        request.transmit_preemphasis_corner_hz = 300.0;
+        request.receive_deemphasis_corner_hz = 299.5;
         // SAFETY: all request storage remains live for this synchronous copy.
         let owned = unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap();
         let cloned = owned.clone();
         assert_eq!(owned, cloned);
         assert_ne!(owned.request().radio, cloned.request().radio);
-        drop((device, receive, transmit, owned));
+        drop((device, receive, transmit, processing, node, owned));
         let view = cloned.request();
         // SAFETY: the view borrows the still-live cloned owner.
         unsafe {
@@ -160,6 +201,24 @@ mod tests {
         assert_eq!(view.hardware_input_gain_db, 0.0);
         assert_eq!(view.hardware_output_a_gain_db, 6.012);
         assert_eq!(view.hardware_output_b_gain_db, 3.0);
+        let processing = cloned.processing_request();
+        // SAFETY: all byte spans borrow the remaining cloned configuration owner.
+        unsafe {
+            assert_eq!(
+                std::slice::from_raw_parts(
+                    processing.configuration,
+                    processing.configuration_length as usize
+                ),
+                b"[1000]\n[link 1000]\nlimiter_enabled=yes\n"
+            );
+            assert_eq!(
+                std::slice::from_raw_parts(processing.node, processing.node_length as usize),
+                b"1000"
+            );
+        }
+        assert_eq!(view.transmit_preemphasis, 1);
+        assert_eq!(view.transmit_preemphasis_corner_hz, 300.0);
+        assert_eq!(view.receive_deemphasis_corner_hz, 299.5);
     }
 
     #[test]

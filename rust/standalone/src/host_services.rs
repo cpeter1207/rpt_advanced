@@ -120,6 +120,7 @@ impl HostServicesOwner {
             peer_read_source: Some(peer_read_source),
             peer_send_human_text: Some(peer_send_human_text),
             echo_account_status: Some(echo_account_status),
+            peer_processing_prepare: Some(peer_processing_prepare),
         });
         Ok(Self {
             context,
@@ -245,6 +246,57 @@ impl HostServicesOwner {
     pub fn discard_staged_radios(&self) {
         self.context.radio.discard_staged_radios();
     }
+}
+
+/// Prepare this node's shared link chain on control, before its PCM consumer is published.
+unsafe extern "C" fn peer_processing_prepare(
+    context: *mut c_void,
+    configuration: *const c_char,
+    configuration_length: usize,
+    local: *const c_char,
+    local_length: usize,
+    maximum_frames: usize,
+    output: *mut abi::rptadv_pcm_processor_v1,
+) -> i32 {
+    boundary(-1, || {
+        let (Some(context), Some(configuration), Some(local), Some(output)) = (
+            unsafe { context.cast::<StandaloneHostContext>().as_ref() },
+            unsafe { input(configuration, configuration_length) },
+            unsafe { input(local, local_length) },
+            unsafe { output.as_mut() },
+        ) else {
+            return -1;
+        };
+        if output.struct_size < size_of::<abi::rptadv_pcm_processor_v1>() as u32
+            || output.abi_version != 1
+        {
+            return -1;
+        }
+        if configuration.is_empty() {
+            return 1;
+        }
+        let Some(providers) = context.radio.providers else {
+            return -1;
+        };
+        let Ok(descriptors) = providers.radio_runtime_descriptors() else {
+            return -1;
+        };
+        match crate::processing::prepare(
+            descriptors.product,
+            std::ptr::from_ref(descriptors.ffmpeg).cast(),
+            configuration,
+            local,
+            maximum_frames,
+            output,
+        ) {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(error) => {
+                eprintln!("node {local} link processing preparation failed: {error}");
+                -1
+            }
+        }
+    })
 }
 
 impl StandaloneHostContext {
@@ -1430,6 +1482,92 @@ mod tests {
         assert!(api.peer_dial.is_some());
         assert!(api.radio_activate.is_some());
         let _context: *mut c_void = api.context;
+    }
+
+    #[test]
+    fn native_processing_boundary_rejects_invalid_requests_and_owns_shared_processors() {
+        let mut owner =
+            HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+        let context = owner.descriptor().context;
+        let configuration = "[1000]\n[link 1000]\nlimiter_enabled=yes\n";
+        let record = || abi::rptadv_pcm_processor_v1 {
+            struct_size: size_of::<abi::rptadv_pcm_processor_v1>() as u32,
+            abi_version: 1,
+            context: ptr::null_mut(),
+            process: None,
+            destroy: None,
+        };
+        let invoke = |text: &str, maximum, output: &mut abi::rptadv_pcm_processor_v1| {
+            // SAFETY: all borrowed request spans and output storage remain live through this call.
+            unsafe {
+                super::peer_processing_prepare(
+                    context,
+                    text.as_ptr().cast(),
+                    text.len(),
+                    c"1000".as_ptr(),
+                    4,
+                    maximum,
+                    output,
+                )
+            }
+        };
+        for absent in 0..4 {
+            let mut output = record();
+            // SAFETY: one missing argument is rejected before access to it.
+            let result = unsafe {
+                super::peer_processing_prepare(
+                    if absent == 0 {
+                        ptr::null_mut()
+                    } else {
+                        context
+                    },
+                    if absent == 1 {
+                        ptr::null()
+                    } else {
+                        c"x".as_ptr()
+                    },
+                    1,
+                    if absent == 2 {
+                        ptr::null()
+                    } else {
+                        c"1000".as_ptr()
+                    },
+                    4,
+                    4,
+                    if absent == 3 {
+                        ptr::null_mut()
+                    } else {
+                        &mut output
+                    },
+                )
+            };
+            assert_eq!(result, -1);
+        }
+        for wrong_version in [false, true] {
+            let mut output = record();
+            if wrong_version {
+                output.abi_version = 2;
+            } else {
+                output.struct_size -= 1;
+            }
+            assert_eq!(invoke(configuration, 4, &mut output), -1);
+        }
+        assert_eq!(invoke("", 4, &mut record()), 1);
+        assert_eq!(invoke(configuration, 4, &mut record()), -1);
+        owner.context.radio.providers = Some(Box::leak(Box::new(
+            crate::providers::tests::empty_provider_set(),
+        )));
+        assert_eq!(invoke(configuration, 4, &mut record()), -1);
+        owner.context.radio.providers = Some(Box::leak(Box::new(
+            crate::providers::ProviderSet::load().unwrap(),
+        )));
+        assert_eq!(invoke("[1000]\n", 4, &mut record()), 1);
+        assert_eq!(invoke(configuration, 0, &mut record()), -1);
+        let mut processor = record();
+        assert_eq!(invoke(configuration, 4, &mut processor), 0);
+        assert!(!processor.context.is_null());
+        // SAFETY: the transferred unique processor is quiescent and released exactly once.
+        unsafe { processor.destroy.unwrap()(processor.context) };
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::{
     sync::OnceLock,
 };
 
-const PROVIDERS: [ProviderSpec; 12] = [
+const PROVIDERS: [ProviderSpec; 13] = [
     inline(
         "librptadv_product.so.2",
         "rptadv_product_descriptor_v1",
@@ -88,6 +88,13 @@ const PROVIDERS: [ProviderSpec; 12] = [
         b"rptadv.cm119-hid-gpio",
         DescriptorLayout::Named,
     ),
+    pointer(
+        "librptadv_rnnoise_adapter.so.1",
+        "rptadv_rnnoise_adapter_descriptor",
+        1,
+        b"rptadv.rnnoise",
+        DescriptorLayout::Named,
+    ),
 ];
 
 /// A product-only load for configuration checking, before device providers are needed.
@@ -112,6 +119,45 @@ impl ProductInspection {
 
     pub(crate) fn api(&self) -> &crate::abi::rptadv_product_descriptor_v1 {
         // The retained library keeps the complete immutable descriptor loaded.
+        unsafe { self.api.as_ref() }
+    }
+}
+
+/// Shared processing inspection loads no device and retains its provider for every call.
+pub(crate) struct ProcessingInspection {
+    _library: ProviderLibrary,
+    api: NonNull<crate::abi::UrpAstDescriptor>,
+}
+
+impl ProcessingInspection {
+    pub(crate) fn open() -> Result<Self, ProviderError> {
+        const NAME: &str = "libusbradioplus_product.so.1";
+        let spec = *PROVIDERS.iter().find(|spec| spec.library == NAME).unwrap();
+        let library = ProviderLibrary::open(spec, None)?;
+        let pointer = library
+            .descriptor(spec.symbol)
+            .ok_or(ProviderError::MissingDescriptor(NAME))?;
+        if !valid_descriptor(pointer, spec) {
+            return Err(ProviderError::IncompatibleDescriptor(NAME));
+        }
+        if descriptor_size(pointer, spec.layout)
+            < std::mem::size_of::<crate::abi::UrpAstDescriptor>()
+        {
+            return Err(ProviderError::IncompleteDescriptor(NAME));
+        }
+        let api = NonNull::new(pointer.cast_mut().cast::<crate::abi::UrpAstDescriptor>()).unwrap();
+        // SAFETY: descriptor identity and its full readable size were checked above.
+        if !native_product_functions_complete(unsafe { api.as_ref() }) {
+            return Err(ProviderError::IncompleteDescriptor(NAME));
+        }
+        Ok(Self {
+            _library: library,
+            api,
+        })
+    }
+
+    pub(crate) fn api(&self) -> &crate::abi::UrpAstDescriptor {
+        // SAFETY: this owner retains the validated immutable descriptor's library.
         unsafe { self.api.as_ref() }
     }
 }
@@ -272,6 +318,8 @@ pub struct RadioRuntimeDescriptors {
     pub gpio: &'static crate::abi::rptadv_gpio_adapter_descriptor,
     /// Exact-frame FFmpeg graph API.
     pub ffmpeg: &'static crate::abi::rptadv_ffmpeg_adapter_descriptor,
+    /// RNNoise provider retained for optional local receive noise reduction.
+    pub rnnoise: *const c_void,
 }
 
 /// Product/control/media descriptors retained for the standalone product lifetime.
@@ -532,6 +580,9 @@ impl ProviderSet {
             audio: self.typed_descriptor("librptadv_portaudio_alsa_adapter.so.2")?,
             gpio: self.typed_descriptor("librptadv_gpio_adapter.so.1")?,
             ffmpeg: self.typed_descriptor("librptadv_ffmpeg_adapter.so.1")?,
+            rnnoise: self
+                .checked_descriptor::<NamedDescriptorHeader>("librptadv_rnnoise_adapter.so.1")?
+                .as_ptr(),
         })
     }
 
@@ -648,6 +699,10 @@ fn native_product_functions_complete(api: &crate::abi::UrpAstDescriptor) -> bool
         && api.native_site_bind.is_some()
         && api.native_site_publish.is_some()
         && api.native_site_snapshot.is_some()
+        && api.native_processing_validate.is_some()
+        && api.native_link_prepare.is_some()
+        && api.link_process_f32.is_some()
+        && api.link_destroy.is_some()
 }
 
 struct ProviderLibrary(Library);
@@ -1112,9 +1167,13 @@ pub(crate) mod tests {
         api.native_site_bind = Some(fake_site_bind);
         api.native_site_publish = Some(fake_site_publish);
         api.native_site_snapshot = Some(fake_site_snapshot);
+        api.native_processing_validate = Some(fake_processing_validate);
+        api.native_link_prepare = Some(fake_link_prepare);
+        api.link_process_f32 = Some(fake_link_process);
+        api.link_destroy = Some(fake_native_destroy);
 
         assert!(native_product_functions_complete(&api));
-        missing_fields!(api, native_product_functions_complete, native_create native_start native_stop native_destroy native_site_bind native_site_publish native_site_snapshot);
+        missing_fields!(api, native_product_functions_complete, native_create native_start native_stop native_destroy native_site_bind native_site_publish native_site_snapshot native_processing_validate native_link_prepare link_process_f32 link_destroy);
         let mut incomplete = api;
         incomplete.native_start = None;
         let providers = Box::leak(Box::new(super::ProviderSet {
@@ -1145,6 +1204,33 @@ pub(crate) mod tests {
     }
 
     unsafe extern "C" fn fake_native_destroy(_: *mut c_void) {}
+
+    unsafe extern "C" fn fake_processing_validate(
+        _: *const crate::abi::UrpNativeProcessingArgs,
+        _: crate::abi::UrpNativeProcessingDiagnostic,
+        _: *mut c_void,
+    ) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn fake_link_prepare(
+        _: *const crate::abi::UrpNativeProcessingArgs,
+        _: *const c_void,
+        _: u32,
+        _: *mut *mut c_void,
+    ) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn fake_link_process(
+        _: *mut c_void,
+        _: u32,
+        _: u32,
+        _: *mut f32,
+        _: u32,
+    ) -> i32 {
+        0
+    }
 
     unsafe extern "C" fn fake_site_bind(
         _: *mut c_void,
@@ -1459,6 +1545,65 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn processing_inspection_rejects_bad_dynamic_tables() {
+        const CHILD: &str = "RPTADV_PROCESSING_INSPECTION_TEST";
+        const NAME: &str = "libusbradioplus_product.so.1";
+        if let Ok(expected) = std::env::var(CHILD) {
+            assert_eq!(
+                super::ProcessingInspection::open().err(),
+                Some(if expected == "version" {
+                    ProviderError::IncompatibleDescriptor(NAME)
+                } else {
+                    ProviderError::IncompleteDescriptor(NAME)
+                })
+            );
+            return;
+        }
+        let inspection = super::ProcessingInspection::open().unwrap();
+        assert!(inspection.api().native_processing_validate.is_some());
+        for (case, version, size) in [
+            (
+                "version",
+                2,
+                std::mem::size_of::<crate::abi::UrpAstDescriptor>() as u32,
+            ),
+            (
+                "size",
+                1,
+                std::mem::size_of::<super::NamedDescriptorHeader>() as u32,
+            ),
+            (
+                "callbacks",
+                1,
+                std::mem::size_of::<crate::abi::UrpAstDescriptor>() as u32,
+            ),
+        ] {
+            let fixture = ProviderFixture::with_native(7, false, false, Some((version, size)));
+            let paths = std::iter::once(fixture.path().to_owned()).chain(
+                std::env::var_os("LD_LIBRARY_PATH")
+                    .into_iter()
+                    .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>()),
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "providers::tests::processing_inspection_rejects_bad_dynamic_tables",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .env("LD_LIBRARY_PATH", std::env::join_paths(paths).unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn product_runtime_descriptors_reject_incomplete_product_tables() {
         let directory = ProviderFixture::new(7, false, false);
         let providers = Box::leak(Box::new(
@@ -1697,6 +1842,15 @@ pub(crate) mod tests {
     #[cfg(unix)]
     impl ProviderFixture {
         fn new(product_version: u32, omit_product: bool, null_product: bool) -> Self {
+            Self::with_native(product_version, omit_product, null_product, None)
+        }
+
+        fn with_native(
+            product_version: u32,
+            omit_product: bool,
+            null_product: bool,
+            native: Option<(u32, u32)>,
+        ) -> Self {
             use std::process::Command;
 
             static NEXT_FIXTURE: std::sync::atomic::AtomicU64 =
@@ -1713,6 +1867,14 @@ pub(crate) mod tests {
             let mut compile = Command::new("cc");
             compile.args(["-shared", "-fPIC"]);
             compile.arg(format!("-DPRODUCT_VERSION={product_version}"));
+            compile.arg(format!(
+                "-DNATIVE_TABLE_BYTES={}",
+                std::mem::size_of::<crate::abi::UrpAstDescriptor>()
+            ));
+            if let Some((version, size)) = native {
+                compile.arg(format!("-DNATIVE_VERSION={version}"));
+                compile.arg(format!("-DNATIVE_SIZE={size}"));
+            }
             if omit_product {
                 compile.arg("-DOMIT_PRODUCT");
             }
@@ -1773,11 +1935,24 @@ pub(crate) mod tests {
             INLINE(resolver, rptadv_resolver_adapter_descriptor_v1, 1, "rptadv.resolver")
             INLINE(jitter, rptadv_jitter_adapter_descriptor_v1, 1, "rptadv.jitter")
             INLINE(iax2, rptadv_iax2_client_descriptor_v2, 2, "rptadv.iax2.v2")
-            NAMED(native, usbradioplus_product_descriptor_v1, 1, "usbradioplus.product1")
+            #ifndef NATIVE_VERSION
+            #define NATIVE_VERSION 1
+            #endif
+            #ifndef NATIVE_SIZE
+            #define NATIVE_SIZE sizeof(Named)
+            #endif
+            #ifndef NATIVE_TABLE_BYTES
+            #define NATIVE_TABLE_BYTES sizeof(Named)
+            #endif
+            static struct { Named header; uint8_t tail[NATIVE_TABLE_BYTES]; } native = {
+                { NATIVE_SIZE, NATIVE_VERSION, "usbradioplus.product1" }, {0}
+            };
+            void *usbradioplus_product_descriptor_v1(void) { return &native; }
             NAMED(radio, rptadv_radio_descriptor, 4, "rptadv.radio-core")
             NAMED(audio, rptadv_portaudio_alsa_adapter_descriptor, 2, "rptadv.portaudio-alsa-audio")
             NAMED(ffmpeg, rptadv_ffmpeg_adapter_descriptor, 1, "rptadv.ffmpeg")
             NAMED(gpio, rptadv_gpio_adapter_descriptor, 1, "rptadv.cm119-hid-gpio")
+            NAMED(rnnoise, rptadv_rnnoise_adapter_descriptor, 1, "rptadv.rnnoise")
         "#
     }
 }

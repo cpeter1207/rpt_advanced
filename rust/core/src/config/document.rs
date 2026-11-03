@@ -72,6 +72,32 @@ impl ConfigDocument {
         &self.entries
     }
 
+    /// Copy only the selected node's processing sections for the shared DSP resolver.
+    /// Values and source order are preserved; processing validation belongs to that provider.
+    /// The caller has validated section grammar through `Schema::validate`.
+    pub(crate) fn processing_configuration(&self, node: &str) -> String {
+        let mut result = String::new();
+        for (index, section) in self.sections.iter().enumerate() {
+            let parsed = scope::parse_scope(section).expect("schema validated processing sections");
+            if !matches!(
+                parsed.kind,
+                scope::ScopeKind::ProcessingDefault | scope::ScopeKind::ProcessingNode
+            ) || parsed.node.is_some_and(|name| name != node)
+                || self.sections[..index].contains(section)
+            {
+                continue;
+            }
+            if result.is_empty() {
+                result.push_str(&format!("[{node}]\n"));
+            }
+            result.push_str(&format!("[{section}]\n"));
+            for entry in self.section_entries(section) {
+                result.push_str(&format!("{}={}\n", entry.key, entry.value));
+            }
+        }
+        result
+    }
+
     /// Return declared node sections in source order.
     pub fn nodes(&self) -> Vec<&str> {
         self.sections

@@ -171,6 +171,9 @@ graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 | `receive_output_gain_db` | `0` | Receiver output gain, from -30 to +30 dB. |
 | `receive_graph` | `anull` | FFmpeg chain applied to mono 48 kHz receiver audio; 1–4096 bytes. |
 | `transmit_graph` | `anull` | FFmpeg chain applied to mono 48 kHz transmitter audio; 1–4096 bytes. |
+| `receive_deemphasis_corner_hz` | `300` | De-emphasis corner for flat receive audio; above 0 through 500 Hz. |
+| `transmit_preemphasis_enabled` | `no` | Apply pre-emphasis when a voice/telemetry processing section is configured. |
+| `transmit_preemphasis_corner_hz` | `300` | Pre-emphasis corner; above 0 through 500 Hz. |
 | `cm119_profile` | `dudeusb` | CM119 wiring profile: `dudeusb`, `sphusb`, `nhrc`, or `custom`. |
 | `cm119_ptt_inverted` | `no` | Invert the CM119 PTT output polarity. |
 | `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
@@ -228,6 +231,55 @@ The complete commented example is installed at
 `rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf` before
 restarting the standalone service. Inherited or invalid radio values use the
 documented defaults with a warning; unsafe configurations are rejected.
+
+## Audio processing
+
+Set up the standalone audio chains in `rpt_advanced.conf`:
+
+| Section | Audio |
+| --- | --- |
+| `[local]` | Local receiver audio |
+| `[link]` | Each incoming link |
+| `[voice_telemetry]` | Mixed voice and telemetry sent to the transmitter |
+
+These sections set shared defaults. Add the node number, such as
+`[link 524950]`, to change one node. Use the same source-chain options as in
+the [USBRadioPlus configuration reference](https://github.com/cpeter1207/USBRadioPlus/blob/main/man/usbradioplus.conf.5).
+They include gains, EQ, AGC, an expander, a de-esser, a compressor, and a
+multiband limiter. The local chain also supports RNNoise and receive filters.
+The voice/telemetry chain supports the final limiter and band-pass filter.
+
+For a three-band link limiter with each threshold at −10 dBFS:
+
+```ini
+[link 524950]
+enabled = yes
+input_gain_db = 0
+output_gain_db = 0
+limiter_enabled = yes
+limiter_bands = 3
+limiter_threshold_dbfs = -10
+limiter_low_threshold_dbfs = -10
+limiter_mid_threshold_dbfs = -10
+limiter_high_threshold_dbfs = -10
+```
+
+A local processing section replaces `receive_graph`, `receive_input_gain_db`,
+and `receive_output_gain_db`. Set its gains with `input_gain_db` and
+`output_gain_db`. Flat receive audio still uses de-emphasis. A voice/telemetry
+section replaces `transmit_graph`; set pre-emphasis with the radio options
+above. Without one of these sections, that source keeps its radio graph and
+gain settings. Link processing changes neither local receive nor telemetry.
+
+Check the file with `rpt-advanced --check-config`. To load a saved change, send
+SIGHUP to the running service:
+
+```sh
+sudo systemctl kill --kill-whom=main --signal=HUP rpt-advanced
+```
+
+Wait for `rpt-advanced configuration reloaded` in the service log. A rejected
+reload leaves the running configuration in place.
 
 ## Courtesy tones
 

@@ -138,6 +138,20 @@ fn radio_schema_accepts_each_carrier_source_and_uses_radio_defaults() {
 }
 
 #[test]
+fn native_emphasis_invalid_corners_use_the_default_without_inherited_values() {
+    for invalid in ["0", "NaN", "501"] {
+        let document = ConfigDocument::parse(&format!(
+            "[1000]\n[radio]\nreceive_deemphasis_corner_hz={invalid}\n\
+             transmit_preemphasis_corner_hz={invalid}\n"
+        ))
+        .unwrap();
+        let warnings = Schema::validate(&document).unwrap().warnings;
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|warning| warning.fallback == "300"));
+    }
+}
+
+#[test]
 fn radio_receive_gains_accept_bounded_integers_in_both_scopes() {
     for section in ["radio", "radio 1000"] {
         for gain in [-30, -2, 0, 30] {

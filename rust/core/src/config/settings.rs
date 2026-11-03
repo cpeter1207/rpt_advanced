@@ -421,6 +421,14 @@ pub struct ResolvedRadioSettings {
     pub receive_graph: String,
     /// Mono 48 kHz transmit-processing graph.
     pub transmit_graph: String,
+    /// Source-chain sections passed unchanged to the shared processing resolver.
+    pub processing_configuration: String,
+    /// Receive de-emphasis corner in Hz, above zero through 500 Hz.
+    pub receive_deemphasis_corner_hz: f64,
+    /// Apply pre-emphasis in the configured voice/telemetry chain.
+    pub transmit_preemphasis_enabled: bool,
+    /// Transmit pre-emphasis corner in Hz, above zero through 500 Hz.
+    pub transmit_preemphasis_corner_hz: f64,
     /// CM119 GPIO wiring profile.
     pub cm119_profile: Cm119Profile,
     /// Invert the dedicated CM119 PTT output.
@@ -450,6 +458,10 @@ impl Default for ResolvedRadioSettings {
             receive_output_gain_db: 0,
             receive_graph: "anull".to_owned(),
             transmit_graph: "anull".to_owned(),
+            processing_configuration: String::new(),
+            receive_deemphasis_corner_hz: 300.0,
+            transmit_preemphasis_enabled: false,
+            transmit_preemphasis_corner_hz: 300.0,
             cm119_profile: Cm119Profile::DudeUsb,
             cm119_ptt_inverted: false,
             cm119_gpio_modes: [Cm119GpioMode::Input; 8],
@@ -524,6 +536,29 @@ impl ResolvedRadioSettings {
         text!(usb_serial, "usb_serial", true, 255);
         text!(receive_graph, "receive_graph", false, 4096);
         text!(transmit_graph, "transmit_graph", false, 4096);
+        value.processing_configuration = document.processing_configuration(node.as_str());
+        for (key, destination) in [
+            (
+                "receive_deemphasis_corner_hz",
+                &mut value.receive_deemphasis_corner_hz,
+            ),
+            (
+                "transmit_preemphasis_corner_hz",
+                &mut value.transmit_preemphasis_corner_hz,
+            ),
+        ] {
+            if let Some(corner) = lookup_valid(document, key, &scopes, parse::emphasis_corner) {
+                *destination = corner;
+            }
+        }
+        if let Some(enabled) = lookup_valid(
+            document,
+            "transmit_preemphasis_enabled",
+            &scopes,
+            parse::boolean,
+        ) {
+            value.transmit_preemphasis_enabled = enabled;
+        }
         if let Some(profile) = lookup_valid(document, "cm119_profile", &scopes, |raw| {
             Some(match raw {
                 "dudeusb" => Cm119Profile::DudeUsb,

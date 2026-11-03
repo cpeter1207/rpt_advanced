@@ -47,7 +47,7 @@ struct Inspection {
 
 /// Validate without opening device providers and return the product's warnings.
 pub fn check_config(text: &str) -> Result<Vec<String>, ConfigError> {
-    inspect(text, false, false).map(|result| result.diagnostics)
+    inspect(text, true, false).map(|result| result.diagnostics)
 }
 
 /// Resolve copied records without retaining any pointer into the product's parser.
@@ -85,7 +85,22 @@ fn inspect(text: &str, nodes: bool, secrets: bool) -> Result<Inspection, ConfigE
             )
         }
     };
-    finish_inspection(output, result)
+    let mut output = finish_inspection(output, result)?;
+    if output
+        .nodes
+        .iter()
+        .any(|node| node.radio.processing_request().configuration_length != 0)
+    {
+        let processing = crate::providers::ProcessingInspection::open()
+            .map_err(|error| ConfigError(error.to_string()))?;
+        for node in &output.nodes {
+            output.diagnostics.extend(
+                crate::processing::validate(processing.api(), &node.radio.processing_request())
+                    .map_err(ConfigError)?,
+            );
+        }
+    }
+    Ok(output)
 }
 
 fn finish_inspection(mut output: Inspection, result: i32) -> Result<Inspection, ConfigError> {
@@ -236,6 +251,31 @@ mod tests {
                 .to_string()
                 .contains("unknown node")
         );
+    }
+
+    #[test]
+    fn configured_native_profiles_use_the_shared_validator_without_hardware() {
+        let valid = "[1000]\n[2000]\n[link 1000]\nlimiter_enabled=yes\n";
+        assert!(check_config(valid).unwrap().is_empty());
+        let warnings = check_config(
+            "[1000]\n[link 1000]\nlimiter_enabled=invalid\nunknown_processing_setting=yes\n",
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("limiter_enabled"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("unknown_processing_setting"))
+        );
+        assert!(check_config(
+            "[1000]\n[link 1000]\nlimiter_low_crossover_hz=2000\nlimiter_high_crossover_hz=1000\n"
+        )
+        .is_err());
     }
 
     #[test]

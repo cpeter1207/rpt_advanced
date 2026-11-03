@@ -428,6 +428,66 @@ fn radio_receive_gains_resolve_defaults_inheritance_and_node_overrides() {
 }
 
 #[test]
+fn audio_processing_sections_are_not_nodes_and_retain_only_the_selected_node() {
+    let document = ConfigDocument::parse(
+        "[1000]\n[2000]\n[local]\nenabled=no\n[local 1000]\ninput_gain_db=-2\n\
+         [link]\nlimiter_enabled=yes\n[link]\noutput_gain_db=0\n[link 1000]\nlimiter_low_threshold_dbfs=-10\n\
+         [link 2000]\nlimiter_low_threshold_dbfs=-20\n\
+         [voice_telemetry 1000]\noutput_gain_db=3\n",
+    )
+    .unwrap();
+    assert_eq!(document.nodes(), ["1000", "2000"]);
+    let resolved =
+        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
+    assert!(resolved.warnings.is_empty());
+    let source = resolved.value.processing_configuration;
+    for expected in [
+        "[1000]",
+        "[local]",
+        "[local 1000]",
+        "input_gain_db=-2",
+        "[link]",
+        "[link 1000]",
+        "limiter_low_threshold_dbfs=-10",
+        "[voice_telemetry 1000]",
+    ] {
+        assert!(source.contains(expected), "missing {expected}: {source}");
+    }
+    assert!(!source.contains("[2000]"));
+    assert!(!source.contains("-20"));
+    assert_eq!(source.matches("[link]\n").count(), 1);
+    assert!(source.contains("output_gain_db=0"));
+    let empty = ConfigDocument::parse("[1000]\n").unwrap();
+    assert!(
+        ResolvedRadioSettings::resolve(&empty, &NodeId::new("1000").unwrap())
+            .unwrap()
+            .value
+            .processing_configuration
+            .is_empty()
+    );
+}
+
+#[test]
+fn radio_processing_emphasis_settings_inherit_and_invalid_values_fall_back() {
+    let document = ConfigDocument::parse(
+        "[1000]\n[2000]\n[radio]\nreceive_deemphasis_corner_hz=299.5\n\
+         transmit_preemphasis_enabled=yes\ntransmit_preemphasis_corner_hz=300\n\
+         [radio 1000]\ntransmit_preemphasis_corner_hz=500\n\
+         [radio 2000]\nreceive_deemphasis_corner_hz=0\n\
+         transmit_preemphasis_enabled=invalid\ntransmit_preemphasis_corner_hz=501\n",
+    )
+    .unwrap();
+    for (node, corner) in [("1000", 500.0), ("2000", 300.0)] {
+        let radio = ResolvedRadioSettings::resolve(&document, &NodeId::new(node).unwrap())
+            .unwrap()
+            .value;
+        assert_eq!(radio.receive_deemphasis_corner_hz, 299.5);
+        assert!(radio.transmit_preemphasis_enabled);
+        assert_eq!(radio.transmit_preemphasis_corner_hz, corner);
+    }
+}
+
+#[test]
 fn radio_hardware_gains_accept_finite_decimals_in_both_scopes() {
     for section in ["radio", "radio 1000"] {
         let source = format!(

@@ -69,7 +69,7 @@ impl ActiveRadio {
             radio: descriptors.radio,
             audio: std::ptr::from_ref(descriptors.audio).cast(),
             gpio: std::ptr::from_ref(descriptors.gpio).cast(),
-            rnnoise: std::ptr::null(),
+            rnnoise: descriptors.rnnoise,
             ring: std::ptr::null(),
             samplerate: std::ptr::null(),
         };
@@ -320,11 +320,15 @@ pub(crate) mod tests {
         use crate::providers::tests::{PublishedRadioDescriptor, replace_descriptor};
 
         let mut providers = ProviderSet::load().unwrap();
-        // SAFETY: the ABI record contains only scalars and nullable pointers.
-        let mut native: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
-        native.struct_size = std::mem::size_of_val(&native) as u32;
-        native.abi_version = 1;
-        native.capability_name = c"usbradioplus.product1".as_ptr();
+        // SAFETY: the loaded provider owns this complete, validated descriptor
+        // and retains the processing operations while lifecycle calls are replaced.
+        let mut native = unsafe {
+            *providers
+                .descriptor("libusbradioplus_product.so.1")
+                .unwrap()
+                .as_ptr()
+                .cast::<abi::UrpAstDescriptor>()
+        };
         native.native_create = Some(create);
         native.native_start = Some(start);
         native.native_stop = Some(stop);

@@ -288,3 +288,14 @@ lifecycle teardown quiesces callbacks and delivery before releasing device
 identity. Shared parallel-port access retains one physical owner with
 per-channel signaling state. Node installation and full release-gate
 verification are separate from this source-level implementation status.
+
+### Shared standalone source chains (2026-11-03)
+
+Native station configuration ABI 3 includes owned processing-section text and
+its node identity, plus explicit receive/transmit emphasis corners. The
+USBRadioPlus product resolves and prepares the same local and voice/telemetry
+chains as the ASL3 adapter, including RNNoise through its released adapter.
+Configuration spans are copied across the synchronous inspection boundary and
+retained by the standalone radio owner. No hardware ownership, gain, or DSP
+implementation is duplicated in the host. Unconfigured source roles retain
+their explicit native graphs; configured roles replace those graphs.

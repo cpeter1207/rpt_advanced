@@ -108,6 +108,12 @@ pub(crate) fn ctcss_tones(text: &str) -> Option<Vec<u16>> {
     .then_some(tones)
 }
 
+/// Parse a finite emphasis corner above zero and at most 500 Hz.
+pub(crate) fn emphasis_corner(text: &str) -> Option<f64> {
+    let value = text.parse::<f64>().ok()?;
+    (value.is_finite() && value > 0.0 && value <= 500.0).then_some(value)
+}
+
 /// Parse a three-digit octal DCS code and its N/I polarity.
 pub(crate) fn dcs_code(text: &str) -> Option<(u16, bool)> {
     let bytes = text.as_bytes();
