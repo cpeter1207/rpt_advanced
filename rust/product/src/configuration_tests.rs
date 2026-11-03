@@ -39,6 +39,8 @@ struct CapturedRadio {
     serial: String,
     receive_graph: String,
     transmit_graph: String,
+    processing_configuration: String,
+    processing_node: String,
 }
 
 unsafe fn text(pointer: *const c_char, length: usize) -> String {
@@ -111,6 +113,18 @@ unsafe extern "C" fn node(
             text(
                 native.transmit_graph.cast(),
                 native.transmit_graph_length as usize,
+            )
+        },
+        processing_configuration: unsafe {
+            text(
+                native.processing_configuration.cast(),
+                native.processing_configuration_length as usize,
+            )
+        },
+        processing_node: unsafe {
+            text(
+                native.processing_node.cast(),
+                native.processing_node_length as usize,
             )
         },
     });
@@ -380,7 +394,7 @@ fn native_requests_forward_only_configured_hardware_mixer_gains() {
         assert_eq!(result, 0, "{output:?}");
         assert!(output.diagnostics.is_empty());
         let request = &output.radios[0].request;
-        assert_eq!(request.abi_version, 2);
+        assert_eq!(request.abi_version, abi::URP_NATIVE_CONFIG_ABI_VERSION);
         assert_eq!(request.hardware_gain_mask, expected_mask);
         assert_eq!(
             [
@@ -390,6 +404,36 @@ fn native_requests_forward_only_configured_hardware_mixer_gains() {
             ],
             expected_gains,
         );
+    }
+}
+
+#[test]
+fn native_requests_copy_selected_processing_sections_and_emphasis_controls() {
+    let (result, output) = inspect(
+        "[1000]\n[2000]\n[radio]\nreceive_deemphasis_corner_hz=299.5\n\
+         transmit_preemphasis_enabled=yes\ntransmit_preemphasis_corner_hz=500\n\
+         [link]\nlimiter_enabled=yes\n[link 1000]\nlimiter_low_threshold_dbfs=-10\n\
+         [link 2000]\nlimiter_low_threshold_dbfs=-20\n",
+        false,
+    );
+    assert_eq!(result, 0, "{output:?}");
+    assert!(output.diagnostics.is_empty());
+    for (index, node, threshold) in [(0, "1000", "-10"), (1, "2000", "-20")] {
+        let radio = &output.radios[index];
+        assert_eq!(radio.processing_node, node);
+        assert!(
+            radio
+                .processing_configuration
+                .contains(&format!("[{node}]"))
+        );
+        assert!(
+            radio
+                .processing_configuration
+                .contains(&format!("limiter_low_threshold_dbfs={threshold}"))
+        );
+        assert_eq!(radio.request.receive_deemphasis_corner_hz, 299.5);
+        assert_eq!(radio.request.transmit_preemphasis_corner_hz, 500.0);
+        assert_eq!(radio.request.transmit_preemphasis, 1);
     }
 }
 

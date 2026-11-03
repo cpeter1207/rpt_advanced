@@ -216,6 +216,7 @@ fn echo_ring_policy_survives_prepared_generation() {
         &host.peers,
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
+        host.services,
     )
     .unwrap();
     assert_eq!(candidate.control.redirects.len(), 1);
@@ -1767,6 +1768,7 @@ fn egress_retirement_waits_for_dispatch_and_redirect() {
         &host.peers,
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
+        host.services,
     )
     .unwrap();
     host.runtime.replace_adapter("1000", candidate, 11).unwrap();
@@ -1853,6 +1855,7 @@ fn ended_ingress_is_omitted_and_unknown_peer_events_do_not_change_routes() {
         &host.peers,
         media_worker(&mut host.media_workers, "1000").unwrap(),
         &mut host.text,
+        host.services,
     )
     .unwrap();
     assert!(candidate.control.redirects.is_empty());
@@ -2044,6 +2047,7 @@ fn saturated_media_publication_keeps_the_running_generation() {
                 &host.peers,
                 media_worker(&mut host.media_workers, "1000").unwrap(),
                 &mut host.text,
+                host.services,
             ) {
                 Ok(candidate) => {
                     held.push(candidate);
@@ -2142,6 +2146,102 @@ fn failed_audio_preparation_and_attachment_preserve_start_and_reload_state() {
             .is_none()
     );
     assert!(host.stop(20));
+}
+
+#[test]
+fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct State {
+        reject: AtomicBool,
+        prepared: AtomicUsize,
+        destroyed: AtomicUsize,
+    }
+    unsafe extern "C" fn process(_: *mut c_void, _: *mut f32, _: usize) -> i32 {
+        0
+    }
+    unsafe extern "C" fn destroy(context: *mut c_void) {
+        unsafe { &*context.cast::<State>() }
+            .destroyed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    unsafe extern "C" fn prepare(
+        context: *mut c_void,
+        configuration: *const std::ffi::c_char,
+        length: usize,
+        local: *const std::ffi::c_char,
+        local_length: usize,
+        maximum: usize,
+        output: *mut abi::rptadv_pcm_processor_v1,
+    ) -> i32 {
+        let state = unsafe { &*context.cast::<State>() };
+        let configuration = unsafe {
+            std::str::from_utf8(std::slice::from_raw_parts(
+                configuration.cast::<u8>(),
+                length,
+            ))
+        }
+        .unwrap();
+        assert!(configuration.starts_with("[1000]\n[link]\n"));
+        assert!(configuration.contains("limiter_low_threshold_dbfs="));
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) },
+            b"1000"
+        );
+        assert_eq!(maximum, MAXIMUM_FRAMES);
+        if state.reject.load(Ordering::Relaxed) {
+            return -1;
+        }
+        state.prepared.fetch_add(1, Ordering::Relaxed);
+        let output = unsafe { &mut *output };
+        output.context = context;
+        output.process = Some(process);
+        output.destroy = Some(destroy);
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut state = Box::new(State {
+        reject: AtomicBool::new(false),
+        prepared: AtomicUsize::new(0),
+        destroyed: AtomicUsize::new(0),
+    });
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.context = ptr::from_mut(state.as_mut()).cast();
+    table.peer_processing_prepare = Some(prepare);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let config = |threshold| {
+        document(
+            "usb",
+            &format!("[link]\nlimiter_low_threshold_dbfs={threshold}\n"),
+        )
+    };
+    let mut host = Host::start(config(-10), media(), services, Instant::now(), clock()).unwrap();
+    assert_eq!(state.prepared.load(Ordering::Relaxed), 0);
+    let _peer = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
+    pump_until(&mut host, |host| {
+        host.runtime.status(10)[0].1.retiring.is_none()
+    });
+    assert_eq!(state.prepared.load(Ordering::Relaxed), 1);
+    let prior_document = host.runtime.document().clone();
+    let prior_revision = host.runtime.revision();
+    state.reject.store(true, Ordering::Relaxed);
+    assert_eq!(
+        host.reload(config(-11), clock()),
+        Err(RuntimeError::Preparation)
+    );
+    assert_eq!(host.runtime.document(), &prior_document);
+    assert_eq!(host.runtime.revision(), prior_revision);
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 0);
+    state.reject.store(false, Ordering::Relaxed);
+    host.reload(config(-11), clock()).unwrap();
+    pump_until(&mut host, |host| {
+        host.runtime.status(10)[0].1.retiring.is_none()
+    });
+    assert_eq!(state.prepared.load(Ordering::Relaxed), 2);
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+    assert!(host.stop(20));
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 2);
 }
 
 #[test]

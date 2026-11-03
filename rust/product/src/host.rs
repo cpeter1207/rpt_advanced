@@ -10,7 +10,7 @@ use crate::{
         NativeMediaPreparer,
         text::{TextExecutor, TextReader},
     },
-    services::{HostServices, PeerIo},
+    services::{HostServices, PeerIo, ProcessedPeer},
     status_post::{PostConfig, StatusPostService},
     worker::{Audio, AudioOwners, LocalRingUpdate, RadioWorker},
 };
@@ -180,6 +180,7 @@ fn prepared(
     peers: &[PeerOwner],
     worker: &mut MediaWorker,
     text: &mut TextExecutor,
+    services: HostServices,
 ) -> Result<PreparedAdapter<Audio, GenerationControl>, RuntimeError> {
     static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
     let text_generation = NEXT_TEXT_STATION.fetch_add(1, Ordering::Relaxed);
@@ -207,6 +208,14 @@ fn prepared(
         let (inbound, input) =
             InboundRing::open(snapshot.input_rate, peer.control.inbound_policy())
                 .map_err(|_| RuntimeError::Preparation)?;
+        let processor = services
+            .prepare_peer_processing(
+                &settings.radio.processing_configuration,
+                local,
+                MAXIMUM_FRAMES,
+            )
+            .map_err(|_| RuntimeError::Preparation)?;
+        let input = ProcessedPeer::new(input, processor);
         let (output, outbound) = LinkAudioQueue::new(48000 / 5, 64)
             .map_err(|_| RuntimeError::Preparation)?
             .into_endpoints();
@@ -240,7 +249,7 @@ fn prepared(
     let regeneration = if settings.dtmf_regeneration.enabled {
         let (writer, reader) = InboundRing::open(48000, InboundPolicy::Media)
             .map_err(|_| RuntimeError::Preparation)?;
-        audio = audio.with_regeneration(reader);
+        audio = audio.with_regeneration(ProcessedPeer::new(reader, None));
         Some((settings.dtmf_regeneration, writer, MAXIMUM_FRAMES))
     } else {
         None
@@ -342,6 +351,7 @@ impl Host {
                     &[],
                     media_worker(&mut media_workers, name)?,
                     &mut text,
+                    services,
                 )
             },
             |name, _| {
@@ -488,6 +498,7 @@ impl Host {
                     peers,
                     media_worker(media_workers, name)?,
                     &mut text,
+                    services,
                 )?;
                 if local_delays
                     .iter()
@@ -684,6 +695,7 @@ impl Host {
                 &self.peers,
                 media_worker(&mut self.media_workers, local)?,
                 &mut self.text,
+                self.services,
             );
             let candidate = match candidate {
                 Ok(candidate) => candidate,

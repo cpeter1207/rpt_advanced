@@ -9,6 +9,8 @@ pub(crate) enum ScopeKind {
     Node,
     RadioDefault,
     RadioNode,
+    ProcessingDefault,
+    ProcessingNode,
     EchoLinkDefault,
     EchoLinkNode,
     IdentifierDefault,
@@ -108,6 +110,10 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         ["general"] => Scope::flat(ScopeKind::General),
         ["radio"] => Scope::flat(ScopeKind::RadioDefault),
         ["radio", node] => Scope::node(ScopeKind::RadioNode, node),
+        ["local" | "link" | "voice_telemetry"] => Scope::flat(ScopeKind::ProcessingDefault),
+        ["local" | "link" | "voice_telemetry", node] => {
+            Scope::node(ScopeKind::ProcessingNode, node)
+        }
         ["echolink"] => Scope::flat(ScopeKind::EchoLinkDefault),
         ["echolink", node] => Scope::node(ScopeKind::EchoLinkNode, node),
         ["identifier"] => Scope::flat(ScopeKind::IdentifierDefault),
@@ -154,6 +160,9 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
                 "general"
                     | "echolink"
                     | "radio"
+                    | "local"
+                    | "link"
+                    | "voice_telemetry"
                     | "identifier"
                     | "announcement"
                     | "tail"
@@ -203,6 +212,7 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::SiteNode(_)
             | ScopeKind::SiteSet(_)
             | ScopeKind::RadioNode
+            | ScopeKind::ProcessingNode
             | ScopeKind::EchoLinkNode
             | ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementNode

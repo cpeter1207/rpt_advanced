@@ -14,6 +14,7 @@ pub mod foreground;
 pub mod host_services;
 /// Dynamically loaded outbound AllStarLink-compatible IAX2 client.
 pub mod iax;
+pub(crate) mod processing;
 /// Runtime provider loading and version validation.
 pub mod providers;
 /// Safe ordered activation of one standalone CM119 radio path.

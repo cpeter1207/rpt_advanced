@@ -22,6 +22,7 @@ pub struct Schema;
 enum KnownScope {
     General,
     Radio,
+    Processing,
     EchoLink,
     Identifier,
     Announcement,
@@ -49,6 +50,7 @@ impl KnownScope {
         Some(match kind {
             ScopeKind::General | ScopeKind::Node => Self::General,
             ScopeKind::RadioDefault | ScopeKind::RadioNode => Self::Radio,
+            ScopeKind::ProcessingDefault | ScopeKind::ProcessingNode => Self::Processing,
             ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode => Self::EchoLink,
             ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet => {
                 Self::Identifier
@@ -252,6 +254,8 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         return true;
     }
     match kind {
+        // The shared USBRadioPlus product validates its own processing vocabulary.
+        KnownScope::Processing => true,
         KnownScope::EchoLink => super::echolink::default_value(key).is_some(),
         KnownScope::Site { kind, named } => super::site::key_known(kind, named, key),
         KnownScope::Radio => {
@@ -271,6 +275,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                     | "receive_output_gain_db"
                     | "receive_graph"
                     | "transmit_graph"
+                    | "receive_deemphasis_corner_hz"
+                    | "transmit_preemphasis_enabled"
+                    | "transmit_preemphasis_corner_hz"
                     | "cm119_profile"
                     | "cm119_ptt_inverted"
                     | "cm119_clip_led_gpio"
@@ -457,6 +464,12 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if matches!(
+        kind,
+        ScopeKind::ProcessingDefault | ScopeKind::ProcessingNode
+    ) {
+        return true;
+    }
     if matches!(kind, ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode) {
         return super::echolink::value_valid(key, value);
     }
@@ -546,6 +559,10 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             parse::hardware_gain(value).is_some()
         }
         "receive_graph" | "transmit_graph" => !value.is_empty() && value.len() <= 4096,
+        "receive_deemphasis_corner_hz" | "transmit_preemphasis_corner_hz" => {
+            parse::emphasis_corner(value).is_some()
+        }
+        "transmit_preemphasis_enabled" => parse::boolean(value).is_some(),
         "statpost_url" => {
             if value.is_empty() {
                 return true;
@@ -725,6 +742,11 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "device_selection") => "exact",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_profile") => "dudeusb",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_ptt_inverted") => "no",
+        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_preemphasis_enabled") => "no",
+        (
+            ScopeKind::RadioDefault | ScopeKind::RadioNode,
+            "receive_deemphasis_corner_hz" | "transmit_preemphasis_corner_hz",
+        ) => "300",
         (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_clip_led_gpio") => "0",
         (
             ScopeKind::RadioDefault | ScopeKind::RadioNode,

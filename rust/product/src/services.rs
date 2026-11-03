@@ -8,7 +8,7 @@ use rpt_advanced_core::link::{PeerIdentity, ProtocolId};
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
-    mem::{size_of, size_of_val},
+    mem::{offset_of, size_of, size_of_val},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{self, NonNull},
 };
@@ -91,6 +91,94 @@ pub struct HostServices(abi::rptadv_host_services_v9);
 unsafe impl Send for HostServices {}
 // SAFETY: the immutable table and context may be copied; object operations remain serialized.
 unsafe impl Sync for HostServices {}
+
+/// Uniquely owned native-rate peer processor prepared by the selected host.
+pub struct PcmProcessor {
+    api: abi::rptadv_pcm_processor_v1,
+    maximum: usize,
+}
+// SAFETY: the host transfers one owner; its process calls remain serial on the
+// transmit worker, and destruction waits for that generation's quiescence.
+unsafe impl Send for PcmProcessor {}
+
+impl PcmProcessor {
+    fn process(&mut self, samples: &mut [f32]) -> bool {
+        if samples.len() > self.maximum {
+            return false;
+        }
+        // SAFETY: preparation validates the function and retains its unique
+        // context. The selected provider promises bounded native in-place work.
+        unsafe {
+            self.api.process.unwrap()(self.api.context, samples.as_mut_ptr(), samples.len()) == 0
+        }
+    }
+}
+impl Drop for PcmProcessor {
+    fn drop(&mut self) {
+        if let Some(destroy) = self.api.destroy.filter(|_| !self.api.context.is_null()) {
+            // SAFETY: the unique transferred owner is destroyed once, including
+            // rejected complete records, after all audio borrows are quiescent.
+            unsafe { destroy(self.api.context) };
+        }
+    }
+}
+
+/// One generation-owned peer ring followed by its optional native-rate graph.
+/// Local receive, telemetry and regeneration do not select this peer graph.
+pub struct ProcessedPeer<P> {
+    input: P,
+    processor: Option<PcmProcessor>,
+}
+impl<P> ProcessedPeer<P> {
+    /// Retain preallocated processing alongside this unique ring consumer.
+    pub fn new(input: P, processor: Option<PcmProcessor>) -> Self {
+        Self { input, processor }
+    }
+}
+impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
+    for ProcessedPeer<P>
+{
+    fn source_rate(&self) -> u32 {
+        self.input.source_rate()
+    }
+    fn signals(&self) -> &rpt_advanced_core::link::PeerSignals {
+        self.input.signals()
+    }
+    fn available(&self) -> u64 {
+        self.input.available()
+    }
+    fn finite_playout(&self) -> Option<bool> {
+        self.input.finite_playout()
+    }
+    fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+        match self.input.render(output) {
+            Some(real)
+                if self
+                    .processor
+                    .as_mut()
+                    .is_none_or(|processor| processor.process(output)) =>
+            {
+                Some(real)
+            }
+            _ => {
+                output.fill(0.0);
+                None
+            }
+        }
+    }
+    fn render_sample(&mut self) -> Option<f32> {
+        let mut sample = self.input.render_sample()?;
+        if self
+            .processor
+            .as_mut()
+            .is_none_or(|processor| processor.process(std::slice::from_mut(&mut sample)))
+        {
+            Some(sample)
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Default)]
 struct DirectoryResults {
@@ -251,11 +339,21 @@ impl HostServices {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        if size < size_of::<abi::rptadv_host_services_v9>() {
+        let required = offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare);
+        let table_size = size_of::<abi::rptadv_host_services_v9>();
+        if size < required || (size != required && size < table_size) {
             return Err(Error::Admission);
         }
-        // ABI 9 requires the complete table, including stateful codec preparation.
-        let api = unsafe { pointer.read() };
+        // ABI 9's released prefix is complete; its optional processor tail is
+        // copied only when fully readable. Missing tails remain nullable.
+        let mut api: abi::rptadv_host_services_v9 = unsafe { std::mem::zeroed() };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                pointer.cast::<u8>(),
+                ptr::from_mut(&mut api).cast::<u8>(),
+                size.min(table_size),
+            )
+        };
         let async_count = [
             api.peer_step_attach.is_some(),
             api.peer_step_stop.is_some(),
@@ -287,6 +385,49 @@ impl HostServices {
             return Err(Error::Admission);
         }
         Ok(Self(api))
+    }
+    /// Prepare one native-rate peer processor on control; absent hosts supply upstream DSP.
+    pub fn prepare_peer_processing(
+        &self,
+        configuration: &str,
+        local: &str,
+        maximum: usize,
+    ) -> Result<Option<PcmProcessor>, Error> {
+        let Some(prepare) = self.0.peer_processing_prepare else {
+            return Ok(None);
+        };
+        let mut api = abi::rptadv_pcm_processor_v1 {
+            struct_size: size_of::<abi::rptadv_pcm_processor_v1>() as u32,
+            abi_version: 1,
+            context: ptr::null_mut(),
+            process: None,
+            destroy: None,
+        };
+        let code = unsafe {
+            prepare(
+                self.0.context,
+                configuration.as_ptr().cast(),
+                configuration.len(),
+                local.as_ptr().cast(),
+                local.len(),
+                maximum,
+                &mut api,
+            )
+        };
+        match code {
+            1 => Ok(None),
+            0 => {
+                let processor = PcmProcessor { api, maximum };
+                (processor.api.struct_size as usize >= size_of::<abi::rptadv_pcm_processor_v1>()
+                    && processor.api.abi_version == 1
+                    && !processor.api.context.is_null()
+                    && processor.api.process.is_some()
+                    && processor.api.destroy.is_some())
+                .then_some(Some(processor))
+                .ok_or(Error::Operation)
+            }
+            _ => Err(Error::Operation),
+        }
     }
     /// Whether all retained peer-owner operations were supplied by this host.
     pub fn peer_step_available(&self) -> bool {

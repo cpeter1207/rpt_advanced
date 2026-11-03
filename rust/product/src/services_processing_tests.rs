@@ -1,0 +1,209 @@
+use super::*;
+use rpt_advanced_core::link::{PeerInput as Input, PeerSignals};
+use std::sync::atomic::AtomicUsize;
+
+const CONFIGURATION: &str = "[link]\nlimiter_enabled=yes\n";
+
+struct State {
+    mode: usize,
+    processed: AtomicUsize,
+    destroyed: AtomicUsize,
+}
+
+unsafe extern "C" fn process(context: *mut c_void, samples: *mut f32, count: usize) -> i32 {
+    let state = unsafe { &*context.cast::<State>() };
+    state.processed.fetch_add(1, Ordering::Relaxed);
+    let samples = unsafe { std::slice::from_raw_parts_mut(samples, count) };
+    if state.mode == 7 {
+        samples.fill(9.0);
+        return -1;
+    }
+    for sample in samples {
+        *sample *= 0.5;
+    }
+    0
+}
+
+unsafe extern "C" fn destroy(context: *mut c_void) {
+    unsafe { &*context.cast::<State>() }
+        .destroyed
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+unsafe extern "C" fn prepare(
+    context: *mut c_void,
+    configuration: *const c_char,
+    length: usize,
+    local: *const c_char,
+    local_length: usize,
+    maximum: usize,
+    output: *mut abi::rptadv_pcm_processor_v1,
+) -> i32 {
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(configuration.cast::<u8>(), length) },
+        CONFIGURATION.as_bytes()
+    );
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) },
+        b"1000"
+    );
+    assert_eq!(maximum, 4);
+    let state = unsafe { &*context.cast::<State>() };
+    match state.mode {
+        1 => return 1,
+        2 => return -1,
+        8 => return 2,
+        _ => {}
+    }
+    let output = unsafe { &mut *output };
+    output.context = context;
+    output.process = Some(process);
+    output.destroy = Some(destroy);
+    match state.mode {
+        3 => output.struct_size -= 1,
+        4 => output.abi_version = 2,
+        5 => output.process = None,
+        6 => output.context = ptr::null_mut(),
+        9 => output.destroy = None,
+        _ => {}
+    }
+    0
+}
+
+fn fixture(mode: usize) -> (Box<State>, HostServices) {
+    let mut state = Box::new(State {
+        mode,
+        processed: AtomicUsize::new(0),
+        destroyed: AtomicUsize::new(0),
+    });
+    let services = host_services(|table| {
+        table.context = ptr::from_mut(state.as_mut()).cast();
+        table.peer_processing_prepare = Some(prepare);
+    });
+    (state, services)
+}
+
+struct Source {
+    signals: PeerSignals,
+    real: Option<usize>,
+}
+impl Source {
+    fn new(real: Option<usize>) -> Self {
+        Self {
+            signals: PeerSignals::default(),
+            real,
+        }
+    }
+}
+impl Input for Source {
+    fn source_rate(&self) -> u32 {
+        8000
+    }
+    fn signals(&self) -> &PeerSignals {
+        &self.signals
+    }
+    fn available(&self) -> u64 {
+        9
+    }
+    fn finite_playout(&self) -> Option<bool> {
+        Some(true)
+    }
+    fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
+        samples.fill(0.5);
+        self.real
+    }
+}
+
+#[test]
+fn host_peer_processor_bypasses_or_rejects_without_leaking_transferred_owners() {
+    assert!(
+        host_services(|_| {})
+            .prepare_peer_processing(CONFIGURATION, "1000", 4)
+            .unwrap()
+            .is_none()
+    );
+    for mode in 1..=9 {
+        if mode == 7 {
+            continue;
+        }
+        let (state, services) = fixture(mode);
+        let result = services.prepare_peer_processing(CONFIGURATION, "1000", 4);
+        if mode == 1 {
+            assert!(result.unwrap().is_none());
+        } else {
+            assert!(matches!(result, Err(Error::Operation)));
+        }
+        assert_eq!(
+            state.destroyed.load(Ordering::Relaxed),
+            usize::from(matches!(mode, 3..=5))
+        );
+    }
+}
+
+#[test]
+fn peer_processor_filters_native_ring_output_including_concealment_once() {
+    let (state, services) = fixture(0);
+    let processor = services
+        .prepare_peer_processing(CONFIGURATION, "1000", 4)
+        .unwrap();
+    let mut input = ProcessedPeer::new(Source::new(Some(0)), processor);
+    assert_eq!(input.source_rate(), 8000);
+    assert_eq!(input.available(), 9);
+    assert_eq!(input.finite_playout(), Some(true));
+    assert!(!input.signals().ended());
+    let mut samples = [0.0; 4];
+    assert_eq!(input.render(&mut samples), Some(0));
+    assert_eq!(samples, [0.25; 4]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+    assert_eq!(input.render_sample(), None);
+    input.input.real = Some(1);
+    assert_eq!(input.render_sample(), Some(0.25));
+    assert_eq!(state.processed.load(Ordering::Relaxed), 2);
+    drop(input);
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn peer_processor_failure_silences_only_its_block_and_preserves_bypass() {
+    let (state, services) = fixture(7);
+    let processor = services
+        .prepare_peer_processing(CONFIGURATION, "1000", 4)
+        .unwrap();
+    let mut input = ProcessedPeer::new(Source::new(Some(4)), processor);
+    let mut samples = [0.0; 4];
+    assert_eq!(input.render(&mut samples), None);
+    assert_eq!(samples, [0.0; 4]);
+    assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+    drop(input);
+    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+    let mut bypass = ProcessedPeer::new(Source::new(Some(4)), None);
+    assert_eq!(bypass.render(&mut samples), Some(4));
+    assert_eq!(samples, [0.5; 4]);
+    let mut unavailable = ProcessedPeer::new(Source::new(None), None);
+    assert_eq!(unavailable.render(&mut samples), None);
+    assert_eq!(samples, [0.0; 4]);
+    assert_eq!(unavailable.render_sample(), None);
+    let mut bypass_sample = ProcessedPeer::new(Source::new(Some(1)), None);
+    assert_eq!(bypass_sample.render_sample(), Some(0.5));
+}
+
+#[test]
+fn peer_processor_rejects_oversized_blocks_and_failed_single_samples() {
+    for mode in [0, 7] {
+        let (state, services) = fixture(mode);
+        let processor = services
+            .prepare_peer_processing(CONFIGURATION, "1000", 4)
+            .unwrap();
+        let mut input = ProcessedPeer::new(Source::new(Some(1)), processor);
+        let mut oversized = [1.0; 5];
+        assert_eq!(input.render(&mut oversized), None);
+        assert_eq!(oversized, [0.0; 5]);
+        assert_eq!(state.processed.load(Ordering::Relaxed), 0);
+        if mode == 7 {
+            assert_eq!(input.render_sample(), None);
+            assert_eq!(state.processed.load(Ordering::Relaxed), 1);
+        }
+        drop(input);
+        assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+    }
+}

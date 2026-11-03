@@ -13,6 +13,8 @@ static PEER_DIAL_MODE: AtomicU8 = AtomicU8::new(0);
 static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
 #[path = "services_echo_tests.rs"]
 mod echo;
+#[path = "services_processing_tests.rs"]
+mod processing;
 
 unsafe extern "C" fn echo_info(
     _: *mut c_void,
@@ -528,6 +530,58 @@ fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v9)) -> H
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
+}
+
+#[test]
+fn optional_peer_processor_tail_accepts_the_released_complete_host_prefix() {
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.struct_size =
+        std::mem::offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare) as u32;
+    assert!(unsafe { HostServices::open(&table) }.is_ok());
+}
+
+#[test]
+fn peer_processor_preparation_uses_the_selected_node_configuration() {
+    unsafe extern "C" fn process(_: *mut c_void, _: *mut f32, _: usize) -> i32 {
+        0
+    }
+    unsafe extern "C" fn destroy(_: *mut c_void) {}
+    unsafe extern "C" fn prepare(
+        _: *mut c_void,
+        configuration: *const c_char,
+        length: usize,
+        local: *const c_char,
+        local_length: usize,
+        maximum: usize,
+        output: *mut abi::rptadv_pcm_processor_v1,
+    ) -> i32 {
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(configuration.cast::<u8>(), length) },
+            b"[link]\nlimiter_enabled=yes\n"
+        );
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) },
+            b"1000"
+        );
+        assert_eq!(maximum, 4096);
+        let output = unsafe { &mut *output };
+        assert_eq!(
+            output.struct_size as usize,
+            size_of::<abi::rptadv_pcm_processor_v1>()
+        );
+        assert_eq!(output.abi_version, 1);
+        output.context = ptr::without_provenance_mut(1);
+        output.process = Some(process);
+        output.destroy = Some(destroy);
+        0
+    }
+    let services = host_services(|table| table.peer_processing_prepare = Some(prepare));
+    assert!(
+        services
+            .prepare_peer_processing("[link]\nlimiter_enabled=yes\n", "1000", 4096)
+            .unwrap()
+            .is_some()
+    );
 }
 
 unsafe extern "C" fn local_time_mode(

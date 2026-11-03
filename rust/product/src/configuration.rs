@@ -54,7 +54,7 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
         }
         if let Some(sink) = node {
             for (identity, settings, radio, account) in nodes {
-                let native = native_configuration(&settings.radio, &radio)?;
+                let native = native_configuration(&settings.radio, &radio, identity.as_str())?;
                 let secrets_file = account
                     .secrets_file
                     .as_ref()
@@ -138,6 +138,7 @@ pub(crate) unsafe extern "C" fn inspect_secrets(
 fn native_configuration(
     settings: &ResolvedRadioSettings,
     radio: &abi::rptadv_radio_session_config,
+    node: &str,
 ) -> Result<abi::UrpNativeStationConfig, String> {
     let length = |value: &str| {
         u32::try_from(value.len()).map_err(|_| "radio configuration value is too long".to_owned())
@@ -186,6 +187,13 @@ fn native_configuration(
         hardware_input_gain_db: settings.hardware_input_gain_db.unwrap_or_default(),
         hardware_output_a_gain_db: settings.hardware_output_a_gain_db.unwrap_or_default(),
         hardware_output_b_gain_db: settings.hardware_output_b_gain_db.unwrap_or_default(),
+        processing_configuration: settings.processing_configuration.as_ptr(),
+        processing_configuration_length: length(&settings.processing_configuration)?,
+        processing_node: node.as_ptr(),
+        processing_node_length: length(node)?,
+        transmit_preemphasis: u32::from(settings.transmit_preemphasis_enabled),
+        transmit_preemphasis_corner_hz: settings.transmit_preemphasis_corner_hz,
+        receive_deemphasis_corner_hz: settings.receive_deemphasis_corner_hz,
     })
 }
 

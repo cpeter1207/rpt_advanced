@@ -69,7 +69,7 @@ impl ActiveRadio {
             radio: descriptors.radio,
             audio: std::ptr::from_ref(descriptors.audio).cast(),
             gpio: std::ptr::from_ref(descriptors.gpio).cast(),
-            rnnoise: std::ptr::null(),
+            rnnoise: descriptors.rnnoise,
             ring: std::ptr::null(),
             samplerate: std::ptr::null(),
         };

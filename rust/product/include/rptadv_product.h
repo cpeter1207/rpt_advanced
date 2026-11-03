@@ -269,6 +269,18 @@ typedef int (*rptadv_secret_sink)(void *context, const char *node, size_t node_l
 typedef void (*rptadv_directory_srv_sink_v1)(void *context, const char *host, size_t length,
                                              uint16_t port);
 
+/** One uniquely owned native-rate PCM processor, prepared off the audio callback.
+ * Processing is serial, bounded, allocation/lock/I/O-free, and fills exactly count
+ * samples in place. Zero succeeds; negative rejects that block. Destroy is called
+ * only after the audio generation is quiescent, never from its callback. */
+struct rptadv_pcm_processor_v1 {
+    uint32_t struct_size; /**< Complete readable record size. */
+    uint32_t abi_version; /**< Exactly 1. */
+    void *context;        /**< Unique non-null processor owner. */
+    int (*process)(void *context, float *samples, size_t count); /**< Native 48 kHz PCM. */
+    void (*destroy)(void *context); /**< Release the prepared processor once. */
+};
+
 /** Host I/O primitives consumed by the portable product owner.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
@@ -443,6 +455,16 @@ struct rptadv_host_services_v9 {
      * zero with no text means no account, negative means unavailable, never offline. */
     int (*echo_account_status)(void *context, const char *local, size_t local_length,
                                rptadv_text_sink_v1 sink, void *sink_context);
+    /** Optional tail: prepare a uniquely owned link processor for one audio generation.
+     * Configuration and local-node UTF-8 spans are borrowed only during this control
+     * call. Zero transfers one complete ABI-1 processor; one bypasses processing;
+     * negative rejects preparation and transfers nothing. Absent means the selected
+     * host already supplies processed peer PCM. Records ending before this tail retain
+     * ABI-9 behavior; a partially present function-pointer field is invalid. */
+    int (*peer_processing_prepare)(void *context, const char *configuration,
+                                   size_t configuration_length, const char *local,
+                                   size_t local_length, size_t maximum_frames,
+                                   struct rptadv_pcm_processor_v1 *processor);
 };
 
 /** Exact revision of a typed site control request. */

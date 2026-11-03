@@ -77,6 +77,36 @@ future version. Runtime acknowledgment rejects older mixed installations safely.
 
 ### Explicit peer link processing (2026-09-25)
 
+### Standalone source-chain parity (2026-11-03)
+
+The shared USBRadioPlus product also resolves standalone `local`, `link`, and
+`voice_telemetry` sections from `rpt_advanced.conf`. Flat sections provide
+defaults; node-scoped sections override them. The controller retains only
+section text and delegates option validation, defaults, graph construction,
+and DSP to that dynamically linked provider. It owns no second processing
+parser or implementation. A role with no processing section retains its
+explicit receive or transmit graph. A configured role replaces that graph.
+
+Local processing remains in the native receive callback. Final voice/telemetry
+processing remains before radio CTCSS/DCS addition in the native transmit
+callback. Each standalone peer has its own normalized-F32 link processor
+after its inbound ring, including concealed output, and before controller
+mixing. Prepared processors and workspaces belong to the audio generation;
+configuration and peer changes prepare replacements on control and reclaim
+retired owners only after callback quiescence. No callback allocates, locks,
+loads a library, or builds a graph.
+
+Host-services ABI 9 has a size-gated optional peer-processor preparation tail.
+Its absence preserves the Asterisk host's existing upstream USBRadioPlus hook,
+so Asterisk peer audio is not processed twice. Complete older ABI-9 prefixes
+remain readable; partially present tail pointers are rejected. The new opaque
+PCM-processor record is ABI 1. USBRadioPlus retains product descriptor ABI 1
+and SONAME 1 with size-gated descriptor additions; native station configuration
+is ABI 3. Matching native producers and consumers are required, with package
+minimums USBRadioPlus alpha26 and standalone controller alpha19.
+
+### Asterisk host association
+
 The ABI 3/4 references in this dated section record their introduction. The
 current host-services descriptor is ABI 7 and the product descriptor is ABI 5,
 as declared in `rust/product/include/rptadv_product.h`.
