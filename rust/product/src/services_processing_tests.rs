@@ -207,3 +207,23 @@ fn peer_processor_rejects_oversized_blocks_and_failed_single_samples() {
         assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
     }
 }
+
+#[test]
+fn peer_processor_mutes_final_output_using_current_dtmf_state() {
+    let (state, services) = fixture(0);
+    let processor = services
+        .prepare_peer_processing(CONFIGURATION, "1000", 4)
+        .unwrap();
+    let mut input = ProcessedPeer::new(Source::new(Some(1)), processor);
+    for muted in [true, false] {
+        // Ring output can precede a detector-state change, and stateful DSP can
+        // retain tone history. Qualification must therefore gate the final PCM.
+        input.signals().set_dtmf_muted(muted);
+        let mut samples = [0.0; 4];
+        assert_eq!(input.render(&mut samples), Some(1));
+        let expected = if muted { 0.0 } else { 0.25 };
+        assert_eq!(samples, [expected; 4]);
+        assert_eq!(input.render_sample(), Some(expected));
+    }
+    assert_eq!(state.processed.load(Ordering::Relaxed), 4);
+}

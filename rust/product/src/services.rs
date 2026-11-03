@@ -125,6 +125,7 @@ impl Drop for PcmProcessor {
 
 /// One generation-owned peer ring followed by its optional native-rate graph.
 /// Local receive, telemetry and regeneration do not select this peer graph.
+/// Current DTMF muting gates its output after stateful processing as well as the ring.
 pub struct ProcessedPeer<P> {
     input: P,
     processor: Option<PcmProcessor>,
@@ -158,6 +159,9 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
                     .as_mut()
                     .is_none_or(|processor| processor.process(output)) =>
             {
+                if self.input.signals().dtmf_muted() {
+                    output.fill(0.0);
+                }
                 Some(real)
             }
             _ => {
@@ -173,7 +177,11 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
             .as_mut()
             .is_none_or(|processor| processor.process(std::slice::from_mut(&mut sample)))
         {
-            Some(sample)
+            Some(if self.input.signals().dtmf_muted() {
+                0.0
+            } else {
+                sample
+            })
         } else {
             None
         }
