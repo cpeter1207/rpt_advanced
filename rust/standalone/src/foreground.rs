@@ -1047,16 +1047,25 @@ mod tests {
             0
         );
         wait_for_log(&receiver, "configuration reload rejected");
-        fs::write(
-            &path,
-            "[general]\nnode_enabled=no\n[524950]\nlink_command_disconnect=3\n",
-        )
-        .unwrap();
+        // Pass configuration inspection, then reject listener preparation before
+        // any radio can activate. A parse error exercises a different reload arm.
+        let occupied = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let candidate = format!(
+            "[general]\nnode_enabled=yes\niax_local_port={port}\n[524950]\nradio_channel=fixture\n"
+        );
+        super::validate_configuration(&candidate).unwrap();
+        assert_eq!(super::resolve_radios(&candidate).unwrap()[0].iax_port, port);
+        fs::write(&path, candidate).unwrap();
         assert_eq!(
             unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGHUP) },
             0
         );
-        wait_for_log(&receiver, "configuration reload rejected");
+        wait_for_log(
+            &receiver,
+            "configuration reload rejected: cannot bind the IAX2 listener",
+        );
+        drop(occupied);
         fs::write(&path, "[general]\nnode_enabled=no\n[524950]\n").unwrap();
         assert_eq!(
             unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGHUP) },
