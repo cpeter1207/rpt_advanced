@@ -46,7 +46,7 @@
 - [x] Preserve all selected named profiles and node selectors in forwarded configuration.
 - [x] Replace controller radio/session construction with shared-provider delegation; delete `rust/product/src/radio_configuration.rs` and obsolete mirrored types/parsing/tests once callers are replaced.
 - [x] Run affected configuration/station/ABI tests and developer docs. Verify equivalent explicit settings yield equivalent radio/hardware plans and invalid/missing settings preserve shared fallback semantics.
-- [ ] Review the source move and ABI ownership, then commit the coherent slice.
+- [x] Review the source move and ABI ownership, then commit the coherent slice.
 
 ## Task 2: Shared native physical lifecycle, maintenance and diagnostics
 
@@ -65,7 +65,7 @@
 - [x] Factor the existing prepared forward/reverse update and independent RX/TX acknowledgment primitive for native updates; do not copy its transaction.
 - [x] Test disabled/valid/invalid/unreadable EEPROM, precedence, no startup writes, update rollback, no second device open, and no-stream-interruption updates.
 - [x] Test temporary manual PTT/CTCSS intent merging with the direct controller callbacks, cleanup and stopped/stale handles.
-- [ ] Run targeted tests/docs/coverage for the changed owner components, review, and commit.
+- [x] Run targeted tests/docs/coverage for the changed owner components, review, and commit.
 
 ## Task 3: Standalone maintenance bridge and local control adapter
 
@@ -83,7 +83,7 @@
 - [x] Tie temporary maintenance key/tone ownership to a connected session. Test disconnect, cancellation, stale generation, reload and shutdown cleanup while normal controller PTT remains asserted when appropriate.
 - [x] Forward physical snapshots and shared graph observations alongside existing controller status. Do not compute measurements twice.
 - [x] Test permissions, malformed/oversized/unknown requests, unavailable/disabled nodes, saturated admission and service cleanup.
-- [ ] Run targeted tests/docs/coverage, review, and commit.
+- [x] Run targeted tests/docs/coverage, review, and commit.
 
 ## Task 4: One tuner frontend for both compositions
 
@@ -100,18 +100,26 @@
 - [x] Prove RX noise/squelch, RX voice, RX CTCSS, TX voice/tone/auxiliary calibration, status/meters, EEPROM save and supported live reloads through both backend adapters.
 - [x] Keep ASL-specific controls conditional; do not add native echo or hardware repeat to standalone.
 - [x] Split packaging only as needed so the same tuner executable works without Asterisk. Verify upgrade ownership and prerequisites.
-- [ ] Run targeted tests/docs/coverage, review, and commit.
+- [x] Run targeted tests/docs/coverage, review, and commit.
 
 
 ## Task 5: Coordinated admission, documentation and full verification
 
 **Files / ownership:** Affected dependency manifests, SDK/version checks, package combinations and install checks in the production/workflow repositories; ADRs 0028/0036 and the corresponding architectural inventory.
 
-- [ ] Audit all seven original gaps against concrete paths and tests, including removal of replaced implementations.
-- [ ] Update developer documentation before commits and operator docs/examples before PRs; describe current operation plainly.
-- [ ] Complete targeted production coverage/source closures and record them once.
-- [ ] Run fast formatting/lint/static preflight using freshly pulled `latest` images and the maintained labeled launcher; clean task-owned containers.
+- [x] Audit all seven original gaps against concrete paths and tests, including removal of replaced implementations.
+- [x] Update developer documentation before commits and operator docs/examples before PRs; describe current operation plainly.
+- [x] Complete targeted production coverage/source closures and record them once.
+- [x] Run fast formatting/lint/static preflight using freshly pulled `latest` images and the maintained labeled launcher; clean task-owned containers.
 - [ ] Push validated feature code for hosted checks; satisfy separately released dynamic dependency requirements through an approved concrete release step if required.
 - [ ] Run the full hosted Debian 13 amd64/arm64 gate, with production-only 100% line/branch coverage on amd64, then verify the actual artifact and exact tested source tree.
-- [ ] Perform independent whole-branch review for shared ownership, callback safety, default preservation, maintenance cleanup and duplicate/dead code.
+- [x] Perform independent whole-branch review for shared ownership, callback safety, default preservation, maintenance cleanup and duplicate/dead code.
 - [ ] Report tested completion and any physical qualification limits. Do not merge, release or activate node code without authority for that step.
+
+## Integration checkpoint (2026-11-04)
+
+- USBRadioPlus implementation: `9e071000`, PR44; full hosted gate pending.
+- RPT controller and private tuner bridge: `6e6f08e` plus `9c6c913`, locally committed; dynamic SDK27 release/image refresh precedes its hosted gate.
+- Workflow admission: `0b0bac4`, workflow PR44; hosted workflow validation passed.
+- Focused production coverage is closed for shared configuration, physical maintenance, tuner, bridge and local transport components. Evidence stays in ignored `.work/quality-progress.md` and component receipts.
+- No node install, configuration change, service restart or RF operation has occurred. Physical qualification remains outside this approval.
