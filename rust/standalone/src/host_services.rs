@@ -121,6 +121,8 @@ impl HostServicesOwner {
             peer_send_human_text: Some(peer_send_human_text),
             echo_account_status: Some(echo_account_status),
             peer_processing_prepare: Some(peer_processing_prepare),
+            radio_control: Some(control_radio),
+            radio_update: Some(update_radio),
         });
         Ok(Self {
             context,
@@ -287,6 +289,7 @@ unsafe extern "C" fn peer_processing_prepare(
             configuration,
             local,
             maximum_frames,
+            Some(&context.radio.observations),
             output,
         ) {
             Ok(true) => 0,
@@ -834,6 +837,34 @@ unsafe extern "C" fn destroy_radio(context: *mut c_void, radio: *mut c_void) {
     let radio_context =
         unsafe { ptr::addr_of_mut!((*context.cast::<StandaloneHostContext>()).radio) }.cast();
     unsafe { radio_destroy(radio_context, radio) };
+}
+
+unsafe extern "C" fn control_radio(
+    context: *mut c_void,
+    radio: *mut c_void,
+    request: *mut abi::rptadv_radio_control_v1,
+    sink: abi::rptadv_text_sink_v1,
+    sink_context: *mut c_void,
+) -> i32 {
+    if context.is_null() {
+        return -1;
+    }
+    // SAFETY: the host owner retains its radio field until all leases are destroyed.
+    let radio_context =
+        unsafe { ptr::addr_of_mut!((*context.cast::<StandaloneHostContext>()).radio) }.cast();
+    // SAFETY: the serialized product owner retains its radio, request and sink.
+    unsafe { crate::radio_host::radio_control(radio_context, radio, request, sink, sink_context) }
+}
+
+unsafe extern "C" fn update_radio(context: *mut c_void, radio: *mut c_void, phase: u32) -> i32 {
+    if context.is_null() {
+        return -1;
+    }
+    // SAFETY: this host owner retains its radio field until every lease is destroyed.
+    let radio_context =
+        unsafe { ptr::addr_of_mut!((*context.cast::<StandaloneHostContext>()).radio) }.cast();
+    // SAFETY: the serialized product owns the existing radio handle through return.
+    unsafe { crate::radio_host::radio_update(radio_context, radio, phase) }
 }
 
 unsafe extern "C" fn peer_dial(
@@ -1482,6 +1513,41 @@ mod tests {
         assert!(api.peer_dial.is_some());
         assert!(api.radio_activate.is_some());
         let _context: *mut c_void = api.context;
+    }
+
+    #[test]
+    fn radio_maintenance_callbacks_reject_absent_context_and_forward_to_the_radio_owner() {
+        let owner = HostServicesOwner::new(
+            crate::resolve_radio_nodes("[1000]\nradio_channel=vhf\n").unwrap(),
+            None,
+            SecretsFile::parse("").unwrap(),
+        )
+        .unwrap();
+        let api = owner.descriptor();
+        let mut radio = ptr::null_mut();
+        // SAFETY: the owner and writable result remain live; reserving opens no hardware.
+        assert_eq!(
+            unsafe { api.radio_open.unwrap()(api.context, c"1000".as_ptr(), 4, 960, &mut radio) },
+            0
+        );
+        assert!(!radio.is_null());
+        // SAFETY: this scalar-only ABI record is initialized before either callback reads it.
+        let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+        request.struct_size = size_of::<abi::rptadv_radio_control_v1>() as u32;
+        request.abi_version = 1;
+        request.operation = 1;
+        for (context, expected) in [(ptr::null_mut(), -1), (api.context, -7)] {
+            // SAFETY: the descriptor and reserved inactive radio remain retained throughout.
+            unsafe {
+                assert_eq!(
+                    api.radio_control.unwrap()(context, radio, &mut request, None, ptr::null_mut()),
+                    expected
+                );
+                assert_eq!(api.radio_update.unwrap()(context, radio, 0), expected);
+            }
+        }
+        // SAFETY: the unique reservation is destroyed once after all borrowed calls finish.
+        unsafe { api.radio_destroy.unwrap()(api.context, radio) };
     }
 
     #[test]

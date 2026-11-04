@@ -80,16 +80,15 @@ Both compositions reuse the shared driver's mixer scaling and the released
 PortAudio/ALSA adapter. The native station applies configured levels on every
 stopped-to-started transition, before GPIO or audio callbacks start. Mixer
 access never occurs inside an audio callback. Preparation and omitted controls
-do not write mixer state; this does not add EEPROM reads, sidetone changes,
-or processing gain changes to standalone.
+do not write mixer state. Native EEPROM loading is opt-in; a valid enabled
+image has the shared tuning precedence. Sidetone is not changed.
 
-The existing native configuration record uses ABI 2 with an explicit gain
+The native configuration record uses ABI 3 with an explicit gain
 presence mask and three gain values. Native arguments and the enclosing
 USBRadioPlus product descriptor remain ABI 1. Current consumers reject the
 old native record, and package dependencies prevent an incompatible provider
-and controller from being installed together. The matching release cohort is
-USBRadioPlus alpha25 and RPT Advanced alpha16; no new shared-object boundary
-or external adapter operation is introduced.
+and controller from being installed together. Sized descriptor extensions
+expose shared configuration resolution and maintenance without another DSO.
 
 USBRadioPlus maintains one ASL3 compatibility adapter once these hardware
 boundaries replace `res_usbradio`. The old legacy/modern split follows the
@@ -299,3 +298,39 @@ Configuration spans are copied across the synchronous inspection boundary and
 retained by the standalone radio owner. No hardware ownership, gain, or DSP
 implementation is duplicated in the host. Unconfigured source roles retain
 their explicit native graphs; configured roles replace those graphs.
+
+### Shared configuration and maintenance (2026-11-04)
+
+`libusbradioplus_product.so.1` owns radio configuration resolution for both
+compositions. RPT Advanced forwards the original document and node identity
+through its C descriptor. The SDK returns an owned resolution and lends a
+complete native request during a synchronous visit. RPT Advanced copies that
+request before the owner is destroyed. Its controller retains only opaque
+radio/profile text for reload identity, not a second radio schema or builder.
+
+The shared maintenance owner provides mixer control, calibration tones,
+EEPROM operations, physical measurements and configured parallel transport.
+Native defaults remain explicit: EEPROM disabled, exact device selection,
+and independent receive/transmit CPU-saver settings. Named profiles use the
+shared resolver; unconfigured roles preserve their native graph defaults.
+
+Same-device changes use the existing prepared update mailbox. Both audio
+owners acknowledge adoption before commit; reverse preparation remains
+retained until the controller transaction succeeds. Failed preparation keeps
+the active configuration. An unsuccessful restore gates the affected device
+through the existing fault/stop path. No device I/O, parsing or control lock
+is moved into audio callbacks. The controller alone owns its squelch-delay ring.
+
+The common tuner uses either its Asterisk transport or a service-only Unix
+socket. Both use the same calibration, configuration and maintenance code.
+The socket is mode 0600 inside a service-owned mode-0700 runtime directory.
+Only one connected tuning session owns temporary manual requests. Closing it,
+signal reload or shutdown releases those requests without clearing ordinary
+controller PTT. An accepted tuner live-update transaction retains its own
+temporary calibration requests until the frontend completes or disconnects.
+
+Physical and link diagnostics read their existing shared counters. Independent
+immutable observer leases permit control reads without borrowing an audio
+processor or duplicating its counters. Package and descriptor admission require
+the complete shared operations before native activation. Integration and
+physical qualification are tracked separately from this ownership decision.

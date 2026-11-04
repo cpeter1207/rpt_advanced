@@ -533,6 +533,98 @@ fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v9)) -> H
 }
 
 #[test]
+fn radio_update_is_optional_and_preserves_stage_results_and_finish_errors() {
+    let services = host_services(|_| {});
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.configuration_update(0), Ok(false));
+    assert_eq!(radio.configuration_update(1), Err(-7));
+    thread_local! { static MODE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) }; }
+    unsafe extern "C" fn update(_: *mut c_void, radio: *mut c_void, phase: u32) -> i32 {
+        assert!(!radio.is_null());
+        assert!(phase <= 2);
+        MODE.get()
+    }
+    let services = host_services(|table| table.radio_update = Some(update));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    for phase in 0..=2 {
+        for code in [0, 1, -5, -9] {
+            MODE.set(code);
+            assert_eq!(
+                radio.configuration_update(phase),
+                match code {
+                    0 => Ok(true),
+                    1 if phase == 0 => Ok(false),
+                    _ => Err(code),
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn radio_maintenance_validates_bounded_text_and_keeps_sink_errors() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    thread_local! { static MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+    unsafe extern "C" fn control(
+        _: *mut c_void,
+        radio: *mut c_void,
+        _: *mut abi::rptadv_radio_control_v1,
+        sink: abi::rptadv_text_sink_v1,
+        context: *mut c_void,
+    ) -> i32 {
+        assert!(!radio.is_null());
+        let sink = sink.unwrap();
+        let mode = MODE.get();
+        match mode {
+            0 => unsafe {
+                sink(context, ptr::null(), 0);
+                sink(context, c"ok".as_ptr(), 2);
+            },
+            1 => unsafe { sink(context, c"ignored".as_ptr(), 0) },
+            2 => unsafe { sink(context, ptr::null(), 1) },
+            3 => unsafe {
+                sink(context, c"\xff".as_ptr(), 1);
+                sink(context, c"ok".as_ptr(), 2);
+            },
+            4..=6 => {
+                let text = vec![b'a'; if mode == 4 { 65537 } else { 65536 }];
+                unsafe { sink(context, text.as_ptr().cast(), text.len()) };
+                if mode == 5 {
+                    unsafe { sink(context, c"!".as_ptr(), 1) };
+                }
+            }
+            _ => return -9,
+        }
+        0
+    }
+    let services = host_services(|table| table.radio_control = Some(control));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    for (mode, expected) in [
+        (0, Ok(2)),
+        (1, Ok(0)),
+        (2, Err(-1)),
+        (3, Err(-1)),
+        (4, Err(-1)),
+        (5, Err(-1)),
+        (6, Ok(65536)),
+        (7, Err(-9)),
+    ] {
+        MODE.set(mode);
+        assert_eq!(
+            radio.maintenance(&mut request).map(|text| text.len()),
+            expected,
+            "maintenance text mode {mode}"
+        );
+    }
+    let services = host_services(|table| table.radio_control = None);
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.maintenance(&mut request), Err(-7));
+}
+
+#[test]
 fn optional_peer_processor_tail_accepts_the_released_complete_host_prefix() {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.struct_size =

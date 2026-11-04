@@ -665,6 +665,16 @@ dependency publication is no longer an outstanding release prerequisite.
 
 ## Decisions
 
+Radio configuration and physical maintenance belong to the dynamically linked
+USBRadioPlus product SDK. Both controller hosts consume its resolved requests;
+the controller does not carry a second radio schema. Standalone's private Unix
+socket adapts the existing tuner to serialized physical maintenance without
+opening another device owner. Compatible changes use the shared prepared update
+and callback acknowledgments. Physical and processing diagnostics read the
+shared owner's existing snapshots and counters. See
+[native radio maintenance](native-radio-maintenance.md) and ADRs 0026, 0028 and
+0036 for ownership and admission requirements.
+
 Peer transmit fan-out has a node-lifetime media thread independent of station
 control. The output callback publishes into a fixed two-block pool; bounded
 64-destination batches feed each peer's sole native-PCM consumer. That peer's

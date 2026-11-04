@@ -136,6 +136,19 @@ See [radio operation](implementation-status.md) and
 
 ## Apply settings and upgrades
 
+To tune a standalone radio, install the tuner and select your node:
+
+```sh
+sudo apt-get install usbradioplus-tune
+sudo usbradioplus-tune --backend standalone --node 524950
+```
+
+Replace `524950` with your node number. Keep the standalone service running.
+The tuner uses that service's configuration file. Its menus provide receive
+and transmit calibration, hardware levels, meters, processing status, and EEPROM
+tuning. Use a dummy load for transmit tests. Close the tuner when done; it
+releases its test tone and temporary PTT request.
+
 Check the configuration, then reload it without stopping the service:
 
 ```sh

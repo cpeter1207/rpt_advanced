@@ -473,6 +473,8 @@ static mut HOST: crate::abi::rptadv_host_services_v9 = crate::abi::rptadv_host_s
     peer_send_human_text: None,
     echo_account_status: Some(echo_account_status),
     peer_processing_prepare: None,
+    radio_control: None,
+    radio_update: None,
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v9 {

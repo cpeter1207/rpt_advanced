@@ -60,6 +60,27 @@ pub struct ProductRuntime {
 }
 
 impl ProductRuntime {
+    /// Borrow the retained immutable product table for local composition adapters.
+    pub(crate) fn product_descriptor(&self) -> &abi::rptadv_product_descriptor_v1 {
+        self.product
+    }
+
+    /// Copy the last successfully committed document, never a staged candidate.
+    pub(crate) fn configuration_text(&self) -> String {
+        self.active_configuration().clone()
+    }
+
+    fn active_configuration(&self) -> std::sync::MutexGuard<'_, String> {
+        self.configuration
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Fixed service configuration path; a maintenance caller cannot replace it.
+    pub(crate) fn fixed_configuration_path(&self) -> Option<&Path> {
+        self.configuration_path.as_deref()
+    }
+
     /// Activate readiness routing while keeping listener admission on control.
     pub(crate) fn enable_listener(
         &self,
@@ -165,10 +186,7 @@ impl ProductRuntime {
 
     /// Replace configuration without stopping the process; failed preparation keeps old state.
     pub fn reload(&self, configuration: &str) -> Result<(), RuntimeError> {
-        let mut active = self
-            .configuration
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut active = self.active_configuration();
         let host = self.host.as_ref().ok_or(RuntimeError::InvalidDescriptor)?;
         let apply =
             || unsafe { (self.reload)(configuration.as_ptr().cast(), configuration.len()) == 0 };
@@ -529,6 +547,7 @@ mod tests {
             incoming: None,
             link_command: None,
             site_command: None,
+            radio_control: None,
             link_status: None,
             digit: None,
             inspect_configuration: None,
@@ -540,6 +559,118 @@ mod tests {
         let mut product = *descriptor(start_without_counts, stop_without_counts, None);
         product.incoming = Some(incoming);
         Box::leak(Box::new(product))
+    }
+
+    #[test]
+    fn local_tuner_uses_the_fixed_path_and_typed_product_operation() {
+        use serde_json::json;
+        unsafe extern "C" fn maintenance(
+            node: *const c_char,
+            length: usize,
+            request: *mut abi::rptadv_radio_control_v1,
+            sink: abi::rptadv_text_sink_v1,
+            context: *mut c_void,
+        ) -> i32 {
+            // SAFETY: runtime retains its exclusively writable sized request.
+            let request = unsafe { &mut *request };
+            let node = unsafe { std::slice::from_raw_parts(node.cast::<u8>(), length) };
+            if (request.operation == 3 && request.keyed != 0) || node == b"9999" {
+                return -6;
+            }
+            request.command.value = 777;
+            if let Some(sink) = sink {
+                let text = c"physical status";
+                unsafe { sink(context, text.as_ptr(), text.to_bytes().len()) };
+            }
+            0
+        }
+        let mut api = *descriptor(start_without_counts, stop_without_counts, None);
+        api.radio_control = Some(maintenance);
+        let source = "[1000]\nradio_channel=usb\n";
+        let mut process = unsafe {
+            ProductRuntime::start(
+                Box::leak(Box::new(api)),
+                host(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                source,
+            )
+        }
+        .unwrap();
+        assert_eq!(process.configuration_text(), source);
+        assert!(
+            process
+                .local_radio_request(&json!({"operation":"configuration-path"}))
+                .is_err()
+        );
+        let path = std::env::temp_dir().join(format!("rpt-radio-config-{}", std::process::id()));
+        std::fs::write(&path, source).unwrap();
+        process.configuration_path = Some(path.clone());
+        assert_eq!(
+            process
+                .local_radio_request(&json!({"operation":"configuration-path"}))
+                .unwrap(),
+            json!(path.canonicalize().unwrap().to_str().unwrap())
+        );
+        assert_eq!(
+            process
+                .local_radio_request(&json!({"operation":"nodes"}))
+                .unwrap(),
+            json!(["1000"])
+        );
+        *process.configuration.lock().unwrap() = "malformed configuration".into();
+        assert!(
+            process
+                .local_radio_request(&json!({"operation":"nodes"}))
+                .is_err()
+        );
+        *process.configuration.lock().unwrap() = source.into();
+        assert!(
+            process
+                .local_radio_request(&json!({"operation":"status"}))
+                .is_err()
+        );
+        assert!(process.local_radio_request(&json!({})).is_err());
+        for operation in ["status", "processing-stats", "active-configuration"] {
+            assert_eq!(
+                process
+                    .local_radio_request(&json!({"operation":operation,"node":"1000"}))
+                    .unwrap(),
+                json!("physical status")
+            );
+        }
+        let reply = process
+            .local_radio_request(&json!({"operation":"command","node":"1000",
+            "command":1,"target":1,"value":0,"flags":0}))
+            .unwrap();
+        assert_eq!(reply["value"], 777);
+        assert!(
+            process
+                .local_radio_request(&json!({"operation":"transmit","node":"1000","keyed":true}))
+                .unwrap_err()
+                .contains("-6")
+        );
+        process.clear_local_manual("1000");
+        process.clear_local_manual("9999");
+        assert_eq!(
+            process
+                .local_radio_request(&json!({"operation":"transmit","node":"1000","keyed":false}))
+                .unwrap(),
+            serde_json::Value::Null
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            process
+                .local_radio_request(&json!({"operation":"configuration-path"}))
+                .is_err()
+        );
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = process.configuration.lock().unwrap();
+            panic!("failed control preparation");
+        }));
+        assert_eq!(process.configuration_text(), source);
+        process.stop().unwrap();
     }
 
     #[test]

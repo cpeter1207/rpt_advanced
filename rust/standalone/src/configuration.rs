@@ -85,22 +85,7 @@ fn inspect(text: &str, nodes: bool, secrets: bool) -> Result<Inspection, ConfigE
             )
         }
     };
-    let mut output = finish_inspection(output, result)?;
-    if output
-        .nodes
-        .iter()
-        .any(|node| node.radio.processing_request().configuration_length != 0)
-    {
-        let processing = crate::providers::ProcessingInspection::open()
-            .map_err(|error| ConfigError(error.to_string()))?;
-        for node in &output.nodes {
-            output.diagnostics.extend(
-                crate::processing::validate(processing.api(), &node.radio.processing_request())
-                    .map_err(ConfigError)?,
-            );
-        }
-    }
-    Ok(output)
+    finish_inspection(output, result)
 }
 
 fn finish_inspection(mut output: Inspection, result: i32) -> Result<Inspection, ConfigError> {
@@ -254,28 +239,33 @@ mod tests {
     }
 
     #[test]
-    fn configured_native_profiles_use_the_shared_validator_without_hardware() {
+    fn configured_native_profiles_are_resolved_once_without_hardware() {
         let valid = "[1000]\n[2000]\n[link 1000]\nlimiter_enabled=yes\n";
         assert!(check_config(valid).unwrap().is_empty());
-        let warnings = check_config(
-            "[1000]\n[link 1000]\nlimiter_enabled=invalid\nunknown_processing_setting=yes\n",
-        )
-        .unwrap();
-        assert_eq!(warnings.len(), 2);
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("limiter_enabled"))
-        );
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("unknown_processing_setting"))
-        );
-        assert!(check_config(
-            "[1000]\n[link 1000]\nlimiter_low_crossover_hz=2000\nlimiter_high_crossover_hz=1000\n"
-        )
-        .is_err());
+        for role in ["local", "link", "voice_telemetry"] {
+            let source = format!("[1000]\n{role}_profile=selected\n[{role} selected]\n");
+            let warnings = check_config(&format!(
+                "{source}limiter_enabled=invalid\nunknown_processing_setting=yes\n"
+            ))
+            .unwrap();
+            assert_eq!(warnings.len(), 2, "{role}: {warnings:?}");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("limiter_enabled"))
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("unknown_processing_setting"))
+            );
+            assert!(
+                check_config(&format!(
+                    "{source}limiter_low_crossover_hz=2000\nlimiter_high_crossover_hz=1000\n"
+                ))
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -291,6 +281,7 @@ mod tests {
         assert!(output.invalid_record);
         output.invalid_record = false;
 
+        assert_eq!(unsafe { text(std::ptr::null(), 0) }, Ok(""));
         assert_eq!(unsafe { text(std::ptr::null(), 1) }, Err(()));
         assert_eq!(
             unsafe { text(c"x".as_ptr(), isize::MAX as usize + 1) },

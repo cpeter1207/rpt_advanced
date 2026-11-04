@@ -717,6 +717,19 @@ pub struct RadioWorker {
     last_report_ms: u64,
 }
 impl RadioWorker {
+    /// Retain the current stream while the shared native owner replaces its plan.
+    pub(crate) fn configuration_update(&mut self, phase: u32) -> Result<bool, i32> {
+        self.radio.as_mut().ok_or(-7)?.configuration_update(phase)
+    }
+
+    /// Borrow the current physical radio for one serialized maintenance request.
+    pub(crate) fn maintenance(
+        &mut self,
+        request: &mut crate::abi::rptadv_radio_control_v1,
+    ) -> Result<String, i32> {
+        self.radio.as_mut().ok_or(-7)?.maintenance(request)
+    }
+
     /// Borrow this live owner's cached site state or bounded command queue on control.
     pub(crate) fn site_operation(
         &mut self,

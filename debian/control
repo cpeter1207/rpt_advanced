@@ -13,7 +13,7 @@ Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
  librptadvdtmf-dev (>= 0.1.0~alpha3-1),
  librptadvtemplate-dev (>= 0.1.0~alpha1-1),
  librptadvschedule-dev (>= 0.1.0~alpha2-1),
- libusbradioplus-product-dev (>= 0.1.0~alpha26-1.deb13),
+ libusbradioplus-product-dev (>= 0.1.0~alpha27-1.deb13),
  librptadvradio-dev (>= 0.1.0~alpha6),
  librptadv-portaudio-alsa-adapter-dev (>= 0.2.0~alpha3),
  librptadv-gpio-adapter-dev (>= 0.1.0~alpha2),
@@ -29,7 +29,7 @@ Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadv-product2 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
- libusbradioplus-product1 (>= 0.1.0~alpha26-1.deb13),
+ libusbradioplus-product1 (>= 0.1.0~alpha27-1.deb13),
  librptadv-file-adapter1 (= ${binary:Version}),
  librptadv-speech-adapter1 (= ${binary:Version}),
  librptadv-control-standalone-adapter1 (= ${binary:Version}),
@@ -73,6 +73,7 @@ Package: librptadv-product2
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
+ libusbradioplus-product1 (>= 0.1.0~alpha27-1.deb13),
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha4),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadvtone1 (>= 0.1.0~alpha1),
@@ -87,7 +88,8 @@ Description: portable controller product for rpt_advanced
 Package: librptadv-product-dev
 Architecture: amd64 arm64
 Multi-Arch: same
-Depends: ${misc:Depends}, librptadv-product2 (= ${binary:Version}), librptadv-codec-dev
+Depends: ${misc:Depends}, librptadv-product2 (= ${binary:Version}), librptadv-codec-dev,
+ libusbradioplus-product-dev (>= 0.1.0~alpha27-1.deb13)
 Description: development files for the rpt_advanced product
  Public C header and unversioned linker name for the versioned product.
 

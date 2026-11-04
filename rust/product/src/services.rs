@@ -349,7 +349,9 @@ impl HostServices {
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
         let required = offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare);
         let table_size = size_of::<abi::rptadv_host_services_v9>();
-        if size < required || (size != required && size < table_size) {
+        let processor_tail = offset_of!(abi::rptadv_host_services_v9, radio_control);
+        let maintenance_tail = offset_of!(abi::rptadv_host_services_v9, radio_update);
+        if size < table_size && ![required, processor_tail, maintenance_tail].contains(&size) {
             return Err(Error::Admission);
         }
         // ABI 9's released prefix is complete; its optional processor tail is
@@ -752,6 +754,72 @@ pub struct Radio {
 // SAFETY: the handle is uniquely owned and never used concurrently.
 unsafe impl Send for Radio {}
 impl Radio {
+    /// Stage, commit, or restore a same-device edit on the retained native owner.
+    pub(crate) fn configuration_update(&mut self, phase: u32) -> Result<bool, i32> {
+        let Some(update) = self.services.0.radio_update else {
+            return if phase == 0 { Ok(false) } else { Err(-7) };
+        };
+        // SAFETY: the unique radio lease serializes control and destruction.
+        match unsafe { update(self.services.0.context, self.handle.as_ptr(), phase) } {
+            0 => Ok(true),
+            1 if phase == 0 => Ok(false),
+            code => Err(code),
+        }
+    }
+
+    /// Dispatch bounded physical maintenance through the existing host radio owner.
+    pub(crate) fn maintenance(
+        &mut self,
+        request: &mut abi::rptadv_radio_control_v1,
+    ) -> Result<String, i32> {
+        unsafe extern "C" fn append(
+            context: *mut c_void,
+            text: *const std::ffi::c_char,
+            length: usize,
+        ) {
+            // SAFETY: the synchronous caller retains this output and validates borrowed UTF-8.
+            let output = unsafe { &mut *context.cast::<Result<String, i32>>() };
+            if text.is_null() && length != 0 {
+                *output = Err(-1);
+                return;
+            }
+            let bytes = if length == 0 {
+                &[]
+            } else {
+                // SAFETY: a conforming host advertises a complete borrowed text span.
+                unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) }
+            };
+            match std::str::from_utf8(bytes) {
+                Ok(text) if text.len() <= 65536 => {
+                    if let Ok(value) = output {
+                        if value.len().saturating_add(text.len()) <= 65536 {
+                            value.push_str(text);
+                        } else {
+                            *output = Err(-1);
+                        }
+                    }
+                }
+                _ => *output = Err(-1),
+            }
+        }
+        let call = self.services.0.radio_control.ok_or(-7)?;
+        let mut output = Ok(String::new());
+        // SAFETY: this unique radio lease serializes all maintenance and destruction.
+        let code = unsafe {
+            call(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                request,
+                Some(append),
+                ptr::from_mut(&mut output).cast(),
+            )
+        };
+        if code != 0 {
+            return Err(code);
+        }
+        output
+    }
+
     /// Replace site output claims on this radio's existing owner, off audio callbacks.
     /// Zero accepts a request; the snapshot's serviced generation confirms application.
     pub fn site_bind(&mut self, bank: u32, binding: &abi::UrpAstSiteBinding) -> Result<(), i32> {

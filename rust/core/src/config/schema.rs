@@ -89,7 +89,8 @@ impl Schema {
             let parsed = scope::parse_scope(section)
                 .map_err(|()| ConfigError::structure(section, "invalid section name"))?;
             let repeated = document.sections()[..index].contains(section);
-            if parsed.node.is_some_and(|node| node.len() > 63)
+            if (!matches!(parsed.kind, ScopeKind::ProcessingNode)
+                && parsed.node.is_some_and(|node| node.len() > 63))
                 || parsed.label.is_some_and(|label| label.len() > 63)
             {
                 return Err(ConfigError::structure(
@@ -152,6 +153,12 @@ impl Schema {
                         "legacy event text conflicts with composed content",
                         "composed content selected",
                     ));
+                }
+                // Shared profile selectors belong to the radio owner, only at node scope.
+                if parsed.kind == ScopeKind::Node
+                    && entry.key.to_ascii_lowercase().ends_with("_profile")
+                {
+                    continue;
                 }
                 if !key_known(known, &entry.key) {
                     warnings.push(ConfigWarning::new(
@@ -258,64 +265,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         KnownScope::Processing => true,
         KnownScope::EchoLink => super::echolink::default_value(key).is_some(),
         KnownScope::Site { kind, named } => super::site::key_known(kind, named, key),
-        KnownScope::Radio => {
-            matches!(
-                key,
-                "device_selection"
-                    | "device_identifier"
-                    | "usb_serial"
-                    | "input_device_channels"
-                    | "output_device_channels"
-                    | "input_extra_buffer_ms"
-                    | "output_extra_buffer_ms"
-                    | "hardware_input_gain_db"
-                    | "hardware_output_a_gain_db"
-                    | "hardware_output_b_gain_db"
-                    | "receive_input_gain_db"
-                    | "receive_output_gain_db"
-                    | "receive_graph"
-                    | "transmit_graph"
-                    | "receive_deemphasis_corner_hz"
-                    | "transmit_preemphasis_enabled"
-                    | "transmit_preemphasis_corner_hz"
-                    | "cm119_profile"
-                    | "cm119_ptt_inverted"
-                    | "cm119_clip_led_gpio"
-                    | "receive_audio"
-                    | "receive_signaling"
-                    | "carrier_source"
-                    | "ctcss_source"
-                    | "receive_ctcss_tones_hz"
-                    | "ctcss_decoder_gain_db"
-                    | "ctcss_relaxed"
-                    | "ctcss_override"
-                    | "dcs_receive_code"
-                    | "squelch_level"
-                    | "squelch_hysteresis"
-                    | "noise_filter"
-                    | "vox_threshold"
-                    | "vox_hang_ms"
-                    | "receive_on_delay_ms"
-                    | "radio_duplex_mode"
-                    | "transmit_output_a_assignment"
-                    | "transmit_output_b_assignment"
-                    | "transmit_signaling"
-                    | "transmit_ctcss_tones_hz"
-                    | "transmit_ctcss_default_hz"
-                    | "transmit_ctcss_level_dbfs"
-                    | "transmit_ctcss_turnoff_mode"
-                    | "transmit_ctcss_phase_shift_degrees"
-                    | "transmit_ctcss_turnoff_duration_ms"
-                    | "transmit_ctcss_tail_tone_hz"
-                    | "transmit_dcs_code"
-                    | "transmit_dcs_level_dbfs"
-                    | "transmit_dcs_turnoff_enabled"
-                    | "transmit_dcs_turnoff_duration_ms"
-                    | "transmit_settle_ms"
-                    | "transmit_receive_blanking_ms"
-                    | "transmit_off_delay_ms"
-            ) || cm119_gpio_mode_index(key).is_some()
-        }
+        KnownScope::Radio => true,
         KnownScope::General => matches!(
             key,
             "node_enabled"
@@ -466,7 +416,10 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
     if matches!(
         kind,
-        ScopeKind::ProcessingDefault | ScopeKind::ProcessingNode
+        ScopeKind::ProcessingDefault
+            | ScopeKind::ProcessingNode
+            | ScopeKind::RadioDefault
+            | ScopeKind::RadioNode
     ) {
         return true;
     }
@@ -511,58 +464,6 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         return parse::unsigned(value, 0, u64::MAX / 48).is_some();
     }
     match key {
-        "device_selection" => matches!(value, "exact" | "automatic_lowest_alsa_card"),
-        "cm119_profile" => matches!(value, "dudeusb" | "sphusb" | "nhrc" | "custom"),
-        "cm119_clip_led_gpio" => parse::unsigned(value, 0, 8).is_some(),
-        key if cm119_gpio_mode_index(key).is_some() => matches!(value, "in" | "out0" | "out1"),
-        "device_identifier" | "usb_serial" => value.len() <= 255,
-        "receive_audio" => matches!(value, "disabled" | "speaker" | "flat"),
-        "receive_signaling" | "transmit_signaling" => {
-            matches!(value, "carrier" | "ctcss" | "dcs")
-        }
-        "carrier_source" => matches!(
-            value,
-            "disabled"
-                | "dsp"
-                | "vox"
-                | "cm119"
-                | "cm119_inverted"
-                | "parallel"
-                | "parallel_inverted"
-        ),
-        "ctcss_source" => matches!(
-            value,
-            "disabled" | "dsp" | "cm119" | "cm119_inverted" | "parallel" | "parallel_inverted"
-        ),
-        "receive_ctcss_tones_hz" | "transmit_ctcss_tones_hz" => parse::ctcss_tones(value).is_some(),
-        "transmit_ctcss_default_hz" => parse::ctcss_tone_tenths_hz(value).is_some(),
-        "dcs_receive_code" | "transmit_dcs_code" => parse::dcs_code(value).is_some(),
-        "noise_filter" => matches!(value, "standard" | "alternate"),
-        "radio_duplex_mode" => matches!(value, "half" | "full"),
-        "transmit_output_a_assignment" | "transmit_output_b_assignment" => matches!(
-            value,
-            "disabled" | "voice" | "tone" | "composite" | "auxiliary_voice"
-        ),
-        "transmit_ctcss_turnoff_mode" => {
-            matches!(value, "none" | "phase_shift" | "tone_remove" | "tail_tone")
-        }
-        "input_device_channels" | "output_device_channels" => {
-            parse::unsigned(value, 1, 2).is_some()
-        }
-        "input_extra_buffer_ms" | "output_extra_buffer_ms" => {
-            parse::unsigned(value, 0, 500).is_some()
-        }
-        "receive_input_gain_db" | "receive_output_gain_db" => {
-            parse::signed(value, -30, 30).is_some()
-        }
-        "hardware_input_gain_db" | "hardware_output_a_gain_db" | "hardware_output_b_gain_db" => {
-            parse::hardware_gain(value).is_some()
-        }
-        "receive_graph" | "transmit_graph" => !value.is_empty() && value.len() <= 4096,
-        "receive_deemphasis_corner_hz" | "transmit_preemphasis_corner_hz" => {
-            parse::emphasis_corner(value).is_some()
-        }
-        "transmit_preemphasis_enabled" => parse::boolean(value).is_some(),
         "statpost_url" => {
             if value.is_empty() {
                 return true;
@@ -599,10 +500,6 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "dtmf_regeneration_enabled"
         | "parrot_enabled"
         | "ctcss_encode_on_input"
-        | "cm119_ptt_inverted"
-        | "ctcss_relaxed"
-        | "ctcss_override"
-        | "transmit_dcs_turnoff_enabled"
         | "first_key_only"
         | "regardless_of_activity"
         | "repeat_during_playback"
@@ -617,21 +514,6 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
         | "squelch_delay_ms"
         | "ctcss_hang_ms"
         | "end_inactivity_ms" => parse::unsigned(value, 0, u64::MAX).is_some(),
-        "squelch_level" => parse::unsigned(value, 0, 999).is_some(),
-        "squelch_hysteresis" | "vox_threshold" => parse::unsigned(value, 0, 32767).is_some(),
-        "vox_hang_ms"
-        | "transmit_settle_ms"
-        | "transmit_receive_blanking_ms"
-        | "transmit_off_delay_ms" => parse::unsigned(value, 0, 32767).is_some(),
-        "receive_on_delay_ms" => parse::unsigned(value, 0, 65535).is_some(),
-        "transmit_ctcss_turnoff_duration_ms" => parse::unsigned(value, 0, 1000).is_some(),
-        "transmit_ctcss_phase_shift_degrees" => parse::unsigned(value, 0, 360).is_some(),
-        "transmit_ctcss_tail_tone_hz" => parse::unsigned(value, 0, 300).is_some(),
-        "transmit_dcs_turnoff_duration_ms" => parse::unsigned(value, 150, 200).is_some(),
-        "ctcss_decoder_gain_db" => parse::signed(value, -60, 24).is_some(),
-        "transmit_ctcss_level_dbfs" | "transmit_dcs_level_dbfs" => {
-            parse::signed(value, -60, 0).is_some()
-        }
         "dtmf_regeneration_duration_ms" | "dtmf_regeneration_gap_ms" => {
             parse::unsigned(value, 1, 1000).is_some()
         }
@@ -693,12 +575,6 @@ fn node_value_valid(value: &str) -> bool {
     value.len() <= 63 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn cm119_gpio_mode_index(key: &str) -> Option<usize> {
-    let pin = key.strip_prefix("cm119_gpio_")?.strip_suffix("_mode")?;
-    let index = pin.parse::<usize>().ok()?.checked_sub(1)?;
-    (index < 8).then_some(index)
-}
-
 fn configured_node_list(value: &str) -> Option<Vec<String>> {
     let nodes: Vec<_> = value
         .split(',')
@@ -739,75 +615,6 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
             "content",
         ) => "{media}",
         (ScopeKind::MessageGlobal | ScopeKind::MessageNode, "level_db") => "-20",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "device_selection") => "exact",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_profile") => "dudeusb",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_ptt_inverted") => "no",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_preemphasis_enabled") => "no",
-        (
-            ScopeKind::RadioDefault | ScopeKind::RadioNode,
-            "receive_deemphasis_corner_hz" | "transmit_preemphasis_corner_hz",
-        ) => "300",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "cm119_clip_led_gpio") => "0",
-        (
-            ScopeKind::RadioDefault | ScopeKind::RadioNode,
-            "input_device_channels" | "output_device_channels",
-        ) => "1",
-        (
-            ScopeKind::RadioDefault | ScopeKind::RadioNode,
-            "input_extra_buffer_ms"
-            | "output_extra_buffer_ms"
-            | "receive_input_gain_db"
-            | "receive_output_gain_db",
-        ) => "0",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "receive_graph" | "transmit_graph") => {
-            "anull"
-        }
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "receive_audio") => "flat",
-        (
-            ScopeKind::RadioDefault | ScopeKind::RadioNode,
-            "receive_signaling" | "transmit_signaling",
-        ) => "carrier",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "carrier_source") => "dsp",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "ctcss_source") => "dsp",
-        (
-            ScopeKind::RadioDefault | ScopeKind::RadioNode,
-            "receive_ctcss_tones_hz" | "transmit_ctcss_tones_hz" | "transmit_ctcss_default_hz",
-        ) => "100.0",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "ctcss_decoder_gain_db") => "0",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "ctcss_relaxed") => "yes",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "ctcss_override") => "no",
-        (
-            ScopeKind::RadioDefault | ScopeKind::RadioNode,
-            "dcs_receive_code" | "transmit_dcs_code",
-        ) => "023N",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "squelch_level") => "500",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "squelch_hysteresis") => "3000",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "noise_filter") => "standard",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "vox_threshold") => "0",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "vox_hang_ms") => "2000",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "receive_on_delay_ms") => "0",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "radio_duplex_mode") => "half",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_output_a_assignment") => "voice",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_output_b_assignment") => "tone",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_ctcss_level_dbfs") => "-24",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_ctcss_turnoff_mode") => {
-            "phase_shift"
-        }
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_ctcss_phase_shift_degrees") => {
-            "120"
-        }
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_ctcss_turnoff_duration_ms") => {
-            "180"
-        }
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_ctcss_tail_tone_hz") => "55",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_dcs_level_dbfs") => "-24",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_dcs_turnoff_enabled") => "yes",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_dcs_turnoff_duration_ms") => {
-            "180"
-        }
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_settle_ms") => "500",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_receive_blanking_ms") => "0",
-        (ScopeKind::RadioDefault | ScopeKind::RadioNode, "transmit_off_delay_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "node_enabled" | "full_duplex" | "dtmf_muting") => {
             "yes"
         }
@@ -862,11 +669,7 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (_, "format") => "12",
         _ => "",
     };
-    if matches!(kind, ScopeKind::RadioDefault | ScopeKind::RadioNode)
-        && cm119_gpio_mode_index(key).is_some()
-    {
-        "in".to_owned()
-    } else if let Some(command) = command_default(key) {
+    if let Some(command) = command_default(key) {
         command.to_owned()
     } else if value.is_empty() {
         "not configured".to_owned()
@@ -914,7 +717,6 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
             candidates.push((format!("{} {node}", kind.name()), key));
             candidates.push((kind.name().to_owned(), key));
         }
-        ScopeKind::RadioNode => candidates.push(("radio".to_owned(), key)),
         ScopeKind::EchoLinkNode if !matches!(key, "callsign" | "node_number") => {
             candidates.push(("echolink".to_owned(), key))
         }

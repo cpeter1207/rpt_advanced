@@ -40,6 +40,7 @@ pub struct RadioHostContext {
     /// Dynamically loaded providers; absent only for callback validation tests.
     pub providers: Option<&'static crate::providers::ProviderSet>,
     next_generation: AtomicU64,
+    pub(crate) observations: crate::processing::Observations,
 }
 
 #[derive(Default)]
@@ -67,6 +68,7 @@ impl RadioHostContext {
             }),
             providers,
             next_generation: AtomicU64::new(0),
+            observations: crate::processing::Observations::default(),
         }
     }
 
@@ -104,6 +106,29 @@ impl RadioHostContext {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .staged = None;
+    }
+
+    fn update_reservation(
+        &self,
+        current: &RadioReservation,
+    ) -> Result<RadioReservation, ReservationError> {
+        let state = self
+            .radios
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let radios = state
+            .staged
+            .as_ref()
+            .map_or(&state.active, |staged| &staged.candidate);
+        let candidate = reserve_radio(
+            radios,
+            current.radio.node.as_str(),
+            current.maximum_frames as usize,
+        )?;
+        if candidate.radio.channel != current.radio.channel {
+            return Err(ReservationError::UnknownRadio);
+        }
+        Ok(candidate)
     }
 
     fn reservation(
@@ -151,6 +176,141 @@ impl RadioHostContext {
 struct RadioHandle {
     reservation: RadioReservation,
     active: Option<crate::radio_activation::ActiveRadio>,
+    pending: Option<RadioReservation>,
+}
+
+/// Stage/acknowledge, commit, or roll back a native radio configuration on its
+/// existing callback and hardware owners. Unsupported settings select handoff.
+///
+/// # Safety
+/// The context and live radio handle remain retained for this serialized call.
+pub unsafe extern "C" fn radio_update(context: *mut c_void, radio: *mut c_void, phase: u32) -> i32 {
+    // SAFETY: this control-only boundary borrows retained context and radio owners.
+    let (host, handle) = unsafe {
+        (
+            context.cast::<RadioHostContext>().as_ref(),
+            radio.cast::<RadioHandle>().as_mut(),
+        )
+    };
+    let (Some(host), Some(handle)) = (host, handle) else {
+        return -1;
+    };
+    let Some(active) = handle.active.as_mut() else {
+        return -7;
+    };
+    match phase {
+        0 => {
+            if handle.pending.is_some() {
+                return -5;
+            }
+            let Ok(candidate) = host.update_reservation(&handle.reservation) else {
+                return -1;
+            };
+            let generation = host.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            match active.stage_update(
+                &candidate.radio.radio.request(),
+                generation,
+                candidate.maximum_frames,
+            ) {
+                Ok(true) => {
+                    handle.pending = Some(candidate);
+                    0
+                }
+                Ok(false) => 1,
+                Err(error) => {
+                    handle.pending = Some(candidate);
+                    error
+                }
+            }
+        }
+        1 | 2 => {
+            if handle.pending.is_none() {
+                return if phase == 2 { 0 } else { -7 };
+            }
+            match active.finish_update(phase == 1) {
+                Ok(()) => {
+                    let candidate = handle.pending.take().expect("staged radio reservation");
+                    if phase == 1 {
+                        handle.reservation = candidate;
+                    }
+                    0
+                }
+                Err(error) => error,
+            }
+        }
+        _ => -1,
+    }
+}
+
+/// Dispatch typed maintenance through this radio's retained shared native owner.
+///
+/// # Safety
+/// Handles and the initialized writable request remain live for this serialized
+/// call. The optional sink borrows returned text only until its callback returns.
+pub unsafe extern "C" fn radio_control(
+    context: *mut c_void,
+    radio: *mut c_void,
+    request: *mut crate::abi::rptadv_radio_control_v1,
+    sink: crate::abi::rptadv_text_sink_v1,
+    sink_context: *mut c_void,
+) -> i32 {
+    if request.is_null() {
+        return -1;
+    }
+    // SAFETY: the callback contract supplies at least the readable ABI header.
+    let header = unsafe { request.cast::<[u32; 2]>().read_unaligned() };
+    if (header[0] as usize) < std::mem::size_of::<crate::abi::rptadv_radio_control_v1>()
+        || header[1] != 1
+    {
+        return -1;
+    }
+    // SAFETY: this boundary borrows the caller's live handle and complete request.
+    let (handle, request) = unsafe { (radio.cast::<RadioHandle>().as_mut(), request.as_mut()) };
+    let (Some(handle), Some(request)) = (handle, request) else {
+        return -1;
+    };
+    let Some(active) = handle.active.as_mut() else {
+        return -7;
+    };
+    if request.operation == 6 {
+        let Some(sink) = sink else {
+            return -1;
+        };
+        let source = handle.reservation.radio.radio.processing_request();
+        // SAFETY: the reservation owns the complete source configuration while
+        // the synchronous sink copies it. No normalized aliases replace source.
+        unsafe {
+            sink(
+                sink_context,
+                source.configuration.cast(),
+                source.configuration_length as usize,
+            )
+        };
+        return 0;
+    }
+    let processing = if request.operation == 5 {
+        // SAFETY: this process-lifetime registry is retained by the host callback.
+        let Some(host) = (unsafe { context.cast::<RadioHostContext>().as_ref() }) else {
+            return -1;
+        };
+        let Some(sink) = sink else {
+            return -1;
+        };
+        Some((host, sink))
+    } else {
+        None
+    };
+    let status = active.maintenance(request, sink, sink_context);
+    if status == 0 {
+        if let Some((host, sink)) = processing {
+            let text = host
+                .observations
+                .text(handle.reservation.radio.node.as_str());
+            // SAFETY: this complete borrowed text lasts through the synchronous sink.
+            unsafe { sink(sink_context, text.as_ptr().cast(), text.len()) };
+        }
+    }
+    status
 }
 
 /// Replace site claims on the already-active native radio, never a second device owner.
@@ -279,6 +439,7 @@ pub unsafe extern "C" fn radio_open(
     *output = Box::into_raw(Box::new(RadioHandle {
         reservation,
         active: None,
+        pending: None,
     }))
     .cast();
     0
@@ -391,12 +552,331 @@ mod tests {
     use crate::resolve_radio_nodes;
 
     #[test]
+    fn maintenance_validates_the_request_prefix_and_returns_original_active_source() {
+        unsafe extern "C" fn append(
+            context: *mut std::ffi::c_void,
+            text: *const std::ffi::c_char,
+            length: usize,
+        ) {
+            // SAFETY: the synchronous caller owns the output and complete source span.
+            unsafe { &mut *context.cast::<String>() }.push_str(
+                std::str::from_utf8(unsafe {
+                    std::slice::from_raw_parts(text.cast::<u8>(), length)
+                })
+                .unwrap(),
+            );
+        }
+        let source = "[1000]\n; original comment\n[radio 1000]\nreceive_output_gain_db=-8\n";
+        let radios = resolve_radio_nodes(source).unwrap();
+        let mut handle = RadioHandle {
+            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            active: None,
+            pending: None,
+        };
+        // SAFETY: the request is a scalar-only ABI record initialized before use.
+        let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+        request.struct_size = std::mem::size_of_val(&request) as u32;
+        request.abi_version = 1;
+        request.operation = 6;
+        let mut output = String::new();
+        let radio = std::ptr::from_mut(&mut handle).cast();
+        // SAFETY: stack owners remain live and the callback copies each borrowed span.
+        unsafe {
+            assert_eq!(
+                super::radio_control(
+                    std::ptr::null_mut(),
+                    radio,
+                    &mut request,
+                    Some(append),
+                    std::ptr::from_mut(&mut output).cast()
+                ),
+                -7
+            );
+            handle.active = Some(crate::radio_activation::tests::empty_active_radio());
+            assert_eq!(
+                super::radio_control(
+                    std::ptr::null_mut(),
+                    radio,
+                    &mut request,
+                    Some(append),
+                    std::ptr::from_mut(&mut output).cast()
+                ),
+                0
+            );
+            assert_eq!(output, source);
+            for invalid in [0, request.struct_size - 1] {
+                let mut header = [invalid, 1_u32];
+                assert_eq!(
+                    super::radio_control(
+                        std::ptr::null_mut(),
+                        radio,
+                        header.as_mut_ptr().cast(),
+                        None,
+                        std::ptr::null_mut()
+                    ),
+                    -1
+                );
+            }
+            assert_eq!(
+                super::radio_control(
+                    std::ptr::null_mut(),
+                    radio,
+                    &mut request,
+                    None,
+                    std::ptr::null_mut()
+                ),
+                -1
+            );
+            request.abi_version = 2;
+            assert_eq!(
+                super::radio_control(
+                    std::ptr::null_mut(),
+                    radio,
+                    &mut request,
+                    None,
+                    std::ptr::null_mut()
+                ),
+                -1
+            );
+        }
+    }
+
+    #[test]
+    fn radio_update_keeps_active_source_until_commit_and_does_not_consume_fallback_open() {
+        use std::ffi::c_void;
+        thread_local! {
+            static REJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            static FINISH_STATUS: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+        }
+        unsafe extern "C" fn prepare(
+            _: *mut c_void,
+            _: *const crate::abi::UrpNativeCreateArgs,
+            output: *mut *mut c_void,
+        ) -> i32 {
+            // SAFETY: the caller owns this writable output; token is an opaque fixture address.
+            unsafe { *output = std::ptr::NonNull::<u8>::dangling().as_ptr().cast() };
+            0
+        }
+        unsafe extern "C" fn begin(_: *mut c_void, _: *mut c_void) -> i32 {
+            if REJECT.get() { -9 } else { 0 }
+        }
+        unsafe extern "C" fn accept(_: *mut c_void) -> i32 {
+            0
+        }
+        unsafe extern "C" fn finish(_: *mut c_void, _: u32) -> i32 {
+            FINISH_STATUS.get()
+        }
+        unsafe extern "C" fn destroy(_: *mut c_void) {}
+        unsafe extern "C" fn requires_handoff(
+            _: *mut c_void,
+            _: *const crate::abi::UrpNativeCreateArgs,
+            output: *mut *mut c_void,
+        ) -> i32 {
+            // SAFETY: structural incompatibility transfers no prepared owner.
+            unsafe { *output = std::ptr::null_mut() };
+            -3
+        }
+        let old = "[1000]\n[radio 1000]\nreceive_output_gain_db=-8\n";
+        let next = "[1000]\n[radio 1000]\nreceive_output_gain_db=-3\n";
+        let radios = resolve_radio_nodes(old).unwrap();
+        let mut host = RadioHostContext::new(radios.clone(), None);
+        assert!(host.stage_radios(resolve_radio_nodes(next).unwrap()));
+        // SAFETY: this descriptor contains only scalar metadata and nullable pointers.
+        let mut api: crate::abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.native_prepare_update = Some(requires_handoff);
+        api.native_begin_update = Some(begin);
+        api.native_accept_update = Some(accept);
+        api.native_finish_update = Some(finish);
+        api.native_destroy_update = Some(destroy);
+        let mut handle = RadioHandle {
+            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
+            pending: None,
+        };
+        let context = std::ptr::from_mut(&mut host).cast();
+        let radio = std::ptr::from_mut(&mut handle).cast();
+        // SAFETY: malformed ownership is rejected without dereferencing absent owners.
+        unsafe {
+            assert_eq!(super::radio_update(std::ptr::null_mut(), radio, 0), -1);
+            assert_eq!(super::radio_update(context, std::ptr::null_mut(), 0), -1);
+            let active = handle.active.take();
+            assert_eq!(super::radio_update(context, radio, 0), -7);
+            handle.active = active;
+        }
+        for source in ["[2000]\n", "[1000]\nradio_channel=different\n"] {
+            let mut other = RadioHostContext::new(resolve_radio_nodes(source).unwrap(), None);
+            // SAFETY: a different configured reservation cannot replace this live identity.
+            assert_eq!(
+                unsafe { super::radio_update(std::ptr::from_mut(&mut other).cast(), radio, 0) },
+                -1
+            );
+        }
+        // SAFETY: these retained stack owners remain serially controlled throughout the test.
+        unsafe { assert_eq!(super::radio_update(context, radio, 0), 1) };
+        assert_eq!(
+            host.reservation("1000", 960).unwrap().radio,
+            resolve_radio_nodes(next).unwrap().remove(0)
+        );
+        api.native_prepare_update = Some(prepare);
+        api.native_begin_update = Some(begin);
+        api.native_accept_update = Some(accept);
+        api.native_finish_update = Some(finish);
+        api.native_destroy_update = Some(destroy);
+        handle.active = Some(crate::radio_activation::tests::fixture_active_radio(api));
+        for commit in [false, true] {
+            // SAFETY: the fixture retains all request and native-owner addresses.
+            unsafe {
+                assert_eq!(super::radio_update(context, radio, 0), 0);
+                assert_eq!(handle.reservation.radio, radios[0]);
+                assert_eq!(super::radio_update(context, radio, 0), -5);
+                FINISH_STATUS.set(-9);
+                assert_eq!(super::radio_update(context, radio, 2), -9);
+                assert!(handle.pending.is_some());
+                FINISH_STATUS.set(0);
+                assert_eq!(
+                    super::radio_update(context, radio, if commit { 1 } else { 2 }),
+                    0
+                );
+            }
+            let expected = if commit {
+                resolve_radio_nodes(next).unwrap().remove(0)
+            } else {
+                radios[0].clone()
+            };
+            assert_eq!(handle.reservation.radio, expected);
+            assert!(handle.pending.is_none());
+        }
+        handle.reservation = reserve_radio(&radios, "1000", 960).unwrap();
+        REJECT.set(true);
+        // SAFETY: rejected stage retains the exact previous source and abort owner.
+        unsafe {
+            assert_eq!(super::radio_update(context, radio, 0), -9);
+            assert!(handle.pending.is_some());
+            assert_eq!(handle.reservation.radio, radios[0]);
+            assert_eq!(super::radio_update(context, radio, 2), 0);
+            assert!(handle.pending.is_none());
+            assert_eq!(super::radio_update(context, radio, 2), 0);
+            assert_eq!(super::radio_update(context, radio, 1), -7);
+            assert_eq!(super::radio_update(context, radio, 3), -1);
+        }
+    }
+
+    #[test]
+    fn processing_status_uses_the_retained_registry_and_rejects_invalid_owners_before_collection() {
+        use std::ffi::{c_char, c_void};
+        thread_local! {
+            static STATUS: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+            static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        unsafe extern "C" fn counters(
+            _: *mut c_void,
+            sink: crate::abi::UrpNativeProcessingDiagnostic,
+            context: *mut c_void,
+        ) -> i32 {
+            READS.set(READS.get() + 1);
+            let bytes = b"radio_receive_calls=7\n";
+            // SAFETY: the bridge retains this synchronous borrowed-span callback.
+            unsafe { sink.unwrap()(context, bytes.as_ptr(), bytes.len() as u32) };
+            STATUS.get()
+        }
+        unsafe extern "C" fn append(context: *mut c_void, text: *const c_char, length: usize) {
+            // SAFETY: the caller retains the destination and the complete fixture text span.
+            unsafe { &mut *context.cast::<String>() }.push_str(
+                std::str::from_utf8(unsafe {
+                    std::slice::from_raw_parts(text.cast::<u8>(), length)
+                })
+                .unwrap(),
+            );
+        }
+        let radios = resolve_radio_nodes("[1000]\n").unwrap();
+        let mut host = RadioHostContext::new(radios.clone(), None);
+        // SAFETY: this descriptor contains only scalar metadata and nullable operations.
+        let mut api: crate::abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.native_processing_status_text = Some(counters);
+        api.native_status_text = Some(counters);
+        let mut handle = RadioHandle {
+            reservation: reserve_radio(&radios, "1000", 960).unwrap(),
+            active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
+            pending: None,
+        };
+        // SAFETY: the request is a scalar-only ABI record initialized before dispatch.
+        let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+        request.struct_size = std::mem::size_of_val(&request) as u32;
+        request.abi_version = 1;
+        request.operation = 5;
+        let context = std::ptr::from_mut(&mut host).cast();
+        let radio = std::ptr::from_mut(&mut handle).cast();
+        let mut output = String::new();
+        let sink_context = std::ptr::from_mut(&mut output).cast();
+        // SAFETY: stack owners remain retained for all synchronous validation/dispatch calls.
+        unsafe {
+            assert_eq!(
+                super::radio_control(
+                    context,
+                    radio,
+                    std::ptr::null_mut(),
+                    Some(append),
+                    sink_context
+                ),
+                -1
+            );
+            assert_eq!(
+                super::radio_control(
+                    context,
+                    std::ptr::null_mut(),
+                    &mut request,
+                    Some(append),
+                    sink_context
+                ),
+                -1
+            );
+            assert_eq!(
+                super::radio_control(
+                    std::ptr::null_mut(),
+                    radio,
+                    &mut request,
+                    Some(append),
+                    sink_context
+                ),
+                -1
+            );
+            assert_eq!(
+                super::radio_control(context, radio, &mut request, None, sink_context),
+                -1
+            );
+            assert_eq!(READS.get(), 0);
+            assert_eq!(
+                super::radio_control(context, radio, &mut request, Some(append), sink_context),
+                0
+            );
+            assert_eq!(
+                output,
+                "radio_receive_calls=7\nlink_processors_retained=0\n"
+            );
+            output.clear();
+            STATUS.set(-9);
+            assert_eq!(
+                super::radio_control(context, radio, &mut request, Some(append), sink_context),
+                -9
+            );
+            assert_eq!(output, "radio_receive_calls=7\n");
+            STATUS.set(0);
+            request.operation = 1;
+            assert_eq!(
+                super::radio_control(context, radio, &mut request, Some(append), sink_context),
+                0
+            );
+        }
+    }
+
+    #[test]
     fn site_bridge_rejects_null_or_inactive_handles_without_opening_hardware() {
         use super::{radio_site_bind, radio_site_publish, radio_site_snapshot};
         let radios = resolve_radio_nodes("[1000]\n[radio 1000]\n").unwrap();
         let mut handle = RadioHandle {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: None,
+            pending: None,
         };
         let binding: crate::abi::UrpAstSiteBinding = unsafe { std::mem::zeroed() };
         let request: crate::abi::UrpAstSiteRequest = unsafe { std::mem::zeroed() };
@@ -880,6 +1360,7 @@ mod tests {
         let mut handle = RadioHandle {
             reservation,
             active: None,
+            pending: None,
         };
 
         assert_eq!(
@@ -904,6 +1385,7 @@ mod tests {
         let mut failed = RadioHandle {
             reservation: handle.reservation.clone(),
             active: None,
+            pending: None,
         };
         assert_eq!(
             finish_activation(

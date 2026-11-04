@@ -674,6 +674,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             .map_err(|_| RuntimeError::Preparation)?;
         }
         let mut changed = Vec::new();
+        let mut updated = Vec::new();
         let mut opened = Vec::new();
         for (index, candidate) in candidates.iter_mut().enumerate() {
             if let Some(old_index) = self
@@ -687,32 +688,105 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 {
                     continue;
                 }
+                if old.bounds.device == candidate.bounds.device
+                    && old.bounds.receive_maximum == candidate.bounds.receive_maximum
+                    && old.bounds.transmit_maximum == candidate.bounds.transmit_maximum
+                {
+                    match old.device.update(&candidate.bounds) {
+                        Ok(true) => {
+                            updated.push(old.name.clone());
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(_) => {
+                            // A rejected stage may already have reached one callback.
+                            // Abort it through the same retained reverse as earlier nodes.
+                            updated.push(old.name.clone());
+                            self.rollback_devices(
+                                &changed,
+                                &updated,
+                                &mut candidates,
+                                &opened,
+                                clock.now_ms,
+                            )?;
+                            return Err(RuntimeError::Device);
+                        }
+                    }
+                }
                 let status = old.status(clock.now_ms);
                 if status.outstanding_work != 0 || !old.device.quiesce() {
-                    self.rollback_devices(&changed, &mut candidates, &opened, clock.now_ms)?;
+                    self.rollback_devices(
+                        &changed,
+                        &updated,
+                        &mut candidates,
+                        &opened,
+                        clock.now_ms,
+                    )?;
                     return Err(RuntimeError::Busy);
                 }
                 old.host.control().gate_callbacks();
                 if old.status(clock.now_ms).protected_owners != 0 {
                     old.host.control().restore_callbacks();
-                    self.rollback_devices(&changed, &mut candidates, &opened, clock.now_ms)?;
+                    self.rollback_devices(
+                        &changed,
+                        &updated,
+                        &mut candidates,
+                        &opened,
+                        clock.now_ms,
+                    )?;
                     return Err(RuntimeError::Busy);
                 }
                 old.device.close();
                 old.device_open = false;
                 changed.push(old_index);
                 if !old.device.open(&candidate.bounds) {
-                    self.rollback_devices(&changed, &mut candidates, &opened, clock.now_ms)?;
+                    self.rollback_devices(
+                        &changed,
+                        &updated,
+                        &mut candidates,
+                        &opened,
+                        clock.now_ms,
+                    )?;
                     return Err(RuntimeError::Device);
                 }
                 old.device_open = true;
             } else {
                 let lease = candidate.device.as_mut().ok_or(RuntimeError::Preparation)?;
                 if !lease.open(&candidate.bounds) {
-                    self.rollback_devices(&changed, &mut candidates, &opened, clock.now_ms)?;
+                    self.rollback_devices(
+                        &changed,
+                        &updated,
+                        &mut candidates,
+                        &opened,
+                        clock.now_ms,
+                    )?;
                     return Err(RuntimeError::Device);
                 }
                 opened.push(index);
+            }
+        }
+        // Accepted native updates retain their reverse until every device is ready.
+        for name in &updated {
+            let node = self
+                .nodes
+                .iter_mut()
+                .find(|node| &node.name == name)
+                .expect("updated lease");
+            if node.device.finish_update(true).is_err() {
+                // Commit has no remaining preparation or device I/O. A broken
+                // host contract degrades safely instead of publishing mixed state.
+                for (index, node) in self.nodes.iter_mut().enumerate() {
+                    if changed.contains(&index) || updated.contains(&node.name) {
+                        stop_node(node, clock.now_ms, &mut self.effects);
+                    }
+                }
+                for &index in opened.iter().rev() {
+                    candidates[index]
+                        .device
+                        .iter_mut()
+                        .for_each(|device| device.close());
+                }
+                return Err(RuntimeError::Restore);
             }
         }
         // No fallible preparation remains: external registration is still gated to these stable hosts.
@@ -746,7 +820,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     .active
                     .expect("active node");
                 let handoff = old.bounds.device != candidate.bounds.device
-                    || old.settings.radio != candidate.settings.radio;
+                    || (old.settings.radio != candidate.settings.radio
+                        && !updated.contains(&candidate.name));
                 let removed = old.links.withdraw_removed(&candidate.links);
                 if !removed.is_empty() {
                     self.effects
@@ -830,6 +905,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
     fn rollback_devices(
         &mut self,
         changed: &[usize],
+        updated: &[String],
         candidates: &mut [Candidate<A, C>],
         opened: &[usize],
         now_ms: u64,
@@ -851,6 +927,17 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 restored = false;
             } else {
                 node.host.control().restore_callbacks();
+            }
+        }
+        for name in updated.iter().rev() {
+            let node = self
+                .nodes
+                .iter_mut()
+                .find(|node| &node.name == name)
+                .expect("updated lease");
+            if node.device.finish_update(false).is_err() {
+                stop_node(node, now_ms, &mut self.effects);
+                restored = false;
             }
         }
         if restored {

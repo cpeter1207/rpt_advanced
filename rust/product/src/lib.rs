@@ -14,7 +14,7 @@ pub mod host;
 pub mod lifecycle;
 pub mod link;
 pub mod media;
-mod radio_configuration;
+mod radio_control;
 mod scheduler_health;
 pub mod services;
 pub mod site;

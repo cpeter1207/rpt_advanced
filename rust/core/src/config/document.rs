@@ -72,26 +72,55 @@ impl ConfigDocument {
         &self.entries
     }
 
-    /// Copy only the selected node's processing sections for the shared DSP resolver.
-    /// Values and source order are preserved; processing validation belongs to that provider.
-    /// The caller has validated section grammar through `Schema::validate`.
+    /// Copy relevant radio/profile source without interpreting any shared setting.
+    ///
+    /// This opaque identity keeps unrelated controller policy out of radio reload
+    /// comparisons. Selected named sections and fallback scopes remain available
+    /// to the shared provider, which owns resolution and validation.
     pub(crate) fn processing_configuration(&self, node: &str) -> String {
-        let mut result = String::new();
+        let mut result = format!("[{node}]\n");
+        for entry in self
+            .section_entries(node)
+            .filter(|entry| entry.key.to_ascii_lowercase().ends_with("_profile"))
+        {
+            result.push_str(&format!("{}={}\n", entry.key, entry.value));
+        }
         for (index, section) in self.sections.iter().enumerate() {
             let parsed = scope::parse_scope(section).expect("schema validated processing sections");
-            if !matches!(
-                parsed.kind,
-                scope::ScopeKind::ProcessingDefault | scope::ScopeKind::ProcessingNode
-            ) || parsed.node.is_some_and(|name| name != node)
-                || self.sections[..index].contains(section)
-            {
+            let selected = section.split_once(' ').is_some_and(|(kind, name)| {
+                self.section_entries(node).any(|entry| {
+                    entry.key.eq_ignore_ascii_case(&format!("{kind}_profile"))
+                        && entry.value.eq_ignore_ascii_case(name)
+                })
+            });
+            let applicable = match parsed.kind {
+                scope::ScopeKind::ProcessingDefault | scope::ScopeKind::RadioDefault => true,
+                scope::ScopeKind::ProcessingNode => {
+                    parsed
+                        .node
+                        .is_some_and(|name| name.eq_ignore_ascii_case(node))
+                        || selected
+                }
+                scope::ScopeKind::RadioNode => parsed
+                    .node
+                    .is_some_and(|name| name.eq_ignore_ascii_case(node)),
+                _ => false,
+            };
+            if !applicable {
                 continue;
             }
-            if result.is_empty() {
-                result.push_str(&format!("[{node}]\n"));
-            }
             result.push_str(&format!("[{section}]\n"));
-            for entry in self.section_entries(section) {
+            let start = self.section_lines[index];
+            let end = self
+                .section_lines
+                .get(index + 1)
+                .copied()
+                .unwrap_or(usize::MAX);
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| entry.line > start && entry.line < end)
+            {
                 result.push_str(&format!("{}={}\n", entry.key, entry.value));
             }
         }

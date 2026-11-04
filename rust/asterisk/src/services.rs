@@ -1068,6 +1068,8 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     peer_send_human_text: Some(peer_send_human_text),
     echo_account_status: Some(echo_account_status),
     peer_processing_prepare: None,
+    radio_control: None,
+    radio_update: None,
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.

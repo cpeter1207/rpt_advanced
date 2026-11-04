@@ -16,6 +16,12 @@ Asterisk channel/codec services. It must not depend on ASL3-specific headers,
 symbols, patched APIs, modules, or required helper services. Its controller
 core and portable radio components remain Asterisk-free under ADR 0005.
 
+The controller product dynamically links the Asterisk-free USBRadioPlus shared
+product for radio configuration and maintenance. This does not require the
+USBRadioPlus Asterisk channel adapter or an ASL3 runtime. The standalone tuner
+uses a private local Unix socket; the Asterisk tuner uses its existing CLI
+transport. Both compose the same shared radio operations and calibration code.
+
 Minimize new Asterisk dependencies as well. Before introducing an Asterisk
 service or type, prefer an existing project component or compatible independent
 library. Any unavoidable Asterisk integration stays in a thin integration adapter;

@@ -250,6 +250,17 @@ pub struct NodeControl<'a, R: Send, T: Send> {
 
 /// Control-only radio lease operations supplied by the selected device adapter.
 pub trait DeviceHandoff: Send {
+    /// Stage and acknowledge a same-device radio edit without closing callbacks.
+    /// False selects ordinary device handoff; an error rejects the candidate and
+    /// invokes finish_update(false) to release any partially adopted preparation.
+    fn update(&mut self, _settings: &GenerationSettings) -> Result<bool, super::RuntimeError> {
+        Ok(false)
+    }
+    /// Complete a staged update only after aggregate admission or restore its
+    /// retained reverse after another device fails. Default adapters have no update.
+    fn finish_update(&mut self, _commit: bool) -> Result<(), super::RuntimeError> {
+        Ok(())
+    }
     /// Request TX-safe idle, deassert PTT, detach both callbacks and join external users.
     /// Return true only once complete; false leaves the old device retained for retry.
     fn quiesce(&mut self) -> bool;
