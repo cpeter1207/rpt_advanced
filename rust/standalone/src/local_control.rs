@@ -190,10 +190,9 @@ fn validate(request: &Value) -> Result<(), String> {
         return Err("unknown local control operation".into());
     }
     if !matches!(operation, "nodes" | "configuration-path") {
-        let node = request["node"].as_str().ok_or("missing local radio node")?;
-        if node.is_empty() || node.len() > 32 || !node.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err("invalid local radio node".into());
-        }
+        // The product owns node admission. Do not impose a second identity
+        // syntax here or import controller implementation types into the host.
+        request["node"].as_str().ok_or("missing local radio node")?;
     }
     Ok(())
 }

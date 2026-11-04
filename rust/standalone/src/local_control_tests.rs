@@ -93,7 +93,7 @@ fn bad_requests_never_reach_backend_and_oversized_frames_close() {
     for request in [
         json!({"version":2,"operation":"nodes"}),
         json!({"version":1,"operation":"shell","command":"x"}),
-        json!({"version":1,"operation":"status","node":"../a"}),
+        json!({"version":1,"operation":"status","node":42}),
     ] {
         client.write_all(&frame(request)).unwrap();
         assert_eq!(
@@ -131,8 +131,7 @@ fn validation_and_manual_command_ownership_use_one_persistent_session() {
     for request in [
         json!({"version":1}),
         json!({"version":1,"operation":"status"}),
-        json!({"version":1,"operation":"status","node":""}),
-        json!({"version":1,"operation":"status","node":"1".repeat(33)}),
+        json!({"version":1,"operation":"status","node":[]}),
     ] {
         client.write_all(&frame(request)).unwrap();
         assert_eq!(
@@ -173,6 +172,23 @@ fn validation_and_manual_command_ownership_use_one_persistent_session() {
     }
     server.close(&mut backend);
     assert_eq!(backend.cleared, ["1000", "2000", "3000"]);
+}
+
+#[test]
+fn configured_node_identities_follow_the_controller_contract() {
+    let (mut server, mut client, mut backend) = setup();
+    for node in ["local-radio".to_owned(), "1".repeat(63)] {
+        client
+            .write_all(&frame(
+                json!({"version":1,"operation":"status","node":node}),
+            ))
+            .unwrap();
+        assert_eq!(
+            read_reply(&mut server, &mut client, &mut backend)["ok"],
+            true
+        );
+    }
+    assert_eq!(backend.requests.len(), 2);
 }
 
 #[test]

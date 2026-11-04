@@ -56,7 +56,7 @@ network polls. No socket operation runs in a radio callback.
 
 Each frame is a four-byte big-endian length followed by UTF-8 JSON, limited to
 65,536 bytes. Version 1 requests name an operation and, for radio operations, a
-configured numeric node. Replies contain `version`, `ok`, and either `result` or
+configured node. Replies contain `version`, `ok`, and either `result` or
 `error`. The shared tuner keeps one request outstanding on its persistent
 connection. Operations are `nodes`, `configuration-path`, `status`,
 `processing-stats`, `active-configuration`, `command`, `transmit`, and `reload`.
