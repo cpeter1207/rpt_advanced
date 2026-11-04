@@ -118,9 +118,9 @@
 
 ## Integration checkpoint (2026-11-04)
 
-- USBRadioPlus implementation: PR44 merged as `08aca13b` after the full hosted gate passed on `3e60b68f`. Alpha27 publication is in progress.
-- RPT controller and private tuner bridge: `6e6f08e` plus `9c6c913`, locally committed; dynamic SDK27 release/image refresh precedes its hosted gate.
-- Workflow admission: `0b0bac4`, workflow PR44; hosted workflow validation passed.
+- USBRadioPlus implementation: PR44 merged as `08aca13b` after the full hosted gate passed on `3e60b68f`. Alpha27 and its signed Debian packages are published.
+- RPT controller and private tuner bridge: `6e6f08e` plus `9c6c913`; focused checks pass. The SDK27-dependent multi-architecture image chain is verified and ready for the controller hosted gate.
+- Workflow admission: PR44 merged as `be0430b`; hosted workflow validation and both native SDK27 image probes passed.
 - Focused production coverage is closed for shared configuration, physical maintenance, tuner, bridge and local transport components. Evidence stays in ignored `.work/quality-progress.md` and component receipts.
 - Packaging workflow PR50 is merged as `e9faf159`; the SDK gate verified the independent tuner package on both architectures.
-- No node install, configuration change, service restart or RF operation has occurred. Physical qualification remains outside this approval.
+- The user authorized a native candidate build and upgrade on node 524950. At this checkpoint, the build is running; activation and the live tuner check are pending. Radio settings and the Asterisk fallback are preserved. No new external call or RF test tone is part of this upgrade. Controller merge and release still require separate approval.
