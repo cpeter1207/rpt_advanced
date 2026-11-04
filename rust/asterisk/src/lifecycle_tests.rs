@@ -198,6 +198,7 @@ static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descr
     inspect_configuration: Some(inspect_configuration),
     inspect_secrets: Some(inspect_secrets),
     site_command: Some(site_command),
+    radio_control: None,
 };
 
 unsafe extern "C" fn inspect_configuration(

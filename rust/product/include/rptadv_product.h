@@ -8,6 +8,7 @@
 #include <rptadv_codec.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <usbradioplus_product.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -281,6 +282,19 @@ struct rptadv_pcm_processor_v1 {
     void (*destroy)(void *context); /**< Release the prepared processor once. */
 };
 
+/** Authorized physical-radio operation, executed only on serialized control.
+ * STATUS=1, COMMAND=2, TRANSMIT=3, CLEAR_MANUAL=4,
+ * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6. The nested command is used
+ * only by COMMAND. Text is returned through the synchronous sink. */
+struct rptadv_radio_control_v1 {
+    uint32_t struct_size;                /**< Exact complete size. */
+    uint32_t abi_version;                /**< One. */
+    uint32_t operation;                  /**< One operation listed above. */
+    struct UrpAstChannelCommand command; /**< In/out shared maintenance command. */
+    uint32_t keyed;                      /**< Temporary manual transmit request, zero or one. */
+    uint32_t forced_ctcss_tenths_hz;     /**< Optional manual transmit tone. */
+};
+
 /** Host I/O primitives consumed by the portable product owner.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
@@ -465,6 +479,15 @@ struct rptadv_host_services_v9 {
                                    size_t configuration_length, const char *local,
                                    size_t local_length, size_t maximum_frames,
                                    struct rptadv_pcm_processor_v1 *processor);
+    /** Optional physical maintenance on this existing radio owner. No callback
+     * or hardware handle escapes; old hosts may omit this sized tail. */
+    int (*radio_control)(void *context, void *radio, struct rptadv_radio_control_v1 *request,
+                         rptadv_text_sink_v1 sink, void *sink_context);
+    /** Optional prepared same-device update: phase 0 stages and acknowledges,
+     * phase 1 commits, phase 2 rolls back. Zero succeeds, one requires device
+     * handoff. A negative stage result still requires phase 2 to restore any
+     * partially adopted state. Phase 2 is idempotent with no staged update. */
+    int (*radio_update)(void *context, void *radio, uint32_t phase);
 };
 
 /** Exact revision of a typed site control request. */
@@ -557,6 +580,12 @@ struct rptadv_product_descriptor_v1 {
      * neither changes link-command semantics nor emits a spoken CLI reply. */
     int (*site_command)(const char *local, size_t local_length,
                         const struct rptadv_site_command_v1 *request);
+    /** Already-authorized local physical maintenance. Serializes with reload,
+     * stop and radio destruction; returns the shared provider status unchanged.
+     * A sink borrows its result only for this synchronous call. */
+    int (*radio_control)(const char *local, size_t local_length,
+                         struct rptadv_radio_control_v1 *request, rptadv_text_sink_v1 sink,
+                         void *sink_context);
 };
 
 /** Return immutable process-lifetime product metadata.

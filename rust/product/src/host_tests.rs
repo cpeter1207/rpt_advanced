@@ -1,6 +1,8 @@
 use super::*;
 #[path = "egress_load_tests.rs"]
 mod egress_load;
+#[path = "native_maintenance_host_tests.rs"]
+mod native_maintenance;
 #[path = "site_host_tests.rs"]
 mod site;
 use crate::{

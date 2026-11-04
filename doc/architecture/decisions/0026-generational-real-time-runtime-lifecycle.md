@@ -200,6 +200,17 @@ notified; the radio-port audio engine never waits for quiescence.
 
 ### Normal configuration reload
 
+The standalone native radio adapter offers a control-only optional device update
+before ordinary device handoff. A change to the same selected device and callback
+bounds uses USBRadioPlus's existing prepared forward/reverse mailbox. Receive and
+transmit acknowledge independently while the stream, callback contexts, and
+controller transmit intent remain retained. The adapter keeps the prepared
+reverse until every node's device preparation succeeds; aggregate admission
+commits it, and a later failure restores it. Unsupported edits use the ordinary
+quiesce/close/open path. No controller policy or physical calibration algorithm
+moves into the adapter. See [native radio maintenance](../native-radio-maintenance.md)
+for the SDK ownership and diagnostics boundary.
+
 An ordinary reload preserves the station host and radio-device lease:
 
 1. The station-control event dispatcher parses, inherits, validates, and preallocates

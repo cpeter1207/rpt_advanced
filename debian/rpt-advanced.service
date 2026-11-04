@@ -18,6 +18,7 @@ LimitMEMLOCK=infinity
 StateDirectory=rpt-advanced
 LogsDirectory=rpt-advanced
 RuntimeDirectory=rpt-advanced
+RuntimeDirectoryMode=0700
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

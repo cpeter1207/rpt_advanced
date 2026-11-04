@@ -67,6 +67,8 @@ fn malformed_documented_shapes_are_not_reinterpreted_as_nodes() {
     for name in [
         "",
         "radio node extra",
+        "radio ",
+        "local ",
         "identifier  usb",
         "identifier usb too many",
         "morse usb label",

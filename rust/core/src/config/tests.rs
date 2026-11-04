@@ -1,10 +1,8 @@
 use super::{
-    ConfigDocument, ConfigError, NodeId, RadioCarrierSource, RadioDuplexMode, RadioNoiseFilter,
-    RadioReceiveAudioSource, RadioSignalingMode, ResolvedAnnouncementSettings,
-    ResolvedCourtesySettings, ResolvedEventSettings, ResolvedIdentifierSettings,
-    ResolvedMorseSettings, ResolvedNodeSettings, ResolvedPermanentLinkSettings,
-    ResolvedRadioSettings, ResolvedScheduleSettings, ResolvedSpeechSettings, ResolvedTimeSettings,
-    Schema,
+    ConfigDocument, ConfigError, NodeId, ResolvedAnnouncementSettings, ResolvedCourtesySettings,
+    ResolvedEventSettings, ResolvedIdentifierSettings, ResolvedMorseSettings, ResolvedNodeSettings,
+    ResolvedPermanentLinkSettings, ResolvedScheduleSettings, ResolvedSpeechSettings,
+    ResolvedTimeSettings, Schema,
 };
 use std::collections::BTreeMap;
 
@@ -342,513 +340,55 @@ fn iax_registration_url_can_be_cleared_and_credentials_are_rejected() {
 }
 
 #[test]
-fn radio_settings_inherit_defaults_and_allow_node_overrides() {
-    let document = ConfigDocument::parse(
-        "[radio]\ndevice_selection=automatic_lowest_alsa_card\ndevice_identifier=3-1:1.0\nusb_serial=SERIAL\ninput_extra_buffer_ms=40\nreceive_graph=highpass=f=150\n[1000]\n[radio 1000]\ndevice_selection=exact\nusb_serial=NODE-SERIAL\noutput_device_channels=2\noutput_extra_buffer_ms=20\ntransmit_graph=anull\n[2000]\n",
+fn radio_identity_forwards_selected_profiles_and_ignores_unrelated_controller_policy() {
+    let source = "[1000]\nlocal_profile=shared\n[2000]\n[radio]\nfuture_option=value\n[radio 1000]\ncm119_profile=nhrc\n[radio 2000]\ncm119_profile=sphusb\n[local]\noutput_gain_db=-2\n[local shared]\ninput_gain_db=3\n[link 1000]\ninput_gain_db=4\n[local 2000]\ninput_gain_db=9\n";
+    let first = ResolvedNodeSettings::resolve(
+        &ConfigDocument::parse(source).unwrap(),
+        &NodeId::new("1000").unwrap(),
     )
-    .unwrap();
-
-    let resolved = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
-        .unwrap()
-        .value;
-    assert_eq!(resolved.device_identifier, "3-1:1.0");
-    assert_eq!(
-        resolved.device_selection,
-        super::RadioDeviceSelection::Exact
-    );
-    assert_eq!(resolved.usb_serial, "NODE-SERIAL");
-    assert_eq!(resolved.input_extra_buffer_ms, 40);
-    assert_eq!(resolved.output_extra_buffer_ms, 20);
-    assert_eq!(resolved.output_device_channels, 2);
-    assert_eq!(resolved.receive_graph, "highpass=f=150");
-    assert_eq!(resolved.transmit_graph, "anull");
-    let node = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap())
-        .unwrap()
-        .value;
-    assert_eq!(node.radio, resolved);
-    let inherited = ResolvedRadioSettings::resolve(&document, &NodeId::new("2000").unwrap())
-        .unwrap()
-        .value;
-    assert_eq!(
-        inherited.device_selection,
-        super::RadioDeviceSelection::AutomaticLowestAlsaCard
-    );
-}
-
-#[test]
-fn radio_receive_gains_resolve_defaults_inheritance_and_node_overrides() {
-    for (source, expected, warning_count) in [
-        ("[1000]\n", (0, 0), 0),
-        (
-            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n",
-            (-2, -6),
-            0,
-        ),
-        (
-            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n[radio 1000]\nreceive_input_gain_db=30\nreceive_output_gain_db=-30\n",
-            (30, -30),
-            0,
-        ),
-        (
-            "[radio]\nreceive_input_gain_db=-30\nreceive_output_gain_db=30\n[1000]\n",
-            (-30, 30),
-            0,
-        ),
-        (
-            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n[radio 1000]\nreceive_input_gain_db=-31\nreceive_output_gain_db=31\n",
-            (-2, -6),
-            2,
-        ),
-        (
-            "[radio]\nreceive_input_gain_db=-2\nreceive_output_gain_db=-6\n[1000]\n[radio 1000]\nreceive_input_gain_db=-2.5\nreceive_output_gain_db=invalid\n",
-            (-2, -6),
-            2,
-        ),
-        (
-            "[radio]\nreceive_input_gain_db=-31\nreceive_output_gain_db=31\n[1000]\n",
-            (0, 0),
-            2,
-        ),
-    ] {
-        let resolved = ResolvedRadioSettings::resolve(
-            &ConfigDocument::parse(source).unwrap(),
-            &NodeId::new("1000").unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                resolved.value.receive_input_gain_db,
-                resolved.value.receive_output_gain_db,
-            ),
-            expected,
-            "{source}"
-        );
-        assert_eq!(resolved.warnings.len(), warning_count, "{source}");
-    }
-}
-
-#[test]
-fn audio_processing_sections_are_not_nodes_and_retain_only_the_selected_node() {
-    let document = ConfigDocument::parse(
-        "[1000]\n[2000]\n[local]\nenabled=no\n[local 1000]\ninput_gain_db=-2\n\
-         [link]\nlimiter_enabled=yes\n[link]\noutput_gain_db=0\n[link 1000]\nlimiter_low_threshold_dbfs=-10\n\
-         [link 2000]\nlimiter_low_threshold_dbfs=-20\n\
-         [voice_telemetry 1000]\noutput_gain_db=3\n",
-    )
-    .unwrap();
-    assert_eq!(document.nodes(), ["1000", "2000"]);
-    let resolved =
-        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
-    assert!(resolved.warnings.is_empty());
-    let source = resolved.value.processing_configuration;
-    for expected in [
-        "[1000]",
-        "[local]",
-        "[local 1000]",
-        "input_gain_db=-2",
-        "[link]",
-        "[link 1000]",
-        "limiter_low_threshold_dbfs=-10",
-        "[voice_telemetry 1000]",
-    ] {
-        assert!(source.contains(expected), "missing {expected}: {source}");
-    }
-    assert!(!source.contains("[2000]"));
-    assert!(!source.contains("-20"));
-    assert_eq!(source.matches("[link]\n").count(), 1);
-    assert!(source.contains("output_gain_db=0"));
-    let empty = ConfigDocument::parse("[1000]\n").unwrap();
+    .unwrap()
+    .value
+    .radio;
     assert!(
-        ResolvedRadioSettings::resolve(&empty, &NodeId::new("1000").unwrap())
-            .unwrap()
-            .value
+        first
             .processing_configuration
-            .is_empty()
+            .contains("local_profile=shared")
     );
-}
-
-#[test]
-fn radio_processing_emphasis_settings_inherit_and_invalid_values_fall_back() {
-    let document = ConfigDocument::parse(
-        "[1000]\n[2000]\n[radio]\nreceive_deemphasis_corner_hz=299.5\n\
-         transmit_preemphasis_enabled=yes\ntransmit_preemphasis_corner_hz=300\n\
-         [radio 1000]\ntransmit_preemphasis_corner_hz=500\n\
-         [radio 2000]\nreceive_deemphasis_corner_hz=0\n\
-         transmit_preemphasis_enabled=invalid\ntransmit_preemphasis_corner_hz=501\n",
-    )
-    .unwrap();
-    for (node, corner) in [("1000", 500.0), ("2000", 300.0)] {
-        let radio = ResolvedRadioSettings::resolve(&document, &NodeId::new(node).unwrap())
-            .unwrap()
-            .value;
-        assert_eq!(radio.receive_deemphasis_corner_hz, 299.5);
-        assert!(radio.transmit_preemphasis_enabled);
-        assert_eq!(radio.transmit_preemphasis_corner_hz, corner);
-    }
-}
-
-#[test]
-fn radio_hardware_gains_accept_finite_decimals_in_both_scopes() {
-    for section in ["radio", "radio 1000"] {
-        let source = format!(
-            "[1000]\n[{section}]\nhardware_input_gain_db=0\nhardware_output_a_gain_db=6.012\nhardware_output_b_gain_db=3\n"
-        );
-        let resolved = ResolvedRadioSettings::resolve(
-            &ConfigDocument::parse(&source).unwrap(),
-            &NodeId::new("1000").unwrap(),
-        )
-        .unwrap();
-        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
-        assert_eq!(
-            (
-                resolved.value.hardware_input_gain_db,
-                resolved.value.hardware_output_a_gain_db,
-                resolved.value.hardware_output_b_gain_db,
-            ),
-            (Some(0.0), Some(6.012), Some(3.0))
-        );
-    }
-}
-
-#[test]
-fn radio_hardware_gains_preserve_omitted_controls_and_inherit_valid_defaults() {
-    let node = NodeId::new("1000").unwrap();
-    let missing =
-        ResolvedRadioSettings::resolve(&ConfigDocument::parse("[1000]\n").unwrap(), &node).unwrap();
-    assert_eq!(missing.value.hardware_input_gain_db, None);
-    assert_eq!(missing.value.hardware_output_a_gain_db, None);
-    assert_eq!(missing.value.hardware_output_b_gain_db, None);
-
-    for (value, expected, warning_count) in [
-        ("-30", -30.0, 0),
-        ("30", 30.0, 0),
-        ("0", 0.0, 0),
-        ("6.012", 6.012, 0),
-        ("-30.001", 3.0, 3),
-        ("30.001", 3.0, 3),
-        ("NaN", 3.0, 3),
-        ("inf", 3.0, 3),
-        ("-inf", 3.0, 3),
-        ("invalid", 3.0, 3),
-        ("", 3.0, 3),
-    ] {
-        let source = format!(
-            "[radio]\nhardware_input_gain_db=3\nhardware_output_a_gain_db=3\nhardware_output_b_gain_db=3\n[1000]\n[radio 1000]\nhardware_input_gain_db={value}\nhardware_output_a_gain_db={value}\nhardware_output_b_gain_db={value}\n"
-        );
-        let resolved =
-            ResolvedRadioSettings::resolve(&ConfigDocument::parse(&source).unwrap(), &node)
-                .unwrap();
-        assert_eq!(resolved.warnings.len(), warning_count, "{value}");
-        assert_eq!(
-            resolved.value.hardware_input_gain_db,
-            Some(expected),
-            "{value}"
-        );
-        assert_eq!(
-            resolved.value.hardware_output_a_gain_db,
-            Some(expected),
-            "{value}"
-        );
-        assert_eq!(
-            resolved.value.hardware_output_b_gain_db,
-            Some(expected),
-            "{value}"
-        );
-    }
-}
-
-#[test]
-fn radio_output_assignments_resolve_both_scopes_and_invalid_fallbacks() {
-    use super::RadioOutputAssignment as Assignment;
-
-    let node = NodeId::new("1000").unwrap();
-    for scope in ["radio", "radio 1000"] {
-        for (name, expected) in [
-            ("disabled", Assignment::Disabled),
-            ("voice", Assignment::Voice),
-            ("tone", Assignment::Tone),
-            ("composite", Assignment::Composite),
-            ("auxiliary_voice", Assignment::AuxiliaryVoice),
-        ] {
-            let document = ConfigDocument::parse(&format!(
-                "[1000]\n[{scope}]\ntransmit_output_a_assignment={name}\ntransmit_output_b_assignment={name}\n"
-            ))
-            .unwrap();
-            let resolved = ResolvedRadioSettings::resolve(&document, &node).unwrap();
-            assert!(resolved.warnings.is_empty(), "{scope}/{name}");
-            assert_eq!(
-                resolved.value.signaling.transmit_output_a_assignment,
-                expected
-            );
-            assert_eq!(
-                resolved.value.signaling.transmit_output_b_assignment,
-                expected
-            );
-        }
-    }
-    for (defaults, expected) in [
-        ("", (Assignment::Voice, Assignment::Tone)),
-        (
-            "[radio]\ntransmit_output_a_assignment=composite\ntransmit_output_b_assignment=disabled\n",
-            (Assignment::Composite, Assignment::Disabled),
-        ),
-    ] {
-        let document = ConfigDocument::parse(&format!(
-            "{defaults}[1000]\n[radio 1000]\ntransmit_output_a_assignment=invalid\ntransmit_output_b_assignment=invalid\n"
-        ))
-        .unwrap();
-        let resolved = ResolvedRadioSettings::resolve(&document, &node).unwrap();
-        assert_eq!(resolved.warnings.len(), 2);
-        assert_eq!(
-            (
-                resolved.value.signaling.transmit_output_a_assignment,
-                resolved.value.signaling.transmit_output_b_assignment,
-            ),
-            expected,
-        );
-    }
-}
-
-#[test]
-fn radio_signaling_options_are_supported_in_default_and_node_scopes() {
-    let document = ConfigDocument::parse(
-        "[radio]\nreceive_audio=flat\nreceive_signaling=ctcss\ncarrier_source=dsp\nctcss_source=dsp\nreceive_ctcss_tones_hz=100.0,103.5\nctcss_relaxed=yes\nctcss_decoder_gain_db=0\ndcs_receive_code=023N\nsquelch_level=500\nsquelch_hysteresis=3000\nnoise_filter=standard\nvox_threshold=0\nvox_hang_ms=2000\nreceive_on_delay_ms=0\nradio_duplex_mode=half\ntransmit_signaling=ctcss\ntransmit_ctcss_tones_hz=100.0\ntransmit_ctcss_default_hz=100.0\ntransmit_ctcss_level_dbfs=-24\ntransmit_ctcss_turnoff_mode=phase_shift\ntransmit_ctcss_phase_shift_degrees=120\ntransmit_ctcss_turnoff_duration_ms=180\ntransmit_ctcss_tail_tone_hz=55\ntransmit_dcs_code=023N\ntransmit_dcs_level_dbfs=-24\ntransmit_dcs_turnoff_enabled=yes\ntransmit_dcs_turnoff_duration_ms=180\ntransmit_settle_ms=500\ntransmit_receive_blanking_ms=0\ntransmit_off_delay_ms=0\n[1000]\n[radio 1000]\nreceive_signaling=dcs\ndcs_receive_code=047I\ntransmit_signaling=dcs\ntransmit_dcs_code=047I\n",
-    )
-    .unwrap();
-
-    let resolved =
-        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
-    assert!(resolved.warnings.is_empty());
-    assert_eq!(
-        resolved.value.signaling.receive_mode,
-        super::RadioSignalingMode::Dcs
+    assert!(first.processing_configuration.contains("[local shared]"));
+    assert!(
+        first
+            .processing_configuration
+            .contains("[local]\noutput_gain_db=-2")
     );
-    assert_eq!(resolved.value.signaling.receive_dcs_code.value, 0o47);
-    assert!(resolved.value.signaling.receive_dcs_code.inverted);
-    assert_eq!(
-        resolved.value.signaling.transmit_mode,
-        super::RadioSignalingMode::Dcs
+    assert!(first.processing_configuration.contains("[link 1000]"));
+    assert!(
+        first
+            .processing_configuration
+            .contains("cm119_profile=nhrc")
     );
-    assert_eq!(resolved.value.signaling.transmit_dcs_code.value, 0o47);
-
-    let inherited = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
-        .unwrap()
-        .value;
-    assert_eq!(
-        inherited.signaling.receive_ctcss_tones_tenths_hz,
-        vec![1_000, 1_035]
-    );
-    assert_eq!(inherited.signaling.squelch_level, 500);
-    assert_eq!(inherited.signaling.squelch_hysteresis, 3_000);
-    assert_eq!(inherited.signaling.transmit_settle_ms, 500);
-    assert_eq!(
-        inherited.signaling.transmit_ctcss_turnoff_mode,
-        super::CtcssTurnoffMode::PhaseShift
-    );
-}
-
-#[test]
-fn radio_signaling_defaults_match_native_radio_defaults_and_invalid_values_fall_back() {
-    let defaults = ResolvedRadioSettings::resolve(
-        &ConfigDocument::parse("[1000]\n[radio 1000]\n").unwrap(),
+    assert!(!first.processing_configuration.contains("[radio 2000]"));
+    assert!(!first.processing_configuration.contains("[local 2000]"));
+    let changed = ResolvedNodeSettings::resolve(
+        &ConfigDocument::parse(&format!("[general]\ntransmit_timeout_ms=120000\n{source}"))
+            .unwrap(),
         &NodeId::new("1000").unwrap(),
     )
-    .unwrap();
-    assert!(defaults.warnings.is_empty());
-    assert_eq!(
-        defaults.value.signaling.receive_audio_source,
-        super::RadioReceiveAudioSource::Flat
-    );
-    assert_eq!(
-        defaults.value.signaling.carrier_source,
-        super::RadioCarrierSource::Dsp
-    );
-    assert_eq!(
-        defaults.value.signaling.receive_mode,
-        super::RadioSignalingMode::Carrier
-    );
-    assert_eq!(
-        defaults.value.signaling.receive_ctcss_tones_tenths_hz,
-        vec![1_000]
-    );
-    assert_eq!(defaults.value.signaling.receive_dcs_code.value, 0o23);
-    assert_eq!(defaults.value.signaling.vox_hang_ms, 2_000);
-    assert_eq!(defaults.value.signaling.transmit_ctcss_level_dbfs, -24);
-    assert_eq!(defaults.value.signaling.transmit_dcs_level_dbfs, -24);
-
-    let invalid = ResolvedRadioSettings::resolve(
-        &ConfigDocument::parse(
-            "[1000]\n[radio]\nsquelch_level=1000\nctcss_source=bogus\nreceive_ctcss_tones_hz=100.1\ndcs_receive_code=028N\ntransmit_ctcss_turnoff_mode=bad\ntransmit_dcs_turnoff_duration_ms=100\n",
-        )
-        .unwrap(),
-        &NodeId::new("1000").unwrap(),
-    )
-    .unwrap();
-    assert_eq!(invalid.value.signaling.squelch_level, 500);
-    assert_eq!(
-        invalid.value.signaling.receive_subaudible_source,
-        super::RadioSubaudibleSource::Dsp
-    );
-    assert_eq!(
-        invalid.value.signaling.receive_ctcss_tones_tenths_hz,
-        vec![1_000]
-    );
-    assert_eq!(invalid.value.signaling.receive_dcs_code.value, 0o23);
-    assert_eq!(
-        invalid.value.signaling.transmit_dcs_turnoff_duration_ms,
-        180
-    );
-    assert_eq!(invalid.warnings.len(), 6);
+    .unwrap()
+    .value
+    .radio;
+    assert_eq!(first, changed);
 }
 
 #[test]
-fn radio_enum_settings_resolve_supported_values_and_fall_back_on_unknown_values() {
-    let carrier_sources = [
-        ("disabled", RadioCarrierSource::Disabled),
-        ("vox", RadioCarrierSource::Vox),
-        ("cm119", RadioCarrierSource::Cm119),
-        ("cm119_inverted", RadioCarrierSource::Cm119Inverted),
-        ("parallel", RadioCarrierSource::Parallel),
-        ("parallel_inverted", RadioCarrierSource::ParallelInverted),
-    ];
-    for (source, expected) in carrier_sources {
-        let document = ConfigDocument::parse(&format!(
-            "[1000]\n[radio 1000]\ncarrier_source={source}\nreceive_audio=invalid\nreceive_signaling=invalid\nctcss_override=yes\nnoise_filter=alternate\n"
-        ))
-        .unwrap();
-        let settings = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
-            .unwrap()
-            .value
-            .signaling;
-        assert_eq!(settings.carrier_source, expected);
-        assert_eq!(settings.receive_audio_source, RadioReceiveAudioSource::Flat);
-        assert_eq!(settings.receive_mode, RadioSignalingMode::Carrier);
-        assert!(settings.receive_ctcss_override);
-        assert_eq!(settings.noise_filter, RadioNoiseFilter::Alternate);
-    }
-
-    let invalid_noise_filter = ConfigDocument::parse(
-        "[1000]\n[radio 1000]\nnoise_filter=unsupported\nradio_duplex_mode=full\n",
-    )
-    .unwrap();
-    let settings =
-        ResolvedRadioSettings::resolve(&invalid_noise_filter, &NodeId::new("1000").unwrap())
-            .unwrap()
-            .value
-            .signaling;
-    assert_eq!(settings.noise_filter, RadioNoiseFilter::Standard);
-    assert_eq!(settings.radio_duplex_mode, RadioDuplexMode::Full);
-
-    let invalid_sources = ConfigDocument::parse(
-        "[1000]\n[radio 1000]\ncarrier_source=unsupported\nradio_duplex_mode=unsupported\n",
-    )
-    .unwrap();
-    let settings = ResolvedRadioSettings::resolve(&invalid_sources, &NodeId::new("1000").unwrap())
+fn shared_profile_forwarding_retains_interleaved_case_insensitive_assignment_order() {
+    let document = ConfigDocument::parse("[1000]\nlink_profile=shared\n[link shared]\ninput_gain_db=2\n[link SHARED]\ninput_gain_db=3\n[link shared]\ninput_gain_db=4\n").unwrap();
+    let radio = ResolvedNodeSettings::resolve(&document, &NodeId::new("1000").unwrap())
         .unwrap()
         .value
-        .signaling;
-    assert_eq!(settings.carrier_source, RadioCarrierSource::Dsp);
-    assert_eq!(settings.radio_duplex_mode, RadioDuplexMode::Half);
-}
-
-#[test]
-fn cm119_hardware_settings_inherit_and_resolve_profile_and_gpio_modes() {
-    let document = ConfigDocument::parse(
-        "[radio]\ncm119_profile=sphusb\ncm119_ptt_inverted=yes\ncm119_gpio_1_mode=out0\ncm119_gpio_2_mode=out1\ncm119_gpio_8_mode=out1\ncm119_clip_led_gpio=2\n[1000]\n[radio 1000]\ncm119_profile=nhrc\ncm119_ptt_inverted=no\ncm119_gpio_2_mode=in\ncm119_gpio_8_mode=out0\ncm119_clip_led_gpio=0\n[2000]\n",
-    )
-    .unwrap();
-
-    let node = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
-    assert!(
-        node.warnings.is_empty(),
-        "supported CM119 settings must not be reported as unknown"
-    );
-    assert_eq!(node.value.cm119_profile, super::Cm119Profile::Nhrc);
-    assert!(!node.value.cm119_ptt_inverted);
-    assert_eq!(
-        node.value.cm119_gpio_modes,
-        [
-            super::Cm119GpioMode::OutputLow,
-            super::Cm119GpioMode::Input,
-            super::Cm119GpioMode::Input,
-            super::Cm119GpioMode::Input,
-            super::Cm119GpioMode::Input,
-            super::Cm119GpioMode::Input,
-            super::Cm119GpioMode::Input,
-            super::Cm119GpioMode::OutputLow,
-        ]
-    );
-    assert_eq!(node.value.cm119_clip_led_gpio, None);
-
-    let inherited = ResolvedRadioSettings::resolve(&document, &NodeId::new("2000").unwrap())
-        .unwrap()
-        .value;
-    assert_eq!(inherited.cm119_profile, super::Cm119Profile::SphUsb);
-    assert!(inherited.cm119_ptt_inverted);
-    assert_eq!(
-        inherited.cm119_gpio_modes[1],
-        super::Cm119GpioMode::OutputHigh
-    );
-    assert_eq!(
-        inherited.cm119_gpio_modes[7],
-        super::Cm119GpioMode::OutputHigh
-    );
-    assert_eq!(inherited.cm119_clip_led_gpio, Some(2));
-}
-
-#[test]
-fn cm119_gpio_modes_convert_to_adapter_masks() {
-    let document = ConfigDocument::parse(
-        "[radio]\ncm119_gpio_1_mode=out0\ncm119_gpio_2_mode=out1\ncm119_gpio_8_mode=out1\n[1000]\n",
-    )
-    .unwrap();
-    let settings = ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap())
-        .unwrap()
-        .value;
-
-    assert_eq!(
-        settings.cm119_gpio_output_masks(),
-        (0b1000_0011, 0b1000_0010)
-    );
-}
-
-#[test]
-fn invalid_radio_settings_warn_and_keep_safe_defaults() {
-    let document = ConfigDocument::parse(
-        "[radio]\ndevice_selection=invalid\ninput_extra_buffer_ms=20\ninput_device_channels=3\ncm119_profile=bad\ncm119_ptt_inverted=maybe\ncm119_gpio_8_mode=out2\ncm119_clip_led_gpio=9\n[1000]\n[radio 1000]\ninput_extra_buffer_ms=501\n",
-    )
-    .unwrap();
-
-    let resolved =
-        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
-    assert_eq!(resolved.value.input_extra_buffer_ms, 20);
-    assert_eq!(resolved.value.input_device_channels, 1);
-    assert_eq!(
-        resolved.value.device_selection,
-        super::RadioDeviceSelection::Exact
-    );
-    assert_eq!(resolved.value.cm119_profile, super::Cm119Profile::DudeUsb);
-    assert!(!resolved.value.cm119_ptt_inverted);
-    assert_eq!(
-        resolved.value.cm119_gpio_modes[7],
-        super::Cm119GpioMode::Input
-    );
-    assert_eq!(resolved.value.cm119_clip_led_gpio, None);
-    assert_eq!(resolved.warnings.len(), 7);
-}
-
-#[test]
-fn oversized_radio_device_identifier_is_ignored_with_warning() {
-    let identifier = "x".repeat(256);
-    let document = ConfigDocument::parse(&format!(
-        "[radio]\ndevice_identifier={identifier}\n[1000]\n"
-    ))
-    .unwrap();
-
-    let resolved =
-        ResolvedRadioSettings::resolve(&document, &NodeId::new("1000").unwrap()).unwrap();
-    assert!(resolved.value.device_identifier.is_empty());
-    assert_eq!(resolved.warnings.len(), 1);
+        .radio;
+    let source = &radio.processing_configuration;
+    assert!(source.find("input_gain_db=2").unwrap() < source.find("input_gain_db=3").unwrap());
+    assert!(source.find("input_gain_db=3").unwrap() < source.find("input_gain_db=4").unwrap());
 }
 
 #[test]

@@ -3,6 +3,10 @@
 use crate::abi;
 use std::{ffi::c_void, mem::size_of, ptr::NonNull};
 
+#[path = "processing_observations.rs"]
+mod observations;
+pub(crate) use observations::Observations;
+
 type Process = unsafe extern "C" fn(*mut c_void, u32, u32, *mut f32, u32) -> i32;
 type Destroy = unsafe extern "C" fn(*mut c_void);
 
@@ -11,6 +15,7 @@ struct Processor {
     process: Process,
     destroy: Destroy,
     maximum: u32,
+    _observation: Option<std::sync::Arc<observations::Observation>>,
 }
 
 impl Drop for Processor {
@@ -27,6 +32,7 @@ pub(crate) fn prepare(
     configuration: &str,
     node: &str,
     maximum_frames: usize,
+    observations: Option<&Observations>,
     output: &mut abi::rptadv_pcm_processor_v1,
 ) -> Result<bool, String> {
     *output = abi::rptadv_pcm_processor_v1 {
@@ -73,12 +79,15 @@ pub(crate) fn prepare(
         process,
         destroy,
         maximum,
+        _observation: None,
     });
     if status != 0 {
         return Err(format!(
             "native peer processing preparation failed ({status})"
         ));
     }
+    let mut processor = processor;
+    processor._observation = observations.map(|registry| registry.register(node, api, handle));
     output.context = Box::into_raw(processor).cast();
     output.process = Some(process_pcm);
     output.destroy = Some(destroy_processor);
@@ -114,55 +123,6 @@ unsafe extern "C" fn destroy_processor(context: *mut c_void) {
     if !context.is_null() {
         // SAFETY: prepare transfers this unique allocation; the host quiesces and destroys it once.
         drop(unsafe { Box::from_raw(context.cast::<Processor>()) });
-    }
-}
-
-#[derive(Default)]
-struct Diagnostics {
-    messages: Vec<String>,
-    invalid: bool,
-}
-
-/// Validate profiles in the shared product and copy its borrowed warning messages.
-pub(crate) fn validate(
-    api: &abi::UrpAstDescriptor,
-    args: &abi::UrpNativeProcessingArgs,
-) -> Result<Vec<String>, String> {
-    let validate = api
-        .native_processing_validate
-        .ok_or("shared product has no native processing validator")?;
-    let mut diagnostics = Diagnostics::default();
-    // SAFETY: validation borrows its request and callback state only for this synchronous call.
-    let status = unsafe {
-        validate(
-            args,
-            Some(copy_diagnostic),
-            std::ptr::from_mut(&mut diagnostics).cast(),
-        )
-    };
-    if diagnostics.invalid {
-        return Err("shared processing validator returned an invalid diagnostic".into());
-    }
-    if status != 0 {
-        return Err(format!(
-            "shared processing validation failed ({status}): {}",
-            diagnostics.messages.join("; ")
-        ));
-    }
-    Ok(diagnostics.messages)
-}
-
-unsafe extern "C" fn copy_diagnostic(context: *mut c_void, text: *const u8, length: u32) {
-    // SAFETY: validate retains the complete callback state for this synchronous call.
-    let diagnostics = unsafe { &mut *context.cast::<Diagnostics>() };
-    if text.is_null() {
-        diagnostics.invalid = true;
-        return;
-    }
-    // SAFETY: the shared validator advertises this complete borrowed diagnostic span.
-    match std::str::from_utf8(unsafe { std::slice::from_raw_parts(text, length as usize) }) {
-        Ok(text) => diagnostics.messages.push(text.to_owned()),
-        Err(_) => diagnostics.invalid = true,
     }
 }
 

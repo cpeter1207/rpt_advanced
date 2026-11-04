@@ -29,6 +29,8 @@ pub enum ForegroundError {
     Registration(std::io::Error),
     /// The standalone IAX2 listener could not bind or operate.
     Iax(crate::iax::IaxError),
+    /// The service-only local maintenance socket could not bind.
+    LocalControl(std::io::Error),
     /// The host cannot provide Unix signal and privilege semantics.
     UnsupportedPlatform,
 }
@@ -44,6 +46,9 @@ impl std::fmt::Display for ForegroundError {
                 write!(formatter, "cannot start registration worker: {error}")
             }
             Self::Iax(error) => error.fmt(formatter),
+            Self::LocalControl(error) => {
+                write!(formatter, "cannot start local radio control: {error}")
+            }
             Self::UnsupportedPlatform => {
                 formatter.write_str("foreground mode requires a Unix system")
             }
@@ -86,47 +91,92 @@ pub fn run(configuration: &Path, secrets_path: Option<&Path>) -> Result<(), Fore
         let mut registration = crate::registration::RegistrationWorker::start(registrations)
             .map_err(ForegroundError::Registration)?;
         install_signal_handlers()?;
+        let mut local_control =
+            crate::local_control::Server::bind(Path::new(crate::local_control::SOCKET_PATH))
+                .map_err(ForegroundError::LocalControl)?;
         eprintln!("rpt-advanced standalone runtime started");
         while !STOP.load(Ordering::Acquire) {
             poll_iax_listeners(&mut iax_listeners, &runtime, &client);
+            let mut control = ForegroundControl {
+                runtime: &mut runtime,
+                configuration,
+                secrets_path,
+                listeners: &mut iax_listeners,
+                client: &client,
+                registration: &mut registration,
+            };
+            local_control.poll(&mut control);
             if RELOAD.swap(false, Ordering::AcqRel) {
-                match read_configuration(configuration).and_then(|updated| {
-                    validate_configuration(&updated)?;
-                    Ok(updated)
-                }) {
-                    Ok(updated) => match resolve_radios(&updated).and_then(|radios| {
-                        let nodes = resolve_listener_nodes(&radios);
-                        update_iax_listeners(&mut iax_listeners, nodes, &client, |candidates| {
-                            // Prepare readiness tasks before changing the active generation.
-                            enable_iax_listeners(candidates, &runtime)?;
-                            runtime
-                                .reload_with_radios(&updated, radios)
-                                .map_err(ForegroundError::Runtime)
-                        })
-                    }) {
-                        Ok(()) => {
-                            match read_secrets(secrets_path)
-                                .and_then(|secrets| registration_targets(&updated, &secrets))
-                            {
-                                Ok(targets) => registration.replace(targets),
-                                Err(error) => {
-                                    eprintln!("registration configuration reload rejected: {error}")
-                                }
-                            }
-                            eprintln!("rpt-advanced configuration reloaded");
-                        }
-                        Err(error) => eprintln!("configuration reload rejected: {error}"),
-                    },
-                    Err(error) => eprintln!("configuration reload rejected: {error}"),
+                local_control.close(&mut control);
+                if let Err(error) = control.reload() {
+                    eprintln!("configuration reload rejected: {error}");
                 }
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+        local_control.close(&mut ForegroundControl {
+            runtime: &mut runtime,
+            configuration,
+            secrets_path,
+            listeners: &mut iax_listeners,
+            client: &client,
+            registration: &mut registration,
+        });
         runtime.stop().map_err(ForegroundError::Runtime)?;
         iax_listeners.clear();
         registration.stop();
         eprintln!("rpt-advanced standalone runtime stopped");
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct ForegroundControl<'a> {
+    runtime: &'a mut crate::runtime::ProductRuntime,
+    configuration: &'a Path,
+    secrets_path: Option<&'a Path>,
+    listeners: &'a mut BTreeMap<u16, crate::iax::IaxServer>,
+    client: &'a crate::iax::IaxClient,
+    registration: &'a mut crate::registration::RegistrationWorker,
+}
+
+#[cfg(unix)]
+impl ForegroundControl<'_> {
+    /// Signal reload and tuner reload use exactly the same foreground transaction.
+    fn reload(&mut self) -> Result<(), ForegroundError> {
+        let updated = read_configuration(self.configuration)?;
+        validate_configuration(&updated)?;
+        let radios = resolve_radios(&updated)?;
+        let nodes = resolve_listener_nodes(&radios);
+        update_iax_listeners(self.listeners, nodes, self.client, |candidates| {
+            enable_iax_listeners(candidates, self.runtime)?;
+            self.runtime
+                .reload_with_radios(&updated, radios)
+                .map_err(ForegroundError::Runtime)
+        })?;
+        match read_secrets(self.secrets_path)
+            .and_then(|secrets| registration_targets(&updated, &secrets))
+        {
+            Ok(targets) => self.registration.replace(targets),
+            Err(error) => eprintln!("registration configuration reload rejected: {error}"),
+        }
+        eprintln!("rpt-advanced configuration reloaded");
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl crate::local_control::Backend for ForegroundControl<'_> {
+    fn execute(&mut self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
+        if request["operation"] == "reload" {
+            self.reload().map_err(|error| error.to_string())?;
+            Ok(serde_json::Value::Null)
+        } else {
+            self.runtime.local_radio_request(request)
+        }
+    }
+    fn clear_manual(&mut self, node: &str) {
+        self.runtime.clear_local_manual(node);
     }
 }
 
@@ -422,6 +472,10 @@ mod tests {
                 "call setup failed",
             ),
             (
+                ForegroundError::LocalControl(std::io::Error::other("occupied socket")),
+                "cannot start local radio control: occupied socket",
+            ),
+            (
                 ForegroundError::UnsupportedPlatform,
                 "requires a Unix system",
             ),
@@ -630,6 +684,7 @@ mod tests {
             incoming: Some(incoming),
             link_command: None,
             site_command: None,
+            radio_control: None,
             link_status: None,
             digit: None,
             inspect_configuration: None,
@@ -938,19 +993,62 @@ mod tests {
             return;
         };
         let secrets = std::env::var_os("RPT_ADVANCED_FOREGROUND_TEST_SECRETS").map(PathBuf::from);
-        super::run(Path::new(&configuration), secrets.as_deref()).unwrap();
+        let result = super::run(Path::new(&configuration), secrets.as_deref());
+        if std::env::var_os("RPT_ADVANCED_FOREGROUND_EXPECT_BIND_ERROR").is_some() {
+            let error = result.unwrap_err();
+            assert!(matches!(error, ForegroundError::LocalControl(_)));
+            eprintln!("{error}");
+        } else {
+            result.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn_foreground(
+        command: &mut Command,
+    ) -> (
+        ChildGuard,
+        std::sync::mpsc::Receiver<String>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{BufRead, BufReader};
+        let mut child = ChildGuard(command.spawn().unwrap());
+        let stderr = child.0.stderr.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        (child, receiver, reader)
+    }
+
+    #[cfg(unix)]
+    fn local_request(
+        stream: &mut std::os::unix::net::UnixStream,
+        request: serde_json::Value,
+    ) -> serde_json::Value {
+        use std::io::{Read, Write};
+        let bytes = serde_json::to_vec(&request).unwrap();
+        stream
+            .write_all(&(bytes.len() as u32).to_be_bytes())
+            .unwrap();
+        stream.write_all(&bytes).unwrap();
+        let mut size = [0_u8; 4];
+        stream.read_exact(&mut size).unwrap();
+        let length = u32::from_be_bytes(size) as usize;
+        assert!(length <= 65_536);
+        let mut bytes = vec![0; length];
+        stream.read_exact(&mut bytes).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
     }
 
     #[cfg(unix)]
     #[test]
     fn foreground_reloads_and_shuts_down_without_restarting() {
-        use std::{
-            io::{BufRead, BufReader},
-            os::unix::fs::PermissionsExt,
-            os::unix::process::CommandExt,
-            sync::mpsc,
-            thread,
-        };
+        use std::{os::unix::fs::PermissionsExt, os::unix::process::CommandExt, thread};
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -972,6 +1070,43 @@ mod tests {
         } else {
             unsafe { libc::getegid() }
         };
+        // Reproduce systemd's private RuntimeDirectory inside the test container.
+        // Never replace or change ownership of an existing runtime directory.
+        struct SocketFixture {
+            created_directory: bool,
+            collision: bool,
+        }
+        impl Drop for SocketFixture {
+            fn drop(&mut self) {
+                if self.collision {
+                    let _ = fs::remove_file(crate::local_control::SOCKET_PATH);
+                }
+                if self.created_directory {
+                    let _ = fs::remove_dir(
+                        Path::new(crate::local_control::SOCKET_PATH)
+                            .parent()
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+        let directory = Path::new(crate::local_control::SOCKET_PATH)
+            .parent()
+            .unwrap();
+        let created_directory = match fs::create_dir(directory) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => panic!("cannot prepare test RuntimeDirectory: {error}"),
+        };
+        let mut socket = SocketFixture {
+            created_directory,
+            collision: false,
+        };
+        if created_directory {
+            let path = std::ffi::CString::new(directory.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::chown(path.as_ptr(), owner, group) }, 0);
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let secrets_path_c =
             std::ffi::CString::new(secrets_path.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(
@@ -1010,18 +1145,62 @@ mod tests {
             });
         }
 
-        let mut child = ChildGuard(command.spawn().unwrap());
-        let stderr = child.0.stderr.take().unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let reader = thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if sender.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+        // A pre-existing entry must survive failed startup without replacement.
+        use std::io::Write;
+        let mut collision = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(crate::local_control::SOCKET_PATH)
+            .unwrap();
+        socket.collision = true;
+        collision.write_all(b"preserve existing entry").unwrap();
+        drop(collision);
+        command.env("RPT_ADVANCED_FOREGROUND_EXPECT_BIND_ERROR", "1");
+        let (mut rejected, rejected_logs, rejected_reader) = spawn_foreground(&mut command);
+        wait_for_log(&rejected_logs, "cannot start local radio control");
+        assert!(rejected.0.wait().unwrap().success());
+        rejected_reader.join().unwrap();
+        assert_eq!(
+            fs::read(crate::local_control::SOCKET_PATH).unwrap(),
+            b"preserve existing entry"
+        );
+        fs::remove_file(crate::local_control::SOCKET_PATH).unwrap();
+        socket.collision = false;
+        command.env_remove("RPT_ADVANCED_FOREGROUND_EXPECT_BIND_ERROR");
+        let (mut child, receiver, reader) = spawn_foreground(&mut command);
 
         wait_for_log(&receiver, "standalone runtime started");
+        let mut local =
+            std::os::unix::net::UnixStream::connect(crate::local_control::SOCKET_PATH).unwrap();
+        local
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        assert_eq!(
+            local_request(
+                &mut local,
+                serde_json::json!({"version":1,"operation":"nodes"})
+            )["result"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            local_request(
+                &mut local,
+                serde_json::json!({"version":1,"operation":"reload","node":"524950"})
+            )["ok"],
+            true
+        );
+        wait_for_log(&receiver, "configuration reloaded");
+        // The disabled fixture node cannot key hardware, but a rejected manual
+        // request must still be cleared through the foreground backend on EOF.
+        assert_eq!(
+            local_request(
+                &mut local,
+                serde_json::json!({"version":1,"operation":"transmit","node":"524950","keyed":true})
+            )["ok"],
+            false
+        );
+        drop(local);
+        wait_for_log(&receiver, "manual radio cleanup for 524950 failed");
         // Exercise ordinary idle polling before driving the reload requests.
         thread::sleep(Duration::from_millis(100));
         fs::write(
@@ -1047,6 +1226,19 @@ mod tests {
             0
         );
         wait_for_log(&receiver, "configuration reload rejected");
+        let mut local =
+            std::os::unix::net::UnixStream::connect(crate::local_control::SOCKET_PATH).unwrap();
+        local
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        assert_eq!(
+            local_request(
+                &mut local,
+                serde_json::json!({"version":1,"operation":"reload","node":"524950"})
+            )["ok"],
+            false
+        );
+        drop(local);
         // Pass configuration inspection, then reject listener preparation before
         // any radio can activate. A parse error exercises a different reload arm.
         let occupied = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
@@ -1080,23 +1272,29 @@ mod tests {
         assert!(child.0.wait().unwrap().success());
         reader.join().unwrap();
         if std::env::var_os("CARGO_LLVM_COV").is_some() {
-            let profile = fs::read_dir(std::env::temp_dir())
+            let profiles: Vec<_> = fs::read_dir(std::env::temp_dir())
                 .unwrap()
                 .filter_map(Result::ok)
                 .map(|entry| entry.path())
-                .find(|profile| {
+                .filter(|profile| {
                     profile
                         .file_name()
                         .is_some_and(|name| name.to_string_lossy().starts_with(&profile_prefix))
                 })
-                .expect("foreground child must write its instrumented coverage profile");
-            let target = std::env::var_os("LLVM_PROFILE_FILE").unwrap();
-            let target = Path::new(&target)
-                .parent()
-                .unwrap()
-                .join(profile.file_name().unwrap());
-            fs::copy(&profile, target).unwrap();
-            fs::remove_file(profile).unwrap();
+                .collect();
+            assert!(
+                !profiles.is_empty(),
+                "foreground children must write coverage profiles"
+            );
+            for profile in profiles {
+                let target = std::env::var_os("LLVM_PROFILE_FILE").unwrap();
+                let target = Path::new(&target)
+                    .parent()
+                    .unwrap()
+                    .join(profile.file_name().unwrap());
+                fs::copy(&profile, target).unwrap();
+                fs::remove_file(profile).unwrap();
+            }
         }
         fs::remove_file(path).unwrap();
         fs::remove_file(secrets_path).unwrap();

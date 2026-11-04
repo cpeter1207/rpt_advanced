@@ -533,6 +533,35 @@ fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v9)) -> H
 }
 
 #[test]
+fn radio_update_is_optional_and_preserves_stage_results_and_finish_errors() {
+    let services = host_services(|_| {});
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.configuration_update(0), Ok(false));
+    assert_eq!(radio.configuration_update(1), Err(-7));
+    thread_local! { static MODE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) }; }
+    unsafe extern "C" fn update(_: *mut c_void, radio: *mut c_void, phase: u32) -> i32 {
+        assert!(!radio.is_null());
+        assert!(phase <= 2);
+        MODE.get()
+    }
+    let services = host_services(|table| table.radio_update = Some(update));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    for phase in 0..=2 {
+        for code in [0, 1, -5, -9] {
+            MODE.set(code);
+            assert_eq!(
+                radio.configuration_update(phase),
+                match code {
+                    0 => Ok(true),
+                    1 if phase == 0 => Ok(false),
+                    _ => Err(code),
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn optional_peer_processor_tail_accepts_the_released_complete_host_prefix() {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.struct_size =

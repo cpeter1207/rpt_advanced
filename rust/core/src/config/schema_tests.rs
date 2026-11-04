@@ -24,6 +24,29 @@ fn unknown_input_warns_once_with_source_context() {
 }
 
 #[test]
+fn radio_values_and_named_processing_profiles_are_delegated_to_the_shared_owner() {
+    let document = ConfigDocument::parse("[1000]\nlocal_profile=shared\n[radio]\nfuture_radio_option=anything\nsquelch_level=invalid\n[local shared]\nfuture_processing_option=anything\n").unwrap();
+    let resolution = Schema::validate(&document).unwrap();
+    assert!(resolution.warnings.is_empty(), "{:?}", resolution.warnings);
+}
+
+#[test]
+fn shared_profile_names_and_case_are_preserved_without_controller_node_grammar() {
+    let source = "[1000]\nLINK_PROFILE=OFFICE VOICE\nhardware_profile=SITE ROOM\n[RADIO]\nfuture_option=anything\n[link office voice]\ninput_gain_db=2\n[HARDWARE SITE ROOM]\nhardware_input_gain_db=3\n";
+    let document = ConfigDocument::parse(source).unwrap();
+    assert_eq!(document.nodes(), ["1000"]);
+    assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    let resolved =
+        super::ResolvedNodeSettings::resolve(&document, &super::NodeId::new("1000").unwrap())
+            .unwrap();
+    let radio = &resolved.value.radio.processing_configuration;
+    assert!(radio.contains("LINK_PROFILE=OFFICE VOICE"));
+    assert!(radio.contains("[link office voice]"));
+    assert!(radio.contains("[HARDWARE SITE ROOM]"));
+    assert!(radio.contains("[RADIO]"));
+}
+
+#[test]
 fn obsolete_timeout_lockout_warns_without_blocking_watchdog_resolution() {
     for section in ["general", "1000"] {
         let document = ConfigDocument::parse(&format!(
@@ -100,93 +123,6 @@ fn iax_registration_accepts_secure_url_and_bounded_port_and_interval() {
             .iter()
             .any(|warning| warning.key == "iax_registration_url")
     );
-}
-
-#[test]
-fn radio_schema_accepts_each_carrier_source_and_uses_radio_defaults() {
-    for source in [
-        "disabled",
-        "dsp",
-        "vox",
-        "cm119",
-        "cm119_inverted",
-        "parallel",
-        "parallel_inverted",
-    ] {
-        let document =
-            ConfigDocument::parse(&format!("[radio]\ncarrier_source={source}\n")).unwrap();
-        assert!(Schema::validate(&document).unwrap().warnings.is_empty());
-    }
-
-    let invalid = ConfigDocument::parse(
-        "[radio]\ninput_extra_buffer_ms=501\nreceive_graph=\ntransmit_graph=\nreceive_signaling=invalid\ntransmit_ctcss_phase_shift_degrees=361\ntransmit_ctcss_turnoff_duration_ms=1001\n",
-    )
-    .unwrap();
-    let warnings = Schema::validate(&invalid).unwrap().warnings;
-    let fallback = |key: &str| {
-        warnings
-            .iter()
-            .find(|warning| warning.key == key)
-            .map(|warning| warning.fallback.as_str())
-    };
-    assert_eq!(fallback("input_extra_buffer_ms"), Some("0"));
-    assert_eq!(fallback("receive_graph"), Some("anull"));
-    assert_eq!(fallback("transmit_graph"), Some("anull"));
-    assert_eq!(fallback("receive_signaling"), Some("carrier"));
-    assert_eq!(fallback("transmit_ctcss_phase_shift_degrees"), Some("120"));
-    assert_eq!(fallback("transmit_ctcss_turnoff_duration_ms"), Some("180"));
-}
-
-#[test]
-fn native_emphasis_invalid_corners_use_the_default_without_inherited_values() {
-    for invalid in ["0", "NaN", "501"] {
-        let document = ConfigDocument::parse(&format!(
-            "[1000]\n[radio]\nreceive_deemphasis_corner_hz={invalid}\n\
-             transmit_preemphasis_corner_hz={invalid}\n"
-        ))
-        .unwrap();
-        let warnings = Schema::validate(&document).unwrap().warnings;
-        assert_eq!(warnings.len(), 2);
-        assert!(warnings.iter().all(|warning| warning.fallback == "300"));
-    }
-}
-
-#[test]
-fn radio_receive_gains_accept_bounded_integers_in_both_scopes() {
-    for section in ["radio", "radio 1000"] {
-        for gain in [-30, -2, 0, 30] {
-            let document = ConfigDocument::parse(&format!(
-                "[1000]\n[{section}]\nreceive_input_gain_db={gain}\nreceive_output_gain_db={gain}\n"
-            ))
-            .unwrap();
-            let result = Schema::validate(&document).unwrap();
-            assert!(result.warnings.is_empty(), "{section}/{gain}: {result:?}");
-        }
-    }
-}
-
-#[test]
-fn invalid_radio_receive_gains_warn_with_inherited_or_unity_fallbacks() {
-    for key in ["receive_input_gain_db", "receive_output_gain_db"] {
-        for invalid in ["-31", "31", "-2.5", "invalid"] {
-            for (defaults, fallback) in [("", "0"), ("-6", "-6")] {
-                let global = if defaults.is_empty() {
-                    String::new()
-                } else {
-                    format!("[radio]\n{key}={defaults}\n")
-                };
-                let document = ConfigDocument::parse(&format!(
-                    "{global}[1000]\n[radio 1000]\n{key}={invalid}\n"
-                ))
-                .unwrap();
-                let warnings = Schema::validate(&document).unwrap().warnings;
-                assert_eq!(warnings.len(), 1, "{key}={invalid}");
-                assert_eq!(warnings[0].key, key);
-                assert_eq!(warnings[0].message, "invalid option value");
-                assert_eq!(warnings[0].fallback, fallback);
-            }
-        }
-    }
 }
 
 #[test]

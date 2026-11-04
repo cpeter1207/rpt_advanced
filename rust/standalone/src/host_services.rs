@@ -121,6 +121,8 @@ impl HostServicesOwner {
             peer_send_human_text: Some(peer_send_human_text),
             echo_account_status: Some(echo_account_status),
             peer_processing_prepare: Some(peer_processing_prepare),
+            radio_control: Some(control_radio),
+            radio_update: Some(update_radio),
         });
         Ok(Self {
             context,
@@ -287,6 +289,7 @@ unsafe extern "C" fn peer_processing_prepare(
             configuration,
             local,
             maximum_frames,
+            Some(&context.radio.observations),
             output,
         ) {
             Ok(true) => 0,
@@ -834,6 +837,34 @@ unsafe extern "C" fn destroy_radio(context: *mut c_void, radio: *mut c_void) {
     let radio_context =
         unsafe { ptr::addr_of_mut!((*context.cast::<StandaloneHostContext>()).radio) }.cast();
     unsafe { radio_destroy(radio_context, radio) };
+}
+
+unsafe extern "C" fn control_radio(
+    context: *mut c_void,
+    radio: *mut c_void,
+    request: *mut abi::rptadv_radio_control_v1,
+    sink: abi::rptadv_text_sink_v1,
+    sink_context: *mut c_void,
+) -> i32 {
+    if context.is_null() {
+        return -1;
+    }
+    // SAFETY: the host owner retains its radio field until all leases are destroyed.
+    let radio_context =
+        unsafe { ptr::addr_of_mut!((*context.cast::<StandaloneHostContext>()).radio) }.cast();
+    // SAFETY: the serialized product owner retains its radio, request and sink.
+    unsafe { crate::radio_host::radio_control(radio_context, radio, request, sink, sink_context) }
+}
+
+unsafe extern "C" fn update_radio(context: *mut c_void, radio: *mut c_void, phase: u32) -> i32 {
+    if context.is_null() {
+        return -1;
+    }
+    // SAFETY: this host owner retains its radio field until every lease is destroyed.
+    let radio_context =
+        unsafe { ptr::addr_of_mut!((*context.cast::<StandaloneHostContext>()).radio) }.cast();
+    // SAFETY: the serialized product owns the existing radio handle through return.
+    unsafe { crate::radio_host::radio_update(radio_context, radio, phase) }
 }
 
 unsafe extern "C" fn peer_dial(

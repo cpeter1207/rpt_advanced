@@ -309,6 +309,66 @@ fn invalid_configuration_emits_no_partial_records() {
 }
 
 #[test]
+fn shared_radio_resolution_preserves_cpu_savers_asymmetric_map_and_named_profiles() {
+    let source = "[1000]\nlocal_profile=receiver\nlink_profile=network\nvoice_telemetry_profile=transmitter\n[radio]\nreceive_signaling=ctcss\ntransmit_signaling=ctcss\nreceive_ctcss_tones_hz=100.0,103.5\ntransmit_ctcss_tones_hz=123.0,127.3\nreceive_cpu_saver_enabled=yes\ntransmit_cpu_saver_enabled=no\n[local receiver]\ninput_gain_db=3\n[link network]\ninput_gain_db=-4\n[voice_telemetry transmitter]\ninput_gain_db=2\n";
+    let (result, output) = inspect(source, false);
+    assert_eq!(result, 0, "{output:?}");
+    assert!(output.diagnostics.is_empty(), "{output:?}");
+    let radio = &output.radios[0];
+    assert_eq!(radio.session.receive.cpu_saver_enabled, 1);
+    assert_eq!(radio.session.transmit.cpu_saver_enabled, 0);
+    assert_eq!(
+        radio.session.transmit.mapped_ctcss_frequency_tenths_hz[11],
+        1230
+    );
+    assert_eq!(
+        radio.session.transmit.mapped_ctcss_frequency_tenths_hz[12],
+        1273
+    );
+    assert_eq!(radio.processing_configuration, source);
+    assert_eq!(radio.session.receive.native_squelch_delay_frames, 0);
+}
+
+#[test]
+fn shared_radio_validation_is_transactional_even_without_a_node_visitor() {
+    let source = "[1000]\n[2000]\n[radio 2000]\nreceive_signaling=ctcss\nctcss_source=disabled\n";
+    let (result, output) = inspect(source, false);
+    assert_eq!(result, -1);
+    assert!(output.nodes.is_empty());
+    let mut output = Collected::default();
+    let table = unsafe { &*rptadv_product_descriptor_v1() };
+    let result = unsafe {
+        table.inspect_configuration.unwrap()(
+            source.as_ptr().cast(),
+            source.len(),
+            None,
+            std::ptr::null_mut(),
+            Some(diagnostic),
+            (&mut output as *mut Collected).cast(),
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!output.diagnostics.is_empty());
+}
+
+#[test]
+fn shared_radio_warnings_reach_the_existing_configuration_diagnostic() {
+    let (status, output) = inspect(
+        "[1000]\n[radio 1000]\nreceive_squelch_level=invalid\n",
+        false,
+    );
+    assert_eq!(status, 0, "{output:?}");
+    assert_eq!(output.radios.len(), 1);
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|text| text.contains("receive_squelch_level")),
+        "{output:?}"
+    );
+}
+
+#[test]
 fn secret_records_keep_node_overrides_and_redact_all_invalid_input() {
     let (result, output) = inspect(
         "[general]\niax_secret=global-secret\n[1000]\niax_secret=node-secret\n",
@@ -363,8 +423,9 @@ fn native_requests_preserve_explicit_gains_graphs_hardware_and_signaling() {
     assert_eq!(second.request.cm119_profile, 1);
     assert_eq!(second.request.ptt_inverted, 1);
     assert_eq!(second.request.gpio_output_initial_mask, 1);
-    assert_eq!(first.request.gpio_output_enable_mask, 1);
-    assert_eq!(first.request.clip_led_mask, 2);
+    // NHRC exposes no ordinary GPIO; the shared hardware owner applies its capabilities.
+    assert_eq!(first.request.gpio_output_enable_mask, 0);
+    assert_eq!(first.request.clip_led_mask, 0);
     assert_eq!(first.request.receive_output_gain_db, -6);
     assert!((first.session.receive_input_gain - 0.794_328_2).abs() < 0.000_001);
     assert_eq!(first.session.receive.ctcss_tone_mask, (1 << 11) | (1 << 12));

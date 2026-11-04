@@ -40,12 +40,12 @@
 
 **Interfaces:** Expose side-effect-free resolution from borrowed configuration text plus node identity to a copied/visited resolved native request. Use shared `ChannelConfiguration`, `radio_session_config` and `hardware_plan`; explicit composition defaults are data/policy in that shared owner. The controller forwards text/selectors and consumes the public descriptor rather than importing USB private Rust crates.
 
-- [ ] Write failing parity cases for native defaults, asymmetric CTCSS mappings, independent CPU savers and explicit named processing profiles. Preserve an existing raw-graph/gain case.
-- [ ] Observe the focused RED failures and log their exact commands.
-- [ ] Move native radio option interpretation/defaults and construction into the shared owner. Keep only composition field aliases in adapters.
-- [ ] Preserve all selected named profiles and node selectors in forwarded configuration.
-- [ ] Replace controller radio/session construction with shared-provider delegation; delete `rust/product/src/radio_configuration.rs` and obsolete mirrored types/parsing/tests once callers are replaced.
-- [ ] Run affected configuration/station/ABI tests and developer docs. Verify equivalent explicit settings yield equivalent radio/hardware plans and invalid/missing settings preserve shared fallback semantics.
+- [x] Write failing parity cases for native defaults, asymmetric CTCSS mappings, independent CPU savers and explicit named processing profiles. Preserve an existing raw-graph/gain case.
+- [x] Observe the focused RED failures and log their exact commands.
+- [x] Move native radio option interpretation/defaults and construction into the shared owner. Keep only composition field aliases in adapters.
+- [x] Preserve all selected named profiles and node selectors in forwarded configuration.
+- [x] Replace controller radio/session construction with shared-provider delegation; delete `rust/product/src/radio_configuration.rs` and obsolete mirrored types/parsing/tests once callers are replaced.
+- [x] Run affected configuration/station/ABI tests and developer docs. Verify equivalent explicit settings yield equivalent radio/hardware plans and invalid/missing settings preserve shared fallback semantics.
 - [ ] Review the source move and ABI ownership, then commit the coherent slice.
 
 ## Task 2: Shared native physical lifecycle, maintenance and diagnostics
@@ -57,14 +57,14 @@
 
 **Interfaces:** Native status/command forwarding on the existing product descriptor, backed by the same semantic operations as channel status/commands. Reuse current mixer, tone, EEPROM, signaling and radio snapshots; retain native link observation. Native startup consumes the shared hardware plan, selected identity and preflight result.
 
-- [ ] Write failing native tests for physical snapshots, typed mixer/tone/EEPROM commands, parallel transport and same-device ownership.
-- [ ] Observe RED before changing implementations.
-- [ ] Factor shared physical status and maintenance operations from the existing channel implementation; keep ASL-only echo/frame/DTMF transport outside native records.
-- [ ] Reuse parallel-plan construction and the existing GPIO service; unconfigured parallel hardware remains unopened.
-- [ ] Reuse EEPROM preflight/read/apply before immutable preparation, including existing live-owner reads for reload. Reuse EEPROM save/read/write and conversion code.
-- [ ] Factor the existing prepared forward/reverse update and independent RX/TX acknowledgment primitive for native updates; do not copy its transaction.
-- [ ] Test disabled/valid/invalid/unreadable EEPROM, precedence, no startup writes, update rollback, no second device open, and no-stream-interruption updates.
-- [ ] Test temporary manual PTT/CTCSS intent merging with the direct controller callbacks, cleanup and stopped/stale handles.
+- [x] Write failing native tests for physical snapshots, typed mixer/tone/EEPROM commands, parallel transport and same-device ownership.
+- [x] Observe RED before changing implementations.
+- [x] Factor shared physical status and maintenance operations from the existing channel implementation; keep ASL-only echo/frame/DTMF transport outside native records.
+- [x] Reuse parallel-plan construction and the existing GPIO service; unconfigured parallel hardware remains unopened.
+- [x] Reuse EEPROM preflight/read/apply before immutable preparation, including existing live-owner reads for reload. Reuse EEPROM save/read/write and conversion code.
+- [x] Factor the existing prepared forward/reverse update and independent RX/TX acknowledgment primitive for native updates; do not copy its transaction.
+- [x] Test disabled/valid/invalid/unreadable EEPROM, precedence, no startup writes, update rollback, no second device open, and no-stream-interruption updates.
+- [x] Test temporary manual PTT/CTCSS intent merging with the direct controller callbacks, cleanup and stopped/stale handles.
 - [ ] Run targeted tests/docs/coverage for the changed owner components, review, and commit.
 
 ## Task 3: Standalone maintenance bridge and local control adapter
@@ -76,13 +76,13 @@
 
 **Interfaces:** `ActiveRadio` retains validated native maintenance/snapshot operations beside lifecycle/site methods. A bounded local Unix listener translates versioned typed maintenance requests to the existing control executor. SDK/domain implementation remains in USBRadioPlus.
 
-- [ ] Write failing forwarding tests with fake descriptors and a local socket test harness; no hardware or live-node dependencies.
-- [ ] Observe RED.
-- [ ] Add native operation forwarding, generation/lease validation and lifecycle quiescence using the existing site-operation bridge as the pattern.
-- [ ] Add `/run/rpt-advanced/radio-control.sock`, mode 0600, through the owning service's runtime directory. Bound frames/admissions; never accept arbitrary shell commands or configuration paths.
-- [ ] Tie temporary maintenance key/tone ownership to a connected session. Test disconnect, cancellation, stale generation, reload and shutdown cleanup while normal controller PTT remains asserted when appropriate.
-- [ ] Forward physical snapshots and shared graph observations alongside existing controller status. Do not compute measurements twice.
-- [ ] Test permissions, malformed/oversized/unknown requests, unavailable/disabled nodes, saturated admission and service cleanup.
+- [x] Write failing forwarding tests with fake descriptors and a local socket test harness; no hardware or live-node dependencies.
+- [x] Observe RED.
+- [x] Add native operation forwarding, generation/lease validation and lifecycle quiescence using the existing site-operation bridge as the pattern.
+- [x] Add `/run/rpt-advanced/radio-control.sock`, mode 0600, through the owning service's runtime directory. Bound frames/admissions; never accept arbitrary shell commands or configuration paths.
+- [x] Tie temporary maintenance key/tone ownership to a connected session. Test disconnect, cancellation, stale generation, reload and shutdown cleanup while normal controller PTT remains asserted when appropriate.
+- [x] Forward physical snapshots and shared graph observations alongside existing controller status. Do not compute measurements twice.
+- [x] Test permissions, malformed/oversized/unknown requests, unavailable/disabled nodes, saturated admission and service cleanup.
 - [ ] Run targeted tests/docs/coverage, review, and commit.
 
 ## Task 4: One tuner frontend for both compositions
@@ -93,14 +93,15 @@
 
 **Interfaces:** Keep one `TunerApp` and one set of calibration loops. Add a configuration-resolution/edit-destination port and a standalone runtime backend; keep the existing Asterisk backend. The selected backend controls prerequisite checks, configuration path/scopes and runtime application.
 
-- [ ] Run the existing calibration scenarios against a second fake composition and observe failures for wrong destinations/backend assumptions.
-- [ ] Add backend selection and standalone configuration destinations without duplicating the menu catalog, shared resolver/defaults or calibration algorithms.
-- [ ] Add the Unix client for the Task 3 protocol and reuse existing radio status parsing/typed command semantics.
-- [ ] Preserve file atomicity, restore points, rollback, bounded convergence, clipping checks, reference levels and unkey/tone-off cleanup.
-- [ ] Prove RX noise/squelch, RX voice, RX CTCSS, TX voice/tone/auxiliary calibration, status/meters, EEPROM save and supported live reloads through both backend adapters.
-- [ ] Keep ASL-specific controls conditional; do not add native echo or hardware repeat to standalone.
-- [ ] Split packaging only as needed so the same tuner executable works without Asterisk. Verify upgrade ownership and prerequisites.
+- [x] Run the existing calibration scenarios against a second fake composition and observe failures for wrong destinations/backend assumptions.
+- [x] Add backend selection and standalone configuration destinations without duplicating the menu catalog, shared resolver/defaults or calibration algorithms.
+- [x] Add the Unix client for the Task 3 protocol and reuse existing radio status parsing/typed command semantics.
+- [x] Preserve file atomicity, restore points, rollback, bounded convergence, clipping checks, reference levels and unkey/tone-off cleanup.
+- [x] Prove RX noise/squelch, RX voice, RX CTCSS, TX voice/tone/auxiliary calibration, status/meters, EEPROM save and supported live reloads through both backend adapters.
+- [x] Keep ASL-specific controls conditional; do not add native echo or hardware repeat to standalone.
+- [x] Split packaging only as needed so the same tuner executable works without Asterisk. Verify upgrade ownership and prerequisites.
 - [ ] Run targeted tests/docs/coverage, review, and commit.
+
 
 ## Task 5: Coordinated admission, documentation and full verification
 

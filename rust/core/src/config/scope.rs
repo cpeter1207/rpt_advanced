@@ -83,11 +83,45 @@ impl<'a> Scope<'a> {
 /// Classify one exact section name. A malformed documented shape is an error;
 /// an unrelated future shape remains safely ignorable.
 pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
-    if name.is_empty()
-        || name
-            .chars()
-            .any(|ch| matches!(ch, '[' | ']' | '\t' | '\r' | '\n'))
+    if name.is_empty() || name.chars().any(|ch| matches!(ch, '[' | ']' | '\r' | '\n')) {
+        return Err(());
+    }
+    let (family, suffix) = name
+        .split_once(' ')
+        .map_or((name, None), |(family, suffix)| (family, Some(suffix)));
+    if [
+        "local",
+        "link",
+        "voice_telemetry",
+        "hardware",
+        "receive",
+        "transmit",
+        "ctcss",
+        "dcs",
+        "duplex",
+        "diagnostics",
+    ]
+    .iter()
+    .any(|known| family.eq_ignore_ascii_case(known))
     {
+        return match suffix {
+            None => Ok(Scope::flat(ScopeKind::ProcessingDefault)),
+            Some(profile) if !profile.is_empty() => {
+                Ok(Scope::node(ScopeKind::ProcessingNode, profile))
+            }
+            Some(_) => Err(()),
+        };
+    }
+    if family.eq_ignore_ascii_case("radio") {
+        return match suffix {
+            None => Ok(Scope::flat(ScopeKind::RadioDefault)),
+            Some(node) if !node.is_empty() && !node.chars().any(char::is_whitespace) => {
+                Ok(Scope::node(ScopeKind::RadioNode, node))
+            }
+            Some(_) => Err(()),
+        };
+    }
+    if name.contains('\t') {
         return Err(());
     }
     let parts: Vec<_> = name.split(' ').collect();
@@ -108,12 +142,6 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         ),
         [family, ..] if SiteKind::parse(family).is_some() => return Err(()),
         ["general"] => Scope::flat(ScopeKind::General),
-        ["radio"] => Scope::flat(ScopeKind::RadioDefault),
-        ["radio", node] => Scope::node(ScopeKind::RadioNode, node),
-        ["local" | "link" | "voice_telemetry"] => Scope::flat(ScopeKind::ProcessingDefault),
-        ["local" | "link" | "voice_telemetry", node] => {
-            Scope::node(ScopeKind::ProcessingNode, node)
-        }
         ["echolink"] => Scope::flat(ScopeKind::EchoLinkDefault),
         ["echolink", node] => Scope::node(ScopeKind::EchoLinkNode, node),
         ["identifier"] => Scope::flat(ScopeKind::IdentifierDefault),
@@ -212,7 +240,6 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::SiteNode(_)
             | ScopeKind::SiteSet(_)
             | ScopeKind::RadioNode
-            | ScopeKind::ProcessingNode
             | ScopeKind::EchoLinkNode
             | ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementNode

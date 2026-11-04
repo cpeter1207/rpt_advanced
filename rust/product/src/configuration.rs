@@ -1,12 +1,17 @@
 //! Host configuration inspection without constructing a running controller.
+//!
+//! The existing USBRadioPlus shared product owns radio defaults, parsing and
+//! construction. All SDK resolutions succeed before any host record is visited;
+//! borrowed native spans remain valid only during that synchronous callback.
 
 use crate::abi;
 use rpt_advanced_core::config::{
-    Cm119Profile, ConfigDocument, EchoLinkSettings, NodeId, RadioDeviceSelection,
-    RadioReceiveAudioSource, ResolvedNodeSettings, ResolvedRadioSettings, Schema,
+    ConfigDocument, EchoLinkSettings, NodeId, ResolvedNodeSettings, Schema,
 };
 #[path = "configuration_echolink.rs"]
 mod echolink;
+#[path = "configuration_radio.rs"]
+mod radio;
 use std::{
     ffi::{c_char, c_void},
     mem::size_of,
@@ -26,21 +31,26 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
         let document = ConfigDocument::parse(source).map_err(|error| error.to_string())?;
         let resolution = Schema::validate(&document).map_err(|error| error.to_string())?;
         let mut nodes = Vec::new();
-        if node.is_some() {
-            // Validate every node before exposing any host request; inspection is transactional.
-            for name in document.nodes() {
-                let identity = NodeId::new(name.to_owned()).map_err(|error| error.to_string())?;
-                let settings = ResolvedNodeSettings::resolve(&document, &identity)
-                    .map_err(|error| error.to_string())?
-                    .value;
-                let radio =
-                    crate::radio_configuration::radio_session_config(&settings.radio, 1, 4096, 50)
-                        .map_err(|error| error.to_string())?;
-                let account = EchoLinkSettings::resolve(&document, &identity)
-                    .map_err(|error| error.to_string())?
-                    .value;
-                nodes.push((identity, settings, radio, account));
-            }
+        let mut radio_diagnostic = RadioDiagnostic {
+            sink: diagnostic,
+            context: diagnostic_context,
+        };
+        // Validate every radio even without a node visitor; config checks use this path.
+        for name in document.nodes() {
+            let identity = NodeId::new(name.to_owned()).map_err(|error| error.to_string())?;
+            let settings = ResolvedNodeSettings::resolve(&document, &identity)
+                .map_err(|error| error.to_string())?
+                .value;
+            let radio = radio::ResolvedRadio::resolve(
+                source,
+                identity.as_str(),
+                Some(radio_diagnostic_sink),
+                std::ptr::from_mut(&mut radio_diagnostic).cast(),
+            )?;
+            let account = EchoLinkSettings::resolve(&document, &identity)
+                .map_err(|error| error.to_string())?
+                .value;
+            nodes.push((identity, settings, radio, account));
         }
         for warning in resolution.warnings {
             emit(
@@ -54,35 +64,38 @@ pub(crate) unsafe extern "C" fn inspect_configuration(
         }
         if let Some(sink) = node {
             for (identity, settings, radio, account) in nodes {
-                let native = native_configuration(&settings.radio, &radio, identity.as_str())?;
                 let secrets_file = account
                     .secrets_file
                     .as_ref()
                     .map_or(std::borrow::Cow::Borrowed(""), |path| {
                         path.to_string_lossy()
                     });
-                let accepted = echolink::visit(identity.as_str(), &account, |account| {
-                    let record = abi::rptadv_node_host_configuration {
-                        struct_size: size_of::<abi::rptadv_node_host_configuration>() as u32,
-                        node: identity.as_str().as_ptr().cast(),
-                        node_length: identity.as_str().len(),
-                        channel: settings.channel.as_ptr().cast(),
-                        channel_length: settings.channel.len(),
-                        enabled: u32::from(settings.enabled),
-                        iax_port: settings.iax_local_port,
-                        registration_url: settings.iax_registration_url.as_ptr().cast(),
-                        registration_url_length: settings.iax_registration_url.len(),
-                        registration_interval_seconds: settings.iax_registration_interval_s,
-                        radio: &native,
-                        echolink: std::ptr::from_ref(account).cast(),
-                        echolink_secrets_file: secrets_file.as_ptr(),
-                        echolink_secrets_file_length: secrets_file.len(),
-                    };
-                    unsafe { sink(node_context, &record) }
-                });
-                if accepted != 0 {
-                    return Err("configuration visitor rejected a node".into());
-                }
+                radio.visit(|native| {
+                    let accepted = echolink::visit(identity.as_str(), &account, |account| {
+                        let record = abi::rptadv_node_host_configuration {
+                            struct_size: size_of::<abi::rptadv_node_host_configuration>() as u32,
+                            node: identity.as_str().as_ptr().cast(),
+                            node_length: identity.as_str().len(),
+                            channel: settings.channel.as_ptr().cast(),
+                            channel_length: settings.channel.len(),
+                            enabled: u32::from(settings.enabled),
+                            iax_port: settings.iax_local_port,
+                            registration_url: settings.iax_registration_url.as_ptr().cast(),
+                            registration_url_length: settings.iax_registration_url.len(),
+                            registration_interval_seconds: settings.iax_registration_interval_s,
+                            radio: native,
+                            echolink: std::ptr::from_ref(account).cast(),
+                            echolink_secrets_file: secrets_file.as_ptr(),
+                            echolink_secrets_file_length: secrets_file.len(),
+                        };
+                        unsafe { sink(node_context, &record) }
+                    });
+                    if accepted == 0 {
+                        Ok(())
+                    } else {
+                        Err("configuration visitor rejected a node".into())
+                    }
+                })?;
             }
         }
         Ok(())
@@ -135,66 +148,18 @@ pub(crate) unsafe extern "C" fn inspect_secrets(
     })
 }
 
-fn native_configuration(
-    settings: &ResolvedRadioSettings,
-    radio: &abi::rptadv_radio_session_config,
-    node: &str,
-) -> Result<abi::UrpNativeStationConfig, String> {
-    let length = |value: &str| {
-        u32::try_from(value.len()).map_err(|_| "radio configuration value is too long".to_owned())
-    };
-    let (outputs, initial) = settings.cm119_gpio_output_masks();
-    Ok(abi::UrpNativeStationConfig {
-        struct_size: size_of::<abi::UrpNativeStationConfig>() as u32,
-        abi_version: abi::URP_NATIVE_CONFIG_ABI_VERSION,
-        radio,
-        device_selection: match settings.device_selection {
-            RadioDeviceSelection::Exact => 0,
-            RadioDeviceSelection::AutomaticLowestAlsaCard => 1,
-        },
-        device_identifier: settings.device_identifier.as_ptr(),
-        device_identifier_length: length(&settings.device_identifier)?,
-        usb_serial: settings.usb_serial.as_ptr(),
-        usb_serial_length: length(&settings.usb_serial)?,
-        input_device_channels: settings.input_device_channels,
-        output_device_channels: settings.output_device_channels,
-        input_extra_buffer_ms: settings.input_extra_buffer_ms,
-        output_extra_buffer_ms: settings.output_extra_buffer_ms,
-        cm119_profile: match settings.cm119_profile {
-            Cm119Profile::DudeUsb => 0,
-            Cm119Profile::SphUsb => 1,
-            Cm119Profile::Nhrc => 2,
-            Cm119Profile::Custom => 3,
-        },
-        ptt_inverted: u32::from(settings.cm119_ptt_inverted),
-        gpio_output_enable_mask: u32::from(outputs),
-        gpio_output_initial_mask: u32::from(initial),
-        clip_led_mask: settings.cm119_clip_led_gpio.map_or(0, |pin| 1 << (pin - 1)),
-        receive_graph: settings.receive_graph.as_ptr(),
-        receive_graph_length: length(&settings.receive_graph)?,
-        transmit_graph: settings.transmit_graph.as_ptr(),
-        transmit_graph_length: length(&settings.transmit_graph)?,
-        receive_deemphasis: u32::from(
-            settings.signaling.receive_audio_source == RadioReceiveAudioSource::Flat,
-        ),
-        receive_output_gain_db: settings.receive_output_gain_db as i32,
-        hardware_gain_mask: (u32::from(settings.hardware_input_gain_db.is_some())
-            * abi::URP_NATIVE_HARDWARE_GAIN_INPUT)
-            | (u32::from(settings.hardware_output_a_gain_db.is_some())
-                * abi::URP_NATIVE_HARDWARE_GAIN_OUTPUT_A)
-            | (u32::from(settings.hardware_output_b_gain_db.is_some())
-                * abi::URP_NATIVE_HARDWARE_GAIN_OUTPUT_B),
-        hardware_input_gain_db: settings.hardware_input_gain_db.unwrap_or_default(),
-        hardware_output_a_gain_db: settings.hardware_output_a_gain_db.unwrap_or_default(),
-        hardware_output_b_gain_db: settings.hardware_output_b_gain_db.unwrap_or_default(),
-        processing_configuration: settings.processing_configuration.as_ptr(),
-        processing_configuration_length: length(&settings.processing_configuration)?,
-        processing_node: node.as_ptr(),
-        processing_node_length: length(node)?,
-        transmit_preemphasis: u32::from(settings.transmit_preemphasis_enabled),
-        transmit_preemphasis_corner_hz: settings.transmit_preemphasis_corner_hz,
-        receive_deemphasis_corner_hz: settings.receive_deemphasis_corner_hz,
-    })
+struct RadioDiagnostic {
+    sink: abi::rptadv_text_sink_v1,
+    context: *mut c_void,
+}
+
+unsafe extern "C" fn radio_diagnostic_sink(context: *mut c_void, text: *const u8, length: u32) {
+    // SAFETY: the shared resolution retains this stack diagnostic adapter until return.
+    let context = unsafe { &*context.cast::<RadioDiagnostic>() };
+    // SAFETY: the shared SDK borrows exactly this diagnostic text for the callback.
+    let text =
+        unsafe { input(text.cast(), length as usize) }.unwrap_or("invalid shared radio diagnostic");
+    emit(context.sink, context.context, text);
 }
 
 unsafe fn input<'a>(pointer: *const c_char, length: usize) -> Result<&'a str, String> {

@@ -1086,6 +1086,7 @@ static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descr
     inspect_configuration: Some(crate::configuration::inspect_configuration),
     inspect_secrets: Some(crate::configuration::inspect_secrets),
     site_command: Some(crate::site::command::execute),
+    radio_control: Some(crate::radio_control::execute),
 };
 
 /// Return immutable process-lifetime product metadata.

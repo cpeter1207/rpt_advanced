@@ -168,7 +168,7 @@ graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 | `hardware_output_a_gain_db` | unchanged | CM119 output A level applied when radio audio starts; -30 to +30 dB. |
 | `hardware_output_b_gain_db` | unchanged | CM119 output B level applied when radio audio starts; -30 to +30 dB. |
 | `receive_input_gain_db` | `0` | Receiver input gain, from -30 to +30 dB. |
-| `receive_output_gain_db` | `0` | Receiver output gain, from -30 to +30 dB. |
+| `receive_output_gain_db` | `0` | Receiver output gain in whole dB, from -30 to +30. |
 | `receive_graph` | `anull` | FFmpeg chain applied to mono 48 kHz receiver audio; 1–4096 bytes. |
 | `transmit_graph` | `anull` | FFmpeg chain applied to mono 48 kHz transmitter audio; 1–4096 bytes. |
 | `receive_deemphasis_corner_hz` | `300` | De-emphasis corner for flat receive audio; above 0 through 500 Hz. |
@@ -178,10 +178,24 @@ graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 | `cm119_ptt_inverted` | `no` | Invert the CM119 PTT output polarity. |
 | `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
 | `cm119_clip_led_gpio` | `0` | GPIO number for the clipping indicator; 0 disables it, 1–8 selects a pin. |
+| `hardware_eeprom_enabled` | `no` | Load valid hardware tuning from EEPROM. Leave disabled to use file tuning. Startup does not write EEPROM. |
+| `receive_cpu_saver_enabled` | `no` | Reduce receive processing while the receiver is idle. |
+| `transmit_cpu_saver_enabled` | `no` | Reduce transmit processing while the transmitter is idle. |
 
 Hardware gains accept decimal values. Zero selects the hardware control's
 midpoint; it does not mean silence. Leave an option out to keep that control's
 current level. These controls set the hardware mixer, not the processing gain.
+
+With EEPROM enabled, valid stored tuning takes priority over file settings for
+capture, outputs A and B, CTCSS level, and squelch. An invalid or unreadable image
+leaves file tuning in use. Use the tuner's EEPROM action to save live tuning.
+
+For parallel-port signaling, set `parallel_port_device` and
+`parallel_port_base_address`. Assign output pins with
+`parallel_pin_2_assignment` through `parallel_pin_9_assignment`; assign inputs
+with `parallel_pin_10_assignment`, `parallel_pin_12_assignment`,
+`parallel_pin_13_assignment`, and `parallel_pin_15_assignment`. Use the supported
+USBRadioPlus pin assignments. Leave pins unassigned when not used.
 
 Receive signaling options:
 
@@ -226,6 +240,9 @@ Transmit signaling options:
 | `transmit_receive_blanking_ms` | `0` | Blank receive qualification while transmitting (0–32767 ms). |
 | `transmit_off_delay_ms` | `0` | Ignore receiver activity for this interval after transmit release (0–32767 ms). |
 
+For different receive and transmit CTCSS tones, enter the two lists in matching
+order. The first receive tone selects the first transmit tone, and so on.
+
 The complete commented example is installed at
 `share/doc/rpt-advanced/examples/rpt_advanced.conf`. Run
 `rpt-advanced --check-config /etc/rpt_advanced/rpt_advanced.conf` before
@@ -248,6 +265,12 @@ the [USBRadioPlus configuration reference](https://github.com/cpeter1207/USBRadi
 They include gains, EQ, AGC, an expander, a de-esser, a compressor, and a
 multiband limiter. The local chain also supports RNNoise and receive filters.
 The voice/telemetry chain supports the final limiter and band-pass filter.
+
+To reuse a named profile, put its name after the section type, such as
+`[local repeater]`. Select it with `local_profile = repeater` in the node's
+`[524950]` section. The same form works for `link_profile` and
+`voice_telemetry_profile`. Named hardware and signaling profiles use the same
+USBRadioPlus selectors. Check warnings for a missing profile or invalid value.
 
 For a three-band link limiter with each threshold at −10 dBFS:
 

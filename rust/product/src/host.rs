@@ -80,6 +80,30 @@ struct Device {
     services: HostServices,
 }
 impl DeviceHandoff for Device {
+    fn update(&mut self, _: &GenerationSettings) -> Result<bool, RuntimeError> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .worker
+            .as_mut()
+            .ok_or(RuntimeError::Device)?
+            .configuration_update(0)
+            .map_err(|_| RuntimeError::Device)
+    }
+
+    fn finish_update(&mut self, commit: bool) -> Result<(), RuntimeError> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .worker
+            .as_mut()
+            .ok_or(RuntimeError::Restore)?
+            .configuration_update(if commit { 1 } else { 2 })
+            .map_err(|_| RuntimeError::Restore)?
+            .then_some(())
+            .ok_or(RuntimeError::Restore)
+    }
+
     fn quiesce(&mut self) -> bool {
         self.lease
             .lock()
@@ -323,6 +347,29 @@ fn media_worker<'a>(
 }
 
 impl Host {
+    /// Resolve the live generation on control, never exposing a handle to the caller.
+    pub(crate) fn radio_control(
+        &mut self,
+        local: &str,
+        mut request: crate::abi::rptadv_radio_control_v1,
+    ) -> Result<crate::radio_control::Reply, i32> {
+        if self.runtime.node(local).is_none() {
+            return Err(-4);
+        }
+        let (_, lease) = self
+            .leases
+            .iter()
+            .rev()
+            .find(|(name, _)| name == local)
+            .ok_or(-7)?;
+        let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
+        if lease.quiesced {
+            return Err(-7);
+        }
+        let text = lease.worker.as_mut().ok_or(-7)?.maintenance(&mut request)?;
+        Ok(crate::radio_control::Reply { request, text })
+    }
+
     fn prune_leases(&mut self) {
         prune_leases(&mut self.leases);
         self.media_workers

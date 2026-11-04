@@ -1093,6 +1093,8 @@ fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
 #[test]
 fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
     let log = Arc::new(Mutex::new(Vec::new()));
+    let mut fallback = Device(log.clone());
+    assert_eq!(fallback.finish_update(false), Ok(()));
     let device = |_: &str, _: &ResolvedNodeSettings| {
         Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
     };
@@ -1118,11 +1120,172 @@ fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
 
     let events = log.lock().unwrap().clone();
     assert_eq!(events, ["quiesce", "close", "1000"]);
-    assert_eq!(
-        runtime.settings("1000").unwrap().radio.cm119_profile,
-        crate::config::Cm119Profile::Nhrc
+    assert!(
+        runtime
+            .settings("1000")
+            .unwrap()
+            .radio
+            .processing_configuration
+            .contains("cm119_profile=nhrc")
     );
     assert!(runtime.stop(0));
+}
+
+#[test]
+fn supported_radio_updates_keep_the_device_and_rollback_if_a_later_open_fails() {
+    struct LiveDevice {
+        name: String,
+        log: Arc<Mutex<Vec<String>>>,
+        failure: u8,
+    }
+    impl DeviceHandoff for LiveDevice {
+        fn quiesce(&mut self) -> bool {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("quiesce:{}", self.name));
+            true
+        }
+        fn close(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("close:{}", self.name));
+        }
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("open:{}", settings.device));
+            settings.device != "fail"
+        }
+        fn update(&mut self, settings: &GenerationSettings) -> Result<bool, RuntimeError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("update:{}", settings.device));
+            if self.failure >= 3 {
+                Err(RuntimeError::Device)
+            } else {
+                Ok(true)
+            }
+        }
+        fn finish_update(&mut self, commit: bool) -> Result<(), RuntimeError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("finish:{}:{commit}", self.name));
+            if self.name == "1000"
+                && ((commit && self.failure == 2) || (!commit && self.failure == 4))
+            {
+                Err(RuntimeError::Restore)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for failure in 0..7 {
+        let fail_later = failure == 1;
+        let commit_failure = failure == 2;
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let device = |name: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(LiveDevice {
+                name: name.to_owned(),
+                log: log.clone(),
+                failure,
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let initial = "[1000]\nradio_channel=first\n[2000]\nradio_channel=second\n[3000]\nradio_channel=third\n";
+        let candidate_bounds = std::cell::Cell::new(false);
+        let runtime_adapter = |name: &str, settings: &ResolvedNodeSettings| {
+            let mut prepared = adapter(name, settings)?;
+            if candidate_bounds.get() && name == "1000" {
+                match failure {
+                    5 => prepared.receive_maximum += 1,
+                    6 => prepared.transmit_maximum += 1,
+                    _ => {}
+                }
+            }
+            Ok(prepared)
+        };
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(initial).unwrap(),
+            &Media,
+            runtime_adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+        log.lock().unwrap().clear();
+        let mut candidate = format!(
+            "[1000]\nradio_channel=first\n[2000]\nradio_channel={}\n[3000]\nradio_channel=third\n[radio 1000]\nreceive_output_gain_db=-6\n",
+            if fail_later {
+                "fail"
+            } else if commit_failure {
+                "replacement"
+            } else {
+                "second"
+            }
+        );
+        if commit_failure {
+            candidate.push_str("[4000]\nradio_channel=fourth\n");
+        }
+        candidate_bounds.set(true);
+        let result = runtime.reload(
+            ConfigDocument::parse(&candidate).unwrap(),
+            &Media,
+            runtime_adapter,
+            device,
+            clock(),
+        );
+        let changes = log.lock().unwrap().clone();
+        assert_eq!(
+            changes.iter().any(|value| value == "update:first"),
+            failure < 5
+        );
+        if failure >= 5 {
+            assert!(changes.contains(&"close:1000".to_owned()));
+            assert!(changes.contains(&"open:first".to_owned()));
+        }
+        if !commit_failure && failure != 4 && failure < 5 {
+            assert!(!changes.iter().any(|value| value == "quiesce:1000"
+                || value == "close:1000"
+                || value == "open:first"));
+        }
+        if matches!(failure, 3 | 4) {
+            assert_eq!(
+                result,
+                Err(if failure == 4 {
+                    RuntimeError::Restore
+                } else {
+                    RuntimeError::Device
+                })
+            );
+            assert!(changes.contains(&"finish:1000:false".to_owned()));
+            assert_eq!(changes.contains(&"close:1000".to_owned()), failure == 4);
+            assert_eq!(runtime.revision(), 1);
+            assert_eq!(runtime.document(), &ConfigDocument::parse(initial).unwrap());
+        } else if commit_failure {
+            assert_eq!(result, Err(RuntimeError::Restore));
+            for name in ["1000", "2000", "4000"] {
+                assert!(
+                    changes.contains(&format!("close:{name}")),
+                    "{name}: {changes:?}"
+                );
+            }
+            assert!(!changes.contains(&"close:3000".to_owned()));
+            assert_eq!(runtime.revision(), 1);
+        } else if fail_later {
+            assert_eq!(result, Err(RuntimeError::Device));
+            assert!(changes.iter().any(|value| value == "finish:1000:false"));
+            assert_eq!(runtime.revision(), 1);
+            assert_eq!(runtime.document(), &ConfigDocument::parse(initial).unwrap());
+        } else {
+            assert_eq!(result, Ok(()));
+            assert_eq!(runtime.revision(), 2);
+        }
+        assert!(runtime.stop(0));
+    }
 }
 
 #[test]
