@@ -227,13 +227,13 @@ Transmit signaling options:
 | `transmit_signaling` | `carrier` | Transmit carrier only (`carrier`), CTCSS (`ctcss`), or DCS (`dcs`). |
 | `transmit_ctcss_tones_hz` | `100.0` | Comma-separated CTCSS tones permitted for transmission. |
 | `transmit_ctcss_default_hz` | `100.0` | CTCSS tone used when no selected mapping overrides it. |
-| `transmit_ctcss_level_dbfs` | `-24` | CTCSS peak level (−60 to 0 dBFS). |
+| `transmit_ctcss_level_dbfs` | `-24` | CTCSS peak level (−90 to 0 dBFS). |
 | `transmit_ctcss_turnoff_mode` | `phase_shift` | CTCSS turnoff: `none`, `phase_shift`, `tone_remove`, or `tail_tone`. |
 | `transmit_ctcss_phase_shift_degrees` | `120` | Phase shift for reverse-burst turnoff (0–360 degrees). |
 | `transmit_ctcss_turnoff_duration_ms` | `180` | CTCSS turnoff duration (0–1000 ms). |
 | `transmit_ctcss_tail_tone_hz` | `55` | Replacement low-frequency tail tone for `tail_tone` mode (0–300 Hz). |
 | `transmit_dcs_code` | `023N` | Transmitted three-digit octal DCS code and polarity. |
-| `transmit_dcs_level_dbfs` | `-24` | DCS peak level (−60 to 0 dBFS). |
+| `transmit_dcs_level_dbfs` | `-24` | DCS peak level (−90 to 0 dBFS). |
 | `transmit_dcs_turnoff_enabled` | `yes` | Send DCS turnoff signaling when transmission ends. |
 | `transmit_dcs_turnoff_duration_ms` | `180` | DCS turnoff interval (150–200 ms). |
 | `transmit_settle_ms` | `500` | Delay after PTT assertion before program audio starts (0–32767 ms). |

@@ -118,8 +118,9 @@
 
 ## Integration checkpoint (2026-11-04)
 
-- USBRadioPlus implementation: `9e071000`, PR44; full hosted gate pending.
+- USBRadioPlus implementation: PR44 merged as `08aca13b` after the full hosted gate passed on `3e60b68f`. Alpha27 publication is in progress.
 - RPT controller and private tuner bridge: `6e6f08e` plus `9c6c913`, locally committed; dynamic SDK27 release/image refresh precedes its hosted gate.
 - Workflow admission: `0b0bac4`, workflow PR44; hosted workflow validation passed.
 - Focused production coverage is closed for shared configuration, physical maintenance, tuner, bridge and local transport components. Evidence stays in ignored `.work/quality-progress.md` and component receipts.
+- Packaging workflow PR50 is merged as `e9faf159`; the SDK gate verified the independent tuner package on both architectures.
 - No node install, configuration change, service restart or RF operation has occurred. Physical qualification remains outside this approval.
