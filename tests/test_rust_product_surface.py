@@ -46,6 +46,7 @@ ELF_DEPENDENCIES = {
         "librptadvdtmf.so.1",
         "librptadvtemplate.so.1",
         "librptadvschedule.so.1",
+        "libusbradioplus_product.so.1",
     },
     "librptadv_control_asterisk_adapter.so.1": set(),
     "librptadv_file_adapter.so.1": set(),
@@ -349,8 +350,8 @@ def package(control: Path) -> None:
         assert token in contents, f"missing package dependency: {token}"
     for token in (
         f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
-        "libusbradioplus-product-dev (>= 0.1.0~alpha26-1.deb13)",
-        "libusbradioplus-product1 (>= 0.1.0~alpha26-1.deb13)",
+        "libusbradioplus-product-dev (>= 0.1.0~alpha27-1.deb13)",
+        "libusbradioplus-product1 (>= 0.1.0~alpha27-1.deb13)",
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",
