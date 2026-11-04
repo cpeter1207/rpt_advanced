@@ -563,6 +563,9 @@ fn radio_update_is_optional_and_preserves_stage_results_and_finish_errors() {
 
 #[test]
 fn radio_maintenance_validates_bounded_text_and_keeps_sink_errors() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     thread_local! { static MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
     unsafe extern "C" fn control(
         _: *mut c_void,
