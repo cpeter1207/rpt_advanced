@@ -1516,6 +1516,41 @@ mod tests {
     }
 
     #[test]
+    fn radio_maintenance_callbacks_reject_absent_context_and_forward_to_the_radio_owner() {
+        let owner = HostServicesOwner::new(
+            crate::resolve_radio_nodes("[1000]\nradio_channel=vhf\n").unwrap(),
+            None,
+            SecretsFile::parse("").unwrap(),
+        )
+        .unwrap();
+        let api = owner.descriptor();
+        let mut radio = ptr::null_mut();
+        // SAFETY: the owner and writable result remain live; reserving opens no hardware.
+        assert_eq!(
+            unsafe { api.radio_open.unwrap()(api.context, c"1000".as_ptr(), 4, 960, &mut radio) },
+            0
+        );
+        assert!(!radio.is_null());
+        // SAFETY: this scalar-only ABI record is initialized before either callback reads it.
+        let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+        request.struct_size = size_of::<abi::rptadv_radio_control_v1>() as u32;
+        request.abi_version = 1;
+        request.operation = 1;
+        for (context, expected) in [(ptr::null_mut(), -1), (api.context, -7)] {
+            // SAFETY: the descriptor and reserved inactive radio remain retained throughout.
+            unsafe {
+                assert_eq!(
+                    api.radio_control.unwrap()(context, radio, &mut request, None, ptr::null_mut()),
+                    expected
+                );
+                assert_eq!(api.radio_update.unwrap()(context, radio, 0), expected);
+            }
+        }
+        // SAFETY: the unique reservation is destroyed once after all borrowed calls finish.
+        unsafe { api.radio_destroy.unwrap()(api.context, radio) };
+    }
+
+    #[test]
     fn native_processing_boundary_rejects_invalid_requests_and_owns_shared_processors() {
         let mut owner =
             HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
