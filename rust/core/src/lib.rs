@@ -16,6 +16,7 @@ pub mod link;
 pub mod media;
 pub mod messages;
 pub mod policy;
+pub mod remote_base_command;
 pub mod runtime;
 pub mod schedule;
 pub mod site;
