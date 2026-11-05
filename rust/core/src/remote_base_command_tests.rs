@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn familiar_status_51_is_detailed_and_52_is_short() {
+    assert_eq!(
+        parse_remote_command("51"),
+        Some(RemoteCommand::Status { long: true })
+    );
+    assert_eq!(
+        parse_remote_command("52"),
+        Some(RemoteCommand::Status { long: false })
+    );
+}
+
+#[test]
 fn remote_commands_copy_exact_units_and_flags_into_the_shared_wire_request() {
     use RemoteCommand as C;
     let commands = [
@@ -162,8 +174,8 @@ fn remote_dtmf_parses_familiar_operating_commands_without_floats() {
         ("44", C::PowerPreset(0)),
         ("45", C::PowerPreset(1)),
         ("46", C::PowerPreset(2)),
-        ("51", C::Status { long: false }),
-        ("52", C::Status { long: true }),
+        ("51", C::Status { long: true }),
+        ("52", C::Status { long: false }),
         ("61", C::Mode(1)),
         ("62", C::Mode(3)),
         ("63", C::Mode(4)),

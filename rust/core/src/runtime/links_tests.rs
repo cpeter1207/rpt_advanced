@@ -63,10 +63,7 @@ fn remote_dtmf_dispatch_retains_origin_and_rechecks_the_grant() {
     let LinkEffect::RemoteBase(operation) = effect else {
         panic!("remote effect")
     };
-    assert_eq!(
-        operation.remote,
-        Some(RemoteCommand::Status { long: false })
-    );
+    assert_eq!(operation.remote, Some(RemoteCommand::Status { long: true }));
     assert_eq!(operation.reply, Some(first));
     let mut stale = DigitOperation::new(
         crate::command::Command {

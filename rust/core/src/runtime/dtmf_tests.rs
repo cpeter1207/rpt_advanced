@@ -11,7 +11,7 @@ fn remote_dtmf_enforces_source_authorization_and_keeps_typed_payloads() {
     let [DigitOutcome::Operation(query)] = query.as_slice() else {
         panic!("public status")
     };
-    assert_eq!(query.remote, Some(RemoteCommand::Status { long: false }));
+    assert_eq!(query.remote, Some(RemoteCommand::Status { long: true }));
     assert_eq!(query.command.action, LinkAction::RemoteBase);
     assert!(query.command.node.is_empty());
     assert!(feed_symbols(&mut commands, "*661#").is_empty());

@@ -1090,7 +1090,7 @@ fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquis
                 .last()
         };
         assert!(
-            matches!(feed(&mut runtime, &format!("*{effective}51#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: false }))
+            matches!(feed(&mut runtime, &format!("*{effective}51#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
         );
         assert!(
             matches!(feed(&mut runtime, &format!("*{effective}61#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Mode(1)))
@@ -1110,7 +1110,7 @@ fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquis
         );
         assert_eq!(runtime.revision(), revision);
         assert!(
-            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: false }))
+            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
         );
         assert!(feed(&mut runtime, &format!("*{effective}5")).is_none());
         runtime
@@ -1121,7 +1121,7 @@ fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquis
             )
             .unwrap();
         assert!(
-            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: false }))
+            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
         );
         assert!(runtime.detached("1000", 1));
         runtime
