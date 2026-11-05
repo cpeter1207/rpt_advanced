@@ -24,18 +24,18 @@ fn text(value: impl Into<String>) -> MessageArgument {
         text,
     })
 }
-fn part(id: &'static str, values: Value) -> Result<RemoteReplyPart, RuntimeError> {
+// Only private, fixed scalar-object constructors below select message arguments.
+fn part(id: &'static str, values: Value) -> RemoteReplyPart {
     let mut arguments = BTreeMap::new();
-    for (key, value) in values.as_object().ok_or_else(invalid)? {
+    for (key, value) in values.as_object().expect("fixed argument object") {
         let value = match value {
             Value::String(value) => text(value),
             Value::Bool(value) => MessageArgument::Number(f64::from(u32::from(*value))),
-            Value::Number(value) => MessageArgument::Number(value.as_f64().ok_or_else(invalid)?),
-            _ => return Err(invalid()),
+            _ => MessageArgument::Number(value.as_f64().expect("fixed finite numeric argument")),
         };
         arguments.insert(key.clone(), value);
     }
-    Ok(RemoteReplyPart { id, arguments })
+    RemoteReplyPart { id, arguments }
 }
 fn decimal(value: i64, places: u32) -> Result<String, RuntimeError> {
     if places > 6 {
@@ -82,7 +82,7 @@ fn field(parts: &mut Vec<RemoteReplyPart>, name: &str, value: &Value) -> Result<
         Value::Number(value) => value.to_string(),
         _ => return Err(invalid()),
     };
-    parts.push(part("remote-field", json!({"field":name,"value":display,"enum":value.as_u64().unwrap_or(u64::from(value.as_bool().unwrap_or(false))),"available":!value.is_null()}))?);
+    parts.push(part("remote-field", json!({"field":name,"value":display,"enum":value.as_u64().unwrap_or(u64::from(value.as_bool().unwrap_or(false))),"available":!value.is_null()})));
     Ok(())
 }
 fn state(
@@ -94,7 +94,7 @@ fn state(
     parts.push(part(
         "remote-state",
         json!({"state":label,"available":!value.is_null()}),
-    )?);
+    ));
     if value.is_null() {
         return Ok(());
     }
@@ -176,13 +176,13 @@ pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, 
     let kind = result["kind"].as_str().ok_or_else(invalid)?;
     let mut parts = Vec::new();
     match kind {
-        "applied" => parts.push(part("remote-applied", json!({}))?),
-        "error" => parts.push(part("remote-error", json!({"reason":result["reason"].as_str().ok_or_else(invalid)?,"code":result["code"].as_i64().unwrap_or(0)}))?),
+        "applied" => parts.push(part("remote-applied", json!({}))),
+        "error" => parts.push(part("remote-error", json!({"reason":result["reason"].as_str().ok_or_else(invalid)?,"code":result["code"].as_i64().unwrap_or(0)}))),
         "value" => {
             let setting = &result["setting"];
             let selector = setting["selector"].as_u64().ok_or_else(invalid)?;
             let value = result["value"].as_i64().ok_or_else(invalid)?;
-            parts.push(part("remote-value", json!({"selector":selector,"value":setting_value(value, setting)?,"units":setting["units"].as_u64().ok_or_else(invalid)?}))?);
+            parts.push(part("remote-value", json!({"selector":selector,"value":setting_value(value, setting)?,"units":setting["units"].as_u64().ok_or_else(invalid)?})));
         }
         "status" => {
             let long = !matches!(request, RemoteCommand::Status { long: false });
@@ -194,27 +194,27 @@ pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, 
                 if let Some(value) = result.get(name) { field(&mut parts, name, value)?; }
             }
             if result["failure_code"].as_i64().is_some_and(|code| code != 0) {
-                parts.push(part("remote-error", json!({"reason":"rejected","code":result["failure_code"]}))?);
+                parts.push(part("remote-error", json!({"reason":"rejected","code":result["failure_code"]})));
             }
         }
         "capabilities" | "memories" | "scans" => {
             let entries = result["entries"].as_array().ok_or_else(invalid)?;
-            if entries.is_empty() { parts.push(part("remote-empty", json!({"catalog":kind}))?); }
+            if entries.is_empty() { parts.push(part("remote-empty", json!({"catalog":kind}))); }
             for entry in entries {
                 let selector = entry["selector"].as_u64().ok_or_else(invalid)?;
                 if kind == "capabilities" {
-                    parts.push(part("remote-capability", json!({"selector":selector,"read":entry["readable"].as_bool().ok_or_else(invalid)?,"write":entry["writable"].as_bool().ok_or_else(invalid)?,"minimum":setting_value(entry["minimum"].as_i64().ok_or_else(invalid)?, entry)?,"maximum":setting_value(entry["maximum"].as_i64().ok_or_else(invalid)?, entry)?,"units":entry["units"].as_u64().ok_or_else(invalid)?,"places":entry["decimal_places"].as_u64().ok_or_else(invalid)?}))?);
-                    for choice in entry["choices"].as_array().ok_or_else(invalid)? { parts.push(part("remote-choice", json!({"selector":selector,"value":setting_value(choice.as_i64().ok_or_else(invalid)?, entry)?}))?); }
+                    parts.push(part("remote-capability", json!({"selector":selector,"read":entry["readable"].as_bool().ok_or_else(invalid)?,"write":entry["writable"].as_bool().ok_or_else(invalid)?,"minimum":setting_value(entry["minimum"].as_i64().ok_or_else(invalid)?, entry)?,"maximum":setting_value(entry["maximum"].as_i64().ok_or_else(invalid)?, entry)?,"units":entry["units"].as_u64().ok_or_else(invalid)?,"places":entry["decimal_places"].as_u64().ok_or_else(invalid)?})));
+                    for choice in entry["choices"].as_array().ok_or_else(invalid)? { parts.push(part("remote-choice", json!({"selector":selector,"value":setting_value(choice.as_i64().ok_or_else(invalid)?, entry)?}))); }
                 } else {
-                    parts.push(part("remote-entry", json!({"catalog":kind,"selector":selector,"name":entry["name"].as_str().ok_or_else(invalid)?}))?);
+                    parts.push(part("remote-entry", json!({"catalog":kind,"selector":selector,"name":entry["name"].as_str().ok_or_else(invalid)?})));
                     if kind == "memories" { state(&mut parts, "memory", &entry["state"], false)?; }
                 }
             }
         }
         "scan" => {
-            parts.push(part("remote-entry", json!({"catalog":"scans","selector":result["selector"].as_u64().ok_or_else(invalid)?,"name":result["name"].as_str().ok_or_else(invalid)?}))?);
+            parts.push(part("remote-entry", json!({"catalog":"scans","selector":result["selector"].as_u64().ok_or_else(invalid)?,"name":result["name"].as_str().ok_or_else(invalid)?})));
             let members = result["members"].as_array().ok_or_else(invalid)?;
-            for value in members { parts.push(part("remote-choice", json!({"selector":result["selector"],"value":value.as_u64().ok_or_else(invalid)?}))?); }
+            for value in members { parts.push(part("remote-choice", json!({"selector":result["selector"],"value":value.as_u64().ok_or_else(invalid)?}))); }
             scan_status(&mut parts, &result["state"])?;
         }
         _ => return Err(invalid()),
@@ -229,18 +229,79 @@ pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, 
 pub(crate) fn failure(code: i32) -> Completion {
     Completion {
         successful: false,
-        parts: vec![
-            part(
-                "remote-error",
-                json!({"reason":if code == 1 { "busy" } else { "rejected" },"code":code}),
-            )
-            .expect("fixed error arguments"),
-        ],
+        parts: vec![part(
+            "remote-error",
+            json!({"reason":if code == 1 { "busy" } else { "rejected" },"code":code}),
+        )],
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_reply_formats_fractional_levels_signaling_and_short_status() {
+        use super::*;
+        for (value, places, expected) in [(125, 2, "1.25"), (-125, 2, "-1.25")] {
+            let source = json!({"version":1,"kind":"value","setting":{"selector":9,"units":0,"decimal_places":places},"value":value});
+            let reply = parse(&source.to_string(), RemoteCommand::CurrentStatus).unwrap();
+            assert_eq!(reply.parts[0].arguments["value"], text(expected));
+        }
+        let source = json!({"version":1,"kind":"status","requested":null,"applied":{"rx_hz":146520000,"mode":1,"encode":{"source":1,"enabled":true,"ctcss_tenths_hz":1148,"dcs_bits":165},"decode":{"control_source":3,"inverted":false}},"observed_values":null});
+        let full = parse(&source.to_string(), RemoteCommand::CurrentStatus).unwrap();
+        for (name, expected) in [
+            ("encode_ctcss_tenths_hz", "114.8"),
+            ("encode_dcs_bits", "245"),
+        ] {
+            let field = full
+                .parts
+                .iter()
+                .find(|part| part.arguments.get("field") == Some(&text(name)))
+                .unwrap();
+            assert_eq!(field.arguments["value"], text(expected));
+        }
+        let short = parse(&source.to_string(), RemoteCommand::Status { long: false }).unwrap();
+        assert_eq!(short.parts.len(), 3);
+        assert_eq!(short.parts[0].arguments["state"], text("applied"));
+        for (code, reason) in [(1, "busy"), (-42, "rejected")] {
+            let reply = failure(code);
+            assert!(!reply.successful);
+            assert_eq!(reply.parts[0].arguments["reason"], text(reason));
+            assert_eq!(
+                reply.parts[0].arguments["code"],
+                MessageArgument::Number(f64::from(code))
+            );
+        }
+    }
+
+    #[test]
+    fn remote_reply_rejects_malformed_public_values_without_partial_completion() {
+        use super::*;
+        for (units, places, value) in [
+            (0, 7, 1),
+            (0, 4_294_967_296_u64, 1),
+            (3, 0, -1),
+            (3, 0, 512),
+            (3, 1, 165),
+        ] {
+            let source = json!({"version":1,"kind":"value","setting":{"selector":14,"units":units,"decimal_places":places},"value":value});
+            assert!(parse(&source.to_string(), RemoteCommand::CurrentStatus).is_err());
+        }
+        for source in [
+            json!({"version":1,"kind":"status","applied":[]}),
+            json!({"version":1,"kind":"status","applied":{"rx_hz":"bad"}}),
+            json!({"version":1,"kind":"status","applied":{"encode":false}}),
+            json!({"version":1,"kind":"status","applied":{"encode":{"dcs_bits":-1}}}),
+            json!({"version":1,"kind":"status","applied":{"decode":{"ctcss_tenths_hz":1.5}}}),
+            json!({"version":1,"kind":"capabilities","entries":[{"selector":1}]}),
+            json!({"version":1,"kind":"scan","selector":1,"name":"scan","members":[false]}),
+        ] {
+            assert!(
+                parse(&source.to_string(), RemoteCommand::CurrentStatus).is_err(),
+                "{source}"
+            );
+        }
+    }
+
     #[test]
     fn remote_scan_queries_and_complete_status_include_retained_failure_and_hold() {
         use rpt_advanced_core::messages::MessageCatalog;

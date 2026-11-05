@@ -2,10 +2,14 @@ use super::*;
 use rpt_advanced_core::remote_base_command::{DecimalValue, RemoteCommand};
 use std::cell::Cell;
 
-thread_local! { static READY: Cell<bool> = const { Cell::new(false) }; static SOURCE: Cell<u32> = const { Cell::new(0) }; static DESTROYED: Cell<u32> = const { Cell::new(0) }; }
+thread_local! { static READY: Cell<bool> = const { Cell::new(false) }; static SOURCE: Cell<u32> = const { Cell::new(0) }; static DESTROYED: Cell<u32> = const { Cell::new(0) }; static MODE: Cell<i32> = const { Cell::new(0) }; static EXPECTED_FLAGS: Cell<u32> = const { Cell::new(1) }; }
 unsafe extern "C" fn source(_: *mut c_void, flags: u32) -> i32 {
     SOURCE.set(flags);
-    0
+    if flags != 0 && MODE.get() == 3 {
+        -42
+    } else {
+        0
+    }
 }
 unsafe extern "C" fn take(
     _: *mut c_void,
@@ -15,7 +19,14 @@ unsafe extern "C" fn take(
     if !READY.get() {
         return 1;
     }
-    let bytes = br#"{"version":1,"kind":"applied"}"#;
+    if MODE.get() == 4 {
+        return -42;
+    }
+    let bytes: &[u8] = if MODE.get() == 5 {
+        b"malformed"
+    } else {
+        br#"{"version":1,"kind":"applied"}"#
+    };
     // SAFETY: the host lends a synchronous output collector through this call.
     unsafe { sink.unwrap()(context, bytes.as_ptr(), bytes.len() as u32) };
     0
@@ -46,7 +57,13 @@ unsafe extern "C" fn submit(
         (request.operation, request.selector, request.magnitude),
         (12, 9, 125)
     );
-    assert_eq!(flags, 1);
+    assert_eq!(flags, EXPECTED_FLAGS.get());
+    if MODE.get() == 1 {
+        return 1;
+    }
+    if MODE.get() == 2 {
+        return -42;
+    }
     // SAFETY: the test functions and radio reservation remain live until destroy.
     unsafe {
         out.write(abi::rptadv_remote_ticket_v1 {
@@ -69,6 +86,8 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     READY.set(false);
     SOURCE.set(0);
     DESTROYED.set(0);
+    MODE.set(0);
+    EXPECTED_FLAGS.set(1);
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.radio_remote_submit = Some(submit);
     table.radio_metadata_bind = Some(bind_metadata);
@@ -121,6 +140,54 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     assert!(host.remote_pending.is_empty());
     assert_eq!(DESTROYED.get(), 2);
     assert_eq!(SOURCE.get(), 0);
+    // A request with no remote operation fails shared authorization before any
+    // physical callback. Synchronous failures never acquire a pending ticket.
+    let mut denied = operation();
+    denied.remote = None;
+    assert_eq!(
+        host.submit_remote("1000", denied, clock()),
+        Err(RuntimeError::Rejected)
+    );
+    for mode in [1, 2] {
+        MODE.set(mode);
+        host.submit_remote("1000", operation(), clock()).unwrap();
+        assert!(host.remote_pending.is_empty());
+        assert_eq!(DESTROYED.get(), 2);
+    }
+    READY.set(true);
+    for (offset, mode) in [3, 4, 5].into_iter().enumerate() {
+        MODE.set(mode);
+        host.submit_remote("1000", operation(), clock()).unwrap();
+        assert_eq!(host.remote_pending.len(), 1);
+        host.pump_remote(clock());
+        assert!(host.remote_pending.is_empty());
+        assert_eq!(DESTROYED.get(), 3 + offset as u32);
+        assert_eq!(SOURCE.get(), 0);
+    }
+    MODE.set(0);
+    READY.set(false);
+    EXPECTED_FLAGS.set(0);
+    host.runtime.incoming("1000", "2000", true).unwrap();
+    let signals = rpt_advanced_core::link::PeerSignals::new();
+    let reply = signals.reply_target();
+    host.runtime.node("1000").unwrap().links().peer_digit(
+        "2000",
+        '*',
+        clock().now_ms,
+        reply.clone(),
+    );
+    let mut request = operation();
+    request.origin = Some("2000".into());
+    request.reply = Some(reply);
+    host.submit_remote("1000", request, clock()).unwrap();
+    assert_eq!(host.remote_pending.len(), 1);
+    signals.end();
+    host.pump_remote(clock());
+    assert!(host.remote_pending.is_empty());
+    assert_eq!(DESTROYED.get(), 6);
+    assert_eq!(SOURCE.get(), 0);
+    host.runtime.node("1000").unwrap().links().ended("2000");
+    host.runtime.peer_detached("1000", "2000", clock().now_ms);
     host.stop(1000);
 }
 
