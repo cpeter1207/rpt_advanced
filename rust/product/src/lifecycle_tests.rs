@@ -32,6 +32,80 @@ fn active_configuration(extra: &str) -> String {
     format!("[1000]\nradio_channel=usb\nduplex=full\n{extra}")
 }
 
+#[test]
+fn activation_reload_poll_stays_admitted_until_commit_or_safe_rollback() {
+    use std::sync::atomic::AtomicI32;
+    static ACTIVATION: AtomicI32 = AtomicI32::new(0);
+    unsafe extern "C" fn ready(_: *mut c_void, _: *mut c_void) -> i32 {
+        let status = ACTIVATION.load(Ordering::Acquire);
+        if status < 0 {
+            ACTIVATION.store(0, Ordering::Release);
+        }
+        status
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let api = descriptor();
+    unsafe { api.stop.unwrap()() };
+    ACTIVATION.store(0, Ordering::Release);
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.radio_ready = Some(ready);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let source = "[1000]\nradio_channel=old\nduplex=full\n";
+    assert_eq!(
+        unsafe {
+            api.start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                source.as_ptr().cast(),
+                source.len(),
+            )
+        },
+        0
+    );
+    let next = source.replace("old", "new");
+    ACTIVATION.store(1, Ordering::Release);
+    assert_eq!(
+        unsafe { api.reload.unwrap()(next.as_ptr().cast(), next.len()) },
+        1
+    );
+    assert_eq!(unsafe { api.reload_poll.unwrap()() }, 1);
+    ACTIVATION.store(0, Ordering::Release);
+    assert_eq!(unsafe { api.reload_poll.unwrap()() }, 0);
+    assert_eq!(unsafe { api.stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(
+        unsafe {
+            api.start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                source.as_ptr().cast(),
+                source.len(),
+            )
+        },
+        0
+    );
+    let rejected = source.replace("old", "rejected");
+    ACTIVATION.store(1, Ordering::Release);
+    assert_eq!(
+        unsafe { api.reload.unwrap()(rejected.as_ptr().cast(), rejected.len()) },
+        1
+    );
+    ACTIVATION.store(-123, Ordering::Release);
+    assert_eq!(unsafe { api.reload_poll.unwrap()() }, -1);
+    let engine = ENGINE.lock().unwrap().as_ref().unwrap().clone();
+    assert_eq!(
+        engine.run(|host| Ok(host.runtime.settings("1000").unwrap().channel.clone())),
+        Ok("old".into())
+    );
+    assert_eq!(unsafe { api.stop.unwrap()() }, 0);
+}
+
 fn scheduler_notices() -> Vec<String> {
     crate::fixture::SCHEDULER_NOTICES.lock().unwrap().clone()
 }

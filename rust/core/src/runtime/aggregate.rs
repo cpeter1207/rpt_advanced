@@ -31,6 +31,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[path = "reload.rs"]
+mod reload;
+use reload::ReloadTransaction;
+
 fn queue_status_media(
     telemetry: &mut ControllerControl,
     station: &mut Option<Box<dyn StationMediaSession>>,
@@ -342,9 +346,12 @@ pub struct Runtime<A: Send = (), C: Send = ()> {
     detaching: Vec<(String, String)>,
     disconnect_notices: Vec<DisconnectNotice>,
     stopping: bool,
+    pending_reload: Option<ReloadTransaction<A, C>>,
 }
 impl<A: Send, C: Send> Runtime<A, C> {
     /// Prepare every enabled node and schedule before opening/publishing any candidate.
+    /// Pending devices retain revision zero; the control owner must poll_reload
+    /// until activation completes before exposing initial registrations.
     pub fn start(
         document: ConfigDocument,
         media: &dyn NativeMediaPreparer,
@@ -365,6 +372,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
             detaching: Vec::new(),
             disconnect_notices: Vec::new(),
             stopping: false,
+            pending_reload: None,
         };
         runtime.reload(document, media, adapter, device, clock)?;
         Ok(runtime)
@@ -528,6 +536,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
     }
 
     /// Fully prepare a candidate, switch changed devices with rollback, then publish all nodes.
+    /// Success may leave reload_pending true while hardware opens or rolls back.
+    /// Poll on control without discarding the prior configuration or device contexts.
     /// The adapter must redirect old generation endpoints and report detachment before another reload.
     pub fn reload(
         &mut self,
@@ -545,6 +555,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
     ) -> Result<(), RuntimeError> {
         self.reclaim();
         if self.stopping
+            || self.pending_reload.is_some()
             || !self.retired.is_empty()
             || self
                 .nodes
@@ -700,98 +711,56 @@ impl<A: Send, C: Send> Runtime<A, C> {
             )
             .map_err(|_| RuntimeError::Preparation)?;
         }
-        let mut changed = Vec::new();
-        let mut updated = Vec::new();
-        let mut opened = Vec::new();
-        for (index, candidate) in candidates.iter_mut().enumerate() {
-            if let Some(old_index) = self
-                .nodes
-                .iter()
-                .position(|node| node.name == candidate.name)
-            {
-                let old = &mut self.nodes[old_index];
-                if old.bounds.device == candidate.bounds.device
-                    && old.settings.radio == candidate.settings.radio
-                {
-                    continue;
-                }
-                if old.bounds.device == candidate.bounds.device
-                    && old.bounds.receive_maximum == candidate.bounds.receive_maximum
-                    && old.bounds.transmit_maximum == candidate.bounds.transmit_maximum
-                {
-                    match old.device.update(&candidate.bounds) {
-                        Ok(true) => {
-                            updated.push(old.name.clone());
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(_) => {
-                            // A rejected stage may already have reached one callback.
-                            // Abort it through the same retained reverse as earlier nodes.
-                            updated.push(old.name.clone());
-                            self.rollback_devices(
-                                &changed,
-                                &updated,
-                                &mut candidates,
-                                &opened,
-                                clock.now_ms,
-                            )?;
-                            return Err(RuntimeError::Device);
-                        }
-                    }
-                }
-                let status = old.status(clock.now_ms);
-                if status.outstanding_work != 0 || !old.device.quiesce() {
-                    self.rollback_devices(
-                        &changed,
-                        &updated,
-                        &mut candidates,
-                        &opened,
-                        clock.now_ms,
-                    )?;
-                    return Err(RuntimeError::Busy);
-                }
-                old.host.control().gate_callbacks();
-                if old.status(clock.now_ms).protected_owners != 0 {
-                    old.host.control().restore_callbacks();
-                    self.rollback_devices(
-                        &changed,
-                        &updated,
-                        &mut candidates,
-                        &opened,
-                        clock.now_ms,
-                    )?;
-                    return Err(RuntimeError::Busy);
-                }
-                old.device.close();
-                old.device_open = false;
-                changed.push(old_index);
-                if !old.device.open(&candidate.bounds) {
-                    self.rollback_devices(
-                        &changed,
-                        &updated,
-                        &mut candidates,
-                        &opened,
-                        clock.now_ms,
-                    )?;
-                    return Err(RuntimeError::Device);
-                }
-                old.device_open = true;
-            } else {
-                let lease = candidate.device.as_mut().ok_or(RuntimeError::Preparation)?;
-                if !lease.open(&candidate.bounds) {
-                    self.rollback_devices(
-                        &changed,
-                        &updated,
-                        &mut candidates,
-                        &opened,
-                        clock.now_ms,
-                    )?;
-                    return Err(RuntimeError::Device);
-                }
-                opened.push(index);
+        self.pending_reload = Some(ReloadTransaction::new(
+            document,
+            warnings,
+            candidates,
+            events,
+            scheduler,
+            (revision, generation_id),
+        ));
+        self.poll_reload(clock).map(|_| ())
+    }
+
+    /// A prepared configuration still owns opening or rolling-back leases.
+    pub fn reload_pending(&self) -> bool {
+        self.pending_reload.is_some()
+    }
+
+    /// Advance every device without waiting for its physical worker. A failed
+    /// candidate remains retained until rollback has safely completed.
+    pub fn poll_reload(&mut self, clock: RuntimeClock) -> Result<bool, RuntimeError> {
+        let Some(mut transaction) = self.pending_reload.take() else {
+            return Ok(true);
+        };
+        match transaction.advance(self, clock) {
+            Ok(false) => {
+                self.pending_reload = Some(transaction);
+                Ok(false)
             }
+            Ok(true) => self.commit_reload(transaction, clock).map(|()| true),
+            Err(error) => Err(error),
         }
+    }
+
+    fn commit_reload(
+        &mut self,
+        transaction: ReloadTransaction<A, C>,
+        clock: RuntimeClock,
+    ) -> Result<(), RuntimeError> {
+        let ReloadTransaction {
+            document,
+            warnings,
+            mut candidates,
+            events,
+            scheduler,
+            revision,
+            generation_id,
+            changed,
+            updated,
+            opened,
+            ..
+        } = transaction;
         // Accepted native updates retain their reverse until every device is ready.
         for name in &updated {
             let node = self
@@ -939,51 +908,6 @@ impl<A: Send, C: Send> Runtime<A, C> {
         self.tick_links(clock);
         self.reclaim();
         Ok(())
-    }
-
-    fn rollback_devices(
-        &mut self,
-        changed: &[usize],
-        updated: &[String],
-        candidates: &mut [Candidate<A, C>],
-        opened: &[usize],
-        now_ms: u64,
-    ) -> Result<(), RuntimeError> {
-        for &index in opened.iter().rev() {
-            candidates[index].device.iter_mut().for_each(|device| {
-                device.close();
-            });
-        }
-        let mut restored = true;
-        for &index in changed.iter().rev() {
-            let node = &mut self.nodes[index];
-            if node.device_open {
-                node.device.close();
-            }
-            node.device_open = node.device.open(&node.bounds);
-            if !node.device_open {
-                node.host.control().stop(now_ms).ok();
-                restored = false;
-            } else {
-                node.host.control().restore_callbacks();
-            }
-        }
-        for name in updated.iter().rev() {
-            let node = self
-                .nodes
-                .iter_mut()
-                .find(|node| &node.name == name)
-                .expect("updated lease");
-            if node.device.finish_update(false).is_err() {
-                stop_node(node, now_ms, &mut self.effects);
-                restored = false;
-            }
-        }
-        if restored {
-            Ok(())
-        } else {
-            Err(RuntimeError::Restore)
-        }
     }
 
     /// Capture current receive-only activity and reconcile window policy before reserving work.
@@ -2067,6 +1991,22 @@ impl<A: Send, C: Send> Runtime<A, C> {
     pub fn stop(&mut self, now_ms: u64) -> bool {
         self.stopping = true;
         self.scheduler = None;
+        if self.pending_reload.is_some() {
+            for node in &mut self.nodes {
+                node.host.control().stop(now_ms).ok();
+            }
+            // Rollback becomes cleanup-only while stopping; retain all indices
+            // and callback owners until the replacement is physically safe.
+            let _ = self.poll_reload(RuntimeClock {
+                now_ms,
+                wall_seconds: 0,
+                wall_subsecond_ms: 0,
+                civil: None,
+            });
+            if self.pending_reload.is_some() {
+                return false;
+            }
+        }
         for mut node in self.nodes.drain(..) {
             stop_node(&mut node, now_ms, &mut self.effects);
             self.retired.push(node);
@@ -2083,6 +2023,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
 impl<A: Send, C: Send> Drop for Runtime<A, C> {
     fn drop(&mut self) {
         self.stop(0);
+        if let Some(transaction) = self.pending_reload.take() {
+            // As with unreclaimed generations below, an uncooperative external
+            // owner cannot authorize freeing contexts still used by callbacks.
+            std::mem::forget(transaction);
+            for node in self.nodes.drain(..) {
+                std::mem::forget(node);
+            }
+        }
         for node in self.retired.drain(..) {
             std::mem::forget(node);
         }
@@ -2105,16 +2053,17 @@ fn stop_node<A: Send, C: Send>(
     if node.device_open && node.device.quiesce() {
         node.device.close();
         node.device_open = false;
-        if !node.pending_peer_cleanup
-            && !node.control.adapter_exposed
-            && node
-                .retired_control
-                .as_ref()
-                .is_none_or(|control| !control.adapter_exposed)
-        {
-            for id in [before.active, before.retiring].into_iter().flatten() {
-                node.detached(id);
-            }
+    }
+    if !node.device_open
+        && !node.pending_peer_cleanup
+        && !node.control.adapter_exposed
+        && node
+            .retired_control
+            .as_ref()
+            .is_none_or(|control| !control.adapter_exposed)
+    {
+        for id in [before.active, before.retiring].into_iter().flatten() {
+            node.detached(id);
         }
     }
 }

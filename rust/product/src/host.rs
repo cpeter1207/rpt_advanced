@@ -89,10 +89,25 @@ impl Lease {
     }
 }
 struct Device {
+    name: String,
     lease: Arc<Mutex<Lease>>,
     services: HostServices,
 }
 impl DeviceHandoff for Device {
+    fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .worker
+            .as_mut()
+            .ok_or(RuntimeError::Device)?
+            .activation_ready()
+            .map_err(|cause| {
+                self.services
+                    .scheduler_notice(&format!("radio {} activation failed: {cause}", self.name));
+                RuntimeError::Device
+            })
+    }
     fn update(&mut self, _: &GenerationSettings) -> Result<bool, RuntimeError> {
         self.lease
             .lock()
@@ -194,6 +209,9 @@ struct PeerOwner {
 
 /// Product runtime; every method is invoked by the selected serialized control executor.
 pub struct Host {
+    reload_text: Option<TextExecutor>,
+    reload_failure: Option<RuntimeError>,
+    activated_revision: u64,
     remote_pending: Vec<remote::Pending>,
     text: TextExecutor,
     text_notice_after_ms: u64,
@@ -441,11 +459,18 @@ impl Host {
                     status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
-                Ok(Box::new(Device { lease, services }))
+                Ok(Box::new(Device {
+                    name: name.to_owned(),
+                    lease,
+                    services,
+                }))
             },
             clock,
         )?;
         let mut host = Self {
+            reload_text: None,
+            reload_failure: None,
+            activated_revision: 0,
             remote_pending: Vec::new(),
             text,
             text_notice_after_ms: 0,
@@ -465,9 +490,7 @@ impl Host {
             site_retired: Vec::new(),
             epoch,
         };
-        host.configure_status_posts(clock.now_ms);
-        host.activate_dispatchers(clock.now_ms);
-        host.attach_workers();
+        host.advance_reload(clock)?;
         Ok(host)
     }
     fn activate_dispatchers(&mut self, now_ms: u64) {
@@ -548,6 +571,10 @@ impl Host {
         document: ConfigDocument,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        if self.runtime.reload_pending() {
+            return Err(RuntimeError::Busy);
+        }
+        self.reload_failure = None;
         let mut text = TextExecutor::prepare(document.nodes().len().max(1), self.media.clone())
             .map_err(|_| RuntimeError::Preparation)?;
         let local_delays: Vec<_> = self
@@ -566,7 +593,6 @@ impl Host {
         let leases = &mut self.leases;
         let epoch = self.epoch;
         let services = self.services;
-        let revision = self.runtime.revision();
         let result = self.runtime.reload(
             document,
             &self.media,
@@ -603,19 +629,39 @@ impl Host {
                     status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
-                Ok(Box::new(Device { lease, services }))
+                Ok(Box::new(Device {
+                    name: name.to_owned(),
+                    lease,
+                    services,
+                }))
             },
             clock,
         );
-        if self.runtime.revision() != revision {
+        if let Err(error) = result {
+            self.prune_leases();
+            return Err(error);
+        }
+        self.reload_text = Some(text);
+        self.advance_reload(clock)?;
+        self.pump(clock)
+    }
+    fn advance_reload(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        if !self.runtime.poll_reload(clock)? {
+            return Ok(());
+        }
+        self.prune_leases();
+        if self.activated_revision == self.runtime.revision() {
+            self.reload_text = None;
+            return Ok(());
+        }
+        if let Some(mut text) = self.reload_text.take() {
             self.remote_pending.clear();
             self.text.stop();
             text.start().map_err(|_| RuntimeError::Preparation)?;
             self.text = text;
             self.commit_sites()?;
         }
-        self.prune_leases();
-        result?;
+        self.activated_revision = self.runtime.revision();
         self.activate_dispatchers(clock.now_ms);
         self.configure_status_posts(clock.now_ms);
         self.attach_workers();
@@ -623,7 +669,17 @@ impl Host {
         for (local, effect) in effects {
             self.immediate(&local, effect, clock)?;
         }
-        self.pump(clock)
+        Ok(())
+    }
+    /// Observe a retained transaction; failures stay visible even when the regular
+    /// control pump completed rollback before the host queried it.
+    pub fn poll_reload(&mut self, clock: RuntimeClock) -> Result<bool, RuntimeError> {
+        self.advance_reload(clock)
+            .inspect_err(|error| self.reload_failure = Some(error.clone()))?;
+        if let Some(error) = &self.reload_failure {
+            return Err(error.clone());
+        }
+        Ok(!self.runtime.reload_pending())
     }
     /// Route reserved Echo aliases before ASL lookup; an address alone cannot admit an Echo QSO.
     pub fn lookup(
@@ -1221,6 +1277,11 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        if let Err(error) = self.advance_reload(clock) {
+            self.reload_failure = Some(error);
+            self.reload_text = None;
+            self.prune_leases();
+        }
         self.pump_remote(clock);
         self.report_text_failures(clock.now_ms);
         self.advance_sites(clock);

@@ -74,6 +74,7 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     table.radio_metadata_bind = Some(bind_metadata);
     table.radio_service = Some(service);
     table.radio_quiesce = Some(service);
+    table.radio_ready = Some(service);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let config = "[remote_base 1000]\nenabled=yes\nbackend=hamlib\nhamlib_model=RIG_MODEL_DUMMY\ndtmf_access=open\nstartup_memory=local\nallowed_modes=FM\nallowed_rx_ranges_hz=144000000-148000000\nallowed_tx_ranges_hz=144000000-148000000\n[remote_memory 1000 local]\nselector=1\nrx_frequency_hz=146520000\ntx_frequency_hz=146520000\nmode=FM\n";
     let mut host = Host::start(
@@ -139,4 +140,69 @@ fn remote_configuration_requires_complete_host_operations_before_device_activati
         )
         .is_err()
     );
+}
+
+#[test]
+fn host_keeps_reload_configuration_until_radio_activation_is_ready() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    thread_local! { static ACTIVATION: Cell<i32> = const { Cell::new(0) }; }
+    unsafe extern "C" fn ready(_: *mut c_void, _: *mut c_void) -> i32 {
+        let status = ACTIVATION.get();
+        if status < 0 {
+            ACTIVATION.set(0);
+        }
+        status
+    }
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.radio_ready = Some(ready);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let mut host = Host::start(
+        document("usb", ""),
+        media(),
+        services,
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let revision = host.runtime.revision();
+    ACTIVATION.set(1);
+    host.reload(document("replacement", ""), clock()).unwrap();
+    assert_eq!(host.runtime.revision(), revision);
+    assert_eq!(host.runtime.settings("1000").unwrap().channel, "usb");
+    host.pump(clock()).unwrap();
+    assert_eq!(host.runtime.revision(), revision);
+    ACTIVATION.set(0);
+    host.pump(clock()).unwrap();
+    assert!(host.runtime.revision() > revision);
+    assert_eq!(
+        host.runtime.settings("1000").unwrap().channel,
+        "replacement"
+    );
+    assert!(host.stop(1000));
+    let mut host = Host::start(
+        document("usb", ""),
+        media(),
+        services,
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let revision = host.runtime.revision();
+    ACTIVATION.set(1);
+    host.reload(document("rejected", ""), clock()).unwrap();
+    ACTIVATION.set(-123);
+    host.pump(clock()).unwrap();
+    assert_eq!(host.poll_reload(clock()), Err(RuntimeError::Device));
+    assert_eq!(host.runtime.revision(), revision);
+    assert_eq!(host.runtime.settings("1000").unwrap().channel, "usb");
+    assert!(
+        crate::fixture::SCHEDULER_NOTICES
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|notice| notice.contains("radio 1000 activation failed: -123"))
+    );
+    host.stop(1000);
 }

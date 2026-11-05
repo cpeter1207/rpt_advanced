@@ -224,6 +224,15 @@ impl ActiveRadio {
             })
         })
     }
+    /// Observe worker-side admission without waiting for a physical rig exchange.
+    pub(crate) fn ready(&mut self) -> i32 {
+        self.handle.map_or(-1, |handle| {
+            self.api.native_activation_status.map_or(-7, |call| {
+                // SAFETY: this unique control owner retains the native handle.
+                unsafe { call(handle.as_ptr()) }
+            })
+        })
+    }
 
     /// Keep callbacks and native ownership while physical retirement is pending.
     pub(crate) fn quiesce(&mut self) -> i32 {
@@ -468,7 +477,8 @@ fn retain_operations(api: &abi::UrpAstDescriptor) -> abi::UrpAstDescriptor {
         native_remote_submit,
         remote_source,
         remote_take,
-        remote_destroy
+        remote_destroy,
+        native_activation_status
     );
     retained
 }

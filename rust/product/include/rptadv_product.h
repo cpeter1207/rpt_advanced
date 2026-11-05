@@ -528,6 +528,9 @@ struct rptadv_host_services_v9 {
     int (*radio_remote_submit)(void *context, void *radio,
                                const struct UrpRemoteOperation *operation, uint32_t flags,
                                struct rptadv_remote_ticket_v1 *ticket);
+    /** Observe activation without I/O: zero is ready, one is opening, negative
+     * is the first failure. Remote compositions require this complete tail. */
+    int (*radio_ready)(void *context, void *radio);
 };
 
 /** Exact revision of a typed site control request. */
@@ -587,7 +590,8 @@ struct rptadv_product_descriptor_v1 {
                  const struct rptadv_speech_descriptor *speech, const char *configuration,
                  size_t configuration_length);
     int (*reload)(const char *configuration,
-                  size_t configuration_length); /**< Replace configuration. */
+                  size_t configuration_length); /**< Replace configuration: zero
+                    complete, one accepted/pending (call reload_poll), negative failed. */
     int (*stop)(void);                          /**< Stop and quiesce every product owner. */
     /** Check current incoming policy before answering a channel. */
     int (*authorize_incoming)(const struct rptadv_incoming_peer_v1 *request, void *peer);
@@ -626,6 +630,10 @@ struct rptadv_product_descriptor_v1 {
     int (*radio_control)(const char *local, size_t local_length,
                          struct rptadv_radio_control_v1 *request, rptadv_text_sink_v1 sink,
                          void *sink_context);
+    /** Advance retained activation/rollback: zero completed, one pending,
+     * negative failed after safe rollback. Keep host candidate settings until
+     * completion. Each call is nonblocking with respect to physical rig I/O. */
+    int (*reload_poll)(void);
 };
 
 /** Return immutable process-lifetime product metadata.

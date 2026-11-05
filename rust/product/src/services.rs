@@ -345,6 +345,7 @@ impl HostServices {
             && self.0.radio_service.is_some()
             && self.0.radio_quiesce.is_some()
             && self.0.radio_remote_submit.is_some()
+            && self.0.radio_ready.is_some()
     }
     /// Validate the complete table before any callback or context is retained.
     ///
@@ -365,6 +366,7 @@ impl HostServices {
         let maintenance_tail = offset_of!(abi::rptadv_host_services_v9, radio_update);
         let metadata_tail = offset_of!(abi::rptadv_host_services_v9, radio_metadata_bind);
         let remote_tail = offset_of!(abi::rptadv_host_services_v9, radio_service);
+        let ready_tail = offset_of!(abi::rptadv_host_services_v9, radio_ready);
         if size < table_size
             && ![
                 required,
@@ -372,6 +374,7 @@ impl HostServices {
                 maintenance_tail,
                 metadata_tail,
                 remote_tail,
+                ready_tail,
             ]
             .contains(&size)
         {

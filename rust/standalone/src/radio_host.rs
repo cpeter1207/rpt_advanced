@@ -547,6 +547,18 @@ pub unsafe extern "C" fn radio_service(_: *mut c_void, radio: *mut c_void) -> i3
     handle.active.as_mut().map_or(0, |active| active.service())
 }
 
+/// Observe initial remote admission; no hardware I/O runs on this caller.
+///
+/// # Safety
+/// `radio` is a live reservation serialized by the product control executor.
+pub unsafe extern "C" fn radio_ready(_: *mut c_void, radio: *mut c_void) -> i32 {
+    // SAFETY: the product retains this unique reservation until checked retirement.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    handle.active.as_mut().map_or(-7, |active| active.ready())
+}
+
 /// Poll retirement while preserving callbacks and the partially started owner.
 ///
 /// # Safety

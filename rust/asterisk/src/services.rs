@@ -289,6 +289,13 @@ unsafe extern "C" fn radio_quiesce(_: *mut c_void, radio: *mut c_void) -> i32 {
         unsafe { remote_control(radio, &mut remote_envelope(ffi::URP_AST_REMOTE_QUIESCE)) }
     })
 }
+
+unsafe extern "C" fn radio_ready(_: *mut c_void, radio: *mut c_void) -> i32 {
+    boundary(-1, || {
+        // SAFETY: the existing channel owner serializes this copied query.
+        unsafe { remote_control(radio, &mut remote_envelope(ffi::URP_AST_REMOTE_READY)) }
+    })
+}
 unsafe extern "C" fn radio_remote_submit(
     _: *mut c_void,
     radio: *mut c_void,
@@ -1168,6 +1175,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     radio_metadata_bind: Some(radio_metadata_bind),
     radio_service: Some(radio_service),
     radio_quiesce: Some(radio_quiesce),
+    radio_ready: Some(radio_ready),
     radio_remote_submit: Some(radio_remote_submit),
 });
 

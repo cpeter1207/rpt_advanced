@@ -13,6 +13,7 @@ const SITE_ACK_WRONG: u8 = 48;
 const SITE_OPTION_FAILED: u8 = 49;
 const REMOTE_PENDING: u8 = 50;
 const REMOTE_ACK_MISSING: u8 = 51;
+const REMOTE_FAILED: u8 = 52;
 
 #[test]
 fn remote_host_bridge_preserves_pending_owner_and_requires_acknowledgment() {
@@ -24,12 +25,17 @@ fn remote_host_bridge_preserves_pending_owner_and_requires_acknowledgment() {
         assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
         assert_eq!(radio_service(null, radio), 0);
         host(|state| state.failure = REMOTE_PENDING);
+        assert_eq!(radio_ready(null, radio), 1);
         assert_eq!(radio_quiesce(null, radio), 1);
         assert_eq!(host(|state| state.channels), 1);
+        host(|state| state.failure = REMOTE_FAILED);
+        assert_eq!(radio_ready(null, radio), -123);
         host(|state| state.failure = REMOTE_ACK_MISSING);
+        assert_eq!(radio_ready(null, radio), -7);
         assert_eq!(radio_quiesce(null, radio), -7);
         assert_eq!(host(|state| state.channels), 1);
         host(|state| state.failure = 0);
+        assert_eq!(radio_ready(null, radio), 0);
         assert_eq!(radio_quiesce(null, radio), 0);
         assert_eq!(host(|state| state.channels), 1);
         radio_destroy(null, radio);
@@ -212,6 +218,13 @@ unsafe extern "C" fn ast_channel_setoption(
         return match request.operation {
             ffi::URP_AST_REMOTE_SERVICE => 0,
             ffi::URP_AST_REMOTE_QUIESCE => i32::from(failure == REMOTE_PENDING),
+            ffi::URP_AST_REMOTE_READY => {
+                if failure == REMOTE_FAILED {
+                    -123
+                } else {
+                    i32::from(failure == REMOTE_PENDING)
+                }
+            }
             _ => -7,
         };
     }

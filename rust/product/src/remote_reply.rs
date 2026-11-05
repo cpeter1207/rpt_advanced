@@ -55,9 +55,15 @@ fn decimal(value: i64, places: u32) -> Result<String, RuntimeError> {
     ))
 }
 fn setting_value(value: i64, setting: &Value) -> Result<String, RuntimeError> {
-    let places: u32 = setting["decimal_places"].as_u64().ok_or_else(invalid)?.try_into().map_err(|_| invalid())?;
+    let places: u32 = setting["decimal_places"]
+        .as_u64()
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
     if setting["units"].as_u64().ok_or_else(invalid)? == 3 {
-        if !(0..=511).contains(&value) || places != 0 { return Err(invalid()); }
+        if !(0..=511).contains(&value) || places != 0 {
+            return Err(invalid());
+        }
         Ok(format!("{value:03o}"))
     } else {
         decimal(value, places)
@@ -138,9 +144,24 @@ fn state(
 }
 
 fn scan_status(parts: &mut Vec<RemoteReplyPart>, value: &Value) -> Result<(), RuntimeError> {
-    for name in ["list", "running", "paused", "activity_hold", "direction", "priority", "memory",
-        "failed_memory", "last_error", "deadline_ms", "dwell_ms", "resume_delay_ms", "skipped"] {
-        if let Some(value) = value.get(name) { field(parts, name, value)?; }
+    for name in [
+        "list",
+        "running",
+        "paused",
+        "activity_hold",
+        "direction",
+        "priority",
+        "memory",
+        "failed_memory",
+        "last_error",
+        "deadline_ms",
+        "dwell_ms",
+        "resume_delay_ms",
+        "skipped",
+    ] {
+        if let Some(value) = value.get(name) {
+            field(parts, name, value)?;
+        }
     }
     Ok(())
 }
@@ -231,9 +252,20 @@ mod tests {
             serde_json::json!({"version":1,"kind":"status","applied":null,"requested":null,"observed_values":null,"scan":scan}),
             serde_json::json!({"version":1,"kind":"scan","selector":7,"name":"Test list","members":[],"state":scan}),
         ] {
-            let reply = super::parse(&source.to_string(), super::RemoteCommand::CurrentStatus).unwrap();
-            let speech = reply.parts.iter().map(|part| catalog.format_named(part.id, &part.arguments).unwrap().tts).collect::<Vec<_>>().join(" ");
-            for required in ["Failed memory 2", "Last scan error -42", "Scan activity hold 1", "Priority memory 3"] {
+            let reply =
+                super::parse(&source.to_string(), super::RemoteCommand::CurrentStatus).unwrap();
+            let speech = reply
+                .parts
+                .iter()
+                .map(|part| catalog.format_named(part.id, &part.arguments).unwrap().tts)
+                .collect::<Vec<_>>()
+                .join(" ");
+            for required in [
+                "Failed memory 2",
+                "Last scan error -42",
+                "Scan activity hold 1",
+                "Priority memory 3",
+            ] {
                 assert!(speech.contains(required), "missing {required}: {speech}");
             }
         }
@@ -244,7 +276,11 @@ mod tests {
         use rpt_advanced_core::{messages::MessageCatalog, remote_base_command::RemoteCommand};
         let catalog = MessageCatalog::load("en-US").unwrap();
         for (source, success, words) in [
-            (r#"{"version":1,"kind":"value","setting":{"selector":14,"units":3,"decimal_places":0},"value":165}"#, true, "245"),
+            (
+                r#"{"version":1,"kind":"value","setting":{"selector":14,"units":3,"decimal_places":0},"value":165}"#,
+                true,
+                "245",
+            ),
             (r#"{"version":1,"kind":"applied"}"#, true, "completed"),
             (
                 r#"{"version":1,"kind":"error","reason":"busy","code":null}"#,

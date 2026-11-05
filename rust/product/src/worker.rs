@@ -802,6 +802,10 @@ impl RadioWorker {
     pub(crate) fn service_remote(&mut self) -> Result<(), i32> {
         self.radio.as_mut().ok_or(-7)?.service()
     }
+    /// A worker exists before its physical/DSP generation is ready for publication.
+    pub(crate) fn activation_ready(&mut self) -> Result<bool, i32> {
+        self.radio.as_mut().ok_or(-7)?.activation_ready()
+    }
 
     /// Retain the current stream while the shared native owner replaces its plan.
     pub(crate) fn configuration_update(&mut self, phase: u32) -> Result<bool, i32> {

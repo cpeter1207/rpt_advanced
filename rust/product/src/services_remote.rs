@@ -74,6 +74,19 @@ impl Drop for RemoteTicket {
 }
 
 impl Radio {
+    /// Observe activation after advancing only the existing nonblocking DSP mailbox.
+    pub fn activation_ready(&mut self) -> Result<bool, i32> {
+        self.service()?;
+        let Some(call) = self.services.0.radio_ready else {
+            return Ok(true);
+        };
+        // SAFETY: control uniquely retains this reservation through the query.
+        match unsafe { call(self.services.0.context, self.handle.as_ptr()) } {
+            0 => Ok(true),
+            1 => Ok(false),
+            cause => Err(cause),
+        }
+    }
     /// Advance the shared DSP control mailbox without waiting for CAT or GPIO.
     pub fn service(&mut self) -> Result<(), i32> {
         let Some(call) = self.services.0.radio_service else {

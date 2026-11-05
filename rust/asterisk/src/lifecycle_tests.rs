@@ -199,7 +199,11 @@ static DESCRIPTOR: ffi::rptadv_product_descriptor_v1 = ffi::rptadv_product_descr
     inspect_secrets: Some(inspect_secrets),
     site_command: Some(site_command),
     radio_control: None,
+    reload_poll: Some(reload_ready),
 };
+unsafe extern "C" fn reload_ready() -> i32 {
+    0
+}
 
 unsafe extern "C" fn inspect_configuration(
     text: *const std::ffi::c_char,

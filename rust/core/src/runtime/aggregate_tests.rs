@@ -1204,6 +1204,109 @@ fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
 }
 
 #[test]
+fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failure() {
+    struct OpeningDevice {
+        current: String,
+        ready: Arc<AtomicUsize>,
+        release: Arc<AtomicBool>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl DeviceHandoff for OpeningDevice {
+        fn quiesce(&mut self) -> bool {
+            self.current != "second" || self.release.load(Ordering::Acquire)
+        }
+        fn close(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("close:{}", self.current));
+        }
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.current.clone_from(&settings.device);
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("open:{}", self.current));
+            true
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            if self.current != "second" {
+                return Ok(true);
+            }
+            match self.ready.load(Ordering::Acquire) {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(RuntimeError::Device),
+            }
+        }
+    }
+    for success in [None, Some(false), Some(true)] {
+        let ready = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let device = |_: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(OpeningDevice {
+                current: String::new(),
+                ready: ready.clone(),
+                release: release.clone(),
+                log: log.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let initial =
+            ConfigDocument::parse("[1000]\nradio_channel=first\n[2000]\nradio_channel=other\n")
+                .unwrap();
+        let mut runtime = Runtime::start(initial, &Media, adapter, device, clock()).unwrap();
+        let revision = runtime.revision();
+        let candidate =
+            ConfigDocument::parse("[1000]\nradio_channel=second\n[2000]\nradio_channel=other\n")
+                .unwrap();
+        runtime
+            .reload(candidate, &Media, adapter, device, clock())
+            .unwrap();
+        assert!(runtime.reload_pending());
+        assert_eq!(runtime.revision(), revision);
+        assert_eq!(runtime.poll_reload(clock()), Ok(false));
+        assert_eq!(runtime.settings("1000").unwrap().channel, "first");
+        // An unrelated active node keeps its control/link path during this wait.
+        runtime.tick_links(clock());
+        assert!(runtime.node("2000").unwrap().status(0).active.is_some());
+        let Some(success) = success else {
+            assert!(!runtime.stop(0));
+            assert!(runtime.reload_pending());
+            release.store(true, Ordering::Release);
+            assert!(runtime.stop(0));
+            assert!(!runtime.reload_pending());
+            continue;
+        };
+        ready.store(if success { 1 } else { 2 }, Ordering::Release);
+        if success {
+            assert_eq!(runtime.poll_reload(clock()), Ok(true));
+            assert_eq!(runtime.revision(), revision + 1);
+            assert_eq!(runtime.settings("1000").unwrap().channel, "second");
+        } else {
+            assert_eq!(
+                runtime.poll_reload(clock()),
+                Ok(false),
+                "retain replacement until safe to close"
+            );
+            assert!(runtime.reload_pending());
+            release.store(true, Ordering::Release);
+            assert_eq!(runtime.poll_reload(clock()), Err(RuntimeError::Device));
+            assert_eq!(runtime.revision(), revision);
+            assert_eq!(runtime.settings("1000").unwrap().channel, "first");
+            assert!(
+                log.lock()
+                    .unwrap()
+                    .ends_with(&["close:second".into(), "open:first".into()])
+            );
+        }
+        release.store(true, Ordering::Release);
+        assert!(!runtime.reload_pending());
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
 fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut fallback = Device(log.clone());
@@ -3998,7 +4101,7 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
 }
 
 #[test]
-fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio() {
+fn device_reload_rejects_outstanding_work_and_hazards_but_waits_for_quiescence() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct PausingDevice(Arc<AtomicBool>);
     impl DeviceHandoff for PausingDevice {
@@ -4026,16 +4129,19 @@ fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio(
         let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
         let work = (reason == 0).then(|| runtime.node("1000").unwrap().work().unwrap());
         let protected = (reason == 2).then(|| rx.acquire().unwrap());
-        assert_eq!(
-            runtime.reload(
-                ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
-                &Media,
-                adapter,
-                device,
-                clock()
-            ),
-            Err(RuntimeError::Busy)
+        let result = runtime.reload(
+            ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
         );
+        if reason == 1 {
+            assert_eq!(result, Ok(()));
+            assert!(runtime.reload_pending());
+        } else {
+            assert_eq!(result, Err(RuntimeError::Busy));
+        }
         assert_eq!(runtime.settings("1000").unwrap().channel, "old");
         assert_eq!(runtime.revision(), 1);
         drop(protected);

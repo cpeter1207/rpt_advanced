@@ -41,6 +41,7 @@ impl Product {
         (descriptor.capability == *b"rptadv.prod7\0\0\0\0"
             && descriptor.start.is_some()
             && descriptor.reload.is_some()
+            && descriptor.reload_poll.is_some()
             && descriptor.stop.is_some()
             && descriptor.authorize_incoming.is_some()
             && descriptor.incoming.is_some()
@@ -78,7 +79,14 @@ impl Product {
     }
     /// Replace configuration without discarding a working generation on failure.
     pub fn reload(&self, configuration: &str) -> bool {
-        unsafe { self.0.reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) == 0 }
+        // The module reload caller waits; the taskprocessor continues servicing peers/radios.
+        let mut status =
+            unsafe { self.0.reload.unwrap()(configuration.as_ptr().cast(), configuration.len()) };
+        while status == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            status = unsafe { self.0.reload_poll.unwrap()() };
+        }
+        status == 0
     }
     /// Stop every product owner and drain accepted calls.
     pub fn stop(&self) -> bool {

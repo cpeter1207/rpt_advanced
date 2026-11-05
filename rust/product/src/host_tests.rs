@@ -1972,6 +1972,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     };
     let mut device = Device {
         lease: first_lease.clone(),
+        name: "1000".into(),
         services: services(),
     };
     assert!(!device.open(&settings));
@@ -2001,6 +2002,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     }));
     let mut device = Device {
         lease: lease.clone(),
+        name: "1000".into(),
         services: services(),
     };
     RadioWorker::fail_next_for_test(crate::worker::TestFailure::Prepare);
