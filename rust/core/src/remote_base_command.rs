@@ -1,5 +1,9 @@
 //! Typed remote-base DTMF payloads; link destinations stay in the linking command API.
 
+#[path = "remote_base_command_wire.rs"]
+mod wire;
+pub use wire::RemoteOperation;
+
 /// Per-node DTMF mutation policy; public status never requires an unlock.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemoteDtmfAccess {

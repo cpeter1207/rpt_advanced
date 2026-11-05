@@ -1,6 +1,104 @@
 use super::*;
 
 #[test]
+fn remote_commands_copy_exact_units_and_flags_into_the_shared_wire_request() {
+    use RemoteCommand as C;
+    let commands = [
+        C::Recall(1),
+        C::Frequency {
+            hertz: 146_940_000,
+            offset: RemoteOffset::Minus,
+        },
+        C::Tone {
+            encode: true,
+            tenths_hz: 1148,
+        },
+        C::ToneEnabled {
+            encode: false,
+            enabled: true,
+        },
+        C::PowerPreset(2),
+        C::Status { long: true },
+        C::Mode(3),
+        C::Step(-500),
+        C::ScanPreset {
+            up: true,
+            preset: 1,
+        },
+        C::Tune,
+        C::GetSetting(101),
+        C::SetSetting {
+            selector: 102,
+            value: DecimalValue {
+                negative: true,
+                magnitude: 12345,
+                decimal_places: 3,
+            },
+        },
+        C::StartScan(2),
+        C::PauseScan,
+        C::ResumeScan,
+        C::StopScan,
+        C::ScanDirection(true),
+        C::Skip,
+        C::Memory(3),
+        C::Catalog {
+            kind: CatalogKind::ScanLists,
+            page: 2,
+        },
+        C::ScanStatus(4),
+        C::Inhibit(true),
+        C::Dwell(700),
+        C::ResumeDelay(2300),
+        C::Priority(Some(5)),
+        C::CurrentStatus,
+        C::Invoke(9),
+    ];
+    for (index, command) in commands.into_iter().enumerate() {
+        let operation = command.wire();
+        assert_eq!(operation.struct_size, 40);
+        assert_eq!(operation.abi_version, 1);
+        assert_eq!(operation.operation, index as u32 + 1);
+    }
+    let frequency = commands[1].wire();
+    assert_eq!((frequency.magnitude, frequency.flags), (146_940_000, 1));
+    let tone = commands[2].wire();
+    assert_eq!((tone.magnitude, tone.flags), (1148, 1));
+    assert_eq!(commands[7].wire().signed_value, -500);
+    let scalar = commands[11].wire();
+    assert_eq!(
+        (
+            scalar.selector,
+            scalar.magnitude,
+            scalar.decimal_places,
+            scalar.flags
+        ),
+        (102, 12345, 3, 1)
+    );
+    let catalog = commands[19].wire();
+    assert_eq!((catalog.selector, catalog.magnitude), (3, 2));
+    assert_eq!(C::Priority(None).wire().selector, 0);
+    assert_eq!(
+        C::Frequency {
+            hertz: 146520000,
+            offset: RemoteOffset::Simplex
+        }
+        .wire()
+        .flags,
+        2
+    );
+    assert_eq!(
+        C::Frequency {
+            hertz: 146520000,
+            offset: RemoteOffset::Plus
+        }
+        .wire()
+        .flags,
+        3
+    );
+}
+
+#[test]
 fn remote_dtmf_parses_familiar_operating_commands_without_floats() {
     use RemoteCommand as C;
     for (digits, expected) in [
