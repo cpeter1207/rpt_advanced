@@ -145,6 +145,41 @@ fn transmit_callback_publishes_ptt_state_for_control_snapshot() {
 }
 
 #[test]
+fn remote_metadata_applies_non_fm_on_the_serial_transmit_owner() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) =
+        audio_owners_with_config(8, "[1000]\nradio_channel=usb\nduplex=full\nhang_ms=0\n");
+    let mut worker = worker();
+    let context = std::ptr::from_ref(&*worker.transmit).cast_mut().cast();
+    let mut linked = 99;
+    assert_eq!(unsafe { metadata_callback(context, 0, &mut linked) }, 0);
+    assert_eq!(linked, 0);
+    assert_eq!(unsafe { metadata_callback(context, 16, &mut linked) }, -1);
+    assert_eq!(
+        unsafe { metadata_callback(std::ptr::null_mut(), 0, &mut linked) },
+        -1
+    );
+    assert_eq!(
+        unsafe { metadata_callback(context, 0, std::ptr::null_mut()) },
+        -1
+    );
+    assert!(worker.attach(owners).is_ok());
+    for (flags, expected_keyed) in [(9, 0), (0, 1)] {
+        assert_eq!(unsafe { metadata_callback(context, flags, &mut linked) }, 0);
+        for _ in 0..64 {
+            assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
+            assert_eq!(tx(&worker, &mut [0.0; 8]), (0, expected_keyed));
+        }
+        assert_eq!(unsafe { metadata_callback(context, flags, &mut linked) }, 0);
+        assert_eq!(linked, 0);
+    }
+    drop(worker.stop());
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn local_ring_captures_squelch_delay_before_any_callback() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

@@ -177,6 +177,7 @@ struct RadioHandle {
     reservation: RadioReservation,
     active: Option<crate::radio_activation::ActiveRadio>,
     pending: Option<RadioReservation>,
+    metadata: crate::abi::rptadv_radio_metadata_v1,
 }
 
 /// Stage/acknowledge, commit, or roll back a native radio configuration on its
@@ -440,8 +441,30 @@ pub unsafe extern "C" fn radio_open(
         reservation,
         active: None,
         pending: None,
+        metadata: None,
     }))
     .cast();
+    0
+}
+
+/// Product host callback that starts one radio's GPIO and audio path.
+/// Bind optional TX metadata before activation, without acquiring hardware.
+///
+/// # Safety
+/// `radio` is this host's unique retained reservation on serialized control.
+pub unsafe extern "C" fn radio_metadata_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    metadata: crate::abi::rptadv_radio_metadata_v1,
+) -> i32 {
+    // SAFETY: the caller lends the retained unique reservation.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    if handle.active.is_some() {
+        return -1;
+    }
+    handle.metadata = metadata;
     0
 }
 
@@ -484,6 +507,7 @@ pub unsafe extern "C" fn radio_activate(
             receive_context,
             transmit,
             transmit_context,
+            metadata: handle.metadata,
         },
     );
     finish_activation(handle, result)
@@ -572,6 +596,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: None,
             pending: None,
+            metadata: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before use.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -692,6 +717,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
+            metadata: None,
         };
         let context = std::ptr::from_mut(&mut host).cast();
         let radio = std::ptr::from_mut(&mut handle).cast();
@@ -798,6 +824,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
+            metadata: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before dispatch.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -877,6 +904,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: None,
             pending: None,
+            metadata: None,
         };
         let binding: crate::abi::UrpAstSiteBinding = unsafe { std::mem::zeroed() };
         let request: crate::abi::UrpAstSiteRequest = unsafe { std::mem::zeroed() };
@@ -1361,6 +1389,7 @@ mod tests {
             reservation,
             active: None,
             pending: None,
+            metadata: None,
         };
 
         assert_eq!(
@@ -1386,6 +1415,7 @@ mod tests {
             reservation: handle.reservation.clone(),
             active: None,
             pending: None,
+            metadata: None,
         };
         assert_eq!(
             finish_activation(

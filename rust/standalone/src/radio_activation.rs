@@ -37,6 +37,8 @@ pub struct ProductRadioCallbacks {
     pub transmit: abi::rptadv_radio_transmit_v3,
     /// Caller-owned transmit context.
     pub transmit_context: *mut c_void,
+    /// Same serial transmit-owner policy/activity endpoint.
+    pub metadata: abi::rptadv_radio_metadata_v1,
 }
 
 /// Native station handle; its shared product owns every hardware and DSP resource.
@@ -118,12 +120,13 @@ impl ActiveRadio {
         };
         let callbacks = abi::UrpAstDirectCallbacks {
             struct_size: std::mem::size_of::<abi::UrpAstDirectCallbacks>() as u32,
-            abi_version: 3,
+            abi_version: 4,
             receive: callbacks.receive,
             receive_context: callbacks.receive_context,
             transmit: callbacks.transmit,
             transmit_context: callbacks.transmit_context,
             accepted_abi_version: 0,
+            metadata: callbacks.metadata,
         };
         let args = abi::UrpNativeCreateArgs {
             struct_size: std::mem::size_of::<abi::UrpNativeCreateArgs>() as u32,
@@ -465,7 +468,7 @@ pub(crate) mod tests {
             assert_eq!(radio.struct_size, 112);
             assert_eq!(radio.abi_version, 4);
         }
-        assert_eq!(callbacks.abi_version, 3);
+        assert_eq!(callbacks.abi_version, 4);
         assert_eq!(
             callbacks.struct_size as usize,
             std::mem::size_of_val(callbacks)
@@ -969,6 +972,7 @@ pub(crate) mod tests {
                 receive_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                metadata: None,
             },
         )
         .unwrap();
@@ -1085,6 +1089,7 @@ pub(crate) mod tests {
                 receive_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                metadata: None,
             };
             let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
             let status = result.as_ref().err().map(|error| match error {
@@ -1118,6 +1123,7 @@ pub(crate) mod tests {
             receive_context: std::ptr::null_mut(),
             transmit: Some(transmit),
             transmit_context: std::ptr::null_mut(),
+            metadata: None,
         };
         let mut missing_receive = callbacks();
         missing_receive.receive = None;

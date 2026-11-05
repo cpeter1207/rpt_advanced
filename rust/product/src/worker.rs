@@ -409,6 +409,8 @@ struct TransmitContext {
     maximum: usize,
     status: RadioStatus,
     meter: UnsafeCell<MeterPublisher>,
+    remote_controls: UnsafeCell<u32>,
+    linked_active: UnsafeCell<bool>,
 }
 // SAFETY: callbacks are serialized independently by the host. Control writes owner slots
 // only before release-publishing active, and takes them only after synchronous radio destroy.
@@ -423,6 +425,34 @@ unsafe impl Send for TransmitContext {}
 // handshake publishes the owner cell once. One serial TX callback owns its mutable
 // cells until synchronous radio destroy makes control reclamation exclusive again.
 unsafe impl Sync for TransmitContext {}
+
+/// Same serial TX endpoint as PCM: no cross-thread controller mutation.
+unsafe extern "C" fn metadata_callback(
+    context: *mut c_void,
+    controls: u32,
+    linked: *mut u32,
+) -> i32 {
+    // SAFETY: the host retains the context and serializes metadata with transmit.
+    let (Some(context), Some(linked)) = (
+        unsafe { context.cast::<TransmitContext>().as_ref() },
+        unsafe { linked.as_mut() },
+    ) else {
+        return -1;
+    };
+    *linked = 0;
+    if controls & !15 != 0 {
+        return -1;
+    }
+    // SAFETY: only the host's serial TX owner accesses these cells.
+    unsafe {
+        *context.remote_controls.get() = controls;
+    }
+    if context.active.load(Ordering::Acquire) {
+        // SAFETY: same owner as the writer in transmit.
+        *linked = u32::from(unsafe { *context.linked_active.get() });
+    }
+    0
+}
 
 unsafe fn samples<'a>(pointer: *mut f32, count: u32) -> Option<&'a mut [f32]> {
     if pointer.is_null() || count == 0 {
@@ -670,14 +700,21 @@ unsafe fn transmit(
         born_ns: stamp.born_ns,
     };
     let transmit = generation.state();
+    // SAFETY: metadata and PCM execute on the same serial TX owner.
+    let controls = unsafe { *context.remote_controls.get() };
+    transmit.controller.set_remote_non_fm(controls & 9 == 9);
     #[cfg(test)]
     if take_test_failure(TestFailure::TransmitPanic) {
         panic!("injected transmit processing panic");
     }
-    match transmit
+    let result = transmit
         .adapter
-        .process(&mut transmit.controller, receiving, samples, source)
-    {
+        .process(&mut transmit.controller, receiving, samples, source);
+    // SAFETY: this callback owns both adapter and metadata state.
+    unsafe {
+        *context.linked_active.get() = result.is_ok() && transmit.adapter.peer_source_active();
+    }
+    match result {
         Ok(value) => {
             *keyed = u32::from(value);
             *ctcss_enabled = u32::from(transmit.controller.ctcss_enabled());
@@ -866,7 +903,12 @@ impl RadioWorker {
                 snapshots: transmit_publisher,
                 dropped_snapshots: 0,
             }),
+            remote_controls: UnsafeCell::new(0),
+            linked_active: UnsafeCell::new(false),
         });
+        if radio.bind_metadata(Some(metadata_callback)).is_err() {
+            return Err(Box::new((Error::Operation, radio)));
+        }
         // SAFETY: boxes have stable addresses and outlive the activated radio. On failure
         // the host must detach both endpoints before returning the still-owned reservation.
         if unsafe {

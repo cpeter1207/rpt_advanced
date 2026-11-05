@@ -244,13 +244,13 @@ unsafe extern "C" fn ast_channel_setoption(
     // SAFETY: attach_direct supplies exclusive access to this complete live descriptor.
     let descriptor = unsafe { &mut *data.cast::<ffi::urp_ast_direct_callbacks>() };
     assert!(descriptor.receive.is_some() && descriptor.transmit.is_some());
-    assert_eq!(descriptor.abi_version, 3);
+    assert_eq!(descriptor.abi_version, 4);
     assert_eq!(descriptor.accepted_abi_version, 0);
     let failure = host(|state| state.failure);
     descriptor.accepted_abi_version = match failure {
         DIRECT_ACK_MISSING => 0,
         DIRECT_ACK_WRONG => 1,
-        _ => 3,
+        _ => 4,
     };
     if failure == DIRECT_OPTION_FAILED {
         -1

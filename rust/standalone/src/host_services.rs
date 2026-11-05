@@ -123,6 +123,7 @@ impl HostServicesOwner {
             peer_processing_prepare: Some(peer_processing_prepare),
             radio_control: Some(control_radio),
             radio_update: Some(update_radio),
+            radio_metadata_bind: Some(crate::radio_host::radio_metadata_bind),
         });
         Ok(Self {
             context,

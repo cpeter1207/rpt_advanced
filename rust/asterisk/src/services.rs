@@ -148,6 +148,7 @@ pub(crate) fn echo_notice(message: &str) {
 struct ReservedRadio {
     radio: Option<Radio>,
     name: CString,
+    metadata: ffi::rptadv_radio_metadata_v1,
 }
 unsafe extern "C" fn radio_open(
     _context: *mut c_void,
@@ -179,6 +180,7 @@ unsafe extern "C" fn radio_open(
                 *output = Box::into_raw(Box::new(ReservedRadio {
                     radio: Some(radio),
                     name: channel,
+                    metadata: None,
                 }))
                 .cast();
                 0
@@ -210,6 +212,7 @@ unsafe extern "C" fn radio_activate(
             transmit_context,
             transmit,
             accepted_abi_version: 0,
+            metadata: reserved.metadata,
         };
         if receive.is_some()
             && transmit.is_some()
@@ -222,6 +225,23 @@ unsafe extern "C" fn radio_activate(
         // those callbacks before returning failure to their owner.
         drop(reserved.radio.take());
         -1
+    })
+}
+unsafe extern "C" fn radio_metadata_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    metadata: ffi::rptadv_radio_metadata_v1,
+) -> i32 {
+    boundary(-1, || {
+        // SAFETY: the serialized host lends its retained reservation.
+        let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
+            return -1;
+        };
+        if reserved.radio.is_none() {
+            return -1;
+        }
+        reserved.metadata = metadata;
+        0
     })
 }
 unsafe extern "C" fn radio_destroy(_context: *mut c_void, radio: *mut c_void) {
@@ -1070,6 +1090,7 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     peer_processing_prepare: None,
     radio_control: None,
     radio_update: None,
+    radio_metadata_bind: Some(radio_metadata_bind),
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.

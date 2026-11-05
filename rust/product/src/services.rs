@@ -351,7 +351,10 @@ impl HostServices {
         let table_size = size_of::<abi::rptadv_host_services_v9>();
         let processor_tail = offset_of!(abi::rptadv_host_services_v9, radio_control);
         let maintenance_tail = offset_of!(abi::rptadv_host_services_v9, radio_update);
-        if size < table_size && ![required, processor_tail, maintenance_tail].contains(&size) {
+        let metadata_tail = offset_of!(abi::rptadv_host_services_v9, radio_metadata_bind);
+        if size < table_size
+            && ![required, processor_tail, maintenance_tail, metadata_tail].contains(&size)
+        {
             return Err(Error::Admission);
         }
         // ABI 9's released prefix is complete; its optional processor tail is
@@ -874,6 +877,16 @@ impl Radio {
     /// Prepared native callback frame bound.
     pub fn maximum_frames(&self) -> usize {
         self.maximum_frames
+    }
+    /// Bind optional metadata on control before callback activation. An old host
+    /// may omit this tail for ordinary radios; enabled remote radios require it.
+    pub fn bind_metadata(&mut self, metadata: abi::rptadv_radio_metadata_v1) -> Result<(), Error> {
+        let Some(bind) = self.services.0.radio_metadata_bind else {
+            return Ok(());
+        };
+        // SAFETY: the unique radio lease serializes this pre-activation call.
+        let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), metadata) };
+        (code == 0).then_some(()).ok_or(Error::Operation)
     }
     /// Attach both stable endpoints and start the channel.
     ///

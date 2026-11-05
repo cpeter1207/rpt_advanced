@@ -633,6 +633,35 @@ fn optional_peer_processor_tail_accepts_the_released_complete_host_prefix() {
 }
 
 #[test]
+fn radio_metadata_binding_preserves_optional_host_prefix_and_failures() {
+    unsafe extern "C" fn bind(
+        _: *mut c_void,
+        _: *mut c_void,
+        metadata: abi::rptadv_radio_metadata_v1,
+    ) -> i32 {
+        if metadata.is_some() { 0 } else { -9 }
+    }
+    unsafe extern "C" fn metadata(_: *mut c_void, _: u32, _: *mut u32) -> i32 {
+        0
+    }
+    let services = host_services(|table| table.radio_metadata_bind = Some(bind));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.bind_metadata(Some(metadata)), Ok(()));
+    assert_eq!(radio.bind_metadata(None), Err(Error::Operation));
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.struct_size =
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_metadata_bind) as u32;
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.bind_metadata(Some(metadata)), Ok(()));
+    table.struct_size += 1;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
+}
+
+#[test]
 fn peer_processor_preparation_uses_the_selected_node_configuration() {
     unsafe extern "C" fn process(_: *mut c_void, _: *mut f32, _: usize) -> i32 {
         0

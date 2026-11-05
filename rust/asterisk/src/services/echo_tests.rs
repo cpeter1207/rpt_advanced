@@ -25,6 +25,7 @@ fn echo_binding_rejects_a_quiesced_radio_reservation() {
     let fixture = support::Fixture::new("network");
     let peer = Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast();
     let mut reservation = ReservedRadio {
+        metadata: None,
         radio: None,
         name: CString::new("quiesced fixture").unwrap(),
     };

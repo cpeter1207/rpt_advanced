@@ -192,10 +192,15 @@ typedef int (*rptadv_radio_receive_v2)(void *context, uint32_t receiving, float 
  * Malformed arguments or processing failure return nonzero with silent output. */
 typedef int (*rptadv_radio_transmit_v3)(void *context, float *samples, uint32_t sample_count,
                                         uint32_t *keyed, uint32_t *ctcss_enabled);
+/** Serial TX owner: apply remote enabled/RX/TX/non-FM flags in bits 0..3.
+ * Return zero/one pre-mute linked activity, including buffered tails and text.
+ * No allocation, wait, or I/O; use the existing transmit context. */
+typedef int (*rptadv_radio_metadata_v1)(void *transmit_context, uint32_t controls,
+                                        uint32_t *linked_active);
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
 /** Exact direct attachment version, independent of the host-services table. */
-#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 3U
+#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 4U
 /** Mutable direct registration; the provider copies callbacks before returning.
  * Initialize accepted_abi_version to zero. Start only when setoption returns zero
  * and acknowledges this exact ABI. Callback code and contexts remain borrowed
@@ -208,6 +213,7 @@ struct urp_ast_direct_callbacks {
     void *transmit_context;            /**< Stable output owner context. */
     rptadv_radio_transmit_v3 transmit; /**< Output endpoint: key and CTCSS enable. */
     uint32_t accepted_abi_version; /**< Provider writes the ABI only after retaining callbacks. */
+    rptadv_radio_metadata_v1 metadata; /**< Optional same-owner remote policy/activity. */
 };
 /** Synchronous RadioPlusAdvanced link-graph attachment; use block=0. */
 #define URP_AST_OPTION_LINK_ATTACH 0x52504C41
@@ -488,6 +494,10 @@ struct rptadv_host_services_v9 {
      * handoff. A negative stage result still requires phase 2 to restore any
      * partially adopted state. Phase 2 is idempotent with no staged update. */
     int (*radio_update)(void *context, void *radio, uint32_t phase);
+    /** Optional complete tail: bind TX metadata before radio_activate. No hardware
+     * is acquired. Callback lifetime ends with synchronous radio destruction.
+     * Zero succeeds; enabled remote compositions require this operation. */
+    int (*radio_metadata_bind)(void *context, void *radio, rptadv_radio_metadata_v1 metadata);
 };
 
 /** Exact revision of a typed site control request. */
