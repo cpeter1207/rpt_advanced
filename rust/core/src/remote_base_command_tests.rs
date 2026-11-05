@@ -89,6 +89,10 @@ fn remote_commands_copy_exact_units_and_flags_into_the_shared_wire_request() {
     );
     let catalog = commands[19].wire();
     assert_eq!((catalog.selector, catalog.magnitude), (3, 2));
+    for (kind, selector) in [(CatalogKind::Capabilities, 1), (CatalogKind::Memories, 2)] {
+        let catalog = C::Catalog { kind, page: 3 }.wire();
+        assert_eq!((catalog.selector, catalog.magnitude), (selector, 3));
+    }
     assert_eq!(C::Priority(None).wire().selector, 0);
     assert_eq!(
         C::Frequency {
@@ -303,6 +307,7 @@ fn remote_dtmf_rejects_partial_malformed_overflow_and_unsupported_precision() {
         "1146*52",
         "1146*520000*2",
         "1146*52*4",
+        "118446744073709*99999*2",
         "1146**2",
         "10*00000*2",
         "2",
@@ -313,6 +318,7 @@ fn remote_dtmf_rejects_partial_malformed_overflow_and_unsupported_precision() {
         "910*0*1*0",
         "911*2*1*0",
         "911*0*1*7",
+        "911*0*1*0*9",
         "911*0*18446744073709551616*0",
         "911*0*9223372036854775808*0",
         "911*1*9223372036854775809*0",
@@ -336,6 +342,15 @@ fn remote_dtmf_fixed_point_is_exact_and_preserves_negative_zero_for_enum_validat
     };
     assert_eq!(value.at_decimal_places(2), Some(-150));
     assert_eq!(value.at_decimal_places(0), None);
+    assert_eq!(value.at_decimal_places(7), None);
+    assert_eq!(
+        DecimalValue {
+            magnitude: 150,
+            ..value
+        }
+        .at_decimal_places(0),
+        Some(-15)
+    );
     let value = DecimalValue {
         negative: true,
         magnitude: 1_u64 << 63,
