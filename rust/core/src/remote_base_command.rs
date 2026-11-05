@@ -1,5 +1,17 @@
 //! Typed remote-base DTMF payloads; link destinations stay in the linking command API.
 
+/// Per-node DTMF mutation policy; public status never requires an unlock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteDtmfAccess {
+    /// Allow operating requests without a code.
+    Open,
+    /// Require the existing source-specific administrative grant.
+    Locked,
+    /// Disable operating requests while retaining public status queries.
+    #[default]
+    Disabled,
+}
+
 /// Direction of the familiar repeater-offset selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteOffset {

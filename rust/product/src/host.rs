@@ -1042,6 +1042,7 @@ impl Host {
             LinkEffect::SiteStatus { selector, reply } => {
                 self.runtime.queue_site_report(local, &selector, reply)
             }
+            LinkEffect::RemoteBase(_) => Err(RuntimeError::Rejected),
             LinkEffect::SelectedRemote
             | LinkEffect::ParrotEnabled(_)
             | LinkEffect::EchoTelemetry(_)
@@ -1266,6 +1267,11 @@ impl Host {
                         node.links().peer_digit(&remote, digit, clock.now_ms, reply)
                     {
                         self.immediate(&local, LinkEffect::Digit(operation), clock)?;
+                    }
+                }
+                Event::RemoteUnkey(now_ms) => {
+                    for outcome in node.links().peer_remote_unkey(now_ms, reply) {
+                        self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
                     }
                 }
             }

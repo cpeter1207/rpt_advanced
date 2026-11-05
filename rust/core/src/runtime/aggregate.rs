@@ -1796,10 +1796,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 return Err(RuntimeError::Rejected);
             }
             if let Some(reply) = &reply {
-                node.links
-                    .confirm_peer_parrot_command(origin.as_deref(), reply, clock.now_ms);
+                node.links.confirm_peer_administrative_command(
+                    origin.as_deref(),
+                    reply,
+                    clock.now_ms,
+                );
             } else {
-                node.links.confirm_parrot_command(clock.now_ms);
+                node.links.confirm_administrative_command(clock.now_ms);
             }
             effect = LinkEffect::None;
         }
@@ -1816,10 +1819,13 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 return Err(RuntimeError::Rejected);
             }
             if let Some(reply) = &reply {
-                node.links
-                    .confirm_peer_parrot_command(origin.as_deref(), reply, clock.now_ms);
+                node.links.confirm_peer_administrative_command(
+                    origin.as_deref(),
+                    reply,
+                    clock.now_ms,
+                );
             } else {
-                node.links.confirm_parrot_command(clock.now_ms);
+                node.links.confirm_administrative_command(clock.now_ms);
             }
         }
         self.track_detach(local, &effect);

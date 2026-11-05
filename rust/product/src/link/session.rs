@@ -68,6 +68,8 @@ pub enum Event {
     HumanText(HumanMessage),
     /// Completed digit, including the existing three-second synthesized terminator.
     Digit(char),
+    /// Actual source unkey, reserved for variable-argument remote-base commands.
+    RemoteUnkey(u64),
     /// Replacement ingress is installed; control may acknowledge old-generation detachment.
     Redirected(InboundObserver),
 }
@@ -258,6 +260,7 @@ pub struct PeerSession {
     remote: String,
     commands: Consumer<Command>,
     events: Producer<Event>,
+    pending_remote_unkey: Option<u64>,
     stop: Arc<AtomicBool>,
     wake: PeerWake,
     outbound: Outbound,
@@ -272,6 +275,20 @@ pub struct PeerSession {
 }
 
 static NEXT_TEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+
+// Keep one copied edge under queue pressure; stop reading further source events
+// until it is queued, preserving digit/unkey order without closing the call.
+fn flush_remote_unkey(events: &mut Producer<Event>, pending: &mut Option<u64>) -> bool {
+    let Some(now_ms) = *pending else {
+        return true;
+    };
+    if events.push(Event::RemoteUnkey(now_ms)).is_err() {
+        return false;
+    }
+    *pending = None;
+    true
+}
+
 struct TextIdentity {
     station: AtomicU64,
     connection: u64,
@@ -599,6 +616,7 @@ impl PeerSession {
                 remote: remote.into(),
                 commands: incoming,
                 events,
+                pending_remote_unkey: None,
                 stop,
                 wake,
                 outbound,
@@ -721,6 +739,9 @@ impl PeerSession {
     // selected talker; provider/jitter completion alone is not audible completion.
     fn read_source(&mut self, now_ms: u64) -> Result<bool, Error> {
         for _ in 0..MAX_ASYNC_READS_PER_STEP {
+            if !flush_remote_unkey(&mut self.events, &mut self.pending_remote_unkey) {
+                return Ok(true);
+            }
             let completion = match self.source_finish {
                 Some(token) => match self
                     .inbound
@@ -820,7 +841,13 @@ impl PeerSession {
             }
             self.source_dirty |= accepted;
             if let Some(keyed) = result.activity {
+                if !keyed && self.inbound.signals().radio_keyed() {
+                    self.pending_remote_unkey = Some(now_ms);
+                }
                 self.inbound.signals().set_radio_keyed(keyed);
+            }
+            if !flush_remote_unkey(&mut self.events, &mut self.pending_remote_unkey) {
+                return Ok(true);
             }
             if result.closed {
                 return Err(Error::Hangup);
@@ -968,6 +995,9 @@ impl PeerSession {
         } else {
             read_budget
         } {
+            if !flush_remote_unkey(&mut self.events, &mut self.pending_remote_unkey) {
+                break;
+            }
             self.flush_pending_input()?;
             if self.pending_input.is_some() || !self.io.ready()? {
                 break;
@@ -1023,6 +1053,9 @@ impl PeerSession {
             }
             if let Some(keyed) = radio_keyed {
                 if !keyed || radio_control_allowed {
+                    if !keyed && self.inbound.signals().radio_keyed() {
+                        self.pending_remote_unkey = Some(now_ms);
+                    }
                     self.inbound.signals().set_radio_keyed(keyed);
                 }
             }
@@ -1038,7 +1071,7 @@ impl PeerSession {
                 break;
             }
         }
-        if self.peer.expire_digit(now_ms) {
+        if self.pending_remote_unkey.is_none() && self.peer.expire_digit(now_ms) {
             self.event(Event::Digit('#'))?;
             if let Some(source) = &mut self.source {
                 source.timeout(&self.inbound);
@@ -1049,7 +1082,7 @@ impl PeerSession {
         let mut after = deadline.map_or(u64::MAX, |deadline| deadline.saturating_sub(now));
         // Space can become available without an activity edge; retry only that
         // backpressure. The media dispatcher wakes ordinary activity changes.
-        if self.pending_input.is_some() || source_wait {
+        if self.pending_input.is_some() || source_wait || self.pending_remote_unkey.is_some() {
             after = after.min(10_000_000);
         }
         if self.commands.slots() != 0 {

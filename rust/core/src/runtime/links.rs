@@ -97,6 +97,8 @@ pub enum LinkEffect {
     ParrotEnabled(bool),
     /// Already-authorized account telemetry selection; runtime applies the policy.
     EchoTelemetry(crate::config::EchoLinkTelemetry),
+    /// Submit typed rig work to its physical owner, retaining the exact source.
+    RemoteBase(DigitOperation),
     /// Cancel only the currently admitted message attempt on the audio owner.
     CancelMessage,
     /// No physical operation is needed (for example resumed retry intent).
@@ -214,12 +216,24 @@ impl NodeLinkControl {
             .configure_admin(unlock_hash, lock_hash, timeout_ms);
         self.peer_commands.clear();
     }
-    /// Renew the DTMF administration window only after the parrot toggle is accepted.
-    pub(crate) fn confirm_parrot_command(&mut self, now_ms: u64) {
-        self.commands.confirm_parrot_action(now_ms);
+    /// Install the shared radio's resolved DTMF family on every source collector.
+    pub fn configure_remote(
+        &mut self,
+        prefix: &str,
+        access: crate::remote_base_command::RemoteDtmfAccess,
+    ) -> Result<(), crate::command::CommandMapError> {
+        self.commands.configure_remote(prefix, access)?;
+        for (_, _, commands) in &mut self.peer_commands {
+            commands.configure_remote(prefix, access)?;
+        }
+        Ok(())
+    }
+    /// Renew the local source grant only after successful administrative work.
+    pub(crate) fn confirm_administrative_command(&mut self, now_ms: u64) {
+        self.commands.confirm_administrative_action(now_ms);
     }
     /// Renew only the collector that authorized a successfully applied peer command.
-    pub(crate) fn confirm_peer_parrot_command(
+    pub(crate) fn confirm_peer_administrative_command(
         &mut self,
         origin: Option<&str>,
         reply: &PeerReply,
@@ -230,7 +244,7 @@ impl NodeLinkControl {
             .iter_mut()
             .find(|(name, source, _)| Some(name.as_str()) == origin && source == reply)
         {
-            commands.confirm_parrot_action(now_ms);
+            commands.confirm_administrative_action(now_ms);
         }
     }
     /// Immutable current hub view for status/topology publication.
@@ -505,6 +519,22 @@ impl NodeLinkControl {
         self.retain_peer_commands(now_ms);
         outcomes
     }
+    /// Complete only remote-base families on an actual ingress unkey. Addressed
+    /// `*4` forwarding and ordinary peer-command termination keep their own rules.
+    pub fn peer_remote_unkey(&mut self, now_ms: u64, reply: PeerReply) -> Vec<DigitOutcome> {
+        if reply.ended() {
+            return Vec::new();
+        }
+        self.peer_commands
+            .iter_mut()
+            .filter(|(_, source, commands)| source == &reply && commands.remote_collecting())
+            .filter_map(|(origin, reply, commands)| {
+                commands
+                    .feed(DigitEvent::Unkey { now_ms })
+                    .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
+            })
+            .collect()
+    }
     /// Apply policy, returning external work without doing a dial, media operation, or write.
     /// `directory_verified` is needed only when selecting a remote-command peer.
     pub fn command(
@@ -535,9 +565,32 @@ impl NodeLinkControl {
             PeerIdentity::canonical_operator(&operation.command.node)
                 .map_err(|_| AdmissionError::Identity)?
         } else {
-            operation.command.node
+            operation.command.node.clone()
         };
         let effect = match operation.command.action {
+            LinkAction::RemoteBase => {
+                let request = operation.remote.ok_or(AdmissionError::Invalid)?;
+                let commands = if let Some(reply) = &operation.reply {
+                    self.peer_commands
+                        .iter_mut()
+                        .find(|(name, source, _)| {
+                            Some(name.as_str()) == operation.origin.as_deref() && source == reply
+                        })
+                        .map(|(_, _, commands)| commands)
+                } else {
+                    Some(&mut self.commands)
+                };
+                if !commands.is_some_and(|commands| {
+                    commands.remote_authorized(
+                        request.administrative(),
+                        operation.admin_authorized,
+                        now_ms,
+                    )
+                }) {
+                    return Err(AdmissionError::Denied);
+                }
+                LinkEffect::RemoteBase(operation)
+            }
             LinkAction::CancelMessage => LinkEffect::CancelMessage,
             action @ (LinkAction::Message | LinkAction::SiteStatus) => {
                 if remote.is_empty() || !crate::config::message_selector_valid(&remote) {
@@ -732,7 +785,8 @@ impl NodeLinkControl {
                     Some(&mut self.commands)
                 };
                 if !commands.is_some_and(|commands| {
-                    commands.consume_parrot_authorization(operation.admin_authorized, now_ms)
+                    commands
+                        .consume_administrative_authorization(operation.admin_authorized, now_ms)
                 }) {
                     return Err(AdmissionError::Denied);
                 }

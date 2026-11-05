@@ -1159,6 +1159,37 @@ fn newkey1_disables_radio_key_control_but_unkey_is_always_honored() {
 }
 
 #[test]
+fn remote_dtmf_actual_unkey_survives_event_backpressure_without_hangup() {
+    let (mut session, mut control, state, _) = make_session("1000");
+    state
+        .lock()
+        .unwrap()
+        .input
+        .push_back(Input::Text(b"!NEWKEY!"));
+    session.step(0).unwrap();
+    state.lock().unwrap().input.push_back(Input::RadioKey);
+    session.step(1).unwrap();
+    assert!(session.inbound.signals().radio_keyed());
+    while control.event().is_some() {}
+    for _ in 0..64 {
+        session.event(Event::Digit('1')).unwrap();
+    }
+    state
+        .lock()
+        .unwrap()
+        .input
+        .extend([Input::RadioUnkey, Input::RadioKey]);
+    session.step(2).unwrap();
+    assert!(!control.ended());
+    assert!(!session.inbound.signals().radio_keyed());
+    assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
+    session.step(3).unwrap();
+    assert!(matches!(control.event(), Some(Event::RemoteUnkey(2))));
+    assert!(session.inbound.signals().radio_keyed());
+    assert!(control.event().is_none());
+}
+
+#[test]
 fn newkey1_does_not_suppress_outbound_audio() {
     let (mut session, _control, state, mut output) = make_session("1000");
     state

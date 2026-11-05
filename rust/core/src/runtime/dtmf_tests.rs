@@ -1,6 +1,73 @@
 use super::*;
 
 #[test]
+fn remote_dtmf_enforces_source_authorization_and_keeps_typed_payloads() {
+    use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    commands
+        .configure_remote("6", RemoteDtmfAccess::Locked)
+        .unwrap();
+    let query = feed_symbols(&mut commands, "*651#");
+    let [DigitOutcome::Operation(query)] = query.as_slice() else {
+        panic!("public status")
+    };
+    assert_eq!(query.remote, Some(RemoteCommand::Status { long: false }));
+    assert_eq!(query.command.action, LinkAction::RemoteBase);
+    assert!(query.command.node.is_empty());
+    assert!(feed_symbols(&mut commands, "*661#").is_empty());
+    commands.admin_until_ms = 1000;
+    let changed = feed_symbols(&mut commands, "*661#");
+    let [DigitOutcome::Operation(changed)] = changed.as_slice() else {
+        panic!("unlocked mode")
+    };
+    assert!(changed.admin_authorized);
+    assert_eq!(changed.remote, Some(RemoteCommand::Mode(1)));
+    let mut peer = commands.for_source();
+    assert!(feed_symbols(&mut peer, "*661#").is_empty());
+    assert!(feed_symbols(&mut peer, "*651#").len() == 1);
+    commands
+        .configure_remote("6", RemoteDtmfAccess::Open)
+        .unwrap();
+    assert_eq!(feed_symbols(&mut commands, "*61146*52*2#").len(), 1);
+    commands
+        .configure_remote("6", RemoteDtmfAccess::Disabled)
+        .unwrap();
+    assert!(feed_symbols(&mut commands, "*661#").is_empty());
+    assert_eq!(feed_symbols(&mut commands, "*651#").len(), 1);
+    assert!(
+        commands
+            .configure_remote("7", RemoteDtmfAccess::Open)
+            .is_err()
+    );
+    assert_eq!(feed_symbols(&mut commands, "*651#").len(), 1);
+}
+
+#[test]
+fn remote_dtmf_waits_for_real_unkey_and_lost_work_cancels_the_prefix() {
+    use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    commands
+        .configure_remote("65", RemoteDtmfAccess::Open)
+        .unwrap();
+    assert!(feed_symbols(&mut commands, "*6561").is_empty());
+    let Some(DigitOutcome::Operation(operation)) = commands.feed(DigitEvent::Unkey { now_ms: 10 })
+    else {
+        panic!("unkey completion")
+    };
+    assert_eq!(operation.remote, Some(RemoteCommand::Mode(1)));
+    assert!(feed_symbols(&mut commands, "*6562").is_empty());
+    commands.feed(DigitEvent::Lost);
+    assert!(commands.feed(DigitEvent::Unkey { now_ms: 20 }).is_none());
+    feed_symbols(&mut commands, "*355553#");
+    feed_symbols(&mut commands, "*6551#");
+    let recalled = feed_symbols(&mut commands, "*30#");
+    let [DigitOutcome::Operation(operation)] = recalled.as_slice() else {
+        panic!("link recall")
+    };
+    assert_eq!(operation.command.node, "55553");
+}
+
+#[test]
 fn site_dtmf_query_does_not_unlock_or_replace_the_last_link() {
     let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
     feed_symbols(&mut commands, "*355553#");
@@ -413,9 +480,9 @@ fn parrot_dtmf_requires_both_argon2id_codes_and_expires_after_idle_timeout() {
     assert!(enter(&mut commands, "*800123456#", 5).is_none());
     let enabled = enter(&mut commands, "*804", 6).unwrap();
     assert_eq!(enabled.command.action, LinkAction::ParrotEnable);
-    assert!(commands.consume_parrot_authorization(enabled.admin_authorized, 6));
-    assert!(!commands.consume_parrot_authorization(false, 6));
-    assert!(!commands.consume_parrot_authorization(false, 2006));
+    assert!(commands.consume_administrative_authorization(enabled.admin_authorized, 6));
+    assert!(!commands.consume_administrative_authorization(false, 6));
+    assert!(!commands.consume_administrative_authorization(false, 2006));
     assert!(enter(&mut commands, "*805", 1005).is_none());
     assert!(enter(&mut commands, "*800123456#", 1006).is_none());
     assert!(enter(&mut commands, "*801000000#", 1007).is_none());
@@ -441,21 +508,21 @@ fn parrot_authorization_handles_disabled_timeout_and_deadline_boundaries() {
     commands.configure_admin(&unlock_hash, &lock_hash, 0);
     assert!(enter(&mut commands, "*8001234#", 10).is_none());
     assert!(enter(&mut commands, "*804", 11).is_none());
-    assert!(!commands.consume_parrot_authorization(true, 11));
-    commands.confirm_parrot_action(11);
+    assert!(!commands.consume_administrative_authorization(true, 11));
+    commands.confirm_administrative_action(11);
     assert!(enter(&mut commands, "*8015678#", 12).is_none());
 
     commands.configure_admin(&unlock_hash, &lock_hash, 100);
     assert!(enter(&mut commands, "*8001234#", 20).is_none());
-    assert!(commands.consume_parrot_authorization(true, 119));
-    assert!(!commands.consume_parrot_authorization(true, 120));
+    assert!(commands.consume_administrative_authorization(true, 119));
+    assert!(!commands.consume_administrative_authorization(true, 120));
     assert_eq!(commands.admin_until_ms, 0);
 
     commands.configure_admin(&unlock_hash, &lock_hash, 100);
     assert!(enter(&mut commands, "*8001234#", 30).is_none());
-    commands.confirm_parrot_action(40);
+    commands.confirm_administrative_action(40);
     assert_eq!(commands.admin_until_ms, 140);
-    commands.confirm_parrot_action(140);
+    commands.confirm_administrative_action(140);
     assert_eq!(commands.admin_until_ms, 140);
 }
 
