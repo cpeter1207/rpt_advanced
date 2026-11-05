@@ -495,6 +495,14 @@ remote-field-name =
         [serviced_ptt] Serviced push to talk
         [running] Scan running
         [paused] Scan paused
+        [list] Scan list
+        [activity_hold] Scan activity hold
+        [direction] Scan direction
+        [priority] Priority memory
+        [failed_memory] Failed memory
+        [last_error] Last scan error
+        [deadline_ms] Next action time in milliseconds
+        [skipped] Skipped members
         [dwell_ms] Dwell milliseconds
         [resume_delay_ms] Resume delay milliseconds
        *[memory] Current memory
@@ -531,6 +539,14 @@ remote-field-name =
         [serviced_ptt] PTT SET
         [running] SCAN
         [paused] PAUSE
+        [list] LIST
+        [activity_hold] HOLD
+        [direction] DIR
+        [priority] PRI
+        [failed_memory] FAIL MEM
+        [last_error] SCAN ERR
+        [deadline_ms] NEXT MS
+        [skipped] SKIP
         [dwell_ms] DWELL MS
         [resume_delay_ms] RESUME MS
        *[memory] MEM

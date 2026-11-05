@@ -137,6 +137,14 @@ fn state(
     Ok(())
 }
 
+fn scan_status(parts: &mut Vec<RemoteReplyPart>, value: &Value) -> Result<(), RuntimeError> {
+    for name in ["list", "running", "paused", "activity_hold", "direction", "priority", "memory",
+        "failed_memory", "last_error", "deadline_ms", "dwell_ms", "resume_delay_ms", "skipped"] {
+        if let Some(value) = value.get(name) { field(parts, name, value)?; }
+    }
+    Ok(())
+}
+
 /// Decode the SDK's versioned copied result. No packet selects message IDs;
 /// each supported kind maps to shipped localizable fragments on control.
 pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, RuntimeError> {
@@ -160,6 +168,7 @@ pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, 
             if long { state(&mut parts, "requested", &result["requested"], true)?; }
             state(&mut parts, "applied", &result["applied"], long)?;
             if long { state(&mut parts, "observed", &result["observed_values"], true)?; }
+            if long { scan_status(&mut parts, &result["scan"])?; }
             for name in ["tx_inhibited", "receive_permitted", "serviced_ptt"] {
                 if let Some(value) = result.get(name) { field(&mut parts, name, value)?; }
             }
@@ -185,9 +194,7 @@ pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, 
             parts.push(part("remote-entry", json!({"catalog":"scans","selector":result["selector"].as_u64().ok_or_else(invalid)?,"name":result["name"].as_str().ok_or_else(invalid)?}))?);
             let members = result["members"].as_array().ok_or_else(invalid)?;
             for value in members { parts.push(part("remote-choice", json!({"selector":result["selector"],"value":value.as_u64().ok_or_else(invalid)?}))?); }
-            for name in ["running", "paused", "dwell_ms", "resume_delay_ms", "memory"] {
-                if let Some(value) = result["state"].get(name) { field(&mut parts, name, value)?; }
-            }
+            scan_status(&mut parts, &result["state"])?;
         }
         _ => return Err(invalid()),
     }
@@ -213,6 +220,25 @@ pub(crate) fn failure(code: i32) -> Completion {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_scan_queries_and_complete_status_include_retained_failure_and_hold() {
+        use rpt_advanced_core::messages::MessageCatalog;
+        let catalog = MessageCatalog::load("en-US").unwrap();
+        let scan = serde_json::json!({"list":7,"running":true,"paused":false,"activity_hold":true,
+            "direction":1,"priority":3,"memory":1,"failed_memory":2,"last_error":-42,
+            "deadline_ms":9000,"dwell_ms":500,"resume_delay_ms":2000,"skipped":1});
+        for source in [
+            serde_json::json!({"version":1,"kind":"status","applied":null,"requested":null,"observed_values":null,"scan":scan}),
+            serde_json::json!({"version":1,"kind":"scan","selector":7,"name":"Test list","members":[],"state":scan}),
+        ] {
+            let reply = super::parse(&source.to_string(), super::RemoteCommand::CurrentStatus).unwrap();
+            let speech = reply.parts.iter().map(|part| catalog.format_named(part.id, &part.arguments).unwrap().tts).collect::<Vec<_>>().join(" ");
+            for required in ["Failed memory 2", "Last scan error -42", "Scan activity hold 1", "Priority memory 3"] {
+                assert!(speech.contains(required), "missing {required}: {speech}");
+            }
+        }
+    }
+
     #[test]
     fn remote_reply_uses_localized_forms_and_retains_truthful_units() {
         use rpt_advanced_core::{messages::MessageCatalog, remote_base_command::RemoteCommand};
