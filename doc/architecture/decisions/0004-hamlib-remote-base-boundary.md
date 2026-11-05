@@ -113,10 +113,11 @@ from the installed headers.
 
 The [remote engine PR](https://github.com/cpeter1207/librptadvremote/pull/1) and
 [Hamlib adapter PR](https://github.com/cpeter1207/rptadv-hamlib-adapter/pull/1)
-pass the full native Debian 13 gates, including production line and branch
-coverage. Focused host tests cover readiness, retained generations, rollback,
+are merged and released after passing the full native Debian 13 gates, including
+production line and branch coverage. Both providers have signed Debian packages.
+Focused host tests cover readiness, retained generations, rollback,
 source-specific replies, and the shared physical owner. Full host gates,
-publication, and physical-radio qualification are pending. No node has been
+host publication, and physical-radio qualification are pending. No node has been
 changed for this implementation.
 
 Current audio paths are CM119 and general PortAudio/ALSA. Streaming-radio

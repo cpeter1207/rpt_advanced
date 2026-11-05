@@ -346,8 +346,9 @@ code-derived OpenAPI documentation remain pending under ADRs 0016 and 0023.
 
 **Status: Partially implemented; verification in progress.** Shared Hamlib and
 parallel radio control, RF limits, independent signaling, remote-base DTMF,
-memories, and scanning are implemented in the candidate. Both new provider PRs
-pass their full native gates. USBRadioPlus/controller hosted gates, publication,
+memories, and scanning are implemented in the candidate. Both new providers
+are merged and released after passing their full native gates. Their signed
+Debian packages are published. USBRadioPlus/controller hosted gates, publication,
 and physical-radio qualification remain pending. Speech squelch, adaptive I/Q
 processing, and streaming-radio audio remain planned under ADR 0004.
 
@@ -477,7 +478,8 @@ Physical site-device qualification remains outstanding.
 **Status: Implemented in the candidate; acceptance pending.** Configuration-only
 memories and scan lists share the remote-base engine. Provider tests cover
 timing, priority, activity holds, interruption, limits, and source revocation.
-Host gates, publication, and physical-radio qualification remain pending.
+The shared engine is released. Host gates, host publication, and physical-radio
+qualification remain pending.
 
 **Requirements**
 
