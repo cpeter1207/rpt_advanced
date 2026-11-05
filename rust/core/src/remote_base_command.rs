@@ -16,6 +16,15 @@ pub enum RemoteDtmfAccess {
     Disabled,
 }
 
+/// Copied command-family policy resolved by the shared radio configuration owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteCommandConfiguration {
+    /// Digits following the command introducer, without the leading asterisk.
+    pub prefix: String,
+    /// Per-source mutation authorization; read-only queries remain public.
+    pub access: RemoteDtmfAccess,
+}
+
 /// Direction of the familiar repeater-offset selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteOffset {

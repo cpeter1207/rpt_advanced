@@ -1038,11 +1038,124 @@ fn clock() -> RuntimeClock {
 }
 fn adapter(_: &str, _: &ResolvedNodeSettings) -> Result<PreparedAdapter<()>, RuntimeError> {
     Ok(PreparedAdapter {
+        remote_commands: None,
         state: (),
         control: (),
         receive_maximum: 960,
         transmit_maximum: 960,
     })
+}
+
+#[test]
+fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquisition() {
+    use crate::{
+        remote_base_command::{RemoteCommand, RemoteCommandConfiguration, RemoteDtmfAccess},
+        runtime::dtmf::{DigitEvent, DigitOutcome},
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
+    };
+    for (override_prefix, effective) in [("", "65"), ("66", "66")] {
+        let prepare = |name: &str, settings: &ResolvedNodeSettings| {
+            let mut prepared = adapter(name, settings)?;
+            prepared.remote_commands = Some(RemoteCommandConfiguration {
+                prefix: "65".into(),
+                access: RemoteDtmfAccess::Open,
+            });
+            Ok(prepared)
+        };
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&format!(
+                "[1000]\nlink_command_remote_base={override_prefix}\n"
+            ))
+            .unwrap(),
+            &Media,
+            prepare,
+            device,
+            clock(),
+        )
+        .unwrap();
+        let feed = |runtime: &mut Runtime, text: &str| {
+            text.chars()
+                .filter_map(|digit| {
+                    runtime.digit(
+                        "1000",
+                        DigitEvent::Digit {
+                            digit,
+                            now_ms: 1001,
+                        },
+                    )
+                })
+                .last()
+        };
+        assert!(
+            matches!(feed(&mut runtime, &format!("*{effective}51#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: false }))
+        );
+        assert!(
+            matches!(feed(&mut runtime, &format!("*{effective}61#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Mode(1)))
+        );
+        assert!(feed(&mut runtime, &format!("*{effective}5")).is_none());
+        let revision = runtime.revision();
+        assert!(
+            runtime
+                .reload(
+                    ConfigDocument::parse("[1000]\nlink_command_remote_base=7\n").unwrap(),
+                    &Media,
+                    prepare,
+                    device,
+                    clock()
+                )
+                .is_err()
+        );
+        assert_eq!(runtime.revision(), revision);
+        assert!(
+            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: false }))
+        );
+        assert!(feed(&mut runtime, &format!("*{effective}5")).is_none());
+        runtime
+            .replace_adapter(
+                "1000",
+                adapter("1000", runtime.settings("1000").unwrap()).unwrap(),
+                1001,
+            )
+            .unwrap();
+        assert!(
+            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: false }))
+        );
+        assert!(runtime.detached("1000", 1));
+        runtime
+            .reload(
+                ConfigDocument::parse("[1000]\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert!(feed(&mut runtime, &format!("*{effective}51#")).is_none());
+        assert!(runtime.stop(1002));
+    }
+    log.lock().unwrap().clear();
+    let collision = |name: &str, settings: &ResolvedNodeSettings| {
+        let mut prepared = adapter(name, settings)?;
+        prepared.remote_commands = Some(RemoteCommandConfiguration {
+            prefix: "7".into(),
+            access: RemoteDtmfAccess::Open,
+        });
+        Ok(prepared)
+    };
+    assert!(
+        Runtime::start(
+            ConfigDocument::parse("[1000]\n").unwrap(),
+            &Media,
+            collision,
+            device,
+            clock()
+        )
+        .is_err()
+    );
+    assert!(log.lock().unwrap().is_empty());
 }
 
 struct SnapshotDevice {
@@ -2508,6 +2621,7 @@ fn adapter_dispatcher_is_owned_off_audio_and_requires_explicit_drain_acknowledgm
     let drops = Arc::new(AtomicUsize::new(0));
     let prepare = |_: &str, _: &ResolvedNodeSettings| {
         Ok(PreparedAdapter {
+            remote_commands: None,
             state: (),
             control: Dispatcher(drops.clone()),
             receive_maximum: 960,
@@ -2770,6 +2884,7 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
         &Media,
         |_, _| {
             Ok(PreparedAdapter {
+                remote_commands: None,
                 state: Adapter(dropped.clone()),
                 control: (),
                 receive_maximum: 960,

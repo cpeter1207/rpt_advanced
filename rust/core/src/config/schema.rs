@@ -49,7 +49,10 @@ impl KnownScope {
     fn from_kind(kind: ScopeKind) -> Option<Self> {
         Some(match kind {
             ScopeKind::General | ScopeKind::Node => Self::General,
-            ScopeKind::RadioDefault | ScopeKind::RadioNode => Self::Radio,
+            ScopeKind::RadioDefault
+            | ScopeKind::RadioNode
+            | ScopeKind::RemoteDefault
+            | ScopeKind::RemoteNode => Self::Radio,
             ScopeKind::ProcessingDefault | ScopeKind::ProcessingNode => Self::Processing,
             ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode => Self::EchoLink,
             ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet => {
@@ -421,6 +424,8 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             | ScopeKind::ProcessingNode
             | ScopeKind::RadioDefault
             | ScopeKind::RadioNode
+            | ScopeKind::RemoteDefault
+            | ScopeKind::RemoteNode
     ) {
         return true;
     }

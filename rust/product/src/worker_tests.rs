@@ -72,6 +72,7 @@ fn audio_owners_with_config(maximum: usize, configuration: &str) -> (Runtime<Aud
             let (state, _) =
                 Audio::new(Vec::new(), maximum).map_err(|_| RuntimeError::Preparation)?;
             Ok(PreparedAdapter {
+                remote_commands: None,
                 state,
                 control: (),
                 receive_maximum: maximum,
@@ -99,6 +100,7 @@ fn reload_audio(runtime: &mut Runtime<Audio>, extra: &str) -> u64 {
             |_, _| {
                 let (state, _) = Audio::new(Vec::new(), 8).unwrap();
                 Ok(PreparedAdapter {
+                    remote_commands: None,
                     state,
                     control: (),
                     receive_maximum: 8,

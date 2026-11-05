@@ -94,14 +94,16 @@ impl ConfigDocument {
                 })
             });
             let applicable = match parsed.kind {
-                scope::ScopeKind::ProcessingDefault | scope::ScopeKind::RadioDefault => true,
+                scope::ScopeKind::ProcessingDefault
+                | scope::ScopeKind::RadioDefault
+                | scope::ScopeKind::RemoteDefault => true,
                 scope::ScopeKind::ProcessingNode => {
                     parsed
                         .node
                         .is_some_and(|name| name.eq_ignore_ascii_case(node))
                         || selected
                 }
-                scope::ScopeKind::RadioNode => parsed
+                scope::ScopeKind::RadioNode | scope::ScopeKind::RemoteNode => parsed
                     .node
                     .is_some_and(|name| name.eq_ignore_ascii_case(node)),
                 _ => false,

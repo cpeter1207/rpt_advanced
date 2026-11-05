@@ -9,6 +9,8 @@ pub(crate) enum ScopeKind {
     Node,
     RadioDefault,
     RadioNode,
+    RemoteDefault,
+    RemoteNode,
     ProcessingDefault,
     ProcessingNode,
     EchoLinkDefault,
@@ -112,13 +114,26 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
             Some(_) => Err(()),
         };
     }
-    if family.eq_ignore_ascii_case("radio") {
+    if family.eq_ignore_ascii_case("radio") || family.eq_ignore_ascii_case("remote_base") {
+        let (global, scoped) = if family.eq_ignore_ascii_case("radio") {
+            (ScopeKind::RadioDefault, ScopeKind::RadioNode)
+        } else {
+            (ScopeKind::RemoteDefault, ScopeKind::RemoteNode)
+        };
         return match suffix {
-            None => Ok(Scope::flat(ScopeKind::RadioDefault)),
+            None => Ok(Scope::flat(global)),
             Some(node) if !node.is_empty() && !node.chars().any(char::is_whitespace) => {
-                Ok(Scope::node(ScopeKind::RadioNode, node))
+                Ok(Scope::node(scoped, node))
             }
             Some(_) => Err(()),
+        };
+    }
+    if family.eq_ignore_ascii_case("remote_memory") || family.eq_ignore_ascii_case("remote_scan") {
+        return match suffix.and_then(|value| value.split_once(' ')) {
+            Some((node, label)) if !node.is_empty() && !label.trim().is_empty() => {
+                Ok(Scope::named(ScopeKind::RemoteNode, Some(node), label))
+            }
+            _ => Err(()),
         };
     }
     if name.contains('\t') {
@@ -240,6 +255,7 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::SiteNode(_)
             | ScopeKind::SiteSet(_)
             | ScopeKind::RadioNode
+            | ScopeKind::RemoteNode
             | ScopeKind::EchoLinkNode
             | ScopeKind::IdentifierSet
             | ScopeKind::AnnouncementNode

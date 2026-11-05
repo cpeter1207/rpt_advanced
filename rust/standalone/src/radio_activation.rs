@@ -141,7 +141,7 @@ impl ActiveRadio {
         };
         let callbacks = abi::UrpAstDirectCallbacks {
             struct_size: std::mem::size_of::<abi::UrpAstDirectCallbacks>() as u32,
-            abi_version: 4,
+            abi_version: abi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
             receive: callbacks.receive,
             receive_context: callbacks.receive_context,
             transmit: callbacks.transmit,
@@ -554,7 +554,7 @@ pub(crate) mod tests {
             assert_eq!(radio.struct_size, 112);
             assert_eq!(radio.abi_version, 4);
         }
-        assert_eq!(callbacks.abi_version, 4);
+        assert_eq!(callbacks.abi_version, 5);
         assert_eq!(
             callbacks.struct_size as usize,
             std::mem::size_of_val(callbacks)

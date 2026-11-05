@@ -68,6 +68,8 @@ pub struct RuntimeClock {
 }
 /// Fixed callback bounds and candidate-owned adapter state prepared before publication.
 pub struct PreparedAdapter<A: Send, C: Send = ()> {
+    /// Canonical shared-radio command family, absent when remote control is disabled.
+    pub remote_commands: Option<crate::remote_base_command::RemoteCommandConfiguration>,
     /// Unique TX link/ring/encoder state; never clone live consumers into a candidate.
     pub state: A,
     /// Prepared, not-yet-running generation-owned dispatcher/control state. Start it only through
@@ -305,6 +307,7 @@ impl RuntimeDispatch {
 }
 
 struct Candidate<A: Send, C: Send> {
+    remote_commands: crate::remote_base_command::RemoteCommandConfiguration,
     name: String,
     settings: ResolvedNodeSettings,
     site: ResolvedSiteSettings,
@@ -603,6 +606,29 @@ impl<A: Send, C: Send> Runtime<A, C> {
             let (receive, digits) = DtmfWorker::new(generation_id, settings.dtmf_muting)
                 .map_err(|_| RuntimeError::Preparation)?;
             let prepared = adapter(name, &settings)?;
+            let mut remote_commands = prepared.remote_commands.unwrap_or(
+                crate::remote_base_command::RemoteCommandConfiguration {
+                    prefix: String::new(),
+                    access: crate::remote_base_command::RemoteDtmfAccess::Disabled,
+                },
+            );
+            if !remote_commands.prefix.is_empty() {
+                if let Some(prefix) = settings
+                    .link_commands
+                    .get("link_command_remote_base")
+                    .filter(|prefix| !prefix.is_empty())
+                {
+                    remote_commands.prefix.clone_from(prefix);
+                }
+            }
+            let mut commands = super::dtmf::DtmfCommands::new(
+                settings
+                    .command_map()
+                    .map_err(|_| RuntimeError::Preparation)?,
+            );
+            commands
+                .configure_remote(&remote_commands.prefix, remote_commands.access)
+                .map_err(|_| RuntimeError::Preparation)?;
             let bounds = GenerationSettings {
                 node: name.into(),
                 device: settings.channel.clone(),
@@ -642,6 +668,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 messages,
             };
             candidates.push(Candidate {
+                remote_commands,
                 name: name.into(),
                 settings,
                 site: ResolvedSiteSettings::resolve(&document, &id)?.value,
@@ -852,6 +879,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     &candidate.settings.dtmf_admin_lock_hash,
                     candidate.settings.dtmf_admin_timeout_ms,
                 );
+                old.links
+                    .configure_remote(
+                        &candidate.remote_commands.prefix,
+                        candidate.remote_commands.access,
+                    )
+                    .expect("prevalidated remote command family");
                 old.settings = candidate.settings;
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
@@ -867,6 +900,12 @@ impl<A: Send, C: Send> Runtime<A, C> {
                     &candidate.settings.dtmf_admin_lock_hash,
                     candidate.settings.dtmf_admin_timeout_ms,
                 );
+                links
+                    .configure_remote(
+                        &candidate.remote_commands.prefix,
+                        candidate.remote_commands.access,
+                    )
+                    .expect("prevalidated remote command family");
                 next.push(RuntimeNode {
                     name: candidate.name,
                     site: crate::site::SiteController::new(candidate.site),

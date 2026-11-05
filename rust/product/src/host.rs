@@ -220,6 +220,14 @@ fn prepared(
     text: &mut TextExecutor,
     services: HostServices,
 ) -> Result<PreparedAdapter<Audio, GenerationControl>, RuntimeError> {
+    let remote_commands = crate::configuration::radio::ResolvedRadio::resolve(
+        &settings.radio.processing_configuration,
+        local,
+        None,
+        std::ptr::null_mut(),
+    )
+    .and_then(|configuration| configuration.remote_commands())
+    .map_err(|_| RuntimeError::Preparation)?;
     static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
     let text_generation = NEXT_TEXT_STATION.fetch_add(1, Ordering::Relaxed);
     let mut text_readers = Vec::new();
@@ -297,6 +305,7 @@ fn prepared(
         .prepare(dispatcher, wakes, regeneration)
         .map_err(|_| RuntimeError::Busy)?;
     Ok(PreparedAdapter {
+        remote_commands,
         state: audio,
         control: GenerationControl {
             text_origins,
