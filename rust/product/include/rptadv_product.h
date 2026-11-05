@@ -200,7 +200,7 @@ typedef int (*rptadv_radio_metadata_v1)(void *transmit_context, uint32_t control
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
 /** Exact direct attachment version, independent of the host-services table. */
-#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 4U
+#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 5U
 /** Mutable direct registration; the provider copies callbacks before returning.
  * Initialize accepted_abi_version to zero. Start only when setoption returns zero
  * and acknowledges this exact ABI. Callback code and contexts remain borrowed
@@ -301,6 +301,21 @@ struct rptadv_radio_control_v1 {
     uint32_t forced_ctcss_tenths_hz;     /**< Optional manual transmit tone. */
 };
 
+/** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */
+typedef void (*rptadv_remote_sink_v1)(void *context, const uint8_t *text, uint32_t length);
+/** One uniquely owned asynchronous operation. Functions and context stay live
+ * until destroy. Source flags: bit0 active, bit1 valid; validity is terminal.
+ * take returns zero with one copied JSON result, one while pending, or an error.
+ * destroy cancels and releases without waiting for the physical owner.
+ */
+struct rptadv_remote_ticket_v1 {
+    uint32_t struct_size; /**< Exact complete record size. */
+    uint32_t abi_version; /**< One. */
+    void *context; /**< Unique ticket, never the radio or peer object. */
+    int (*source)(void *ticket, uint32_t flags); /**< Publish current source state. */
+    int (*take)(void *ticket, rptadv_remote_sink_v1 sink, void *context); /**< Copy completion. */
+    void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */
+};
 /** Host I/O primitives consumed by the portable product owner.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
@@ -356,8 +371,10 @@ struct rptadv_host_services_v9 {
      * the same value for both fields. */
     int (*radio_open)(void *context, const char *name, size_t name_length, size_t maximum_frames,
                       void **radio);
-    /** Attach both endpoints before starting. On failure detach/quiesce both endpoints
-     * before return, retaining a safely destroyable reservation. Endpoints are serial
+    /** Attach both endpoints before starting. Failure may retain a partial owner;
+     * radio_quiesce must succeed before callback storage is released. A host without
+     * that optional tail must detach/quiesce both endpoints before returning failure.
+     * Endpoints are serial
      * individually and may run concurrently with each other, never with destroy. */
     int (*radio_activate)(void *context, void *radio, rptadv_radio_receive_v2 receive,
                           void *receive_context, rptadv_radio_transmit_v3 transmit,
@@ -498,6 +515,19 @@ struct rptadv_host_services_v9 {
      * is acquired. Callback lifetime ends with synchronous radio destruction.
      * Zero succeeds; enabled remote compositions require this operation. */
     int (*radio_metadata_bind)(void *context, void *radio, rptadv_radio_metadata_v1 metadata);
+    /** Optional complete remote tail. Advance existing control/DSP adoption
+     * without waiting for physical rig I/O. A disabled composition may omit it. */
+    int (*radio_service)(void *context, void *radio);
+    /** Begin/poll retirement. Zero proves callbacks stopped and physical outputs
+     * safe; one means pending. Any nonzero result retains radio and callbacks.
+     * radio_destroy follows successful retirement. Hosts without this operation
+     * retain the synchronous radio_destroy contract above. */
+    int (*radio_quiesce)(void *context, void *radio);
+    /** Copy a command into the existing physical owner. Flags: bit0 local source,
+     * bit1 source active. Success transfers one complete ticket to the caller. */
+    int (*radio_remote_submit)(void *context, void *radio,
+                               const struct UrpRemoteOperation *operation, uint32_t flags,
+                               struct rptadv_remote_ticket_v1 *ticket);
 };
 
 /** Exact revision of a typed site control request. */

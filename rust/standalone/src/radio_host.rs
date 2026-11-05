@@ -527,9 +527,67 @@ fn finish_activation(
         }
         Err(error) => {
             eprintln!("rpt-advanced radio activation failed: {error}");
+            if let crate::radio_activation::RadioActivationError::Retained { active, .. } = error {
+                handle.active = Some(*active);
+            }
             -1
         }
     }
+}
+
+/// Advance only the already-owned native control mailbox.
+///
+/// # Safety
+/// `radio` is a live reservation serialized by the product control executor.
+pub unsafe extern "C" fn radio_service(_: *mut c_void, radio: *mut c_void) -> i32 {
+    // SAFETY: the caller retains the unique radio reservation through this call.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    handle.active.as_mut().map_or(0, |active| active.service())
+}
+
+/// Poll retirement while preserving callbacks and the partially started owner.
+///
+/// # Safety
+/// The caller retains `radio` and all callback contexts until this returns zero.
+pub unsafe extern "C" fn radio_quiesce(_: *mut c_void, radio: *mut c_void) -> i32 {
+    // SAFETY: same serialized reservation; this does not transfer its ownership.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    handle.active.as_mut().map_or(0, |active| active.quiesce())
+}
+
+/// Submit copied control intent and transfer an independent SDK ticket.
+///
+/// # Safety
+/// `radio` is live; operation/output are complete borrowed records with unique output.
+pub unsafe extern "C" fn radio_remote_submit(
+    _: *mut c_void,
+    radio: *mut c_void,
+    operation: *const crate::abi::UrpRemoteOperation,
+    flags: u32,
+    output: *mut crate::abi::rptadv_remote_ticket_v1,
+) -> i32 {
+    // SAFETY: the synchronous caller lends exclusively writable complete output storage.
+    let Some(output) = (unsafe { output.as_mut() }) else {
+        return -1;
+    };
+    // SAFETY: a zero record contains only valid empty scalar/pointer values.
+    *output = unsafe { std::mem::zeroed() };
+    // SAFETY: the retained reservation and borrowed input remain valid through dispatch.
+    let (Some(handle), Some(operation)) =
+        (unsafe { radio.cast::<RadioHandle>().as_mut() }, unsafe {
+            operation.as_ref()
+        })
+    else {
+        return -1;
+    };
+    handle
+        .active
+        .as_mut()
+        .map_or(-7, |active| active.remote_submit(operation, flags, output))
 }
 
 /// Product host callback that releases an inactive radio reservation.

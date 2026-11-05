@@ -13,6 +13,10 @@ use std::{
     ptr::{self, NonNull},
 };
 
+#[path = "services_remote.rs"]
+mod remote;
+pub use remote::RemoteTicket;
+
 /// Borrowed peer event delivered synchronously by the host owner.
 pub enum PeerInput<'a> {
     /// Complete text payload.
@@ -352,8 +356,16 @@ impl HostServices {
         let processor_tail = offset_of!(abi::rptadv_host_services_v9, radio_control);
         let maintenance_tail = offset_of!(abi::rptadv_host_services_v9, radio_update);
         let metadata_tail = offset_of!(abi::rptadv_host_services_v9, radio_metadata_bind);
+        let remote_tail = offset_of!(abi::rptadv_host_services_v9, radio_service);
         if size < table_size
-            && ![required, processor_tail, maintenance_tail, metadata_tail].contains(&size)
+            && ![
+                required,
+                processor_tail,
+                maintenance_tail,
+                metadata_tail,
+                remote_tail,
+            ]
+            .contains(&size)
         {
             return Err(Error::Admission);
         }

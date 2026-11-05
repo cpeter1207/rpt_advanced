@@ -132,7 +132,7 @@ fn worker_with_interval(status: RadioStatus, interval_ms: u64) -> RadioWorker {
         0,
         interval_ms,
     )
-    .unwrap_or_else(|failure| panic!("prepare callbacks: {:?}", failure.0))
+    .unwrap_or_else(|failure| panic!("prepare callbacks: {failure:?}"))
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn remote_metadata_applies_non_fm_on_the_serial_transmit_owner() {
     let mut linked = 99;
     assert_eq!(unsafe { metadata_callback(context, 0, &mut linked) }, 0);
     assert_eq!(linked, 0);
-    assert_eq!(unsafe { metadata_callback(context, 16, &mut linked) }, -1);
+    assert_eq!(unsafe { metadata_callback(context, 32, &mut linked) }, -1);
     assert_eq!(
         unsafe { metadata_callback(std::ptr::null_mut(), 0, &mut linked) },
         -1
@@ -166,11 +166,15 @@ fn remote_metadata_applies_non_fm_on_the_serial_transmit_owner() {
         -1
     );
     assert!(worker.attach(owners).is_ok());
-    for (flags, expected_keyed) in [(9, 0), (0, 1)] {
+    for (flags, expected_keyed) in [(9, 0), (25, 0), (0, 1)] {
         assert_eq!(unsafe { metadata_callback(context, flags, &mut linked) }, 0);
         for _ in 0..64 {
             assert_eq!(rx(&worker, true, &mut [0.25; 8]), 0);
             assert_eq!(tx(&worker, &mut [0.0; 8]), (0, expected_keyed));
+            assert_eq!(
+                worker.transmit.status.remote_command_source_active(),
+                flags != 25
+            );
         }
         assert_eq!(unsafe { metadata_callback(context, flags, &mut linked) }, 0);
         assert_eq!(linked, 0);
@@ -488,7 +492,9 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
     ) else {
         panic!("expected failure")
     };
-    let (_, radio) = *failure;
+    let PrepareFailure::Reservation(_, radio) = failure else {
+        panic!("unactivated reservation")
+    };
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
     drop(radio);
     let (mut runtime, owners) = audio_owners();
@@ -501,6 +507,42 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
     );
     assert!(runtime.node("1000").unwrap().register_audio().is_none());
     drop(owners);
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn radio_retirement_poll_preserves_callbacks_and_owners_while_pending() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    thread_local! { static READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    unsafe extern "C" fn quiesce(_: *mut c_void, _: *mut c_void) -> i32 {
+        if READY.get() { 0 } else { 1 }
+    }
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.radio_quiesce = Some(quiesce);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let (mut runtime, owners) = audio_owners();
+    let mut worker = RadioWorker::prepare(
+        services.radio("1000", "usb", 8).unwrap(),
+        Instant::now(),
+        RadioStatus::default(),
+        0,
+        50,
+    )
+    .unwrap_or_else(|_| panic!("prepare"));
+    assert!(worker.attach(owners).is_ok());
+    let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    assert_eq!(worker.poll_stop(), Ok(false));
+    assert!(worker.radio.is_some());
+    assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
+    READY.set(true);
+    assert_eq!(worker.poll_stop(), Ok(true));
+    assert_eq!(
+        crate::fixture::RADIO_DROPS.load(Ordering::Relaxed),
+        before + 1
+    );
+    drop(worker.stop());
     assert!(runtime.stop(0));
 }
 #[test]
@@ -967,16 +1009,26 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
     ) else {
         panic!("activation must fail")
     };
-    let (error, radio) = *failure;
+    let PrepareFailure::Activation(error, mut failed) = failure else {
+        panic!("retain partial activation")
+    };
     assert!(matches!(error, Error::Operation));
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
-    let mut worker = RadioWorker::prepare(radio, Instant::now(), RadioStatus::default(), 0, 50)
-        .unwrap_or_else(|_| panic!("reservation retry"));
+    assert_eq!(failed.poll_stop(), Ok(true));
+    drop(failed);
+    let mut worker = RadioWorker::prepare(
+        services.radio("1000", "usb", 8).unwrap(),
+        Instant::now(),
+        RadioStatus::default(),
+        0,
+        50,
+    )
+    .unwrap_or_else(|_| panic!("reservation retry"));
     assert!(worker.attach(owners).is_ok());
     drop(worker.stop().unwrap());
     assert_eq!(
         crate::fixture::RADIO_DROPS.load(Ordering::Relaxed),
-        before + 1
+        before + 2
     );
     assert!(runtime.stop(0));
 }

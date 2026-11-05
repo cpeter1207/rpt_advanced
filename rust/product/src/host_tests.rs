@@ -1991,6 +1991,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
 
     let lease = Arc::new(Mutex::new(Lease {
         quiesced: false,
+        quiescing: false,
         owners: None,
         worker: None,
         epoch: Instant::now(),

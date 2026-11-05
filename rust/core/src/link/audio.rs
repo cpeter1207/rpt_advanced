@@ -574,6 +574,7 @@ impl<P: PeerInput> LinkAudio<P> {
             .as_mut()
             .is_some_and(|input| input.render(&mut self.text_samples[..count]));
         self.peer_source_active = any_peer_active || text_active;
+        controller.set_nonlocal_source_activity(self.peer_source_active);
         let keyed = controller.process_audio_with_parrot(
             receiving,
             linked_active,

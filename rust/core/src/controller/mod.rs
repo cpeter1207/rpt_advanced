@@ -119,6 +119,8 @@ struct ProgramSample<'a> {
 pub struct NodeController {
     settings: ControllerSettings,
     remote_non_fm: bool,
+    remote_unqualified_open: bool,
+    nonlocal_source_activity: bool,
     duplex: DuplexPolicy,
     identifiers: IdentifierPolicy,
     ids: Vec<Identifier>,
@@ -159,6 +161,18 @@ impl NodeController {
     /// open receive; that receiver never repeats into its own transmitter.
     pub fn set_remote_non_fm(&mut self, enabled: bool) {
         self.remote_non_fm = enabled;
+    }
+
+    /// Publish the adapter's explicit open/no-qualifier source fact. Raw receive
+    /// still drives rendering; only command-reply admission may disregard it.
+    pub fn set_remote_unqualified_open(&mut self, enabled: bool) {
+        self.remote_unqualified_open = enabled;
+    }
+
+    /// Publish peer/text activity independently of the local receive indication.
+    /// The link mixer refreshes this on the same TX owner before each render.
+    pub(crate) fn set_nonlocal_source_activity(&mut self, active: bool) {
+        self.nonlocal_source_activity = active;
     }
 
     fn repeats_local(&self) -> bool {
@@ -247,6 +261,8 @@ impl NodeController {
             Self {
                 settings,
                 remote_non_fm: false,
+                remote_unqualified_open: false,
+                nonlocal_source_activity: false,
                 duplex: DuplexPolicy::default(),
                 identifiers,
                 ids,
@@ -664,8 +680,10 @@ impl NodeController {
         }
         self.telemetry.poll_status();
         let receive = receiving || linked;
-        let status_idle = !receive
-            && !source_activity
+        let unqualified_local = self.remote_non_fm && self.remote_unqualified_open;
+        let status_idle = !linked
+            && !self.nonlocal_source_activity
+            && (unqualified_local || !receive && !source_activity)
             && local_media.is_none()
             && self
                 .telemetry

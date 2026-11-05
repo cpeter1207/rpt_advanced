@@ -12,6 +12,13 @@ pub enum RadioActivationError {
     InvalidCallbacks,
     /// The shared product returned a failure status.
     Product(i32),
+    /// Startup may have retained callbacks; keep the exact native owner until quiesced.
+    Retained {
+        /// Original startup failure, preserved through later cleanup.
+        status: i32,
+        /// Partially started owner retained by the radio reservation.
+        active: Box<ActiveRadio>,
+    },
 }
 
 impl std::fmt::Display for RadioActivationError {
@@ -22,6 +29,10 @@ impl std::fmt::Display for RadioActivationError {
                 formatter.write_str("invalid native radio callbacks or frame bound")
             }
             Self::Product(status) => write!(formatter, "shared radio product failed ({status})"),
+            Self::Retained { status, .. } => write!(
+                formatter,
+                "shared radio startup failed ({status}); retirement pending"
+            ),
         }
     }
 }
@@ -51,6 +62,16 @@ pub struct ActiveRadio {
     site_bind: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteBinding) -> i32,
     site_publish: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteRequest) -> i32,
     site_snapshot: unsafe extern "C" fn(*mut c_void, u32, *mut abi::UrpAstSiteSnapshot) -> i32,
+}
+
+impl std::fmt::Debug for ActiveRadio {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActiveRadio")
+            .field("open", &self.handle.is_some())
+            .field("updating", &self.updating)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ActiveRadio {
@@ -162,7 +183,10 @@ impl ActiveRadio {
         // SAFETY: successful create returns this stopped, uniquely owned station.
         let status = unsafe { start(handle.as_ptr()) };
         if status != 0 {
-            return Err(RadioActivationError::Product(status));
+            return Err(RadioActivationError::Retained {
+                status,
+                active: Box::new(active),
+            });
         }
         Ok(active)
     }
@@ -189,6 +213,62 @@ impl ActiveRadio {
             // SAFETY: the output is exclusively borrowed for this synchronous call.
             unsafe { (self.site_snapshot)(handle.as_ptr(), bank, output) }
         })
+    }
+
+    /// Pump the existing SDK control owner without a physical rig exchange.
+    pub(crate) fn service(&mut self) -> i32 {
+        self.handle.map_or(-1, |handle| {
+            self.api.native_service.map_or(-7, |call| {
+                // SAFETY: the serialized caller retains its native station.
+                unsafe { call(handle.as_ptr()) }
+            })
+        })
+    }
+
+    /// Keep callbacks and native ownership while physical retirement is pending.
+    pub(crate) fn quiesce(&mut self) -> i32 {
+        self.handle.map_or(0, |handle| {
+            let call = self.api.native_quiesce.unwrap_or(self.stop);
+            // SAFETY: no handle or callback is released by this poll.
+            unsafe { call(handle.as_ptr()) }
+        })
+    }
+
+    /// Copy intent into the shared physical owner's bounded queue.
+    pub(crate) fn remote_submit(
+        &mut self,
+        operation: &abi::UrpRemoteOperation,
+        flags: u32,
+        output: &mut abi::rptadv_remote_ticket_v1,
+    ) -> i32 {
+        let (Some(handle), Some(submit), Some(source), Some(take), Some(destroy)) = (
+            self.handle,
+            self.api.native_remote_submit,
+            self.api.remote_source,
+            self.api.remote_take,
+            self.api.remote_destroy,
+        ) else {
+            return -7;
+        };
+        let mut ticket = std::ptr::null_mut();
+        // SAFETY: inputs are borrowed and success transfers one independent SDK ticket.
+        let code = unsafe { submit(handle.as_ptr(), operation, flags, &mut ticket) };
+        if code != 0 || ticket.is_null() {
+            if !ticket.is_null() {
+                // SAFETY: even an erroneous partial transfer retains its matching destructor.
+                unsafe { destroy(ticket) };
+            }
+            return if code == 0 { -1 } else { code };
+        }
+        *output = abi::rptadv_remote_ticket_v1 {
+            struct_size: std::mem::size_of::<abi::rptadv_remote_ticket_v1>() as u32,
+            abi_version: 1,
+            context: ticket,
+            source: Some(source),
+            take: Some(take),
+            destroy: Some(destroy),
+        };
+        0
     }
 }
 
@@ -382,7 +462,13 @@ fn retain_operations(api: &abi::UrpAstDescriptor) -> abi::UrpAstDescriptor {
         native_accept_update,
         native_finish_update,
         native_destroy_update,
-        native_processing_status_text
+        native_processing_status_text,
+        native_service,
+        native_quiesce,
+        native_remote_submit,
+        remote_source,
+        remote_take,
+        remote_destroy
     );
     retained
 }
@@ -509,6 +595,29 @@ pub(crate) mod tests {
     unsafe extern "C" fn stop(_: *mut c_void) -> i32 {
         CALLS.with(|calls| calls.borrow_mut().push("stop"));
         0
+    }
+
+    #[test]
+    fn native_quiesce_retains_the_station_until_the_physical_owner_finishes() {
+        thread_local! { static READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+        unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
+            CALLS.with(|calls| calls.borrow_mut().push("quiesce"));
+            if READY.get() { 0 } else { 1 }
+        }
+        CALLS.with(|calls| calls.borrow_mut().clear());
+        // SAFETY: flat nullable descriptor; only the declared fake callbacks are used.
+        let mut api: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.struct_size = std::mem::size_of::<abi::UrpAstDescriptor>() as u32;
+        api.native_quiesce = Some(quiesce);
+        let mut radio = fixture_active_radio(api);
+        assert_eq!(radio.quiesce(), 1);
+        assert!(radio.handle.is_some());
+        READY.set(true);
+        assert_eq!(radio.quiesce(), 0);
+        CALLS.with(|calls| assert_eq!(&*calls.borrow(), &["quiesce", "quiesce"]));
+        drop(radio);
+        CALLS
+            .with(|calls| assert_eq!(&*calls.borrow(), &["quiesce", "quiesce", "stop", "destroy"]));
     }
     unsafe extern "C" fn destroy(_: *mut c_void) {
         CALLS.with(|calls| calls.borrow_mut().push("destroy"));
@@ -1093,10 +1202,20 @@ pub(crate) mod tests {
             };
             let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
             let status = result.as_ref().err().map(|error| match error {
-                RadioActivationError::Product(status) => *status,
+                RadioActivationError::Product(status)
+                | RadioActivationError::Retained { status, .. } => *status,
                 error => panic!("unexpected client error: {error}"),
             });
             assert_eq!(status, expected_status);
+            if scenario == (0, true, -8) {
+                CALLS.with(|calls| {
+                    assert_eq!(
+                        &*calls.borrow(),
+                        &["create", "start"],
+                        "a failed startup retains its callback owner until checked cleanup"
+                    )
+                });
+            }
             drop(result);
             CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected_calls));
         }

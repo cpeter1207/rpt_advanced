@@ -17,9 +17,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../product/include/rptadv_product.h");
     println!("cargo:rerun-if-changed=../control-abi/include/rptadv_control_adapter.h");
     println!("cargo:rerun-if-env-changed=RPTADV_CODEC_INCLUDE");
+    println!("cargo:rerun-if-env-changed=URP_PRODUCT_INCLUDE");
     println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,librptadv_asterisk_adapter.so.1");
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
+        .clang_arg(format!("-I{}", env::var("URP_PRODUCT_INCLUDE").unwrap_or_else(|_| "/usr/include".to_owned())))
         .clang_arg("-I../media-support/include")
         .clang_arg("-I../control-abi/include")
         .clang_arg(format!("-I{}", env::var("RPTADV_CODEC_INCLUDE").unwrap_or_else(|_| "/usr/include/rptadv-codec".to_owned())))
@@ -33,6 +35,8 @@ fn main() {
         .allowlist_type("rptadv_.*")
         .allowlist_var("RPTADV_SITE_.*")
         .allowlist_type("UrpAstSite.*")
+        .allowlist_type("Urp(AstRemoteControl|RemoteOperation|RemoteTicket)")
+        .allowlist_var("URP_AST_(REMOTE_.*|OPTION_REMOTE_CONTROL)")
         .allowlist_var("URP_AST_(SITE_.*|OPTION_SITE_IO)")
         .allowlist_type("urp_ast_(direct_callbacks|link_attach)")
         .allowlist_var("URP_AST_(OPTION_DIRECT_CALLBACKS|DIRECT_CALLBACKS_ABI_VERSION|OPTION_LINK_ATTACH|LINK_ATTACH_ABI_VERSION)")

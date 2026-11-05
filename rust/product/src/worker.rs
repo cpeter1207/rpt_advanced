@@ -21,7 +21,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -218,6 +218,7 @@ pub struct RadioStatus {
     carrier: Arc<AtomicU64>,
     dtmf: Arc<AtomicBool>,
     transmit_keyed: Arc<AtomicBool>,
+    remote_controls: Arc<AtomicU32>,
     handoff: Arc<LocalHandoff>,
 }
 #[derive(Default)]
@@ -353,6 +354,11 @@ impl RadioStatus {
         let value = self.carrier.load(Ordering::Acquire);
         (value & 1 != 0, value >> 1)
     }
+    /// Actual local activity for explicit command-source waiting. An intentionally
+    /// open, unqualified non-FM receiver cannot supply an unkey edge.
+    pub fn remote_command_source_active(&self) -> bool {
+        self.snapshot().0 && self.remote_controls.load(Ordering::Acquire) & 25 != 25
+    }
     pub(crate) fn transmit_keyed(&self) -> bool {
         self.transmit_keyed.load(Ordering::Acquire)
     }
@@ -440,13 +446,17 @@ unsafe extern "C" fn metadata_callback(
         return -1;
     };
     *linked = 0;
-    if controls & !15 != 0 {
+    if controls & !31 != 0 {
         return -1;
     }
     // SAFETY: only the host's serial TX owner accesses these cells.
     unsafe {
         *context.remote_controls.get() = controls;
     }
+    context
+        .status
+        .remote_controls
+        .store(controls, Ordering::Release);
     if context.active.load(Ordering::Acquire) {
         // SAFETY: same owner as the writer in transmit.
         *linked = u32::from(unsafe { *context.linked_active.get() });
@@ -703,6 +713,9 @@ unsafe fn transmit(
     // SAFETY: metadata and PCM execute on the same serial TX owner.
     let controls = unsafe { *context.remote_controls.get() };
     transmit.controller.set_remote_non_fm(controls & 9 == 9);
+    transmit
+        .controller
+        .set_remote_unqualified_open(controls & 17 == 17);
     #[cfg(test)]
     if take_test_failure(TestFailure::TransmitPanic) {
         panic!("injected transmit processing panic");
@@ -753,7 +766,31 @@ pub struct RadioWorker {
     reported_faults: [u64; 6],
     last_report_ms: u64,
 }
+
+/// Setup failure retains the exact owner whose callbacks may already be bound.
+pub enum PrepareFailure {
+    /// Activation has not borrowed either callback context.
+    Reservation(Error, Box<Radio>),
+    /// The host may retain callbacks; poll retirement before releasing this owner.
+    Activation(Error, Box<RadioWorker>),
+}
+
+impl std::fmt::Debug for PrepareFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reservation(error, _) => {
+                formatter.debug_tuple("Reservation").field(error).finish()
+            }
+            Self::Activation(error, _) => formatter.debug_tuple("Activation").field(error).finish(),
+        }
+    }
+}
 impl RadioWorker {
+    /// Pump only existing control/DSP adoption; the physical owner retains I/O errors.
+    pub(crate) fn service_remote(&mut self) -> Result<(), i32> {
+        self.radio.as_mut().ok_or(-7)?.service()
+    }
+
     /// Retain the current stream while the shared native owner replaces its plan.
     pub(crate) fn configuration_update(&mut self, phase: u32) -> Result<bool, i32> {
         self.radio.as_mut().ok_or(-7)?.configuration_update(phase)
@@ -848,14 +885,14 @@ impl RadioWorker {
     }
 
     /// Attach both inactive endpoints and start the reserved channel transactionally.
-    /// Failed activation synchronously detaches endpoints and returns the reservation.
+    /// Failed activation retains the complete callback owner until safe retirement.
     pub fn prepare(
         mut radio: Radio,
         epoch: Instant,
         status: RadioStatus,
         squelch_delay_ms: u64,
         status_snapshot_interval_ms: u64,
-    ) -> Result<Self, Box<(Error, Radio)>> {
+    ) -> Result<Self, PrepareFailure> {
         let maximum = radio.maximum_frames();
         let ring = LocalRingUpdate::with_handoff(squelch_delay_ms, status.handoff.clone());
         #[cfg(test)]
@@ -865,7 +902,10 @@ impl RadioWorker {
             ring
         };
         let Ok(update) = ring else {
-            return Err(Box::new((Error::Allocation, radio)));
+            return Err(PrepareFailure::Reservation(
+                Error::Allocation,
+                Box::new(radio),
+            ));
         };
         let observer = update.transmit.observer.clone();
         let handoff = update.transmit.handoff.clone();
@@ -907,23 +947,12 @@ impl RadioWorker {
             linked_active: UnsafeCell::new(false),
         });
         if radio.bind_metadata(Some(metadata_callback)).is_err() {
-            return Err(Box::new((Error::Operation, radio)));
+            return Err(PrepareFailure::Reservation(
+                Error::Operation,
+                Box::new(radio),
+            ));
         }
-        // SAFETY: boxes have stable addresses and outlive the activated radio. On failure
-        // the host must detach both endpoints before returning the still-owned reservation.
-        if unsafe {
-            radio.activate(
-                Some(receive_callback),
-                std::ptr::from_ref(&*receive).cast_mut().cast(),
-                Some(transmit_callback),
-                std::ptr::from_ref(&*transmit).cast_mut().cast(),
-            )
-        }
-        .is_err()
-        {
-            return Err(Box::new((Error::Operation, radio)));
-        }
-        Ok(Self {
+        let mut worker = Self {
             radio: Some(radio),
             receive,
             transmit,
@@ -939,7 +968,24 @@ impl RadioWorker {
             latest_transmit: None,
             reported_faults: [0; 6],
             last_report_ms: 0,
-        })
+        };
+        // SAFETY: the complete owner retains both stable callback boxes on success
+        // and failure. Only checked retirement may release them after activation.
+        let activated = unsafe {
+            worker.radio.as_mut().unwrap().activate(
+                Some(receive_callback),
+                std::ptr::from_ref(&*worker.receive).cast_mut().cast(),
+                Some(transmit_callback),
+                std::ptr::from_ref(&*worker.transmit).cast_mut().cast(),
+            )
+        };
+        if activated.is_err() {
+            return Err(PrepareFailure::Activation(
+                Error::Operation,
+                Box::new(worker),
+            ));
+        }
+        Ok(worker)
     }
     fn fault_counts(&self, ring: &Observation) -> [u64; 6] {
         let handoff = &self.handoff;
@@ -1074,14 +1120,29 @@ impl RadioWorker {
         self.receive.active.store(true, Ordering::Release);
         Ok(())
     }
-    /// Synchronously stop/destroy the channel before reclaiming either fixed owner.
-    pub fn stop(mut self) -> Option<AudioOwners> {
+    /// Poll retirement without relinquishing callback storage or audio ownership.
+    /// A false result or error keeps the radio for a later control-plane poll.
+    pub fn poll_stop(&mut self) -> Result<bool, i32> {
+        if let Some(radio) = &mut self.radio {
+            if !radio.poll_quiesce()? {
+                return Ok(false);
+            }
+        }
         drop(self.radio.take());
         self.receive.active.store(false, Ordering::Release);
         self.transmit
             .status
             .transmit_keyed
             .store(false, Ordering::Release);
+        Ok(true)
+    }
+
+    /// Synchronous final cleanup for callers that cannot retain a pending owner.
+    /// Managed device handoff uses `poll_stop` before entering this destructor path.
+    pub fn stop(mut self) -> Option<AudioOwners> {
+        while self.poll_stop() != Ok(true) {
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        }
         // SAFETY: synchronous destroy has stopped both callbacks.
         let receive = unsafe { &mut *self.receive.owner.get() }.take();
         let transmit = unsafe { &mut *self.transmit.owner.get() }.take();

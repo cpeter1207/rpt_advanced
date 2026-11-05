@@ -12,7 +12,7 @@ use crate::{
     },
     services::{HostServices, PeerIo, ProcessedPeer},
     status_post::{PostConfig, StatusPostService},
-    worker::{Audio, AudioOwners, LocalRingUpdate, RadioWorker},
+    worker::{Audio, AudioOwners, LocalRingUpdate, PrepareFailure, RadioWorker},
 };
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
@@ -46,6 +46,7 @@ mod site;
 
 struct Lease {
     quiesced: bool,
+    quiescing: bool,
     owners: Option<AudioOwners>,
     worker: Option<RadioWorker>,
     epoch: Instant,
@@ -53,12 +54,21 @@ struct Lease {
 }
 impl Lease {
     fn quiesce(&mut self) -> bool {
+        self.quiescing = true;
+        if self
+            .worker
+            .as_mut()
+            .is_some_and(|worker| worker.poll_stop() != Ok(true))
+        {
+            return false;
+        }
         if let Some(worker) = self.worker.take() {
             self.quiesced = true;
             if let Some(owners) = worker.stop() {
                 self.owners = Some(owners);
             }
         }
+        self.quiescing = false;
         true
     }
     fn attach(&mut self, owners: AudioOwners) -> bool {
@@ -112,12 +122,13 @@ impl DeviceHandoff for Device {
     }
     fn close(&mut self) {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-        lease.quiesce();
-        lease.quiesced = false;
+        if lease.quiesce() {
+            lease.quiesced = false;
+        }
     }
     fn open(&mut self, settings: &GenerationSettings) -> bool {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-        if lease.worker.is_some() || lease.quiesced {
+        if lease.worker.is_some() || lease.quiesced || lease.quiescing {
             return false;
         }
         let radio = self.services.radio(
@@ -143,7 +154,10 @@ impl DeviceHandoff for Device {
                 true
             }
             Err(failure) => {
-                drop(failure);
+                if let PrepareFailure::Activation(_, worker) = failure {
+                    lease.worker = Some(*worker);
+                    lease.quiesce();
+                }
                 false
             }
         }
@@ -404,6 +418,7 @@ impl Host {
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
                     quiesced: false,
+                    quiescing: false,
                     owners: None,
                     worker: None,
                     epoch,
@@ -564,6 +579,7 @@ impl Host {
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
                     quiesced: false,
+                    quiescing: false,
                     owners: None,
                     worker: None,
                     epoch,
@@ -1191,7 +1207,15 @@ impl Host {
         self.advance_sites(clock);
         self.runtime.prepare_messages(clock);
         for (local, lease) in &self.leases {
-            if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {
+            let mut lease = lease.lock().unwrap_or_else(|e| e.into_inner());
+            if lease.quiescing {
+                lease.quiesce();
+                continue;
+            }
+            if let Some(worker) = &mut lease.worker {
+                // A failed device cannot stop control/peer service on other nodes.
+                // The physical owner closes admission and retains its first cause.
+                let _ = worker.service_remote();
                 worker.report_faults(local, clock.now_ms);
                 worker.collect_snapshots();
             }
@@ -1436,7 +1460,9 @@ impl Host {
     }
 }
 fn prune_leases(leases: &mut Vec<(String, Arc<Mutex<Lease>>)>) {
-    leases.retain(|(_, lease)| Arc::strong_count(lease) > 1);
+    leases.retain(|(_, lease)| {
+        Arc::strong_count(lease) > 1 || !lease.lock().unwrap_or_else(|e| e.into_inner()).quiesce()
+    });
 }
 // Only a protected/retiring generation is retryable; preparation failures keep their diagnosis.
 fn replacement_completed(result: Result<u64, RuntimeError>) -> Result<bool, RuntimeError> {

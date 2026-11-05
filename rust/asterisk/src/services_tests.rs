@@ -11,6 +11,31 @@ const LINK_OPTION_FAILED: u8 = 46;
 const SITE_ACK_MISSING: u8 = 47;
 const SITE_ACK_WRONG: u8 = 48;
 const SITE_OPTION_FAILED: u8 = 49;
+const REMOTE_PENDING: u8 = 50;
+const REMOTE_ACK_MISSING: u8 = 51;
+
+#[test]
+fn remote_host_bridge_preserves_pending_owner_and_requires_acknowledgment() {
+    reset();
+    let null = ptr::null_mut();
+    // SAFETY: the fixture retains this reservation through every serialized call.
+    unsafe {
+        let mut radio = null;
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+        assert_eq!(radio_service(null, radio), 0);
+        host(|state| state.failure = REMOTE_PENDING);
+        assert_eq!(radio_quiesce(null, radio), 1);
+        assert_eq!(host(|state| state.channels), 1);
+        host(|state| state.failure = REMOTE_ACK_MISSING);
+        assert_eq!(radio_quiesce(null, radio), -7);
+        assert_eq!(host(|state| state.channels), 1);
+        host(|state| state.failure = 0);
+        assert_eq!(radio_quiesce(null, radio), 0);
+        assert_eq!(host(|state| state.channels), 1);
+        radio_destroy(null, radio);
+    }
+    host(|state| state.clean());
+}
 
 #[test]
 fn site_bridge_forwards_on_the_reserved_channel_and_requires_acknowledgment() {
@@ -177,6 +202,19 @@ unsafe extern "C" fn ast_channel_setoption(
     block: i32,
 ) -> i32 {
     assert_eq!(block, 0);
+    if option == ffi::URP_AST_OPTION_REMOTE_CONTROL as i32 {
+        assert_eq!(length as usize, size_of::<ffi::UrpAstRemoteControl>());
+        // SAFETY: this fixture is passed a complete exclusive control envelope.
+        let request = unsafe { &mut *data.cast::<ffi::UrpAstRemoteControl>() };
+        assert_eq!(request.abi_version, 1);
+        let failure = host(|state| state.failure);
+        request.accepted_abi_version = u32::from(failure != REMOTE_ACK_MISSING);
+        return match request.operation {
+            ffi::URP_AST_REMOTE_SERVICE => 0,
+            ffi::URP_AST_REMOTE_QUIESCE => i32::from(failure == REMOTE_PENDING),
+            _ => -7,
+        };
+    }
     if option == 0x52505349 {
         assert_eq!(length as usize, size_of::<ffi::UrpAstSiteControl>());
         let site = unsafe { &mut *data.cast::<ffi::UrpAstSiteControl>() };
@@ -244,13 +282,16 @@ unsafe extern "C" fn ast_channel_setoption(
     // SAFETY: attach_direct supplies exclusive access to this complete live descriptor.
     let descriptor = unsafe { &mut *data.cast::<ffi::urp_ast_direct_callbacks>() };
     assert!(descriptor.receive.is_some() && descriptor.transmit.is_some());
-    assert_eq!(descriptor.abi_version, 4);
+    assert_eq!(
+        descriptor.abi_version,
+        ffi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION
+    );
     assert_eq!(descriptor.accepted_abi_version, 0);
     let failure = host(|state| state.failure);
     descriptor.accepted_abi_version = match failure {
         DIRECT_ACK_MISSING => 0,
         DIRECT_ACK_WRONG => 1,
-        _ => 4,
+        _ => ffi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
     };
     if failure == DIRECT_OPTION_FAILED {
         -1
@@ -307,8 +348,8 @@ fn radio_activation_rejects_unacknowledged_direct_callbacks_before_call() {
                 "direct attachment must be acknowledged: {failure}"
             );
             assert_eq!(
-                retained_channels, 0,
-                "failed attachment must hang up before returning"
+                retained_channels, 1,
+                "failed attachment retains its callback owner until quiesced/destroyed"
             );
         }
         host(|state| {

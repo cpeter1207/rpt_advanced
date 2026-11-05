@@ -15,6 +15,8 @@ static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
 mod echo;
 #[path = "services_processing_tests.rs"]
 mod processing;
+#[path = "services_remote_tests.rs"]
+mod remote;
 
 unsafe extern "C" fn echo_info(
     _: *mut c_void,
