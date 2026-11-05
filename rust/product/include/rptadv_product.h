@@ -311,7 +311,8 @@ typedef void (*rptadv_remote_sink_v1)(void *context, const uint8_t *text, uint32
 struct rptadv_remote_ticket_v1 {
     uint32_t struct_size; /**< Exact complete record size. */
     uint32_t abi_version; /**< One. */
-    void *context; /**< Unique ticket, never the radio or peer object. */
+    /** Unique ticket, never the radio or peer object. */
+    void *context;
     int (*source)(void *ticket, uint32_t flags); /**< Publish current source state. */
     int (*take)(void *ticket, rptadv_remote_sink_v1 sink, void *context); /**< Copy completion. */
     void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */

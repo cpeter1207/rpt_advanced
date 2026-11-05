@@ -1,3 +1,12 @@
+rpt-advanced (0.1.0~alpha20-1) unstable; urgency=medium
+
+  * Operate shared remote-base radios with remappable DTMF and source replies.
+  * Support configuration-only memories, scan lists and RF safety limits.
+  * Commit radio reloads after asynchronous physical and DSP readiness.
+  * Require USBRadioPlus SDK28, direct callbacks5, product7 and host services9.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Thu, 05 Nov 2026 12:18:44 -0600
+
 rpt-advanced (0.1.0~alpha19-1) unstable; urgency=medium
 
   * Configure shared local, link and voice/telemetry processing in rpt_advanced.conf.
