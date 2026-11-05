@@ -1,6 +1,6 @@
 # ADR 0004: Hamlib remote-base boundary
 
-Status: Planned; decision accepted
+Status: In progress; decision accepted (shared-control design approved 2026-11-04)
 
 ## Context
 
@@ -26,6 +26,14 @@ when available, and a supported streaming API when the radio provides one.
 COS, CTCSS, and DCS remain USBRadioPlus DSP or hardware-signaling
 responsibilities unless a practical Hamlib replacement exists.
 
+Decoder programming is separate from tone qualification. Generic Hamlib can
+set receive codes but does not provide independent CTCSS/DCS-present status.
+Use the configured DSP or external GPIO qualifier. An explicit
+`decode_control_source = hamlib` may program the radio while GPIO provides
+its qualified signal; otherwise programming follows the selected decoder.
+Never infer decoded tone from configured code, TSQL/CSQL enable, raw DCD, or
+audio level. Unsupported qualification is rejected without source fallback.
+
 On the appliance, a direct-codec radio port is the conventional-radio audio
 source and its adjacent USB-C CAT port carries native USB CAT or a USB-to-serial
 adapter. Hamlib network transports use the appliance Ethernet or Wi-Fi path.
@@ -40,10 +48,12 @@ selection decisions.
 
 Each node configures permitted receive and transmit frequency ranges, modes,
 transmit-power limits, and receive-only ranges. A request outside those limits
-is rejected. A non-FM mode on a single-sideband-capable radio requires full
-duplex so a linked peer can key the transmitter when RF squelch is unreliable.
-Reject the request when the selected radio and audio path cannot provide full
-duplex.
+is rejected. Non-FM operation keeps controller transmit admission independent
+of receive qualification so a linked peer can key the transmitter when RF
+squelch is unreliable. A physically half-duplex radio interrupts receive
+while transmitting; simultaneous RF receive/transmit is not required. This
+corrects the earlier conflation of controller duplex operation with physical
+radio duplex capability.
 
 AM and single-sideband speech squelch uses stateful 16 kHz Silero VAD through
 ONNX Runtime. A configurable fixed SSB passband in the shared FFmpeg graph is
@@ -56,9 +66,62 @@ Asterisk CLI users. Per-node DTMF remote-base control is open,
 unlock-code-protected, or disabled. Its default configurable command map
 extends familiar AllStarLink commands with frequency, mode, receive/transmit
 VFO, split/offset, transmit power, CTCSS/DCS, remote-base status, and scan
-operations. Named frequency/mode/tone memories and named scan lists are
-required remote-base capabilities; their detailed scan and persistence policy
-remains separately configurable.
+operations. Every supported remote-base operating function has a DTMF
+representation; none is restricted to CLI/REST for implementation convenience.
+The default remappable `*6` family extends familiar ASL remote commands without
+changing existing link commands or `*722`.
+
+Use one versioned remote-base shared library for both standalone and
+USBRadioPlus. It owns limits, tune transactions, memories, and scanning;
+Hamlib remains a separate dependency adapter. Preserve existing parallel-port
+channel selection and RTX programming through the same physical GPIO owner.
+Only Asterisk channel/framing and other genuinely Asterisk-specific functions
+are exempt from standalone parity.
+
+Named frequency/mode/tone memories and scan lists are configuration-only.
+DTMF recalls/queries memories and operates scans but does not edit or save
+their definitions. Scan dwell defaults to 500 ms after tune/settle, resume to
+2,000 ms after activity ends, and priority scanning to disabled. Scan activity
+holds the current member. Transmit uses only its fully applied, permitted
+state; stop retains that member, and restart selects the configured startup
+memory rather than resuming a live scan. Rig I/O is serialized per physical
+owner outside audio callbacks; one blocked rig cannot block other rigs.
+
+Activation means the physical worker has admitted the rig's capabilities and
+committed its initial DSP state. Spawning a worker does not establish readiness.
+Reload retains the candidate, previous configuration and callback owners while
+the existing control pump polls activation. It publishes the new generation
+only after every candidate is ready. Failure triggers checked retirement and
+asynchronous restoration of the old generation. Failed restoration leaves that
+node RF-inhibited and retains the original diagnostic. Other radios and peer
+service continue while the transaction waits. Both hosts retain their staged
+configuration until the shared product reports completion or safe rollback.
+
+The approved [design](../../../docs/superpowers/specs/2026-11-04-hamlib-remote-base-design.md)
+and [implementation plan](../../../docs/superpowers/plans/2026-11-04-hamlib-remote-base.md)
+specify the contract, DTMF, safety, and validation details.
+
+## Implementation status
+
+The candidate implements the shared control engine, separate Hamlib adapter,
+retained parallel backends, configuration-only memories and scan lists, complete
+remote-base DTMF operations, independent signaling, and asynchronous activation
+and rollback in both radio hosts. Each Hamlib context retains its own copied
+capability record through native cleanup so transport options cannot change
+another rig's model defaults. Native layouts remain private and are generated
+from the installed headers.
+
+The [remote engine PR](https://github.com/cpeter1207/librptadvremote/pull/1) and
+[Hamlib adapter PR](https://github.com/cpeter1207/rptadv-hamlib-adapter/pull/1)
+pass the full native Debian 13 gates, including production line and branch
+coverage. Focused host tests cover readiness, retained generations, rollback,
+source-specific replies, and the shared physical owner. Full host gates,
+publication, and physical-radio qualification are pending. No node has been
+changed for this implementation.
+
+Current audio paths are CM119 and general PortAudio/ALSA. Streaming-radio
+audio, human-speech squelch, and adaptive I/Q selection remain planned. REST and
+the full CLI follow ADR 0023; this work does not implement those interfaces.
 
 ## Consequences
 
