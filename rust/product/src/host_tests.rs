@@ -3,6 +3,8 @@ use super::*;
 mod egress_load;
 #[path = "native_maintenance_host_tests.rs"]
 mod native_maintenance;
+#[path = "host_remote_tests.rs"]
+mod remote;
 #[path = "site_host_tests.rs"]
 mod site;
 use crate::{

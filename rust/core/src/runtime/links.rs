@@ -228,6 +228,28 @@ impl NodeLinkControl {
         }
         Ok(())
     }
+    /// Recheck the exact collector without extending its administrative grant.
+    pub(crate) fn remote_authorized(&mut self, operation: &DigitOperation, now_ms: u64) -> bool {
+        if !self.admitting || operation.reply.as_ref().is_some_and(PeerReply::ended) {
+            return false;
+        }
+        let Some(request) = operation.remote else {
+            return false;
+        };
+        let commands = if let Some(reply) = &operation.reply {
+            self.peer_commands
+                .iter_mut()
+                .find(|(name, source, _)| {
+                    Some(name.as_str()) == operation.origin.as_deref() && source == reply
+                })
+                .map(|(_, _, commands)| commands)
+        } else {
+            Some(&mut self.commands)
+        };
+        commands.is_some_and(|commands| {
+            commands.remote_authorized(request.administrative(), operation.admin_authorized, now_ms)
+        })
+    }
     /// Renew the local source grant only after successful administrative work.
     pub(crate) fn confirm_administrative_command(&mut self, now_ms: u64) {
         self.commands.confirm_administrative_action(now_ms);
@@ -569,24 +591,8 @@ impl NodeLinkControl {
         };
         let effect = match operation.command.action {
             LinkAction::RemoteBase => {
-                let request = operation.remote.ok_or(AdmissionError::Invalid)?;
-                let commands = if let Some(reply) = &operation.reply {
-                    self.peer_commands
-                        .iter_mut()
-                        .find(|(name, source, _)| {
-                            Some(name.as_str()) == operation.origin.as_deref() && source == reply
-                        })
-                        .map(|(_, _, commands)| commands)
-                } else {
-                    Some(&mut self.commands)
-                };
-                if !commands.is_some_and(|commands| {
-                    commands.remote_authorized(
-                        request.administrative(),
-                        operation.admin_authorized,
-                        now_ms,
-                    )
-                }) {
+                operation.remote.ok_or(AdmissionError::Invalid)?;
+                if !self.remote_authorized(&operation, now_ms) {
                     return Err(AdmissionError::Denied);
                 }
                 LinkEffect::RemoteBase(operation)

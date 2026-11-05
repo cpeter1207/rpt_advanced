@@ -95,6 +95,33 @@ fn remote_dtmf_dispatch_retains_origin_and_rechecks_the_grant() {
 }
 
 #[test]
+fn pending_remote_requests_recheck_the_same_source_policy_without_renewing_it() {
+    use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
+    let mut links = links();
+    links.configure_remote("6", RemoteDtmfAccess::Open).unwrap();
+    let mut request = operation(LinkAction::RemoteBase, "");
+    request.remote = Some(RemoteCommand::Mode(1));
+    assert!(links.remote_authorized(&request, 1));
+    links
+        .configure_remote("6", RemoteDtmfAccess::Locked)
+        .unwrap();
+    assert!(!links.remote_authorized(&request, 2));
+    request.remote = Some(RemoteCommand::Status { long: false });
+    assert!(links.remote_authorized(&request, 2));
+    let signals = crate::link::PeerSignals::new();
+    request.reply = Some(signals.reply_target());
+    request.origin = Some("2000".into());
+    assert!(!links.remote_authorized(&request, 2));
+    links.accept("2000", true).unwrap();
+    for digit in "*651#".chars() {
+        let _ = links.peer_digit("2000", digit, 2, request.reply.clone().unwrap());
+    }
+    assert!(links.remote_authorized(&request, 2));
+    signals.end();
+    assert!(!links.remote_authorized(&request, 2));
+}
+
+#[test]
 fn ordinary_links_without_a_schedule_have_no_priority_group_status() {
     let mut links = links();
     links.accept("2000", true).unwrap();

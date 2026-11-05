@@ -786,6 +786,18 @@ impl std::fmt::Debug for PrepareFailure {
     }
 }
 impl RadioWorker {
+    /// Copy one command to the shared physical owner without performing device I/O.
+    pub(crate) fn remote_submit(
+        &mut self,
+        request: &rpt_advanced_core::remote_base_command::RemoteOperation,
+        local: bool,
+        active: bool,
+    ) -> Result<crate::services::RemoteTicket, i32> {
+        self.radio
+            .as_mut()
+            .ok_or(-7)?
+            .remote_submit(request, local, active)
+    }
     /// Pump only existing control/DSP adoption; the physical owner retains I/O errors.
     pub(crate) fn service_remote(&mut self) -> Result<(), i32> {
         self.radio.as_mut().ok_or(-7)?.service()

@@ -8,6 +8,11 @@ use std::{ffi::c_void, mem::size_of, ptr};
 /// The control executor publishes source lifetime and copies a bounded result.
 pub struct RemoteTicket(abi::rptadv_remote_ticket_v1);
 
+// SAFETY: these SDK operations retain copied atomic/queue state, never a rig,
+// channel or creator-thread-affine context. The selected control executor moves
+// this unique ticket between tasks and never invokes it concurrently.
+unsafe impl Send for RemoteTicket {}
+
 impl RemoteTicket {
     /// Publish current key state and terminal source validity without waiting.
     pub fn source_state(&mut self, active: bool, valid: bool) -> Result<(), i32> {

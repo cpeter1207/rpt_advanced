@@ -1786,6 +1786,83 @@ impl<A: Send, C: Send> Runtime<A, C> {
         failure.map_or(Ok(()), Err)
     }
     /// Process one copied local event on the same serialized owner as reload and incoming admission.
+    pub fn remote_command_authorized(
+        &mut self,
+        local: &str,
+        revision: u64,
+        operation: &DigitOperation,
+        now_ms: u64,
+    ) -> bool {
+        !self.stopping
+            && self.revision == revision
+            && self
+                .node(local)
+                .is_some_and(|node| node.links.remote_authorized(operation, now_ms))
+    }
+    /// Renew only the exact initiating source after an applied administrative request.
+    pub fn complete_remote_command(
+        &mut self,
+        local: &str,
+        operation: &DigitOperation,
+        now_ms: u64,
+    ) {
+        if !operation
+            .remote
+            .is_some_and(|request| request.administrative())
+        {
+            return;
+        }
+        if let Some(node) = self.node(local) {
+            if let Some(reply) = &operation.reply {
+                node.links.confirm_peer_administrative_command(
+                    operation.origin.as_deref(),
+                    reply,
+                    now_ms,
+                );
+            } else {
+                node.links.confirm_administrative_command(now_ms);
+            }
+        }
+    }
+    /// Prepare one source-routed response through the existing streamed telemetry path.
+    /// IDs and arguments are selected by the trusted presenter, never a radio packet.
+    pub fn queue_remote_reply(
+        &mut self,
+        local: &str,
+        parts: &[crate::remote_base_command::RemoteReplyPart],
+        reply: Option<crate::link::PeerReply>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeError> {
+        let node = self.node(local).ok_or(RuntimeError::MissingNode)?;
+        let mut speech = String::new();
+        let mut morse = String::new();
+        for part in parts {
+            let forms = node
+                .control
+                .catalog
+                .format_named(part.id, &part.arguments)
+                .map_err(|_| RuntimeError::Preparation)?;
+            if !speech.is_empty() {
+                speech.push(' ');
+                morse.push(' ');
+            }
+            speech.push_str(&forms.tts);
+            morse.push_str(&forms.morse);
+        }
+        if let Some(reply) = &reply {
+            node.echo_telemetry.requested(reply, now_ms);
+        }
+        queue_status_media(
+            &mut node.control.telemetry,
+            &mut node.control.media_session,
+            &node.status,
+            &morse,
+            &speech,
+            reply,
+            None,
+        )
+    }
+    /// Process one copied local event on the same serialized owner as reload and incoming admission.
     pub fn digit(&mut self, local: &str, event: DigitEvent) -> Option<DigitOutcome> {
         self.node(local)?.links.digit(event)
     }

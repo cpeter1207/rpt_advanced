@@ -15,6 +15,7 @@ pub mod lifecycle;
 pub mod link;
 pub mod media;
 mod radio_control;
+mod remote_reply;
 mod scheduler_health;
 pub mod services;
 pub mod site;

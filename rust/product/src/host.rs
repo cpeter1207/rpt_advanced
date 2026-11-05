@@ -38,6 +38,9 @@ use std::{
     time::Instant,
 };
 
+#[path = "host_remote.rs"]
+mod remote;
+
 /// Maximum supported hardware voice frame, prepared before worker entry.
 pub const MAXIMUM_FRAMES: usize = 4096;
 
@@ -191,6 +194,7 @@ struct PeerOwner {
 
 /// Product runtime; every method is invoked by the selected serialized control executor.
 pub struct Host {
+    remote_pending: Vec<remote::Pending>,
     text: TextExecutor,
     text_notice_after_ms: u64,
     /// Core configuration, controller, schedule, and link-policy aggregate.
@@ -439,6 +443,7 @@ impl Host {
             clock,
         )?;
         let mut host = Self {
+            remote_pending: Vec::new(),
             text,
             text_notice_after_ms: 0,
             runtime,
@@ -600,6 +605,7 @@ impl Host {
             clock,
         );
         if self.runtime.revision() != revision {
+            self.remote_pending.clear();
             self.text.stop();
             text.start().map_err(|_| RuntimeError::Preparation)?;
             self.text = text;
@@ -1067,7 +1073,7 @@ impl Host {
             LinkEffect::SiteStatus { selector, reply } => {
                 self.runtime.queue_site_report(local, &selector, reply)
             }
-            LinkEffect::RemoteBase(_) => Err(RuntimeError::Rejected),
+            LinkEffect::RemoteBase(operation) => self.submit_remote(local, operation, clock),
             LinkEffect::SelectedRemote
             | LinkEffect::ParrotEnabled(_)
             | LinkEffect::EchoTelemetry(_)
@@ -1212,6 +1218,7 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        self.pump_remote(clock);
         self.report_text_failures(clock.now_ms);
         self.advance_sites(clock);
         self.runtime.prepare_messages(clock);
@@ -1433,6 +1440,7 @@ impl Host {
     }
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {
             return false;
         }

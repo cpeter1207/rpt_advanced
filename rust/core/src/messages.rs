@@ -21,6 +21,19 @@ const ADMIN_DIRS: [&str; 2] = [
 pub(crate) const MAX_MESSAGE_BYTES: usize = 127;
 const ATTRIBUTES: [&str; 3] = ["text", "tts", "morse"];
 const REQUIRED_IDS: &[&str] = &[
+    "remote-applied",
+    "remote-error",
+    "remote-value",
+    "remote-state",
+    "remote-field",
+    "remote-field-name",
+    "remote-field-value",
+    "remote-entry",
+    "remote-capability",
+    "remote-choice",
+    "remote-empty",
+    "remote-unit",
+    "remote-setting-name",
     "no-links",
     "link-status",
     "last-keyed-none",
@@ -916,6 +929,33 @@ fn validate_translation(bundle: &Bundle, require_builtin_attributes: bool) -> Ve
 
 fn required_sample_args(id: &str) -> FluentArgs<'static> {
     let mut args = FluentArgs::new();
+    if id.starts_with("remote-") && id != "remote-command-unsupported" {
+        for (name, value) in [
+            ("reason", "busy"),
+            ("value", "146520000"),
+            ("field", "rx_hz"),
+            ("state", "applied"),
+            ("catalog", "memories"),
+            ("name", "local repeater"),
+        ] {
+            args.set(name, value);
+        }
+        for (name, value) in [
+            ("code", 0),
+            ("selector", 1),
+            ("units", 1),
+            ("available", 1),
+            ("enum", 1),
+            ("read", 1),
+            ("write", 1),
+            ("minimum", 0),
+            ("maximum", 48000),
+            ("places", 0),
+        ] {
+            args.set(name, value);
+        }
+        return args;
+    }
     match id {
         "echo-peer-identity" => {
             args.set("mode", "both");

@@ -25,6 +25,14 @@ pub struct RemoteCommandConfiguration {
     pub access: RemoteDtmfAccess,
 }
 
+/// One bounded bundle fragment selected by the trusted remote-result presenter.
+pub struct RemoteReplyPart {
+    /// Shipped message identifier, never supplied by a received packet.
+    pub id: &'static str,
+    /// Data substitutions formatted independently for text, speech and Morse.
+    pub arguments: std::collections::BTreeMap<String, crate::messages::MessageArgument>,
+}
+
 /// Direction of the familiar repeater-offset selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteOffset {
