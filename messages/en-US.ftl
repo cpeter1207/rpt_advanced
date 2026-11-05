@@ -429,6 +429,11 @@ remote-setting-name =
         [306] Monitor
         [307] Receive incremental tuning enabled
         [308] Transmit incremental tuning enabled
+        [400] Encode source
+        [401] Decode signal source
+        [402] Decode programming source
+        [403] Transmit D C S inverted
+        [404] Receive D C S inverted
        *[other] Setting { $selector }
         }
     .morse = SET { $selector }

@@ -54,6 +54,15 @@ fn decimal(value: i64, places: u32) -> Result<String, RuntimeError> {
         width = places as usize
     ))
 }
+fn setting_value(value: i64, setting: &Value) -> Result<String, RuntimeError> {
+    let places: u32 = setting["decimal_places"].as_u64().ok_or_else(invalid)?.try_into().map_err(|_| invalid())?;
+    if setting["units"].as_u64().ok_or_else(invalid)? == 3 {
+        if !(0..=511).contains(&value) || places != 0 { return Err(invalid()); }
+        Ok(format!("{value:03o}"))
+    } else {
+        decimal(value, places)
+    }
+}
 fn field(parts: &mut Vec<RemoteReplyPart>, name: &str, value: &Value) -> Result<(), RuntimeError> {
     let display = match value {
         Value::Null => String::new(),
@@ -144,8 +153,7 @@ pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, 
             let setting = &result["setting"];
             let selector = setting["selector"].as_u64().ok_or_else(invalid)?;
             let value = result["value"].as_i64().ok_or_else(invalid)?;
-            let places: u32 = setting["decimal_places"].as_u64().ok_or_else(invalid)?.try_into().map_err(|_| invalid())?;
-            parts.push(part("remote-value", json!({"selector":selector,"value":decimal(value, places)?,"units":setting["units"].as_u64().ok_or_else(invalid)?}))?);
+            parts.push(part("remote-value", json!({"selector":selector,"value":setting_value(value, setting)?,"units":setting["units"].as_u64().ok_or_else(invalid)?}))?);
         }
         "status" => {
             let long = !matches!(request, RemoteCommand::Status { long: false });
@@ -165,8 +173,8 @@ pub(crate) fn parse(source: &str, request: RemoteCommand) -> Result<Completion, 
             for entry in entries {
                 let selector = entry["selector"].as_u64().ok_or_else(invalid)?;
                 if kind == "capabilities" {
-                    parts.push(part("remote-capability", json!({"selector":selector,"read":entry["readable"].as_bool().ok_or_else(invalid)?,"write":entry["writable"].as_bool().ok_or_else(invalid)?,"minimum":entry["minimum"].as_i64().ok_or_else(invalid)?,"maximum":entry["maximum"].as_i64().ok_or_else(invalid)?,"units":entry["units"].as_u64().ok_or_else(invalid)?,"places":entry["decimal_places"].as_u64().ok_or_else(invalid)?}))?);
-                    for choice in entry["choices"].as_array().ok_or_else(invalid)? { parts.push(part("remote-choice", json!({"selector":selector,"value":choice.as_i64().ok_or_else(invalid)?}))?); }
+                    parts.push(part("remote-capability", json!({"selector":selector,"read":entry["readable"].as_bool().ok_or_else(invalid)?,"write":entry["writable"].as_bool().ok_or_else(invalid)?,"minimum":setting_value(entry["minimum"].as_i64().ok_or_else(invalid)?, entry)?,"maximum":setting_value(entry["maximum"].as_i64().ok_or_else(invalid)?, entry)?,"units":entry["units"].as_u64().ok_or_else(invalid)?,"places":entry["decimal_places"].as_u64().ok_or_else(invalid)?}))?);
+                    for choice in entry["choices"].as_array().ok_or_else(invalid)? { parts.push(part("remote-choice", json!({"selector":selector,"value":setting_value(choice.as_i64().ok_or_else(invalid)?, entry)?}))?); }
                 } else {
                     parts.push(part("remote-entry", json!({"catalog":kind,"selector":selector,"name":entry["name"].as_str().ok_or_else(invalid)?}))?);
                     if kind == "memories" { state(&mut parts, "memory", &entry["state"], false)?; }
@@ -210,6 +218,7 @@ mod tests {
         use rpt_advanced_core::{messages::MessageCatalog, remote_base_command::RemoteCommand};
         let catalog = MessageCatalog::load("en-US").unwrap();
         for (source, success, words) in [
+            (r#"{"version":1,"kind":"value","setting":{"selector":14,"units":3,"decimal_places":0},"value":165}"#, true, "245"),
             (r#"{"version":1,"kind":"applied"}"#, true, "completed"),
             (
                 r#"{"version":1,"kind":"error","reason":"busy","code":null}"#,
