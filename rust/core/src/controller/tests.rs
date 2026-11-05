@@ -40,6 +40,45 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn remote_base_non_fm_allows_link_transmit_without_repeating_open_receive() {
+    for full_duplex in [false, true] {
+        for remote_non_fm in [false, true] {
+            let (mut node, _control) = NodeController::new(
+                ControllerSettings {
+                    full_duplex,
+                    ..ControllerSettings::default()
+                },
+                vec![],
+                vec![],
+                CourtesySettings::default(),
+            )
+            .unwrap();
+            node.set_remote_non_fm(remote_non_fm);
+            let mut local = [0.5; 960];
+            let repeat = full_duplex && !remote_non_fm;
+            assert_eq!(node.process_audio(true, false, &[], &mut local), repeat);
+            assert_eq!(local, [if repeat { 0.5 } else { 0.0 }; 960]);
+            local.fill(0.5);
+            let may_transmit = full_duplex || remote_non_fm;
+            assert_eq!(
+                node.process_audio(true, true, &[0.25; 960], &mut local),
+                may_transmit
+            );
+            assert_eq!(
+                local,
+                [if repeat {
+                    0.75
+                } else if may_transmit {
+                    0.25
+                } else {
+                    0.0
+                }; 960]
+            );
+        }
+    }
+}
+
+#[test]
 fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
     for peer_reply in [false, true] {
         let (mut node, mut control) = NodeController::new(

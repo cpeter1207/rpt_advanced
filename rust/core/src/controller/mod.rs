@@ -118,6 +118,7 @@ struct ProgramSample<'a> {
 /// All configured media remains allocated until this controller is dropped off the audio path.
 pub struct NodeController {
     settings: ControllerSettings,
+    remote_non_fm: bool,
     duplex: DuplexPolicy,
     identifiers: IdentifierPolicy,
     ids: Vec<Identifier>,
@@ -154,6 +155,19 @@ pub struct NodeController {
 }
 
 impl NodeController {
+    /// Apply the rig's non-FM policy on the TX owner. Linked input may interrupt
+    /// open receive; that receiver never repeats into its own transmitter.
+    pub fn set_remote_non_fm(&mut self, enabled: bool) {
+        self.remote_non_fm = enabled;
+    }
+
+    fn repeats_local(&self) -> bool {
+        self.settings.full_duplex && !self.remote_non_fm
+    }
+
+    fn transmits_during_receive(&self) -> bool {
+        self.settings.full_duplex || self.remote_non_fm
+    }
     /// Validate immutable settings and allocate bounded queues and per-rule state on control.
     pub fn new(
         mut settings: ControllerSettings,
@@ -232,6 +246,7 @@ impl NodeController {
         Ok((
             Self {
                 settings,
+                remote_non_fm: false,
                 duplex: DuplexPolicy::default(),
                 identifiers,
                 ids,
@@ -523,9 +538,12 @@ impl NodeController {
         let expired = |index: usize| {
             self.ids[index].polite_maximum_wait_ms.is_some() && self.id_ready(index, true)
         };
-        let selected =
-            self.identifiers
-                .select(&self.rules, self.now, receiving, self.settings.full_duplex);
+        let selected = self.identifiers.select(
+            &self.rules,
+            self.now,
+            receiving,
+            self.transmits_during_receive(),
+        );
         let minimum_priority = selected
             .filter(|&index| {
                 self.ids[index].first_key_only && self.ids[index].polite_maximum_wait_ms.is_some()
@@ -540,7 +558,7 @@ impl NodeController {
                     &self.rules,
                     self.now,
                     receiving,
-                    self.settings.full_duplex,
+                    self.transmits_during_receive(),
                     |index| expired(index) && self.ids[index].priority >= minimum_priority,
                 )
             })
@@ -733,7 +751,7 @@ impl NodeController {
                 parrot_output,
             );
         }
-        let may_transmit = !inhibited && (self.settings.full_duplex || !receiving);
+        let may_transmit = !inhibited && (self.transmits_during_receive() || !receiving);
         let courtesy_ready = !receive && self.courtesy.ready(self.now);
         self.telemetry.expire_status(
             self.now,
@@ -832,7 +850,7 @@ impl NodeController {
             .as_ref()
             .and_then(|output| output.regeneration);
         let demand = local_media.is_some() || regeneration.is_some() || linked
-            || (self.settings.full_duplex && receiving)
+            || (self.repeats_local() && receiving)
             || (local_telemetry && !active_stream)
             || self.courtesy.pending()
             || parrot_ready
@@ -977,7 +995,7 @@ impl NodeController {
             Some(Source::Identifier(_) | Source::Announcement(_) | Source::Tail(_))
         );
         let other = linked
-            || (self.settings.full_duplex && receiving)
+            || (self.repeats_local() && receiving)
             || self.courtesy.pending()
             || (status_ready && !peer_status && !exempt);
         let transmit = local_media.is_some()
@@ -996,8 +1014,8 @@ impl NodeController {
             samples(self.settings.hang_ms)
         };
         let mut requested = self.duplex.update(
-            self.settings.full_duplex,
-            receiving,
+            self.transmits_during_receive(),
+            receiving && !self.remote_non_fm,
             transmit,
             self.now,
             hang,
@@ -1073,12 +1091,11 @@ impl NodeController {
         } else {
             self.telemetry.gain
         };
-        let local =
-            if self.settings.full_duplex && receiving && self.traffic_keyed && !suppress_repeat {
-                input.unwrap_or(0.0)
-            } else {
-                0.0
-            };
+        let local = if self.repeats_local() && receiving && self.traffic_keyed && !suppress_repeat {
+            input.unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let link = if may_transmit && linked && !suppress_repeat {
             link_sample
         } else {
