@@ -338,6 +338,14 @@ fn complete(api: &abi::rptadv_host_services_v9) -> bool {
 }
 
 impl HostServices {
+    /// Enabled remote rigs require the complete nonblocking lifecycle and
+    /// callback-metadata bridge before any physical device can be reserved.
+    pub fn remote_control_available(self) -> bool {
+        self.0.radio_metadata_bind.is_some()
+            && self.0.radio_service.is_some()
+            && self.0.radio_quiesce.is_some()
+            && self.0.radio_remote_submit.is_some()
+    }
     /// Validate the complete table before any callback or context is retained.
     ///
     /// # Safety

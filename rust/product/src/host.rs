@@ -232,6 +232,9 @@ fn prepared(
     )
     .and_then(|configuration| configuration.remote_commands())
     .map_err(|_| RuntimeError::Preparation)?;
+    if remote_commands.is_some() && !services.remote_control_available() {
+        return Err(RuntimeError::Preparation);
+    }
     static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
     let text_generation = NEXT_TEXT_STATION.fetch_add(1, Ordering::Relaxed);
     let mut text_readers = Vec::new();

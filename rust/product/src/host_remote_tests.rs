@@ -23,6 +23,16 @@ unsafe extern "C" fn take(
 unsafe extern "C" fn destroy(_: *mut c_void) {
     DESTROYED.set(DESTROYED.get() + 1);
 }
+unsafe extern "C" fn service(_: *mut c_void, _: *mut c_void) -> i32 {
+    0
+}
+unsafe extern "C" fn bind_metadata(
+    _: *mut c_void,
+    _: *mut c_void,
+    _: abi::rptadv_radio_metadata_v1,
+) -> i32 {
+    0
+}
 unsafe extern "C" fn submit(
     _: *mut c_void,
     radio: *mut c_void,
@@ -61,6 +71,9 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     DESTROYED.set(0);
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.radio_remote_submit = Some(submit);
+    table.radio_metadata_bind = Some(bind_metadata);
+    table.radio_service = Some(service);
+    table.radio_quiesce = Some(service);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let config = "[remote_base 1000]\nenabled=yes\nbackend=hamlib\nhamlib_model=RIG_MODEL_DUMMY\ndtmf_access=open\nstartup_memory=local\nallowed_modes=FM\nallowed_rx_ranges_hz=144000000-148000000\nallowed_tx_ranges_hz=144000000-148000000\n[remote_memory 1000 local]\nselector=1\nrx_frequency_hz=146520000\ntx_frequency_hz=146520000\nmode=FM\n";
     let mut host = Host::start(
@@ -108,4 +121,22 @@ fn host_remote_completion_is_nonblocking_and_reload_revokes_pending_work() {
     assert_eq!(DESTROYED.get(), 2);
     assert_eq!(SOURCE.get(), 0);
     host.stop(1000);
+}
+
+#[test]
+fn remote_configuration_requires_complete_host_operations_before_device_activation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let config = "[remote_base 1000]\nenabled=yes\nbackend=hamlib\nhamlib_model=RIG_MODEL_DUMMY\nstartup_memory=local\nallowed_modes=FM\nallowed_rx_ranges_hz=144000000-148000000\nallowed_tx_ranges_hz=144000000-148000000\n[remote_memory 1000 local]\nselector=1\nrx_frequency_hz=146520000\ntx_frequency_hz=146520000\nmode=FM\n";
+    assert!(
+        Host::start(
+            document("usb", config),
+            media(),
+            services(),
+            Instant::now(),
+            clock()
+        )
+        .is_err()
+    );
 }
