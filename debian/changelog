@@ -1,4 +1,4 @@
-rpt-advanced (0.1.0~alpha19-2+bs1770.20261106) unstable; urgency=medium
+rpt-advanced (0.1.0~alpha20-1+bs1770.20261106) unstable; urgency=medium
 
   * Require USBRadioPlus alpha29 for LUFS AGC settings.
   * Target -23 LUFS in configurable local, link and voice processing graphs.
