@@ -71,6 +71,9 @@ fn main() {
         .allowlist_function("rptadv_product_descriptor_v1")
         .layout_tests(false)
         .generate_comments(false)
+        // Evaluate the SDK's standard UINT32_C ABI macros with Clang.
+        .clang_macro_fallback()
+        .clang_macro_fallback_build_dir(PathBuf::from(env::var_os("OUT_DIR").unwrap()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("generate standalone product ABI bindings");

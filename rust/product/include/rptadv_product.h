@@ -199,8 +199,6 @@ typedef int (*rptadv_radio_metadata_v1)(void *transmit_context, uint32_t control
                                         uint32_t *linked_active);
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
-/** Exact direct attachment version, independent of the host-services table. */
-#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 5U
 /** Mutable direct registration; the provider copies callbacks before returning.
  * Initialize accepted_abi_version to zero. Start only when setoption returns zero
  * and acknowledges this exact ABI. Callback code and contexts remain borrowed
