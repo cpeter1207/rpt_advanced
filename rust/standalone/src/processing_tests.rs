@@ -387,7 +387,7 @@ fn shared_sdk_peer_observer_reaches_control_after_the_graph_is_destroyed() {
         prepare(
             api,
             ffmpeg,
-            "[524950]\n[link]\noutput_gain_db=-6\n",
+            "[524950]\n[link]\noutput_gain_db=-6\nagc_enabled=yes\nagc_target_lufs=-23\nagc_loudness_window_ms=400\n",
             "524950",
             960,
             Some(&registry),

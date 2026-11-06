@@ -1,3 +1,10 @@
+rpt-advanced (0.1.0~alpha19-2+bs1770.20261106) unstable; urgency=medium
+
+  * Require USBRadioPlus alpha29 for LUFS AGC settings.
+  * Target -23 LUFS in configurable local, link and voice processing graphs.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Fri, 06 Nov 2026 09:28:40 -0600
+
 rpt-advanced (0.1.0~alpha19-1) unstable; urgency=medium
 
   * Configure shared local, link and voice/telemetry processing in rpt_advanced.conf.

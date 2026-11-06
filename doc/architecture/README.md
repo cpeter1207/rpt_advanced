@@ -29,7 +29,11 @@ its node's existing radio lease. The Asterisk host forwards this control-only
 operation through the acknowledged `RadioPlusAdvanced` link-attachment option;
 USBRadioPlus retains its upstream graph and reload lifetime. Standalone passes
 `local`, `link`, and `voice_telemetry` sections from `rpt_advanced.conf` to the
-same shared product's resolver and DSP factory. Its optional host-services
+same shared product's resolver and DSP factory. The existing FFmpeg-hosted AGC
+meters the full-band program in LUFS with BS.1770 K-weighting and a -23 LUFS
+default. Its gain rider retains bounded, smooth correction and independent
+activity qualification; controller policy does not implement another gain
+stage. Its optional host-services
 ABI-9 tail prepares one F32 graph per peer audio generation after the inbound
 ring and before mixing. Asterisk omits that tail to avoid processing twice.
 See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).

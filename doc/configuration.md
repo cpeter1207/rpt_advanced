@@ -266,6 +266,19 @@ They include gains, EQ, AGC, an expander, a de-esser, a compressor, and a
 multiband limiter. The local chain also supports RNNoise and receive filters.
 The voice/telemetry chain supports the final limiter and band-pass filter.
 
+USBRadioPlus uses a causal LUFS gain rider inside the shared FFmpeg graph.
+The default
+`agc_target_lufs` is **-23 LUFS**.
+
+`agc_loudness_window_ms` selects a 400-3000 ms measurement window; its default
+is 400 ms.
+This causal, bounded rider cannot guarantee exact integrated loudness for a
+short transmission or a target beyond its configured gain limits.
+
+AGC is not a true-peak limiter and does not itself guarantee a -1 dBTP
+ceiling. Compressor and limiter stages remain separate; verify the required
+peak protection independently.
+
 To reuse a named profile, put its name after the section type, such as
 `[local repeater]`. Select it with `local_profile = repeater` in the node's
 `[524950]` section. The same form works for `link_profile` and
