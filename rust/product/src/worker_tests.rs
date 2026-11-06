@@ -494,6 +494,7 @@ fn prepare_failure_returns_reservation_and_quiesce_destroys_before_owner_release
     ) else {
         panic!("expected failure")
     };
+    assert!(format!("{failure:?}").starts_with("Reservation("));
     let PrepareFailure::Reservation(_, radio) = failure else {
         panic!("unactivated reservation")
     };
@@ -517,9 +518,11 @@ fn radio_retirement_poll_preserves_callbacks_and_owners_while_pending() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    thread_local! { static READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    thread_local! { static PENDING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
     unsafe extern "C" fn quiesce(_: *mut c_void, _: *mut c_void) -> i32 {
-        if READY.get() { 0 } else { 1 }
+        let remaining = PENDING.get();
+        PENDING.set(remaining.saturating_sub(1));
+        i32::from(remaining != 0)
     }
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.radio_quiesce = Some(quiesce);
@@ -535,17 +538,64 @@ fn radio_retirement_poll_preserves_callbacks_and_owners_while_pending() {
     .unwrap_or_else(|_| panic!("prepare"));
     assert!(worker.attach(owners).is_ok());
     let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    PENDING.set(1);
     assert_eq!(worker.poll_stop(), Ok(false));
     assert!(worker.radio.is_some());
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
-    READY.set(true);
     assert_eq!(worker.poll_stop(), Ok(true));
     assert_eq!(
         crate::fixture::RADIO_DROPS.load(Ordering::Relaxed),
         before + 1
     );
     drop(worker.stop());
+    let worker = RadioWorker::prepare(
+        services.radio("1000", "usb", 8).unwrap(),
+        Instant::now(),
+        RadioStatus::default(),
+        0,
+        50,
+    )
+    .unwrap_or_else(|_| panic!("prepare synchronous retirement"));
+    PENDING.set(2);
+    drop(worker.stop());
+    assert_eq!(PENDING.get(), 0);
     assert!(runtime.stop(0));
+}
+
+#[test]
+fn metadata_bind_failure_returns_the_unactivated_radio_reservation() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    unsafe extern "C" fn reject(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: crate::abi::rptadv_radio_metadata_v1,
+    ) -> i32 {
+        -42
+    }
+    // SAFETY: the fixture supplies a complete immutable host table.
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.radio_metadata_bind = Some(reject);
+    // SAFETY: the leaked table remains live for the reservation's lifetime.
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let before = crate::fixture::RADIO_DROPS.load(Ordering::Relaxed);
+    let failure = RadioWorker::prepare(
+        services.radio("1000", "usb", 8).unwrap(),
+        Instant::now(),
+        RadioStatus::default(),
+        0,
+        50,
+    )
+    .err()
+    .expect("metadata binding must fail before activation");
+    assert!(format!("{failure:?}").starts_with("Reservation(Operation)"));
+    assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Relaxed), before);
+    drop(failure);
+    assert_eq!(
+        crate::fixture::RADIO_DROPS.load(Ordering::Relaxed),
+        before + 1
+    );
 }
 #[test]
 fn radio_status_preserves_the_original_edge_time() {
@@ -1011,6 +1061,7 @@ fn failed_host_activation_returns_reservation_without_consuming_owners() {
     ) else {
         panic!("activation must fail")
     };
+    assert!(format!("{failure:?}").starts_with("Activation("));
     let PrepareFailure::Activation(error, mut failed) = failure else {
         panic!("retain partial activation")
     };

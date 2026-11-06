@@ -236,6 +236,10 @@ fn host_keeps_reload_configuration_until_radio_activation_is_ready() {
     let revision = host.runtime.revision();
     ACTIVATION.set(1);
     host.reload(document("replacement", ""), clock()).unwrap();
+    assert_eq!(
+        host.reload(document("second", ""), clock()),
+        Err(RuntimeError::Busy)
+    );
     assert_eq!(host.runtime.revision(), revision);
     assert_eq!(host.runtime.settings("1000").unwrap().channel, "usb");
     host.pump(clock()).unwrap();

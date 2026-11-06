@@ -1498,6 +1498,119 @@ mod tests {
     }
 
     #[test]
+    fn remote_host_callbacks_validate_reservations_and_retain_failed_startup_owners() {
+        use crate::{
+            abi,
+            radio_activation::{RadioActivationError, tests as native},
+        };
+        use std::{
+            ffi::c_void,
+            ptr::{self, NonNull},
+        };
+
+        unsafe extern "C" fn metadata(_: *mut c_void, _: u32, _: *mut u32) -> i32 {
+            0
+        }
+
+        let mut handle = RadioHandle {
+            reservation: reserve_radio(&resolve_radio_nodes("[1000]\n").unwrap(), "1000", 960)
+                .unwrap(),
+            active: None,
+            pending: None,
+            metadata: None,
+        };
+        let radio = ptr::from_mut(&mut handle).cast();
+        let operation = native::remote_operation();
+        // SAFETY: null requests are rejected; the stack reservation stays exclusively owned.
+        unsafe {
+            assert_eq!(
+                super::radio_metadata_bind(ptr::null_mut(), ptr::null_mut(), Some(metadata)),
+                -1
+            );
+            assert_eq!(
+                super::radio_metadata_bind(ptr::null_mut(), radio, Some(metadata)),
+                0
+            );
+            assert_eq!(super::radio_service(ptr::null_mut(), ptr::null_mut()), -1);
+            assert_eq!(super::radio_ready(ptr::null_mut(), ptr::null_mut()), -1);
+            assert_eq!(super::radio_quiesce(ptr::null_mut(), ptr::null_mut()), -1);
+            assert_eq!(super::radio_service(ptr::null_mut(), radio), 0);
+            assert_eq!(super::radio_ready(ptr::null_mut(), radio), -7);
+            assert_eq!(super::radio_quiesce(ptr::null_mut(), radio), 0);
+            assert_eq!(
+                super::radio_remote_submit(ptr::null_mut(), radio, &operation, 3, ptr::null_mut()),
+                -1
+            );
+        }
+        assert!(handle.metadata.is_some());
+        // SAFETY: an empty ticket is a valid scalar/pointer-only output record.
+        let mut output: abi::rptadv_remote_ticket_v1 = unsafe { std::mem::zeroed() };
+        for (owner, request) in [
+            (ptr::null_mut(), &operation as *const _),
+            (radio, ptr::null()),
+            (ptr::null_mut(), ptr::null()),
+        ] {
+            output.context = NonNull::<u64>::dangling().as_ptr().cast();
+            // SAFETY: complete output remains borrowed while malformed inputs are rejected.
+            assert_eq!(
+                unsafe {
+                    super::radio_remote_submit(ptr::null_mut(), owner, request, 3, &mut output)
+                },
+                -1
+            );
+            assert!(output.context.is_null());
+            assert_eq!(output.struct_size, 0);
+        }
+        // SAFETY: this valid but inactive reservation has no native owner to receive the command.
+        assert_eq!(
+            unsafe {
+                super::radio_remote_submit(ptr::null_mut(), radio, &operation, 3, &mut output)
+            },
+            -7
+        );
+
+        let active = native::fixture_active_radio(native::remote_fixture_api());
+        let debug = format!("{active:?}");
+        assert!(debug.contains("open: true") && debug.contains("updating: false"));
+        let retained = RadioActivationError::Retained {
+            status: -19,
+            active: Box::new(active),
+        };
+        assert_eq!(
+            retained.to_string(),
+            "shared radio startup failed (-19); retirement pending"
+        );
+        assert_eq!(finish_activation(&mut handle, Err(retained)), -1);
+        assert!(
+            handle.active.is_some(),
+            "failed startup retains its callback owner"
+        );
+        // SAFETY: the same retained reservation now owns the fixture SDK station and ticket table.
+        unsafe {
+            assert_eq!(super::radio_metadata_bind(ptr::null_mut(), radio, None), -1);
+            assert_eq!(super::radio_service(ptr::null_mut(), radio), -31);
+            assert_eq!(super::radio_ready(ptr::null_mut(), radio), 1);
+            assert_eq!(super::radio_quiesce(ptr::null_mut(), radio), 0);
+            assert_eq!(
+                super::radio_remote_submit(ptr::null_mut(), radio, &operation, 3, &mut output),
+                0
+            );
+            assert_eq!(output.abi_version, 1);
+            assert_eq!(output.source.unwrap()(output.context, 2), 0);
+            assert_eq!(
+                output.take.unwrap()(output.context, None, ptr::null_mut()),
+                0
+            );
+            output.destroy.unwrap()(output.context);
+        }
+        assert!(handle.metadata.is_some());
+        assert!(
+            handle.active.is_some(),
+            "quiesce does not transfer ownership"
+        );
+    }
+
+    #[test]
     fn provider_backed_activation_fails_safely_without_cm119_hardware() {
         use std::ffi::c_void;
 

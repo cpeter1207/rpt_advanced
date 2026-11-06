@@ -74,7 +74,11 @@ unsafe extern "C" fn reload(configuration: *const std::ffi::c_char, length: usiz
     }
     .unwrap();
     RELOAD_DOCUMENTS.with_borrow_mut(|documents| documents.push(text.to_owned()));
-    -i32::from(text == "rejected-candidate")
+    match text {
+        "pending-candidate" => 1,
+        "rejected-candidate" => -1,
+        _ => 0,
+    }
 }
 
 unsafe extern "C" fn stop() -> i32 {
@@ -278,7 +282,7 @@ pub(crate) fn with_running(operation: impl FnOnce()) {
 #[test]
 fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() {
     assert!(unsafe { Product::open(ptr::null()) }.is_none());
-    for field in 0..14 {
+    for field in 0..15 {
         let mut descriptor = DESCRIPTOR;
         match field {
             0 => descriptor.struct_size -= 1,
@@ -294,13 +298,24 @@ fn product_descriptor_rejects_every_incompatible_prefix_and_missing_operation() 
             10 => descriptor.digit = None,
             11 => descriptor.inspect_configuration = None,
             12 => descriptor.inspect_secrets = None,
-            _ => descriptor.site_command = None,
+            13 => descriptor.site_command = None,
+            _ => descriptor.reload_poll = None,
         }
         assert!(
             unsafe { Product::open(&descriptor) }.is_none(),
             "field {field}"
         );
     }
+}
+
+#[test]
+fn product_reload_waits_for_pending_completion() {
+    let product = unsafe { Product::open(ptr::from_ref(&DESCRIPTOR)) }.unwrap();
+    assert!(product.reload("pending-candidate"));
+    assert_eq!(
+        RELOAD_DOCUMENTS.with_borrow(|documents| documents.last().cloned()),
+        Some("pending-candidate".to_owned())
+    );
 }
 
 #[test]

@@ -146,7 +146,7 @@ impl DeviceHandoff for Device {
     }
     fn open(&mut self, settings: &GenerationSettings) -> bool {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-        if lease.worker.is_some() || lease.quiesced || lease.quiescing {
+        if lease.worker.is_some() || lease.quiesced {
             return false;
         }
         let radio = self.services.radio(

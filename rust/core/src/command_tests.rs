@@ -39,6 +39,13 @@ fn remote_dtmf_family_remapping_rejects_collisions_and_keeps_link_resets() {
     let map = remote_map("65");
     assert!(map.parse_remote("6551").is_some());
     assert!(map.parse_remote("651").is_none());
+    assert_eq!(
+        DtmfCommandMap::new(vec![
+            CommandMapping::new("6", LinkAction::RemoteBase),
+            CommandMapping::new("65", LinkAction::Status),
+        ]),
+        Err(CommandMapError::AmbiguousPrefix)
+    );
     let mut mappings = DtmfCommandMap::standard().mappings().to_vec();
     mappings
         .iter_mut()

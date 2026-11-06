@@ -534,6 +534,7 @@ pub(crate) mod tests {
         static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         static RESULTS: Cell<(i32, bool, i32)> = const { Cell::new((0, true, 0)) };
         static EXPECTED_RADIO: Cell<Option<*const c_void>> = const { Cell::new(None) };
+        static REMOTE_RESULT: Cell<(i32, bool)> = const { Cell::new((0, true)) };
     }
     unsafe extern "C" fn create(
         args: *const abi::UrpNativeCreateArgs,
@@ -674,6 +675,173 @@ pub(crate) mod tests {
         active.handle = Some(NonNull::<u8>::dangling().cast());
         active.api = api;
         active
+    }
+
+    unsafe extern "C" fn remote_service(handle: *mut c_void) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("service"));
+        -31
+    }
+    unsafe extern "C" fn remote_ready(handle: *mut c_void) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("ready"));
+        1
+    }
+    unsafe extern "C" fn remote_quiesce(handle: *mut c_void) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("quiesce"));
+        0
+    }
+    unsafe extern "C" fn remote_submit(
+        handle: *mut c_void,
+        operation: *const abi::UrpRemoteOperation,
+        flags: u32,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        // SAFETY: the client lends the complete operation and writable ticket destination.
+        assert_eq!(unsafe { (*operation).operation }, 1);
+        assert_eq!(flags, 3);
+        CALLS.with(|calls| calls.borrow_mut().push("submit"));
+        let (code, transferred) = REMOTE_RESULT.get();
+        // SAFETY: this synchronous callback supplies one opaque fixture ticket or null.
+        unsafe {
+            *output = if transferred {
+                NonNull::<u32>::dangling().as_ptr().cast()
+            } else {
+                std::ptr::null_mut()
+            };
+        }
+        code
+    }
+    unsafe extern "C" fn ticket_source(ticket: *mut c_void, flags: u32) -> i32 {
+        assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
+        assert_eq!(flags, 2);
+        CALLS.with(|calls| calls.borrow_mut().push("source"));
+        0
+    }
+    unsafe extern "C" fn ticket_take(
+        ticket: *mut c_void,
+        _: abi::UrpNativeProcessingDiagnostic,
+        _: *mut c_void,
+    ) -> i32 {
+        assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("take"));
+        0
+    }
+    unsafe extern "C" fn ticket_destroy(ticket: *mut c_void) {
+        assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("ticket_destroy"));
+    }
+
+    pub(crate) fn remote_fixture_api() -> abi::UrpAstDescriptor {
+        REMOTE_RESULT.set((0, true));
+        // SAFETY: the flat descriptor's unused operations are nullable pointers.
+        let mut api: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.struct_size = std::mem::size_of_val(&api) as u32;
+        api.abi_version = 1;
+        api.native_service = Some(remote_service);
+        api.native_activation_status = Some(remote_ready);
+        api.native_quiesce = Some(remote_quiesce);
+        api.native_remote_submit = Some(remote_submit);
+        api.remote_source = Some(ticket_source);
+        api.remote_take = Some(ticket_take);
+        api.remote_destroy = Some(ticket_destroy);
+        api
+    }
+
+    pub(crate) fn remote_operation() -> abi::UrpRemoteOperation {
+        abi::UrpRemoteOperation {
+            struct_size: std::mem::size_of::<abi::UrpRemoteOperation>() as u32,
+            abi_version: 1,
+            operation: 1,
+            selector: 0,
+            signed_value: 0,
+            magnitude: 0,
+            decimal_places: 0,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn native_remote_control_preserves_status_and_independent_ticket_ownership() {
+        let operation = remote_operation();
+        let mut radio = empty_active_radio();
+        assert_eq!(radio.service(), -1);
+        assert_eq!(radio.ready(), -1);
+        radio.handle = Some(NonNull::<u8>::dangling().cast());
+        assert_eq!(radio.service(), -7);
+        assert_eq!(radio.ready(), -7);
+        radio.api = remote_fixture_api();
+        assert_eq!(radio.service(), -31);
+        assert_eq!(radio.ready(), 1);
+        for missing in 0..5 {
+            radio.api = remote_fixture_api();
+            CALLS.with(|calls| calls.borrow_mut().clear());
+            match missing {
+                0 => radio.handle = None,
+                1 => radio.api.native_remote_submit = None,
+                2 => radio.api.remote_source = None,
+                3 => radio.api.remote_take = None,
+                _ => radio.api.remote_destroy = None,
+            }
+            // SAFETY: an empty ticket consists solely of valid scalar/pointer values.
+            let mut output: abi::rptadv_remote_ticket_v1 = unsafe { std::mem::zeroed() };
+            output.context = NonNull::<u64>::dangling().as_ptr().cast();
+            assert_eq!(radio.remote_submit(&operation, 3, &mut output), -7);
+            assert_eq!(output.context, NonNull::<u64>::dangling().as_ptr().cast());
+            CALLS.with(|calls| {
+                assert!(
+                    calls.borrow().is_empty(),
+                    "incomplete SDK tables must not dispatch"
+                )
+            });
+            radio.handle = Some(NonNull::<u8>::dangling().cast());
+        }
+        radio.api = remote_fixture_api();
+        for (code, transferred, expected) in [
+            (0, true, 0),
+            (-9, true, -9),
+            (-9, false, -9),
+            (0, false, -1),
+        ] {
+            REMOTE_RESULT.set((code, transferred));
+            CALLS.with(|calls| calls.borrow_mut().clear());
+            // SAFETY: the caller initializes complete writable ticket output storage.
+            let mut output: abi::rptadv_remote_ticket_v1 = unsafe { std::mem::zeroed() };
+            assert_eq!(radio.remote_submit(&operation, 3, &mut output), expected);
+            if expected == 0 {
+                assert_eq!(output.struct_size as usize, std::mem::size_of_val(&output));
+                assert_eq!(output.abi_version, 1);
+                // SAFETY: success transferred this ticket and its matching lifecycle table.
+                unsafe {
+                    assert_eq!(output.source.unwrap()(output.context, 2), 0);
+                    assert_eq!(
+                        output.take.unwrap()(output.context, None, std::ptr::null_mut()),
+                        0
+                    );
+                    output.destroy.unwrap()(output.context);
+                }
+                CALLS.with(|calls| {
+                    assert_eq!(
+                        &*calls.borrow(),
+                        &["submit", "source", "take", "ticket_destroy"]
+                    )
+                });
+            } else {
+                assert!(output.context.is_null());
+                CALLS.with(|calls| {
+                    assert_eq!(
+                        &*calls.borrow(),
+                        if transferred {
+                            &["submit", "ticket_destroy"][..]
+                        } else {
+                            &["submit"][..]
+                        }
+                    )
+                });
+            }
+        }
     }
 
     #[test]

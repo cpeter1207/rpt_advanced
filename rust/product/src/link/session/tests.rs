@@ -320,8 +320,18 @@ fn echo_source_drains_the_finite_burst_before_unkey_without_asl_signaling() {
     }
     assert!(heard);
     assert_eq!(consumer.finite_playout(), Some(false));
+    while control.event().is_some() {}
+    for _ in 0..64 {
+        session.event(Event::Digit('1')).unwrap();
+    }
     session.step(20).unwrap();
     session.step(30).unwrap();
+    assert!(!control.ended());
+    assert_eq!(session.pending_remote_unkey, Some(20));
+    assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
+    session.step(40).unwrap();
+    assert!(matches!(control.event(), Some(Event::RemoteUnkey(20))));
+    assert!(control.event().is_none());
     assert!(!consumer.signals().radio_keyed());
     assert_eq!(state.lock().unwrap().source_acknowledgements, 1);
     assert_eq!(
@@ -1182,8 +1192,11 @@ fn remote_dtmf_actual_unkey_survives_event_backpressure_without_hangup() {
     session.step(2).unwrap();
     assert!(!control.ended());
     assert!(!session.inbound.signals().radio_keyed());
-    assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
     session.step(3).unwrap();
+    assert_eq!(session.pending_remote_unkey, Some(2));
+    assert!(!session.inbound.signals().radio_keyed());
+    assert_eq!((0..64).filter_map(|_| control.event()).count(), 64);
+    session.step(4).unwrap();
     assert!(matches!(control.event(), Some(Event::RemoteUnkey(2))));
     assert!(session.inbound.signals().radio_keyed());
     assert!(control.event().is_none());

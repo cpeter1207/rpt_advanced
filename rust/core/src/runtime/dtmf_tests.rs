@@ -40,12 +40,22 @@ fn remote_dtmf_enforces_source_authorization_and_keeps_typed_payloads() {
             .is_err()
     );
     assert_eq!(feed_symbols(&mut commands, "*651#").len(), 1);
+    let mut custom = DtmfCommands::new(DtmfCommandMap::new(Vec::new()).unwrap());
+    custom
+        .configure_remote("6", RemoteDtmfAccess::Open)
+        .unwrap();
+    assert!(matches!(
+        feed_symbols(&mut custom, "*651#").as_slice(),
+        [DigitOutcome::Operation(operation)]
+            if operation.remote == Some(RemoteCommand::Status { long: true })
+    ));
 }
 
 #[test]
 fn remote_dtmf_waits_for_real_unkey_and_lost_work_cancels_the_prefix() {
     use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
     let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    assert!(!commands.remote_collecting());
     commands
         .configure_remote("65", RemoteDtmfAccess::Open)
         .unwrap();

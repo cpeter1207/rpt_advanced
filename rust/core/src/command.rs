@@ -275,7 +275,7 @@ impl CommandCollector {
         let mut finish =
             digit == '#' || (digit == '\0' && now_ms.wrapping_sub(self.last_ms) >= 3000);
         if digit != '\0' && digit != '#' {
-            if !(digit.is_ascii_digit() || matches!(digit, 'A'..='D') || digit == '*' && remote)
+            if !(digit.is_ascii_digit() || matches!(digit, 'A'..='D') || digit == '*')
                 || self.digits.len() == 127
             {
                 self.active = false;

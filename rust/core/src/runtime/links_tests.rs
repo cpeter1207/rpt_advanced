@@ -114,8 +114,23 @@ fn pending_remote_requests_recheck_the_same_source_policy_without_renewing_it() 
         let _ = links.peer_digit("2000", digit, 2, request.reply.clone().unwrap());
     }
     assert!(links.remote_authorized(&request, 2));
+    let other = crate::link::PeerSignals::new();
+    let mut other_request = request.clone();
+    other_request.reply = Some(other.reply_target());
+    assert!(!links.remote_authorized(&other_request, 2));
+    other_request.reply = request.reply.clone();
+    other_request.origin = Some("3000".into());
+    assert!(!links.remote_authorized(&other_request, 2));
     signals.end();
     assert!(!links.remote_authorized(&request, 2));
+    assert!(
+        links
+            .peer_remote_unkey(3, signals.reply_target())
+            .is_empty()
+    );
+    links.close();
+    request.reply = None;
+    assert!(!links.remote_authorized(&request, 3));
 }
 
 #[test]

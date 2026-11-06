@@ -216,3 +216,32 @@ fn remote_radio_lifecycle_maps_optional_operations_and_original_failures() {
     RADIO_CODE.set(0);
     assert_eq!(radio.service(), Ok(()));
 }
+
+#[test]
+fn remote_control_requires_every_lifecycle_operation() {
+    unsafe extern "C" fn metadata(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: abi::rptadv_radio_metadata_v1,
+    ) -> i32 {
+        0
+    }
+    for missing in 0..=5 {
+        let services = host_services(|table| {
+            table.radio_metadata_bind = Some(metadata);
+            table.radio_service = Some(radio_response);
+            table.radio_quiesce = Some(radio_response);
+            table.radio_remote_submit = Some(submit);
+            table.radio_ready = Some(radio_response);
+            match missing {
+                0 => table.radio_metadata_bind = None,
+                1 => table.radio_service = None,
+                2 => table.radio_quiesce = None,
+                3 => table.radio_remote_submit = None,
+                4 => table.radio_ready = None,
+                _ => {}
+            }
+        });
+        assert_eq!(services.remote_control_available(), missing == 5);
+    }
+}

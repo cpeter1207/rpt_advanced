@@ -1158,6 +1158,86 @@ fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquis
     assert!(log.lock().unwrap().is_empty());
 }
 
+#[test]
+fn remote_completions_renew_only_the_requesting_peer_and_compose_its_reply() {
+    use crate::{
+        remote_base_command::{RemoteCommand, RemoteDtmfAccess, RemoteReplyPart},
+        runtime::dtmf::DigitOutcome,
+    };
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[echolink]\ntelemetry=demand\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.incoming("1000", "2000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    let operation = {
+        let links = runtime.node("1000").unwrap().links();
+        links.configure_admin(&digest, &digest, 100);
+        links
+            .configure_remote("6", RemoteDtmfAccess::Locked)
+            .unwrap();
+        for digit in "*8001234#".chars() {
+            assert!(
+                links
+                    .peer_digit("2000", digit, 1001, reply.clone())
+                    .is_none()
+            );
+        }
+        let outcome = "*661#"
+            .chars()
+            .filter_map(|digit| links.peer_digit("2000", digit, 1002, reply.clone()))
+            .last();
+        let Some(DigitOutcome::Operation(operation)) = outcome else {
+            panic!("authorized remote request")
+        };
+        operation
+    };
+    let revision = runtime.revision();
+    assert!(runtime.remote_command_authorized("1000", revision, &operation, 1003));
+    assert!(!runtime.remote_command_authorized("1000", revision + 1, &operation, 1003));
+    assert!(!runtime.remote_command_authorized("missing", revision, &operation, 1003));
+    runtime.complete_remote_command("missing", &operation, 1050);
+    runtime.complete_remote_command("1000", &operation, 1050);
+    assert!(runtime.remote_command_authorized("1000", revision, &operation, 1149));
+    let mut query = operation.clone();
+    query.remote = Some(RemoteCommand::Status { long: true });
+    runtime.complete_remote_command("1000", &query, 1149);
+    assert!(!runtime.remote_command_authorized("1000", revision, &operation, 1150));
+    let parts = [
+        RemoteReplyPart {
+            id: "remote-applied",
+            arguments: Default::default(),
+        },
+        RemoteReplyPart {
+            id: "remote-applied",
+            arguments: Default::default(),
+        },
+    ];
+    runtime
+        .queue_remote_reply("1000", &parts, Some(reply.clone()), 1151)
+        .unwrap();
+    assert_eq!(
+        messages.lock().unwrap().last().map(String::as_str),
+        Some("Remote radio command completed. Remote radio command completed.")
+    );
+    assert!(runtime.echo_telemetry_allows("1000", &reply, 1151));
+    runtime.node("1000").unwrap().links().ended("2000");
+    runtime.peer_detached("1000", "2000", 1152);
+    assert!(runtime.stop(1152));
+    assert!(!runtime.remote_command_authorized("1000", revision, &query, 1153));
+}
+
 struct SnapshotDevice {
     node: String,
     snapshots: Arc<Mutex<Vec<(String, u64)>>>,
@@ -1240,7 +1320,12 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
             }
         }
     }
-    for success in [None, Some(false), Some(true)] {
+    for (success, abandon_pending) in [
+        (None, false),
+        (None, true),
+        (Some(false), false),
+        (Some(true), false),
+    ] {
         let ready = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(AtomicBool::new(false));
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -1264,6 +1349,17 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
             .reload(candidate, &Media, adapter, device, clock())
             .unwrap();
         assert!(runtime.reload_pending());
+        assert_eq!(
+            runtime.reload(
+                ConfigDocument::parse("[1000]\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            ),
+            Err(RuntimeError::Busy),
+            "a pending handoff cannot be replaced by another reload"
+        );
         assert_eq!(runtime.revision(), revision);
         assert_eq!(runtime.poll_reload(clock()), Ok(false));
         assert_eq!(runtime.settings("1000").unwrap().channel, "first");
@@ -1273,6 +1369,19 @@ fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failu
         let Some(success) = success else {
             assert!(!runtime.stop(0));
             assert!(runtime.reload_pending());
+            if abandon_pending {
+                let retained_owners = Arc::strong_count(&ready);
+                drop(runtime);
+                assert_eq!(Arc::strong_count(&ready), retained_owners);
+                assert!(
+                    !log.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry == "close:second"),
+                    "dropping a runtime cannot close an unquiesced replacement"
+                );
+                continue;
+            }
             release.store(true, Ordering::Release);
             assert!(runtime.stop(0));
             assert!(!runtime.reload_pending());

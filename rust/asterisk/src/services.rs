@@ -218,9 +218,7 @@ unsafe extern "C" fn radio_activate(
             accepted_abi_version: 0,
             metadata: reserved.metadata,
         };
-        if receive.is_some()
-            && transmit.is_some()
-            && unsafe { radio.attach_direct(&mut direct) }.is_ok()
+        if unsafe { radio.attach_direct(&mut direct) }.is_ok()
             && radio.start(&reserved.name).is_ok()
         {
             return 0;

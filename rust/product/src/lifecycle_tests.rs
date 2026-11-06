@@ -33,6 +33,43 @@ fn active_configuration(extra: &str) -> String {
 }
 
 #[test]
+fn startup_waits_for_the_radio_activation_acknowledgement() {
+    use std::sync::atomic::AtomicUsize;
+    static PENDING: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn ready(_: *mut c_void, _: *mut c_void) -> i32 {
+        i32::from(
+            PENDING
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .is_ok(),
+        )
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.radio_ready = Some(ready);
+    PENDING.store(10, Ordering::Release);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let source = active_configuration("");
+    assert_eq!(
+        unsafe {
+            descriptor().start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                source.as_ptr().cast(),
+                source.len(),
+            )
+        },
+        0
+    );
+    assert_eq!(PENDING.load(Ordering::Acquire), 0);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
 fn activation_reload_poll_stays_admitted_until_commit_or_safe_rollback() {
     use std::sync::atomic::AtomicI32;
     static ACTIVATION: AtomicI32 = AtomicI32::new(0);
@@ -125,8 +162,13 @@ fn scheduler_health_status_counts_submission_failure_not_stale_work() {
     clear_scheduler_notices();
     let (engine, call) = selected().unwrap();
     engine.reloading.store(true, Ordering::Release);
+    assert_eq!(
+        engine.reload_configuration(document(&active_configuration("")).unwrap()),
+        Err(RuntimeError::Busy)
+    );
     let stale = engine.run(|_| Ok(()));
     engine.reloading.store(false, Ordering::Release);
+    assert_eq!(engine.poll_reload_configuration(), Ok(true));
     crate::fixture::CONTROL_SUBMIT_MODE.store(1, Ordering::Release);
     let failed = engine.run(|_| Ok(()));
     let lost_digits = engine.lost_digits.load(Ordering::Acquire);

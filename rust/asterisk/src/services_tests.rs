@@ -21,6 +21,10 @@ fn remote_host_bridge_preserves_pending_owner_and_requires_acknowledgment() {
     let null = ptr::null_mut();
     // SAFETY: the fixture retains this reservation through every serialized call.
     unsafe {
+        assert_eq!(radio_metadata_bind(null, null, None), -1);
+        assert_eq!(radio_service(null, null), -1);
+        assert_eq!(radio_ready(null, null), -1);
+        assert_eq!(radio_quiesce(null, null), -1);
         let mut radio = null;
         assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
         assert_eq!(radio_service(null, radio), 0);
@@ -38,6 +42,69 @@ fn remote_host_bridge_preserves_pending_owner_and_requires_acknowledgment() {
         assert_eq!(radio_ready(null, radio), 0);
         assert_eq!(radio_quiesce(null, radio), 0);
         assert_eq!(host(|state| state.channels), 1);
+        drop((*radio.cast::<ReservedRadio>()).radio.take());
+        assert_eq!(radio_metadata_bind(null, radio, None), -1);
+        assert_eq!(radio_service(null, radio), -7);
+        assert_eq!(radio_ready(null, radio), -7);
+        assert_eq!(radio_quiesce(null, radio), 0);
+        radio_destroy(null, radio);
+    }
+    host(|state| state.clean());
+}
+
+#[test]
+fn remote_submit_validates_borrows_and_transfers_the_owned_ticket() {
+    reset();
+    let null = ptr::null_mut();
+    // SAFETY: the fixture retains complete input/output records and its unique reservation.
+    unsafe {
+        let mut radio = null;
+        assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+        let operation = ffi::UrpRemoteOperation {
+            struct_size: size_of::<ffi::UrpRemoteOperation>() as u32,
+            abi_version: 1,
+            operation: 9,
+            selector: 7,
+            signed_value: -12,
+            magnitude: 145_500_000,
+            decimal_places: 1,
+            flags: 4,
+        };
+        let mut output: ffi::rptadv_remote_ticket_v1 = std::mem::zeroed();
+        assert_eq!(
+            radio_remote_submit(null, radio, &operation, 3, ptr::null_mut()),
+            -1
+        );
+        output.context = ptr::dangling_mut();
+        assert_eq!(
+            radio_remote_submit(null, radio, ptr::null(), 3, &mut output),
+            -1
+        );
+        assert_eq!(output.struct_size, 0);
+        assert!(output.context.is_null());
+        assert_eq!(
+            radio_remote_submit(null, null, &operation, 3, &mut output),
+            -1
+        );
+        host(|state| state.failure = REMOTE_FAILED);
+        assert_eq!(
+            radio_remote_submit(null, radio, &operation, 3, &mut output),
+            -123
+        );
+        assert!(output.context.is_null());
+        assert!(output.source.is_none() && output.take.is_none() && output.destroy.is_none());
+        host(|state| state.failure = 0);
+        assert_eq!(
+            radio_remote_submit(null, radio, &operation, 3, &mut output),
+            0
+        );
+        assert_eq!(output.struct_size as usize, size_of_val(&output));
+        assert_eq!(output.abi_version, 1);
+        assert!(!output.context.is_null());
+        assert_eq!(output.source.unwrap()(output.context, 3), 0);
+        assert_eq!(*output.context.cast::<u32>(), 3);
+        assert_eq!(output.take.unwrap()(output.context, None, null), 1);
+        output.destroy.unwrap()(output.context);
         radio_destroy(null, radio);
     }
     host(|state| state.clean());
@@ -199,6 +266,26 @@ unsafe extern "C" fn transmit(
 ) -> i32 {
     0
 }
+
+unsafe extern "C" fn remote_ticket_source(context: *mut c_void, flags: u32) -> i32 {
+    // SAFETY: the fixture transfers this unique boxed ticket through its matching destroy.
+    unsafe { *context.cast::<u32>() = flags };
+    0
+}
+
+unsafe extern "C" fn remote_ticket_take(
+    _: *mut c_void,
+    _: ffi::UrpNativeProcessingDiagnostic,
+    _: *mut c_void,
+) -> i32 {
+    1
+}
+
+unsafe extern "C" fn remote_ticket_destroy(context: *mut c_void) {
+    // SAFETY: the receiving test owns this ticket and destroys it exactly once.
+    unsafe { drop(Box::from_raw(context.cast::<u32>())) };
+}
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn ast_channel_setoption(
     channel: *mut ffi::ast_channel,
@@ -224,6 +311,27 @@ unsafe extern "C" fn ast_channel_setoption(
                 } else {
                     i32::from(failure == REMOTE_PENDING)
                 }
+            }
+            ffi::URP_AST_REMOTE_SUBMIT => {
+                assert_eq!(request.source_flags, 3);
+                assert_eq!(request.request.operation, 9);
+                assert_eq!(request.request.selector, 7);
+                assert_eq!(request.request.signed_value, -12);
+                assert_eq!(request.request.magnitude, 145_500_000);
+                assert_eq!(request.request.decimal_places, 1);
+                assert_eq!(request.request.flags, 4);
+                if failure == REMOTE_FAILED {
+                    return -123;
+                }
+                request.ticket = ffi::UrpRemoteTicket {
+                    struct_size: size_of::<ffi::UrpRemoteTicket>() as u32,
+                    abi_version: 1,
+                    context: Box::into_raw(Box::new(0_u32)).cast(),
+                    source: Some(remote_ticket_source),
+                    take: Some(remote_ticket_take),
+                    destroy: Some(remote_ticket_destroy),
+                };
+                0
             }
             _ => -7,
         };

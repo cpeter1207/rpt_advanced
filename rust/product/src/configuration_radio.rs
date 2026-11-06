@@ -281,6 +281,64 @@ mod tests {
         -1
     }
 
+    #[test]
+    fn remote_command_options_reject_provider_errors_and_invalid_access_or_prefix() {
+        struct Options {
+            status: i32,
+            access: u32,
+            prefix: &'static [u8],
+            length: u32,
+        }
+        unsafe extern "C" fn options(
+            owner: *mut c_void,
+            output: *mut abi::UrpRemoteCommandOptions,
+        ) -> i32 {
+            // SAFETY: the test lends both complete objects for this synchronous call.
+            let (owner, output) = unsafe { (&*owner.cast::<Options>(), &mut *output) };
+            output.enabled = 1;
+            output.access = owner.access;
+            output.prefix[..owner.prefix.len()].copy_from_slice(owner.prefix);
+            output.prefix_length = owner.length;
+            owner.status
+        }
+        for (status, access, prefix, length, expected) in [
+            (-42, 0, b"65".as_slice(), 2, Some("failed (-42)")),
+            (0, 3, b"65".as_slice(), 2, Some("access is invalid")),
+            (0, 0, b"".as_slice(), 0, Some("prefix is invalid")),
+            (0, 0, b"65".as_slice(), 64, Some("prefix is invalid")),
+            (0, 0, b"65".as_slice(), 65, Some("prefix is invalid")),
+            (0, 0, b"6x".as_slice(), 2, Some("prefix is invalid")),
+            (0, 0, b"65".as_slice(), 2, None),
+        ] {
+            let mut owner = Options {
+                status,
+                access,
+                prefix,
+                length,
+            };
+            let resolved = ResolvedRadio {
+                owner: NonNull::from(&mut owner).cast(),
+                api: Api {
+                    resolve: resolve_unavailable,
+                    visit: visit_unavailable,
+                    destroy: destroy_noop,
+                    remote_options: options,
+                },
+            };
+            match expected {
+                Some(message) => assert!(resolved.remote_commands().unwrap_err().contains(message)),
+                None => {
+                    let value = resolved.remote_commands().unwrap().unwrap();
+                    assert_eq!(
+                        value.access,
+                        rpt_advanced_core::remote_base_command::RemoteDtmfAccess::Disabled
+                    );
+                    assert_eq!(value.prefix, "65");
+                }
+            }
+        }
+    }
+
     unsafe extern "C" fn visit_request(
         _: *const c_void,
         sink: abi::UrpNativeConfigurationSink,
