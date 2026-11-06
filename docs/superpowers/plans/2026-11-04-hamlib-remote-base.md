@@ -235,11 +235,15 @@ These are coordinated candidate minimums, not a release or deployment record.
 | --- | --- | --- |
 | Remote engine | `librptadvremote.so.1`, `rptadv_remote_api_v1`, ABI 1 | `librptadvremote1` / `librptadvremote-dev` 0.1.0~alpha1-1 |
 | Hamlib dependency | `librptadv_hamlib_adapter.so.1`, `rptadv_hamlib_api_v1`, ABI 1 | `librptadv-hamlib-adapter1` / `librptadv-hamlib-adapter-dev` 0.1.0~alpha1-1 |
+| Radio DSP | `librptadvradio.so.4`, independent external/open carrier sources | `librptadvradio4` / `librptadvradio-dev` 0.1.0~alpha9-1 |
+| Physical audio | `librptadv_portaudio_alsa_adapter.so.2`, exact ALSA resolver tail | `librptadv-portaudio-alsa-adapter2` / `librptadv-portaudio-alsa-adapter-dev` 0.2.0~alpha4-1 |
+| Physical signaling | `librptadv_gpio_adapter.so.1`, safe-level site outputs | `librptadv-gpio-adapter1` / `librptadv-gpio-adapter-dev` 0.1.0~alpha4-1 |
 | Shared radio SDK | `libusbradioplus_product.so.1`, descriptor ABI 1, native config 3, direct callbacks 5, complete remote/readiness tail | `libusbradioplus-product1` / `libusbradioplus-product-dev` 0.1.0~alpha28-1.deb13 |
 | Controller product | `librptadv_product.so.2`, descriptor ABI 7, host services 9, `reload_poll` | `rpt-advanced` / `app-rpt-advanced` / `librptadv-product2` 0.1.0~alpha20-1 |
 
-Both provider PRs pass their complete native gates. Host code and readiness
-rollback pass focused tests and fast checks; host full gates, publication and
+The remote engine, Hamlib, radio DSP, and physical-audio providers have passed
+their native gates and are released in the signed package index. Host code and
+readiness rollback pass focused tests and fast checks; host full gates and
 physical qualification remain pending. Runtime dependencies are dynamic.
 Source checkouts and candidate pins do not replace installed production packages.
 The existing publisher and native image chain are reused after authorization.
