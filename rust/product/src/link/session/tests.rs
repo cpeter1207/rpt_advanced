@@ -1855,7 +1855,10 @@ fn egress_host_contract_and_asterisk_pcm() {
         if complete_prefixes.contains(&length) {
             assert!(result.is_ok(), "complete host prefix {length}");
         } else {
-            assert!(matches!(result, Err(Error::Admission)), "partial host prefix {length}");
+            assert!(
+                matches!(result, Err(Error::Admission)),
+                "partial host prefix {length}"
+            );
         }
     }
     let (mut session, _control, state, mut output) = make_session("1000");
