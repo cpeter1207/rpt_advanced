@@ -269,6 +269,21 @@ pub unsafe extern "C" fn radio_control(
     let (Some(handle), Some(request)) = (handle, request) else {
         return -1;
     };
+    if request.operation == 7 {
+        let command = &mut request.command;
+        if command.struct_size as usize != std::mem::size_of_val(command)
+            || command.abi_version != 1
+            || command.command != crate::abi::URP_AST_COMMAND_GET_RECEIVE_POLICY
+            || command.target != 0
+        {
+            return -1;
+        }
+        let reservation = handle.pending.as_ref().unwrap_or(&handle.reservation);
+        let (mode, frames) = reservation.radio.radio.receive_policy();
+        command.value = i64::from(mode);
+        command.flags = frames;
+        return 0;
+    }
     let Some(active) = handle.active.as_mut() else {
         return -7;
     };
@@ -453,7 +468,7 @@ pub unsafe extern "C" fn radio_open(
 pub unsafe extern "C" fn radio_activate(
     context: *mut c_void,
     radio: *mut c_void,
-    receive: crate::abi::rptadv_radio_receive_v2,
+    receive: crate::abi::rptadv_radio_receive_v3,
     receive_context: *mut c_void,
     transmit: crate::abi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
@@ -1245,7 +1260,12 @@ mod tests {
     fn activation_without_providers_fails_closed_and_preserves_reservation() {
         use std::ffi::c_void;
 
-        unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
+        unsafe extern "C" fn receive(
+            _: *mut c_void,
+            _: *const crate::abi::UrpNativeReceiveMetadata,
+            _: *mut f32,
+            _: u32,
+        ) -> i32 {
             0
         }
         unsafe extern "C" fn transmit(
@@ -1288,7 +1308,12 @@ mod tests {
     fn radio_activation_rejects_invalid_contexts_handles_and_duplicate_activation() {
         use std::ffi::c_void;
 
-        unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
+        unsafe extern "C" fn receive(
+            _: *mut c_void,
+            _: *const crate::abi::UrpNativeReceiveMetadata,
+            _: *mut f32,
+            _: u32,
+        ) -> i32 {
             0
         }
         unsafe extern "C" fn transmit(
@@ -1401,7 +1426,12 @@ mod tests {
     fn provider_backed_activation_fails_safely_without_cm119_hardware() {
         use std::ffi::c_void;
 
-        unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
+        unsafe extern "C" fn receive(
+            _: *mut c_void,
+            _: *const crate::abi::UrpNativeReceiveMetadata,
+            _: *mut f32,
+            _: u32,
+        ) -> i32 {
             0
         }
         unsafe extern "C" fn transmit(
@@ -1442,5 +1472,131 @@ mod tests {
                 .is_none()
         );
         unsafe { radio_destroy(context, reservation) };
+    }
+}
+
+#[cfg(test)]
+mod receive_policy_tests {
+    use super::*;
+    use crate::abi;
+    fn reservation(mode: u32) -> RadioReservation {
+        // SAFETY: these C records contain only scalars and nullable pointers.
+        let mut radio: abi::rptadv_radio_session_config = unsafe { std::mem::zeroed() };
+        radio.struct_size = std::mem::size_of_val(&radio) as u32;
+        radio.abi_version = 5;
+        radio.receive.vad_mode = mode;
+        // SAFETY: zero initializes scalar fields and nullable pointers, never Rust references.
+        let mut config: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
+        config.struct_size = std::mem::size_of_val(&config) as u32;
+        config.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
+        config.radio = &radio;
+        RadioReservation {
+            maximum_frames: 960,
+            radio: crate::ResolvedRadioNode {
+                node: "1000".into(),
+                channel: "usb".into(),
+                enabled: true,
+                iax_port: 4569,
+                registration_url: String::new(),
+                registration_interval_seconds: 60,
+                // SAFETY: both complete records live through the synchronous scalar copy.
+                radio: unsafe {
+                    crate::native_configuration::NativeRadioConfiguration::copy_from(&config)
+                }
+                .unwrap(),
+            },
+        }
+    }
+    #[test]
+    fn receive_policy_is_available_before_activation_and_tracks_pending_rollback() {
+        let mut handle = RadioHandle {
+            reservation: reservation(0),
+            active: None,
+            pending: None,
+        };
+        // SAFETY: the record contains only integers and a fixed integer array.
+        let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+        request.struct_size = std::mem::size_of_val(&request) as u32;
+        request.abi_version = 1;
+        request.operation = 7;
+        request.command.struct_size = std::mem::size_of_val(&request.command) as u32;
+        request.command.abi_version = 1;
+        request.command.command = abi::URP_AST_COMMAND_GET_RECEIVE_POLICY;
+        for mode in 0..=2 {
+            handle.reservation = reservation(mode);
+            assert_eq!(
+                // SAFETY: the stack handle and complete writable request remain retained.
+                unsafe {
+                    radio_control(
+                        std::ptr::null_mut(),
+                        std::ptr::from_mut(&mut handle).cast(),
+                        &mut request,
+                        None,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                (request.command.value, request.command.flags),
+                (i64::from(mode), if mode == 0 { 0 } else { 7680 })
+            );
+        }
+        handle.reservation = reservation(0);
+        handle.pending = Some(reservation(2));
+        assert_eq!(
+            // SAFETY: the same unique handle and complete request remain live.
+            unsafe {
+                radio_control(
+                    std::ptr::null_mut(),
+                    std::ptr::from_mut(&mut handle).cast(),
+                    &mut request,
+                    None,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!((request.command.value, request.command.flags), (2, 7680));
+        handle.pending = None;
+        assert_eq!(
+            // SAFETY: rollback retained the same handle and committed reservation.
+            unsafe {
+                radio_control(
+                    std::ptr::null_mut(),
+                    std::ptr::from_mut(&mut handle).cast(),
+                    &mut request,
+                    None,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!((request.command.value, request.command.flags), (0, 0));
+        for defect in 0..4 {
+            request.command.struct_size = std::mem::size_of_val(&request.command) as u32;
+            request.command.abi_version = 1;
+            request.command.command = abi::URP_AST_COMMAND_GET_RECEIVE_POLICY;
+            request.command.target = 0;
+            match defect {
+                0 => request.command.struct_size = 4,
+                1 => request.command.abi_version = 2,
+                2 => request.command.command = 1,
+                _ => request.command.target = 1,
+            }
+            assert_eq!(
+                // SAFETY: the live stack reservation rejects these malformed scalar requests.
+                unsafe {
+                    radio_control(
+                        std::ptr::null_mut(),
+                        std::ptr::from_mut(&mut handle).cast(),
+                        &mut request,
+                        None,
+                        std::ptr::null_mut(),
+                    )
+                },
+                -1
+            );
+        }
     }
 }

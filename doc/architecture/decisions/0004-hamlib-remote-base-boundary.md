@@ -45,8 +45,10 @@ duplex so a linked peer can key the transmitter when RF squelch is unreliable.
 Reject the request when the selected radio and audio path cannot provide full
 duplex.
 
-AM and single-sideband speech squelch uses stateful 16 kHz Silero VAD through
-ONNX Runtime. A configurable fixed SSB passband in the shared FFmpeg graph is
+AM and single-sideband speech squelch will reuse the shared radio's Earshot
+VAD with 16 kHz analysis. The local receiver implementation supports Off,
+Kerchunk filter and On; connecting future Hamlib sources remains planned.
+A configurable fixed SSB passband in the shared FFmpeg graph is
 the universal fallback; capable I/Q sources may add adaptive
 pre-demodulation selection. If speech detection is unavailable, fall back to
 conventional noise squelch; if that is unavailable, leave receive open.

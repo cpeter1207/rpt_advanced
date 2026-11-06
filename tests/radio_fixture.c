@@ -187,6 +187,19 @@ static void inspect_audio(struct fixture *device) {
  */
 static int setoption(struct ast_channel *channel, int option, void *data, int size) {
     struct fixture *device = ast_channel_tech_pvt(channel);
+    if (option == URP_AST_OPTION_RECEIVE_POLICY) {
+        if (!data || size != sizeof(UrpAstChannelCommand)) {
+            return -1;
+        }
+        UrpAstChannelCommand *command = data;
+        if (command->struct_size != sizeof(*command) || command->abi_version != 1 ||
+            command->command != URP_AST_COMMAND_GET_RECEIVE_POLICY) {
+            return -1;
+        }
+        command->value = 0;
+        command->flags = 0;
+        return 0;
+    }
     if (option == URP_AST_OPTION_LINK_ATTACH) {
         if (!data || size != sizeof(struct urp_ast_link_attach)) {
             return -1;
@@ -225,8 +238,18 @@ static void *clock_run(void *context) {
         receive_audio(device);
         uint32_t keyed = 0;
         uint32_t ctcss_enabled = 0;
-        if (device->callbacks.receive(device->callbacks.receive_context, device->carrier,
-                                      device->audio, 960) ||
+        const UrpNativeReceiveMetadata metadata = {
+            .struct_size = sizeof(metadata),
+            .abi_version = URP_NATIVE_RECEIVE_METADATA_ABI_VERSION,
+            .generation_id = 1,
+            .first_sample_index = (uint64_t)tick * 960,
+            .frame_count = 960,
+            .raw_receiver_keyed = device->carrier,
+            .receiver_keyed = device->carrier,
+            .vad_voice_sample_index = UINT64_MAX,
+        };
+        if (device->callbacks.receive(device->callbacks.receive_context, &metadata, device->audio,
+                                      960) ||
             device->callbacks.transmit(device->callbacks.transmit_context, device->audio, 960,
                                        &keyed, &ctcss_enabled)) {
             break;

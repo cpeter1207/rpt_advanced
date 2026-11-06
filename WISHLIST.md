@@ -388,15 +388,17 @@ remain unimplemented under ADR 0004.
   or disabled.
 - Reject a non-FM mode request when the selected radio/audio implementation
   cannot provide full duplex.
-- The DSP speech-squelch implementation and its configurable defaults may be
-  selected during implementation. If unavailable, fall back to conventional
-  noise squelch; if that is unavailable, leave receive open.
+- Speech detection reuses the shared radio's Earshot implementation. The
+  future Hamlib-source integration retains its conventional-noise-squelch
+  fallback policy when speech detection is unavailable; current local VAD
+  processing errors close receive admission.
 - Remote-base configuration uses inheritable `[remote_base]` and
   `[remote_base node]` sections. `hamlib_model` is a canonical model name,
   `audio_source` selects `cm119`, `alsa`, or `hamlib_stream`, and
   `hamlib_option_*` passes named backend options.
-- Speech squelch uses stateful 16 kHz Silero VAD through ONNX Runtime. A
-  configurable fixed SSB passband in the shared FFmpeg graph is the universal
+- Speech squelch reuses the shared radio's Earshot VAD with 16 kHz analysis.
+  The local receiver supports Off, Kerchunk filter and On; integration with
+  future Hamlib audio sources remains planned. A configurable fixed SSB passband in the shared FFmpeg graph is the universal
   fallback; capable I/Q sources may add adaptive pre-demodulation selection.
 - Default remote-base DTMF commands cover frequency, mode, receive/transmit
   VFO, split/offset, transmit power, CTCSS/DCS selection, remote-base status,

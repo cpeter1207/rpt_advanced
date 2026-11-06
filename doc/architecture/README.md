@@ -59,8 +59,8 @@ Stable reusable functions are progressively extracted as narrow, independently
 versioned shared libraries. The approved component boundaries and the rule that
 policy remains in the controller are defined by [ADR 0011](decisions/0011-versioned-functional-components.md).
 The nine existing-function components are released runtime dependencies. Direct
-dynamic links are `librptadvradio.so.4` to `librptadvsquelch.so.2`,
-`librptadvctcss.so.2`, and `librptadvdcs.so.1`;
+dynamic links are `librptadvradio.so.5` to `librptadvsquelch.so.2`,
+`librptadvctcss.so.2`, `librptadvdcs.so.1`, and the released samplerate ABI 2;
 `librptadv_gpio_adapter.so.1` to `librptadvsignaling.so.1`;
 `librptadv_product.so.2` to `librptadvtone.so.1`, `librptadvmorse.so.1`,
 `librptadvdtmf.so.1`, `librptadvtemplate.so.1`, and
@@ -70,6 +70,35 @@ dynamic links are `librptadvradio.so.4` to `librptadvsquelch.so.2`,
 generation. Hardware I/O and controller policy remain with their
 existing owners. ADR 0011's further directions are tracked separately from
 this extraction.
+
+Local receive speech qualification uses Earshot 1.2.2 in the shared radio
+owner immediately after squelch. The released samplerate ABI 2 supplies exact
+256-sample 16 kHz analysis frames while programme PCM stays at 48 kHz. Off
+preserves the existing receive path. Kerchunk requires fresh speech for each
+RF-qualified carrier opening, then latches until RF qualification closes. On
+requires speech or its configurable hang (1000 ms by default), together with
+every enabled COS/CTCSS/DCS requirement; it supplies receive qualification when
+those RF requirements are disabled. Disabled audio and existing duplex,
+blanking and input-validity guards still apply.
+
+VAD uses the existing delay storage with a minimum 160 ms reserve, preserving a
+larger configured delay. Legacy AppRpt8k owns that delay inside the radio;
+standalone and app_rpt_advanced use the controller's existing local PCM ring.
+The controller retains continuous source-tagged PCM, writes zeros during raw
+RF loss, and mutes the old accepted tail at a carrier closing. A normal rekey
+preserves its first PCM without waiting for a consumer reset. Speech admission
+must match the current raw RF token and current RX handoff after rendering;
+PCM energy and real-sample counts never grant admission. A failed or short
+write, source gap, invalid metadata or processing failure cancels admission.
+Actual faults reset/re-prime the ring and require a fresh voice decision after
+the discontinuity. Mode changes allocate replacement storage on control and
+reuse the existing endpoint adoption acknowledgments.
+
+Radio ABI/SONAME 5, USBRadioPlus direct-callback ABI 6 with sized RX metadata,
+native request ABI 4, and controller host-services ABI 10 form a matched
+cohort. Only the radio crate requires Rust >=1.87; USBRadioPlus and the
+controller retain Rust 1.85. Hamlib source integration remains planned in
+ADR 0004; the local VAD feature does not implement remote-base control.
 
 The USBRadioPlus hardware cutover uses one channel implementation backed by
 the dynamic PortAudio/ALSA and GPIO adapters, with no `res_usbradio` imports or

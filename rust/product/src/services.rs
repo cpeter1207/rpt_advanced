@@ -85,7 +85,7 @@ pub struct SourceRead {
 
 /// Validated copy of the process-lifetime host capability.
 #[derive(Clone, Copy)]
-pub struct HostServices(abi::rptadv_host_services_v9);
+pub struct HostServices(abi::rptadv_host_services_v10);
 // SAFETY: validation requires a process-lifetime immutable table. Opaque objects remain
 // uniquely owned; the host documents independent operation on their owner threads.
 unsafe impl Send for HostServices {}
@@ -310,7 +310,7 @@ impl Backend for HostServices {
     }
 }
 
-fn complete(api: &abi::rptadv_host_services_v9) -> bool {
+fn complete(api: &abi::rptadv_host_services_v10) -> bool {
     [
         api.local_time.is_some(),
         api.command_notice.is_some(),
@@ -350,21 +350,21 @@ impl HostServices {
     /// calls are thread-safe, while each returned handle permits exactly one serial owner.
     /// Callbacks are synchronous, do not retain borrowed buffers, provide aligned bounded
     /// slices, follow documented ownership/status values, and never unwind.
-    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v9) -> Result<Self, Error> {
+    pub unsafe fn open(pointer: *const abi::rptadv_host_services_v10) -> Result<Self, Error> {
         if pointer.is_null() {
             return Err(Error::Admission);
         }
         let size = unsafe { ptr::addr_of!((*pointer).struct_size).read() } as usize;
-        let required = offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare);
-        let table_size = size_of::<abi::rptadv_host_services_v9>();
-        let processor_tail = offset_of!(abi::rptadv_host_services_v9, radio_control);
-        let maintenance_tail = offset_of!(abi::rptadv_host_services_v9, radio_update);
+        let required = offset_of!(abi::rptadv_host_services_v10, peer_processing_prepare);
+        let table_size = size_of::<abi::rptadv_host_services_v10>();
+        let processor_tail = offset_of!(abi::rptadv_host_services_v10, radio_control);
+        let maintenance_tail = offset_of!(abi::rptadv_host_services_v10, radio_update);
         if size < table_size && ![required, processor_tail, maintenance_tail].contains(&size) {
             return Err(Error::Admission);
         }
-        // ABI 9's released prefix is complete; its optional processor tail is
+        // ABI 10's released prefix is complete; its optional processor tail is
         // copied only when fully readable. Missing tails remain nullable.
-        let mut api: abi::rptadv_host_services_v9 = unsafe { std::mem::zeroed() };
+        let mut api: abi::rptadv_host_services_v10 = unsafe { std::mem::zeroed() };
         unsafe {
             ptr::copy_nonoverlapping(
                 pointer.cast::<u8>(),
@@ -391,8 +391,8 @@ impl HostServices {
         .into_iter()
         .filter(|present| *present)
         .count();
-        if api.abi_version != 9
-            || api.capability != *b"rptadv.hst9\0"
+        if api.abi_version != 10
+            || api.capability != *b"rptadv.hst10\0\0\0\0"
             || !complete(&api)
             || !matches!(async_count, 0 | 3)
             || !matches!(egress_count, 0 | 6)
@@ -753,6 +753,13 @@ impl HostServices {
     }
 }
 
+/// Resolved speech admission and reserve required by the existing local receive ring.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReceivePolicy {
+    pub(crate) mode: u32,
+    pub(crate) preroll_frames: u32,
+}
+
 /// Unique radio handle operated by one product worker.
 pub struct Radio {
     services: HostServices,
@@ -762,6 +769,57 @@ pub struct Radio {
 // SAFETY: the handle is uniquely owned and never used concurrently.
 unsafe impl Send for Radio {}
 impl Radio {
+    /// Read the configured receive reserve before activation or after a live edit.
+    pub(crate) fn receive_policy(&mut self) -> Result<ReceivePolicy, i32> {
+        let call = self.services.0.radio_control.ok_or(-7)?;
+        let mut request = abi::rptadv_radio_control_v1 {
+            struct_size: size_of::<abi::rptadv_radio_control_v1>() as u32,
+            abi_version: 1,
+            operation: 7,
+            keyed: 0,
+            forced_ctcss_tenths_hz: 0,
+            command: abi::UrpAstChannelCommand {
+                struct_size: size_of::<abi::UrpAstChannelCommand>() as u32,
+                abi_version: 1,
+                command: abi::URP_AST_COMMAND_GET_RECEIVE_POLICY,
+                target: 0,
+                value: -1,
+                flags: u32::MAX,
+                eeprom_words: [0; 64],
+            },
+        };
+        // SAFETY: the unique radio and complete writable request outlive this serial query.
+        let status = unsafe {
+            call(
+                self.services.0.context,
+                self.handle.as_ptr(),
+                &mut request,
+                None,
+                ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(status);
+        }
+        if request.struct_size as usize != size_of_val(&request)
+            || request.abi_version != 1
+            || request.operation != 7
+            || request.command.struct_size as usize != size_of_val(&request.command)
+            || request.command.abi_version != 1
+            || request.command.command != abi::URP_AST_COMMAND_GET_RECEIVE_POLICY
+            || request.command.target != 0
+            || !matches!(
+                (request.command.value, request.command.flags),
+                (0, 0) | (1 | 2, 7680)
+            )
+        {
+            return Err(-1);
+        }
+        Ok(ReceivePolicy {
+            mode: request.command.value as u32,
+            preroll_frames: request.command.flags,
+        })
+    }
     /// Stage, commit, or restore a same-device edit on the retained native owner.
     pub(crate) fn configuration_update(&mut self, phase: u32) -> Result<bool, i32> {
         let Some(update) = self.services.0.radio_update else {
@@ -890,7 +948,7 @@ impl Radio {
     /// The host serializes each endpoint and synchronously stops both on destroy.
     pub unsafe fn activate(
         &mut self,
-        receive: abi::rptadv_radio_receive_v2,
+        receive: abi::rptadv_radio_receive_v3,
         receive_context: *mut c_void,
         transmit: abi::rptadv_radio_transmit_v3,
         transmit_context: *mut c_void,

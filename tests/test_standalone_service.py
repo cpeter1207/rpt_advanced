@@ -54,8 +54,8 @@ def test_standalone_package_does_not_depend_on_asterisk() -> None:
 
 def test_standalone_requires_radio_core_with_live_update_api() -> None:
     control = (ROOT / "debian/control").read_text(encoding="utf-8")
-    assert "librptadvradio-dev (>= 0.1.0~alpha6)" in control
-    assert "librptadvradio4 (>= 0.1.0~alpha6)" in package_stanza("rpt-advanced")
+    assert "librptadvradio-dev (>= 0.1.0~alpha10)" in control
+    assert "librptadvradio5 (>= 0.1.0~alpha10)" in package_stanza("rpt-advanced")
 
 
 def test_standalone_package_grants_service_user_cm119_usb_access() -> None:

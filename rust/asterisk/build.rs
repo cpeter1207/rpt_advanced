@@ -35,6 +35,8 @@ fn main() {
         .allowlist_type("UrpAstSite.*")
         .allowlist_var("URP_AST_(SITE_.*|OPTION_SITE_IO)")
         .allowlist_type("UrpAstDirectCallbacks")
+        .allowlist_type("UrpAstChannelCommand")
+        .allowlist_var("URP_AST_(OPTION_RECEIVE_POLICY|COMMAND_GET_RECEIVE_POLICY)")
         .allowlist_type("urp_ast_link_attach")
         .allowlist_var("URP_AST_(OPTION_DIRECT_CALLBACKS|DIRECT_CALLBACKS_ABI_VERSION|OPTION_LINK_ATTACH|LINK_ATTACH_ABI_VERSION)")
         .allowlist_function("ast_(request_and_dial|channel_state)")

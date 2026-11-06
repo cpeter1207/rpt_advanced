@@ -882,3 +882,24 @@ fn peer_input_single_sample_maps_real_pcm_and_provider_error() {
     producer.signals().set_dtmf_muted(true);
     assert_eq!(PeerInput::render_sample(&mut consumer), Some(0.0));
 }
+
+/// Borrow a retained test descriptor around the real local ring lifecycle.
+///
+/// # Safety
+/// The descriptor and callbacks remain valid until both returned endpoints drop.
+pub(crate) unsafe fn local_with_descriptor(
+    api: *const ffi::rpcr3_descriptor,
+    delay: u64,
+) -> (InboundProducer, InboundConsumer) {
+    // SAFETY: the test caller supplies the retained descriptor promised above.
+    unsafe {
+        InboundRing::from_descriptor(
+            48000,
+            InboundPolicy::Local {
+                squelch_delay_ms: delay,
+            },
+            api,
+        )
+    }
+    .unwrap()
+}

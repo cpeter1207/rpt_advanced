@@ -48,7 +48,7 @@ struct PeerIngress {
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
-    descriptor: Box<abi::rptadv_host_services_v9>,
+    descriptor: Box<abi::rptadv_host_services_v10>,
 }
 
 impl HostServicesOwner {
@@ -77,10 +77,10 @@ impl HostServicesOwner {
             ingress,
             echo: Mutex::new(None),
         });
-        let descriptor = Box::new(abi::rptadv_host_services_v9 {
-            struct_size: size_of::<abi::rptadv_host_services_v9>() as u32,
-            abi_version: 9,
-            capability: *b"rptadv.hst9\0",
+        let descriptor = Box::new(abi::rptadv_host_services_v10 {
+            struct_size: size_of::<abi::rptadv_host_services_v10>() as u32,
+            abi_version: 10,
+            capability: *b"rptadv.hst10\0\0\0\0",
             context: ptr::from_mut(context.as_mut()).cast(),
             local_time: Some(local_time),
             command_notice: Some(command_notice),
@@ -131,7 +131,7 @@ impl HostServicesOwner {
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
-    pub fn descriptor(&self) -> &abi::rptadv_host_services_v9 {
+    pub fn descriptor(&self) -> &abi::rptadv_host_services_v10 {
         let _keep_context_alive = &self.context;
         self.descriptor.as_ref()
     }
@@ -808,7 +808,7 @@ unsafe extern "C" fn open_radio(
 unsafe extern "C" fn activate_radio(
     context: *mut c_void,
     radio: *mut c_void,
-    receive: abi::rptadv_radio_receive_v2,
+    receive: abi::rptadv_radio_receive_v3,
     receive_context: *mut c_void,
     transmit: abi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
@@ -1504,10 +1504,10 @@ mod tests {
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
-            size_of::<crate::abi::rptadv_host_services_v9>() as u32
+            size_of::<crate::abi::rptadv_host_services_v10>() as u32
         );
-        assert_eq!(api.abi_version, 9);
-        assert_eq!(api.capability, *b"rptadv.hst9\0");
+        assert_eq!(api.abi_version, 10);
+        assert_eq!(api.capability, *b"rptadv.hst10\0\0\0\0");
         assert!(!api.context.is_null());
         assert!(api.local_time.is_some());
         assert!(api.peer_dial.is_some());

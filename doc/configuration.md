@@ -72,7 +72,7 @@ clears an inherited value.
 | `dtmf_admin_unlock_hash` | empty | Argon2id hash of the code used after `*800` to unlock admin DTMF commands. Both admin hashes must be set to enable them. |
 | `dtmf_admin_lock_hash` | empty | Argon2id hash of the code used after `*801` to lock admin DTMF commands. Do not put a plain code here. |
 | `dtmf_admin_timeout_ms` | 300000 | Lock admin DTMF after this many milliseconds without a successful admin command; must be positive. |
-| `squelch_delay_ms` | 0 | Delay local receive audio by this many milliseconds. Unkey drops the buffered tail. Zero adds no delay. |
+| `squelch_delay_ms` | 0 | Delay local receive audio by this many milliseconds. Active VAD raises the effective reserve to at least 160 ms; a larger configured value is preserved. Raw RF unkey drops the buffered tail. With VAD Off, zero adds no delay. |
 | `status_snapshot_interval_ms` | 50 | Update RX/TX meters and receive-buffer statistics this often, in milliseconds; must be positive. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
 | `ctcss_encode_on_input` | no | Send transmit CTCSS only during local or linked receive activity and command replies, plus `ctcss_hang_ms`. Other IDs and telemetry do not turn it on. |
@@ -217,6 +217,8 @@ Receive signaling options:
 | `noise_filter` | `standard` | Native discriminator-noise detector response: `standard` or `alternate`. |
 | `vox_threshold` | `0` | VOX detector threshold in PCM codes (0–32767). |
 | `vox_hang_ms` | `2000` | VOX hold time after received audio ends (0–32767 ms). |
+| `vad_mode` | `off` | Earshot speech qualification: `off`, `kerchunk` (first speech admits the RF burst), or `on` (speech plus hang). Retains all enabled carrier/tone requirements and receive guards. Kerchunk without a closing RF requirement warns and uses On. |
+| `vad_hang_ms` | `1000` | Speech release hold, 0-32767 ms, independent of the VOX hold. Active VAD uses the existing local receive ring with at least 160 ms reserve; no additional delay line is added. |
 | `receive_on_delay_ms` | `0` | Ignore receiver keying for this interval after transmitter release (0–65535 ms). |
 | `radio_duplex_mode` | `half` | Physical radio capability: `half` or `full` duplex. |
 

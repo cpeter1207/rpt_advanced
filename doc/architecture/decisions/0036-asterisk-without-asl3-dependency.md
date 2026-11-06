@@ -201,7 +201,11 @@ or package dependency check.
 
 ### Codec host cutover (2026-10-27, integration in progress)
 
-Product ABI 7 (`rptadv.prod7`) requires host-services ABI 9 (`rptadv.hst9`).
+Product ABI 7 (`rptadv.prod7`) requires host-services ABI 10 (`rptadv.hst10`).
+The Earshot receive cutover adds sized source/burst metadata through the shared
+SDK's direct-callback ABI 6 and a pre-activation receive-policy query through
+the existing host radio-control operation. Earlier ABI 9 references below
+describe their original changes.
 Prepared media carries encoder consumption, encoded bytes, real source span,
 wire-frame duration and timestamps independently. The standalone host delegates
 preparation/reset/send to IAX client ABI 2 and retains its codec catalog across

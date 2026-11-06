@@ -350,8 +350,8 @@ def package(control: Path) -> None:
         assert token in contents, f"missing package dependency: {token}"
     for token in (
         f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
-        "libusbradioplus-product-dev (>= 0.1.0~alpha30-1+bs1770.20261106)",
-        "libusbradioplus-product1 (>= 0.1.0~alpha30-1+bs1770.20261106)",
+        "libusbradioplus-product-dev (>= 0.1.0~alpha31-1+vad.20261106)",
+        "libusbradioplus-product1 (>= 0.1.0~alpha31-1+vad.20261106)",
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",

@@ -30,7 +30,7 @@ impl std::error::Error for RadioActivationError {}
 /// Borrowed native callback pair retained through synchronous station destruction.
 pub struct ProductRadioCallbacks {
     /// Qualified receive audio callback.
-    pub receive: abi::rptadv_radio_receive_v2,
+    pub receive: abi::rptadv_radio_receive_v3,
     /// Caller-owned receive context.
     pub receive_context: *mut c_void,
     /// Exact-frame transmit audio and PTT/CTCSS callback.
@@ -464,7 +464,7 @@ pub(crate) mod tests {
                     .cast::<crate::providers::tests::PublishedRadioDescriptor>()
             };
             assert_eq!(radio.struct_size, 112);
-            assert_eq!(radio.abi_version, 4);
+            assert_eq!(radio.abi_version, 5);
         }
         assert_eq!(
             callbacks.abi_version,
@@ -495,7 +495,12 @@ pub(crate) mod tests {
         CALLS.with(|calls| calls.borrow_mut().push("start"));
         RESULTS.get().2
     }
-    unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
+    unsafe extern "C" fn receive(
+        _: *mut c_void,
+        _: *const abi::UrpNativeReceiveMetadata,
+        _: *mut f32,
+        _: u32,
+    ) -> i32 {
         0
     }
     unsafe extern "C" fn transmit(
@@ -946,11 +951,11 @@ pub(crate) mod tests {
         replace_descriptor(&mut providers, "libusbradioplus_product.so.1", native);
         let descriptor = PublishedRadioDescriptor::new();
         assert_eq!(std::mem::size_of_val(&descriptor), 112);
-        replace_descriptor(&mut providers, "librptadvradio.so.4", descriptor);
+        replace_descriptor(&mut providers, "librptadvradio.so.5", descriptor);
         // SAFETY: the provider set retains this fixture descriptor throughout activation.
         let expected = unsafe {
             providers
-                .descriptor("librptadvradio.so.4")
+                .descriptor("librptadvradio.so.5")
                 .unwrap()
                 .as_ptr()
         };

@@ -187,10 +187,49 @@ unsafe extern "C" fn radio_open(
         }
     })
 }
+unsafe extern "C" fn radio_control(
+    _context: *mut c_void,
+    radio: *mut c_void,
+    request: *mut ffi::rptadv_radio_control_v1,
+    _sink: ffi::rptadv_text_sink_v1,
+    _sink_context: *mut c_void,
+) -> i32 {
+    boundary(-1, || {
+        if request.is_null() {
+            return -1;
+        }
+        // SAFETY: this control ABI supplies a readable size/version prefix.
+        let header = unsafe { request.cast::<[u32; 2]>().read_unaligned() };
+        if header[0] as usize != size_of::<ffi::rptadv_radio_control_v1>() || header[1] != 1 {
+            return -1;
+        }
+        let (reserved,request)=
+            // SAFETY: the caller retains the complete writable request and unique radio.
+            unsafe {(radio.cast::<ReservedRadio>().as_mut(),request.as_mut())};
+        let (Some(reserved), Some(request)) = (reserved, request) else {
+            return -1;
+        };
+        if request.operation != 7 {
+            return -7;
+        }
+        if request.command.struct_size as usize != size_of::<ffi::UrpAstChannelCommand>()
+            || request.command.abi_version != 1
+            || request.command.command != ffi::URP_AST_COMMAND_GET_RECEIVE_POLICY
+            || request.command.target != 0
+        {
+            return -1;
+        }
+        let Some(radio) = reserved.radio.as_mut() else {
+            return -1;
+        };
+        radio.receive_policy(&mut request.command)
+    })
+}
+
 unsafe extern "C" fn radio_activate(
     _context: *mut c_void,
     radio: *mut c_void,
-    receive: ffi::rptadv_radio_receive_v2,
+    receive: ffi::rptadv_radio_receive_v3,
     receive_context: *mut c_void,
     transmit: ffi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
@@ -845,7 +884,7 @@ unsafe extern "C" fn echo_account_status(
 /// Owned immutable host table retained until all product/account callbacks stop.
 pub(crate) struct HostServicesOwner {
     context: Box<HostContext>,
-    descriptor: Box<ffi::rptadv_host_services_v9>,
+    descriptor: Box<ffi::rptadv_host_services_v10>,
 }
 // The table/context allocations remain stable, and accounts are thread-safe.
 unsafe impl Send for HostServicesOwner {}
@@ -863,7 +902,7 @@ impl HostServicesOwner {
         }
     }
     /// Borrow the immutable table through successful account/product stop.
-    pub(crate) fn descriptor(&self) -> &ffi::rptadv_host_services_v9 {
+    pub(crate) fn descriptor(&self) -> &ffi::rptadv_host_services_v10 {
         &self.descriptor
     }
     /// Prepare resolved accounts while their record spans are borrowed. Store
@@ -1021,14 +1060,14 @@ pub(crate) unsafe fn incoming_echo(
     }
 }
 
-struct Services(ffi::rptadv_host_services_v9);
+struct Services(ffi::rptadv_host_services_v10);
 // SAFETY: the table is immutable, its context is null, and object callbacks serialize each handle.
 unsafe impl Sync for Services {}
 
-static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
-    struct_size: size_of::<ffi::rptadv_host_services_v9>() as u32,
-    abi_version: 9,
-    capability: *b"rptadv.hst9\0",
+static SERVICES: Services = Services(ffi::rptadv_host_services_v10 {
+    struct_size: size_of::<ffi::rptadv_host_services_v10>() as u32,
+    abi_version: 10,
+    capability: *b"rptadv.hst10\0\0\0\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(command_notice),
@@ -1069,13 +1108,13 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     peer_send_human_text: Some(peer_send_human_text),
     echo_account_status: Some(echo_account_status),
     peer_processing_prepare: None,
-    radio_control: None,
+    radio_control: Some(radio_control),
     radio_update: None,
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.
 #[cfg(test)]
-pub fn descriptor() -> &'static ffi::rptadv_host_services_v9 {
+pub fn descriptor() -> &'static ffi::rptadv_host_services_v10 {
     &SERVICES.0
 }
 

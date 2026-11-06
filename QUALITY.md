@@ -71,7 +71,7 @@ policy with ad-hoc local builds during normal validation.
 ## Radio signaling and hardware admission contract
 
 `make radio-interlock-check` compiles a hardware-free C consumer against the
-installed radio ABI 4 and GPIO ABI 1 shared objects. Required descriptor tails
+installed radio ABI 5 and GPIO ABI 1 shared objects. Required descriptor tails
 must be present; missing functionality is a failure, not a skipped test. The
 test is part of `make check` and the source archive. Its C formatting and static
 analysis run with the platform-independent checks.

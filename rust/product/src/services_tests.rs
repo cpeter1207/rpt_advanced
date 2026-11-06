@@ -234,16 +234,16 @@ fn scheduler_notice_is_required_for_host_admission() {
 fn site_bridge_rejects_a_host_without_the_site_contract() {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.abi_version = 6;
-    table.capability = *b"rptadv.hst6\0";
+    table.capability = *b"rptadv.hst6\0\0\0\0\0";
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
     table = unsafe { crate::fixture::host_descriptor().read() };
     for length in [
-        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_bind),
-        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_publish),
-        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_site_snapshot),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_site_bind),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_site_publish),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_site_snapshot),
     ] {
         table.struct_size = length as u32;
         assert!(matches!(
@@ -526,7 +526,7 @@ fn direct_table_requires_both_activation_and_destroy() {
     ));
 }
 
-fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v9)) -> HostServices {
+fn host_services(configure: impl FnOnce(&mut abi::rptadv_host_services_v10)) -> HostServices {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     configure(&mut table);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -565,7 +565,7 @@ fn radio_update_is_optional_and_preserves_stage_results_and_finish_errors() {
 fn optional_peer_processor_tail_accepts_the_released_complete_host_prefix() {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.struct_size =
-        std::mem::offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare) as u32;
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_processing_prepare) as u32;
     assert!(unsafe { HostServices::open(&table) }.is_ok());
 }
 
@@ -905,7 +905,8 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_step_attach) as u32;
+    table.struct_size =
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_step_attach) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
@@ -915,7 +916,7 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_observe) as u32;
+    table.struct_size = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_observe) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
@@ -925,13 +926,13 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v9, peer_destroy)
+    table.struct_size = (std::mem::offset_of!(abi::rptadv_host_services_v10, peer_destroy)
         + size_of::<usize>() * 2) as u32;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.struct_size = size_of::<abi::rptadv_host_services_v9>() as u32;
+    table.struct_size = size_of::<abi::rptadv_host_services_v10>() as u32;
     table.peer_step_stop = Some(stop_only);
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -943,13 +944,13 @@ fn host_table_validation_and_value_conversions_fail_closed() {
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.abi_version = 9;
+    table.abi_version = 10;
     table.capability[0] = b'!';
     assert!(matches!(
         unsafe { HostServices::open(&table) },
         Err(Error::Admission)
     ));
-    table.capability = *b"rptadv.hst9\0";
+    table.capability = *b"rptadv.hst10\0\0\0\0";
     table.local_time = None;
     assert!(matches!(
         unsafe { HostServices::open(&table) },
@@ -1120,4 +1121,71 @@ fn peer_callbacks_dispatch_valid_events_and_reject_invalid_or_failed_operations(
     let mut peer = services.dial("remote", "1000", 8, || true).unwrap();
     assert_eq!(peer.write(&[0.25]), Err(Error::Write));
     drop(peer);
+}
+
+#[test]
+fn receive_policy_query_requires_exact_response_and_rejects_unknown_success() {
+    use std::cell::Cell;
+    thread_local! {static CASE:Cell<u8>=const {Cell::new(0)};}
+    unsafe extern "C" fn query(
+        _: *mut c_void,
+        _: *mut c_void,
+        p: *mut abi::rptadv_radio_control_v1,
+        _: abi::rptadv_text_sink_v1,
+        _: *mut c_void,
+    ) -> i32 {
+        // SAFETY: the typed client owns a complete writable request through this call.
+        let p = unsafe { &mut *p };
+        assert_eq!(p.operation, 7);
+        assert_eq!(p.command.value, -1);
+        assert_eq!(p.command.flags, u32::MAX);
+        let case = CASE.get();
+        if case == 9 {
+            return -9;
+        }
+        if case == 10 {
+            return 0;
+        }
+        p.command.value = if case <= 2 { i64::from(case) } else { 2 };
+        p.command.flags = if case == 0 { 0 } else { 7680 };
+        match case {
+            3 => p.command.value = 3,
+            4 => {
+                p.command.value = 0;
+                p.command.flags = 7680
+            }
+            5 => p.command.flags = 0,
+            6 => p.command.abi_version = 2,
+            7 => p.operation = 6,
+            8 => p.command.struct_size = 4,
+            11 => p.abi_version = 2,
+            12 => p.struct_size = 4,
+            13 => p.command.command = 1,
+            14 => p.command.target = 1,
+            _ => {}
+        }
+        0
+    }
+    let services = host_services(|table| table.radio_control = Some(query));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    for case in 0..15 {
+        CASE.set(case);
+        assert_eq!(
+            radio.receive_policy(),
+            match case {
+                0..=2 => Ok(ReceivePolicy {
+                    mode: u32::from(case),
+                    preroll_frames: if case == 0 { 0 } else { 7680 }
+                }),
+                9 => Err(-9),
+                _ => Err(-1),
+            },
+            "case{case}"
+        );
+    }
+    let services = host_services(|table| table.radio_control = None);
+    assert_eq!(
+        services.radio("1000", "usb", 8).unwrap().receive_policy(),
+        Err(-7)
+    );
 }

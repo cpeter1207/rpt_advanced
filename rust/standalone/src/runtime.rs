@@ -410,7 +410,7 @@ mod tests {
     static ACCEPTED_PEER: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn start_without_counts(
-        _: *const abi::rptadv_host_services_v9,
+        _: *const abi::rptadv_host_services_v10,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -426,7 +426,7 @@ mod tests {
     static AUTHORIZED: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" fn start(
-        _: *const abi::rptadv_host_services_v9,
+        _: *const abi::rptadv_host_services_v10,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -439,7 +439,7 @@ mod tests {
     }
 
     unsafe extern "C" fn fail_start(
-        _: *const abi::rptadv_host_services_v9,
+        _: *const abi::rptadv_host_services_v10,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -506,7 +506,7 @@ mod tests {
 
     fn descriptor(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v9,
+            *const abi::rptadv_host_services_v10,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -523,7 +523,7 @@ mod tests {
 
     fn descriptor_with_reload(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v9,
+            *const abi::rptadv_host_services_v10,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,

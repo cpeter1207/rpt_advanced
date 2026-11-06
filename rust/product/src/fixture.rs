@@ -66,6 +66,7 @@ static ALLOCATOR: Allocator = Allocator;
 pub static LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub static RADIO_DROPS: AtomicUsize = AtomicUsize::new(0);
 pub static RADIO_OPENS: AtomicUsize = AtomicUsize::new(0);
+pub static RADIO_VAD_MODE: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_DROPS: AtomicUsize = AtomicUsize::new(0);
 pub static PEER_OPENS: AtomicUsize = AtomicUsize::new(0);
 pub static RADIO_OPEN_RESULT: AtomicUsize = AtomicUsize::new(0);
@@ -223,7 +224,7 @@ pub static RADIO_ACTIVATE_RESULT: std::sync::atomic::AtomicUsize =
 unsafe extern "C" fn radio_activate(
     host_context: *mut c_void,
     handle: *mut c_void,
-    receive: crate::abi::rptadv_radio_receive_v2,
+    receive: crate::abi::rptadv_radio_receive_v3,
     receive_context: *mut c_void,
     transmit: crate::abi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
@@ -239,13 +240,20 @@ unsafe extern "C" fn radio_activate(
     let contexts = (receive_context as usize, transmit_context as usize);
     let always = !host_context.is_null();
     radio.thread = Some(std::thread::spawn(move || {
+        let mut first = 0;
         while !stop.load(Ordering::Acquire) {
             if always || RADIO_READY.load(Ordering::Acquire) != 0 {
                 let mut samples = [0.0; 8];
                 let mut keyed = 0;
                 let mut ctcss_enabled = 0;
                 unsafe {
-                    receive(contexts.0 as *mut c_void, 0, samples.as_mut_ptr(), 8);
+                    receive(
+                        contexts.0 as *mut c_void,
+                        &receive_metadata(false, first, 8),
+                        samples.as_mut_ptr(),
+                        8,
+                    );
+                    first += 8;
                     transmit(
                         contexts.1 as *mut c_void,
                         samples.as_mut_ptr(),
@@ -429,10 +437,10 @@ pub unsafe extern "C" fn peer_info(
     0
 }
 
-static mut HOST: crate::abi::rptadv_host_services_v9 = crate::abi::rptadv_host_services_v9 {
-    struct_size: size_of::<crate::abi::rptadv_host_services_v9>() as u32,
-    abi_version: 9,
-    capability: *b"rptadv.hst9\0",
+static mut HOST: crate::abi::rptadv_host_services_v10 = crate::abi::rptadv_host_services_v10 {
+    struct_size: size_of::<crate::abi::rptadv_host_services_v10>() as u32,
+    abi_version: 10,
+    capability: *b"rptadv.hst10\0\0\0\0",
     context: ptr::null_mut(),
     local_time: Some(local_time),
     command_notice: Some(notice),
@@ -473,11 +481,11 @@ static mut HOST: crate::abi::rptadv_host_services_v9 = crate::abi::rptadv_host_s
     peer_send_human_text: None,
     echo_account_status: Some(echo_account_status),
     peer_processing_prepare: None,
-    radio_control: None,
+    radio_control: Some(radio_control),
     radio_update: None,
 };
 
-pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v9 {
+pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v10 {
     &raw const HOST
 }
 
@@ -580,4 +588,51 @@ fn peer_prepare_failure_is_not_consumed_by_worker_text() {
             expected
         );
     }
+}
+
+/// Source metadata with the serial fixture-selected receive policy.
+pub(crate) fn receive_metadata(
+    receiving: bool,
+    first: u64,
+    count: u32,
+) -> crate::abi::UrpNativeReceiveMetadata {
+    let mode = RADIO_VAD_MODE.load(Ordering::Acquire) as u32;
+    crate::abi::UrpNativeReceiveMetadata {
+        struct_size: std::mem::size_of::<crate::abi::UrpNativeReceiveMetadata>() as u32,
+        abi_version: 1,
+        generation_id: 1,
+        first_sample_index: first,
+        frame_count: count,
+        raw_receiver_keyed: u32::from(receiving),
+        receiver_keyed: u32::from(receiving),
+        vad_mode: mode,
+        rf_burst_id: if mode != 0 && receiving { 1 } else { 0 },
+        vad_voice_sample_index: if mode != 0 && receiving {
+            first
+        } else {
+            u64::MAX
+        },
+        vad_preroll_frames: if mode == 0 { 0 } else { 7680 },
+        vad_voice_active: 0,
+        vad_score: 0.0,
+        status: 0,
+    }
+}
+
+unsafe extern "C" fn radio_control(
+    _: *mut c_void,
+    _: *mut c_void,
+    request: *mut crate::abi::rptadv_radio_control_v1,
+    _: crate::abi::rptadv_text_sink_v1,
+    _: *mut c_void,
+) -> i32 {
+    // SAFETY: test clients retain their complete scalar-only request through this call.
+    let request = unsafe { &mut *request };
+    if request.operation != 7 {
+        return -7;
+    }
+    let mode = RADIO_VAD_MODE.load(Ordering::Acquire) as i64;
+    request.command.value = mode;
+    request.command.flags = if mode == 0 { 0 } else { 7680 };
+    0
 }

@@ -21,7 +21,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -219,13 +219,17 @@ pub struct RadioStatus {
     dtmf: Arc<AtomicBool>,
     transmit_keyed: Arc<AtomicBool>,
     handoff: Arc<LocalHandoff>,
+    vad_delay_ms: Arc<AtomicU64>,
+    current_handoff: Arc<AtomicPtr<LocalHandoff>>,
 }
 #[derive(Default)]
-/// RX owns the qualification token; TX acknowledges each completed tail reset.
-/// The low bit is current qualification and the other bits count falling edges,
-/// so a complete unkey/rekey between TX callbacks cannot hide a stale burst.
+/// RX owns raw qualification and speech admission; TX acknowledges required resets.
+/// Normal VAD RF edges advance the token while retaining tagged PCM. Actual faults
+/// separately request a reset, including faults observed after raw RF has closed.
 struct LocalHandoff {
     token: AtomicU64,
+    admission: AtomicU64,
+    reset_required: AtomicU64,
     reset_ack: AtomicU64,
     pending_reset_dropped: AtomicU64,
     write_failed_samples: AtomicU64,
@@ -236,6 +240,9 @@ struct LocalHandoff {
 struct ReceiveRing {
     producer: InboundProducer,
     delay_ms: u64,
+    fresh: bool,
+    tagged_start: u64,
+    tagged_end: Option<u64>,
     handoff: Arc<LocalHandoff>,
 }
 struct TransmitRing {
@@ -267,6 +274,9 @@ impl LocalRingUpdate {
             receive: ReceiveRing {
                 producer,
                 delay_ms,
+                fresh: true,
+                tagged_start: 0,
+                tagged_end: None,
                 handoff: handoff.clone(),
             },
             transmit: TransmitRing {
@@ -356,12 +366,16 @@ impl RadioStatus {
     pub(crate) fn transmit_keyed(&self) -> bool {
         self.transmit_keyed.load(Ordering::Acquire)
     }
+    #[cfg(test)]
     fn update(&self, receiving: bool, now_ms: u64) {
         self.update_carrier(receiving, now_ms);
         self.update_qualification(receiving, &self.handoff);
     }
     fn update_qualification(&self, receiving: bool, handoff: &LocalHandoff) {
         let previous = handoff.token.load(Ordering::Relaxed);
+        if !receiving {
+            handoff.admission.store(0, Ordering::Release);
+        }
         if previous & 1 != u64::from(receiving) {
             // Publish only after the serial RX endpoint finished its previous write.
             handoff.token.store(
@@ -392,6 +406,11 @@ impl RadioStatus {
 struct ReceiveState {
     ring: EndpointOwner<ReceiveRing>,
     elapsed_samples: u64,
+    source_generation: u64,
+    next_source_sample: u64,
+    rf_burst_id: u64,
+    voice_after: u64,
+    discontinuous: bool,
     meter: MeterPublisher,
 }
 struct ReceiveContext {
@@ -431,64 +450,148 @@ unsafe fn samples<'a>(pointer: *mut f32, count: u32) -> Option<&'a mut [f32]> {
     // SAFETY: the host supplies aligned writable storage for the complete declared count.
     Some(unsafe { std::slice::from_raw_parts_mut(pointer, count as usize) })
 }
+fn invalidate(handoff: &LocalHandoff) {
+    handoff.admission.store(0, Ordering::Release);
+    let previous = handoff.token.load(Ordering::Relaxed);
+    if handoff.reset_required.load(Ordering::Acquire) > handoff.reset_ack.load(Ordering::Acquire) {
+        handoff.token.store(previous & !1, Ordering::Release);
+        return;
+    }
+    let epoch = (previous & !1).wrapping_add(2);
+    handoff.reset_required.store(epoch, Ordering::Release);
+    handoff.token.store(epoch, Ordering::Release);
+}
+fn cancel_receive(context: &ReceiveContext) {
+    // SAFETY: only the serial receive endpoint calls this helper.
+    let state = unsafe { &mut *context.state.get() };
+    if context.active.load(Ordering::Acquire) {
+        invalidate(&state.ring.current.handoff);
+    } else {
+        context
+            .status
+            .update_qualification(false, &state.ring.current.handoff);
+    }
+    state.ring.current.tagged_end = None;
+    state.source_generation = 0;
+    state.discontinuous = true;
+    context.status.update_carrier(
+        false,
+        context.origin_ms.saturating_add(state.elapsed_samples / 48),
+    );
+    context.status.set_dtmf_muted(false);
+}
 unsafe extern "C" fn receive_callback(
     context: *mut c_void,
-    receiving: u32,
+    metadata: *const crate::abi::UrpNativeReceiveMetadata,
     pointer: *mut f32,
     count: u32,
 ) -> i32 {
-    // SAFETY: the host lends aligned writable PCM for this complete callback.
-    let Some(samples) = (unsafe { samples(pointer, count) }) else {
+    // SAFETY: the host retains this context through synchronous destroy.
+    let Some(context) = (unsafe { context.cast::<ReceiveContext>().as_ref() }) else {
+        if let Some(samples) = unsafe { samples(pointer, count) } {
+            samples.fill(0.0);
+        }
         return -1;
     };
-    let result = match catch_unwind(AssertUnwindSafe(|| unsafe {
-        receive(context, receiving, samples)
-    })) {
+    // SAFETY: the host supplies a readable size/version prefix, even on mismatch.
+    let prefix_valid = !metadata.is_null()
+        && unsafe {
+            std::ptr::addr_of!((*metadata).struct_size).read()
+                == std::mem::size_of::<crate::abi::UrpNativeReceiveMetadata>() as u32
+                && std::ptr::addr_of!((*metadata).abi_version).read() == 1
+        };
+    if !prefix_valid {
+        cancel_receive(context);
+        return -1;
+    }
+    // SAFETY: the validated prefix promises this complete current record.
+    let metadata = unsafe { &*metadata };
+    if metadata.status < 0 {
+        cancel_receive(context);
+        return 0;
+    }
+    if count == 0 || count as usize > context.maximum || pointer.is_null() {
+        if let Some(samples) = unsafe { samples(pointer, count) } {
+            samples.fill(0.0);
+        }
+        cancel_receive(context);
+        return -1;
+    }
+    // SAFETY: the host lends the validated writable PCM span for this callback.
+    let samples = unsafe { std::slice::from_raw_parts_mut(pointer, count as usize) };
+    let end = metadata.first_sample_index.checked_add(u64::from(count));
+    if metadata.status != 0
+        || metadata.frame_count != count
+        || metadata.generation_id == 0
+        || end.is_none()
+        || metadata.raw_receiver_keyed > 1
+        || metadata.receiver_keyed > metadata.raw_receiver_keyed
+        || metadata.vad_mode > 2
+        || metadata.vad_voice_active > 1
+        || !metadata.vad_score.is_finite()
+        || !(0.0..=1.0).contains(&metadata.vad_score)
+        || metadata.vad_preroll_frames != if metadata.vad_mode == 0 { 0 } else { 7680 }
+        || (metadata.raw_receiver_keyed != 0 && metadata.vad_mode != 0 && metadata.rf_burst_id == 0)
+        || (metadata.vad_voice_sample_index != u64::MAX
+            && metadata.vad_voice_sample_index >= end.unwrap_or(0))
+        || samples.iter().any(|sample| !sample.is_finite())
+    {
+        samples.fill(0.0);
+        cancel_receive(context);
+        return -1;
+    }
+    let result = match catch_unwind(AssertUnwindSafe(|| receive(context, metadata, samples))) {
         Ok(result) => result,
         Err(_) => {
             samples.fill(0.0);
+            cancel_receive(context);
             -1
         }
     };
-    // SAFETY: receive() and its panic boundary have returned; this serial callback
-    // is now the sole access to its meter publisher.
-    if let Some(context) = unsafe { context.cast::<ReceiveContext>().as_ref() } {
-        unsafe { &mut *context.state.get() }
-            .meter
-            .publish(samples, None);
-    }
+    // SAFETY: processing and its panic boundary returned to the sole serial owner.
+    unsafe { &mut *context.state.get() }
+        .meter
+        .publish(samples, None);
     result
 }
-unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> i32 {
-    // SAFETY: the host retains this context until synchronous destroy returns.
-    let Some(context) = (unsafe { context.cast::<ReceiveContext>().as_ref() }) else {
-        samples.fill(0.0);
-        return -1;
-    };
-    if samples.len() > context.maximum {
-        samples.fill(0.0);
-        return -1;
-    }
-    if !context.active.load(Ordering::Acquire) {
-        samples.fill(0.0);
-        // SAFETY: only the serial receive callback accesses its elapsed sample counter.
-        let elapsed = unsafe { &*context.state.get() }.elapsed_samples;
-        context
-            .status
-            .update(false, context.origin_ms.saturating_add(elapsed / 48));
-        return 0;
-    }
-    // SAFETY: only this serial receive endpoint accesses these cells while active.
-    let (owner, state) = unsafe { (&mut *context.owner.get(), &mut *context.state.get()) };
-    let count = samples.len() as u64;
-    state.elapsed_samples = state.elapsed_samples.saturating_add(count);
-    let now_ms = context.origin_ms.saturating_add(state.elapsed_samples / 48);
-    context.status.update_carrier(receiving != 0, now_ms);
+fn receive(
+    context: &ReceiveContext,
+    metadata: &crate::abi::UrpNativeReceiveMetadata,
+    samples: &mut [f32],
+) -> i32 {
+    let vad = metadata.vad_mode != 0;
+    let minimum_delay = u64::from(metadata.vad_preroll_frames) / 48;
     context
         .status
-        .update_qualification(receiving != 0, &state.ring.current.handoff);
+        .vad_delay_ms
+        .store(minimum_delay, Ordering::Release);
+    if !context.active.load(Ordering::Acquire) {
+        samples.fill(0.0);
+        cancel_receive(context);
+        return 0;
+    }
+    // SAFETY: only this serialized receive endpoint accesses these cells while active.
+    let (owner, state) = unsafe { (&mut *context.owner.get(), &mut *context.state.get()) };
+    let count = samples.len() as u64;
+    let end = metadata.first_sample_index + count;
+    state.elapsed_samples = state.elapsed_samples.saturating_add(count);
+    let now_ms = context.origin_ms.saturating_add(state.elapsed_samples / 48);
+    let raw = metadata.raw_receiver_keyed != 0;
+    context
+        .status
+        .update_carrier(metadata.receiver_keyed != 0, now_ms);
+    context
+        .status
+        .update_qualification(raw, &state.ring.current.handoff);
     let Some(mut generation) = owner.as_mut().expect("active receive owner").acquire() else {
         samples.fill(0.0);
+        state
+            .ring
+            .current
+            .handoff
+            .admission
+            .store(0, Ordering::Release);
+        state.discontinuous = true;
         return 0;
     };
     state
@@ -496,11 +599,42 @@ unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> 
         .window
         .configure(generation.settings().status_snapshot_interval_ms);
     state.ring.adopt(generation.id());
+    context.status.current_handoff.store(
+        Arc::as_ptr(&state.ring.current.handoff).cast_mut(),
+        Ordering::Release,
+    );
+    let was_raw = state.rf_burst_id != 0;
+    let gap = vad
+        && state.source_generation != 0
+        && (state.source_generation != metadata.generation_id
+            || state.next_source_sample != metadata.first_sample_index
+            || (raw && state.rf_burst_id != 0 && state.rf_burst_id != metadata.rf_burst_id));
+    state.source_generation = metadata.generation_id;
+    state.next_source_sample = end;
+    state.rf_burst_id = if raw { metadata.rf_burst_id } else { 0 };
     let ring = &mut state.ring.current;
-    context
-        .status
-        .update_qualification(receiving != 0, &ring.handoff);
-    if ring.delay_ms != generation.settings().squelch_delay_ms {
+    if state.discontinuous || ring.fresh || (raw && !was_raw) {
+        state.voice_after = metadata.first_sample_index;
+        state.discontinuous = false;
+        ring.fresh = false;
+    }
+    if gap {
+        invalidate(&ring.handoff);
+        ring.tagged_end = None;
+        state.voice_after = end;
+        context.status.update_carrier(false, now_ms);
+        samples.fill(0.0);
+        return 0;
+    }
+    context.status.update_qualification(raw, &ring.handoff);
+    if ring.delay_ms != generation.settings().squelch_delay_ms.max(minimum_delay) {
+        if ring.handoff.token.load(Ordering::Acquire) & 1 != 0 {
+            invalidate(&ring.handoff);
+        }
+        ring.tagged_end = None;
+        state.voice_after = end;
+        state.discontinuous = true;
+        context.status.update_carrier(false, now_ms);
         samples.fill(0.0);
         return 0;
     }
@@ -508,25 +642,93 @@ unsafe fn receive(context: *mut c_void, receiving: u32, samples: &mut [f32]) -> 
     if take_test_failure(TestFailure::ReceivePanic) {
         panic!("injected receive processing panic");
     }
-    generation.state().process(receiving != 0, samples, now_ms);
-    let muted = receiving != 0 && generation.state().suppressing();
-    context.status.set_dtmf_muted(muted);
-    if receiving != 0 {
-        let handoff = &ring.handoff;
-        let epoch = handoff.token.load(Ordering::Acquire) & !1;
-        if epoch != handoff.reset_ack.load(Ordering::Acquire) {
-            // Bound the handoff to one reset acknowledgement. Do not let new audio
-            // enter storage that TX is about to discard with the previous burst.
+    generation
+        .state()
+        .process(metadata.receiver_keyed != 0, samples, now_ms);
+    context
+        .status
+        .set_dtmf_muted(metadata.receiver_keyed != 0 && generation.state().suppressing());
+    if !raw {
+        samples.fill(0.0);
+    }
+    if !vad && !raw {
+        return 0;
+    }
+    let token = ring.handoff.token.load(Ordering::Acquire);
+    let acknowledged = ring.handoff.reset_ack.load(Ordering::Acquire);
+    if token & !1 != acknowledged
+        && (!vad || ring.handoff.reset_required.load(Ordering::Acquire) > acknowledged)
+    {
+        ring.handoff
+            .pending_reset_dropped
+            .fetch_add(count, Ordering::Relaxed);
+        ring.handoff.admission.store(0, Ordering::Release);
+        state.voice_after = end;
+        context.status.update_carrier(false, now_ms);
+        return 0;
+    }
+    let result = if vad {
+        write_vad_pcm(ring, metadata, samples, was_raw && !raw)
+    } else {
+        ring.producer.write(samples)
+    };
+    let handoff = &ring.handoff;
+    match result {
+        Ok(accepted) if accepted == samples.len() => {
+            let admitted = metadata.receiver_keyed != 0
+                && (!vad
+                    || (metadata.vad_voice_sample_index != u64::MAX
+                        && metadata.vad_voice_sample_index >= state.voice_after));
             handoff
-                .pending_reset_dropped
-                .fetch_add(count, Ordering::Relaxed);
-        } else if ring.producer.write(samples).is_err() {
+                .admission
+                .store(if admitted { token } else { 0 }, Ordering::Release);
+            context.status.update_carrier(admitted, now_ms);
+        }
+        _ => {
             handoff
                 .write_failed_samples
                 .fetch_add(count, Ordering::Relaxed);
+            invalidate(handoff);
+            ring.tagged_end = None;
+            state.voice_after = end;
+            context.status.update_qualification(raw, handoff);
+            context.status.update_carrier(false, now_ms);
         }
     }
     0
+}
+fn write_vad_pcm(
+    ring: &mut ReceiveRing,
+    metadata: &crate::abi::UrpNativeReceiveMetadata,
+    samples: &[f32],
+    cancel_old: bool,
+) -> Result<usize, RingError> {
+    if cancel_old {
+        if let Some(end) = ring.tagged_end {
+            let start = ring.tagged_start.max(end.saturating_sub(14_400));
+            if start < end
+                && ring.producer.mute(
+                    metadata.generation_id,
+                    &[crate::link::ring::MuteSpan { start, end }],
+                )? != 1
+            {
+                return Err(RingError);
+            }
+        }
+    }
+    let accepted = ring.producer.write_tagged(
+        samples,
+        metadata.generation_id,
+        metadata.first_sample_index,
+        &[],
+    )?;
+    if accepted != 0 {
+        if ring.tagged_end.is_none() {
+            ring.tagged_start = metadata.first_sample_index;
+        }
+        ring.tagged_end = Some(metadata.first_sample_index + accepted as u64);
+    }
+    Ok(accepted)
 }
 unsafe extern "C" fn transmit_callback(
     context: *mut c_void,
@@ -634,7 +836,12 @@ unsafe fn transmit(
         .configure(generation.settings().status_snapshot_interval_ms);
     endpoint.adopt(generation.id());
     let ring = &mut endpoint.current;
-    if ring.delay_ms != generation.settings().squelch_delay_ms {
+    if ring.delay_ms
+        != generation
+            .settings()
+            .squelch_delay_ms
+            .max(context.status.vad_delay_ms.load(Ordering::Acquire))
+    {
         return 0;
     }
     let consumer = &mut ring.consumer;
@@ -642,8 +849,12 @@ unsafe fn transmit(
     let token = handoff.token.load(Ordering::Acquire);
     let epoch = token & !1;
     let mut reset_ok = true;
-    if epoch != handoff.reset_ack.load(Ordering::Acquire) {
-        if reset_local(consumer).is_ok() {
+    let acknowledged = handoff.reset_ack.load(Ordering::Acquire);
+    let vad = context.status.vad_delay_ms.load(Ordering::Acquire) != 0;
+    if epoch != acknowledged {
+        if (vad && handoff.reset_required.load(Ordering::Acquire) <= acknowledged)
+            || reset_local(consumer).is_ok()
+        {
             handoff.reset_ack.store(epoch, Ordering::Release);
         } else {
             // Retry on the next TX callback; never acknowledge a failed reset.
@@ -652,14 +863,19 @@ unsafe fn transmit(
         }
     }
     let mut receiving = token & 1 != 0 && reset_ok;
-    // An idle consumer must not drain a newly published burst or synthesize PLC.
-    if receiving && consumer.render(samples).is_err() {
+    // Active VAD keeps its sole delay line flowing across normal RF edges.
+    if (receiving || vad) && reset_ok && consumer.render(samples).is_err() {
         handoff.render_failures.fetch_add(1, Ordering::Relaxed);
         samples.fill(0.0);
         receiving = false;
     }
     // Cancel the rendered tail if RX unkeyed or changed bursts during this call.
-    receiving &= handoff.token.load(Ordering::Acquire) == token;
+    receiving &= handoff.token.load(Ordering::Acquire) == token
+        && handoff.admission.load(Ordering::Acquire) == token
+        && std::ptr::eq(
+            Arc::as_ptr(&ring.handoff),
+            context.status.current_handoff.load(Ordering::Acquire),
+        );
     if !receiving || context.status.dtmf_muted() {
         samples.fill(0.0);
     }
@@ -750,6 +966,11 @@ impl RadioWorker {
         peer.bind_radio(self.radio.as_ref().expect("live radio reservation"))
     }
 
+    /// Resolved minimum requested by the source, read only on control.
+    pub(crate) fn minimum_delay_ms(&self) -> u64 {
+        self.receive.status.vad_delay_ms.load(Ordering::Acquire)
+    }
+
     /// Effective reserve currently installed, or prepared for this worker's next adoption.
     pub(crate) fn squelch_delay_ms(&self) -> u64 {
         self.pending_update
@@ -771,6 +992,8 @@ impl RadioWorker {
         {
             return Err(update);
         }
+        self.receive_updates.adopted.store(0, Ordering::Release);
+        self.transmit_updates.adopted.store(0, Ordering::Release);
         self.pending_update = Some((
             generation,
             update.transmit.delay_ms,
@@ -820,6 +1043,17 @@ impl RadioWorker {
         status_snapshot_interval_ms: u64,
     ) -> Result<Self, Box<(Error, Radio)>> {
         let maximum = radio.maximum_frames();
+        let policy = match radio.receive_policy() {
+            Ok(policy) => policy,
+            Err(_) => return Err(Box::new((Error::Operation, radio))),
+        };
+        let minimum_delay = if policy.mode == 0 {
+            0
+        } else {
+            u64::from(policy.preroll_frames) / 48
+        };
+        status.vad_delay_ms.store(minimum_delay, Ordering::Release);
+        let squelch_delay_ms = squelch_delay_ms.max(minimum_delay);
         let ring = LocalRingUpdate::with_handoff(squelch_delay_ms, status.handoff.clone());
         #[cfg(test)]
         let ring = if take_test_failure(TestFailure::Prepare) {
@@ -832,6 +1066,9 @@ impl RadioWorker {
         };
         let observer = update.transmit.observer.clone();
         let handoff = update.transmit.handoff.clone();
+        status
+            .current_handoff
+            .store(Arc::as_ptr(&handoff).cast_mut(), Ordering::Release);
         let (receive_ring, receive_updates) = EndpointOwner::new(update.receive);
         let (transmit_ring, transmit_updates) = EndpointOwner::new(update.transmit);
         let origin_ms = epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
@@ -845,6 +1082,11 @@ impl RadioWorker {
             state: UnsafeCell::new(ReceiveState {
                 ring: receive_ring,
                 elapsed_samples: 0,
+                source_generation: 0,
+                next_source_sample: 0,
+                rf_burst_id: 0,
+                voice_after: 0,
+                discontinuous: true,
                 meter: MeterPublisher {
                     window: MeterWindow::new(status_snapshot_interval_ms, origin_ms),
                     snapshots: receive_publisher,

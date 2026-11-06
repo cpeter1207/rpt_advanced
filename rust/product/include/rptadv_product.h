@@ -26,9 +26,9 @@ struct UrpAstSiteSnapshot;
 /** Product capability name stored in its fixed-width descriptor field. */
 #define RPTADV_PRODUCT_CAPABILITY "rptadv.prod7"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 9U
+#define RPTADV_HOST_ABI_VERSION 10U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst9"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst10"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -186,8 +186,7 @@ struct rptadv_local_time_v1 {
 };
 
 /** Serial input endpoint; inactive/gated generations succeed with silence. */
-typedef int (*rptadv_radio_receive_v2)(void *context, uint32_t receiving, float *samples,
-                                       uint32_t sample_count);
+typedef UrpNativeReceive rptadv_radio_receive_v3;
 /** Serial output endpoint; inactive/gated generations succeed with silence/unkeyed.
  * Malformed arguments or processing failure return nonzero with silent output. */
 typedef int (*rptadv_radio_transmit_v3)(void *context, float *samples, uint32_t sample_count,
@@ -269,8 +268,10 @@ struct rptadv_pcm_processor_v1 {
 
 /** Authorized physical-radio operation, executed only on serialized control.
  * STATUS=1, COMMAND=2, TRANSMIT=3, CLEAR_MANUAL=4,
- * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6. The nested command is used
- * only by COMMAND. Text is returned through the synchronous sink. */
+ * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6, RECEIVE_POLICY=7.
+ * RECEIVE_POLICY works before activation and uses GET_RECEIVE_POLICY in the
+ * nested command: value is effective VAD mode, flags is minimum native preroll.
+ * COMMAND also uses the nested command. Text uses the synchronous sink. */
 struct rptadv_radio_control_v1 {
     uint32_t struct_size;                /**< Exact complete size. */
     uint32_t abi_version;                /**< One. */
@@ -301,10 +302,10 @@ struct rptadv_radio_control_v1 {
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v9 {
+struct rptadv_host_services_v10 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
-    uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
+    uint8_t capability[16]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
     void *context;          /**< Shared provider context. */
 
     /** Convert one Unix second to local civil time. */
@@ -338,7 +339,7 @@ struct rptadv_host_services_v9 {
     /** Attach both endpoints before starting. On failure detach/quiesce both endpoints
      * before return, retaining a safely destroyable reservation. Endpoints are serial
      * individually and may run concurrently with each other, never with destroy. */
-    int (*radio_activate)(void *context, void *radio, rptadv_radio_receive_v2 receive,
+    int (*radio_activate)(void *context, void *radio, rptadv_radio_receive_v3 receive,
                           void *receive_context, rptadv_radio_transmit_v3 transmit,
                           void *transmit_context);
     /** Synchronously stop/hang up and detach both callbacks before returning. */
@@ -526,7 +527,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v9 *host,
+    int (*start)(const struct rptadv_host_services_v10 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,

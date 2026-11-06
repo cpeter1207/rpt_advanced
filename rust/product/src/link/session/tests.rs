@@ -1835,11 +1835,11 @@ fn egress_host_contract_and_asterisk_pcm() {
     table.peer_step_detach = None;
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
-    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_prepare_audio);
+    let boundary = std::mem::offset_of!(abi::rptadv_host_services_v10, peer_prepare_audio);
     let complete_prefixes = [
-        std::mem::offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare),
-        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_control),
-        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_update),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, peer_processing_prepare),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_control),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_update),
     ];
     for length in boundary..std::mem::size_of_val(&table) {
         table.struct_size = length as u32;

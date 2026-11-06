@@ -156,7 +156,12 @@ fn scheduler_notice_uses_warning_logger_with_text_as_data() {
 unsafe extern "C" fn current(_: *mut c_void) -> u32 {
     1
 }
-unsafe extern "C" fn receive(_: *mut c_void, _: u32, _: *mut f32, _: u32) -> i32 {
+unsafe extern "C" fn receive(
+    _: *mut c_void,
+    _: *const ffi::UrpNativeReceiveMetadata,
+    _: *mut f32,
+    _: u32,
+) -> i32 {
     0
 }
 unsafe extern "C" fn transmit(
@@ -177,6 +182,43 @@ unsafe extern "C" fn ast_channel_setoption(
     block: i32,
 ) -> i32 {
     assert_eq!(block, 0);
+    if option == ffi::URP_AST_OPTION_RECEIVE_POLICY as i32 {
+        assert_eq!(length as usize, size_of::<ffi::UrpAstChannelCommand>());
+        // SAFETY: the typed bridge retains one complete writable command.
+        let command = unsafe { &mut *data.cast::<ffi::UrpAstChannelCommand>() };
+        assert_eq!(command.value, -1);
+        assert_eq!(command.flags, u32::MAX);
+        let failure = host(|state| state.failure);
+        if failure == 50 {
+            return 0;
+        }
+        if failure == 53 {
+            return -4;
+        }
+        command.value = match failure {
+            54 => 1,
+            55 => 2,
+            51 => 9,
+            _ => 0,
+        };
+        command.flags = if matches!(failure, 54 | 55) { 7680 } else { 0 };
+        if failure == 52 {
+            command.value = 2;
+        }
+        if failure == 56 {
+            command.abi_version = 2;
+        }
+        if failure == 57 {
+            command.struct_size = 4;
+        }
+        if failure == 58 {
+            command.command = 1;
+        }
+        if failure == 59 {
+            command.target = 1;
+        }
+        return 0;
+    }
     if option == 0x52505349 {
         assert_eq!(length as usize, size_of::<ffi::UrpAstSiteControl>());
         let site = unsafe { &mut *data.cast::<ffi::UrpAstSiteControl>() };
@@ -376,7 +418,7 @@ fn clock_notice_and_panic_boundaries_reject_invalid_inputs() {
         command_notice(null, c"100".as_ptr(), 3, 0);
     }
     assert_eq!(boundary(-1, || panic!("callback fault")), -1);
-    assert_eq!(descriptor().abi_version, 9);
+    assert_eq!(descriptor().abi_version, 10);
 }
 
 #[test]
@@ -594,4 +636,77 @@ fn peer_services_validate_buffers_dispatch_borrowed_events_and_release_once() {
         peer_destroy(null, null);
     }
     host(|state| state.clean());
+}
+
+#[test]
+fn receive_policy_bridge_works_before_call_and_requires_a_valid_query_reply() {
+    for failure in [0, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59] {
+        reset();
+        let null = ptr::null_mut();
+        let mut radio = null;
+        // SAFETY: this test retains all scalar records and the unique reservation.
+        unsafe {
+            assert_eq!(radio_open(null, c"usb".as_ptr(), 3, 8, &mut radio), 0);
+            host(|state| state.failure = failure);
+            let mut request: ffi::rptadv_radio_control_v1 = std::mem::zeroed();
+            request.struct_size = size_of_val(&request) as u32;
+            request.abi_version = 1;
+            request.operation = 7;
+            request.command.struct_size = size_of_val(&request.command) as u32;
+            request.command.abi_version = 1;
+            request.command.command = ffi::URP_AST_COMMAND_GET_RECEIVE_POLICY;
+            let expected = match failure {
+                0 | 54 | 55 => 0,
+                53 => -4,
+                _ => -1,
+            };
+            assert_eq!(
+                radio_control(null, radio, &mut request, None, null),
+                expected
+            );
+            assert_eq!(host(|state| state.channels), 1);
+            if expected == 0 {
+                assert_eq!(
+                    (request.command.value, request.command.flags),
+                    match failure {
+                        54 => (1, 7680),
+                        55 => (2, 7680),
+                        _ => (0, 0),
+                    }
+                );
+            }
+            request.operation = 1;
+            assert_eq!(radio_control(null, radio, &mut request, None, null), -7);
+            request.operation = 7;
+            request.command.target = 1;
+            assert_eq!(radio_control(null, radio, &mut request, None, null), -1);
+            request.command.target = 0;
+            request.abi_version = 2;
+            assert_eq!(radio_control(null, radio, &mut request, None, null), -1);
+            request.abi_version = 1;
+            assert_eq!(radio_control(null, null, &mut request, None, null), -1);
+            assert_eq!(radio_control(null, radio, ptr::null_mut(), None, null), -1);
+            request.struct_size = 4;
+            assert_eq!(radio_control(null, radio, &mut request, None, null), -1);
+            request.struct_size = size_of_val(&request) as u32;
+            for defect in 0..3 {
+                request.command.struct_size = size_of_val(&request.command) as u32;
+                request.command.abi_version = 1;
+                request.command.command = ffi::URP_AST_COMMAND_GET_RECEIVE_POLICY;
+                match defect {
+                    0 => request.command.struct_size = 4,
+                    1 => request.command.abi_version = 2,
+                    _ => request.command.command = 1,
+                }
+                assert_eq!(radio_control(null, radio, &mut request, None, null), -1);
+            }
+            request.command.struct_size = size_of_val(&request.command) as u32;
+            request.command.abi_version = 1;
+            request.command.command = ffi::URP_AST_COMMAND_GET_RECEIVE_POLICY;
+            drop((*radio.cast::<ReservedRadio>()).radio.take());
+            assert_eq!(radio_control(null, radio, &mut request, None, null), -1);
+            radio_destroy(null, radio);
+        }
+        host(|state| state.clean());
+    }
 }
