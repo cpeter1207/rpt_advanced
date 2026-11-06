@@ -80,7 +80,7 @@ impl Radio {
     /// Endpoint code and contexts must remain valid through synchronous channel hangup.
     pub unsafe fn attach_direct(
         &mut self,
-        direct: &mut ffi::urp_ast_direct_callbacks,
+        direct: &mut ffi::UrpAstDirectCallbacks,
     ) -> Result<(), Error> {
         direct.accepted_abi_version = 0;
         // SAFETY: the uniquely owned channel synchronously copies the callbacks

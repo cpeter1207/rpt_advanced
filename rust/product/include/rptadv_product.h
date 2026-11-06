@@ -194,21 +194,6 @@ typedef int (*rptadv_radio_transmit_v3)(void *context, float *samples, uint32_t 
                                         uint32_t *keyed, uint32_t *ctcss_enabled);
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
-/** Exact direct attachment version, independent of the host-services table. */
-#define URP_AST_DIRECT_CALLBACKS_ABI_VERSION 3U
-/** Mutable direct registration; the provider copies callbacks before returning.
- * Initialize accepted_abi_version to zero. Start only when setoption returns zero
- * and acknowledges this exact ABI. Callback code and contexts remain borrowed
- * until synchronous channel hangup, including a failed attachment/start. */
-struct urp_ast_direct_callbacks {
-    uint32_t struct_size;              /**< Exact readable/writable descriptor size. */
-    uint32_t abi_version;              /**< Exact direct attachment revision. */
-    void *receive_context;             /**< Stable input owner context. */
-    rptadv_radio_receive_v2 receive;   /**< Input endpoint. */
-    void *transmit_context;            /**< Stable output owner context. */
-    rptadv_radio_transmit_v3 transmit; /**< Output endpoint: key and CTCSS enable. */
-    uint32_t accepted_abi_version; /**< Provider writes the ABI only after retaining callbacks. */
-};
 /** Synchronous RadioPlusAdvanced link-graph attachment; use block=0. */
 #define URP_AST_OPTION_LINK_ATTACH 0x52504C41
 /** Exact link attachment option revision. */

@@ -39,9 +39,9 @@ struct fixture {
     unsigned int early;         /**< Nonzero output during initial local reception. */
     unsigned int keys;          /**< PTT assertions. */
     unsigned int unkeys;        /**< PTT releases observed in callback output. */
-    struct urp_ast_direct_callbacks callbacks; /**< Retained ABI2 endpoints. */
-    struct ast_channel *channel; /**< Borrowed until synchronous hangup joins the clock. */
-    float audio[960];            /**< Normalized native-rate PCM. */
+    UrpAstDirectCallbacks callbacks; /**< Retained endpoints. */
+    struct ast_channel *channel;     /**< Borrowed until synchronous hangup joins the clock. */
+    float audio[960];                /**< Normalized native-rate PCM. */
 };
 /** @brief One native signed-linear capability. */
 static struct ast_format_cap *capabilities;
@@ -202,10 +202,10 @@ static int setoption(struct ast_channel *channel, int option, void *data, int si
         return 0;
     }
     if (option != URP_AST_OPTION_DIRECT_CALLBACKS || !data ||
-        size != sizeof(struct urp_ast_direct_callbacks) || device->callbacks.receive) {
+        size != sizeof(UrpAstDirectCallbacks) || device->callbacks.receive) {
         return -1;
     }
-    struct urp_ast_direct_callbacks *callbacks = data;
+    UrpAstDirectCallbacks *callbacks = data;
     callbacks->accepted_abi_version = 0;
     if (callbacks->struct_size != sizeof(*callbacks) ||
         callbacks->abi_version != URP_AST_DIRECT_CALLBACKS_ABI_VERSION || !callbacks->receive ||
