@@ -271,13 +271,33 @@ The default
 `agc_target_lufs` is **-23 LUFS**.
 
 `agc_loudness_window_ms` selects a 400-3000 ms measurement window; its default
-is 400 ms.
+is 3000 ms.
+The rolling analysis advances with each delivered sample, using zero during
+inactivity. Renewed activity preserves the measurement history. Activation,
+a new instance, or a window change requires a complete initial window.
 This causal, bounded rider cannot guarantee exact integrated loudness for a
 short transmission or a target beyond its configured gain limits.
 
-AGC is not a true-peak limiter and does not itself guarantee a -1 dBTP
-ceiling. Compressor and limiter stages remain separate; verify the required
-peak protection independently.
+The independent output meter and final peak limiter belong in the full mixed
+transmit-program profile:
+
+```ini
+[voice_telemetry]
+loudness_meter_enabled = yes
+lookahead_limiter_enabled = yes
+lookahead_limiter_oversample = 4
+lookahead_limiter_ceiling_dbfs = -2
+```
+
+The existing final limiter runs at 192 kHz with 4x oversampling and returns
+audio to 48 kHz. Its internal -2 dBFS ceiling leaves reconstruction headroom;
+check the measured final true peak against the -1 dBTP reference. The
+bandpass precedes final limiting. The output meter reports gated integrated
+LUFS, maximum true peak, validity, sample count, and epoch in processing
+statistics; it observes the audible graph output without driving AGC. Pauses
+retain history, and unchanged TX graphs retain the epoch on reload. Graph
+changes or meter re-enabling begin a new epoch. Calibration signals, access
+tones, and hardware mixer scaling follow this digital-program reference.
 
 To reuse a named profile, put its name after the section type, such as
 `[local repeater]`. Select it with `local_profile = repeater` in the node's

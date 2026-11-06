@@ -7,6 +7,8 @@ const CONFIGURATION: &str = "[link]\nlimiter_enabled=yes\n";
 struct State {
     mode: usize,
     processed: AtomicUsize,
+    processed_samples: AtomicUsize,
+    nonzero_samples: AtomicUsize,
     destroyed: AtomicUsize,
 }
 
@@ -14,6 +16,11 @@ unsafe extern "C" fn process(context: *mut c_void, samples: *mut f32, count: usi
     let state = unsafe { &*context.cast::<State>() };
     state.processed.fetch_add(1, Ordering::Relaxed);
     let samples = unsafe { std::slice::from_raw_parts_mut(samples, count) };
+    state.processed_samples.fetch_add(count, Ordering::Relaxed);
+    state.nonzero_samples.fetch_add(
+        samples.iter().filter(|sample| **sample != 0.0).count(),
+        Ordering::Relaxed,
+    );
     if state.mode == 7 {
         samples.fill(9.0);
         return -1;
@@ -74,6 +81,8 @@ fn fixture(mode: usize) -> (Box<State>, HostServices) {
     let mut state = Box::new(State {
         mode,
         processed: AtomicUsize::new(0),
+        processed_samples: AtomicUsize::new(0),
+        nonzero_samples: AtomicUsize::new(0),
         destroyed: AtomicUsize::new(0),
     });
     let services = host_services(|table| {
@@ -86,12 +95,14 @@ fn fixture(mode: usize) -> (Box<State>, HostServices) {
 struct Source {
     signals: PeerSignals,
     real: Option<usize>,
+    renders: usize,
 }
 impl Source {
     fn new(real: Option<usize>) -> Self {
         Self {
             signals: PeerSignals::default(),
             real,
+            renders: 0,
         }
     }
 }
@@ -109,9 +120,44 @@ impl Input for Source {
         Some(true)
     }
     fn render(&mut self, samples: &mut [f32]) -> Option<usize> {
+        self.renders += 1;
         samples.fill(0.5);
         self.real
     }
+}
+
+#[test]
+fn idle_peer_graph_receives_only_silence_without_reading_or_keying_its_source() {
+    for mode in [0, 7] {
+        let (state, services) = fixture(mode);
+        let processor = services
+            .prepare_peer_processing(CONFIGURATION, "1000", 4)
+            .unwrap();
+        let mut input = ProcessedPeer::new(Source::new(Some(4)), processor);
+        let edge = input.signals().activity_edge();
+        let mut scratch = [7.0; 4];
+        for count in [3, 1] {
+            input.silence(&mut scratch[..count]);
+            assert_eq!(&scratch[..count], &[0.0; 4][..count]);
+        }
+        assert_eq!(input.input.renders, 0);
+        assert_eq!(input.input.real, Some(4));
+        assert_eq!(input.available(), 9);
+        assert!(!input.signals().radio_keyed());
+        assert_eq!(input.signals().activity_edge(), edge);
+        assert_eq!(state.processed.load(Ordering::Relaxed), 2);
+        assert_eq!(state.processed_samples.load(Ordering::Relaxed), 4);
+        assert_eq!(state.nonzero_samples.load(Ordering::Relaxed), 0);
+        let mut oversized = [7.0; 5];
+        input.silence(&mut oversized);
+        assert_eq!(oversized, [0.0; 5]);
+        assert_eq!(state.processed.load(Ordering::Relaxed), 2);
+    }
+    let mut bypass = ProcessedPeer::new(Source::new(None), None);
+    let mut scratch = [7.0; 4];
+    bypass.silence(&mut scratch);
+    assert_eq!(scratch, [0.0; 4]);
+    assert_eq!(bypass.input.renders, 0);
 }
 
 #[test]

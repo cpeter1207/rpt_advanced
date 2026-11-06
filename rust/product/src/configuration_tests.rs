@@ -310,7 +310,7 @@ fn invalid_configuration_emits_no_partial_records() {
 
 #[test]
 fn shared_radio_resolution_preserves_cpu_savers_asymmetric_map_and_named_profiles() {
-    let source = "[1000]\nlocal_profile=receiver\nlink_profile=network\nvoice_telemetry_profile=transmitter\n[radio]\nreceive_signaling=ctcss\ntransmit_signaling=ctcss\nreceive_ctcss_tones_hz=100.0,103.5\ntransmit_ctcss_tones_hz=123.0,127.3\nreceive_cpu_saver_enabled=yes\ntransmit_cpu_saver_enabled=no\n[local receiver]\ninput_gain_db=3\nagc_target_lufs=-23\nagc_loudness_window_ms=400\n[link network]\ninput_gain_db=-4\nagc_target_lufs=-23\nagc_loudness_window_ms=400\n[voice_telemetry transmitter]\ninput_gain_db=2\nagc_target_lufs=-23\nagc_loudness_window_ms=400\n";
+    let source = "[1000]\nlocal_profile=receiver\nlink_profile=network\nvoice_telemetry_profile=transmitter\n[radio]\nreceive_signaling=ctcss\ntransmit_signaling=ctcss\nreceive_ctcss_tones_hz=100.0,103.5\ntransmit_ctcss_tones_hz=123.0,127.3\nreceive_cpu_saver_enabled=yes\ntransmit_cpu_saver_enabled=no\n[local receiver]\ninput_gain_db=3\nagc_target_lufs=-23\nagc_loudness_window_ms=3000\n[link network]\ninput_gain_db=-4\nagc_target_lufs=-23\nagc_loudness_window_ms=3000\n[voice_telemetry transmitter]\ninput_gain_db=2\nagc_target_lufs=-23\nagc_loudness_window_ms=3000\n";
     let (result, output) = inspect(source, false);
     assert_eq!(result, 0, "{output:?}");
     assert!(output.diagnostics.is_empty(), "{output:?}");
