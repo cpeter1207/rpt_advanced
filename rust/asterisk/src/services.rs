@@ -148,6 +148,7 @@ pub(crate) fn echo_notice(message: &str) {
 struct ReservedRadio {
     radio: Option<Radio>,
     name: CString,
+    metadata: ffi::rptadv_radio_metadata_v1,
 }
 unsafe extern "C" fn radio_open(
     _context: *mut c_void,
@@ -179,6 +180,7 @@ unsafe extern "C" fn radio_open(
                 *output = Box::into_raw(Box::new(ReservedRadio {
                     radio: Some(radio),
                     name: channel,
+                    metadata: None,
                 }))
                 .cast();
                 0
@@ -202,6 +204,10 @@ unsafe extern "C" fn radio_activate(
         let Some(radio) = reserved.radio.as_mut() else {
             return -1;
         };
+        if receive.is_none() || transmit.is_none() {
+            drop(reserved.radio.take());
+            return -1;
+        }
         let mut direct = ffi::urp_ast_direct_callbacks {
             struct_size: size_of::<ffi::urp_ast_direct_callbacks>() as u32,
             abi_version: ffi::URP_AST_DIRECT_CALLBACKS_ABI_VERSION,
@@ -210,18 +216,33 @@ unsafe extern "C" fn radio_activate(
             transmit_context,
             transmit,
             accepted_abi_version: 0,
+            metadata: reserved.metadata,
         };
-        if receive.is_some()
-            && transmit.is_some()
-            && unsafe { radio.attach_direct(&mut direct) }.is_ok()
+        if unsafe { radio.attach_direct(&mut direct) }.is_ok()
             && radio.start(&reserved.name).is_ok()
         {
             return 0;
         }
-        // A failed option/start may already have copied callbacks. Hangup must quiesce
-        // those callbacks before returning failure to their owner.
-        drop(reserved.radio.take());
+        // Keep a possibly partially started channel and both callback contexts.
+        // The product polls safe retirement before releasing its complete worker.
         -1
+    })
+}
+unsafe extern "C" fn radio_metadata_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    metadata: ffi::rptadv_radio_metadata_v1,
+) -> i32 {
+    boundary(-1, || {
+        // SAFETY: the serialized host lends its retained reservation.
+        let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
+            return -1;
+        };
+        if reserved.radio.is_none() {
+            return -1;
+        }
+        reserved.metadata = metadata;
+        0
     })
 }
 unsafe extern "C" fn radio_destroy(_context: *mut c_void, radio: *mut c_void) {
@@ -230,6 +251,85 @@ unsafe extern "C" fn radio_destroy(_context: *mut c_void, radio: *mut c_void) {
             unsafe { drop(Box::from_raw(radio.cast::<ReservedRadio>())) };
         }
     });
+}
+
+unsafe fn remote_control(radio: *mut c_void, request: &mut ffi::UrpAstRemoteControl) -> i32 {
+    // SAFETY: the product retains this serialized reservation through dispatch.
+    let Some(reserved) = (unsafe { radio.cast::<ReservedRadio>().as_mut() }) else {
+        return -1;
+    };
+    let Some(radio) = reserved.radio.as_mut() else {
+        return if request.operation == ffi::URP_AST_REMOTE_QUIESCE {
+            0
+        } else {
+            -7
+        };
+    };
+    radio.remote_control(request)
+}
+fn remote_envelope(operation: u32) -> ffi::UrpAstRemoteControl {
+    // SAFETY: the envelope is a flat record of scalar values and nullable output pointers.
+    let mut request: ffi::UrpAstRemoteControl = unsafe { std::mem::zeroed() };
+    request.struct_size = size_of::<ffi::UrpAstRemoteControl>() as u32;
+    request.abi_version = ffi::URP_AST_REMOTE_OPTION_ABI_VERSION;
+    request.operation = operation;
+    request
+}
+unsafe extern "C" fn radio_service(_: *mut c_void, radio: *mut c_void) -> i32 {
+    boundary(-1, || {
+        // SAFETY: the serialized host retains this reservation throughout the option.
+        unsafe { remote_control(radio, &mut remote_envelope(ffi::URP_AST_REMOTE_SERVICE)) }
+    })
+}
+unsafe extern "C" fn radio_quiesce(_: *mut c_void, radio: *mut c_void) -> i32 {
+    boundary(-1, || {
+        // SAFETY: pending results retain channel and callback ownership in the caller.
+        unsafe { remote_control(radio, &mut remote_envelope(ffi::URP_AST_REMOTE_QUIESCE)) }
+    })
+}
+
+unsafe extern "C" fn radio_ready(_: *mut c_void, radio: *mut c_void) -> i32 {
+    boundary(-1, || {
+        // SAFETY: the existing channel owner serializes this copied query.
+        unsafe { remote_control(radio, &mut remote_envelope(ffi::URP_AST_REMOTE_READY)) }
+    })
+}
+unsafe extern "C" fn radio_remote_submit(
+    _: *mut c_void,
+    radio: *mut c_void,
+    operation: *const ffi::UrpRemoteOperation,
+    flags: u32,
+    output: *mut ffi::rptadv_remote_ticket_v1,
+) -> i32 {
+    boundary(-1, || {
+        // SAFETY: the caller lends complete exclusive output storage.
+        let Some(output) = (unsafe { output.as_mut() }) else {
+            return -1;
+        };
+        // SAFETY: a zero ticket is an empty, non-owning output record.
+        *output = unsafe { std::mem::zeroed() };
+        // SAFETY: the input is borrowed for this synchronous option only.
+        let Some(operation) = (unsafe { operation.as_ref() }) else {
+            return -1;
+        };
+        let mut request = remote_envelope(ffi::URP_AST_REMOTE_SUBMIT);
+        request.request = *operation;
+        request.source_flags = flags;
+        // SAFETY: input and output remain valid through serialized dispatch.
+        let code = unsafe { remote_control(radio, &mut request) };
+        if code == 0 {
+            let ticket = request.ticket;
+            *output = ffi::rptadv_remote_ticket_v1 {
+                struct_size: size_of::<ffi::rptadv_remote_ticket_v1>() as u32,
+                abi_version: ticket.abi_version,
+                context: ticket.context,
+                source: ticket.source,
+                take: ticket.take,
+                destroy: ticket.destroy,
+            };
+        }
+        code
+    })
 }
 /// Serialize one site option through the already-reserved channel; never open hardware here.
 unsafe fn site_control(radio: *mut c_void, request: &mut ffi::UrpAstSiteControl) -> i32 {
@@ -1070,6 +1170,11 @@ static SERVICES: Services = Services(ffi::rptadv_host_services_v9 {
     peer_processing_prepare: None,
     radio_control: None,
     radio_update: None,
+    radio_metadata_bind: Some(radio_metadata_bind),
+    radio_service: Some(radio_service),
+    radio_quiesce: Some(radio_quiesce),
+    radio_ready: Some(radio_ready),
+    radio_remote_submit: Some(radio_remote_submit),
 });
 
 /// Return the immutable host-services table retained by the adapter DSO.

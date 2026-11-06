@@ -1,8 +1,8 @@
-//! Configurable DTMF linking-command recognition.
+//! Configurable DTMF command recognition and bounded collection.
 
 use std::fmt;
 
-/// Linking operations represented by the legacy command table.
+/// Operations represented by the configurable DTMF command table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkAction {
     /// Disconnect one nonpermanent link.
@@ -59,10 +59,12 @@ pub enum LinkAction {
     CancelMessage,
     /// Set this node's EchoLink telemetry mode (0 off, 1 on, 2 follow, 3 demand).
     EchoTelemetry,
+    /// Operate the configured remote base through its typed command family.
+    RemoteBase,
 }
 
 /// Number of configurable linking actions.
-pub const ACTION_COUNT: usize = 25;
+pub const ACTION_COUNT: usize = 26;
 
 /// A DTMF prefix and the operation it selects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,6 +162,8 @@ impl DtmfCommandMap {
                     || takes_node(longer.action)
                     || matches!(left.action, LinkAction::Message | LinkAction::SiteStatus)
                     || matches!(right.action, LinkAction::Message | LinkAction::SiteStatus)
+                    || left.action == LinkAction::RemoteBase
+                    || right.action == LinkAction::RemoteBase
                 {
                     return Err(CommandMapError::AmbiguousPrefix);
                 }
@@ -179,6 +183,7 @@ impl DtmfCommandMap {
             .iter()
             .find(|mapping| {
                 !mapping.digits.is_empty()
+                    && mapping.action != LinkAction::RemoteBase
                     && !takes_node(mapping.action)
                     && mapping.digits == digits
             })
@@ -206,6 +211,14 @@ impl DtmfCommandMap {
             })
     }
 
+    /// Parse the configured remote-base family without its initiating asterisk.
+    pub fn parse_remote(&self, digits: &str) -> Option<crate::remote_base_command::RemoteCommand> {
+        let mapping = self.mappings.iter().find(|mapping| {
+            mapping.action == LinkAction::RemoteBase && !mapping.digits.is_empty()
+        })?;
+        crate::remote_base_command::parse_remote_command(digits.strip_prefix(&mapping.digits)?)
+    }
+
     /// Start bounded command collection using this map.
     pub fn collector(&self) -> CommandCollector {
         CommandCollector {
@@ -220,7 +233,7 @@ impl DtmfCommandMap {
     pub fn standard() -> Self {
         let prefixes = [
             "1", "2", "3", "4", "70", "806", "72", "75", "811", "812", "813", "73", "816", "818",
-            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78", "",
+            "10", "722", "800", "801", "804", "805", "82", "77", "76", "78", "", "",
         ];
         let mappings = prefixes
             .into_iter()
@@ -249,7 +262,8 @@ pub struct CommandCollector {
 impl CommandCollector {
     /// Feed one DTMF character or `\0` as the timeout tick.
     pub fn feed(&mut self, digit: char, now_ms: u64) -> Option<String> {
-        if digit == '*' {
+        let remote = self.active && self.remote_family();
+        if digit == '*' && !remote {
             self.digits.clear();
             self.active = true;
             self.last_ms = now_ms;
@@ -261,7 +275,9 @@ impl CommandCollector {
         let mut finish =
             digit == '#' || (digit == '\0' && now_ms.wrapping_sub(self.last_ms) >= 3000);
         if digit != '\0' && digit != '#' {
-            if !digit.is_ascii_digit() && !matches!(digit, 'A'..='D') || self.digits.len() == 127 {
+            if !(digit.is_ascii_digit() || matches!(digit, 'A'..='D') || digit == '*')
+                || self.digits.len() == 127
+            {
                 self.active = false;
                 return None;
             }
@@ -284,6 +300,15 @@ impl CommandCollector {
     /// Return whether collection is currently active.
     pub fn active(&self) -> bool {
         self.active
+    }
+
+    /// Whether collection belongs to the variable-argument remote-base family.
+    pub fn remote_family(&self) -> bool {
+        self.mappings.iter().any(|mapping| {
+            mapping.action == LinkAction::RemoteBase
+                && !mapping.digits.is_empty()
+                && self.digits.starts_with(&mapping.digits)
+        })
     }
 
     /// In-progress remote-command destination for an exact directory lookup.
@@ -329,6 +354,7 @@ fn all_actions() -> [LinkAction; ACTION_COUNT] {
         LinkAction::SiteStatus,
         LinkAction::CancelMessage,
         LinkAction::EchoTelemetry,
+        LinkAction::RemoteBase,
     ]
 }
 
@@ -348,6 +374,7 @@ fn takes_node(action: LinkAction) -> bool {
             | LinkAction::ParrotDisable
             | LinkAction::PadTest
             | LinkAction::CancelMessage
+            | LinkAction::RemoteBase
     )
 }
 

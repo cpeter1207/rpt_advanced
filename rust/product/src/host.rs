@@ -12,7 +12,7 @@ use crate::{
     },
     services::{HostServices, PeerIo, ProcessedPeer},
     status_post::{PostConfig, StatusPostService},
-    worker::{Audio, AudioOwners, LocalRingUpdate, RadioWorker},
+    worker::{Audio, AudioOwners, LocalRingUpdate, PrepareFailure, RadioWorker},
 };
 use rpt_advanced_core::{
     audio::LinkAudioQueue,
@@ -38,6 +38,9 @@ use std::{
     time::Instant,
 };
 
+#[path = "host_remote.rs"]
+mod remote;
+
 /// Maximum supported hardware voice frame, prepared before worker entry.
 pub const MAXIMUM_FRAMES: usize = 4096;
 
@@ -46,6 +49,7 @@ mod site;
 
 struct Lease {
     quiesced: bool,
+    quiescing: bool,
     owners: Option<AudioOwners>,
     worker: Option<RadioWorker>,
     epoch: Instant,
@@ -53,12 +57,21 @@ struct Lease {
 }
 impl Lease {
     fn quiesce(&mut self) -> bool {
+        self.quiescing = true;
+        if self
+            .worker
+            .as_mut()
+            .is_some_and(|worker| worker.poll_stop() != Ok(true))
+        {
+            return false;
+        }
         if let Some(worker) = self.worker.take() {
             self.quiesced = true;
             if let Some(owners) = worker.stop() {
                 self.owners = Some(owners);
             }
         }
+        self.quiescing = false;
         true
     }
     fn attach(&mut self, owners: AudioOwners) -> bool {
@@ -76,10 +89,25 @@ impl Lease {
     }
 }
 struct Device {
+    name: String,
     lease: Arc<Mutex<Lease>>,
     services: HostServices,
 }
 impl DeviceHandoff for Device {
+    fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .worker
+            .as_mut()
+            .ok_or(RuntimeError::Device)?
+            .activation_ready()
+            .map_err(|cause| {
+                self.services
+                    .scheduler_notice(&format!("radio {} activation failed: {cause}", self.name));
+                RuntimeError::Device
+            })
+    }
     fn update(&mut self, _: &GenerationSettings) -> Result<bool, RuntimeError> {
         self.lease
             .lock()
@@ -112,8 +140,9 @@ impl DeviceHandoff for Device {
     }
     fn close(&mut self) {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
-        lease.quiesce();
-        lease.quiesced = false;
+        if lease.quiesce() {
+            lease.quiesced = false;
+        }
     }
     fn open(&mut self, settings: &GenerationSettings) -> bool {
         let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
@@ -143,7 +172,10 @@ impl DeviceHandoff for Device {
                 true
             }
             Err(failure) => {
-                drop(failure);
+                if let PrepareFailure::Activation(_, worker) = failure {
+                    lease.worker = Some(*worker);
+                    lease.quiesce();
+                }
                 false
             }
         }
@@ -177,6 +209,10 @@ struct PeerOwner {
 
 /// Product runtime; every method is invoked by the selected serialized control executor.
 pub struct Host {
+    reload_text: Option<TextExecutor>,
+    reload_failure: Option<RuntimeError>,
+    activated_revision: u64,
+    remote_pending: Vec<remote::Pending>,
     text: TextExecutor,
     text_notice_after_ms: u64,
     /// Core configuration, controller, schedule, and link-policy aggregate.
@@ -206,6 +242,17 @@ fn prepared(
     text: &mut TextExecutor,
     services: HostServices,
 ) -> Result<PreparedAdapter<Audio, GenerationControl>, RuntimeError> {
+    let remote_commands = crate::configuration::radio::ResolvedRadio::resolve(
+        &settings.radio.processing_configuration,
+        local,
+        None,
+        std::ptr::null_mut(),
+    )
+    .and_then(|configuration| configuration.remote_commands())
+    .map_err(|_| RuntimeError::Preparation)?;
+    if remote_commands.is_some() && !services.remote_control_available() {
+        return Err(RuntimeError::Preparation);
+    }
     static NEXT_TEXT_STATION: AtomicU64 = AtomicU64::new(1);
     let text_generation = NEXT_TEXT_STATION.fetch_add(1, Ordering::Relaxed);
     let mut text_readers = Vec::new();
@@ -283,6 +330,7 @@ fn prepared(
         .prepare(dispatcher, wakes, regeneration)
         .map_err(|_| RuntimeError::Busy)?;
     Ok(PreparedAdapter {
+        remote_commands,
         state: audio,
         control: GenerationControl {
             text_origins,
@@ -404,17 +452,26 @@ impl Host {
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
                     quiesced: false,
+                    quiescing: false,
                     owners: None,
                     worker: None,
                     epoch,
                     status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
-                Ok(Box::new(Device { lease, services }))
+                Ok(Box::new(Device {
+                    name: name.to_owned(),
+                    lease,
+                    services,
+                }))
             },
             clock,
         )?;
         let mut host = Self {
+            reload_text: None,
+            reload_failure: None,
+            activated_revision: 0,
+            remote_pending: Vec::new(),
             text,
             text_notice_after_ms: 0,
             runtime,
@@ -433,9 +490,7 @@ impl Host {
             site_retired: Vec::new(),
             epoch,
         };
-        host.configure_status_posts(clock.now_ms);
-        host.activate_dispatchers(clock.now_ms);
-        host.attach_workers();
+        host.advance_reload(clock)?;
         Ok(host)
     }
     fn activate_dispatchers(&mut self, now_ms: u64) {
@@ -516,6 +571,10 @@ impl Host {
         document: ConfigDocument,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        if self.runtime.reload_pending() {
+            return Err(RuntimeError::Busy);
+        }
+        self.reload_failure = None;
         let mut text = TextExecutor::prepare(document.nodes().len().max(1), self.media.clone())
             .map_err(|_| RuntimeError::Preparation)?;
         let local_delays: Vec<_> = self
@@ -534,7 +593,6 @@ impl Host {
         let leases = &mut self.leases;
         let epoch = self.epoch;
         let services = self.services;
-        let revision = self.runtime.revision();
         let result = self.runtime.reload(
             document,
             &self.media,
@@ -564,24 +622,46 @@ impl Host {
             |name, _| {
                 let lease = Arc::new(Mutex::new(Lease {
                     quiesced: false,
+                    quiescing: false,
                     owners: None,
                     worker: None,
                     epoch,
                     status: crate::worker::RadioStatus::with_epoch(epoch),
                 }));
                 leases.push((name.to_owned(), Arc::clone(&lease)));
-                Ok(Box::new(Device { lease, services }))
+                Ok(Box::new(Device {
+                    name: name.to_owned(),
+                    lease,
+                    services,
+                }))
             },
             clock,
         );
-        if self.runtime.revision() != revision {
+        if let Err(error) = result {
+            self.prune_leases();
+            return Err(error);
+        }
+        self.reload_text = Some(text);
+        self.advance_reload(clock)?;
+        self.pump(clock)
+    }
+    fn advance_reload(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        if !self.runtime.poll_reload(clock)? {
+            return Ok(());
+        }
+        self.prune_leases();
+        if self.activated_revision == self.runtime.revision() {
+            self.reload_text = None;
+            return Ok(());
+        }
+        if let Some(mut text) = self.reload_text.take() {
+            self.remote_pending.clear();
             self.text.stop();
             text.start().map_err(|_| RuntimeError::Preparation)?;
             self.text = text;
             self.commit_sites()?;
         }
-        self.prune_leases();
-        result?;
+        self.activated_revision = self.runtime.revision();
         self.activate_dispatchers(clock.now_ms);
         self.configure_status_posts(clock.now_ms);
         self.attach_workers();
@@ -589,7 +669,17 @@ impl Host {
         for (local, effect) in effects {
             self.immediate(&local, effect, clock)?;
         }
-        self.pump(clock)
+        Ok(())
+    }
+    /// Observe a retained transaction; failures stay visible even when the regular
+    /// control pump completed rollback before the host queried it.
+    pub fn poll_reload(&mut self, clock: RuntimeClock) -> Result<bool, RuntimeError> {
+        self.advance_reload(clock)
+            .inspect_err(|error| self.reload_failure = Some(error.clone()))?;
+        if let Some(error) = &self.reload_failure {
+            return Err(error.clone());
+        }
+        Ok(!self.runtime.reload_pending())
     }
     /// Route reserved Echo aliases before ASL lookup; an address alone cannot admit an Echo QSO.
     pub fn lookup(
@@ -1042,6 +1132,7 @@ impl Host {
             LinkEffect::SiteStatus { selector, reply } => {
                 self.runtime.queue_site_report(local, &selector, reply)
             }
+            LinkEffect::RemoteBase(operation) => self.submit_remote(local, operation, clock),
             LinkEffect::SelectedRemote
             | LinkEffect::ParrotEnabled(_)
             | LinkEffect::EchoTelemetry(_)
@@ -1186,11 +1277,25 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        if let Err(error) = self.advance_reload(clock) {
+            self.reload_failure = Some(error);
+            self.reload_text = None;
+            self.prune_leases();
+        }
+        self.pump_remote(clock);
         self.report_text_failures(clock.now_ms);
         self.advance_sites(clock);
         self.runtime.prepare_messages(clock);
         for (local, lease) in &self.leases {
-            if let Some(worker) = &mut lease.lock().unwrap_or_else(|e| e.into_inner()).worker {
+            let mut lease = lease.lock().unwrap_or_else(|e| e.into_inner());
+            if lease.quiescing {
+                lease.quiesce();
+                continue;
+            }
+            if let Some(worker) = &mut lease.worker {
+                // A failed device cannot stop control/peer service on other nodes.
+                // The physical owner closes admission and retains its first cause.
+                let _ = worker.service_remote();
                 worker.report_faults(local, clock.now_ms);
                 worker.collect_snapshots();
             }
@@ -1266,6 +1371,11 @@ impl Host {
                         node.links().peer_digit(&remote, digit, clock.now_ms, reply)
                     {
                         self.immediate(&local, LinkEffect::Digit(operation), clock)?;
+                    }
+                }
+                Event::RemoteUnkey(now_ms) => {
+                    for outcome in node.links().peer_remote_unkey(now_ms, reply) {
+                        self.immediate(&local, LinkEffect::Digit(outcome), clock)?;
                     }
                 }
             }
@@ -1394,6 +1504,7 @@ impl Host {
     }
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {
             return false;
         }
@@ -1430,7 +1541,9 @@ impl Host {
     }
 }
 fn prune_leases(leases: &mut Vec<(String, Arc<Mutex<Lease>>)>) {
-    leases.retain(|(_, lease)| Arc::strong_count(lease) > 1);
+    leases.retain(|(_, lease)| {
+        Arc::strong_count(lease) > 1 || !lease.lock().unwrap_or_else(|e| e.into_inner()).quiesce()
+    });
 }
 // Only a protected/retiring generation is retryable; preparation failures keep their diagnosis.
 fn replacement_completed(result: Result<u64, RuntimeError>) -> Result<bool, RuntimeError> {

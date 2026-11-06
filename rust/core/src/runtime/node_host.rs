@@ -261,13 +261,20 @@ pub trait DeviceHandoff: Send {
     fn finish_update(&mut self, _commit: bool) -> Result<(), super::RuntimeError> {
         Ok(())
     }
-    /// Request TX-safe idle, deassert PTT, detach both callbacks and join external users.
+    /// Poll TX-safe idle, PTT deassertion, callback detachment and external users.
     /// Return true only once complete; false leaves the old device retained for retry.
     fn quiesce(&mut self) -> bool;
     /// Close the old lease after quiescence, leaving PTT deasserted.
     fn close(&mut self);
-    /// Open the requested lease with RF-safe output; failure retains no device ownership.
+    /// Begin opening with RF-safe output. A false result selects rollback;
+    /// partially started ownership stays retained until quiesce and close.
     fn open(&mut self, settings: &GenerationSettings) -> bool;
+    /// Advance control-side activation without waiting for physical I/O. False
+    /// retains the transaction and its prior generation; errors select rollback.
+    /// Ordinary synchronous adapters are ready when open returns successfully.
+    fn activation_ready(&mut self) -> Result<bool, super::RuntimeError> {
+        Ok(true)
+    }
 }
 
 impl<R: Send, T: Send> NodeControl<'_, R, T> {

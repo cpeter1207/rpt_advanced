@@ -31,6 +31,28 @@ fn radio_values_and_named_processing_profiles_are_delegated_to_the_shared_owner(
 }
 
 #[test]
+fn remote_radio_source_is_forwarded_to_its_shared_owner_without_reparsing() {
+    let document = ConfigDocument::parse("[1000]\n[2000]\n[remote_base]\nfuture_remote_option=anything\n[remote_base 1000]\nenabled=yes\n[remote_memory 1000 local repeater]\nrx_hz=146520000\n[remote_scan 1000 local scan]\nmemories=local repeater\n[remote_base 2000]\nenabled=no\n[remote_memory 2000 other]\nrx_hz=145000000\n").unwrap();
+    assert_eq!(document.nodes(), ["1000", "2000"]);
+    assert!(Schema::validate(&document).unwrap().warnings.is_empty());
+    let resolved =
+        super::ResolvedNodeSettings::resolve(&document, &super::NodeId::new("1000").unwrap())
+            .unwrap();
+    let source = &resolved.value.radio.processing_configuration;
+    for retained in [
+        "[remote_base]",
+        "future_remote_option=anything",
+        "[remote_base 1000]",
+        "[remote_memory 1000 local repeater]",
+        "[remote_scan 1000 local scan]",
+    ] {
+        assert!(source.contains(retained), "missing {retained}: {source}");
+    }
+    assert!(!source.contains("[remote_base 2000]"));
+    assert!(!source.contains("[remote_memory 2000"));
+}
+
+#[test]
 fn shared_profile_names_and_case_are_preserved_without_controller_node_grammar() {
     let source = "[1000]\nLINK_PROFILE=OFFICE VOICE\nhardware_profile=SITE ROOM\n[RADIO]\nfuture_option=anything\n[link office voice]\ninput_gain_db=2\n[HARDWARE SITE ROOM]\nhardware_input_gain_db=3\n";
     let document = ConfigDocument::parse(source).unwrap();

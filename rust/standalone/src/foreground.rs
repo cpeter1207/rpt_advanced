@@ -654,6 +654,9 @@ mod tests {
         unsafe extern "C" fn reload(_: *const c_char, _: usize) -> i32 {
             0
         }
+        unsafe extern "C" fn reload_ready() -> i32 {
+            0
+        }
         extern "C" fn stop() -> i32 {
             0
         }
@@ -689,6 +692,7 @@ mod tests {
             digit: None,
             inspect_configuration: None,
             inspect_secrets: None,
+            reload_poll: Some(reload_ready),
         }));
         let host = crate::host_services::HostServicesOwner::new(
             Vec::new(),

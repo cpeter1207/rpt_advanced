@@ -11,7 +11,7 @@ use rpt_advanced_core::config::{
 #[path = "configuration_echolink.rs"]
 mod echolink;
 #[path = "configuration_radio.rs"]
-mod radio;
+pub(crate) mod radio;
 use std::{
     ffi::{c_char, c_void},
     mem::size_of,

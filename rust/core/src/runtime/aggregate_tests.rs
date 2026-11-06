@@ -1038,11 +1038,204 @@ fn clock() -> RuntimeClock {
 }
 fn adapter(_: &str, _: &ResolvedNodeSettings) -> Result<PreparedAdapter<()>, RuntimeError> {
     Ok(PreparedAdapter {
+        remote_commands: None,
         state: (),
         control: (),
         receive_maximum: 960,
         transmit_maximum: 960,
     })
+}
+
+#[test]
+fn remote_family_uses_shared_options_and_rejects_collisions_before_device_acquisition() {
+    use crate::{
+        remote_base_command::{RemoteCommand, RemoteCommandConfiguration, RemoteDtmfAccess},
+        runtime::dtmf::{DigitEvent, DigitOutcome},
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>)
+    };
+    for (override_prefix, effective) in [("", "65"), ("66", "66")] {
+        let prepare = |name: &str, settings: &ResolvedNodeSettings| {
+            let mut prepared = adapter(name, settings)?;
+            prepared.remote_commands = Some(RemoteCommandConfiguration {
+                prefix: "65".into(),
+                access: RemoteDtmfAccess::Open,
+            });
+            Ok(prepared)
+        };
+        let mut runtime = Runtime::start(
+            ConfigDocument::parse(&format!(
+                "[1000]\nlink_command_remote_base={override_prefix}\n"
+            ))
+            .unwrap(),
+            &Media,
+            prepare,
+            device,
+            clock(),
+        )
+        .unwrap();
+        let feed = |runtime: &mut Runtime, text: &str| {
+            text.chars()
+                .filter_map(|digit| {
+                    runtime.digit(
+                        "1000",
+                        DigitEvent::Digit {
+                            digit,
+                            now_ms: 1001,
+                        },
+                    )
+                })
+                .last()
+        };
+        assert!(
+            matches!(feed(&mut runtime, &format!("*{effective}51#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
+        );
+        assert!(
+            matches!(feed(&mut runtime, &format!("*{effective}61#")), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Mode(1)))
+        );
+        assert!(feed(&mut runtime, &format!("*{effective}5")).is_none());
+        let revision = runtime.revision();
+        assert!(
+            runtime
+                .reload(
+                    ConfigDocument::parse("[1000]\nlink_command_remote_base=7\n").unwrap(),
+                    &Media,
+                    prepare,
+                    device,
+                    clock()
+                )
+                .is_err()
+        );
+        assert_eq!(runtime.revision(), revision);
+        assert!(
+            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
+        );
+        assert!(feed(&mut runtime, &format!("*{effective}5")).is_none());
+        runtime
+            .replace_adapter(
+                "1000",
+                adapter("1000", runtime.settings("1000").unwrap()).unwrap(),
+                1001,
+            )
+            .unwrap();
+        assert!(
+            matches!(feed(&mut runtime, "1#"), Some(DigitOutcome::Operation(operation)) if operation.remote == Some(RemoteCommand::Status { long: true }))
+        );
+        assert!(runtime.detached("1000", 1));
+        runtime
+            .reload(
+                ConfigDocument::parse("[1000]\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert!(feed(&mut runtime, &format!("*{effective}51#")).is_none());
+        assert!(runtime.stop(1002));
+    }
+    log.lock().unwrap().clear();
+    let collision = |name: &str, settings: &ResolvedNodeSettings| {
+        let mut prepared = adapter(name, settings)?;
+        prepared.remote_commands = Some(RemoteCommandConfiguration {
+            prefix: "7".into(),
+            access: RemoteDtmfAccess::Open,
+        });
+        Ok(prepared)
+    };
+    assert!(
+        Runtime::start(
+            ConfigDocument::parse("[1000]\n").unwrap(),
+            &Media,
+            collision,
+            device,
+            clock()
+        )
+        .is_err()
+    );
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn remote_completions_renew_only_the_requesting_peer_and_compose_its_reply() {
+    use crate::{
+        remote_base_command::{RemoteCommand, RemoteDtmfAccess, RemoteReplyPart},
+        runtime::dtmf::DigitOutcome,
+    };
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n[echolink]\ntelemetry=demand\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(Arc::new(Mutex::new(Vec::new())))) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.incoming("1000", "2000", true).unwrap();
+    let reply = crate::link::PeerSignals::new().reply_target();
+    let operation = {
+        let links = runtime.node("1000").unwrap().links();
+        links.configure_admin(&digest, &digest, 100);
+        links
+            .configure_remote("6", RemoteDtmfAccess::Locked)
+            .unwrap();
+        for digit in "*8001234#".chars() {
+            assert!(
+                links
+                    .peer_digit("2000", digit, 1001, reply.clone())
+                    .is_none()
+            );
+        }
+        let outcome = "*661#"
+            .chars()
+            .filter_map(|digit| links.peer_digit("2000", digit, 1002, reply.clone()))
+            .last();
+        let Some(DigitOutcome::Operation(operation)) = outcome else {
+            panic!("authorized remote request")
+        };
+        operation
+    };
+    let revision = runtime.revision();
+    assert!(runtime.remote_command_authorized("1000", revision, &operation, 1003));
+    assert!(!runtime.remote_command_authorized("1000", revision + 1, &operation, 1003));
+    assert!(!runtime.remote_command_authorized("missing", revision, &operation, 1003));
+    runtime.complete_remote_command("missing", &operation, 1050);
+    runtime.complete_remote_command("1000", &operation, 1050);
+    assert!(runtime.remote_command_authorized("1000", revision, &operation, 1149));
+    let mut query = operation.clone();
+    query.remote = Some(RemoteCommand::Status { long: true });
+    runtime.complete_remote_command("1000", &query, 1149);
+    assert!(!runtime.remote_command_authorized("1000", revision, &operation, 1150));
+    let parts = [
+        RemoteReplyPart {
+            id: "remote-applied",
+            arguments: Default::default(),
+        },
+        RemoteReplyPart {
+            id: "remote-applied",
+            arguments: Default::default(),
+        },
+    ];
+    runtime
+        .queue_remote_reply("1000", &parts, Some(reply.clone()), 1151)
+        .unwrap();
+    assert_eq!(
+        messages.lock().unwrap().last().map(String::as_str),
+        Some("Remote radio command completed. Remote radio command completed.")
+    );
+    assert!(runtime.echo_telemetry_allows("1000", &reply, 1151));
+    runtime.node("1000").unwrap().links().ended("2000");
+    runtime.peer_detached("1000", "2000", 1152);
+    assert!(runtime.stop(1152));
+    assert!(!runtime.remote_command_authorized("1000", revision, &query, 1153));
 }
 
 struct SnapshotDevice {
@@ -1091,6 +1284,138 @@ fn runtime_passes_resolved_snapshot_interval_to_each_device_generation() {
 }
 
 #[test]
+fn reload_waits_for_activation_and_restores_old_generation_after_a_delayed_failure() {
+    struct OpeningDevice {
+        current: String,
+        ready: Arc<AtomicUsize>,
+        release: Arc<AtomicBool>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl DeviceHandoff for OpeningDevice {
+        fn quiesce(&mut self) -> bool {
+            self.current != "second" || self.release.load(Ordering::Acquire)
+        }
+        fn close(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("close:{}", self.current));
+        }
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.current.clone_from(&settings.device);
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("open:{}", self.current));
+            true
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            if self.current != "second" {
+                return Ok(true);
+            }
+            match self.ready.load(Ordering::Acquire) {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(RuntimeError::Device),
+            }
+        }
+    }
+    for (success, abandon_pending) in [
+        (None, false),
+        (None, true),
+        (Some(false), false),
+        (Some(true), false),
+    ] {
+        let ready = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let device = |_: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(OpeningDevice {
+                current: String::new(),
+                ready: ready.clone(),
+                release: release.clone(),
+                log: log.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let initial =
+            ConfigDocument::parse("[1000]\nradio_channel=first\n[2000]\nradio_channel=other\n")
+                .unwrap();
+        let mut runtime = Runtime::start(initial, &Media, adapter, device, clock()).unwrap();
+        let revision = runtime.revision();
+        let candidate =
+            ConfigDocument::parse("[1000]\nradio_channel=second\n[2000]\nradio_channel=other\n")
+                .unwrap();
+        runtime
+            .reload(candidate, &Media, adapter, device, clock())
+            .unwrap();
+        assert!(runtime.reload_pending());
+        assert_eq!(
+            runtime.reload(
+                ConfigDocument::parse("[1000]\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            ),
+            Err(RuntimeError::Busy),
+            "a pending handoff cannot be replaced by another reload"
+        );
+        assert_eq!(runtime.revision(), revision);
+        assert_eq!(runtime.poll_reload(clock()), Ok(false));
+        assert_eq!(runtime.settings("1000").unwrap().channel, "first");
+        // An unrelated active node keeps its control/link path during this wait.
+        runtime.tick_links(clock());
+        assert!(runtime.node("2000").unwrap().status(0).active.is_some());
+        let Some(success) = success else {
+            assert!(!runtime.stop(0));
+            assert!(runtime.reload_pending());
+            if abandon_pending {
+                let retained_owners = Arc::strong_count(&ready);
+                drop(runtime);
+                assert_eq!(Arc::strong_count(&ready), retained_owners);
+                assert!(
+                    !log.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry == "close:second"),
+                    "dropping a runtime cannot close an unquiesced replacement"
+                );
+                continue;
+            }
+            release.store(true, Ordering::Release);
+            assert!(runtime.stop(0));
+            assert!(!runtime.reload_pending());
+            continue;
+        };
+        ready.store(if success { 1 } else { 2 }, Ordering::Release);
+        if success {
+            assert_eq!(runtime.poll_reload(clock()), Ok(true));
+            assert_eq!(runtime.revision(), revision + 1);
+            assert_eq!(runtime.settings("1000").unwrap().channel, "second");
+        } else {
+            assert_eq!(
+                runtime.poll_reload(clock()),
+                Ok(false),
+                "retain replacement until safe to close"
+            );
+            assert!(runtime.reload_pending());
+            release.store(true, Ordering::Release);
+            assert_eq!(runtime.poll_reload(clock()), Err(RuntimeError::Device));
+            assert_eq!(runtime.revision(), revision);
+            assert_eq!(runtime.settings("1000").unwrap().channel, "first");
+            assert!(
+                log.lock()
+                    .unwrap()
+                    .ends_with(&["close:second".into(), "open:first".into()])
+            );
+        }
+        release.store(true, Ordering::Release);
+        assert!(!runtime.reload_pending());
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
 fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut fallback = Device(log.clone());
@@ -1128,6 +1453,223 @@ fn changed_radio_settings_reopen_the_device_during_configuration_reload() {
             .processing_configuration
             .contains("cm119_profile=nhrc")
     );
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn reload_retains_new_leases_until_reverse_order_cleanup_is_safe() {
+    struct StagedDevice {
+        channel: String,
+        release: Arc<AtomicBool>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+    impl DeviceHandoff for StagedDevice {
+        fn quiesce(&mut self) -> bool {
+            self.channel != "fail" || self.release.load(Ordering::Acquire)
+        }
+        fn close(&mut self) {
+            self.log.lock().unwrap().push(self.channel.clone());
+        }
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.channel.clone_from(&settings.device);
+            self.channel != "fail"
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            Ok(self.channel != "pending")
+        }
+    }
+    let release = Arc::new(AtomicBool::new(false));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(StagedDevice {
+            channel: String::new(),
+            release: release.clone(),
+            log: log.clone(),
+        }) as Box<dyn DeviceHandoff>)
+    };
+    let initial = ConfigDocument::parse("[1000]\n").unwrap();
+    let mut runtime = Runtime::start(initial.clone(), &Media, adapter, device, clock()).unwrap();
+    runtime
+        .reload(
+            ConfigDocument::parse(
+                "[1000]\n[2000]\nradio_channel=pending\n[3000]\nradio_channel=fail\n",
+            )
+            .unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
+        )
+        .unwrap();
+    assert!(runtime.reload_pending());
+    assert_eq!(runtime.document(), &initial);
+    assert_eq!(runtime.revision(), 1);
+    assert!(log.lock().unwrap().is_empty());
+    assert!(runtime.node("1000").unwrap().status(0).active.is_some());
+    release.store(true, Ordering::Release);
+    assert_eq!(runtime.poll_reload(clock()), Err(RuntimeError::Device));
+    assert_eq!(*log.lock().unwrap(), ["fail", "pending"]);
+    assert!(!runtime.reload_pending());
+    assert!(runtime.stop(0));
+}
+
+#[test]
+fn reload_waits_for_restored_readiness_and_retains_failed_restoration_until_safe() {
+    struct RestoringDevice {
+        channel: String,
+        opens: usize,
+        failed: bool,
+        ready: Arc<AtomicUsize>,
+        release: Arc<AtomicBool>,
+    }
+    impl DeviceHandoff for RestoringDevice {
+        fn quiesce(&mut self) -> bool {
+            !self.failed || self.release.load(Ordering::Acquire)
+        }
+        fn close(&mut self) {}
+        fn open(&mut self, settings: &GenerationSettings) -> bool {
+            self.channel.clone_from(&settings.device);
+            self.opens += 1;
+            self.channel != "fail"
+        }
+        fn activation_ready(&mut self) -> Result<bool, RuntimeError> {
+            if self.opens == 1 {
+                return Ok(true);
+            }
+            match self.ready.load(Ordering::Acquire) {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => {
+                    self.failed = true;
+                    Err(RuntimeError::Device)
+                }
+            }
+        }
+    }
+    for success in [true, false] {
+        let ready = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let device = |_: &str, _: &ResolvedNodeSettings| {
+            Ok(Box::new(RestoringDevice {
+                channel: String::new(),
+                opens: 0,
+                failed: false,
+                ready: ready.clone(),
+                release: release.clone(),
+            }) as Box<dyn DeviceHandoff>)
+        };
+        let initial = ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap();
+        let mut runtime =
+            Runtime::start(initial.clone(), &Media, adapter, device, clock()).unwrap();
+        let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+        runtime
+            .reload(
+                ConfigDocument::parse("[1000]\nradio_channel=fail\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert!(runtime.reload_pending());
+        assert!(rx.acquire().is_none());
+        assert_eq!(runtime.document(), &initial);
+        ready.store(if success { 1 } else { 2 }, Ordering::Release);
+        if !success {
+            assert_eq!(runtime.poll_reload(clock()), Ok(false));
+            assert!(runtime.reload_pending());
+            assert!(rx.acquire().is_none());
+            release.store(true, Ordering::Release);
+        }
+        assert_eq!(
+            runtime.poll_reload(clock()),
+            Err(if success {
+                RuntimeError::Device
+            } else {
+                RuntimeError::Restore
+            })
+        );
+        assert_eq!(runtime.revision(), 1);
+        assert_eq!(runtime.document(), &initial);
+        assert_eq!(rx.acquire().is_some(), success);
+        runtime.detached("1000", 1);
+        assert!(runtime.stop(0));
+    }
+}
+
+#[test]
+fn reload_waits_for_a_callback_acquired_during_device_quiescence() {
+    use std::sync::Barrier;
+    struct RacingDevice {
+        armed: Arc<AtomicBool>,
+        enter: Arc<Barrier>,
+        acquired: Arc<Barrier>,
+        closes: Arc<AtomicUsize>,
+    }
+    impl DeviceHandoff for RacingDevice {
+        fn quiesce(&mut self) -> bool {
+            if self.armed.swap(false, Ordering::AcqRel) {
+                self.enter.wait();
+                self.acquired.wait();
+            }
+            true
+        }
+        fn close(&mut self) {
+            self.closes.fetch_add(1, Ordering::Relaxed);
+        }
+        fn open(&mut self, _: &GenerationSettings) -> bool {
+            true
+        }
+    }
+    let armed = Arc::new(AtomicBool::new(false));
+    let enter = Arc::new(Barrier::new(2));
+    let acquired = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let closes = Arc::new(AtomicUsize::new(0));
+    let device = |_: &str, _: &ResolvedNodeSettings| {
+        Ok(Box::new(RacingDevice {
+            armed: armed.clone(),
+            enter: enter.clone(),
+            acquired: acquired.clone(),
+            closes: closes.clone(),
+        }) as Box<dyn DeviceHandoff>)
+    };
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\nradio_channel=old\n").unwrap(),
+        &Media,
+        adapter,
+        device,
+        clock(),
+    )
+    .unwrap();
+    let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    armed.store(true, Ordering::Release);
+    std::thread::scope(|scope| {
+        let callback = scope.spawn(|| {
+            enter.wait();
+            let guard = rx.acquire().unwrap();
+            acquired.wait();
+            release.wait();
+            drop(guard);
+        });
+        runtime
+            .reload(
+                ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
+                &Media,
+                adapter,
+                device,
+                clock(),
+            )
+            .unwrap();
+        assert!(runtime.reload_pending());
+        assert_eq!(closes.load(Ordering::Relaxed), 0);
+        release.wait();
+        callback.join().unwrap();
+    });
+    assert_eq!(runtime.poll_reload(clock()), Ok(true));
+    assert_eq!(runtime.settings("1000").unwrap().channel, "new");
+    assert_eq!(closes.load(Ordering::Relaxed), 1);
+    assert!(runtime.detached("1000", 1));
     assert!(runtime.stop(0));
 }
 
@@ -2019,7 +2561,10 @@ fn partial_start_closes_previously_opened_devices_and_bad_media_keeps_live_revis
         ),
         Err(RuntimeError::Device)
     ));
-    assert_eq!(*log.lock().unwrap(), ["1000", "fail", "close"]);
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["1000", "fail", "quiesce", "close", "quiesce", "close"]
+    );
     let mut runtime = Runtime::start(
         ConfigDocument::parse("[1000]\n").unwrap(),
         &Media,
@@ -2508,6 +3053,7 @@ fn adapter_dispatcher_is_owned_off_audio_and_requires_explicit_drain_acknowledgm
     let drops = Arc::new(AtomicUsize::new(0));
     let prepare = |_: &str, _: &ResolvedNodeSettings| {
         Ok(PreparedAdapter {
+            remote_commands: None,
             state: (),
             control: Dispatcher(drops.clone()),
             receive_maximum: 960,
@@ -2770,6 +3316,7 @@ fn abnormal_runtime_drop_retains_protected_adapter_instead_of_freeing_live_audio
         &Media,
         |_, _| {
             Ok(PreparedAdapter {
+                remote_commands: None,
                 state: Adapter(dropped.clone()),
                 control: (),
                 receive_maximum: 960,
@@ -3883,7 +4430,7 @@ fn runtime_echo_telemetry_selection_respects_dynamic_policy_and_exact_command_so
 }
 
 #[test]
-fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio() {
+fn device_reload_rejects_outstanding_work_and_hazards_but_waits_for_quiescence() {
     use std::sync::atomic::{AtomicBool, Ordering};
     struct PausingDevice(Arc<AtomicBool>);
     impl DeviceHandoff for PausingDevice {
@@ -3911,16 +4458,19 @@ fn device_reload_rejects_outstanding_work_failed_quiescence_and_protected_audio(
         let (mut rx, _tx) = runtime.node("1000").unwrap().register_audio().unwrap();
         let work = (reason == 0).then(|| runtime.node("1000").unwrap().work().unwrap());
         let protected = (reason == 2).then(|| rx.acquire().unwrap());
-        assert_eq!(
-            runtime.reload(
-                ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
-                &Media,
-                adapter,
-                device,
-                clock()
-            ),
-            Err(RuntimeError::Busy)
+        let result = runtime.reload(
+            ConfigDocument::parse("[1000]\nradio_channel=new\n").unwrap(),
+            &Media,
+            adapter,
+            device,
+            clock(),
         );
+        if reason == 1 {
+            assert_eq!(result, Ok(()));
+            assert!(runtime.reload_pending());
+        } else {
+            assert_eq!(result, Err(RuntimeError::Busy));
+        }
         assert_eq!(runtime.settings("1000").unwrap().channel, "old");
         assert_eq!(runtime.revision(), 1);
         drop(protected);

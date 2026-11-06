@@ -75,6 +75,9 @@ fn malformed_documented_shapes_are_not_reinterpreted_as_nodes() {
         "template",
         "event label",
         "schedule usb",
+        "remote_memory",
+        "remote_memory  label",
+        "remote_scan usb ",
         "usb\tlabel",
         "usb[label",
     ] {

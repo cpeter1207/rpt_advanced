@@ -8,6 +8,12 @@ for both. Use only the sections that apply to your station.
 For EchoLink accounts, ports, passwords, and dialing, see
 [EchoLink links](echolink.md).
 
+For Hamlib radio control, limits, memories, scan lists, and remote-base DTMF,
+see the [remote-base operating guide](https://github.com/cpeter1207/USBRadioPlus/blob/main/doc/remote-base.md).
+It is also installed under `/usr/share/doc/libusbradioplus-product1/`.
+Put its `[remote_base]`, `[remote_memory]`, and `[remote_scan]` sections in this
+node's `rpt_advanced.conf`.
+
 The installed example is `share/doc/rpt-advanced/examples/rpt_advanced.conf`
 under the installation prefix. Its example node is disabled and its ID text is
 empty. Installation does not replace an active configuration or activate a node.
