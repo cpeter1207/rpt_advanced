@@ -10,6 +10,8 @@ permissions:
 jobs:
   release:
     uses: cpeter1207/rpt_advanced-workflows/.github/workflows/release.yml@main
+    secrets:
+      APT_INDEX_DISPATCH_TOKEN: ${{ secrets.APT_INDEX_DISPATCH_TOKEN }}
     with:
       code_ref: ${{ github.sha }}
       tag: ${{ github.ref_name }}
