@@ -243,8 +243,9 @@ These are coordinated candidate minimums, not a release or deployment record.
 
 The remote engine, Hamlib, radio DSP, and physical-audio providers have passed
 their native gates and are released in the signed package index. Host code and
-readiness rollback pass focused tests and fast checks; host full gates and
-physical qualification remain pending. Runtime dependencies are dynamic.
+readiness rollback pass focused tests and fast checks. SDK alpha28 is released
+after its full native gates; controller merge/release and physical qualification
+remain pending. Runtime dependencies are dynamic.
 Source checkouts and candidate pins do not replace installed production packages.
 The existing publisher and native image chain are reused after authorization.
 

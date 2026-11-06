@@ -348,8 +348,9 @@ code-derived OpenAPI documentation remain pending under ADRs 0016 and 0023.
 parallel radio control, RF limits, independent signaling, remote-base DTMF,
 memories, and scanning are implemented in the candidate. Both new providers
 are merged and released after passing their full native gates. Their signed
-Debian packages are published. USBRadioPlus/controller hosted gates, publication,
-and physical-radio qualification remain pending. Speech squelch, adaptive I/Q
+Debian packages are published. USBRadioPlus SDK alpha28 also passed its hosted
+gates and is released. Controller merge, publication, and physical-radio
+qualification remain pending. Speech squelch, adaptive I/Q
 processing, and streaming-radio audio remain planned under ADR 0004.
 
 **Requirements**
@@ -478,8 +479,9 @@ Physical site-device qualification remains outstanding.
 **Status: Implemented in the candidate; acceptance pending.** Configuration-only
 memories and scan lists share the remote-base engine. Provider tests cover
 timing, priority, activity holds, interruption, limits, and source revocation.
-The shared engine is released. Host gates, host publication, and physical-radio
-qualification remain pending.
+The shared engine and USBRadioPlus SDK are released after passing their hosted
+gates. Controller merge, publication, and physical-radio qualification remain
+pending.
 
 **Requirements**
 

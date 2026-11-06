@@ -115,10 +115,13 @@ The [remote engine PR](https://github.com/cpeter1207/librptadvremote/pull/1) and
 [Hamlib adapter PR](https://github.com/cpeter1207/rptadv-hamlib-adapter/pull/1)
 are merged and released after passing the full native Debian 13 gates, including
 production line and branch coverage. Both providers have signed Debian packages.
-Focused host tests cover readiness, retained generations, rollback,
-source-specific replies, and the shared physical owner. Full host gates,
-host publication, and physical-radio qualification are pending. No node has been
-changed for this implementation.
+The shared [radio SDK alpha28](https://github.com/cpeter1207/USBRadioPlus/releases/tag/v0.1.0-alpha28)
+also passed its full native gates and has signed Debian packages. Focused
+controller tests cover readiness, retained generations, rollback,
+source-specific replies, and the shared physical owner. Controller integration
+requires its full native PR gate before merge and release. Physical-radio
+qualification remains model-specific. No node has been changed for this
+implementation.
 
 Current audio paths are CM119 and general PortAudio/ALSA. Streaming-radio
 audio, human-speech squelch, and adaptive I/Q selection remain planned. REST and
