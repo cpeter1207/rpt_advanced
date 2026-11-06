@@ -94,19 +94,52 @@ impl Observation {
             processed_blocks: 0,
             bypassed_blocks: 0,
             failed_blocks: 0,
+            loudness_epoch: 0,
+            loudness_sample_count: 0,
+            loudness_valid: 0,
+            true_peak_valid: 0,
+            integrated_lufs: 0.0,
+            true_peak_dbtp: 0.0,
         };
         // SAFETY: the independent observer and writable record remain retained for this read.
         let status = unsafe { (lease.read)(lease.handle.as_ptr(), &mut snapshot) };
+        let status = if status == 0
+            && (snapshot.struct_size as usize != size_of::<abi::UrpAstLinkObservation>()
+                || snapshot.abi_version != 1)
+        {
+            -7
+        } else {
+            status
+        };
         if status != 0 {
             let _ = writeln!(
                 text,
                 "link_processor={index} observation_status=failed status={status}"
             );
         } else {
+            let metric = |valid, value: f64| {
+                if valid != 0 && value.is_finite() {
+                    (1, format!("{value:.2}"))
+                } else {
+                    (0, "unmeasured".to_owned())
+                }
+            };
+            let (loudness_valid, loudness) =
+                metric(snapshot.loudness_valid, snapshot.integrated_lufs);
+            let (true_peak_valid, true_peak) =
+                metric(snapshot.true_peak_valid, snapshot.true_peak_dbtp);
             let _ = writeln!(
                 text,
-                "link_processor={index} processed_blocks={} bypassed_blocks={} failed_blocks={}",
-                snapshot.processed_blocks, snapshot.bypassed_blocks, snapshot.failed_blocks
+                "link_processor={index} processed_blocks={} bypassed_blocks={} failed_blocks={} loudness_epoch={} loudness_sample_count={} integrated_lufs={} true_peak_dbtp={} loudness_valid={} true_peak_valid={}",
+                snapshot.processed_blocks,
+                snapshot.bypassed_blocks,
+                snapshot.failed_blocks,
+                snapshot.loudness_epoch,
+                snapshot.loudness_sample_count,
+                loudness,
+                true_peak,
+                loudness_valid,
+                true_peak_valid,
             );
         }
     }

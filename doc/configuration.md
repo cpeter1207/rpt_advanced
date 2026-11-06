@@ -179,12 +179,14 @@ graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 | `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
 | `cm119_clip_led_gpio` | `0` | GPIO number for the clipping indicator; 0 disables it, 1–8 selects a pin. |
 | `hardware_eeprom_enabled` | `no` | Load valid hardware tuning from EEPROM. Leave disabled to use file tuning. Startup does not write EEPROM. |
-| `receive_cpu_saver_enabled` | `no` | Reduce receive processing while the receiver is idle. |
-| `transmit_cpu_saver_enabled` | `no` | Reduce transmit processing while the transmitter is idle. |
 
 Hardware gains accept decimal values. Zero selects the hardware control's
 midpoint; it does not mean silence. Leave an option out to keep that control's
 current level. These controls set the hardware mixer, not the processing gain.
+
+Receive and transmit CPU-saver settings are retired. Their old keys produce
+normal unknown-option warnings and are ignored, so mandatory output analysis
+continues during idle intervals.
 
 With EEPROM enabled, valid stored tuning takes priority over file settings for
 capture, outputs A and B, CTCSS level, and squelch. An invalid or unreadable image
@@ -264,7 +266,10 @@ These sections set shared defaults. Add the node number, such as
 the [USBRadioPlus configuration reference](https://github.com/cpeter1207/USBRadioPlus/blob/main/man/usbradioplus.conf.5).
 They include gains, EQ, AGC, an expander, a de-esser, a compressor, and a
 multiband limiter. The local chain also supports RNNoise and receive filters.
-The voice/telemetry chain supports the final limiter and band-pass filter.
+Every chain supports the fixed Peak Limiter after dynamics, software gain,
+and source-specific filtering. It is separate from the reorderable Multiband
+Limiter and does not belong in `stage_order`. Only voice/telemetry supports
+the transmitter band-pass filter, which precedes Peak Limiter.
 
 USBRadioPlus uses a causal LUFS gain rider inside the shared FFmpeg graph.
 The default
@@ -278,26 +283,38 @@ a new instance, or a window change requires a complete initial window.
 This causal, bounded rider cannot guarantee exact integrated loudness for a
 short transmission or a target beyond its configured gain limits.
 
-The independent output meter and final peak limiter belong in the full mixed
-transmit-program profile:
+Each chain has a separate, always-active integrated loudness and true-peak
+meter after Peak Limiter. These example profiles enable Peak Limiter with
+a -2 dBFS ceiling; its common defaults remain disabled and -3 dBFS:
 
 ```ini
-[voice_telemetry]
-loudness_meter_enabled = yes
+[local]
 lookahead_limiter_enabled = yes
-lookahead_limiter_oversample = 4
+lookahead_limiter_ceiling_dbfs = -2
+
+[link]
+lookahead_limiter_enabled = yes
+lookahead_limiter_ceiling_dbfs = -2
+
+[voice_telemetry]
+lookahead_limiter_enabled = yes
 lookahead_limiter_ceiling_dbfs = -2
 ```
 
-The existing final limiter runs at 192 kHz with 4x oversampling and returns
-audio to 48 kHz. Its internal -2 dBFS ceiling leaves reconstruction headroom;
-check the measured final true peak against the -1 dBTP reference. The
-bandpass precedes final limiting. The output meter reports gated integrated
-LUFS, maximum true peak, validity, sample count, and epoch in processing
-statistics; it observes the audible graph output without driving AGC. Pauses
-retain history, and unchanged TX graphs retain the epoch on reload. Graph
-changes or meter re-enabling begin a new epoch. Calibration signals, access
-tones, and hardware mixer scaling follow this digital-program reference.
+The default 4x oversampling runs at four times the source rate and returns
+audio to that rate (192 kHz then 48 kHz on the native path). An internal
+-2 dBFS ceiling leaves reconstruction headroom; check measured output against
+the -1 dBTP reference. Metering observes final audible chain output without
+driving AGC. Processing statistics report separate `receive_*` and `transmit_*`
+fields, and per-link `loudness_epoch`, `loudness_sample_count`, `loudness_valid`,
+`true_peak_valid`, `integrated_lufs`, and `true_peak_dbtp`. The existing tuner
+**Show processing measurement snapshot** entry displays these measurements.
+Pauses retain history; an unchanged complete path retains its epoch on reload.
+A changed path begins a new epoch. Setup warmup is excluded, and values remain
+unmeasured until at least 400 ms of output have been observed. Transmit
+calibration signals, access tones, and hardware mixer scaling follow this
+digital-program reference. Remove `loudness_meter_enabled`; this retired key
+now produces an unknown-option warning and is ignored.
 
 To reuse a named profile, put its name after the section type, such as
 `[local repeater]`. Select it with `local_profile = repeater` in the node's
