@@ -1836,12 +1836,12 @@ fn egress_host_contract_and_asterisk_pcm() {
     assert!(unsafe { HostServices::open(&table) }.is_err());
     table = unsafe { crate::fixture::host_descriptor().read() };
     let boundary = std::mem::offset_of!(abi::rptadv_host_services_v9, peer_prepare_audio);
-    // The published complete prefix is valid without its optional processor tail.
-    let complete_prefix =
-        std::mem::offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare);
-    for length in
-        (boundary..std::mem::size_of_val(&table)).filter(|length| *length != complete_prefix)
-    {
+    let complete_prefixes = [
+        std::mem::offset_of!(abi::rptadv_host_services_v9, peer_processing_prepare),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_control),
+        std::mem::offset_of!(abi::rptadv_host_services_v9, radio_update),
+    ];
+    for length in boundary..std::mem::size_of_val(&table) {
         table.struct_size = length as u32;
         let mut prefix = vec![0_u64; length.div_ceil(8)];
         unsafe {
@@ -1851,10 +1851,12 @@ fn egress_host_contract_and_asterisk_pcm() {
                 length,
             )
         };
-        assert!(matches!(
-            unsafe { HostServices::open(prefix.as_ptr().cast()) },
-            Err(Error::Admission)
-        ));
+        let result = unsafe { HostServices::open(prefix.as_ptr().cast()) };
+        if complete_prefixes.contains(&length) {
+            assert!(result.is_ok(), "complete host prefix {length}");
+        } else {
+            assert!(matches!(result, Err(Error::Admission)), "partial host prefix {length}");
+        }
     }
     let (mut session, _control, state, mut output) = make_session("1000");
     output.write(rpt_advanced_core::audio::AudioSpan::default(), &[0.25; 960]);
