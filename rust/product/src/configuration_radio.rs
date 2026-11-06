@@ -296,8 +296,9 @@ mod tests {
     fn advertised_tail_requires_all_operations_and_accepts_its_exact_prefix() {
         // SAFETY: this C table contains only scalar fields and nullable function/data pointers.
         let mut descriptor: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
-        descriptor.struct_size = (offset_of!(abi::UrpAstDescriptor, native_configuration_destroy)
-            + size_of::<Option<Destroy>>()) as u32;
+        descriptor.struct_size =
+            (offset_of!(abi::UrpAstDescriptor, native_configuration_remote_options)
+                + size_of::<Option<RemoteOptions>>()) as u32;
         descriptor.abi_version = 1;
         descriptor.capability_name = c"usbradioplus.product1".as_ptr();
         // SAFETY: this test retains the complete readable descriptor, including its checked prefix.
@@ -305,10 +306,16 @@ mod tests {
         assert!(load(&descriptor).err().unwrap().contains("resolution"));
         descriptor.native_configuration_resolve = Some(resolve_unavailable);
         assert!(load(&descriptor).err().unwrap().contains("visit"));
-        descriptor.native_configuration_remote_options = Some(remote_options_unavailable);
         descriptor.native_configuration_visit = Some(visit_unavailable);
         assert!(load(&descriptor).err().unwrap().contains("destruction"));
         descriptor.native_configuration_destroy = Some(destroy_noop);
+        assert!(
+            load(&descriptor)
+                .err()
+                .unwrap()
+                .contains("command configuration")
+        );
+        descriptor.native_configuration_remote_options = Some(remote_options_unavailable);
         assert!(load(&descriptor).is_ok());
         for capability in [c"wrong.product".as_ptr(), ptr::null()] {
             descriptor.capability_name = capability;
