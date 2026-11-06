@@ -39,7 +39,7 @@ struct fixture {
     unsigned int early;         /**< Nonzero output during initial local reception. */
     unsigned int keys;          /**< PTT assertions. */
     unsigned int unkeys;        /**< PTT releases observed in callback output. */
-    struct urp_ast_direct_callbacks callbacks; /**< Retained ABI2 endpoints. */
+    struct urp_ast_direct_callbacks callbacks; /**< Retained SDK direct endpoints. */
     struct ast_channel *channel; /**< Borrowed until synchronous hangup joins the clock. */
     float audio[960];            /**< Normalized native-rate PCM. */
 };
@@ -54,9 +54,33 @@ static struct ast_channel_tech technology;
  * @param context Owned device.
  * @return Null after stop or the test interval.
  * Duplex cases finish at an observed unkey; streaming media/network cases stay live.
- * A stuck key never produces finite readiness, and teardown adds no counted edge.
+ * A stuck key never produces finite readiness; only callback-observed PTT edges count.
  */
 static void *clock_run(void *context);
+
+/** @brief Join the clock before releasing its borrowed callback contexts.
+ * @param device Serialized channel owner; repeated stops are harmless.
+ */
+static void stop_clock(struct fixture *device) {
+    atomic_store(&device->stop, true);
+    if (device->started) {
+        pthread_join(device->thread, NULL);
+        device->started = false;
+    }
+}
+
+/** @brief Record only PTT edges returned by the controller's transmit callback.
+ * @param device Clock-owned fixture.
+ * @param keyed Observed transmit state.
+ * @return Whether the observed state changed.
+ */
+static bool observe_ptt(struct fixture *device, bool keyed) {
+    bool changed = keyed != device->keyed;
+    device->keys += keyed && !device->keyed;
+    device->unkeys += !keyed && device->keyed;
+    device->keyed = keyed;
+    return changed;
+}
 
 /** @brief Reserve a synthetic device through the real Asterisk channel allocator.
  * @param type Requested technology.
@@ -178,15 +202,37 @@ static void inspect_audio(struct fixture *device) {
     }
 }
 
-/** @brief Acknowledge supported direct endpoints and borrowed link attachments.
+/** @brief Acknowledge SDK endpoints, attachments, and non-remote lifecycle requests.
  * @param channel Reserved test device.
  * @param option Supported attachment identifier.
  * @param data Mutable descriptor.
  * @param size Exact descriptor size.
- * @return Zero after acknowledgment, minus one for an invalid attachment.
+ * @return Zero after acknowledgment, an error for invalid or unsupported requests.
  */
 static int setoption(struct ast_channel *channel, int option, void *data, int size) {
     struct fixture *device = ast_channel_tech_pvt(channel);
+    if (option == URP_AST_OPTION_REMOTE_CONTROL) {
+        if (!data || size != sizeof(UrpAstRemoteControl)) {
+            return -1;
+        }
+        UrpAstRemoteControl *control = data;
+        control->accepted_abi_version = 0;
+        if (control->struct_size != sizeof(*control) ||
+            control->abi_version != URP_AST_REMOTE_OPTION_ABI_VERSION) {
+            return -1;
+        }
+        control->accepted_abi_version = URP_AST_REMOTE_OPTION_ABI_VERSION;
+        switch (control->operation) {
+        case URP_AST_REMOTE_SERVICE:
+        case URP_AST_REMOTE_READY:
+            return 0;
+        case URP_AST_REMOTE_QUIESCE:
+            stop_clock(device);
+            return 0;
+        default:
+            return URP_AST_NOT_READY;
+        }
+    }
     if (option == URP_AST_OPTION_LINK_ATTACH) {
         if (!data || size != sizeof(struct urp_ast_link_attach)) {
             return -1;
@@ -231,10 +277,7 @@ static void *clock_run(void *context) {
                                        &keyed, &ctcss_enabled)) {
             break;
         }
-        bool changed = (keyed != 0) != device->keyed;
-        device->keys += keyed && !device->keyed;
-        device->unkeys += !keyed && device->keyed;
-        device->keyed = keyed != 0;
+        bool changed = observe_ptt(device, keyed != 0);
         inspect_audio(device);
         if (changed && device->phase == 100) {
             ast_log(LOG_NOTICE, "rpt_fixture echo ptt=%u remote=%u\n", keyed,
@@ -255,7 +298,16 @@ static void *clock_run(void *context) {
         }
         nanosleep(&interval, NULL);
     }
-    device->keyed = false;
+    if (atomic_load(&device->stop)) {
+        uint32_t keyed = 0;
+        uint32_t ctcss_enabled = 0;
+        // Core gates its generation before quiescing. Observe the actual final
+        // PTT result without delivering RX or counting another media interval.
+        if (!device->callbacks.transmit(device->callbacks.transmit_context, device->audio, 960,
+                                        &keyed, &ctcss_enabled)) {
+            observe_ptt(device, keyed != 0);
+        }
+    }
     return NULL;
 }
 
@@ -265,10 +317,7 @@ static void *clock_run(void *context) {
  */
 static int hangup(struct ast_channel *channel) {
     struct fixture *device = ast_channel_tech_pvt(channel);
-    atomic_store(&device->stop, true);
-    if (device->started) {
-        pthread_join(device->thread, NULL);
-    }
+    stop_clock(device);
     ast_log(LOG_NOTICE, "rpt_fixture %s ticks=%u writes=%u nonzero=%u early=%u keys=%u unkeys=%u\n",
             ast_channel_name(channel), device->ticks, device->writes, device->nonzero,
             device->early, device->keys, device->unkeys);
