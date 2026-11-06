@@ -1592,7 +1592,32 @@ mod tests {
         owner.context.radio.providers = Some(Box::leak(Box::new(
             crate::providers::ProviderSet::load().unwrap(),
         )));
-        assert_eq!(invoke("[1000]\n", 4, &mut record()), 1);
+        let mut identity = record();
+        assert_eq!(invoke("[1000]\n", 4, &mut identity), 0);
+        assert!(!identity.context.is_null());
+        let expected = [0.25_f32, -0.5, 0.125, -0.25];
+        let mut samples = expected;
+        assert_eq!(
+            // SAFETY: this sole owner supplies a complete exclusive PCM span.
+            unsafe {
+                identity.process.unwrap()(identity.context, samples.as_mut_ptr(), samples.len())
+            },
+            0
+        );
+        assert_eq!(samples, expected);
+        let observed = owner.context.radio.observations.text("1000");
+        assert!(
+            observed.contains("link_processors_retained=1"),
+            "{observed}"
+        );
+        assert!(observed.contains("loudness_epoch="), "{observed}");
+        assert!(!observed.contains("observation_status="), "{observed}");
+        // SAFETY: the transferred identity processor is quiescent and released once.
+        unsafe { identity.destroy.unwrap()(identity.context) };
+        assert_eq!(
+            owner.context.radio.observations.text("1000"),
+            "link_processors_retained=0\n"
+        );
         assert_eq!(invoke(configuration, 0, &mut record()), -1);
         let mut processor = record();
         assert_eq!(invoke(configuration, 4, &mut processor), 0);
