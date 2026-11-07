@@ -706,11 +706,10 @@ fn write_vad_pcm(
     if cancel_old {
         if let Some(end) = ring.tagged_end {
             let start = ring.tagged_start.max(end.saturating_sub(14_400));
-            if start < end
-                && ring.producer.mute(
-                    metadata.generation_id,
-                    &[crate::link::ring::MuteSpan { start, end }],
-                )? != 1
+            if ring.producer.mute(
+                metadata.generation_id,
+                &[crate::link::ring::MuteSpan { start, end }],
+            )? != 1
             {
                 return Err(RingError);
             }
