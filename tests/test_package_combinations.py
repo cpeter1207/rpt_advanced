@@ -89,9 +89,8 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
     assert "libusbradioplus-product1 (>= 0.1.0~alpha31-1+vad.20261106)" in depends(
         stanzas["librptadv-product2"]
     )
-    assert (
-        "libusbradioplus-product-dev (>= 0.1.0~alpha31-1+vad.20261106)"
-        in depends(stanzas["librptadv-product-dev"])
+    assert "libusbradioplus-product-dev (>= 0.1.0~alpha31-1+vad.20261106)" in depends(
+        stanzas["librptadv-product-dev"]
     )
 
 
