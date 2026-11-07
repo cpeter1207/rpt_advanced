@@ -8,6 +8,12 @@ for both. Use only the sections that apply to your station.
 For EchoLink accounts, ports, passwords, and dialing, see
 [EchoLink links](echolink.md).
 
+For Hamlib radio control, limits, memories, scan lists, and remote-base DTMF,
+see the [remote-base operating guide](https://github.com/cpeter1207/USBRadioPlus/blob/main/doc/remote-base.md).
+It is also installed under `/usr/share/doc/libusbradioplus-product1/`.
+Put its `[remote_base]`, `[remote_memory]`, and `[remote_scan]` sections in this
+node's `rpt_advanced.conf`.
+
 The installed example is `share/doc/rpt-advanced/examples/rpt_advanced.conf`
 under the installation prefix. Its example node is disabled and its ID text is
 empty. Installation does not replace an active configuration or activate a node.
@@ -278,7 +284,13 @@ The default
 `agc_target_lufs` is **-23 LUFS**.
 
 `agc_loudness_window_ms` selects a 400-3000 ms measurement window; its default
-is 3000 ms.
+is 400 ms for local, link, and voice/telemetry processing.
+`agc_gain_decrease_db_per_second` defaults to 6 dB/s for attack, while
+`agc_gain_increase_db_per_second` defaults to 2 dB/s for release/recovery.
+These are gain-change rates, separate from the loudness measurement window.
+They fall within the typical 1-10 dB/s AGC range described by
+[Jeff DePolo](https://www.repeater-builder.com/tech-info/audio-processing.html),
+who does not prescribe an exact attack/release pair.
 The rolling analysis advances with each delivered sample, using zero during
 inactivity. Renewed activity preserves the measurement history. Activation,
 a new instance, or a window change requires a complete initial window.

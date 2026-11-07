@@ -641,6 +641,7 @@ fn descriptor_size(pointer: *const c_void, layout: DescriptorLayout) -> usize {
 fn product_functions_complete(api: &crate::abi::rptadv_product_descriptor_v1) -> bool {
     api.start.is_some()
         && api.reload.is_some()
+        && api.reload_poll.is_some()
         && api.stop.is_some()
         && api.authorize_incoming.is_some()
         && api.incoming.is_some()
@@ -679,6 +680,14 @@ fn native_product_functions_complete(api: &crate::abi::UrpAstDescriptor) -> bool
         && api.native_destroy_update.is_some()
         && api.native_status_text.is_some()
         && api.native_processing_status_text.is_some()
+        && api.native_service.is_some()
+        && api.native_quiesce.is_some()
+        && api.native_activation_status.is_some()
+        && api.native_remote_submit.is_some()
+        && api.remote_source.is_some()
+        && api.remote_take.is_some()
+        && api.remote_destroy.is_some()
+        && api.native_configuration_remote_options.is_some()
         && api.link_observer_create.is_some()
         && api.link_observer_read.is_some()
         && api.link_observer_destroy.is_some()
@@ -1130,6 +1139,22 @@ pub(crate) mod tests {
                 "librptadv_resolver_adapter.so.1"
             ))
         );
+    }
+
+    #[test]
+    fn native_runtime_requires_activation_and_remote_control_before_hardware() {
+        let spec = *super::PROVIDERS
+            .iter()
+            .find(|spec| spec.library == "libusbradioplus_product.so.1")
+            .unwrap();
+        let library = ProviderLibrary::open(spec, None).unwrap();
+        let descriptor = library.descriptor(spec.symbol).unwrap();
+        // SAFETY: this matched SDK exports a complete immutable descriptor.
+        let mut api = unsafe { descriptor.cast::<crate::abi::UrpAstDescriptor>().read() };
+        assert!(native_product_functions_complete(&api));
+        missing_fields!(api, native_product_functions_complete,
+            native_service native_quiesce native_activation_status native_remote_submit
+            remote_source remote_take remote_destroy native_configuration_remote_options);
     }
 
     #[test]
@@ -1603,7 +1628,7 @@ pub(crate) mod tests {
             .typed_descriptor::<crate::abi::rptadv_product_descriptor_v1>("librptadv_product.so.2")
             .unwrap();
         assert!(super::product_functions_complete(&product));
-        missing_fields!(product, super::product_functions_complete, start reload stop authorize_incoming incoming link_command link_status digit inspect_configuration inspect_secrets site_command radio_control);
+        missing_fields!(product, super::product_functions_complete, start reload reload_poll stop authorize_incoming incoming link_command link_status digit inspect_configuration inspect_secrets site_command radio_control);
     }
 
     #[cfg(unix)]

@@ -36,6 +36,104 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn remote_dtmf_dispatch_retains_origin_and_rechecks_the_grant() {
+    use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
+    let mut host = NodeHost::new(generation(1));
+    let mut links = links();
+    links.configure_remote("6", RemoteDtmfAccess::Open).unwrap();
+    links.accept("2000", true).unwrap();
+    let first = crate::link::PeerSignals::new().reply_target();
+    let other = crate::link::PeerSignals::new().reply_target();
+    let mut result = None;
+    for digit in "*651".chars() {
+        assert!(links.peer_digit("2000", digit, 1, first.clone()).is_none());
+    }
+    assert!(links.peer_remote_unkey(2, other).is_empty());
+    let mut completed = links.peer_remote_unkey(2, first.clone());
+    assert_eq!(completed.len(), 1);
+    if let DigitOutcome::Operation(operation) = completed.remove(0) {
+        result = Some(operation);
+    }
+    let operation = result.unwrap();
+    assert_eq!(operation.reply, Some(first.clone()));
+    assert_eq!(operation.origin.as_deref(), Some("2000"));
+    let effect = links
+        .command(operation, host.control().work().unwrap(), 2, false)
+        .unwrap();
+    let LinkEffect::RemoteBase(operation) = effect else {
+        panic!("remote effect")
+    };
+    assert_eq!(operation.remote, Some(RemoteCommand::Status { long: true }));
+    assert_eq!(operation.reply, Some(first));
+    let mut stale = DigitOperation::new(
+        crate::command::Command {
+            action: LinkAction::RemoteBase,
+            node: String::new(),
+        },
+        None,
+    );
+    stale.remote = Some(RemoteCommand::Mode(1));
+    links
+        .configure_remote("6", RemoteDtmfAccess::Locked)
+        .unwrap();
+    assert!(matches!(
+        links.command(stale, host.control().work().unwrap(), 3, false),
+        Err(AdmissionError::Denied)
+    ));
+    assert!(matches!(
+        links.command(
+            self::operation(LinkAction::RemoteBase, ""),
+            host.control().work().unwrap(),
+            3,
+            false
+        ),
+        Err(AdmissionError::Invalid)
+    ));
+}
+
+#[test]
+fn pending_remote_requests_recheck_the_same_source_policy_without_renewing_it() {
+    use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
+    let mut links = links();
+    links.configure_remote("6", RemoteDtmfAccess::Open).unwrap();
+    let mut request = operation(LinkAction::RemoteBase, "");
+    request.remote = Some(RemoteCommand::Mode(1));
+    assert!(links.remote_authorized(&request, 1));
+    links
+        .configure_remote("6", RemoteDtmfAccess::Locked)
+        .unwrap();
+    assert!(!links.remote_authorized(&request, 2));
+    request.remote = Some(RemoteCommand::Status { long: false });
+    assert!(links.remote_authorized(&request, 2));
+    let signals = crate::link::PeerSignals::new();
+    request.reply = Some(signals.reply_target());
+    request.origin = Some("2000".into());
+    assert!(!links.remote_authorized(&request, 2));
+    links.accept("2000", true).unwrap();
+    for digit in "*651#".chars() {
+        let _ = links.peer_digit("2000", digit, 2, request.reply.clone().unwrap());
+    }
+    assert!(links.remote_authorized(&request, 2));
+    let other = crate::link::PeerSignals::new();
+    let mut other_request = request.clone();
+    other_request.reply = Some(other.reply_target());
+    assert!(!links.remote_authorized(&other_request, 2));
+    other_request.reply = request.reply.clone();
+    other_request.origin = Some("3000".into());
+    assert!(!links.remote_authorized(&other_request, 2));
+    signals.end();
+    assert!(!links.remote_authorized(&request, 2));
+    assert!(
+        links
+            .peer_remote_unkey(3, signals.reply_target())
+            .is_empty()
+    );
+    links.close();
+    request.reply = None;
+    assert!(!links.remote_authorized(&request, 3));
+}
+
+#[test]
 fn ordinary_links_without_a_schedule_have_no_priority_group_status() {
     let mut links = links();
     links.accept("2000", true).unwrap();
@@ -357,14 +455,14 @@ fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
         links.command(allowed.clone(), host.control().work().unwrap(), 4, false),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
-    links.confirm_peer_parrot_command(Some("2000"), &first, 4);
+    links.confirm_peer_administrative_command(Some("2000"), &first, 4);
     let mut wrong_origin = allowed.clone();
     wrong_origin.origin = Some("4000".into());
     assert!(matches!(
         links.command(wrong_origin, host.control().work().unwrap(), 5, false),
         Err(AdmissionError::Denied)
     ));
-    links.confirm_peer_parrot_command(Some("4000"), &first, 60_000);
+    links.confirm_peer_administrative_command(Some("4000"), &first, 60_000);
     assert!(matches!(
         links.command(
             allowed.clone(),
@@ -381,7 +479,7 @@ fn peer_unlock_authorizes_only_that_connection_and_ended_work_is_stale() {
         Err(AdmissionError::Stale)
     ));
     let replacement = crate::link::PeerSignals::new().reply_target();
-    links.confirm_peer_parrot_command(Some("2000"), &replacement, 5);
+    links.confirm_peer_administrative_command(Some("2000"), &replacement, 5);
     for digit in "*804".chars() {
         assert!(
             links
@@ -493,7 +591,7 @@ fn parrot_actions_require_a_valid_admin_unlock_and_use_live_typed_effects() {
         ),
         Ok(LinkEffect::ParrotEnabled(true))
     ));
-    links.confirm_parrot_command(6);
+    links.confirm_administrative_command(6);
     assert!(matches!(
         links.command(
             operation(LinkAction::ParrotDisable, ""),
@@ -551,7 +649,7 @@ fn authorized_parrot_disable_confirms_the_disabled_state() {
         ),
         Ok(LinkEffect::ParrotEnabled(false))
     ));
-    links.confirm_parrot_command(3);
+    links.confirm_administrative_command(3);
     assert!(matches!(
         links.command(
             operation(LinkAction::AdminUnlock, ""),

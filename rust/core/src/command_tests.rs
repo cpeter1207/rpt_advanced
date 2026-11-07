@@ -1,5 +1,71 @@
 use super::{CommandMapError, CommandMapping, DtmfCommandMap, LinkAction};
 
+fn remote_map(prefix: &str) -> DtmfCommandMap {
+    let mut mappings = DtmfCommandMap::standard().mappings().to_vec();
+    mappings
+        .iter_mut()
+        .find(|mapping| mapping.action == LinkAction::RemoteBase)
+        .unwrap()
+        .digits = prefix.into();
+    DtmfCommandMap::new(mappings).unwrap()
+}
+
+#[test]
+fn remote_dtmf_collector_keeps_internal_stars_until_real_termination() {
+    let map = remote_map("6");
+    let mut collector = map.collector();
+    for (now, digit) in "*61146*52*2".chars().enumerate() {
+        assert_eq!(collector.feed(digit, now as u64), None);
+    }
+    let text = collector.feed('#', 20).unwrap();
+    assert_eq!(text, "61146*52*2");
+    assert_eq!(
+        map.parse_remote(&text),
+        Some(crate::remote_base_command::RemoteCommand::Frequency {
+            hertz: 146_520_000,
+            offset: crate::remote_base_command::RemoteOffset::Simplex
+        })
+    );
+    assert!(map.parse(&text).is_none());
+    for (now, digit) in "*651".chars().enumerate() {
+        assert_eq!(collector.feed(digit, now as u64 + 100), None);
+    }
+    assert_eq!(collector.feed('\0', 3102), None);
+    assert_eq!(collector.feed('\0', 3103), Some("651".into()));
+}
+
+#[test]
+fn remote_dtmf_family_remapping_rejects_collisions_and_keeps_link_resets() {
+    let map = remote_map("65");
+    assert!(map.parse_remote("6551").is_some());
+    assert!(map.parse_remote("651").is_none());
+    assert_eq!(
+        DtmfCommandMap::new(vec![
+            CommandMapping::new("6", LinkAction::RemoteBase),
+            CommandMapping::new("65", LinkAction::Status),
+        ]),
+        Err(CommandMapError::AmbiguousPrefix)
+    );
+    let mut mappings = DtmfCommandMap::standard().mappings().to_vec();
+    mappings
+        .iter_mut()
+        .find(|mapping| mapping.action == LinkAction::RemoteBase)
+        .unwrap()
+        .digits = "7".into();
+    assert_eq!(
+        DtmfCommandMap::new(mappings),
+        Err(CommandMapError::AmbiguousPrefix)
+    );
+    let mut collector = map.collector();
+    let mut result = None;
+    for (now, digit) in "*351018*70#".chars().enumerate() {
+        result = collector.feed(digit, now as u64).or(result);
+    }
+    assert_eq!(result, Some("70".into()));
+    assert_eq!(map.parse("722").unwrap().action, LinkAction::Time);
+    assert_eq!(map.parse("3506316").unwrap().node, "506316");
+}
+
 #[test]
 fn site_dtmf_query_has_a_separate_remappable_selector_prefix() {
     let map = DtmfCommandMap::standard();

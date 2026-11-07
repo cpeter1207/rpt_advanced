@@ -80,6 +80,9 @@ impl Engine {
         self: &Arc<Self>,
         document: ConfigDocument,
     ) -> Result<(), RuntimeError> {
+        if self.reloading.load(Ordering::Acquire) {
+            return Err(RuntimeError::Busy);
+        }
         self.site_backends.validate(&document)?;
         let settings = crate::site::configured(&document)?;
         let definition = document.clone();
@@ -107,10 +110,35 @@ impl Engine {
             self.lost_digits.store(true, Ordering::Release);
             let clock = self.clock();
             catch_unwind(AssertUnwindSafe(|| {
-                self.run_inner(true, move |host| host.reload(document, clock))
+                self.run_inner(true, move |host| {
+                    host.reload(document, clock)?;
+                    Ok(host.runtime.reload_pending())
+                })
             }))
             .unwrap_or(Err(RuntimeError::Preparation))
         });
+        if result == Ok(true) {
+            return Ok(());
+        }
+        self.finish_reload(result.map(|_| ()))
+    }
+
+    pub(super) fn poll_reload_configuration(self: &Arc<Self>) -> Result<bool, RuntimeError> {
+        if !self.reloading.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        let clock = self.clock();
+        let result = self.run_inner(true, move |host| host.poll_reload(clock));
+        if result == Ok(false) {
+            return Ok(false);
+        }
+        self.finish_reload(result.map(|_| ())).map(|()| true)
+    }
+
+    fn finish_reload(
+        self: &Arc<Self>,
+        result: Result<(), RuntimeError>,
+    ) -> Result<(), RuntimeError> {
         self.reloading.store(false, Ordering::Release);
         // Host has already cleared the candidate when Runtime published it. A later
         // notification error must not roll back physical ownership to old settings.

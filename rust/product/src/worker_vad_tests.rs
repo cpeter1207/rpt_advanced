@@ -104,39 +104,63 @@ fn first_pending_voice_marker_survives_preroll_without_early_keying() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (_runtime, worker) = setup();
-    let mut clock = 0;
-    let mut played = Vec::new();
-    for block in 0..24 {
-        let granted = block >= 3;
-        let mut input = [if block == 0 { 0.375 } else { 0.125 }; 960];
-        let metadata = metadata(clock, 960, true, granted, 1, granted.then_some(3839), 1);
-        assert_eq!(deliver(&worker, &metadata, &mut input), 0);
-        clock += 960;
-        let mut output = [9.0; 960];
-        let (status, keyed) = tx(&worker, &mut output);
-        assert_eq!(status, 0);
-        if !granted {
-            assert_eq!(keyed, 0);
-            assert_eq!(output, [0.0; 960]);
-            assert!(!worker.receive.status.snapshot().0);
+    for controls in [0, 7] {
+        let (_runtime, worker) = setup();
+        let metadata_context = std::ptr::from_ref(&*worker.transmit).cast_mut().cast();
+        let mut linked = 99;
+        let mut clock = 0;
+        let mut played = Vec::new();
+        for block in 0..24 {
+            assert_eq!(
+                // SAFETY: the fixture invokes both endpoints serially with stable contexts.
+                unsafe { metadata_callback(metadata_context, controls, &mut linked) },
+                0
+            );
+            assert_eq!(linked, 0);
+            assert_eq!(
+                // SAFETY: the fixture clock is parked and no receive callback is running.
+                unsafe { (*worker.receive.state.get()).elapsed_samples },
+                clock
+            );
+            let granted = block >= 3;
+            let mut input = [if block == 0 { 0.375 } else { 0.125 }; 960];
+            let metadata = metadata(clock, 960, true, granted, 1, granted.then_some(3839), 1);
+            assert_eq!(deliver(&worker, &metadata, &mut input), 0);
+            clock += 960;
+            {
+                // SAFETY: receive has returned and no callback runs concurrently in this fixture.
+                let state = unsafe { &*worker.receive.state.get() };
+                assert_eq!(state.elapsed_samples, clock);
+                assert_eq!(state.next_source_sample, clock);
+                assert_eq!(state.source_generation, metadata.generation_id);
+                assert_eq!(state.rf_burst_id, 1);
+            }
+            let mut output = [9.0; 960];
+            let (status, keyed) = tx(&worker, &mut output);
+            assert_eq!(status, 0);
+            if !granted {
+                assert_eq!(keyed, 0);
+                assert_eq!(output, [0.0; 960]);
+                assert!(!worker.receive.status.snapshot().0);
+            }
+            played.extend_from_slice(&output);
         }
-        played.extend_from_slice(&output);
-    }
-    let first = played
-        .iter()
-        .position(|s| s.abs() > 0.05)
-        .expect("pending onset should play after admission");
-    assert!(
-        played
+        let first = played
             .iter()
-            .skip(first)
-            .take(64)
-            .any(|sample| *sample > 0.3),
-        "first retained block must be the onset marker"
-    );
-    drop(worker.stop());
+            .position(|s| s.abs() > 0.05)
+            .expect("pending onset should play after admission");
+        assert!(
+            played
+                .iter()
+                .skip(first)
+                .take(64)
+                .any(|sample| *sample > 0.3),
+            "first retained block must be the onset marker"
+        );
+        drop(worker.stop());
+    }
 }
+
 #[test]
 fn rapid_rekey_mutes_old_tail_and_retains_new_onset_before_tx_runs() {
     let _serial = crate::fixture::LIFECYCLE
@@ -725,7 +749,10 @@ fn failed_receive_policy_query_returns_the_unactivated_radio_reservation() {
     )
     .err()
     .expect("invalid policy must prevent activation");
-    assert!(matches!(failure.0, Error::Operation));
+    assert!(matches!(
+        &failure,
+        PrepareFailure::Reservation(Error::Operation, _)
+    ));
     assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Acquire), before);
     drop(failure);
     assert_eq!(

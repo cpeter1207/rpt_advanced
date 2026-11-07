@@ -1489,6 +1489,7 @@ fn command_keys() -> [&'static str; crate::command::ACTION_COUNT] {
         "link_command_site_status",
         "link_command_cancel_message",
         "link_command_echo_telemetry",
+        "link_command_remote_base",
     ]
 }
 
@@ -1556,6 +1557,7 @@ fn command_action(key: &str) -> Option<LinkAction> {
         "link_command_site_status" => LinkAction::SiteStatus,
         "link_command_cancel_message" => LinkAction::CancelMessage,
         "link_command_echo_telemetry" => LinkAction::EchoTelemetry,
+        "link_command_remote_base" => LinkAction::RemoteBase,
         _ => return None,
     })
 }

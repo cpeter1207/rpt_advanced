@@ -177,6 +177,7 @@ struct RadioHandle {
     reservation: RadioReservation,
     active: Option<crate::radio_activation::ActiveRadio>,
     pending: Option<RadioReservation>,
+    metadata: crate::abi::rptadv_radio_metadata_v1,
 }
 
 /// Stage/acknowledge, commit, or roll back a native radio configuration on its
@@ -455,8 +456,30 @@ pub unsafe extern "C" fn radio_open(
         reservation,
         active: None,
         pending: None,
+        metadata: None,
     }))
     .cast();
+    0
+}
+
+/// Product host callback that starts one radio's GPIO and audio path.
+/// Bind optional TX metadata before activation, without acquiring hardware.
+///
+/// # Safety
+/// `radio` is this host's unique retained reservation on serialized control.
+pub unsafe extern "C" fn radio_metadata_bind(
+    _: *mut c_void,
+    radio: *mut c_void,
+    metadata: crate::abi::rptadv_radio_metadata_v1,
+) -> i32 {
+    // SAFETY: the caller lends the retained unique reservation.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    if handle.active.is_some() {
+        return -1;
+    }
+    handle.metadata = metadata;
     0
 }
 
@@ -499,6 +522,7 @@ pub unsafe extern "C" fn radio_activate(
             receive_context,
             transmit,
             transmit_context,
+            metadata: handle.metadata,
         },
     );
     finish_activation(handle, result)
@@ -518,9 +542,79 @@ fn finish_activation(
         }
         Err(error) => {
             eprintln!("rpt-advanced radio activation failed: {error}");
+            if let crate::radio_activation::RadioActivationError::Retained { active, .. } = error {
+                handle.active = Some(*active);
+            }
             -1
         }
     }
+}
+
+/// Advance only the already-owned native control mailbox.
+///
+/// # Safety
+/// `radio` is a live reservation serialized by the product control executor.
+pub unsafe extern "C" fn radio_service(_: *mut c_void, radio: *mut c_void) -> i32 {
+    // SAFETY: the caller retains the unique radio reservation through this call.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    handle.active.as_mut().map_or(0, |active| active.service())
+}
+
+/// Observe initial remote admission; no hardware I/O runs on this caller.
+///
+/// # Safety
+/// `radio` is a live reservation serialized by the product control executor.
+pub unsafe extern "C" fn radio_ready(_: *mut c_void, radio: *mut c_void) -> i32 {
+    // SAFETY: the product retains this unique reservation until checked retirement.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    handle.active.as_mut().map_or(-7, |active| active.ready())
+}
+
+/// Poll retirement while preserving callbacks and the partially started owner.
+///
+/// # Safety
+/// The caller retains `radio` and all callback contexts until this returns zero.
+pub unsafe extern "C" fn radio_quiesce(_: *mut c_void, radio: *mut c_void) -> i32 {
+    // SAFETY: same serialized reservation; this does not transfer its ownership.
+    let Some(handle) = (unsafe { radio.cast::<RadioHandle>().as_mut() }) else {
+        return -1;
+    };
+    handle.active.as_mut().map_or(0, |active| active.quiesce())
+}
+
+/// Submit copied control intent and transfer an independent SDK ticket.
+///
+/// # Safety
+/// `radio` is live; operation/output are complete borrowed records with unique output.
+pub unsafe extern "C" fn radio_remote_submit(
+    _: *mut c_void,
+    radio: *mut c_void,
+    operation: *const crate::abi::UrpRemoteOperation,
+    flags: u32,
+    output: *mut crate::abi::rptadv_remote_ticket_v1,
+) -> i32 {
+    // SAFETY: the synchronous caller lends exclusively writable complete output storage.
+    let Some(output) = (unsafe { output.as_mut() }) else {
+        return -1;
+    };
+    // SAFETY: a zero record contains only valid empty scalar/pointer values.
+    *output = unsafe { std::mem::zeroed() };
+    // SAFETY: the retained reservation and borrowed input remain valid through dispatch.
+    let (Some(handle), Some(operation)) =
+        (unsafe { radio.cast::<RadioHandle>().as_mut() }, unsafe {
+            operation.as_ref()
+        })
+    else {
+        return -1;
+    };
+    handle
+        .active
+        .as_mut()
+        .map_or(-7, |active| active.remote_submit(operation, flags, output))
 }
 
 /// Product host callback that releases an inactive radio reservation.
@@ -587,6 +681,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: None,
             pending: None,
+            metadata: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before use.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -707,6 +802,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
+            metadata: None,
         };
         let context = std::ptr::from_mut(&mut host).cast();
         let radio = std::ptr::from_mut(&mut handle).cast();
@@ -813,6 +909,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: Some(crate::radio_activation::tests::fixture_active_radio(api)),
             pending: None,
+            metadata: None,
         };
         // SAFETY: the request is a scalar-only ABI record initialized before dispatch.
         let mut request: crate::abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
@@ -892,6 +989,7 @@ mod tests {
             reservation: reserve_radio(&radios, "1000", 960).unwrap(),
             active: None,
             pending: None,
+            metadata: None,
         };
         let binding: crate::abi::UrpAstSiteBinding = unsafe { std::mem::zeroed() };
         let request: crate::abi::UrpAstSiteRequest = unsafe { std::mem::zeroed() };
@@ -1386,6 +1484,7 @@ mod tests {
             reservation,
             active: None,
             pending: None,
+            metadata: None,
         };
 
         assert_eq!(
@@ -1411,6 +1510,7 @@ mod tests {
             reservation: handle.reservation.clone(),
             active: None,
             pending: None,
+            metadata: None,
         };
         assert_eq!(
             finish_activation(
@@ -1420,6 +1520,119 @@ mod tests {
             -1
         );
         assert!(failed.active.is_none());
+    }
+
+    #[test]
+    fn remote_host_callbacks_validate_reservations_and_retain_failed_startup_owners() {
+        use crate::{
+            abi,
+            radio_activation::{RadioActivationError, tests as native},
+        };
+        use std::{
+            ffi::c_void,
+            ptr::{self, NonNull},
+        };
+
+        unsafe extern "C" fn metadata(_: *mut c_void, _: u32, _: *mut u32) -> i32 {
+            0
+        }
+
+        let mut handle = RadioHandle {
+            reservation: reserve_radio(&resolve_radio_nodes("[1000]\n").unwrap(), "1000", 960)
+                .unwrap(),
+            active: None,
+            pending: None,
+            metadata: None,
+        };
+        let radio = ptr::from_mut(&mut handle).cast();
+        let operation = native::remote_operation();
+        // SAFETY: null requests are rejected; the stack reservation stays exclusively owned.
+        unsafe {
+            assert_eq!(
+                super::radio_metadata_bind(ptr::null_mut(), ptr::null_mut(), Some(metadata)),
+                -1
+            );
+            assert_eq!(
+                super::radio_metadata_bind(ptr::null_mut(), radio, Some(metadata)),
+                0
+            );
+            assert_eq!(super::radio_service(ptr::null_mut(), ptr::null_mut()), -1);
+            assert_eq!(super::radio_ready(ptr::null_mut(), ptr::null_mut()), -1);
+            assert_eq!(super::radio_quiesce(ptr::null_mut(), ptr::null_mut()), -1);
+            assert_eq!(super::radio_service(ptr::null_mut(), radio), 0);
+            assert_eq!(super::radio_ready(ptr::null_mut(), radio), -7);
+            assert_eq!(super::radio_quiesce(ptr::null_mut(), radio), 0);
+            assert_eq!(
+                super::radio_remote_submit(ptr::null_mut(), radio, &operation, 3, ptr::null_mut()),
+                -1
+            );
+        }
+        assert!(handle.metadata.is_some());
+        // SAFETY: an empty ticket is a valid scalar/pointer-only output record.
+        let mut output: abi::rptadv_remote_ticket_v1 = unsafe { std::mem::zeroed() };
+        for (owner, request) in [
+            (ptr::null_mut(), &operation as *const _),
+            (radio, ptr::null()),
+            (ptr::null_mut(), ptr::null()),
+        ] {
+            output.context = NonNull::<u64>::dangling().as_ptr().cast();
+            // SAFETY: complete output remains borrowed while malformed inputs are rejected.
+            assert_eq!(
+                unsafe {
+                    super::radio_remote_submit(ptr::null_mut(), owner, request, 3, &mut output)
+                },
+                -1
+            );
+            assert!(output.context.is_null());
+            assert_eq!(output.struct_size, 0);
+        }
+        // SAFETY: this valid but inactive reservation has no native owner to receive the command.
+        assert_eq!(
+            unsafe {
+                super::radio_remote_submit(ptr::null_mut(), radio, &operation, 3, &mut output)
+            },
+            -7
+        );
+
+        let active = native::fixture_active_radio(native::remote_fixture_api());
+        let debug = format!("{active:?}");
+        assert!(debug.contains("open: true") && debug.contains("updating: false"));
+        let retained = RadioActivationError::Retained {
+            status: -19,
+            active: Box::new(active),
+        };
+        assert_eq!(
+            retained.to_string(),
+            "shared radio startup failed (-19); retirement pending"
+        );
+        assert_eq!(finish_activation(&mut handle, Err(retained)), -1);
+        assert!(
+            handle.active.is_some(),
+            "failed startup retains its callback owner"
+        );
+        // SAFETY: the same retained reservation now owns the fixture SDK station and ticket table.
+        unsafe {
+            assert_eq!(super::radio_metadata_bind(ptr::null_mut(), radio, None), -1);
+            assert_eq!(super::radio_service(ptr::null_mut(), radio), -31);
+            assert_eq!(super::radio_ready(ptr::null_mut(), radio), 1);
+            assert_eq!(super::radio_quiesce(ptr::null_mut(), radio), 0);
+            assert_eq!(
+                super::radio_remote_submit(ptr::null_mut(), radio, &operation, 3, &mut output),
+                0
+            );
+            assert_eq!(output.abi_version, 1);
+            assert_eq!(output.source.unwrap()(output.context, 2), 0);
+            assert_eq!(
+                output.take.unwrap()(output.context, None, ptr::null_mut()),
+                0
+            );
+            output.destroy.unwrap()(output.context);
+        }
+        assert!(handle.metadata.is_some());
+        assert!(
+            handle.active.is_some(),
+            "quiesce does not transfer ownership"
+        );
     }
 
     #[test]
@@ -1513,6 +1726,7 @@ mod receive_policy_tests {
             reservation: reservation(0),
             active: None,
             pending: None,
+            metadata: None,
         };
         // SAFETY: the record contains only integers and a fixed integer array.
         let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };

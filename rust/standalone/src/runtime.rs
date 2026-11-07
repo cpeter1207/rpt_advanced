@@ -107,7 +107,9 @@ impl ProductRuntime {
         let Some(start) = product.start else {
             return Err(RuntimeError::InvalidDescriptor);
         };
-        let (Some(reload), Some(stop)) = (product.reload, product.stop) else {
+        let (Some(reload), Some(stop), Some(_)) =
+            (product.reload, product.stop, product.reload_poll)
+        else {
             return Err(RuntimeError::InvalidDescriptor);
         };
         if product.struct_size < size_of::<abi::rptadv_product_descriptor_v1>() as u32
@@ -188,13 +190,12 @@ impl ProductRuntime {
     pub fn reload(&self, configuration: &str) -> Result<(), RuntimeError> {
         let mut active = self.active_configuration();
         let host = self.host.as_ref().ok_or(RuntimeError::InvalidDescriptor)?;
-        let apply =
-            || unsafe { (self.reload)(configuration.as_ptr().cast(), configuration.len()) == 0 };
+        let apply = || self.reload_product(configuration);
         let restore = || {
             // A product failure may follow publication. Reopen only the old
             // hardware snapshot while restoring the last successful document.
             host.discard_staged_radios();
-            unsafe { (self.reload)(active.as_ptr().cast(), active.len()) == 0 }
+            self.reload_product(&active)
         };
         if let Some(providers) = &self.providers {
             providers
@@ -225,6 +226,17 @@ impl ProductRuntime {
         }
         *active = configuration.to_owned();
         Ok(())
+    }
+    fn reload_product(&self, configuration: &str) -> bool {
+        // These calls run on the host's reload caller, never its audio/control executor.
+        let mut status =
+            unsafe { (self.reload)(configuration.as_ptr().cast(), configuration.len()) };
+        while status == 1 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            // Admission required the completed lifecycle tail before startup.
+            status = unsafe { self.product.reload_poll.unwrap()() };
+        }
+        status == 0
     }
 
     /// Reload product and host radio settings as one control-plane transaction.
@@ -453,6 +465,9 @@ mod tests {
         RELOADS.fetch_add(1, Ordering::Relaxed);
         0
     }
+    unsafe extern "C" fn reload_ready() -> i32 {
+        0
+    }
 
     unsafe extern "C" fn reject_reload(_: *const c_char, _: usize) -> i32 {
         -1
@@ -552,6 +567,7 @@ mod tests {
             digit: None,
             inspect_configuration: None,
             inspect_secrets: None,
+            reload_poll: Some(reload_ready),
         }))
     }
 
@@ -769,6 +785,78 @@ mod tests {
         assert!(!radio_channel_available(&process, "old"));
         assert!(radio_channel_available(&process, "new"));
         process.stop().unwrap();
+    }
+
+    #[test]
+    fn pending_reload_retains_staged_radios_until_ready_or_rollback() {
+        use std::cell::Cell;
+        fn nodes(channel: &str) -> Vec<crate::ResolvedRadioNode> {
+            // No hardware is opened: this test exercises host transaction ownership.
+            let mut radio: abi::rptadv_radio_session_config = unsafe { std::mem::zeroed() };
+            radio.struct_size = std::mem::size_of_val(&radio) as u32;
+            radio.abi_version = 4;
+            let mut config: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
+            config.struct_size = std::mem::size_of_val(&config) as u32;
+            config.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
+            config.radio = &radio;
+            vec![crate::ResolvedRadioNode {
+                node: "1000".into(),
+                channel: channel.into(),
+                enabled: true,
+                iax_port: 4569,
+                registration_url: String::new(),
+                registration_interval_seconds: 300,
+                radio: unsafe {
+                    crate::native_configuration::NativeRadioConfiguration::copy_from(&config)
+                }
+                .unwrap(),
+            }]
+        }
+        thread_local! {
+            static POLLS: Cell<u32> = const { Cell::new(0) };
+            static FAIL: Cell<bool> = const { Cell::new(false) };
+        }
+        unsafe extern "C" fn pending(_: *const c_char, _: usize) -> i32 {
+            1
+        }
+        unsafe extern "C" fn poll() -> i32 {
+            let count = POLLS.get();
+            POLLS.set(count + 1);
+            if count < 2 {
+                1
+            } else if FAIL.get() {
+                -1
+            } else {
+                0
+            }
+        }
+        let active = "[1000]\nradio_channel=old\n[radio 1000]\n";
+        let candidate = "[1000]\nradio_channel=new\n[radio 1000]\n";
+        for fail in [false, true] {
+            POLLS.set(0);
+            FAIL.set(fail);
+            let mut api =
+                *descriptor_with_reload(start_without_counts, pending, stop_without_counts, None);
+            api.reload_poll = Some(poll);
+            let mut process = unsafe {
+                ProductRuntime::start(
+                    Box::leak(Box::new(api)),
+                    HostServicesOwner::new(nodes("old"), None, SecretsFile::parse("").unwrap())
+                        .unwrap(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    active,
+                )
+            }
+            .unwrap();
+            let result = process.reload_with_radios(candidate, nodes("new"));
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(radio_channel_available(&process, "old"), fail);
+            assert_eq!(radio_channel_available(&process, "new"), !fail);
+            assert!(POLLS.get() >= 3);
+            process.stop().unwrap();
+        }
     }
 
     #[test]

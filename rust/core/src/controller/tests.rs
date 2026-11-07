@@ -40,6 +40,45 @@ fn media(value: f32, count: usize) -> PreparedMedia {
 }
 
 #[test]
+fn remote_base_non_fm_allows_link_transmit_without_repeating_open_receive() {
+    for full_duplex in [false, true] {
+        for remote_non_fm in [false, true] {
+            let (mut node, _control) = NodeController::new(
+                ControllerSettings {
+                    full_duplex,
+                    ..ControllerSettings::default()
+                },
+                vec![],
+                vec![],
+                CourtesySettings::default(),
+            )
+            .unwrap();
+            node.set_remote_non_fm(remote_non_fm);
+            let mut local = [0.5; 960];
+            let repeat = full_duplex && !remote_non_fm;
+            assert_eq!(node.process_audio(true, false, &[], &mut local), repeat);
+            assert_eq!(local, [if repeat { 0.5 } else { 0.0 }; 960]);
+            local.fill(0.5);
+            let may_transmit = full_duplex || remote_non_fm;
+            assert_eq!(
+                node.process_audio(true, true, &[0.25; 960], &mut local),
+                may_transmit
+            );
+            assert_eq!(
+                local,
+                [if repeat {
+                    0.75
+                } else if may_transmit {
+                    0.25
+                } else {
+                    0.0
+                }; 960]
+            );
+        }
+    }
+}
+
+#[test]
 fn incoming_text_interrupts_voice_telemetry_with_its_morse_fallback() {
     for peer_reply in [false, true] {
         let (mut node, mut control) = NodeController::new(
@@ -2534,6 +2573,41 @@ fn status_waits_for_every_receive_source_without_a_deadline() {
         node.process_audio(false, false, &[], &mut output);
         assert_eq!(output, [0.75; 4], "deferred status must retain its speech");
         assert_eq!(control.reclaim().count(), 1);
+    }
+}
+
+#[test]
+fn unqualified_non_fm_local_receive_does_not_block_a_reply_but_peers_still_do() {
+    for (non_fm, open, peer, expected) in [
+        (true, true, false, true),
+        (true, true, true, false),
+        (true, false, false, false),
+        (false, true, false, false),
+    ] {
+        let (mut node, mut control) = NodeController::new(
+            ControllerSettings {
+                full_duplex: true,
+                hang_ms: 0,
+                telemetry_duck_db: 0,
+                ..ControllerSettings::default()
+            },
+            vec![],
+            vec![],
+            CourtesySettings::default(),
+        )
+        .unwrap();
+        node.set_remote_non_fm(non_fm);
+        node.set_remote_unqualified_open(open);
+        node.set_nonlocal_source_activity(peer);
+        node.now = 12_000;
+        assert!(control.queue_prepared_status(media(0.75, 4)));
+        let mut heard = false;
+        for _ in 0..100 {
+            let mut output = [0.0; 96];
+            node.process_audio_outputs(true, false, true, &[], &mut output, None);
+            heard |= output.iter().any(|sample| *sample != 0.0);
+        }
+        assert_eq!(heard, expected, "non-FM={non_fm}, open={open}, peer={peer}");
     }
 }
 

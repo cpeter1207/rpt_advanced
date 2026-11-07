@@ -49,7 +49,10 @@ impl KnownScope {
     fn from_kind(kind: ScopeKind) -> Option<Self> {
         Some(match kind {
             ScopeKind::General | ScopeKind::Node => Self::General,
-            ScopeKind::RadioDefault | ScopeKind::RadioNode => Self::Radio,
+            ScopeKind::RadioDefault
+            | ScopeKind::RadioNode
+            | ScopeKind::RemoteDefault
+            | ScopeKind::RemoteNode => Self::Radio,
             ScopeKind::ProcessingDefault | ScopeKind::ProcessingNode => Self::Processing,
             ScopeKind::EchoLinkDefault | ScopeKind::EchoLinkNode => Self::EchoLink,
             ScopeKind::IdentifierDefault | ScopeKind::IdentifierNode | ScopeKind::IdentifierSet => {
@@ -324,6 +327,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_parrot_enable"
                 | "link_command_parrot_disable"
                 | "link_command_echo_telemetry"
+                | "link_command_remote_base"
         ),
         KnownScope::Identifier => {
             super::messages::content_key(key)
@@ -420,6 +424,8 @@ fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
             | ScopeKind::ProcessingNode
             | ScopeKind::RadioDefault
             | ScopeKind::RadioNode
+            | ScopeKind::RemoteDefault
+            | ScopeKind::RemoteNode
     ) {
         return true;
     }
@@ -703,6 +709,7 @@ fn command_default(key: &str) -> Option<&'static str> {
         "link_command_site_status" => "76",
         "link_command_cancel_message" => "78",
         "link_command_echo_telemetry" => "",
+        "link_command_remote_base" => "",
         _ => return None,
     })
 }

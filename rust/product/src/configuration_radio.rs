@@ -17,12 +17,14 @@ type Resolve = unsafe extern "C" fn(
 type Visit =
     unsafe extern "C" fn(*const c_void, abi::UrpNativeConfigurationSink, *mut c_void) -> i32;
 type Destroy = unsafe extern "C" fn(*mut c_void);
+type RemoteOptions = unsafe extern "C" fn(*mut c_void, *mut abi::UrpRemoteCommandOptions) -> i32;
 
 #[derive(Clone, Copy)]
 struct Api {
     resolve: Resolve,
     visit: Visit,
     destroy: Destroy,
+    remote_options: RemoteOptions,
 }
 
 impl Api {
@@ -32,8 +34,8 @@ impl Api {
         }
         // SAFETY: every descriptor exposes its size word; no other field is read yet.
         let advertised_size = unsafe { descriptor.cast::<u32>().read_unaligned() };
-        let required = offset_of!(abi::UrpAstDescriptor, native_configuration_destroy)
-            + size_of::<Option<Destroy>>();
+        let required = offset_of!(abi::UrpAstDescriptor, native_configuration_remote_options)
+            + size_of::<Option<RemoteOptions>>();
         if advertised_size < required as u32 {
             return Err(
                 "shared radio configuration provider has an incompatible descriptor".into(),
@@ -64,22 +66,68 @@ impl Api {
         // SAFETY: the size requirement ends after this checked destroy operation.
         let destroy =
             unsafe { ptr::addr_of!((*descriptor).native_configuration_destroy).read_unaligned() };
+        // SAFETY: the required prefix ends after this configuration-only operation.
+        let remote_options = unsafe {
+            ptr::addr_of!((*descriptor).native_configuration_remote_options).read_unaligned()
+        };
         Ok(Self {
             resolve: resolve.ok_or("shared radio configuration resolution is unavailable")?,
             visit: visit.ok_or("shared radio configuration visit is unavailable")?,
             destroy: destroy.ok_or("shared radio configuration destruction is unavailable")?,
+            remote_options: remote_options
+                .ok_or("shared radio command configuration is unavailable")?,
         })
     }
 }
 
 /// One SDK-owned radio request; every borrowed visit ends before destruction.
-pub(super) struct ResolvedRadio {
+pub(crate) struct ResolvedRadio {
     owner: NonNull<c_void>,
     api: Api,
 }
 
 impl ResolvedRadio {
-    pub(super) fn resolve(
+    /// Copy canonical DTMF policy without acquiring or opening a device.
+    pub(crate) fn remote_commands(
+        &self,
+    ) -> Result<Option<rpt_advanced_core::remote_base_command::RemoteCommandConfiguration>, String>
+    {
+        use rpt_advanced_core::remote_base_command::{
+            RemoteCommandConfiguration, RemoteDtmfAccess,
+        };
+        // SAFETY: this complete scalar/byte record has no invalid bit patterns.
+        let mut output: abi::UrpRemoteCommandOptions = unsafe { std::mem::zeroed() };
+        output.struct_size = size_of::<abi::UrpRemoteCommandOptions>() as u32;
+        output.abi_version = 1;
+        // SAFETY: the unique SDK owner remains live and the output is complete/writable.
+        let status = unsafe { (self.api.remote_options)(self.owner.as_ptr(), &mut output) };
+        if status != 0 {
+            return Err(format!(
+                "shared radio command configuration failed ({status})"
+            ));
+        }
+        if output.enabled == 0 {
+            return Ok(None);
+        }
+        let access = match output.access {
+            0 => RemoteDtmfAccess::Disabled,
+            1 => RemoteDtmfAccess::Open,
+            2 => RemoteDtmfAccess::Locked,
+            _ => return Err("shared radio command access is invalid".into()),
+        };
+        let bytes = output
+            .prefix
+            .get(..output.prefix_length as usize)
+            .filter(|prefix| {
+                !prefix.is_empty() && prefix.len() <= 63 && prefix.iter().all(u8::is_ascii_digit)
+            })
+            .ok_or("shared radio command prefix is invalid")?;
+        Ok(Some(RemoteCommandConfiguration {
+            prefix: String::from_utf8(bytes.to_vec()).expect("validated ASCII digits"),
+            access,
+        }))
+    }
+    pub(crate) fn resolve(
         configuration: &str,
         node: &str,
         diagnostic: abi::UrpNativeProcessingDiagnostic,
@@ -175,6 +223,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_remote_command_options_are_copied_without_opening_hardware() {
+        for (source, expected) in [
+            ("[524950]\n", None),
+            (
+                "[524950]\n[remote_base 524950]\nenabled=yes\nbackend=hamlib\nhamlib_model=RIG_MODEL_DUMMY\ndtmf_prefix=65\ndtmf_access=open\nstartup_memory=local\nallowed_modes=FM\nallowed_rx_ranges_hz=144000000-148000000\nallowed_tx_ranges_hz=144000000-148000000\n[remote_memory 524950 local]\nselector=1\nrx_frequency_hz=146520000\ntx_frequency_hz=146520000\nmode=FM\n",
+                Some((
+                    "65",
+                    rpt_advanced_core::remote_base_command::RemoteDtmfAccess::Open,
+                )),
+            ),
+        ] {
+            let owner = ResolvedRadio::resolve(source, "524950", None, ptr::null_mut()).unwrap();
+            assert_eq!(
+                owner
+                    .remote_commands()
+                    .unwrap()
+                    .map(|value| (value.prefix, value.access)),
+                expected.map(|(prefix, access)| (prefix.to_string(), access))
+            );
+        }
+    }
+
+    #[test]
     fn short_and_wrong_abi_descriptors_are_rejected_before_reading_tails() {
         let size_only = 4_u32;
         // SAFETY: a rejected size-only prefix must not require a readable ABI word.
@@ -203,6 +274,70 @@ mod tests {
         -1
     }
     unsafe extern "C" fn destroy_noop(_: *mut c_void) {}
+    unsafe extern "C" fn remote_options_unavailable(
+        _: *mut c_void,
+        _: *mut abi::UrpRemoteCommandOptions,
+    ) -> i32 {
+        -1
+    }
+
+    #[test]
+    fn remote_command_options_reject_provider_errors_and_invalid_access_or_prefix() {
+        struct Options {
+            status: i32,
+            access: u32,
+            prefix: &'static [u8],
+            length: u32,
+        }
+        unsafe extern "C" fn options(
+            owner: *mut c_void,
+            output: *mut abi::UrpRemoteCommandOptions,
+        ) -> i32 {
+            // SAFETY: the test lends both complete objects for this synchronous call.
+            let (owner, output) = unsafe { (&*owner.cast::<Options>(), &mut *output) };
+            output.enabled = 1;
+            output.access = owner.access;
+            output.prefix[..owner.prefix.len()].copy_from_slice(owner.prefix);
+            output.prefix_length = owner.length;
+            owner.status
+        }
+        for (status, access, prefix, length, expected) in [
+            (-42, 0, b"65".as_slice(), 2, Some("failed (-42)")),
+            (0, 3, b"65".as_slice(), 2, Some("access is invalid")),
+            (0, 0, b"".as_slice(), 0, Some("prefix is invalid")),
+            (0, 0, b"65".as_slice(), 64, Some("prefix is invalid")),
+            (0, 0, b"65".as_slice(), 65, Some("prefix is invalid")),
+            (0, 0, b"6x".as_slice(), 2, Some("prefix is invalid")),
+            (0, 0, b"65".as_slice(), 2, None),
+        ] {
+            let mut owner = Options {
+                status,
+                access,
+                prefix,
+                length,
+            };
+            let resolved = ResolvedRadio {
+                owner: NonNull::from(&mut owner).cast(),
+                api: Api {
+                    resolve: resolve_unavailable,
+                    visit: visit_unavailable,
+                    destroy: destroy_noop,
+                    remote_options: options,
+                },
+            };
+            match expected {
+                Some(message) => assert!(resolved.remote_commands().unwrap_err().contains(message)),
+                None => {
+                    let value = resolved.remote_commands().unwrap().unwrap();
+                    assert_eq!(
+                        value.access,
+                        rpt_advanced_core::remote_base_command::RemoteDtmfAccess::Disabled
+                    );
+                    assert_eq!(value.prefix, "65");
+                }
+            }
+        }
+    }
 
     unsafe extern "C" fn visit_request(
         _: *const c_void,
@@ -219,8 +354,9 @@ mod tests {
     fn advertised_tail_requires_all_operations_and_accepts_its_exact_prefix() {
         // SAFETY: this C table contains only scalar fields and nullable function/data pointers.
         let mut descriptor: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
-        descriptor.struct_size = (offset_of!(abi::UrpAstDescriptor, native_configuration_destroy)
-            + size_of::<Option<Destroy>>()) as u32;
+        descriptor.struct_size =
+            (offset_of!(abi::UrpAstDescriptor, native_configuration_remote_options)
+                + size_of::<Option<RemoteOptions>>()) as u32;
         descriptor.abi_version = 1;
         descriptor.capability_name = c"usbradioplus.product1".as_ptr();
         // SAFETY: this test retains the complete readable descriptor, including its checked prefix.
@@ -231,6 +367,13 @@ mod tests {
         descriptor.native_configuration_visit = Some(visit_unavailable);
         assert!(load(&descriptor).err().unwrap().contains("destruction"));
         descriptor.native_configuration_destroy = Some(destroy_noop);
+        assert!(
+            load(&descriptor)
+                .err()
+                .unwrap()
+                .contains("command configuration")
+        );
+        descriptor.native_configuration_remote_options = Some(remote_options_unavailable);
         assert!(load(&descriptor).is_ok());
         for capability in [c"wrong.product".as_ptr(), ptr::null()] {
             descriptor.capability_name = capability;
@@ -249,6 +392,7 @@ mod tests {
                 resolve: resolve_unavailable,
                 visit: visit_unavailable,
                 destroy: destroy_noop,
+                remote_options: remote_options_unavailable,
             },
         };
         assert!(
@@ -306,6 +450,7 @@ mod tests {
                     resolve: resolve_unavailable,
                     visit: visit_request,
                     destroy,
+                    remote_options: remote_options_unavailable,
                 },
             };
             assert_eq!(

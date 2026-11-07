@@ -145,6 +145,41 @@ impl PeerInput for FiniteInput {
 }
 
 #[test]
+fn remote_base_link_activity_remains_visible_before_transmit_muting() {
+    let input = FiniteInput {
+        signals: PeerSignals::new(),
+        samples: [0.25; 4].into_iter().collect(),
+    };
+    input.signals.set_radio_keyed(true);
+    input.signals.publish_pcm();
+    let (writer, _reader) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, writer, 4, 0).unwrap();
+    let (mut audio, _dispatcher) = LinkAudio::new(vec![peer], 4).unwrap();
+    let (mut node, _control) = NodeController::new(
+        ControllerSettings {
+            full_duplex: false,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    assert!(!audio.peer_source_active());
+    assert!(
+        !audio
+            .process(&mut node, true, &mut [0.0; 4], SourcePosition::default())
+            .unwrap()
+    );
+    assert!(audio.peer_source_active());
+    audio.peers[0].input.signals.end();
+    audio
+        .process(&mut node, false, &mut [0.0; 4], SourcePosition::default())
+        .unwrap();
+    assert!(!audio.peer_source_active());
+}
+
+#[test]
 fn regeneration_replaces_rf_not_peer_program_or_parrot_capture() {
     let input = |samples: &[f32]| FiniteInput {
         signals: PeerSignals::new(),

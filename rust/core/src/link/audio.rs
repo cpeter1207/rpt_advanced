@@ -188,6 +188,7 @@ impl<P: PeerInput> AudioPeer<P> {
 
 /// Fixed prepared peer set retained until its generation is detached and reclaimed.
 pub struct LinkAudio<P: PeerInput> {
+    peer_source_active: bool,
     text: Option<Box<dyn LocalTextInput>>,
     text_samples: Vec<f32>,
     peers: Vec<AudioPeer<P>>,
@@ -405,6 +406,7 @@ impl<P: PeerInput> LinkAudio<P> {
         };
         Ok((
             Self {
+                peer_source_active: false,
                 text: None,
                 text_samples: vec![0.0; maximum],
                 routing: vec![Destination::default(); peers.len()],
@@ -442,6 +444,10 @@ impl<P: PeerInput> LinkAudio<P> {
     /// Count receive-qualified peers on the owning audio worker.
     pub fn active_count(&self) -> usize {
         self.peers.iter().filter(|peer| peer.active).count()
+    }
+    /// Current frame's peer/text activity before controller muting and RF admission.
+    pub fn peer_source_active(&self) -> bool {
+        self.peer_source_active
     }
     /// Render RF and publish one prepared pre-access-tone peer-audio block for the dispatcher.
     /// Terminal peers contribute neither PCM nor key state, even before reclamation.
@@ -577,6 +583,8 @@ impl<P: PeerInput> LinkAudio<P> {
             .text
             .as_mut()
             .is_some_and(|input| input.render(&mut self.text_samples[..count]));
+        self.peer_source_active = any_peer_active || text_active;
+        controller.set_nonlocal_source_activity(self.peer_source_active);
         let keyed = controller.process_audio_with_parrot(
             receiving,
             linked_active,

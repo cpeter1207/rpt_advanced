@@ -12,6 +12,13 @@ pub enum RadioActivationError {
     InvalidCallbacks,
     /// The shared product returned a failure status.
     Product(i32),
+    /// Startup may have retained callbacks; keep the exact native owner until quiesced.
+    Retained {
+        /// Original startup failure, preserved through later cleanup.
+        status: i32,
+        /// Partially started owner retained by the radio reservation.
+        active: Box<ActiveRadio>,
+    },
 }
 
 impl std::fmt::Display for RadioActivationError {
@@ -22,6 +29,10 @@ impl std::fmt::Display for RadioActivationError {
                 formatter.write_str("invalid native radio callbacks or frame bound")
             }
             Self::Product(status) => write!(formatter, "shared radio product failed ({status})"),
+            Self::Retained { status, .. } => write!(
+                formatter,
+                "shared radio startup failed ({status}); retirement pending"
+            ),
         }
     }
 }
@@ -37,6 +48,8 @@ pub struct ProductRadioCallbacks {
     pub transmit: abi::rptadv_radio_transmit_v3,
     /// Caller-owned transmit context.
     pub transmit_context: *mut c_void,
+    /// Same serial transmit-owner policy/activity endpoint.
+    pub metadata: abi::rptadv_radio_metadata_v1,
 }
 
 /// Native station handle; its shared product owns every hardware and DSP resource.
@@ -49,6 +62,16 @@ pub struct ActiveRadio {
     site_bind: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteBinding) -> i32,
     site_publish: unsafe extern "C" fn(*mut c_void, u32, *const abi::UrpAstSiteRequest) -> i32,
     site_snapshot: unsafe extern "C" fn(*mut c_void, u32, *mut abi::UrpAstSiteSnapshot) -> i32,
+}
+
+impl std::fmt::Debug for ActiveRadio {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActiveRadio")
+            .field("open", &self.handle.is_some())
+            .field("updating", &self.updating)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ActiveRadio {
@@ -124,7 +147,7 @@ impl ActiveRadio {
             transmit: callbacks.transmit,
             transmit_context: callbacks.transmit_context,
             accepted_abi_version: 0,
-            metadata: None,
+            metadata: callbacks.metadata,
         };
         let args = abi::UrpNativeCreateArgs {
             struct_size: std::mem::size_of::<abi::UrpNativeCreateArgs>() as u32,
@@ -160,7 +183,10 @@ impl ActiveRadio {
         // SAFETY: successful create returns this stopped, uniquely owned station.
         let status = unsafe { start(handle.as_ptr()) };
         if status != 0 {
-            return Err(RadioActivationError::Product(status));
+            return Err(RadioActivationError::Retained {
+                status,
+                active: Box::new(active),
+            });
         }
         Ok(active)
     }
@@ -187,6 +213,71 @@ impl ActiveRadio {
             // SAFETY: the output is exclusively borrowed for this synchronous call.
             unsafe { (self.site_snapshot)(handle.as_ptr(), bank, output) }
         })
+    }
+
+    /// Pump the existing SDK control owner without a physical rig exchange.
+    pub(crate) fn service(&mut self) -> i32 {
+        self.handle.map_or(-1, |handle| {
+            self.api.native_service.map_or(-7, |call| {
+                // SAFETY: the serialized caller retains its native station.
+                unsafe { call(handle.as_ptr()) }
+            })
+        })
+    }
+    /// Observe worker-side admission without waiting for a physical rig exchange.
+    pub(crate) fn ready(&mut self) -> i32 {
+        self.handle.map_or(-1, |handle| {
+            self.api.native_activation_status.map_or(-7, |call| {
+                // SAFETY: this unique control owner retains the native handle.
+                unsafe { call(handle.as_ptr()) }
+            })
+        })
+    }
+
+    /// Keep callbacks and native ownership while physical retirement is pending.
+    pub(crate) fn quiesce(&mut self) -> i32 {
+        self.handle.map_or(0, |handle| {
+            let call = self.api.native_quiesce.unwrap_or(self.stop);
+            // SAFETY: no handle or callback is released by this poll.
+            unsafe { call(handle.as_ptr()) }
+        })
+    }
+
+    /// Copy intent into the shared physical owner's bounded queue.
+    pub(crate) fn remote_submit(
+        &mut self,
+        operation: &abi::UrpRemoteOperation,
+        flags: u32,
+        output: &mut abi::rptadv_remote_ticket_v1,
+    ) -> i32 {
+        let (Some(handle), Some(submit), Some(source), Some(take), Some(destroy)) = (
+            self.handle,
+            self.api.native_remote_submit,
+            self.api.remote_source,
+            self.api.remote_take,
+            self.api.remote_destroy,
+        ) else {
+            return -7;
+        };
+        let mut ticket = std::ptr::null_mut();
+        // SAFETY: inputs are borrowed and success transfers one independent SDK ticket.
+        let code = unsafe { submit(handle.as_ptr(), operation, flags, &mut ticket) };
+        if code != 0 || ticket.is_null() {
+            if !ticket.is_null() {
+                // SAFETY: even an erroneous partial transfer retains its matching destructor.
+                unsafe { destroy(ticket) };
+            }
+            return if code == 0 { -1 } else { code };
+        }
+        *output = abi::rptadv_remote_ticket_v1 {
+            struct_size: std::mem::size_of::<abi::rptadv_remote_ticket_v1>() as u32,
+            abi_version: 1,
+            context: ticket,
+            source: Some(source),
+            take: Some(take),
+            destroy: Some(destroy),
+        };
+        0
     }
 }
 
@@ -380,7 +471,14 @@ fn retain_operations(api: &abi::UrpAstDescriptor) -> abi::UrpAstDescriptor {
         native_accept_update,
         native_finish_update,
         native_destroy_update,
-        native_processing_status_text
+        native_processing_status_text,
+        native_service,
+        native_quiesce,
+        native_remote_submit,
+        remote_source,
+        remote_take,
+        remote_destroy,
+        native_activation_status
     );
     retained
 }
@@ -436,6 +534,7 @@ pub(crate) mod tests {
         static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         static RESULTS: Cell<(i32, bool, i32)> = const { Cell::new((0, true, 0)) };
         static EXPECTED_RADIO: Cell<Option<*const c_void>> = const { Cell::new(None) };
+        static REMOTE_RESULT: Cell<(i32, bool)> = const { Cell::new((0, true)) };
     }
     unsafe extern "C" fn create(
         args: *const abi::UrpNativeCreateArgs,
@@ -516,6 +615,29 @@ pub(crate) mod tests {
         CALLS.with(|calls| calls.borrow_mut().push("stop"));
         0
     }
+
+    #[test]
+    fn native_quiesce_retains_the_station_until_the_physical_owner_finishes() {
+        thread_local! { static READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+        unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
+            CALLS.with(|calls| calls.borrow_mut().push("quiesce"));
+            if READY.get() { 0 } else { 1 }
+        }
+        CALLS.with(|calls| calls.borrow_mut().clear());
+        // SAFETY: flat nullable descriptor; only the declared fake callbacks are used.
+        let mut api: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.struct_size = std::mem::size_of::<abi::UrpAstDescriptor>() as u32;
+        api.native_quiesce = Some(quiesce);
+        let mut radio = fixture_active_radio(api);
+        assert_eq!(radio.quiesce(), 1);
+        assert!(radio.handle.is_some());
+        READY.set(true);
+        assert_eq!(radio.quiesce(), 0);
+        CALLS.with(|calls| assert_eq!(&*calls.borrow(), &["quiesce", "quiesce"]));
+        drop(radio);
+        CALLS
+            .with(|calls| assert_eq!(&*calls.borrow(), &["quiesce", "quiesce", "stop", "destroy"]));
+    }
     unsafe extern "C" fn destroy(_: *mut c_void) {
         CALLS.with(|calls| calls.borrow_mut().push("destroy"));
     }
@@ -561,6 +683,173 @@ pub(crate) mod tests {
         active.handle = Some(NonNull::<u8>::dangling().cast());
         active.api = api;
         active
+    }
+
+    unsafe extern "C" fn remote_service(handle: *mut c_void) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("service"));
+        -31
+    }
+    unsafe extern "C" fn remote_ready(handle: *mut c_void) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("ready"));
+        1
+    }
+    unsafe extern "C" fn remote_quiesce(handle: *mut c_void) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("quiesce"));
+        0
+    }
+    unsafe extern "C" fn remote_submit(
+        handle: *mut c_void,
+        operation: *const abi::UrpRemoteOperation,
+        flags: u32,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        assert_eq!(handle, NonNull::<u8>::dangling().as_ptr().cast());
+        // SAFETY: the client lends the complete operation and writable ticket destination.
+        assert_eq!(unsafe { (*operation).operation }, 1);
+        assert_eq!(flags, 3);
+        CALLS.with(|calls| calls.borrow_mut().push("submit"));
+        let (code, transferred) = REMOTE_RESULT.get();
+        // SAFETY: this synchronous callback supplies one opaque fixture ticket or null.
+        unsafe {
+            *output = if transferred {
+                NonNull::<u32>::dangling().as_ptr().cast()
+            } else {
+                std::ptr::null_mut()
+            };
+        }
+        code
+    }
+    unsafe extern "C" fn ticket_source(ticket: *mut c_void, flags: u32) -> i32 {
+        assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
+        assert_eq!(flags, 2);
+        CALLS.with(|calls| calls.borrow_mut().push("source"));
+        0
+    }
+    unsafe extern "C" fn ticket_take(
+        ticket: *mut c_void,
+        _: abi::UrpNativeProcessingDiagnostic,
+        _: *mut c_void,
+    ) -> i32 {
+        assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("take"));
+        0
+    }
+    unsafe extern "C" fn ticket_destroy(ticket: *mut c_void) {
+        assert_eq!(ticket, NonNull::<u32>::dangling().as_ptr().cast());
+        CALLS.with(|calls| calls.borrow_mut().push("ticket_destroy"));
+    }
+
+    pub(crate) fn remote_fixture_api() -> abi::UrpAstDescriptor {
+        REMOTE_RESULT.set((0, true));
+        // SAFETY: the flat descriptor's unused operations are nullable pointers.
+        let mut api: abi::UrpAstDescriptor = unsafe { std::mem::zeroed() };
+        api.struct_size = std::mem::size_of_val(&api) as u32;
+        api.abi_version = 1;
+        api.native_service = Some(remote_service);
+        api.native_activation_status = Some(remote_ready);
+        api.native_quiesce = Some(remote_quiesce);
+        api.native_remote_submit = Some(remote_submit);
+        api.remote_source = Some(ticket_source);
+        api.remote_take = Some(ticket_take);
+        api.remote_destroy = Some(ticket_destroy);
+        api
+    }
+
+    pub(crate) fn remote_operation() -> abi::UrpRemoteOperation {
+        abi::UrpRemoteOperation {
+            struct_size: std::mem::size_of::<abi::UrpRemoteOperation>() as u32,
+            abi_version: 1,
+            operation: 1,
+            selector: 0,
+            signed_value: 0,
+            magnitude: 0,
+            decimal_places: 0,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn native_remote_control_preserves_status_and_independent_ticket_ownership() {
+        let operation = remote_operation();
+        let mut radio = empty_active_radio();
+        assert_eq!(radio.service(), -1);
+        assert_eq!(radio.ready(), -1);
+        radio.handle = Some(NonNull::<u8>::dangling().cast());
+        assert_eq!(radio.service(), -7);
+        assert_eq!(radio.ready(), -7);
+        radio.api = remote_fixture_api();
+        assert_eq!(radio.service(), -31);
+        assert_eq!(radio.ready(), 1);
+        for missing in 0..5 {
+            radio.api = remote_fixture_api();
+            CALLS.with(|calls| calls.borrow_mut().clear());
+            match missing {
+                0 => radio.handle = None,
+                1 => radio.api.native_remote_submit = None,
+                2 => radio.api.remote_source = None,
+                3 => radio.api.remote_take = None,
+                _ => radio.api.remote_destroy = None,
+            }
+            // SAFETY: an empty ticket consists solely of valid scalar/pointer values.
+            let mut output: abi::rptadv_remote_ticket_v1 = unsafe { std::mem::zeroed() };
+            output.context = NonNull::<u64>::dangling().as_ptr().cast();
+            assert_eq!(radio.remote_submit(&operation, 3, &mut output), -7);
+            assert_eq!(output.context, NonNull::<u64>::dangling().as_ptr().cast());
+            CALLS.with(|calls| {
+                assert!(
+                    calls.borrow().is_empty(),
+                    "incomplete SDK tables must not dispatch"
+                )
+            });
+            radio.handle = Some(NonNull::<u8>::dangling().cast());
+        }
+        radio.api = remote_fixture_api();
+        for (code, transferred, expected) in [
+            (0, true, 0),
+            (-9, true, -9),
+            (-9, false, -9),
+            (0, false, -1),
+        ] {
+            REMOTE_RESULT.set((code, transferred));
+            CALLS.with(|calls| calls.borrow_mut().clear());
+            // SAFETY: the caller initializes complete writable ticket output storage.
+            let mut output: abi::rptadv_remote_ticket_v1 = unsafe { std::mem::zeroed() };
+            assert_eq!(radio.remote_submit(&operation, 3, &mut output), expected);
+            if expected == 0 {
+                assert_eq!(output.struct_size as usize, std::mem::size_of_val(&output));
+                assert_eq!(output.abi_version, 1);
+                // SAFETY: success transferred this ticket and its matching lifecycle table.
+                unsafe {
+                    assert_eq!(output.source.unwrap()(output.context, 2), 0);
+                    assert_eq!(
+                        output.take.unwrap()(output.context, None, std::ptr::null_mut()),
+                        0
+                    );
+                    output.destroy.unwrap()(output.context);
+                }
+                CALLS.with(|calls| {
+                    assert_eq!(
+                        &*calls.borrow(),
+                        &["submit", "source", "take", "ticket_destroy"]
+                    )
+                });
+            } else {
+                assert!(output.context.is_null());
+                CALLS.with(|calls| {
+                    assert_eq!(
+                        &*calls.borrow(),
+                        if transferred {
+                            &["submit", "ticket_destroy"][..]
+                        } else {
+                            &["submit"][..]
+                        }
+                    )
+                });
+            }
+        }
     }
 
     #[test]
@@ -978,6 +1267,7 @@ pub(crate) mod tests {
                 receive_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                metadata: None,
             },
         )
         .unwrap();
@@ -1094,13 +1384,24 @@ pub(crate) mod tests {
                 receive_context: NonNull::<u8>::dangling().as_ptr().cast(),
                 transmit: Some(transmit),
                 transmit_context: NonNull::<u8>::dangling().as_ptr().cast(),
+                metadata: None,
             };
             let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
             let status = result.as_ref().err().map(|error| match error {
-                RadioActivationError::Product(status) => *status,
+                RadioActivationError::Product(status)
+                | RadioActivationError::Retained { status, .. } => *status,
                 error => panic!("unexpected client error: {error}"),
             });
             assert_eq!(status, expected_status);
+            if scenario == (0, true, -8) {
+                CALLS.with(|calls| {
+                    assert_eq!(
+                        &*calls.borrow(),
+                        &["create", "start"],
+                        "a failed startup retains its callback owner until checked cleanup"
+                    )
+                });
+            }
             drop(result);
             CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected_calls));
         }
@@ -1127,6 +1428,7 @@ pub(crate) mod tests {
             receive_context: std::ptr::null_mut(),
             transmit: Some(transmit),
             transmit_context: std::ptr::null_mut(),
+            metadata: None,
         };
         let mut missing_receive = callbacks();
         missing_receive.receive = None;

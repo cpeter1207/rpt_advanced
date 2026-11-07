@@ -15,6 +15,8 @@ static DIRECTORY_NOTICE: AtomicU8 = AtomicU8::new(0);
 mod echo;
 #[path = "services_processing_tests.rs"]
 mod processing;
+#[path = "services_remote_tests.rs"]
+mod remote;
 
 unsafe extern "C" fn echo_info(
     _: *mut c_void,
@@ -562,11 +564,153 @@ fn radio_update_is_optional_and_preserves_stage_results_and_finish_errors() {
 }
 
 #[test]
+fn radio_maintenance_validates_bounded_text_and_keeps_sink_errors() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    thread_local! { static MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+    unsafe extern "C" fn control(
+        _: *mut c_void,
+        radio: *mut c_void,
+        _: *mut abi::rptadv_radio_control_v1,
+        sink: abi::rptadv_text_sink_v1,
+        context: *mut c_void,
+    ) -> i32 {
+        assert!(!radio.is_null());
+        let sink = sink.unwrap();
+        let mode = MODE.get();
+        match mode {
+            0 => unsafe {
+                sink(context, ptr::null(), 0);
+                sink(context, c"ok".as_ptr(), 2);
+            },
+            1 => unsafe { sink(context, c"ignored".as_ptr(), 0) },
+            2 => unsafe { sink(context, ptr::null(), 1) },
+            3 => unsafe {
+                sink(context, c"\xff".as_ptr(), 1);
+                sink(context, c"ok".as_ptr(), 2);
+            },
+            4..=6 => {
+                let text = vec![b'a'; if mode == 4 { 65537 } else { 65536 }];
+                unsafe { sink(context, text.as_ptr().cast(), text.len()) };
+                if mode == 5 {
+                    unsafe { sink(context, c"!".as_ptr(), 1) };
+                }
+            }
+            _ => return -9,
+        }
+        0
+    }
+    let services = host_services(|table| table.radio_control = Some(control));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    for (mode, expected) in [
+        (0, Ok(2)),
+        (1, Ok(0)),
+        (2, Err(-1)),
+        (3, Err(-1)),
+        (4, Err(-1)),
+        (5, Err(-1)),
+        (6, Ok(65536)),
+        (7, Err(-9)),
+    ] {
+        MODE.set(mode);
+        assert_eq!(
+            radio.maintenance(&mut request).map(|text| text.len()),
+            expected,
+            "maintenance text mode {mode}"
+        );
+    }
+    let services = host_services(|table| table.radio_control = None);
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.maintenance(&mut request), Err(-7));
+}
+
+#[test]
 fn optional_peer_processor_tail_accepts_the_released_complete_host_prefix() {
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.struct_size =
         std::mem::offset_of!(abi::rptadv_host_services_v10, peer_processing_prepare) as u32;
     assert!(unsafe { HostServices::open(&table) }.is_ok());
+}
+
+#[test]
+fn complete_pre_remote_host_v10_prefix_has_no_remote_callbacks() {
+    unsafe extern "C" fn bind(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: abi::rptadv_radio_metadata_v1,
+    ) -> i32 {
+        0
+    }
+    unsafe extern "C" fn service(_: *mut c_void, _: *mut c_void) -> i32 {
+        0
+    }
+    unsafe extern "C" fn submit(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: *const abi::UrpRemoteOperation,
+        _: u32,
+        _: *mut abi::rptadv_remote_ticket_v1,
+    ) -> i32 {
+        0
+    }
+    // SAFETY: the fixture retains this immutable descriptor for the test process.
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.radio_metadata_bind = Some(bind);
+    table.radio_service = Some(service);
+    table.radio_quiesce = Some(service);
+    table.radio_remote_submit = Some(submit);
+    table.radio_ready = Some(service);
+    assert_eq!(size_of_val(&table), 400);
+    table.struct_size =
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind) as u32;
+    assert_eq!(table.struct_size, 360);
+    let mut prefix = [0_u64; 45];
+    // SAFETY: the aligned destination contains exactly the declared complete old prefix.
+    unsafe {
+        ptr::copy_nonoverlapping(
+            ptr::from_ref(&table).cast::<u8>(),
+            prefix.as_mut_ptr().cast(),
+            table.struct_size as usize,
+        );
+    }
+    // SAFETY: the aligned prefix remains readable for its declared size throughout admission.
+    let services = unsafe { HostServices::open(prefix.as_ptr().cast()) }.unwrap();
+    assert!(services.0.radio_metadata_bind.is_none());
+    assert!(services.0.radio_service.is_none());
+    assert!(services.0.radio_quiesce.is_none());
+    assert!(services.0.radio_remote_submit.is_none());
+    assert!(services.0.radio_ready.is_none());
+}
+
+#[test]
+fn radio_metadata_binding_preserves_optional_host_prefix_and_failures() {
+    unsafe extern "C" fn bind(
+        _: *mut c_void,
+        _: *mut c_void,
+        metadata: abi::rptadv_radio_metadata_v1,
+    ) -> i32 {
+        if metadata.is_some() { 0 } else { -9 }
+    }
+    unsafe extern "C" fn metadata(_: *mut c_void, _: u32, _: *mut u32) -> i32 {
+        0
+    }
+    let services = host_services(|table| table.radio_metadata_bind = Some(bind));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.bind_metadata(Some(metadata)), Ok(()));
+    assert_eq!(radio.bind_metadata(None), Err(Error::Operation));
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.struct_size =
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind) as u32;
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    assert_eq!(radio.bind_metadata(Some(metadata)), Ok(()));
+    table.struct_size += 1;
+    assert!(matches!(
+        unsafe { HostServices::open(&table) },
+        Err(Error::Admission)
+    ));
 }
 
 #[test]

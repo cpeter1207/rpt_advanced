@@ -3,6 +3,8 @@ use super::*;
 mod egress_load;
 #[path = "native_maintenance_host_tests.rs"]
 mod native_maintenance;
+#[path = "host_remote_tests.rs"]
+mod remote;
 #[path = "site_host_tests.rs"]
 mod site;
 use crate::{
@@ -1970,6 +1972,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     };
     let mut device = Device {
         lease: first_lease.clone(),
+        name: "1000".into(),
         services: services(),
     };
     assert!(!device.open(&settings));
@@ -1991,6 +1994,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
 
     let lease = Arc::new(Mutex::new(Lease {
         quiesced: false,
+        quiescing: false,
         owners: None,
         worker: None,
         epoch: Instant::now(),
@@ -1998,6 +2002,7 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     }));
     let mut device = Device {
         lease: lease.clone(),
+        name: "1000".into(),
         services: services(),
     };
     RadioWorker::fail_next_for_test(crate::worker::TestFailure::Prepare);
@@ -2013,6 +2018,87 @@ fn device_handoff_retains_unique_owners_and_refuses_failed_or_duplicate_open() {
     device.close();
     assert!(device.open(&settings));
     device.close();
+}
+
+#[test]
+fn pending_radio_retirement_is_pumped_without_reopening_or_discarding_owners() {
+    thread_local! { static PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    unsafe extern "C" fn quiesce(_: *mut c_void, _: *mut c_void) -> i32 {
+        i32::from(PENDING.get())
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.radio_quiesce = Some(quiesce);
+    let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let mut host = Host::start(
+        document("usb", ""),
+        media(),
+        services,
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let lease = Arc::clone(&host.leases[0].1);
+    let mut device = Device {
+        name: "1000".into(),
+        lease: Arc::clone(&lease),
+        services,
+    };
+    PENDING.set(true);
+    device.close();
+    assert!(lease.lock().unwrap().quiescing);
+    assert!(lease.lock().unwrap().worker.is_some());
+    host.pump(clock()).unwrap();
+    assert!(lease.lock().unwrap().quiescing);
+    PENDING.set(false);
+    host.pump(clock()).unwrap();
+    assert!(lease.lock().unwrap().worker.is_none());
+    assert!(lease.lock().unwrap().owners.is_some());
+    device.close();
+    assert!(host.stop(20));
+}
+
+#[test]
+fn peer_radio_unkey_completes_remote_commands_with_the_original_reply_target() {
+    use rpt_advanced_core::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    host.runtime
+        .node("1000")
+        .unwrap()
+        .links()
+        .configure_remote("6", RemoteDtmfAccess::Open)
+        .unwrap();
+    host.runtime.incoming("1000", "2000", true).unwrap();
+    let (io, state) = peer(48000);
+    host.attach_peer("1000", "2000", Mode::TRANSCEIVE, io, clock())
+        .unwrap();
+    pump_until(&mut host, |host| {
+        named_peer_ready(host, "2000") && host.runtime.status(10)[0].1.retiring.is_none()
+    });
+    let reply = host.peers[0].control.reply_target();
+    state.lock().unwrap().input.extend([
+        Input::Text(b"!NEWKEY!"),
+        Input::RadioKey,
+        Input::Digit(b'*'),
+        Input::Digit(b'6'),
+        Input::Digit(b'5'),
+        Input::Digit(b'1'),
+        Input::RadioUnkey,
+    ]);
+    pump_until(&mut host, |host| !host.operations.is_empty());
+    let outcomes = host.take_operations();
+    assert!(
+        matches!(outcomes.as_slice(), [(local, DigitOutcome::Operation(operation))]
+        if local == "1000" && operation.remote == Some(RemoteCommand::Status { long: true })
+            && operation.reply.as_ref() == Some(&reply) && operation.origin.as_deref() == Some("2000")),
+        "{outcomes:?}"
+    );
+    assert!(host.stop(20));
 }
 
 #[test]

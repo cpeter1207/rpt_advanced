@@ -380,8 +380,13 @@ impl Engine {
         result
     }
     fn enter(self: &Arc<Self>) -> Result<Call, RuntimeError> {
+        self.enter_reload(false)
+    }
+    fn enter_reload(self: &Arc<Self>, reload: bool) -> Result<Call, RuntimeError> {
         let mut count = self.calls.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.accepting.load(Ordering::Acquire) || self.reloading.load(Ordering::Acquire) {
+        if !self.accepting.load(Ordering::Acquire)
+            || !reload && self.reloading.load(Ordering::Acquire)
+        {
             return Err(RuntimeError::Rejected);
         }
         *count += 1;
@@ -612,6 +617,10 @@ impl Engine {
                     }
                     if !engine.reloading.load(Ordering::Acquire) {
                         engine.pump_observed(clock, schedule);
+                    } else {
+                        // Hardware readiness cannot suspend existing peers or other
+                        // radios. Only configuration/scheduled-action publication waits.
+                        let _ = engine.run_inner(true, move |host| host.pump(clock));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
@@ -704,13 +713,16 @@ impl Engine {
 }
 
 pub(crate) fn selected() -> Result<(Arc<Engine>, Call), RuntimeError> {
+    selected_reload(false)
+}
+fn selected_reload(reload: bool) -> Result<(Arc<Engine>, Call), RuntimeError> {
     let engine = ENGINE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .cloned()
         .ok_or(RuntimeError::Rejected)?;
-    let call = engine.enter()?;
+    let call = engine.enter_reload(reload)?;
     Ok((engine, call))
 }
 fn capture(origin: Instant, services: HostServices) -> RuntimeClock {
@@ -886,7 +898,17 @@ unsafe extern "C" fn rptadv_product_start(
             }
             return Err(error);
         }
-        if let Err(error) = engine.start_ticker() {
+        let activation = (|| {
+            loop {
+                let clock = engine.clock();
+                if engine.run(move |host| host.poll_reload(clock))? {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok::<(), RuntimeError>(())
+        })();
+        if let Err(error) = activation.and_then(|()| engine.start_ticker()) {
             if !engine.stop() {
                 *selected = Some(engine);
                 return Ok(());
@@ -905,14 +927,25 @@ unsafe extern "C" fn rptadv_product_reload(
     configuration: *const std::ffi::c_char,
     configuration_length: usize,
 ) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| -> Result<(), RuntimeError> {
+    catch_unwind(AssertUnwindSafe(|| -> Result<i32, RuntimeError> {
         let document = document(unsafe { input(configuration, configuration_length) }?)?;
         let (engine, _call) = selected()?;
-        engine.reload_configuration(document)
+        engine.reload_configuration(document)?;
+        Ok(i32::from(engine.reloading.load(Ordering::Acquire)))
     }))
     .ok()
     .and_then(Result::ok)
-    .map_or(-1, |()| 0)
+    .unwrap_or(-1)
+}
+/// Poll the existing control owner; a pending call retains both generations.
+unsafe extern "C" fn rptadv_product_reload_poll() -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let (engine, _call) = selected_reload(true)?;
+        engine.poll_reload_configuration()
+    }))
+    .ok()
+    .and_then(Result::ok)
+    .map_or(-1, |ready| i32::from(!ready))
 }
 /// Gate admission, stop/join owners, and drain accepted tasks before releasing registrations.
 extern "C" fn rptadv_product_stop() -> i32 {
@@ -1087,6 +1120,7 @@ static DESCRIPTOR: abi::rptadv_product_descriptor_v1 = abi::rptadv_product_descr
     inspect_secrets: Some(crate::configuration::inspect_secrets),
     site_command: Some(crate::site::command::execute),
     radio_control: Some(crate::radio_control::execute),
+    reload_poll: Some(rptadv_product_reload_poll),
 };
 
 /// Return immutable process-lifetime product metadata.

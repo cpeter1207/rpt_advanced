@@ -13,6 +13,10 @@ use std::{
     ptr::{self, NonNull},
 };
 
+#[path = "services_remote.rs"]
+mod remote;
+pub use remote::RemoteTicket;
+
 /// Borrowed peer event delivered synchronously by the host owner.
 pub enum PeerInput<'a> {
     /// Complete text payload.
@@ -342,6 +346,15 @@ fn complete(api: &abi::rptadv_host_services_v10) -> bool {
 }
 
 impl HostServices {
+    /// Enabled remote rigs require the complete nonblocking lifecycle and
+    /// callback-metadata bridge before any physical device can be reserved.
+    pub fn remote_control_available(self) -> bool {
+        self.0.radio_metadata_bind.is_some()
+            && self.0.radio_service.is_some()
+            && self.0.radio_quiesce.is_some()
+            && self.0.radio_remote_submit.is_some()
+            && self.0.radio_ready.is_some()
+    }
     /// Validate the complete table before any callback or context is retained.
     ///
     /// # Safety
@@ -359,10 +372,23 @@ impl HostServices {
         let table_size = size_of::<abi::rptadv_host_services_v10>();
         let processor_tail = offset_of!(abi::rptadv_host_services_v10, radio_control);
         let maintenance_tail = offset_of!(abi::rptadv_host_services_v10, radio_update);
-        if size < table_size && ![required, processor_tail, maintenance_tail].contains(&size) {
+        let metadata_tail = offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind);
+        let remote_tail = offset_of!(abi::rptadv_host_services_v10, radio_service);
+        let ready_tail = offset_of!(abi::rptadv_host_services_v10, radio_ready);
+        if size < table_size
+            && ![
+                required,
+                processor_tail,
+                maintenance_tail,
+                metadata_tail,
+                remote_tail,
+                ready_tail,
+            ]
+            .contains(&size)
+        {
             return Err(Error::Admission);
         }
-        // ABI 10's released prefix is complete; its optional processor tail is
+        // ABI 10's required prefix is complete; its optional processor tail is
         // copied only when fully readable. Missing tails remain nullable.
         let mut api: abi::rptadv_host_services_v10 = unsafe { std::mem::zeroed() };
         unsafe {
@@ -940,6 +966,16 @@ impl Radio {
     /// Prepared native callback frame bound.
     pub fn maximum_frames(&self) -> usize {
         self.maximum_frames
+    }
+    /// Bind optional metadata on control before callback activation. An old host
+    /// may omit this tail for ordinary radios; enabled remote radios require it.
+    pub fn bind_metadata(&mut self, metadata: abi::rptadv_radio_metadata_v1) -> Result<(), Error> {
+        let Some(bind) = self.services.0.radio_metadata_bind else {
+            return Ok(());
+        };
+        // SAFETY: the unique radio lease serializes this pre-activation call.
+        let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), metadata) };
+        (code == 0).then_some(()).ok_or(Error::Operation)
     }
     /// Attach both stable endpoints and start the channel.
     ///

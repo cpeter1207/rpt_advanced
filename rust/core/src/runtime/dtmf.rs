@@ -3,6 +3,7 @@
 use crate::{
     audio::{DtmfDetector, DtmfError},
     command::{Command, CommandCollector, DtmfCommandMap, LinkAction},
+    remote_base_command::{RemoteCommand, RemoteDtmfAccess},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
@@ -174,6 +175,8 @@ pub struct DigitOperation {
     pub command: Command,
     /// Remote-command symbol, absent for ordinary link operations.
     pub digit: Option<char>,
+    /// Typed rig payload; never stored in the link-destination field.
+    pub remote: Option<RemoteCommand>,
     /// Exact originating peer; absent for the existing local/CLI path.
     pub reply: Option<crate::link::PeerReply>,
     /// Claimed source label for relayed commands; never an authorization identity.
@@ -209,6 +212,7 @@ impl DigitOperation {
         Self {
             command,
             digit,
+            remote: None,
             reply: None,
             origin: None,
             admin_authorized: false,
@@ -229,12 +233,14 @@ pub struct DtmfCommands {
     admin_lock_hash: String,
     admin_timeout_ms: u64,
     admin_until_ms: u64,
+    remote_access: RemoteDtmfAccess,
 }
 impl DtmfCommands {
     /// Create independent collection and authorization state with the same resolved policy.
     pub(super) fn for_source(&self) -> Self {
         let mut commands = Self::new(self.map.clone());
         commands.peer_source = true;
+        commands.remote_access = self.remote_access;
         commands.configure_admin(
             &self.admin_unlock_hash,
             &self.admin_lock_hash,
@@ -257,7 +263,33 @@ impl DtmfCommands {
             admin_lock_hash: String::new(),
             admin_timeout_ms: 300_000,
             admin_until_ms: 0,
+            remote_access: RemoteDtmfAccess::Disabled,
         }
+    }
+    /// Atomically install the enabled rig's family and mutation policy. An empty
+    /// prefix removes the family; invalid mappings leave the current collector intact.
+    pub fn configure_remote(
+        &mut self,
+        prefix: &str,
+        access: RemoteDtmfAccess,
+    ) -> Result<(), crate::command::CommandMapError> {
+        let mut mappings = self.map.mappings().to_vec();
+        if let Some(mapping) = mappings
+            .iter_mut()
+            .find(|m| m.action == LinkAction::RemoteBase)
+        {
+            mapping.digits = prefix.into();
+        } else {
+            mappings.push(crate::command::CommandMapping::new(
+                prefix,
+                LinkAction::RemoteBase,
+            ));
+        }
+        let map = DtmfCommandMap::new(mappings)?;
+        self.collector = map.collector();
+        self.map = map;
+        self.remote_access = access;
+        Ok(())
     }
     /// Install hashed DTMF credentials on control; administration stays unavailable unless both
     /// credential digests are valid Argon2id PHC strings.
@@ -327,6 +359,7 @@ impl DtmfCommands {
                         node: self.remote.clone(),
                     },
                     digit: Some(digit),
+                    remote: None,
                     reply: None,
                     origin: None,
                     admin_authorized: false,
@@ -359,6 +392,22 @@ impl DtmfCommands {
                     ))
                 });
         };
+        if let Some(remote) = self.map.parse_remote(&text) {
+            let authorized = self.admin_until_ms != 0;
+            if !self.remote_authorized(remote.administrative(), authorized, now_ms) {
+                return None;
+            }
+            let mut operation = DigitOperation::new(
+                Command {
+                    action: LinkAction::RemoteBase,
+                    node: String::new(),
+                },
+                None,
+            );
+            operation.remote = Some(remote);
+            operation.admin_authorized = authorized;
+            return Some(DigitOutcome::Operation(operation));
+        }
         let mut command = self.map.parse(&text)?;
         if matches!(command.action, LinkAction::Message | LinkAction::SiteStatus) {
             // The command map already requires a nonempty argument for these actions.
@@ -417,6 +466,7 @@ impl DtmfCommands {
         Some(DigitOutcome::Operation(DigitOperation {
             command,
             digit: None,
+            remote: None,
             reply: None,
             origin: None,
             admin_authorized,
@@ -430,6 +480,9 @@ impl DtmfCommands {
             || !self.last_node.is_empty()
             || self.pad.is_some()
             || now_ms < self.admin_until_ms
+    }
+    pub(super) fn remote_collecting(&self) -> bool {
+        self.collector.active() && self.collector.remote_family()
     }
     /// Expire only this origin's pending command, without ending remote selection.
     pub(super) fn expire(&mut self, now_ms: u64) -> Option<DigitOutcome> {
@@ -447,7 +500,11 @@ impl DtmfCommands {
     }
 
     /// Check the one DTMF grant before an administrative action is applied.
-    pub(crate) fn consume_parrot_authorization(&mut self, authorized: bool, now_ms: u64) -> bool {
+    pub(crate) fn consume_administrative_authorization(
+        &mut self,
+        authorized: bool,
+        now_ms: u64,
+    ) -> bool {
         let authorized = authorized && self.admin_until_ms != 0 && now_ms < self.admin_until_ms;
         if !authorized && now_ms >= self.admin_until_ms {
             self.admin_until_ms = 0;
@@ -455,8 +512,25 @@ impl DtmfCommands {
         authorized
     }
 
-    /// Reset the inactivity deadline only after link and parrot-control owners accept the action.
-    pub(crate) fn confirm_parrot_action(&mut self, now_ms: u64) {
+    /// Recheck a queued rig request against its exact source's current grant.
+    pub(crate) fn remote_authorized(
+        &mut self,
+        administrative: bool,
+        authorized: bool,
+        now_ms: u64,
+    ) -> bool {
+        !administrative
+            || match self.remote_access {
+                RemoteDtmfAccess::Open => true,
+                RemoteDtmfAccess::Locked => {
+                    self.consume_administrative_authorization(authorized, now_ms)
+                }
+                RemoteDtmfAccess::Disabled => false,
+            }
+    }
+
+    /// Renew the source grant only after a successful administrative completion.
+    pub(crate) fn confirm_administrative_action(&mut self, now_ms: u64) {
         if self.admin_until_ms != 0 && now_ms < self.admin_until_ms {
             self.admin_until_ms = now_ms.saturating_add(self.admin_timeout_ms);
         }

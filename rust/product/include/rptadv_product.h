@@ -191,6 +191,11 @@ typedef UrpNativeReceive rptadv_radio_receive_v3;
  * Malformed arguments or processing failure return nonzero with silent output. */
 typedef int (*rptadv_radio_transmit_v3)(void *context, float *samples, uint32_t sample_count,
                                         uint32_t *keyed, uint32_t *ctcss_enabled);
+/** Serial TX owner: apply remote enabled/RX/TX/non-FM flags in bits 0..3.
+ * Return zero/one pre-mute linked activity, including buffered tails and text.
+ * No allocation, wait, or I/O; use the existing transmit context. */
+typedef int (*rptadv_radio_metadata_v1)(void *transmit_context, uint32_t controls,
+                                        uint32_t *linked_active);
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
 /** Synchronous RadioPlusAdvanced link-graph attachment; use block=0. */
@@ -281,7 +286,26 @@ struct rptadv_radio_control_v1 {
     uint32_t forced_ctcss_tenths_hz;     /**< Optional manual transmit tone. */
 };
 
+/** Borrowed UTF-8 result emitted synchronously by a remote operation ticket. */
+typedef void (*rptadv_remote_sink_v1)(void *context, const uint8_t *text, uint32_t length);
+/** One uniquely owned asynchronous operation. Functions and context stay live
+ * until destroy. Source flags: bit0 active, bit1 valid; validity is terminal.
+ * take returns zero with one copied JSON result, one while pending, or an error.
+ * destroy cancels and releases without waiting for the physical owner.
+ */
+struct rptadv_remote_ticket_v1 {
+    uint32_t struct_size; /**< Exact complete record size. */
+    uint32_t abi_version; /**< One. */
+    /** Unique ticket, never the radio or peer object. */
+    void *context;
+    int (*source)(void *ticket, uint32_t flags); /**< Publish current source state. */
+    int (*take)(void *ticket, rptadv_remote_sink_v1 sink, void *context); /**< Copy completion. */
+    void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */
+};
 /** Host I/O primitives consumed by the portable product owner.
+ * On supported 64-bit platforms, ABI 10 retains its complete 360-byte prefix
+ * through radio_update and appends five optional callbacks for a 400-byte table.
+ * Omitted complete capability tails are copied as null; partial tails are rejected.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
  * handle is uniquely owned and used serially until its destroy callback. Open/dial
@@ -336,8 +360,10 @@ struct rptadv_host_services_v10 {
      * the same value for both fields. */
     int (*radio_open)(void *context, const char *name, size_t name_length, size_t maximum_frames,
                       void **radio);
-    /** Attach both endpoints before starting. On failure detach/quiesce both endpoints
-     * before return, retaining a safely destroyable reservation. Endpoints are serial
+    /** Attach both endpoints before starting. Failure may retain a partial owner;
+     * radio_quiesce must succeed before callback storage is released. A host without
+     * that optional tail must detach/quiesce both endpoints before returning failure.
+     * Endpoints are serial
      * individually and may run concurrently with each other, never with destroy. */
     int (*radio_activate)(void *context, void *radio, rptadv_radio_receive_v3 receive,
                           void *receive_context, rptadv_radio_transmit_v3 transmit,
@@ -459,8 +485,8 @@ struct rptadv_host_services_v10 {
      * Configuration and local-node UTF-8 spans are borrowed only during this control
      * call. Zero transfers one complete ABI-1 processor; one bypasses processing;
      * negative rejects preparation and transfers nothing. Absent means the selected
-     * host already supplies processed peer PCM. Records ending before this tail retain
-     * ABI-9 behavior; a partially present function-pointer field is invalid. */
+     * host already supplies processed peer PCM. A partially present function-pointer
+     * field is invalid. */
     int (*peer_processing_prepare)(void *context, const char *configuration,
                                    size_t configuration_length, const char *local,
                                    size_t local_length, size_t maximum_frames,
@@ -474,6 +500,26 @@ struct rptadv_host_services_v10 {
      * handoff. A negative stage result still requires phase 2 to restore any
      * partially adopted state. Phase 2 is idempotent with no staged update. */
     int (*radio_update)(void *context, void *radio, uint32_t phase);
+    /** Optional complete tail: bind TX metadata before radio_activate. No hardware
+     * is acquired. Callback lifetime ends with synchronous radio destruction.
+     * Zero succeeds; enabled remote compositions require this operation. */
+    int (*radio_metadata_bind)(void *context, void *radio, rptadv_radio_metadata_v1 metadata);
+    /** Optional complete remote tail. Advance existing control/DSP adoption
+     * without waiting for physical rig I/O. A disabled composition may omit it. */
+    int (*radio_service)(void *context, void *radio);
+    /** Begin/poll retirement. Zero proves callbacks stopped and physical outputs
+     * safe; one means pending. Any nonzero result retains radio and callbacks.
+     * radio_destroy follows successful retirement. Hosts without this operation
+     * retain the synchronous radio_destroy contract above. */
+    int (*radio_quiesce)(void *context, void *radio);
+    /** Copy a command into the existing physical owner. Flags: bit0 local source,
+     * bit1 source active. Success transfers one complete ticket to the caller. */
+    int (*radio_remote_submit)(void *context, void *radio,
+                               const struct UrpRemoteOperation *operation, uint32_t flags,
+                               struct rptadv_remote_ticket_v1 *ticket);
+    /** Observe activation without I/O: zero is ready, one is opening, negative
+     * is the first failure. Remote compositions require this complete tail. */
+    int (*radio_ready)(void *context, void *radio);
 };
 
 /** Exact revision of a typed site control request. */
@@ -533,7 +579,8 @@ struct rptadv_product_descriptor_v1 {
                  const struct rptadv_speech_descriptor *speech, const char *configuration,
                  size_t configuration_length);
     int (*reload)(const char *configuration,
-                  size_t configuration_length); /**< Replace configuration. */
+                  size_t configuration_length); /**< Replace configuration: zero
+                    complete, one accepted/pending (call reload_poll), negative failed. */
     int (*stop)(void);                          /**< Stop and quiesce every product owner. */
     /** Check current incoming policy before answering a channel. */
     int (*authorize_incoming)(const struct rptadv_incoming_peer_v1 *request, void *peer);
@@ -572,6 +619,10 @@ struct rptadv_product_descriptor_v1 {
     int (*radio_control)(const char *local, size_t local_length,
                          struct rptadv_radio_control_v1 *request, rptadv_text_sink_v1 sink,
                          void *sink_context);
+    /** Advance retained activation/rollback: zero completed, one pending,
+     * negative failed after safe rollback. Keep host candidate settings until
+     * completion. Each call is nonblocking with respect to physical rig I/O. */
+    int (*reload_poll)(void);
 };
 
 /** Return immutable process-lifetime product metadata.

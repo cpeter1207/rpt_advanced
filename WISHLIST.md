@@ -344,8 +344,14 @@ code-derived OpenAPI documentation remain pending under ADRs 0016 and 0023.
 
 ### Mode- and frequency-agile remote base
 
-**Status: Planned.** Hamlib control, speech squelch, and remote-base operations
-remain unimplemented under ADR 0004.
+**Status: Partially implemented; verification in progress.** Shared Hamlib and
+parallel radio control, RF limits, independent signaling, remote-base DTMF,
+memories, and scanning are implemented in the candidate. Both new providers
+are merged and released after passing their full native gates. Their signed
+Debian packages are published. USBRadioPlus SDK alpha28 also passed its hosted
+gates and is released. Controller merge, publication, and physical-radio
+qualification remain pending. Speech squelch, adaptive I/Q
+processing, and streaming-radio audio remain planned under ADR 0004.
 
 **Requirements**
 
@@ -372,7 +378,9 @@ remain unimplemented under ADR 0004.
 - Hamlib is the primary radio-control implementation.
 - COS, CTCSS, and DCS remain USBRadioPlus DSP or hardware-signaling functions
   unless a Hamlib replacement is practical.
-- Non-FM single-sideband-capable operation requires full duplex.
+- Non-FM controller operation admits linked transmit independently of receive
+  qualification. Physically half-duplex radios interrupt receive for transmit;
+  simultaneous RF transmit/receive is not required.
 - Support one Hamlib rig per node. Additional radios use additional nodes.
 - Make a best effort to select the appropriate radio audio path: CM119 for
   conventional radios, Linux-supported onboard USB audio where available, and
@@ -386,8 +394,8 @@ remain unimplemented under ADR 0004.
 - Authenticated REST users and authorized Asterisk CLI users may control the
   rig. DTMF rig control is configurable per node as open, unlock-code-protected,
   or disabled.
-- Reject a non-FM mode request when the selected radio/audio implementation
-  cannot provide full duplex.
+- Do not reject a non-FM radio merely because it cannot simultaneously transmit
+  and receive RF. Preserve the linked-peer ability to interrupt receive.
 - Speech detection reuses the shared radio's Earshot implementation. The
   future Hamlib-source integration retains its conventional-noise-squelch
   fallback policy when speech detection is unavailable; current local VAD
@@ -400,10 +408,13 @@ remain unimplemented under ADR 0004.
   The local receiver supports Off, Kerchunk filter and On; integration with
   future Hamlib audio sources remains planned. A configurable fixed SSB passband in the shared FFmpeg graph is the universal
   fallback; capable I/Q sources may add adaptive pre-demodulation selection.
-- Default remote-base DTMF commands cover frequency, mode, receive/transmit
-  VFO, split/offset, transmit power, CTCSS/DCS selection, remote-base status,
-  and scan control. Other supported rig capabilities remain available through
-  the Asterisk CLI and REST API.
+- Every supported remote-base operating function is available through DTMF.
+  The remappable `*6` family extends familiar ASL remote commands while
+  preserving existing link commands and `*722`.
+- One dynamically linked remote-base implementation serves standalone and
+  USBRadioPlus. Preserve existing parallel-port radio programming through its
+  existing owner; only genuinely Asterisk-specific functions are exempt from
+  standalone parity. The shared-control design was approved on 2026-11-04.
 
 **Material decisions needed before implementation**
 
@@ -467,7 +478,12 @@ Physical site-device qualification remains outstanding.
 
 ### Remote-base memories and scan lists
 
-**Status: Planned.** Requires the remote-base capability and decisions below.
+**Status: Implemented in the candidate; acceptance pending.** Configuration-only
+memories and scan lists share the remote-base engine. Provider tests cover
+timing, priority, activity holds, interruption, limits, and source revocation.
+The shared engine and USBRadioPlus SDK are released after passing their hosted
+gates. Controller merge, publication, and physical-radio qualification remain
+pending.
 
 **Requirements**
 
@@ -478,12 +494,16 @@ Physical site-device qualification remains outstanding.
 **Decisions recorded**
 
 - Named memory and scan-list operation is a required remote-base capability.
+- Definitions are configuration-only. DTMF may query/recall memories and
+  control scans but cannot save or edit the definitions.
+- Scan dwell defaults to 500 ms after tune/settle, resume delay to 2,000 ms
+  after activity ends, and priority scanning to disabled. Activity holds the
+  current member; transmit uses its fully applied permitted state. Stop leaves
+  it selected; restart restores the configured startup memory.
 
 **Material decisions needed before implementation**
 
-- Scan dwell, resume, hold, priority, and stop conditions.
-- Whether memories and scan lists are configuration-only or may be changed and
-  persisted through administrative REST/CLI operations.
+None. See ADR 0004 and the approved shared remote-base design.
 
 ### Operational configuration management
 

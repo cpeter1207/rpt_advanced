@@ -483,6 +483,11 @@ static mut HOST: crate::abi::rptadv_host_services_v10 = crate::abi::rptadv_host_
     peer_processing_prepare: None,
     radio_control: Some(radio_control),
     radio_update: None,
+    radio_metadata_bind: None,
+    radio_service: None,
+    radio_quiesce: None,
+    radio_remote_submit: None,
+    radio_ready: None,
 };
 
 pub fn host_descriptor() -> *const crate::abi::rptadv_host_services_v10 {

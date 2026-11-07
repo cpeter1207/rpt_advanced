@@ -53,6 +53,26 @@ impl Radio {
         }
         0
     }
+    /// Copy a typed control envelope through the channel's own taskprocessor.
+    /// An explicit ABI acknowledgment distinguishes pending from an unknown option.
+    pub(crate) fn remote_control(&mut self, request: &mut ffi::UrpAstRemoteControl) -> i32 {
+        request.accepted_abi_version = 0;
+        // SAFETY: the exclusive channel and complete envelope outlive setoption.
+        let status = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_REMOTE_CONTROL as i32,
+                std::ptr::from_mut(request).cast(),
+                std::mem::size_of_val(request) as i32,
+                0,
+            )
+        };
+        if request.accepted_abi_version != ffi::URP_AST_REMOTE_OPTION_ABI_VERSION {
+            -7
+        } else {
+            status
+        }
+    }
     /// Send one borrowed site command on the reserved channel. Require the exact
     /// acknowledgment: Asterisk can return success for an unrecognized option.
     pub(crate) fn site_control(&mut self, request: &mut ffi::UrpAstSiteControl) -> i32 {
