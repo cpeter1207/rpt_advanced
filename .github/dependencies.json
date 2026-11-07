@@ -1,8 +1,8 @@
 [
   {
     "repository": "librptadvradio",
-    "sha": "4891625394bfe994d00dc8b4bdb1f55f7c936587",
-    "packages": ["librptadvradio4", "librptadvradio-dev"]
+    "sha": "804f05937a78948f700c2bd7fbb1e54994145029",
+    "packages": ["librptadvradio5", "librptadvradio-dev"]
   },
   {
     "repository": "rptadv-gpio-adapter",

@@ -13,8 +13,8 @@ Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
  librptadvdtmf-dev (>= 0.1.0~alpha3-1),
  librptadvtemplate-dev (>= 0.1.0~alpha1-1),
  librptadvschedule-dev (>= 0.1.0~alpha2-1),
- libusbradioplus-product-dev (>= 0.1.0~alpha28-1.deb13),
- librptadvradio-dev (>= 0.1.0~alpha9),
+ libusbradioplus-product-dev (>= 0.1.0~alpha32-1),
+ librptadvradio-dev (>= 0.1.0~alpha10),
  librptadv-portaudio-alsa-adapter-dev (>= 0.2.0~alpha4),
  librptadv-gpio-adapter-dev (>= 0.1.0~alpha4),
  librptadv-ffmpeg-adapter-dev (>= 0.1.0~alpha2), ffmpeg
@@ -29,13 +29,13 @@ Depends: ${misc:Depends}, ${shlibs:Depends}, adduser,
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadv-product2 (= ${binary:Version}),
  librptadvecholink1 (>= 0.1.0~alpha1),
- libusbradioplus-product1 (>= 0.1.0~alpha28-1.deb13),
+ libusbradioplus-product1 (>= 0.1.0~alpha32-1),
  librptadv-file-adapter1 (= ${binary:Version}),
  librptadv-speech-adapter1 (= ${binary:Version}),
  librptadv-control-standalone-adapter1 (= ${binary:Version}),
  librptadv-resolver-adapter1 (= ${binary:Version}),
  librptadv-jitter-adapter1 (= ${binary:Version}),
- librptadvradio4 (>= 0.1.0~alpha9),
+ librptadvradio5 (>= 0.1.0~alpha10),
  librptadv-portaudio-alsa-adapter2 (>= 0.2.0~alpha4),
  librptadv-gpio-adapter1 (>= 0.1.0~alpha4),
  librptadv-ffmpeg-adapter1 (>= 0.1.0~alpha2),
@@ -73,7 +73,7 @@ Package: librptadv-product2
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
- libusbradioplus-product1 (>= 0.1.0~alpha28-1.deb13),
+ libusbradioplus-product1 (>= 0.1.0~alpha32-1),
  librate-adjusting-pcm-ring3 (>= 3.0.0~alpha4),
  librptadv-samplerate-adapter2 (>= 0.2.0~alpha2),
  librptadvtone1 (>= 0.1.0~alpha1),
@@ -89,7 +89,7 @@ Package: librptadv-product-dev
 Architecture: amd64 arm64
 Multi-Arch: same
 Depends: ${misc:Depends}, librptadv-product2 (= ${binary:Version}), librptadv-codec-dev,
- libusbradioplus-product-dev (>= 0.1.0~alpha28-1.deb13)
+ libusbradioplus-product-dev (>= 0.1.0~alpha32-1)
 Description: development files for the rpt_advanced product
  Public C header and unversioned linker name for the versioned product.
 

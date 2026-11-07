@@ -132,6 +132,12 @@ graph retains the explicit radio association so enabling it by reload works.
 No DSP implementation, configuration parser, or Asterisk type enters the core;
 the existing hardware callbacks perform no binding or control synchronization.
 
+Legacy LinkHooks retain graph ownership under their existing audiohook mutex. A per-hook Asterisk timer/framehook clocks bounded silence when READ PCM supplies insufficient credit; WRITE frames supply none. Use at least 50 Hz and raise the rate when needed to keep each quantum within 960 samples. Fractional sample counts retain their remainder. All original frames and controls are returned unchanged. No new processing thread/hardware owner or PTT audio queue is introduced.
+
+A stalled Asterisk channel reader coalesces expirations. Resume processes at most one current quantum; no exact elapsed aging claim across a stalled reader. Normal periodic idle gaps advance continuously.
+
+A separate framehook data lease retains the existing LinkHook/module references until destroy_cb. Track current channel/id/FD slot. Masquerade ATTACHED(new), fixup, DETACHED(old) must preserve timer state and ignore superseded detach. Terminal detach removes FD registration before releasing the timer; asynchronous detach remains serviceable. Setup failures unwind all owned resources.
+
 The required `peer_bind_radio` host operation changes only the host-services
 table to ABI 3 (`rptadv.hst3`). Old host tables are rejected before any callback,
 and old USBRadioPlus providers fail the option acknowledgment. Product and module
@@ -195,7 +201,11 @@ or package dependency check.
 
 ### Codec host cutover (2026-10-27, integration in progress)
 
-Product ABI 7 (`rptadv.prod7`) requires host-services ABI 9 (`rptadv.hst9`).
+Product ABI 7 (`rptadv.prod7`) requires host-services ABI 10 (`rptadv.hst10`).
+The Earshot receive cutover adds sized source/burst metadata through the shared
+SDK's direct-callback ABI 6 and a pre-activation receive-policy query through
+the existing host radio-control operation. Earlier ABI 9 references below
+describe their original changes.
 Prepared media carries encoder consumption, encoded bytes, real source span,
 wire-frame duration and timestamps independently. The standalone host delegates
 preparation/reset/send to IAX client ABI 2 and retains its codec catalog across

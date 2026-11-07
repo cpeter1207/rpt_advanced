@@ -26,6 +26,33 @@ impl Drop for Frame {
 }
 
 impl Radio {
+    /// Query resolved receive policy before call(), rejecting unknown-option success.
+    pub(crate) fn receive_policy(&mut self, command: &mut ffi::UrpAstChannelCommand) -> i32 {
+        command.value = -1;
+        command.flags = u32::MAX;
+        // SAFETY: the unique reserved channel and writable command outlive setoption.
+        let status = unsafe {
+            ffi::ast_channel_setoption(
+                self.connection.channel.pointer.as_ptr(),
+                ffi::URP_AST_OPTION_RECEIVE_POLICY as i32,
+                std::ptr::from_mut(command).cast(),
+                std::mem::size_of_val(command) as i32,
+                0,
+            )
+        };
+        if status != 0 {
+            return status;
+        }
+        if command.struct_size as usize != std::mem::size_of_val(command)
+            || command.abi_version != 1
+            || command.command != ffi::URP_AST_COMMAND_GET_RECEIVE_POLICY
+            || command.target != 0
+            || !matches!((command.value, command.flags), (0, 0) | (1 | 2, 7680))
+        {
+            return -1;
+        }
+        0
+    }
     /// Copy a typed control envelope through the channel's own taskprocessor.
     /// An explicit ABI acknowledgment distinguishes pending from an unknown option.
     pub(crate) fn remote_control(&mut self, request: &mut ffi::UrpAstRemoteControl) -> i32 {
@@ -100,7 +127,7 @@ impl Radio {
     /// Endpoint code and contexts must remain valid through synchronous channel hangup.
     pub unsafe fn attach_direct(
         &mut self,
-        direct: &mut ffi::urp_ast_direct_callbacks,
+        direct: &mut ffi::UrpAstDirectCallbacks,
     ) -> Result<(), Error> {
         direct.accepted_abi_version = 0;
         // SAFETY: the uniquely owned channel synchronously copies the callbacks

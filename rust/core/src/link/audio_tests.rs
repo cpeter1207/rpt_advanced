@@ -5,6 +5,121 @@ use crate::controller::{ControllerSettings, CourtesySettings};
 #[path = "text_audio_tests.rs"]
 mod text;
 
+#[test]
+fn idle_peer_processing_follows_the_native_clock_without_consuming_media() {
+    struct ClockedInput {
+        signals: PeerSignals,
+        available: u64,
+        real: Option<usize>,
+        finite: Option<bool>,
+        renders: usize,
+        rendered_samples: usize,
+        silent_samples: usize,
+    }
+    impl PeerInput for ClockedInput {
+        fn source_rate(&self) -> u32 {
+            48_000
+        }
+        fn signals(&self) -> &PeerSignals {
+            &self.signals
+        }
+        fn available(&self) -> u64 {
+            self.available
+        }
+        fn finite_playout(&self) -> Option<bool> {
+            self.finite
+        }
+        fn render(&mut self, output: &mut [f32]) -> Option<usize> {
+            self.renders += 1;
+            self.rendered_samples += output.len();
+            output.fill(0.25);
+            self.real
+        }
+        fn silence(&mut self, scratch: &mut [f32]) {
+            self.silent_samples += scratch.len();
+            // A stateful graph tail must never become media or activity.
+            scratch.fill(9.0);
+        }
+    }
+    fn tick(links: &mut LinkAudio<ClockedInput>, controller: &mut NodeController, count: usize) {
+        links
+            .process(
+                controller,
+                false,
+                &mut [0.0; 960][..count],
+                SourcePosition::default(),
+            )
+            .unwrap();
+    }
+    let input = ClockedInput {
+        signals: PeerSignals::new(),
+        available: 0,
+        real: Some(0),
+        finite: None,
+        renders: 0,
+        rendered_samples: 0,
+        silent_samples: 0,
+    };
+    let (writer, _reader) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let peer = AudioPeer::new("200", Mode::TRANSCEIVE, input, writer, 960, 0).unwrap();
+    let (mut links, _dispatcher) = LinkAudio::new(vec![peer], 960).unwrap();
+    let (mut controller, _control) = NodeController::new(
+        ControllerSettings::default(),
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    for count in [3, 17] {
+        tick(&mut links, &mut controller, count);
+    }
+    assert_eq!(links.peers[0].input.silent_samples, 20);
+    assert_eq!(links.peers[0].input.renders, 0);
+    assert_eq!(links.peers[0].input.available, 0);
+    assert!(!links.peers[0].active);
+    assert_eq!(links.peers[0].input.signals.activity_edge(), 0);
+    assert!(
+        links.peers[0].audio[..17]
+            .iter()
+            .all(|sample| *sample == 0.0)
+    );
+
+    links.peers[0].input.available = 12_480;
+    links.peers[0].input.real = Some(480);
+    links.peers[0].input.signals.publish_pcm();
+    links.peers[0].input.signals.set_radio_keyed(true);
+    tick(&mut links, &mut controller, 480);
+    assert!(links.peers[0].active);
+    links.peers[0].input.available = 0;
+    links.peers[0].input.real = Some(0);
+    links.peers[0].input.signals.set_radio_keyed(false);
+    for _ in 0..3 {
+        tick(&mut links, &mut controller, 960);
+    }
+    assert_eq!(links.peers[0].input.renders, 4);
+    assert_eq!(links.peers[0].input.rendered_samples, 480 + 2_880);
+    assert_eq!(links.peers[0].input.silent_samples, 20);
+    assert!(!links.peers[0].active);
+    let unkey_edge = links.peers[0].input.signals.activity_edge();
+    tick(&mut links, &mut controller, 479);
+    assert_eq!(links.peers[0].input.renders, 4);
+    assert_eq!(links.peers[0].input.silent_samples, 499);
+    assert_eq!(links.peers[0].input.signals.activity_edge(), unkey_edge);
+
+    links.peers[0].input.finite = Some(true);
+    tick(&mut links, &mut controller, 17);
+    assert_eq!(links.peers[0].input.renders, 5);
+    assert_eq!(links.peers[0].input.silent_samples, 499);
+    links.peers[0].input.finite = Some(false);
+    tick(&mut links, &mut controller, 1);
+    links.peers[0].input.finite = Some(true);
+    links.peers[0].input.signals.end();
+    tick(&mut links, &mut controller, 3);
+    assert_eq!(links.peers[0].input.renders, 5);
+    assert_eq!(links.peers[0].input.silent_samples, 503);
+    assert!(!links.peers[0].active);
+}
+
 struct FiniteInput {
     signals: PeerSignals,
     samples: std::collections::VecDeque<f32>,

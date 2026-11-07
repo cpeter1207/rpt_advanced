@@ -3,10 +3,27 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <rptadv_product.h>
+#include <stddef.h>
 #include <string.h>
 
 _Static_assert(RPTADV_PRODUCT_ABI_VERSION == 7, "update product ABI probe deliberately");
-_Static_assert(RPTADV_HOST_ABI_VERSION == 9, "update host ABI probe deliberately");
+_Static_assert(RPTADV_HOST_ABI_VERSION == 10, "update host ABI probe deliberately");
+_Static_assert(URP_AST_DIRECT_CALLBACKS_ABI_VERSION == 6,
+               "use the canonical metadata-aware SDK callbacks");
+_Static_assert(sizeof(UrpNativeReceiveMetadata) == 72,
+               "preserve the source-associated receive metadata record");
+_Static_assert(offsetof(struct rptadv_host_services_v10, radio_metadata_bind) == 360,
+               "preserve the complete pre-remote ABI-10 prefix");
+_Static_assert(offsetof(struct rptadv_host_services_v10, radio_service) == 368,
+               "preserve the complete metadata tail");
+_Static_assert(offsetof(struct rptadv_host_services_v10, radio_quiesce) == 376,
+               "preserve remote callback order");
+_Static_assert(offsetof(struct rptadv_host_services_v10, radio_remote_submit) == 384,
+               "preserve remote callback order");
+_Static_assert(offsetof(struct rptadv_host_services_v10, radio_ready) == 392,
+               "preserve the complete remote tail");
+_Static_assert(sizeof(struct rptadv_host_services_v10) == 400,
+               "update the complete ABI-10 size deliberately");
 
 static int node(void *context, const struct rptadv_node_host_configuration *record) {
     assert(record);
@@ -31,7 +48,7 @@ int main(int argc, char **argv) {
     assert(product->abi_version == RPTADV_PRODUCT_ABI_VERSION);
     const unsigned char capability[16] = RPTADV_PRODUCT_CAPABILITY;
     assert(memcmp(product->capability, capability, sizeof(capability)) == 0);
-    assert(strcmp(RPTADV_HOST_CAPABILITY, "rptadv.hst9") == 0);
+    assert(strcmp(RPTADV_HOST_CAPABILITY, "rptadv.hst10") == 0);
     assert(product->start && product->reload && product->stop && product->authorize_incoming);
     assert(product->incoming && product->link_command && product->link_status && product->digit);
     assert(product->inspect_configuration && product->inspect_secrets);

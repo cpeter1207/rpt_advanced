@@ -422,7 +422,7 @@ mod tests {
     static ACCEPTED_PEER: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn start_without_counts(
-        _: *const abi::rptadv_host_services_v9,
+        _: *const abi::rptadv_host_services_v10,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -438,7 +438,7 @@ mod tests {
     static AUTHORIZED: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" fn start(
-        _: *const abi::rptadv_host_services_v9,
+        _: *const abi::rptadv_host_services_v10,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -451,7 +451,7 @@ mod tests {
     }
 
     unsafe extern "C" fn fail_start(
-        _: *const abi::rptadv_host_services_v9,
+        _: *const abi::rptadv_host_services_v10,
         _: *const abi::rptadv_control_descriptor_v1,
         _: *const abi::rptadv_file_descriptor,
         _: *const abi::rptadv_speech_descriptor,
@@ -521,7 +521,7 @@ mod tests {
 
     fn descriptor(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v9,
+            *const abi::rptadv_host_services_v10,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -538,7 +538,7 @@ mod tests {
 
     fn descriptor_with_reload(
         start: unsafe extern "C" fn(
-            *const abi::rptadv_host_services_v9,
+            *const abi::rptadv_host_services_v10,
             *const abi::rptadv_control_descriptor_v1,
             *const abi::rptadv_file_descriptor,
             *const abi::rptadv_speech_descriptor,
@@ -794,7 +794,7 @@ mod tests {
             // No hardware is opened: this test exercises host transaction ownership.
             let mut radio: abi::rptadv_radio_session_config = unsafe { std::mem::zeroed() };
             radio.struct_size = std::mem::size_of_val(&radio) as u32;
-            radio.abi_version = 4;
+            radio.abi_version = 5;
             let mut config: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
             config.struct_size = std::mem::size_of_val(&config) as u32;
             config.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;

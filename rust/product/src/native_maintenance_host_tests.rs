@@ -31,6 +31,11 @@ unsafe extern "C" fn maintenance(
 ) -> i32 {
     // SAFETY: Host supplies its complete exclusive typed request.
     let request = unsafe { &mut *request };
+    if request.operation == 7 {
+        request.command.value = 0;
+        request.command.flags = 0;
+        return 0;
+    }
     // SAFETY: this shared tracker remains retained through the synchronous call.
     unsafe { record(context, radio, request.operation) };
     if request.operation == 2 {

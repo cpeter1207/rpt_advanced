@@ -51,7 +51,7 @@ impl NativeRadioConfiguration {
         }
         // SAFETY: the size prefix covers the released radio-session template.
         let radio = unsafe { config.radio.read_unaligned() };
-        if radio.abi_version != 4 {
+        if radio.abi_version != 5 {
             return Err("incompatible native radio session template".to_owned());
         }
         // SAFETY: the caller guarantees each advertised span for this call.
@@ -92,6 +92,12 @@ impl NativeRadioConfiguration {
             processing_configuration,
             processing_node,
         })
+    }
+
+    /// Return resolved speech mode and the sole receive owner's minimum native reserve.
+    pub(crate) fn receive_policy(&self) -> (u32, u32) {
+        let mode = self.radio.receive.vad_mode;
+        (mode, if mode == 0 { 0 } else { 7_680 })
     }
 
     /// Create a borrowed request view valid while this owner remains borrowed.
@@ -144,7 +150,7 @@ mod tests {
         // SAFETY: these C records contain only scalar fields and nullable pointers.
         let mut radio: abi::rptadv_radio_session_config = unsafe { std::mem::zeroed() };
         radio.struct_size = std::mem::size_of_val(&radio) as u32;
-        radio.abi_version = 4;
+        radio.abi_version = 5;
         radio.receive_input_gain = 0.7943282;
         let receive = String::from("highpass=f=60,lowpass=f=5500");
         let transmit = String::from("volume=-2dB");
@@ -241,7 +247,7 @@ mod tests {
             abi::UrpNativeStationConfig,
         ) = unsafe { std::mem::zeroed() };
         radio.struct_size = std::mem::size_of_val(&radio) as u32;
-        radio.abi_version = 4;
+        radio.abi_version = 5;
         request.struct_size = std::mem::size_of_val(&request) as u32;
         request.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
         request.radio = &radio;
@@ -264,12 +270,12 @@ mod tests {
             "short native radio session template"
         );
         radio.struct_size = std::mem::size_of_val(&radio) as u32;
-        radio.abi_version = 3;
+        radio.abi_version = 4;
         assert_eq!(
             unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
             "incompatible native radio session template"
         );
-        radio.abi_version = 4;
+        radio.abi_version = 5;
         request.device_identifier_length = 1;
         assert_eq!(
             unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),

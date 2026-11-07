@@ -582,10 +582,13 @@ impl Host {
             .iter()
             .filter_map(|(name, lease)| {
                 let lease = lease.lock().unwrap_or_else(|error| error.into_inner());
-                lease
-                    .worker
-                    .as_ref()
-                    .map(|worker| (name.clone(), worker.squelch_delay_ms()))
+                lease.worker.as_ref().map(|worker| {
+                    (
+                        name.clone(),
+                        worker.squelch_delay_ms(),
+                        worker.minimum_delay_ms(),
+                    )
+                })
             })
             .collect();
         let peers = &self.peers;
@@ -605,17 +608,19 @@ impl Host {
                     &mut text,
                     services,
                 )?;
-                if local_delays
+                if let Some((_, delay, minimum)) = local_delays
                     .iter()
                     .rev()
-                    .find(|(local, _)| local == name)
-                    .is_some_and(|(_, delay)| *delay != settings.squelch_delay_ms)
+                    .find(|(local, _, _)| local == name)
                 {
-                    candidate.control.local_update = Some(
-                        LocalRingUpdate::prepare(settings.squelch_delay_ms)
-                            .map_err(|_| RuntimeError::Preparation)?,
-                    );
-                    candidate.control.awaiting_local = true;
+                    let target = settings.squelch_delay_ms.max(*minimum);
+                    if *delay != target {
+                        candidate.control.local_update = Some(
+                            LocalRingUpdate::prepare(target)
+                                .map_err(|_| RuntimeError::Preparation)?,
+                        );
+                        candidate.control.awaiting_local = true;
+                    }
                 }
                 Ok(candidate)
             },
@@ -1425,6 +1430,10 @@ impl Host {
             let Some(generation) = status.active.or(status.retiring) else {
                 continue;
             };
+            let configured_delay = self
+                .runtime
+                .settings(&local)
+                .map_or(0, |settings| settings.squelch_delay_ms);
             // No publication/reclamation occurs between this snapshot and its borrow.
             let control = self
                 .runtime
@@ -1434,7 +1443,7 @@ impl Host {
                 control.dispatcher.activate();
                 bind_text_origins(&local, control, &self.peers, &self.text);
             }
-            if control.awaiting_local {
+            {
                 // Runtime retains the device for every active or retiring generation.
                 let (_, lease) = self
                     .leases
@@ -1444,10 +1453,21 @@ impl Host {
                     .expect("runtime node retains its device lease");
                 let mut lease = lease.lock().unwrap_or_else(|error| error.into_inner());
                 if let Some(worker) = &mut lease.worker {
-                    if let Some(update) = control.local_update.take() {
-                        control.local_update = worker.update_local_ring(generation, update).err();
+                    let target = configured_delay.max(worker.minimum_delay_ms());
+                    if !control.awaiting_local && target != worker.squelch_delay_ms() {
+                        control.local_update = Some(
+                            LocalRingUpdate::prepare(target)
+                                .map_err(|_| RuntimeError::Preparation)?,
+                        );
+                        control.awaiting_local = true;
                     }
-                    control.awaiting_local = !worker.local_ring_applied(generation);
+                    if control.awaiting_local {
+                        if let Some(update) = control.local_update.take() {
+                            control.local_update =
+                                worker.update_local_ring(generation, update).err();
+                        }
+                        control.awaiting_local = !worker.local_ring_applied(generation);
+                    }
                 }
             }
             let mut pending = Vec::new();

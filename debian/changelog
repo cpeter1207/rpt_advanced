@@ -1,3 +1,28 @@
+rpt-advanced (0.1.0~alpha22-1) unstable; urgency=medium
+
+  * Preserve VAD speech onset in the existing local receive ring.
+  * Separate raw RF eligibility from burst-qualified speech admission.
+  * Require USBRadioPlus alpha32 and host-services ABI10.
+  * Default local, link and voice AGC windows to 400 ms with 6/2 dB/s rates.
+  * Validate distinct LLVM branch decisions even when source spans coincide.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Sat, 07 Nov 2026 12:00:00 -0600
+
+rpt-advanced (0.1.0~alpha21-1+bs1770.20261106) unstable; urgency=medium
+
+  * Require USBRadioPlus alpha30 for complete link output-meter observations.
+  * Report per-link integrated loudness and true peak in processing statistics.
+  * Retire CPU-saver configuration that bypassed mandatory output analysis.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Fri, 06 Nov 2026 15:00:00 -0600
+
+rpt-advanced (0.1.0~alpha20-1+bs1770.20261106) unstable; urgency=medium
+
+  * Require USBRadioPlus alpha29 for LUFS AGC settings.
+  * Target -23 LUFS in configurable local, link and voice processing graphs.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Fri, 06 Nov 2026 09:28:40 -0600
+
 rpt-advanced (0.1.0~alpha20-1) unstable; urgency=medium
 
   * Operate shared remote-base radios with remappable DTMF and source replies.

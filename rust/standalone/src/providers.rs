@@ -61,9 +61,9 @@ const PROVIDERS: [ProviderSpec; 13] = [
         DescriptorLayout::Named,
     ),
     pointer(
-        "librptadvradio.so.4",
+        "librptadvradio.so.5",
         "rptadv_radio_descriptor",
-        4,
+        5,
         b"rptadv.radio-core",
         DescriptorLayout::Named,
     ),
@@ -536,7 +536,7 @@ impl ProviderSet {
         Ok(RadioRuntimeDescriptors {
             product: self.native_product_descriptor()?,
             radio: self
-                .checked_descriptor::<NamedDescriptorHeader>("librptadvradio.so.4")?
+                .checked_descriptor::<NamedDescriptorHeader>("librptadvradio.so.5")?
                 .as_ptr(),
             audio: self.typed_descriptor("librptadv_portaudio_alsa_adapter.so.2")?,
             gpio: self.typed_descriptor("librptadv_gpio_adapter.so.1")?,
@@ -821,7 +821,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Published alpha8 ABI-4 storage, without the later optional profile tail.
+    /// Current ABI-5 session table prefix; optional profile operations are not consumed.
     #[repr(C)]
     pub(crate) struct PublishedRadioDescriptor {
         pub(crate) struct_size: u32,
@@ -837,7 +837,7 @@ pub(crate) mod tests {
             }
             Self {
                 struct_size: std::mem::size_of::<Self>() as u32,
-                abi_version: 4,
+                abi_version: 5,
                 capability_name: c"rptadv.radio-core".as_ptr(),
                 operations: [unused; 12],
             }
@@ -846,17 +846,11 @@ pub(crate) mod tests {
 
     #[test]
     fn released_radio_descriptor_preserves_header_validation() {
-        const NAME: &str = "librptadvradio.so.4";
+        const NAME: &str = "librptadvradio.so.5";
         for (size, version, capability, expected) in [
-            (112, 4, c"rptadv.radio-core", None),
+            (112, 5, c"rptadv.radio-core", None),
             (
                 15,
-                4,
-                c"rptadv.radio-core",
-                Some(ProviderError::IncompatibleDescriptor(NAME)),
-            ),
-            (
-                112,
                 5,
                 c"rptadv.radio-core",
                 Some(ProviderError::IncompatibleDescriptor(NAME)),
@@ -864,6 +858,12 @@ pub(crate) mod tests {
             (
                 112,
                 4,
+                c"rptadv.radio-core",
+                Some(ProviderError::IncompatibleDescriptor(NAME)),
+            ),
+            (
+                112,
+                5,
                 c"rptadv.other",
                 Some(ProviderError::IncompatibleDescriptor(NAME)),
             ),
@@ -1865,7 +1865,7 @@ pub(crate) mod tests {
                 { NATIVE_SIZE, NATIVE_VERSION, "usbradioplus.product1" }, {0}
             };
             void *usbradioplus_product_descriptor_v1(void) { return &native; }
-            NAMED(radio, rptadv_radio_descriptor, 4, "rptadv.radio-core")
+            NAMED(radio, rptadv_radio_descriptor, 5, "rptadv.radio-core")
             NAMED(audio, rptadv_portaudio_alsa_adapter_descriptor, 2, "rptadv.portaudio-alsa-audio")
             NAMED(ffmpeg, rptadv_ffmpeg_adapter_descriptor, 1, "rptadv.ffmpeg")
             NAMED(gpio, rptadv_gpio_adapter_descriptor, 1, "rptadv.cm119-hid-gpio")

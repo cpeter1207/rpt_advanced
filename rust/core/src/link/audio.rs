@@ -118,6 +118,9 @@ pub trait PeerInput: Send {
     }
     /// Render native F32, returning real samples (not concealment), or None on failure.
     fn render(&mut self, output: &mut [f32]) -> Option<usize>;
+    /// Advance configured processing with silence without consuming input or activity.
+    /// The native owner supplies bounded prepared scratch and discards its output.
+    fn silence(&mut self, _scratch: &mut [f32]) {}
     /// One real media sample; unlike PCM zero, absence cannot demand PTT.
     fn render_sample(&mut self) -> Option<f32> {
         let mut sample = [0.0];
@@ -466,29 +469,36 @@ impl<P: PeerInput> LinkAudio<P> {
                 let signal = peer.input.signals();
                 (signal.pcm_epoch(), peer.input.available(), signal.ended())
             };
+            let mut render_attempted = false;
             let audio_active = match peer.input.finite_playout() {
                 Some(pending) => {
                     // An explicit finite boundary bypasses ordinary startup and
                     // PLC grace. Preserve the last real block even when rendering
                     // it also publishes the consumer's drained acknowledgement.
                     peer.receive.rendered(None, count);
-                    !ended
-                        && pending
-                        && peer
-                            .input
+                    !ended && pending && {
+                        render_attempted = true;
+                        peer.input
                             .render(&mut peer.audio[..count])
                             .is_some_and(|real| {
                                 real != 0 || peer.input.finite_playout() == Some(true)
                             })
+                    }
                 }
                 None => {
                     peer.receive
                         .should_render(pcm_epoch, available, ended, count)
-                        && peer
-                            .receive
-                            .rendered(peer.input.render(&mut peer.audio[..count]), count)
+                        && {
+                            render_attempted = true;
+                            peer.receive
+                                .rendered(peer.input.render(&mut peer.audio[..count]), count)
+                        }
                 }
             };
+            // Rendered PLC already advanced processing, even with no real PCM.
+            if !render_attempted {
+                peer.input.silence(&mut peer.audio[..count]);
+            }
             if !audio_active {
                 peer.audio[..count].fill(0.0);
             }

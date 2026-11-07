@@ -89,7 +89,7 @@ unsafe extern "C" fn bind_radio(_: *mut c_void, _: *mut c_void, _: *mut c_void) 
 unsafe extern "C" fn radio_activate(
     _: *mut c_void,
     radio: *mut c_void,
-    receive: abi::rptadv_radio_receive_v2,
+    receive: abi::rptadv_radio_receive_v3,
     receive_context: *mut c_void,
     transmit: abi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
@@ -129,7 +129,11 @@ unsafe extern "C" fn radio_activate(
                     unsafe {
                         receive(
                             contexts.0 as *mut c_void,
-                            u32::from(samples / 48_000 % 7 != 6),
+                            &crate::fixture::receive_metadata(
+                                samples / 48_000 % 7 != 6,
+                                samples,
+                                count as u32,
+                            ),
                             input.as_mut_ptr(),
                             count as u32,
                         );
@@ -258,7 +262,7 @@ fn egress_full_path_load() {
         HostServicesOwner::new(vec![], Some(retained), SecretsFile::parse("").unwrap()).unwrap();
     let mut table = Box::new(unsafe {
         ptr::from_ref(owner.descriptor())
-            .cast::<abi::rptadv_host_services_v9>()
+            .cast::<abi::rptadv_host_services_v10>()
             .read()
     });
     table.radio_open = Some(radio_open);

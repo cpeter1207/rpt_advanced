@@ -26,9 +26,9 @@ struct UrpAstSiteSnapshot;
 /** Product capability name stored in its fixed-width descriptor field. */
 #define RPTADV_PRODUCT_CAPABILITY "rptadv.prod7"
 /** Exact incompatible host-services ABI revision. */
-#define RPTADV_HOST_ABI_VERSION 9U
+#define RPTADV_HOST_ABI_VERSION 10U
 /** Host-services capability name stored in its fixed-width descriptor field. */
-#define RPTADV_HOST_CAPABILITY "rptadv.hst9"
+#define RPTADV_HOST_CAPABILITY "rptadv.hst10"
 /** Peer event carrying borrowed text bytes. */
 #define RPTADV_PEER_EVENT_TEXT 1U
 /** Peer event carrying one DTMF digit byte. */
@@ -186,8 +186,7 @@ struct rptadv_local_time_v1 {
 };
 
 /** Serial input endpoint; inactive/gated generations succeed with silence. */
-typedef int (*rptadv_radio_receive_v2)(void *context, uint32_t receiving, float *samples,
-                                       uint32_t sample_count);
+typedef UrpNativeReceive rptadv_radio_receive_v3;
 /** Serial output endpoint; inactive/gated generations succeed with silence/unkeyed.
  * Malformed arguments or processing failure return nonzero with silent output. */
 typedef int (*rptadv_radio_transmit_v3)(void *context, float *samples, uint32_t sample_count,
@@ -199,20 +198,6 @@ typedef int (*rptadv_radio_metadata_v1)(void *transmit_context, uint32_t control
                                         uint32_t *linked_active);
 /** Direct RadioPlusAdvanced option identifier, validated before ast_call. */
 #define URP_AST_OPTION_DIRECT_CALLBACKS 0x52504144
-/** Mutable direct registration; the provider copies callbacks before returning.
- * Initialize accepted_abi_version to zero. Start only when setoption returns zero
- * and acknowledges this exact ABI. Callback code and contexts remain borrowed
- * until synchronous channel hangup, including a failed attachment/start. */
-struct urp_ast_direct_callbacks {
-    uint32_t struct_size;              /**< Exact readable/writable descriptor size. */
-    uint32_t abi_version;              /**< Exact direct attachment revision. */
-    void *receive_context;             /**< Stable input owner context. */
-    rptadv_radio_receive_v2 receive;   /**< Input endpoint. */
-    void *transmit_context;            /**< Stable output owner context. */
-    rptadv_radio_transmit_v3 transmit; /**< Output endpoint: key and CTCSS enable. */
-    uint32_t accepted_abi_version; /**< Provider writes the ABI only after retaining callbacks. */
-    rptadv_radio_metadata_v1 metadata; /**< Optional same-owner remote policy/activity. */
-};
 /** Synchronous RadioPlusAdvanced link-graph attachment; use block=0. */
 #define URP_AST_OPTION_LINK_ATTACH 0x52504C41
 /** Exact link attachment option revision. */
@@ -288,8 +273,10 @@ struct rptadv_pcm_processor_v1 {
 
 /** Authorized physical-radio operation, executed only on serialized control.
  * STATUS=1, COMMAND=2, TRANSMIT=3, CLEAR_MANUAL=4,
- * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6. The nested command is used
- * only by COMMAND. Text is returned through the synchronous sink. */
+ * PROCESSING_STATUS=5, ACTIVE_CONFIGURATION=6, RECEIVE_POLICY=7.
+ * RECEIVE_POLICY works before activation and uses GET_RECEIVE_POLICY in the
+ * nested command: value is effective VAD mode, flags is minimum native preroll.
+ * COMMAND also uses the nested command. Text uses the synchronous sink. */
 struct rptadv_radio_control_v1 {
     uint32_t struct_size;                /**< Exact complete size. */
     uint32_t abi_version;                /**< One. */
@@ -316,6 +303,9 @@ struct rptadv_remote_ticket_v1 {
     void (*destroy)(void *ticket); /**< Cancel before releasing, including while pending. */
 };
 /** Host I/O primitives consumed by the portable product owner.
+ * On supported 64-bit platforms, ABI 10 retains its complete 360-byte prefix
+ * through radio_update and appends five optional callbacks for a 400-byte table.
+ * Omitted complete capability tails are copied as null; partial tails are rejected.
  * The immutable table, context and callback code remain valid through successful
  * product stop. The context supports concurrent calls. Each non-null radio/peer
  * handle is uniquely owned and used serially until its destroy callback. Open/dial
@@ -336,10 +326,10 @@ struct rptadv_remote_ticket_v1 {
  * emit numeric IPs in resolver order. A standalone empty DNS answer is recoverable;
  * Asterisk's empty answer succeeds with no results, preserving its existing diagnosis.
  */
-struct rptadv_host_services_v9 {
+struct rptadv_host_services_v10 {
     uint32_t struct_size;   /**< Complete readable table size. */
     uint32_t abi_version;   /**< Exact RPTADV_HOST_ABI_VERSION. */
-    uint8_t capability[12]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
+    uint8_t capability[16]; /**< Exact NUL-padded RPTADV_HOST_CAPABILITY. */
     void *context;          /**< Shared provider context. */
 
     /** Convert one Unix second to local civil time. */
@@ -375,7 +365,7 @@ struct rptadv_host_services_v9 {
      * that optional tail must detach/quiesce both endpoints before returning failure.
      * Endpoints are serial
      * individually and may run concurrently with each other, never with destroy. */
-    int (*radio_activate)(void *context, void *radio, rptadv_radio_receive_v2 receive,
+    int (*radio_activate)(void *context, void *radio, rptadv_radio_receive_v3 receive,
                           void *receive_context, rptadv_radio_transmit_v3 transmit,
                           void *transmit_context);
     /** Synchronously stop/hang up and detach both callbacks before returning. */
@@ -495,8 +485,8 @@ struct rptadv_host_services_v9 {
      * Configuration and local-node UTF-8 spans are borrowed only during this control
      * call. Zero transfers one complete ABI-1 processor; one bypasses processing;
      * negative rejects preparation and transfers nothing. Absent means the selected
-     * host already supplies processed peer PCM. Records ending before this tail retain
-     * ABI-9 behavior; a partially present function-pointer field is invalid. */
+     * host already supplies processed peer PCM. A partially present function-pointer
+     * field is invalid. */
     int (*peer_processing_prepare)(void *context, const char *configuration,
                                    size_t configuration_length, const char *local,
                                    size_t local_length, size_t maximum_frames,
@@ -583,7 +573,7 @@ struct rptadv_product_descriptor_v1 {
     uint32_t abi_version;   /**< Exact RPTADV_PRODUCT_ABI_VERSION. */
     uint8_t capability[16]; /**< Exact NUL-padded RPTADV_PRODUCT_CAPABILITY. */
     /** Start one product owner from copied configuration. */
-    int (*start)(const struct rptadv_host_services_v9 *host,
+    int (*start)(const struct rptadv_host_services_v10 *host,
                  const struct rptadv_control_descriptor_v1 *control,
                  const struct rptadv_file_descriptor *file,
                  const struct rptadv_speech_descriptor *speech, const char *configuration,

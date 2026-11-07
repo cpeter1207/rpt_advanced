@@ -39,9 +39,9 @@ struct fixture {
     unsigned int early;         /**< Nonzero output during initial local reception. */
     unsigned int keys;          /**< PTT assertions. */
     unsigned int unkeys;        /**< PTT releases observed in callback output. */
-    struct urp_ast_direct_callbacks callbacks; /**< Retained SDK direct endpoints. */
-    struct ast_channel *channel; /**< Borrowed until synchronous hangup joins the clock. */
-    float audio[960];            /**< Normalized native-rate PCM. */
+    UrpAstDirectCallbacks callbacks; /**< Retained endpoints. */
+    struct ast_channel *channel;     /**< Borrowed until synchronous hangup joins the clock. */
+    float audio[960];                /**< Normalized native-rate PCM. */
 };
 /** @brief One native signed-linear capability. */
 static struct ast_format_cap *capabilities;
@@ -211,6 +211,19 @@ static void inspect_audio(struct fixture *device) {
  */
 static int setoption(struct ast_channel *channel, int option, void *data, int size) {
     struct fixture *device = ast_channel_tech_pvt(channel);
+    if (option == URP_AST_OPTION_RECEIVE_POLICY) {
+        if (!data || size != sizeof(UrpAstChannelCommand)) {
+            return -1;
+        }
+        UrpAstChannelCommand *command = data;
+        if (command->struct_size != sizeof(*command) || command->abi_version != 1 ||
+            command->command != URP_AST_COMMAND_GET_RECEIVE_POLICY) {
+            return -1;
+        }
+        command->value = 0;
+        command->flags = 0;
+        return 0;
+    }
     if (option == URP_AST_OPTION_REMOTE_CONTROL) {
         if (!data || size != sizeof(UrpAstRemoteControl)) {
             return -1;
@@ -248,10 +261,10 @@ static int setoption(struct ast_channel *channel, int option, void *data, int si
         return 0;
     }
     if (option != URP_AST_OPTION_DIRECT_CALLBACKS || !data ||
-        size != sizeof(struct urp_ast_direct_callbacks) || device->callbacks.receive) {
+        size != sizeof(UrpAstDirectCallbacks) || device->callbacks.receive) {
         return -1;
     }
-    struct urp_ast_direct_callbacks *callbacks = data;
+    UrpAstDirectCallbacks *callbacks = data;
     callbacks->accepted_abi_version = 0;
     if (callbacks->struct_size != sizeof(*callbacks) ||
         callbacks->abi_version != URP_AST_DIRECT_CALLBACKS_ABI_VERSION || !callbacks->receive ||
@@ -271,8 +284,18 @@ static void *clock_run(void *context) {
         receive_audio(device);
         uint32_t keyed = 0;
         uint32_t ctcss_enabled = 0;
-        if (device->callbacks.receive(device->callbacks.receive_context, device->carrier,
-                                      device->audio, 960) ||
+        const UrpNativeReceiveMetadata metadata = {
+            .struct_size = sizeof(metadata),
+            .abi_version = URP_NATIVE_RECEIVE_METADATA_ABI_VERSION,
+            .generation_id = 1,
+            .first_sample_index = (uint64_t)tick * 960,
+            .frame_count = 960,
+            .raw_receiver_keyed = device->carrier,
+            .receiver_keyed = device->carrier,
+            .vad_voice_sample_index = UINT64_MAX,
+        };
+        if (device->callbacks.receive(device->callbacks.receive_context, &metadata, device->audio,
+                                      960) ||
             device->callbacks.transmit(device->callbacks.transmit_context, device->audio, 960,
                                        &keyed, &ctcss_enabled)) {
             break;

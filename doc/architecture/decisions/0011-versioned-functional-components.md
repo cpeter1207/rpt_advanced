@@ -78,9 +78,9 @@ released SONAMEs, and direct consumers are:
 
 | Provider release | SONAME | Debian runtime / development packages | Direct consumer |
 | --- | --- | --- | --- |
-| [squelch v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvsquelch/releases/tag/v0.1.0-alpha.2) | `librptadvsquelch.so.2` | `librptadvsquelch2` / `librptadvsquelch-dev` | `librptadvradio.so.4` |
-| [CTCSS v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvctcss/releases/tag/v0.1.0-alpha.2) | `librptadvctcss.so.2` | `librptadvctcss2` / `librptadvctcss-dev` | `librptadvradio.so.4` |
-| [DCS v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvdcs/releases/tag/v0.1.0-alpha.1) | `librptadvdcs.so.1` | `librptadvdcs1` / `librptadvdcs-dev` | `librptadvradio.so.4` |
+| [squelch v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvsquelch/releases/tag/v0.1.0-alpha.2) | `librptadvsquelch.so.2` | `librptadvsquelch2` / `librptadvsquelch-dev` | `librptadvradio.so.5` |
+| [CTCSS v0.1.0-alpha.2](https://github.com/cpeter1207/librptadvctcss/releases/tag/v0.1.0-alpha.2) | `librptadvctcss.so.2` | `librptadvctcss2` / `librptadvctcss-dev` | `librptadvradio.so.5` |
+| [DCS v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvdcs/releases/tag/v0.1.0-alpha.1) | `librptadvdcs.so.1` | `librptadvdcs1` / `librptadvdcs-dev` | `librptadvradio.so.5` |
 | [signaling v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvsignaling/releases/tag/v0.1.0-alpha.1) | `librptadvsignaling.so.1` | `librptadvsignaling1` / `librptadvsignaling-dev` | `librptadv_gpio_adapter.so.1` |
 | [tone v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvtone/releases/tag/v0.1.0-alpha.1) | `librptadvtone.so.1` | `librptadvtone1` / `librptadvtone-dev` | `librptadv_product.so.2`, `librptadvmorse.so.1`, `librptadvdtmf.so.1` |
 | [Morse v0.1.0-alpha.1](https://github.com/cpeter1207/librptadvmorse/releases/tag/v0.1.0-alpha.1) | `librptadvmorse.so.1` | `librptadvmorse1` / `librptadvmorse-dev` | `librptadv_product.so.2` |

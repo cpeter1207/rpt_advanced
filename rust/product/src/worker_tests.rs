@@ -211,7 +211,11 @@ fn rx(worker: &RadioWorker, receiving: bool, samples: &mut [f32]) -> i32 {
     unsafe {
         receive_callback(
             std::ptr::from_ref(&*worker.receive).cast_mut().cast(),
-            u32::from(receiving),
+            &crate::fixture::receive_metadata(
+                receiving,
+                (*worker.receive.state.get()).elapsed_samples,
+                samples.len() as u32,
+            ),
             samples.as_mut_ptr(),
             samples.len() as u32,
         )
@@ -321,13 +325,14 @@ fn absent_owners_and_invalid_sizes_fail_silent_and_unkeyed() {
         worker.receive.status.snapshot().0,
         "gated generation must retain physical COS"
     );
-    assert_eq!(worker.handoff.token.load(Ordering::Acquire), 1);
+    let qualified_token = worker.handoff.token.load(Ordering::Acquire);
+    assert_eq!(qualified_token & 1, 1);
     assert_eq!(samples, [0.0; 8]);
     assert_eq!(rx(&worker, false, &mut samples), 0);
     assert!(!worker.receive.status.snapshot().0);
     assert_eq!(
         worker.handoff.token.load(Ordering::Acquire),
-        2,
+        qualified_token + 1,
         "gated unkey must close the old ring tail and request its reset"
     );
     samples.fill(0.25);
@@ -350,8 +355,24 @@ fn malformed_callback_pointers_fail_without_publishing_audio_or_keying() {
     let mut keyed = 99;
     let mut ctcss_enabled = 99;
     unsafe {
-        assert_eq!(receive_callback(receive, 1, null, 8), -1);
-        assert_eq!(receive_callback(null.cast(), 1, output.as_mut_ptr(), 8), -1);
+        assert_eq!(
+            receive_callback(
+                receive,
+                &crate::fixture::receive_metadata(true, 0, 8),
+                null,
+                8
+            ),
+            -1
+        );
+        assert_eq!(
+            receive_callback(
+                null.cast(),
+                &crate::fixture::receive_metadata(true, 0, 8),
+                output.as_mut_ptr(),
+                8
+            ),
+            -1
+        );
         assert_eq!(output, [0.0; 8]);
         assert_eq!(
             transmit_callback(transmit, null, 8, &mut keyed, &mut ctcss_enabled),
@@ -1007,8 +1028,8 @@ fn processing_panics_are_contained_and_silence_both_endpoints() {
     let mut samples = [0.25; 8];
     assert_eq!(rx(&worker, true, &mut samples), -1);
     assert!(
-        worker.receive.status.snapshot().0,
-        "processing panic must retain physical COS"
+        !worker.receive.status.snapshot().0,
+        "processing failure must cancel the current receive admission"
     );
     assert_eq!(samples, [0.0; 8]);
     samples.fill(0.25);
@@ -1097,7 +1118,7 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
     unsafe extern "C" fn activate(
         context: *mut c_void,
         _: *mut c_void,
-        receive: crate::abi::rptadv_radio_receive_v2,
+        receive: crate::abi::rptadv_radio_receive_v3,
         receive_context: *mut c_void,
         transmit: crate::abi::rptadv_radio_transmit_v3,
         transmit_context: *mut c_void,
@@ -1109,7 +1130,14 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
         let mut keyed = 9;
         let mut ctcss_enabled = 9;
         assert_eq!(
-            unsafe { receive.unwrap()(receive_context, 1, samples.as_mut_ptr(), 8) },
+            unsafe {
+                receive.unwrap()(
+                    receive_context,
+                    &crate::fixture::receive_metadata(true, 0, 8),
+                    samples.as_mut_ptr(),
+                    8,
+                )
+            },
             0
         );
         assert_eq!(
@@ -1139,7 +1167,19 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
         for _ in 0..64 {
             samples.fill(0.25);
             assert_eq!(
-                unsafe { receive_callback(probe.receive.get(), 1, samples.as_mut_ptr(), 8) },
+                unsafe {
+                    receive_callback(
+                        probe.receive.get(),
+                        &crate::fixture::receive_metadata(
+                            true,
+                            (*(*probe.receive.get().cast::<ReceiveContext>()).state.get())
+                                .elapsed_samples,
+                            8,
+                        ),
+                        samples.as_mut_ptr(),
+                        8,
+                    )
+                },
                 0
             );
             assert_eq!(
@@ -1195,3 +1235,144 @@ fn activation_installs_both_inactive_endpoints_and_destroy_still_sees_live_owner
     drop(owners);
     assert!(runtime.stop(0));
 }
+
+#[test]
+fn vad_pending_speech_retains_pcm_in_existing_delay_ring() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    let update = LocalRingUpdate::prepare(160).unwrap();
+    worker.observer = update.transmit.observer.clone();
+    worker.receive.state.get_mut().ring.current = update.receive;
+    worker.transmit.ring.get_mut().current = update.transmit;
+    let mut metadata = crate::fixture::receive_metadata(false, 0, 8);
+    metadata.raw_receiver_keyed = 1;
+    metadata.vad_mode = 1;
+    metadata.rf_burst_id = 1;
+    metadata.vad_preroll_frames = 7680;
+    let mut samples = [0.25; 8];
+    assert_eq!(
+        unsafe {
+            receive_callback(
+                std::ptr::from_ref(&*worker.receive).cast_mut().cast(),
+                &metadata,
+                samples.as_mut_ptr(),
+                8,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        worker.observer.observe().unwrap().available_samples,
+        8,
+        "pending VAD speech must retain the first syllable"
+    );
+    let mut output = [9.0; 8];
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 8]);
+    drop(worker.stop());
+}
+
+#[test]
+fn source_failure_cancels_admission_without_requiring_pcm_or_identity() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    for _ in 0..64 {
+        rx(&worker, true, &mut [0.25; 8]);
+        tx(&worker, &mut [0.0; 8]);
+    }
+    let mut output = [0.0; 8];
+    assert_eq!(tx(&worker, &mut output).1, 1);
+    let mut cancellation = crate::fixture::receive_metadata(false, 0, 0);
+    cancellation.status = -1;
+    cancellation.generation_id = 0;
+    assert_eq!(
+        unsafe {
+            receive_callback(
+                std::ptr::from_ref(&*worker.receive).cast_mut().cast(),
+                &cancellation,
+                std::ptr::null_mut(),
+                0,
+            )
+        },
+        0
+    );
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 8]);
+    drop(worker.stop());
+}
+
+#[test]
+fn same_generation_ring_replacement_requires_new_endpoint_acknowledgments() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mut runtime, owners) = audio_owners();
+    let generation = runtime.status(0)[0].1.active.unwrap();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    for _ in 0..2 {
+        assert!(
+            worker
+                .update_local_ring(generation, LocalRingUpdate::prepare(0).unwrap())
+                .is_ok()
+        );
+        assert!(
+            !worker.local_ring_applied(generation),
+            "previous adoption cannot acknowledge a new live policy update"
+        );
+        rx(&worker, true, &mut [0.25; 8]);
+        assert!(!worker.local_ring_applied(generation));
+        tx(&worker, &mut [0.0; 8]);
+        assert!(worker.local_ring_applied(generation));
+    }
+    drop(worker.stop());
+}
+
+#[test]
+fn vad_rapid_rekey_retains_first_pcm_without_waiting_for_transmit_reset() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_runtime, owners) = audio_owners();
+    let mut worker = worker();
+    assert!(worker.attach(owners).is_ok());
+    let update = LocalRingUpdate::prepare(160).unwrap();
+    worker.observer = update.transmit.observer.clone();
+    worker.receive.state.get_mut().ring.current = update.receive;
+    worker.transmit.ring.get_mut().current = update.transmit;
+    for (first, raw, burst) in [(0, true, 1), (8, false, 1), (16, true, 2)] {
+        let mut metadata = crate::fixture::receive_metadata(false, first, 8);
+        metadata.raw_receiver_keyed = u32::from(raw);
+        metadata.vad_mode = 1;
+        metadata.rf_burst_id = burst;
+        metadata.vad_preroll_frames = 7680;
+        assert_eq!(
+            unsafe {
+                receive_callback(
+                    std::ptr::from_ref(&*worker.receive).cast_mut().cast(),
+                    &metadata,
+                    [0.25; 8].as_mut_ptr(),
+                    8,
+                )
+            },
+            0
+        );
+    }
+    assert_eq!(
+        worker.observer.observe().unwrap().available_samples,
+        24,
+        "VAD must retain every new burst's onset even before TX runs"
+    );
+    drop(worker.stop());
+}
+
+#[path = "worker_vad_tests.rs"]
+mod vad;

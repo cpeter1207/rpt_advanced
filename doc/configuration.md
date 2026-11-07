@@ -78,7 +78,7 @@ clears an inherited value.
 | `dtmf_admin_unlock_hash` | empty | Argon2id hash of the code used after `*800` to unlock admin DTMF commands. Both admin hashes must be set to enable them. |
 | `dtmf_admin_lock_hash` | empty | Argon2id hash of the code used after `*801` to lock admin DTMF commands. Do not put a plain code here. |
 | `dtmf_admin_timeout_ms` | 300000 | Lock admin DTMF after this many milliseconds without a successful admin command; must be positive. |
-| `squelch_delay_ms` | 0 | Delay local receive audio by this many milliseconds. Unkey drops the buffered tail. Zero adds no delay. |
+| `squelch_delay_ms` | 0 | Delay local receive audio by this many milliseconds. Active VAD raises the effective reserve to at least 160 ms; a larger configured value is preserved. Raw RF unkey drops the buffered tail. With VAD Off, zero adds no delay. |
 | `status_snapshot_interval_ms` | 50 | Update RX/TX meters and receive-buffer statistics this often, in milliseconds; must be positive. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
 | `ctcss_encode_on_input` | no | Send transmit CTCSS only during local or linked receive activity and command replies, plus `ctcss_hang_ms`. Other IDs and telemetry do not turn it on. |
@@ -185,12 +185,14 @@ graphs are mono FFmpeg audio-filter chains; `anull` leaves audio unchanged.
 | `cm119_gpio_1_mode` … `cm119_gpio_8_mode` | `in` | Set each general GPIO pin to input (`in`), output low (`out0`), or output high (`out1`) at open. |
 | `cm119_clip_led_gpio` | `0` | GPIO number for the clipping indicator; 0 disables it, 1–8 selects a pin. |
 | `hardware_eeprom_enabled` | `no` | Load valid hardware tuning from EEPROM. Leave disabled to use file tuning. Startup does not write EEPROM. |
-| `receive_cpu_saver_enabled` | `no` | Reduce receive processing while the receiver is idle. |
-| `transmit_cpu_saver_enabled` | `no` | Reduce transmit processing while the transmitter is idle. |
 
 Hardware gains accept decimal values. Zero selects the hardware control's
 midpoint; it does not mean silence. Leave an option out to keep that control's
 current level. These controls set the hardware mixer, not the processing gain.
+
+Receive and transmit CPU-saver settings are retired. Their old keys produce
+normal unknown-option warnings and are ignored, so mandatory output analysis
+continues during idle intervals.
 
 With EEPROM enabled, valid stored tuning takes priority over file settings for
 capture, outputs A and B, CTCSS level, and squelch. An invalid or unreadable image
@@ -221,6 +223,8 @@ Receive signaling options:
 | `noise_filter` | `standard` | Native discriminator-noise detector response: `standard` or `alternate`. |
 | `vox_threshold` | `0` | VOX detector threshold in PCM codes (0–32767). |
 | `vox_hang_ms` | `2000` | VOX hold time after received audio ends (0–32767 ms). |
+| `vad_mode` | `off` | Earshot speech qualification: `off`, `kerchunk` (first speech admits the RF burst), or `on` (speech plus hang). Retains all enabled carrier/tone requirements and receive guards. Kerchunk without a closing RF requirement warns and uses On. |
+| `vad_hang_ms` | `1000` | Speech release hold, 0-32767 ms, independent of the VOX hold. Active VAD uses the existing local receive ring with at least 160 ms reserve; no additional delay line is added. |
 | `receive_on_delay_ms` | `0` | Ignore receiver keying for this interval after transmitter release (0–65535 ms). |
 | `radio_duplex_mode` | `half` | Physical radio capability: `half` or `full` duplex. |
 
@@ -268,9 +272,64 @@ Set up the standalone audio chains in `rpt_advanced.conf`:
 These sections set shared defaults. Add the node number, such as
 `[link 524950]`, to change one node. Use the same source-chain options as in
 the [USBRadioPlus configuration reference](https://github.com/cpeter1207/USBRadioPlus/blob/main/man/usbradioplus.conf.5).
+These processing profiles require USBRadioPlus alpha32 or newer.
 They include gains, EQ, AGC, an expander, a de-esser, a compressor, and a
 multiband limiter. The local chain also supports RNNoise and receive filters.
-The voice/telemetry chain supports the final limiter and band-pass filter.
+Every chain supports the fixed Peak Limiter after dynamics, software gain,
+and source-specific filtering. It is separate from the reorderable Multiband
+Limiter and does not belong in `stage_order`. Only voice/telemetry supports
+the transmitter band-pass filter, which precedes Peak Limiter.
+
+USBRadioPlus uses a causal LUFS gain rider inside the shared FFmpeg graph.
+The default
+`agc_target_lufs` is **-23 LUFS**.
+
+`agc_loudness_window_ms` selects a 400-3000 ms measurement window; its default
+is 400 ms for local, link, and voice/telemetry processing.
+`agc_gain_decrease_db_per_second` defaults to 6 dB/s for attack, while
+`agc_gain_increase_db_per_second` defaults to 2 dB/s for release/recovery.
+These are gain-change rates, separate from the loudness measurement window.
+They fall within the typical 1-10 dB/s AGC range described by
+[Jeff DePolo](https://www.repeater-builder.com/tech-info/audio-processing.html),
+who does not prescribe an exact attack/release pair.
+The rolling analysis advances with each delivered sample, using zero during
+inactivity. Renewed activity preserves the measurement history. Activation,
+a new instance, or a window change requires a complete initial window.
+This causal, bounded rider cannot guarantee exact integrated loudness for a
+short transmission or a target beyond its configured gain limits.
+
+Each chain has a separate, always-active integrated loudness and true-peak
+meter after Peak Limiter. These example profiles enable Peak Limiter with
+a -2 dBFS ceiling; its common defaults remain disabled and -3 dBFS:
+
+```ini
+[local]
+lookahead_limiter_enabled = yes
+lookahead_limiter_ceiling_dbfs = -2
+
+[link]
+lookahead_limiter_enabled = yes
+lookahead_limiter_ceiling_dbfs = -2
+
+[voice_telemetry]
+lookahead_limiter_enabled = yes
+lookahead_limiter_ceiling_dbfs = -2
+```
+
+The default 4x oversampling runs at four times the source rate and returns
+audio to that rate (192 kHz then 48 kHz on the native path). An internal
+-2 dBFS ceiling leaves reconstruction headroom; check measured output against
+the -1 dBTP reference. Metering observes final audible chain output without
+driving AGC. Processing statistics report separate `receive_*` and `transmit_*`
+fields, and per-link `loudness_epoch`, `loudness_sample_count`, `loudness_valid`,
+`true_peak_valid`, `integrated_lufs`, and `true_peak_dbtp`. The existing tuner
+**Show processing measurement snapshot** entry displays these measurements.
+Pauses retain history; an unchanged complete path retains its epoch on reload.
+A changed path begins a new epoch. Setup warmup is excluded, and values remain
+unmeasured until at least 400 ms of output have been observed. Transmit
+calibration signals, access tones, and hardware mixer scaling follow this
+digital-program reference. Remove `loudness_meter_enabled`; this retired key
+now produces an unknown-option warning and is ignored.
 
 To reuse a named profile, put its name after the section type, such as
 `[local repeater]`. Select it with `local_profile = repeater` in the node's

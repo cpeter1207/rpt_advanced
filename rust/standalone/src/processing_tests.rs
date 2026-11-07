@@ -252,8 +252,29 @@ fn immutable_observer_lease_reads_actual_counters_while_audio_owns_the_graph() {
         }
         // SAFETY: the independent observer retains the counter even during PCM processing.
         unsafe {
-            (*output).processed_blocks = (*owner.cast::<Arc<AtomicU64>>()).load(Ordering::Relaxed)
-        };
+            let output = &mut *output;
+            output.processed_blocks = (*owner.cast::<Arc<AtomicU64>>()).load(Ordering::Relaxed);
+            output.loudness_epoch = 9;
+            output.loudness_sample_count = 48_000;
+            output.loudness_valid = u32::from(MODE.get() != 16);
+            output.true_peak_valid = u32::from(MODE.get() != 16);
+            output.integrated_lufs = if MODE.get() == 15 { f64::NAN } else { -23.25 };
+            output.true_peak_dbtp = if MODE.get() == 15 {
+                f64::INFINITY
+            } else {
+                -2.5
+            };
+            match MODE.get() {
+                12 => output.struct_size = 32,
+                13 => output.abi_version = 2,
+                17 => output.struct_size += 1,
+                18 => {
+                    output.loudness_valid = 7;
+                    output.true_peak_valid = 9;
+                }
+                _ => {}
+            }
+        }
         0
     }
     unsafe extern "C" fn observe_destroy(owner: *mut c_void) {
@@ -324,6 +345,33 @@ fn immutable_observer_lease_reads_actual_counters_while_audio_owns_the_graph() {
         (false, 0, 9, "observation_status=unavailable status=-8"),
         (false, 0, 10, "observation_status=unavailable status=-8"),
         (false, 0, 11, "observation_status=failed status=-9"),
+        (false, 0, 12, "observation_status=failed status=-7"),
+        (false, 0, 13, "observation_status=failed status=-7"),
+        (
+            false,
+            0,
+            14,
+            "loudness_epoch=9 loudness_sample_count=48000 integrated_lufs=-23.25 true_peak_dbtp=-2.50 loudness_valid=1 true_peak_valid=1",
+        ),
+        (
+            false,
+            0,
+            15,
+            "integrated_lufs=unmeasured true_peak_dbtp=unmeasured loudness_valid=0 true_peak_valid=0",
+        ),
+        (
+            false,
+            0,
+            16,
+            "integrated_lufs=unmeasured true_peak_dbtp=unmeasured loudness_valid=0 true_peak_valid=0",
+        ),
+        (false, 0, 17, "observation_status=failed status=-7"),
+        (
+            false,
+            0,
+            18,
+            "integrated_lufs=-23.25 true_peak_dbtp=-2.50 loudness_valid=1 true_peak_valid=1",
+        ),
     ] {
         let mut api = api;
         api.struct_size = (boundary - usize::from(short)) as u32;
@@ -387,7 +435,7 @@ fn shared_sdk_peer_observer_reaches_control_after_the_graph_is_destroyed() {
         prepare(
             api,
             ffmpeg,
-            "[524950]\n[link]\noutput_gain_db=-6\n",
+            "[524950]\n[link]\nequalizer_enabled=no\noutput_gain_db=-6\nagc_enabled=no\n",
             "524950",
             960,
             Some(&registry),
@@ -395,24 +443,53 @@ fn shared_sdk_peer_observer_reaches_control_after_the_graph_is_destroyed() {
         ),
         Ok(true)
     );
-    let mut samples = [0.25_f32; 960];
-    // SAFETY: the sole audio owner supplies this complete exclusive PCM block.
-    assert_eq!(
-        unsafe { output.process.unwrap()(output.context, samples.as_mut_ptr(), samples.len()) },
-        0
-    );
     assert!(
         registry
             .text("524950")
-            .contains("processed_blocks=1 bypassed_blocks=0 failed_blocks=0")
+            .contains("integrated_lufs=unmeasured true_peak_dbtp=unmeasured")
     );
+    let mut samples = [0.0_f32; 960];
+    for block in 0..50 {
+        for (offset, sample) in samples.iter_mut().enumerate() {
+            let phase = std::f64::consts::TAU * 1_000.0 * (block * 960 + offset) as f64 / 48_000.0;
+            *sample = (0.1 * phase.sin()) as f32;
+        }
+        // SAFETY: the sole audio owner supplies this complete exclusive PCM block.
+        assert_eq!(
+            unsafe { output.process.unwrap()(output.context, samples.as_mut_ptr(), samples.len()) },
+            0
+        );
+    }
+    let measured = registry.text("524950");
+    assert!(
+        measured.contains("processed_blocks=50 bypassed_blocks=0 failed_blocks=0"),
+        "{measured}"
+    );
+    assert!(
+        measured.contains("loudness_sample_count=48000"),
+        "{measured}"
+    );
+    let metric = |key: &str| {
+        measured
+            .split_ascii_whitespace()
+            .find_map(|field| field.strip_prefix(key))
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    // The 1kHz sine is about -23.05 LUFS/-20dBTP before the graph's -6dB gain.
+    assert!(
+        (metric("integrated_lufs=") + 29.05).abs() < 0.2,
+        "{measured}"
+    );
+    assert!((metric("true_peak_dbtp=") + 26.0).abs() < 0.2, "{measured}");
     // SAFETY: processing has ended; only the immutable observer crosses to control.
     let observer = unsafe { &*output.context.cast::<Processor>() }
         ._observation
         .clone();
     // SAFETY: this quiescent transferred graph is destroyed once, before its observer.
     unsafe { output.destroy.unwrap()(output.context) };
-    assert!(registry.text("524950").contains("processed_blocks=1"));
+    assert_eq!(registry.text("524950"), measured);
     drop(observer);
     assert_eq!(registry.text("524950"), "link_processors_retained=0\n");
 }

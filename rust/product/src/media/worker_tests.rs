@@ -793,6 +793,21 @@ fn morse_final_samples_retire_producer_without_an_extra_read() {
     assert_eq!(retired_rx.pop().unwrap().0, 1);
 }
 
+#[derive(Default)]
+struct StreamingGate {
+    entered: AtomicBool,
+    released: AtomicBool,
+    exited: AtomicBool,
+}
+
+struct ReleaseStreamingRead(Arc<StreamingGate>);
+
+impl Drop for ReleaseStreamingRead {
+    fn drop(&mut self) {
+        self.0.released.store(true, Ordering::Release);
+    }
+}
+
 struct Fixture {
     open_code: i32,
     null_handle: bool,
@@ -808,6 +823,7 @@ struct Fixture {
     cancel_after_first_read: bool,
     cancel_after_later_read: bool,
     reads: AtomicUsize,
+    streaming_gate: Option<Arc<StreamingGate>>,
 }
 
 fn fixture(rate: u32, first_count: usize, sample: f32) -> Fixture {
@@ -826,6 +842,7 @@ fn fixture(rate: u32, first_count: usize, sample: f32) -> Fixture {
         cancel_after_first_read: false,
         cancel_after_later_read: false,
         reads: AtomicUsize::new(0),
+        streaming_gate: None,
     }
 }
 
@@ -975,6 +992,25 @@ unsafe extern "C" fn read_fixture_stream(
         unsafe { *count = 0 };
         return code;
     }
+    if !first {
+        if let Some(gate) = &fixture.streaming_gate {
+            gate.entered.store(true, Ordering::Release);
+            while !gate.released.load(Ordering::Acquire) {
+                // SAFETY: the worker retains its cancellation record throughout this read.
+                let cancelled = unsafe { &*cancellation };
+                // SAFETY: the callback and its context are borrowed from that live record.
+                if unsafe {
+                    cancelled
+                        .is_cancelled
+                        .is_some_and(|check| check(cancelled.context) != 0)
+                } {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            gate.exited.store(true, Ordering::Release);
+        }
+    }
     if (first && fixture.cancel_after_first_read) || (!first && fixture.cancel_after_later_read) {
         // SAFETY: worker open/read callbacks borrow the live worker cancellation value.
         let cancellation = unsafe { &*(*cancellation).context.cast::<Cancellation<'_>>() };
@@ -1082,17 +1118,17 @@ fn context(
 
 #[test]
 fn producer_streams_first_pcm_while_provider_is_still_decoding() {
-    READS.store(0, Ordering::Release);
-    READING.store(false, Ordering::Release);
-    RELEASE_READ.store(false, Ordering::Release);
-    let _release = ReleaseRead;
+    let gate = Arc::new(StreamingGate::default());
+    let mut file = fixture(48_000, STREAM_CHUNK, 0.25);
+    file.streaming_gate = Some(Arc::clone(&gate));
     let mut session = StationSession::new(
         "1000".into(),
         1,
-        context(Some(open_test_file)),
+        fixture_context(file, true, false),
         context(None),
     )
     .unwrap();
+    let _release = ReleaseStreamingRead(Arc::clone(&gate));
     let mut reader = session
         .register(MediaSource {
             file: Some("memory.wav".into()),
@@ -1102,22 +1138,25 @@ fn producer_streams_first_pcm_while_provider_is_still_decoding() {
     session.start().unwrap();
     reader.start();
 
-    let mut output = [0.0; 64];
-    let mut streamed = false;
     for _ in 0..1000 {
-        if matches!(reader.render(&mut output), PcmRead::Samples(count) if count != 0) {
-            streamed = READING.load(Ordering::Acquire) && (output[0] - 0.25).abs() < 0.003;
+        if gate.entered.load(Ordering::Acquire) {
             break;
         }
         thread::sleep(Duration::from_millis(1));
     }
     assert!(
-        streamed,
-        "audio must reach the consumer before provider EOF; reads={}, reading={}",
-        READS.load(Ordering::Acquire),
-        READING.load(Ordering::Acquire)
+        gate.entered.load(Ordering::Acquire),
+        "provider must enter its blocked second read"
     );
-    RELEASE_READ.store(true, Ordering::Release);
+    let mut output = [0.0; 64];
+    assert!(!gate.exited.load(Ordering::Acquire));
+    assert!(matches!(reader.render(&mut output), PcmRead::Samples(count) if count != 0));
+    assert!((output[0] - 0.25).abs() < 0.003);
+    assert!(
+        !gate.exited.load(Ordering::Acquire),
+        "audio must reach the consumer while the provider remains blocked"
+    );
+    gate.released.store(true, Ordering::Release);
     let mut finished = false;
     for _ in 0..1000 {
         match reader.render(&mut output) {

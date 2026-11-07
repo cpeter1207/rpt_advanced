@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+from collections import Counter
 from itertools import pairwise
 from pathlib import Path
 
@@ -39,8 +40,44 @@ def object_commands(log):
     return [[*base, "-object", obj] for obj in objects]
 
 
+def branch_records(report):
+    """Keep source decisions distinct while matching copies of one function."""
+    records, required, available = [], set(), set()
+    names = {source["filename"] for unit in report["data"] for source in unit["files"]}
+    for unit in report["data"]:
+        required.update(
+            (source["filename"], *branch[:4])
+            for source in unit["files"]
+            for branch in source.get("branches", [])
+        )
+        for function in unit.get("functions", []):
+            if names.isdisjoint(function["filenames"]):
+                continue
+            starts, occurrences = {}, Counter()
+            for region in function["regions"]:
+                if region[7] == 0:
+                    name = function["filenames"][region[5]]
+                    # Optimized copies can end their first region differently.
+                    starts.setdefault(name, tuple(region[:2]))
+            for branch in function.get("branches", []):
+                name = function["filenames"][branch[6]]
+                if name not in names:
+                    continue
+                if name not in starts:
+                    raise ValueError("missing LLVM function source region")
+                span = (name, *branch[:4])
+                key = (*span, *starts[name], occurrences[span])
+                occurrences[span] += 1
+                records.append((key, branch[4:6]))
+                available.add(span)
+    # A hash-zero object can lack metadata supplied by another same-run object.
+    if available != required:
+        raise ValueError("missing or inconsistent LLVM function branch metadata")
+    return records
+
+
 def measurement_keys(report):
-    """Identify every executable line and branch coordinate, including zero hits."""
+    """Identify every executable line and distinct decision, including zero hits."""
     keys = set()
     for unit in report["data"]:
         for source in unit["files"]:
@@ -51,9 +88,7 @@ def measurement_keys(report):
                     keys.update(
                         ("line", name, line) for line in range(segment[0], end + 1)
                     )
-            keys.update(
-                ("branch", name, *branch[:4]) for branch in source.get("branches", [])
-            )
+    keys.update(("branch", *key) for key, _counts in branch_records(report))
     return keys
 
 

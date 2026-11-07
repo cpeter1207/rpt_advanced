@@ -48,7 +48,7 @@ struct PeerIngress {
 /// Owns a complete host-services table and the context it points to.
 pub struct HostServicesOwner {
     context: Box<StandaloneHostContext>,
-    descriptor: Box<abi::rptadv_host_services_v9>,
+    descriptor: Box<abi::rptadv_host_services_v10>,
 }
 
 impl HostServicesOwner {
@@ -77,10 +77,10 @@ impl HostServicesOwner {
             ingress,
             echo: Mutex::new(None),
         });
-        let descriptor = Box::new(abi::rptadv_host_services_v9 {
-            struct_size: size_of::<abi::rptadv_host_services_v9>() as u32,
-            abi_version: 9,
-            capability: *b"rptadv.hst9\0",
+        let descriptor = Box::new(abi::rptadv_host_services_v10 {
+            struct_size: size_of::<abi::rptadv_host_services_v10>() as u32,
+            abi_version: 10,
+            capability: *b"rptadv.hst10\0\0\0\0",
             context: ptr::from_mut(context.as_mut()).cast(),
             local_time: Some(local_time),
             command_notice: Some(command_notice),
@@ -136,7 +136,7 @@ impl HostServicesOwner {
     }
 
     /// Borrow the descriptor; this owner and its provider libraries must remain live through stop.
-    pub fn descriptor(&self) -> &abi::rptadv_host_services_v9 {
+    pub fn descriptor(&self) -> &abi::rptadv_host_services_v10 {
         let _keep_context_alive = &self.context;
         self.descriptor.as_ref()
     }
@@ -813,7 +813,7 @@ unsafe extern "C" fn open_radio(
 unsafe extern "C" fn activate_radio(
     context: *mut c_void,
     radio: *mut c_void,
-    receive: abi::rptadv_radio_receive_v2,
+    receive: abi::rptadv_radio_receive_v3,
     receive_context: *mut c_void,
     transmit: abi::rptadv_radio_transmit_v3,
     transmit_context: *mut c_void,
@@ -1509,10 +1509,10 @@ mod tests {
         let api = owner.descriptor();
         assert_eq!(
             api.struct_size,
-            size_of::<crate::abi::rptadv_host_services_v9>() as u32
+            size_of::<crate::abi::rptadv_host_services_v10>() as u32
         );
-        assert_eq!(api.abi_version, 9);
-        assert_eq!(api.capability, *b"rptadv.hst9\0");
+        assert_eq!(api.abi_version, 10);
+        assert_eq!(api.capability, *b"rptadv.hst10\0\0\0\0");
         assert!(!api.context.is_null());
         assert!(api.local_time.is_some());
         assert!(api.peer_dial.is_some());
@@ -1632,13 +1632,76 @@ mod tests {
         owner.context.radio.providers = Some(Box::leak(Box::new(
             crate::providers::ProviderSet::load().unwrap(),
         )));
-        assert_eq!(invoke("[1000]\n", 4, &mut record()), 1);
+        let mut identity = record();
+        assert_eq!(invoke("[1000]\n", 4, &mut identity), 0);
+        assert!(!identity.context.is_null());
+        let expected = [0.25_f32, -0.5, 0.125, -0.25];
+        let mut samples = expected;
+        assert_eq!(
+            // SAFETY: this sole owner supplies a complete exclusive PCM span.
+            unsafe {
+                identity.process.unwrap()(identity.context, samples.as_mut_ptr(), samples.len())
+            },
+            0
+        );
+        assert_eq!(samples, expected);
+        let observed = owner.context.radio.observations.text("1000");
+        assert!(
+            observed.contains("link_processors_retained=1"),
+            "{observed}"
+        );
+        assert!(observed.contains("loudness_epoch="), "{observed}");
+        assert!(!observed.contains("observation_status="), "{observed}");
+        // SAFETY: the transferred identity processor is quiescent and released once.
+        unsafe { identity.destroy.unwrap()(identity.context) };
+        assert_eq!(
+            owner.context.radio.observations.text("1000"),
+            "link_processors_retained=0\n"
+        );
         assert_eq!(invoke(configuration, 0, &mut record()), -1);
         let mut processor = record();
         assert_eq!(invoke(configuration, 4, &mut processor), 0);
         assert!(!processor.context.is_null());
         // SAFETY: the transferred unique processor is quiescent and released exactly once.
         unsafe { processor.destroy.unwrap()(processor.context) };
+
+        unsafe extern "C" fn not_applicable(
+            _: *const abi::UrpNativeProcessingArgs,
+            _: *const c_void,
+            _: u32,
+            output: *mut *mut c_void,
+        ) -> i32 {
+            // SAFETY: the processing caller provides its live writable handle slot.
+            let Some(output) = (unsafe { output.as_mut() }) else {
+                return -1;
+            };
+            *output = ptr::null_mut();
+            0
+        }
+        let mut product = *owner
+            .context
+            .radio
+            .providers
+            .unwrap()
+            .radio_runtime_descriptors()
+            .unwrap()
+            .product;
+        let mut providers = crate::providers::ProviderSet::load().unwrap();
+        product.native_link_prepare = Some(not_applicable);
+        crate::providers::tests::replace_descriptor(
+            &mut providers,
+            "libusbradioplus_product.so.1",
+            product,
+        );
+        owner.context.radio.providers = Some(Box::leak(Box::new(providers)));
+        let mut absent = record();
+        assert_eq!(invoke(configuration, 4, &mut absent), 1);
+        assert!(absent.context.is_null());
+        assert!(absent.process.is_none() && absent.destroy.is_none());
+        assert_eq!(
+            owner.context.radio.observations.text("1000"),
+            "link_processors_retained=0\n"
+        );
     }
 
     #[test]
@@ -2057,6 +2120,31 @@ mod tests {
         );
         unsafe { super::destroy_radio(ptr::null_mut(), ptr::null_mut()) };
         unsafe { super::destroy_radio(api.context, ptr::null_mut()) };
+
+        // SAFETY: this C record contains only scalar values and nullable pointers.
+        let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+        request.struct_size = size_of::<abi::rptadv_radio_control_v1>() as u32;
+        request.abi_version = 1;
+        for context in [ptr::null_mut(), api.context] {
+            assert_eq!(
+                // SAFETY: the owner and request stay live; absent handles are rejected.
+                unsafe {
+                    api.radio_control.unwrap()(
+                        context,
+                        ptr::null_mut(),
+                        &mut request,
+                        None,
+                        ptr::null_mut(),
+                    )
+                },
+                -1
+            );
+            assert_eq!(
+                // SAFETY: the retained context is valid and the absent handle is rejected.
+                unsafe { api.radio_update.unwrap()(context, ptr::null_mut(), 0) },
+                -1
+            );
+        }
 
         let mut peer = ptr::null_mut();
         assert_eq!(

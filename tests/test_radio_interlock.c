@@ -181,7 +181,7 @@ int main(void) {
     assert(gpio && gpio->abi_version == 1 &&
            gpio->struct_size >= offsetof(struct rptadv_gpio_adapter_descriptor, port_retire) +
                                     sizeof(gpio->port_retire));
-    assert(radio && radio->abi_version == 4 &&
+    assert(radio && radio->abi_version == 5 &&
            radio->struct_size >=
                offsetof(struct rptadv_radio_descriptor, session_transmit_profiled) +
                    sizeof(radio->session_transmit_profiled));

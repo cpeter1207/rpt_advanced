@@ -1,8 +1,13 @@
 """Coverage exports preserve every object and the complete measured keyset."""
 
+import json
+import tempfile
 import unittest
+from copy import deepcopy
+from pathlib import Path
 
 from export_rust_coverage import object_commands, reconcile
+from test_rust_product_surface import coverage
 
 
 def report(count, true_count=0, false_count=0):
@@ -21,10 +26,129 @@ def report(count, true_count=0, false_count=0):
                         ],
                         "branches": [[1, 1, 1, 2, true_count, false_count, 0, 0, 4]],
                     }
-                ]
+                ],
+                "functions": [
+                    {
+                        "name": "fixture",
+                        "filenames": ["/source.rs"],
+                        "regions": [[1, 1, 3, 1, count, 0, 0, 0]],
+                        "branches": [[1, 1, 1, 2, true_count, false_count, 0, 0, 4]],
+                    }
+                ],
             }
         ],
     }
+
+
+def decision_report(*copies):
+    """LLVM-shaped copies retain function starts and each repeated decision."""
+    unit = report(1, 1, 1)["data"][0]
+    unit["functions"] = []
+    unit["files"][0]["branches"] = []
+    for index, (start, end, counts) in enumerate(copies):
+        branches = [[2, 1, 2, 8, *arms, 0, 0, 4] for arms in counts]
+        unit["functions"].append(
+            {
+                "name": f"compiled_hash_{index}",
+                "filenames": ["/source.rs"],
+                "regions": [[*start, *end, 1, 0, 0, 0]],
+                "branches": branches,
+            }
+        )
+        unit["files"][0]["branches"].extend(deepcopy(branches))
+    return {"type": "llvm.coverage.json.export", "version": "2.0.1", "data": [unit]}
+
+
+class CoverageDecisionTests(unittest.TestCase):
+    def validate(self, value):
+        """Exercise the real production coverage gate using a serialized report."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "coverage.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            coverage(path)
+
+    def test_repeated_span_siblings_cannot_borrow_each_others_hits(self):
+        value = decision_report(
+            ((1, 1), (3, 1), [(1, 1), (1, 0)]),
+            ((1, 1), (3, 1), [(0, 0), (0, 0)]),
+        )
+        with self.assertRaisesRegex(AssertionError, "branch coverage below 100%"):
+            self.validate(value)
+        value["data"][0]["functions"][1]["branches"][1][5] = 1
+        self.validate(value)
+
+    def test_compiled_copies_share_a_start_even_when_region_ends_differ(self):
+        self.validate(
+            decision_report(
+                ((1, 1), (3, 1), [(1, 0)]),
+                ((1, 1), (2, 9), [(0, 1)]),
+            )
+        )
+
+    def test_distinct_function_starts_do_not_share_branch_hits(self):
+        with self.assertRaisesRegex(AssertionError, "branch coverage below 100%"):
+            self.validate(
+                decision_report(
+                    ((1, 1), (3, 1), [(1, 0)]),
+                    ((1, 2), (3, 1), [(0, 1)]),
+                )
+            )
+
+    def test_file_branches_require_function_metadata(self):
+        value = report(1, 1, 1)
+        del value["data"][0]["functions"]
+        with self.assertRaisesRegex(ValueError, "function branch metadata"):
+            self.validate(value)
+
+    def test_partial_metadata_cannot_omit_a_reported_branch_span(self):
+        value = decision_report(((1, 1), (3, 1), [(1, 1)]))
+        value["data"][0]["files"][0]["branches"].append([2, 2, 2, 8, 1, 1, 0, 0, 4])
+        with self.assertRaisesRegex(ValueError, "function branch metadata"):
+            self.validate(value)
+
+    def test_another_same_run_object_can_supply_function_metadata(self):
+        value = decision_report(((1, 1), (3, 1), [(1, 1)]))
+        hash_zero = deepcopy(value["data"][0])
+        del hash_zero["functions"]
+        value["data"].insert(0, hash_zero)
+        self.validate(value)
+
+    def test_function_metadata_can_live_in_an_empty_file_unit(self):
+        value = decision_report(((1, 1), (3, 1), [(1, 1)]))
+        metadata = deepcopy(value["data"][0])
+        metadata["files"] = []
+        del value["data"][0]["functions"]
+        value["data"].append(metadata)
+        self.validate(value)
+
+    def test_dependencies_outside_report_files_do_not_expand_scope(self):
+        value = decision_report(((1, 1), (3, 1), [(1, 1)]))
+        dependency = deepcopy(value["data"][0]["functions"][0])
+        dependency["filenames"] = ["/registry/dependency.rs"]
+        dependency["branches"][0][4:6] = [0, 0]
+        value["data"][0]["functions"].append(dependency)
+        self.validate(value)
+
+    def test_function_file_ids_select_the_actual_branch_source(self):
+        value = decision_report(((1, 1), (3, 1), [(1, 1)]))
+        function = value["data"][0]["functions"][0]
+        function["filenames"].insert(0, "/registry/dependency.rs")
+        function["regions"][0][5] = 1
+        function["branches"][0][6] = 1
+        self.validate(value)
+
+    def test_export_rejects_lost_same_span_decision_metadata(self):
+        original = decision_report(((1, 1), (3, 1), [(1, 1), (1, 1)]))
+        changed = deepcopy(original)
+        changed["data"][0]["functions"][0]["branches"].pop()
+        with self.assertRaises(ValueError):
+            reconcile(original, [changed])
+
+    def test_export_merges_extra_compiled_copies_without_losing_decisions(self):
+        original = decision_report(((1, 1), (3, 1), [(1, 1), (1, 1)]))
+        zero_copy = decision_report(((1, 1), (2, 9), [(0, 0), (0, 0)]))
+        combined = reconcile(original, [zero_copy, original])
+        self.assertEqual(combined["data"], zero_copy["data"] + original["data"])
 
 
 class CoverageExportTests(unittest.TestCase):

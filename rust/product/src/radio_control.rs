@@ -84,6 +84,11 @@ mod tests {
         ) -> i32 {
             // SAFETY: the product owns and lends its complete copied request.
             let request = unsafe { &mut *request };
+            if request.operation == 7 {
+                request.command.value = 0;
+                request.command.flags = 0;
+                return 0;
+            }
             if request.operation == 3 {
                 return -6;
             }

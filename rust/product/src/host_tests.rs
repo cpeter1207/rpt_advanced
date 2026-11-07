@@ -32,7 +32,7 @@ fn media() -> NativeMediaPreparer {
     .unwrap()
 }
 fn services() -> HostServices {
-    let mut table: abi::rptadv_host_services_v9 =
+    let mut table: abi::rptadv_host_services_v10 =
         unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap()
@@ -2590,5 +2590,65 @@ fn incoming_and_outgoing_peers_bind_to_their_nodes_existing_radio_leases() {
         opens,
         "binding must reuse existing radio reservations"
     );
+    assert!(host.stop(20));
+}
+
+#[test]
+fn live_vad_policy_updates_ring_reserve_without_reopening_the_radio() {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::fixture::RADIO_VAD_MODE.store(0, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _restore = Restore;
+    crate::fixture::RADIO_VAD_MODE.store(1, std::sync::atomic::Ordering::Release);
+    let mut host = host();
+    assert!(
+        host.status_text("1000").unwrap().contains("reserve=160ms"),
+        "initial policy must reserve onset before callbacks activate"
+    );
+    let opens = crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed);
+    let drops = crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let generation = host.runtime.status(10)[0].1.active;
+    for (mode, expected) in [
+        (0, "reserve=0ms"),
+        (1, "reserve=160ms"),
+        (2, "reserve=160ms"),
+        (0, "reserve=0ms"),
+    ] {
+        crate::fixture::RADIO_VAD_MODE.store(mode, std::sync::atomic::Ordering::Release);
+        pump_until(&mut host, |host| {
+            host.status_text("1000").unwrap().contains(expected)
+        });
+        assert_eq!(host.runtime.status(10)[0].1.active, generation);
+        assert_eq!(
+            crate::fixture::RADIO_OPENS.load(std::sync::atomic::Ordering::Relaxed),
+            opens
+        );
+        assert_eq!(
+            crate::fixture::RADIO_DROPS.load(std::sync::atomic::Ordering::Relaxed),
+            drops
+        );
+    }
+    assert!(host.stop(20));
+}
+
+#[test]
+fn radio_maintenance_rejects_a_quiesced_device_lease() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    assert!(host.leases[0].1.lock().unwrap().quiesce());
+    // SAFETY: the complete scalar-only control record permits all-zero initialization.
+    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    request.struct_size = std::mem::size_of_val(&request) as u32;
+    request.abi_version = 1;
+    request.operation = 1;
+    assert!(matches!(host.radio_control("1000", request), Err(-7)));
     assert!(host.stop(20));
 }
