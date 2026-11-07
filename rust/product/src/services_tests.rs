@@ -1189,3 +1189,59 @@ fn receive_policy_query_requires_exact_response_and_rejects_unknown_success() {
         Err(-7)
     );
 }
+
+#[test]
+fn maintenance_text_rejects_invalid_spans_and_bounds_the_complete_reply() {
+    thread_local! { static CASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+    unsafe extern "C" fn reply(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: *mut abi::rptadv_radio_control_v1,
+        sink: abi::rptadv_text_sink_v1,
+        context: *mut c_void,
+    ) -> i32 {
+        let sink = sink.expect("maintenance client supplies its bounded text collector");
+        let data = vec![b'x'; 65_537];
+        // SAFETY: every nonnull pointer covers its declared length. The deliberately
+        // malformed null/nonzero case must be rejected without dereferencing it.
+        unsafe {
+            match CASE.get() {
+                0 => sink(context, ptr::null(), 1),
+                1 => sink(context, ptr::null(), 0),
+                2 => sink(context, data.as_ptr().cast(), 65_536),
+                3 => sink(context, [0xff_u8].as_ptr().cast(), 1),
+                4 => sink(context, data.as_ptr().cast(), data.len()),
+                5 => {
+                    sink(context, data.as_ptr().cast(), 65_536);
+                    sink(context, c"!".as_ptr(), 1);
+                }
+                6 => {
+                    sink(context, ptr::null(), 1);
+                    sink(context, c"ok".as_ptr(), 2);
+                }
+                _ => sink(context, c"ok".as_ptr(), 2),
+            }
+        }
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let services = host_services(|table| table.radio_control = Some(reply));
+    let mut radio = services.radio("1000", "usb", 8).unwrap();
+    // SAFETY: this record contains only scalars and arrays; all-zero is valid storage.
+    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    request.struct_size = size_of_val(&request) as u32;
+    request.abi_version = 1;
+    request.operation = 1;
+    for case in 0..8 {
+        CASE.set(case);
+        let result = radio.maintenance(&mut request);
+        match case {
+            1 => assert_eq!(result, Ok(String::new())),
+            2 => assert_eq!(result.as_ref().map(String::len), Ok(65_536)),
+            7 => assert_eq!(result, Ok("ok".to_owned())),
+            _ => assert_eq!(result, Err(-1), "malformed or oversized reply case {case}"),
+        }
+    }
+}

@@ -72,6 +72,21 @@ fn grant(worker: &RadioWorker, clock: &mut u64, mode: u32) {
         assert_eq!(tx(worker, &mut [0.0; 960]).0, 0);
     }
 }
+
+fn replace_local_provider(worker: &mut RadioWorker, api: ffi::rpcr3_descriptor) {
+    let api = Box::leak(Box::new(api));
+    // SAFETY: the copied descriptor and its real provider callbacks remain live for both endpoints.
+    let (producer, consumer) = unsafe { crate::link::ring::tests::local_with_descriptor(api, 160) };
+    let mut update = LocalRingUpdate::prepare(160).unwrap();
+    update.transmit.observer = producer.observer();
+    update.receive.producer = producer;
+    update.transmit.consumer = consumer;
+    worker.observer = update.transmit.observer.clone();
+    worker.handoff = update.receive.handoff.clone();
+    worker.receive.state.get_mut().ring.current = update.receive;
+    worker.transmit.ring.get_mut().current = update.transmit;
+}
+
 #[test]
 fn released_tagged_local_constructor_retains_the_vad_reserve() {
     let _serial = crate::fixture::LIFECYCLE
@@ -220,7 +235,7 @@ fn malformed_source_and_identity_free_error_records_cancel_prior_admission() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    for bad in 0..8 {
+    for bad in 0..19 {
         let (_runtime, worker) = setup();
         let mut clock = 0;
         grant(&worker, &mut clock, 1);
@@ -234,12 +249,23 @@ fn malformed_source_and_identity_free_error_records_cancel_prior_admission() {
             4 => metadata.frame_count -= 1,
             5 => metadata.generation_id = 0,
             6 => metadata.first_sample_index += 960,
-            _ => {
+            7 => {
                 metadata.status = -1;
                 metadata.generation_id = 0;
                 metadata.frame_count = 0;
                 metadata.first_sample_index = 0;
             }
+            8 => metadata.status = 1,
+            9 => metadata.first_sample_index = u64::MAX,
+            10 => metadata.raw_receiver_keyed = 2,
+            11 => metadata.raw_receiver_keyed = 0,
+            12 => metadata.vad_mode = 3,
+            13 => metadata.vad_voice_active = 2,
+            14 => metadata.vad_score = -0.1,
+            15 => metadata.vad_preroll_frames = 0,
+            16 => metadata.rf_burst_id = 0,
+            17 => metadata.vad_voice_sample_index = clock + 960,
+            _ => metadata.vad_score = 1.1,
         }
         let status = if bad == 7 {
             // SAFETY: negative status is the sized cancellation record; it requires no PCM or identity.
@@ -254,7 +280,7 @@ fn malformed_source_and_identity_free_error_records_cancel_prior_admission() {
         } else {
             deliver(&worker, &metadata, &mut input)
         };
-        assert_eq!(status, if bad >= 6 { 0 } else { -1 });
+        assert_eq!(status, if matches!(bad, 6 | 7) { 0 } else { -1 });
         let mut output = [9.0; 960];
         assert_eq!(tx(&worker, &mut output), (0, 0), "bad source case {bad}");
         assert_eq!(output, [0.0; 960]);
@@ -541,4 +567,222 @@ fn reopened_radio_stream_cannot_inherit_previous_speech_admission() {
     assert_eq!(output, [0.0; 960]);
     assert_eq!(reopened.observer.observe().unwrap().available_samples, 960);
     drop(reopened.stop());
+}
+
+#[test]
+fn absent_callback_context_or_metadata_never_retains_an_admitted_tail() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        // SAFETY: absent context/metadata and an empty PCM span require no dereference.
+        unsafe {
+            receive_callback(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+            )
+        },
+        -1
+    );
+    let (_runtime, worker) = setup();
+    let mut clock = 0;
+    grant(&worker, &mut clock, 1);
+    let mut input = [0.25; 960];
+    // SAFETY: the live callback context and writable PCM are valid; metadata is deliberately absent.
+    let status = unsafe {
+        receive_callback(
+            std::ptr::from_ref(&*worker.receive).cast_mut().cast(),
+            std::ptr::null(),
+            input.as_mut_ptr(),
+            960,
+        )
+    };
+    assert_eq!(status, -1);
+    let mut output = [9.0; 960];
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 960]);
+    drop(worker.stop());
+}
+
+#[test]
+fn vad_fault_waits_for_successful_reset_and_cannot_grant_without_a_voice_stamp() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_runtime, worker) = setup();
+    let mut clock = 0;
+    for count in [4096, 4096, 4096, 2112, 960] {
+        let capture = metadata(clock, count, true, false, 1, None, 1);
+        assert_eq!(deliver(&worker, &capture, &mut vec![0.25; count]), 0);
+        clock += count as u64;
+    }
+    assert_eq!(
+        worker.handoff.write_failed_samples.load(Ordering::Acquire),
+        960
+    );
+    let pending = metadata(clock, 960, true, true, 1, Some(clock + 959), 1);
+    assert_eq!(deliver(&worker, &pending, &mut [0.25; 960]), 0);
+    clock += 960;
+    assert_eq!(
+        worker.handoff.pending_reset_dropped.load(Ordering::Acquire),
+        960
+    );
+    let required = worker.handoff.reset_required.load(Ordering::Acquire);
+    RadioWorker::fail_next_for_test(TestFailure::Reset);
+    let mut output = [9.0; 960];
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 960]);
+    assert!(worker.handoff.reset_ack.load(Ordering::Acquire) < required);
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(worker.handoff.reset_ack.load(Ordering::Acquire), required);
+    let falling = metadata(clock, 960, false, false, 1, None, 1);
+    assert_eq!(deliver(&worker, &falling, &mut [0.0; 960]), 0);
+    clock += 960;
+    assert_eq!(worker.observer.observe().unwrap().available_samples, 960);
+    let unstamped = metadata(clock, 960, true, true, 2, None, 1);
+    assert_eq!(deliver(&worker, &unstamped, &mut [0.25; 960]), 0);
+    assert_eq!(worker.handoff.admission.load(Ordering::Acquire), 0);
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 960]);
+    drop(worker.stop());
+}
+
+thread_local! {
+    static MUTE_FAILURE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+unsafe extern "C" fn rejected_mute(
+    _: *mut ffi::rpcr3_ring,
+    _: u64,
+    _: *const crate::link::ring::MuteSpan,
+    _: u32,
+    accepted: *mut u32,
+) -> i32 {
+    // SAFETY: the typed ring client supplies a complete writable interval-credit output.
+    unsafe { *accepted = 0 };
+    if MUTE_FAILURE.get() == 1 { -1 } else { 0 }
+}
+
+#[test]
+fn falling_edge_mute_errors_and_missing_credit_cancel_the_grant_and_reset() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for failure in [1, 2] {
+        let (_runtime, mut worker) = setup();
+        // SAFETY: the immutable real provider table remains live for the test process.
+        let mut api = unsafe { *ffi::rpcr3_descriptor() };
+        api.ring_producer_mute = Some(rejected_mute);
+        replace_local_provider(&mut worker, api);
+        let mut clock = 0;
+        grant(&worker, &mut clock, 1);
+        MUTE_FAILURE.set(failure);
+        let falling = metadata(clock, 960, false, false, 1, None, 1);
+        assert_eq!(deliver(&worker, &falling, &mut [0.0; 960]), 0);
+        assert_eq!(worker.handoff.admission.load(Ordering::Acquire), 0);
+        assert!(
+            worker.handoff.reset_required.load(Ordering::Acquire)
+                > worker.handoff.reset_ack.load(Ordering::Acquire)
+        );
+        assert_eq!(
+            worker.handoff.write_failed_samples.load(Ordering::Acquire),
+            960
+        );
+        let mut output = [9.0; 960];
+        assert_eq!(tx(&worker, &mut output), (0, 0));
+        assert_eq!(output, [0.0; 960]);
+        drop(worker.stop());
+    }
+}
+
+#[test]
+fn failed_receive_policy_query_returns_the_unactivated_radio_reservation() {
+    unsafe extern "C" fn rejected_query(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: *mut ffi::rptadv_radio_control_v1,
+        _: ffi::rptadv_text_sink_v1,
+        _: *mut c_void,
+    ) -> i32 {
+        -1
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // SAFETY: copy the complete immutable fixture table, retaining all original callbacks.
+    let mut table = unsafe { *crate::fixture::host_descriptor() };
+    table.radio_control = Some(rejected_query);
+    // SAFETY: the complete table remains alive until its copied typed service and radio drop.
+    let services = unsafe { HostServices::open(&table) }.unwrap();
+    let before = crate::fixture::RADIO_DROPS.load(Ordering::Acquire);
+    let failure = RadioWorker::prepare(
+        services.radio("1000", "usb", 4096).unwrap(),
+        Instant::now(),
+        RadioStatus::default(),
+        160,
+        50,
+    )
+    .err()
+    .expect("invalid policy must prevent activation");
+    assert!(matches!(failure.0, Error::Operation));
+    assert_eq!(crate::fixture::RADIO_DROPS.load(Ordering::Acquire), before);
+    drop(failure);
+    assert_eq!(
+        crate::fixture::RADIO_DROPS.load(Ordering::Acquire),
+        before + 1
+    );
+}
+
+static CANCELLED_RENDER: OnceLock<Render> = OnceLock::new();
+thread_local! {
+    static CANCEL_DURING_RENDER: std::cell::Cell<*mut c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+unsafe extern "C" fn cancelling_render(
+    ring: *mut ffi::rpcr3_ring,
+    output: *mut f32,
+    count: u64,
+    real: *mut u64,
+) -> i32 {
+    // SAFETY: preserve the real provider handle and complete writable render span.
+    let status = unsafe { CANCELLED_RENDER.get().unwrap()(ring, output, count, real) };
+    let context = CANCEL_DURING_RENDER.replace(std::ptr::null_mut());
+    if !context.is_null() {
+        let mut cancellation = crate::fixture::receive_metadata(false, 0, 0);
+        cancellation.status = -1;
+        cancellation.generation_id = 0;
+        // SAFETY: the test keeps the separate RX context alive through this serial cancellation.
+        let result = unsafe { receive_callback(context, &cancellation, std::ptr::null_mut(), 0) };
+        if result != 0 {
+            return result;
+        }
+    }
+    status
+}
+
+#[test]
+fn same_ring_rx_cancellation_during_render_mutes_the_completed_tx_frame() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_runtime, mut worker) = setup();
+    // SAFETY: copy the immutable provider descriptor and retain its real callback code.
+    let mut api = unsafe { *ffi::rpcr3_descriptor() };
+    assert!(
+        CANCELLED_RENDER
+            .set(api.ring_consumer_render.unwrap())
+            .is_ok()
+    );
+    api.ring_consumer_render = Some(cancelling_render);
+    replace_local_provider(&mut worker, api);
+    let mut clock = 0;
+    grant(&worker, &mut clock, 1);
+    let capture = metadata(clock, 960, true, true, 1, Some(clock + 959), 1);
+    assert_eq!(deliver(&worker, &capture, &mut [0.25; 960]), 0);
+    CANCEL_DURING_RENDER.set(std::ptr::from_ref(&*worker.receive).cast_mut().cast());
+    let mut output = [9.0; 960];
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 960]);
+    assert!(CANCEL_DURING_RENDER.get().is_null());
+    drop(worker.stop());
 }

@@ -2550,3 +2550,19 @@ fn live_vad_policy_updates_ring_reserve_without_reopening_the_radio() {
     }
     assert!(host.stop(20));
 }
+
+#[test]
+fn radio_maintenance_rejects_a_quiesced_device_lease() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut host = host();
+    assert!(host.leases[0].1.lock().unwrap().quiesce());
+    // SAFETY: the complete scalar-only control record permits all-zero initialization.
+    let mut request: abi::rptadv_radio_control_v1 = unsafe { std::mem::zeroed() };
+    request.struct_size = std::mem::size_of_val(&request) as u32;
+    request.abi_version = 1;
+    request.operation = 1;
+    assert!(matches!(host.radio_control("1000", request), Err(-7)));
+    assert!(host.stop(20));
+}

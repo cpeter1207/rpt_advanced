@@ -583,7 +583,7 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
             assert!(InboundRing::open(48000, InboundPolicy::Local { squelch_delay_ms }).is_err());
         }
         let original = *ffi::rpcr3_descriptor();
-        for case in 0..18 {
+        for case in 0..20 {
             let mut api = original;
             match case {
                 0 => api.struct_size = 8,
@@ -603,12 +603,18 @@ fn malformed_ring_tables_and_failed_operations_never_publish_or_retain_invalid_a
                 14 => api.ring_producer_gap = None,
                 15 => api.ring_finish_status = None,
                 16 => api.ring_producer_push_tagged = None,
+                17 => api.ring_producer_mute = None,
+                18 => api.ring_producer_push_tagged = None,
                 _ => api.ring_producer_mute = None,
             }
             let policy = if case < 15 {
                 InboundPolicy::Peer
-            } else {
+            } else if case < 18 {
                 InboundPolicy::Echo
+            } else {
+                InboundPolicy::Local {
+                    squelch_delay_ms: 160,
+                }
             };
             assert!(InboundRing::from_descriptor(8000, policy, Box::leak(Box::new(api))).is_err());
         }
