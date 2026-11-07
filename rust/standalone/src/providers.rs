@@ -1840,7 +1840,7 @@ pub(crate) mod tests {
                 { NATIVE_SIZE, NATIVE_VERSION, "usbradioplus.product1" }, {0}
             };
             void *usbradioplus_product_descriptor_v1(void) { return &native; }
-            NAMED(radio, rptadv_radio_descriptor, 4, "rptadv.radio-core")
+            NAMED(radio, rptadv_radio_descriptor, 5, "rptadv.radio-core")
             NAMED(audio, rptadv_portaudio_alsa_adapter_descriptor, 2, "rptadv.portaudio-alsa-audio")
             NAMED(ffmpeg, rptadv_ffmpeg_adapter_descriptor, 1, "rptadv.ffmpeg")
             NAMED(gpio, rptadv_gpio_adapter_descriptor, 1, "rptadv.cm119-hid-gpio")
