@@ -509,3 +509,36 @@ fn source_generation_change_while_already_unkeyed_requires_quiescent_reset() {
     assert_eq!(worker.observer.observe().unwrap().available_samples, 960);
     drop(worker.stop());
 }
+
+#[test]
+fn reopened_radio_stream_cannot_inherit_previous_speech_admission() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_runtime, worker) = setup();
+    let mut clock = 0;
+    grant(&worker, &mut clock, 1);
+    assert_ne!(worker.handoff.admission.load(Ordering::Acquire), 0);
+    let status = worker.receive.status.clone();
+    let owners = worker.stop().expect("stopped stream returns both owners");
+    // SAFETY: the fixture descriptor and callbacks live for the test process.
+    let services = unsafe { HostServices::open(crate::fixture::host_descriptor()) }.unwrap();
+    let mut reopened = RadioWorker::prepare(
+        services.radio("1000", "usb", 4096).unwrap(),
+        Instant::now(),
+        status,
+        160,
+        50,
+    )
+    .unwrap_or_else(|_| panic!("prepare reopened VAD stream"));
+    assert!(reopened.attach(owners).is_ok());
+    let mut output = [9.0; 960];
+    assert_eq!(tx(&reopened, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 960]);
+    let pending = metadata(0, 960, true, false, 1, None, 1);
+    assert_eq!(deliver(&reopened, &pending, &mut [0.375; 960]), 0);
+    assert_eq!(tx(&reopened, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 960]);
+    assert_eq!(reopened.observer.observe().unwrap().available_samples, 960);
+    drop(reopened.stop());
+}

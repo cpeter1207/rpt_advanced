@@ -1038,7 +1038,7 @@ impl RadioWorker {
     pub fn prepare(
         mut radio: Radio,
         epoch: Instant,
-        status: RadioStatus,
+        mut status: RadioStatus,
         squelch_delay_ms: u64,
         status_snapshot_interval_ms: u64,
     ) -> Result<Self, Box<(Error, Radio)>> {
@@ -1054,6 +1054,7 @@ impl RadioWorker {
         };
         status.vad_delay_ms.store(minimum_delay, Ordering::Release);
         let squelch_delay_ms = squelch_delay_ms.max(minimum_delay);
+        status.handoff = Arc::default();
         let ring = LocalRingUpdate::with_handoff(squelch_delay_ms, status.handoff.clone());
         #[cfg(test)]
         let ring = if take_test_failure(TestFailure::Prepare) {
@@ -1072,6 +1073,8 @@ impl RadioWorker {
         let (receive_ring, receive_updates) = EndpointOwner::new(update.receive);
         let (transmit_ring, transmit_updates) = EndpointOwner::new(update.transmit);
         let origin_ms = epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        status.update_carrier(false, origin_ms);
+        status.set_dtmf_muted(false);
         let (receive_publisher, receive_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
         let (transmit_publisher, transmit_snapshots) = RingBuffer::new(SNAPSHOT_QUEUE_CAPACITY);
         let active = Arc::new(AtomicBool::new(false));
