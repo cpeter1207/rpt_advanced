@@ -794,7 +794,7 @@ mod tests {
             // No hardware is opened: this test exercises host transaction ownership.
             let mut radio: abi::rptadv_radio_session_config = unsafe { std::mem::zeroed() };
             radio.struct_size = std::mem::size_of_val(&radio) as u32;
-            radio.abi_version = 4;
+            radio.abi_version = 5;
             let mut config: abi::UrpNativeStationConfig = unsafe { std::mem::zeroed() };
             config.struct_size = std::mem::size_of_val(&config) as u32;
             config.abi_version = abi::URP_NATIVE_CONFIG_ABI_VERSION;
