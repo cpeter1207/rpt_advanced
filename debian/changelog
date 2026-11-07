@@ -2,8 +2,9 @@ rpt-advanced (0.1.0~alpha22-1) unstable; urgency=medium
 
   * Preserve VAD speech onset in the existing local receive ring.
   * Separate raw RF eligibility from burst-qualified speech admission.
-  * Require USBRadioPlus alpha31 and host-services ABI10.
+  * Require USBRadioPlus alpha32 and host-services ABI10.
   * Default local, link and voice AGC windows to 400 ms with 6/2 dB/s rates.
+  * Validate distinct LLVM branch decisions even when source spans coincide.
 
  -- Chris Peterson <cpeter1207@users.noreply.github.com>  Sat, 07 Nov 2026 12:00:00 -0600
 

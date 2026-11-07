@@ -14,6 +14,8 @@ from itertools import pairwise
 from pathlib import Path
 from unittest.mock import patch
 
+from export_rust_coverage import branch_records
+
 LOADER = Path("module/app_rpt_advanced_loader.c")
 FORBIDDEN_MAKE_TOKENS = (
     "librpt_advanced.a",
@@ -350,8 +352,8 @@ def package(control: Path) -> None:
         assert token in contents, f"missing package dependency: {token}"
     for token in (
         f"librate-adjusting-pcm-ring3-dev (>= {RING_MINIMUM_VERSION})",
-        "libusbradioplus-product-dev (>= 0.1.0~alpha31-1)",
-        "libusbradioplus-product1 (>= 0.1.0~alpha31-1)",
+        "libusbradioplus-product-dev (>= 0.1.0~alpha32-1)",
+        "libusbradioplus-product1 (>= 0.1.0~alpha32-1)",
         f"librate-adjusting-pcm-ring3 (>= {RING_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter-dev (>= {SAMPLERATE_MINIMUM_VERSION})",
         f"librptadv-samplerate-adapter2 (>= {SAMPLERATE_MINIMUM_VERSION})",
@@ -550,6 +552,7 @@ def coverage(report: Path) -> None:
     data = json.loads(report.read_text(encoding="utf-8"))
     lines = {}
     branches = {}
+    test_ranges_by_source = {}
     assert data["data"], "missing coverage instrumentation"
     for unit in data["data"]:
         code_regions = {
@@ -563,6 +566,7 @@ def coverage(report: Path) -> None:
                 continue
             segments = source.get("segments", [])
             test_ranges = get_test_only_ranges(source["filename"])
+            test_ranges_by_source[source["filename"]] = test_ranges
             if segments:
                 assert not segments[-1][3] or segments[-1][5], (
                     "unterminated executable coverage segment"
@@ -586,23 +590,39 @@ def coverage(report: Path) -> None:
                         or (source["filename"], *segment[:2], *following[:2])
                         in code_regions
                     )
-            for branch in source.get("branches", []):
-                if any(start <= branch[0] <= end for start, end in test_ranges):
-                    continue
-                # LLVM emits the same source region for the DSO, unit-test crate,
-                # and generic callback instances. Each source arm must run, but
-                # it need not run in every codegen instance of that same region.
-                key = (source["filename"], *branch[:4])
-                arms = branches.setdefault(key, [False, False])
-                for arm, count in enumerate(branch[4:6]):
-                    assert count >= 0, f"invalid branch count: {key}"
-                    arms[arm] |= count > 0
+    for key, counts in branch_records(data):
+        if is_test_source(key[0]) or any(
+            start <= key[1] <= end for start, end in test_ranges_by_source[key[0]]
+        ):
+            continue
+        arms = branches.setdefault(key, [False, False])
+        for arm, count in enumerate(counts):
+            assert count >= 0, f"invalid branch count: {key}"
+            arms[arm] |= count > 0
     assert lines, "missing lines instrumentation"
     missing = [key for key, covered in lines.items() if not covered]
     assert not missing, f"production lines coverage below 100%: {missing}"
     assert branches, "missing branches instrumentation"
     missing = [key for key, arms in branches.items() if not all(arms)]
     assert not missing, f"production branch coverage below 100%: {missing}"
+
+
+def coverage_fixture_unit(sources: list[dict]) -> dict:
+    """Supply function records for synthetic object copies without adding hits."""
+    return {
+        "files": sources,
+        "functions": [
+            {
+                "name": f"object_copy_{index}",
+                "filenames": [source["filename"]],
+                "regions": [[1, 1, 1, 9, 0, 0, 0, 0]],
+                "branches": [
+                    [*branch[:6], 0, 0, 4] for branch in source.get("branches", [])
+                ],
+            }
+            for index, source in enumerate(sources)
+        ],
+    }
 
 
 def production_c(root: Path) -> set[Path]:
@@ -814,6 +834,14 @@ def verify_artifact_policy() -> None:
                                         else [],
                                     }
                                 ],
+                                "functions": [
+                                    {
+                                        "name": "production",
+                                        "filenames": ["production.rs"],
+                                        "regions": [[1, 1, 1, 9, 0, 0, 0, 0]],
+                                        "branches": [[1, 1, 1, 9, 1, 1, 0, 0, 4]],
+                                    }
+                                ],
                             }
                         ]
                     }
@@ -833,8 +861,9 @@ def verify_artifact_policy() -> None:
                 [
                     {
                         "filename": "a.rs",
-                        "branches": [[1, 1, 1, 9, 3, 0], [1, 1, 1, 9, 0, 2]],
-                    }
+                        "branches": [[1, 1, 1, 9, 3, 0]],
+                    },
+                    {"filename": "a.rs", "branches": [[1, 1, 1, 9, 0, 2]]},
                 ],
                 True,
             ),
@@ -877,7 +906,7 @@ def verify_artifact_policy() -> None:
                         "data": [
                             {
                                 "totals": {"lines": {"count": 1, "covered": 1}},
-                                "files": sources,
+                                **coverage_fixture_unit(sources),
                             }
                         ]
                     }
@@ -914,7 +943,18 @@ def verify_artifact_policy() -> None:
                                         [3, 1, 3, 10, 0, 0],
                                     ],
                                 }
-                            ]
+                            ],
+                            "functions": [
+                                {
+                                    "name": "production_and_test_fixture",
+                                    "filenames": [str(source_file)],
+                                    "regions": [[1, 1, 1, 10, 0, 0, 0, 0]],
+                                    "branches": [
+                                        [1, 1, 1, 10, 1, 1, 0, 0, 4],
+                                        [3, 1, 3, 10, 0, 0, 0, 0, 4],
+                                    ],
+                                }
+                            ],
                         }
                     ]
                 }
@@ -955,7 +995,11 @@ def verify_artifact_policy() -> None:
                 True,
             ),
         ):
-            write(root, report.name, json.dumps({"data": [{"files": sources}]}))
+            write(
+                root,
+                report.name,
+                json.dumps({"data": [coverage_fixture_unit(sources)]}),
+            )
             try:
                 coverage(report)
             except AssertionError:
@@ -1012,7 +1056,13 @@ def verify_artifact_policy() -> None:
                                     }
                                 ],
                                 "functions": [
-                                    {"filenames": filenames, "regions": [region]}
+                                    {"filenames": filenames, "regions": [region]},
+                                    {
+                                        "name": "observed_branch",
+                                        "filenames": [str(observed)],
+                                        "regions": [[198, 1, 198, 10, 0, 0, 0, 0]],
+                                        "branches": [[198, 1, 198, 10, *arms, 0, 0, 4]],
+                                    },
                                 ],
                             }
                         ]

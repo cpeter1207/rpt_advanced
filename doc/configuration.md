@@ -272,6 +272,7 @@ Set up the standalone audio chains in `rpt_advanced.conf`:
 These sections set shared defaults. Add the node number, such as
 `[link 524950]`, to change one node. Use the same source-chain options as in
 the [USBRadioPlus configuration reference](https://github.com/cpeter1207/USBRadioPlus/blob/main/man/usbradioplus.conf.5).
+These processing profiles require USBRadioPlus alpha32 or newer.
 They include gains, EQ, AGC, an expander, a de-esser, a compressor, and a
 multiband limiter. The local chain also supports RNNoise and receive filters.
 Every chain supports the fixed Peak Limiter after dynamics, software gain,
