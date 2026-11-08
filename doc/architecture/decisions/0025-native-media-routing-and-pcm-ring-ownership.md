@@ -57,8 +57,12 @@ milliseconds of DTMF before the gate takes effect.
 An adapter-proven shared ADC/DAC clock permits ADR 0027's back-to-back
 receive/transmit fast path and removes the need for adaptive local drift
 correction. It does not bypass the local ring: its target reserve is exactly
-zero plus the configured squelch-delay value, so a zero delay imposes no
-additional local-ring delay while retaining output gating. This retains the
+the configured squelch delay with VAD Off, so zero adds no local-ring delay.
+Active VAD preserves `max(squelch_delay_ms, 160 ms)` in that ring even for the
+future shared-clock path. [ADR 0043](0043-shared-loudness-and-receive-vad.md)
+adds raw-RF/source/burst qualification without a second buffer or mixer.
+The local, per-peer link, and final voice/telemetry graphs retain their shared
+LUFS AGC, fixed Peak Limiter tail, and mandatory output meters. This retains the
 same routing/ownership graph; independent link and telemetry rings still
 perform their necessary conversion and recovery.
 

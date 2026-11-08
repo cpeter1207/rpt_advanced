@@ -1,6 +1,6 @@
 # ADR 0004: Hamlib remote-base boundary
 
-Status: In progress; decision accepted (shared-control design approved 2026-11-04)
+Status: Control software released; remote-audio integration and model-specific qualification pending (reconciled 2026-11-08)
 
 ## Context
 
@@ -105,7 +105,7 @@ specify the contract, DTMF, safety, and validation details.
 
 ## Implementation status
 
-The candidate implements the shared control engine, separate Hamlib adapter,
+The released composition implements the shared control engine, separate Hamlib adapter,
 retained parallel backends, configuration-only memories and scan lists, complete
 remote-base DTMF operations, independent signaling, and asynchronous activation
 and rollback in both radio hosts. Each Hamlib context retains its own copied
@@ -117,16 +117,18 @@ The [remote engine PR](https://github.com/cpeter1207/librptadvremote/pull/1) and
 [Hamlib adapter PR](https://github.com/cpeter1207/rptadv-hamlib-adapter/pull/1)
 are merged and released after passing the full native Debian 13 gates, including
 production line and branch coverage. Both providers have signed Debian packages.
-The shared [radio SDK alpha28](https://github.com/cpeter1207/USBRadioPlus/releases/tag/v0.1.0-alpha28)
-also passed its full native gates and has signed Debian packages. Focused
-controller tests cover readiness, retained generations, rollback,
-source-specific replies, and the shared physical owner. Controller integration
-requires its full native PR gate before merge and release. Physical-radio
-qualification remains model-specific. No node has been changed for this
-implementation.
+The matched [SDK alpha32](https://github.com/cpeter1207/USBRadioPlus/releases/tag/v0.1.0-alpha32)
+and [controller alpha22](https://github.com/cpeter1207/rpt_advanced/releases/tag/v0.1.0-alpha22)
+passed their full native gates and are published with signed Debian packages.
+Controller tests cover readiness, retained generations, rollback, source-specific
+replies, and the shared physical owner. The cohort was installed on 524950 on
+2026-11-07. That CM119/USB deployment and its bounded passive health check do
+not qualify a Hamlib rig: physical-radio acceptance remains model-specific.
 
 Current audio paths are CM119 and general PortAudio/ALSA. Streaming-radio
-audio, human-speech squelch, and adaptive I/Q selection remain planned. REST and
+audio, Hamlib-source AM/SSB speech integration, and adaptive I/Q selection
+remain planned. Local Earshot speech qualification is released under
+[ADR 0043](0043-shared-loudness-and-receive-vad.md). REST and
 the full CLI follow ADR 0023; this work does not implement those interfaces.
 
 ## Consequences

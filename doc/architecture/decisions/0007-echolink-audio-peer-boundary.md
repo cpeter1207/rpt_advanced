@@ -1,6 +1,6 @@
 # ADR 0007: EchoLink audio-peer boundary
 
-Status: Implemented; broader live acceptance pending
+Status: Implemented and released; broader live acceptance pending (reconciled 2026-11-08)
 
 ## Context
 
@@ -85,8 +85,10 @@ add a WebRTC stack for anticipated protocols. Reuse across adapters is a goal,
 not a requirement to reject a useful dependency. The
 [implementation plan](../../../docs/superpowers/plans/2026-10-28-echolink-interoperability.md)
 records codec-client moves, packet-library fit tests and coordinated host/DTMF
-contracts. Host-services ABI 9 and product ABI 7 introduce typed incoming
-requests and copied per-peer protocol/capability metadata. Both IAX hosts
+contracts. The EchoLink cutover introduced typed incoming requests and copied
+per-peer protocol/capability metadata through host-services ABI 9 and product
+ABI 7. The current VAD cohort uses host-services ABI 10 with product ABI 7
+(ADR 0043). Both IAX hosts
 preserve their existing transport/media behavior and populate real local and
 remote identities. Product SONAME 2 rejects the older host/product pair.
 EchoLink host attachment, account reload and finite source-read integration
@@ -299,11 +301,11 @@ driver before releasing callback storage.
 
 ## Consequences
 
-The coordinated, unreleased account record appends an owned APRS endpoint span
-without moving existing fields. Its complete 64-bit extent is360bytes; older
-short records fail preparation before access. Descriptor, functions and SONAME1
-remain unchanged before the complete network/media provider release; consumers
-and staged test artifacts must use matching source revisions.
+The coordinated pre-release account cutover appended an owned APRS endpoint
+span without moving existing fields. Its complete 64-bit extent is360bytes;
+older short records fail preparation before access. Descriptor, functions and
+SONAME1 remained unchanged for that release; consumers and staged test artifacts
+must use matching released artifacts.
 
 `aprs_server` inherits per account and defaults to
 `aprs.echolink.org:5199`. An explicit blank disables publication. Direct mode

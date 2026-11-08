@@ -14,26 +14,49 @@ The standalone controller, shared radio core, direct PortAudio composition,
 Rust migration, and `res_usbradio` removal are also implemented. Their ongoing
 constraints remain in the ADRs; only remaining work is listed below.
 
-Status audit: 2026-10-17, against merged code and tests. Software-contract
-completion is not a claim of physical hardware qualification or deployment.
+The [shared loudness and receive-VAD policy](doc/architecture/decisions/0043-shared-loudness-and-receive-vad.md)
+is implemented and released in Radio alpha10, USBRadioPlus alpha32, and
+rpt_advanced alpha22. All three source roles use the configurable 400 ms LUFS
+AGC default; integrated/true-peak output meters, the fixed Peak Limiter tail,
+local Earshot VAD, and idle advancement are implemented. These are not open
+implementation entries.
+
+Release/audio reconciliation: 2026-11-08, against that merged cohort, its native
+gates, and the dated 2026-11-07 node installation. The broader status audit was
+2026-10-17. Representative listening, peer acceptance, and physical/RF
+qualification are distinct from software implementation and passive node health.
 
 ## Entries
 
-### Complete Asterisk 20 IAX audio-format interoperability
+### Listening and RF acceptance of released audio processing
 
-**Status: Sixteen active formats implemented; final controller verification in progress (2026-10-27).** The full
-target remains all 19 audio formats mapped by Asterisk 20's IAX compatibility
-layer. The user deferred `siren7`, `siren14`, and `g719`; the remaining 16
-formats are the active implementation scope. Format recognition alone is not
-complete codec support.
+**Status: Software released and installed; station acceptance pending.** The
+bounded passive check recorded in ADR 0043 does not replace these checks:
+
+- Listen with representative speakers and changing levels to assess AGC response
+  and the final programme's integrated-loudness and true-peak readings.
+- Exercise speech onset, kerchunks, noise/flutter, VAD hang, and rapid rekeying
+  to verify admission and retained first syllables in the intended conditions.
+- Verify calibration, radio deviation, and post-DAC/RF levels on the physical
+  station; digital programme meters do not measure that path.
+
+### Deferred IAX formats and remaining peer acceptance
+
+**Status: Sixteen active formats released; three formats explicitly deferred.**
+The remaining implementation scope is `siren7`, `siren14`, and `g719`, only
+when the owner resumes them. Broader peer acceptance and the separately deferred
+iLBC 20 ms interoperability remain open. The full target is the 19 formats
+mapped by Asterisk 20's IAX compatibility layer; format recognition alone is
+not complete codec support.
 
 The [codec and text-media design](docs/superpowers/specs/2026-10-27-protocol-neutral-codecs-and-text-media-design.md)
 was approved on 2026-10-27. Its [implementation plan](docs/superpowers/plans/2026-10-27-protocol-neutral-codecs-and-text-media.md)
-is approved. Provider and IAX library gates pass on native Debian 13 amd64 and
-arm64, including full production coverage. The ABI-matched candidate is running
-on 524950; local repeat, courtesy, and time speech are confirmed. The controller
-gate and final incoming-text refinements remain in verification. These candidate
-components have not been released.
+is approved. Provider, IAX library, and controller gates pass on native Debian
+13 amd64 and arm64, including required production coverage. The controller
+composition and incoming-text refinements are released in alpha22 and installed
+on 524950. The implemented codec boundary is retained in ADR 0022; this entry
+keeps the deferred formats and remaining peer acceptance, not completed
+controller verification or publication.
 
 **Requirements and decisions recorded**
 
@@ -165,7 +188,8 @@ adapter path remains pending under ADRs 0003, 0025, and 0027.
   adapter can prove that ADC/DAC clocks are shared and supply aligned frames.
 - Use the existing local inbound ring in unity pass-through, with no adaptive
   correction or redundant converter. Its target reserve is the configured
-  squelch delay; zero adds no local-ring delay.
+  squelch delay with VAD Off; zero then adds no local-ring delay. Active VAD
+  retains `max(squelch_delay_ms, 160 ms)` in the same ring under ADR 0043.
 - Adopt one coherent generation across the paired calls. Retain bounded frame
   handling, elapsed-sample timing, receive qualification, and PTT safety.
 
@@ -344,14 +368,15 @@ code-derived OpenAPI documentation remain pending under ADRs 0016 and 0023.
 
 ### Mode- and frequency-agile remote base
 
-**Status: Partially implemented; verification in progress.** Shared Hamlib and
-parallel radio control, RF limits, independent signaling, remote-base DTMF,
-memories, and scanning are implemented in the candidate. Both new providers
-are merged and released after passing their full native gates. Their signed
-Debian packages are published. USBRadioPlus SDK alpha28 also passed its hosted
-gates and is released. Controller merge, publication, and physical-radio
-qualification remain pending. Speech squelch, adaptive I/Q
-processing, and streaming-radio audio remain planned under ADR 0004.
+**Status: Control software released; physical acceptance and remote-audio
+capabilities pending.** Shared Hamlib and parallel control, RF limits,
+independent signaling, remote-base DTMF, memories, and scanning are released
+with their providers, SDK alpha32, and controller alpha22 after the full native
+gates. The cohort is installed on 524950, but that USB-radio installation does
+not qualify a Hamlib rig. Model-specific physical-radio acceptance, future
+Hamlib-source AM/SSB speech integration, adaptive I/Q processing, and
+streaming-radio audio remain open under ADR 0004. Local receiver speech
+qualification is already implemented under ADR 0043.
 
 **Requirements**
 
@@ -478,12 +503,12 @@ Physical site-device qualification remains outstanding.
 
 ### Remote-base memories and scan lists
 
-**Status: Implemented in the candidate; acceptance pending.** Configuration-only
-memories and scan lists share the remote-base engine. Provider tests cover
-timing, priority, activity holds, interruption, limits, and source revocation.
-The shared engine and USBRadioPlus SDK are released after passing their hosted
-gates. Controller merge, publication, and physical-radio qualification remain
-pending.
+**Status: Released; physical-radio acceptance pending.** Configuration-only
+memories and scan lists share the released remote-base engine. Provider and
+controller tests cover timing, priority, activity holds, interruption, limits,
+and source revocation. SDK alpha32 and controller alpha22 passed their hosted
+gates and are published. Model-specific physical-radio acceptance remains open;
+software publication is complete.
 
 **Requirements**
 

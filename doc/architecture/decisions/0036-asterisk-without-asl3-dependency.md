@@ -102,19 +102,21 @@ configuration and peer changes prepare replacements on control and reclaim
 retired owners only after callback quiescence. No callback allocates, locks,
 loads a library, or builds a graph.
 
-Host-services ABI 9 has a size-gated optional peer-processor preparation tail.
-Its absence preserves the Asterisk host's existing upstream USBRadioPlus hook,
-so Asterisk peer audio is not processed twice. Complete older ABI-9 prefixes
-remain readable; partially present tail pointers are rejected. The new opaque
-PCM-processor record is ABI 1. USBRadioPlus retains product descriptor ABI 1
-and SONAME 1 with size-gated descriptor additions; native station configuration
-is ABI 3. Matching native producers and consumers are required, with package
-minimums USBRadioPlus alpha26 and standalone controller alpha19.
+Current host-services ABI 10 retains the optional peer-processor preparation
+operation. Its absence preserves the Asterisk host's upstream USBRadioPlus
+hook, so Asterisk peer audio is not processed twice. Within ABI 10, complete
+size-gated prefixes and callback groups are validated before use; this does
+not admit earlier host ABI revisions. The opaque PCM-processor record remains
+ABI 1. USBRadioPlus keeps product descriptor ABI 1/SONAME 1; native station
+configuration is ABI 4 and direct callbacks are ABI 6. The validated released
+cohort is USBRadioPlus alpha32, controller alpha22, and Radio ABI 5 alpha10.
+[ADR 0043](0043-shared-loudness-and-receive-vad.md) records output-meter
+placement, normally clocked legacy-link idle advancement, and local VAD.
 
 ### Asterisk host association
 
 The ABI 3/4 references in this dated section record their introduction. The
-current host-services descriptor is ABI 7 and the product descriptor is ABI 5,
+current host-services descriptor is ABI 10 and the product descriptor is ABI 7,
 as declared in `rust/product/include/rptadv_product.h`.
 
 Before starting either an incoming or outgoing peer's media owner, the product
@@ -199,7 +201,7 @@ or package dependency check.
 
 ## Consequences
 
-### Codec host cutover (2026-10-27, integration in progress)
+### Codec host cutover (introduced 2026-10-27; released in alpha22)
 
 Product ABI 7 (`rptadv.prod7`) requires host-services ABI 10 (`rptadv.hst10`).
 The Earshot receive cutover adds sized source/burst metadata through the shared
