@@ -74,7 +74,7 @@ The audio, radio-control, and GPIO adapters are separate selected capabilities,
 not a single hardware-services facade. ADR 0028 assigns their ownership and
 requires them to replace the current `res_usbradio` dependency.
 
-### Protocol-neutral codec capabilities — accepted, implementation pending (2026-10-26)
+### Protocol-neutral codec capabilities — implemented and released (reconciled 2026-11-08)
 
 Codec implementations belong behind independently replaceable, versioned
 dynamic adapters. Their contracts are protocol-neutral: other protocol adapters
@@ -102,7 +102,11 @@ origin and normal no-echo policy. Protocol-control text is not a speech input.
 If synthesis fails, skip only the local spoken rendition and log an error,
 without Morse fallback or interruption of other audio. Text forwarding is
 independent of local synthesis. This does not implement any planned protocol
-adapter; the text-message codec remains unimplemented.
+adapter. The sixteen active audio formats and incoming-text speech composition
+are released in controller alpha22 after the native gates. Siren7, Siren14,
+G.719, and iLBC 20 ms interoperability retain their recorded deferrals. Broader
+peer/client acceptance, including EchoLink's remaining checks in ADR 0007, is
+separate from implementation and release.
 
 ## Consequences
 
@@ -133,8 +137,9 @@ destruction and library release. A rejected reload preserves the active
 configuration. Resolver runtime and development packages are independently
 installable and do not become Asterisk-module dependencies.
 
-This completes the current composition's external-capability extraction, not
-unimplemented Hamlib, remote-base, or other wishlist capabilities. Filesystem,
+The 2026-10-13 resolver extraction did not implement the separate Hamlib or
+remote-base capabilities. Their control software is now released under ADR 0004;
+future remote audio and other wishlist capabilities remain separate. Filesystem,
 socket, clock, and other ordinary operating-system facilities remain with their
 existing owners; this decision does not introduce a generic OS adapter.
 

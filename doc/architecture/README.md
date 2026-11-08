@@ -31,10 +31,15 @@ USBRadioPlus retains its upstream graph and reload lifetime. Standalone passes
 `local`, `link`, and `voice_telemetry` sections from `rpt_advanced.conf` to the
 same shared product's resolver and DSP factory. The existing FFmpeg-hosted AGC
 meters the full-band program in LUFS with BS.1770 K-weighting and a -23 LUFS
-default. Its gain rider retains bounded, smooth correction and independent
-activity qualification; controller policy does not implement another gain
-stage. Its optional host-services
-ABI-9 tail prepares one F32 graph per peer audio generation after the inbound
+default. Its default window is 400 ms (configurable 400–3000 ms), with 6 dB/s
+gain reduction, 2 dB/s recovery, and the existing 500 ms increase hold. The
+gain rider retains bounded correction and independent raw RMS activity
+qualification. Each local, link, and voice/telemetry graph has a fixed Peak
+Limiter tail followed by mandatory integrated-LUFS and true-peak meters; the
+output integrated meter does not drive AGC. [ADR 0043](decisions/0043-shared-loudness-and-receive-vad.md)
+records defaults, node overrides, idle timing, and validation limits. Controller
+policy adds no second gain stage. The current host-services ABI-10 tail
+prepares one F32 graph per peer audio generation after the inbound
 ring and before mixing. Asterisk omits that tail to avoid processing twice.
 See [ADR 0036](decisions/0036-asterisk-without-asl3-dependency.md).
 
@@ -97,8 +102,10 @@ reuse the existing endpoint adoption acknowledgments.
 Radio ABI/SONAME 5, USBRadioPlus direct-callback ABI 6 with sized RX metadata,
 native request ABI 4, and controller host-services ABI 10 form a matched
 cohort. Only the radio crate requires Rust >=1.87; USBRadioPlus and the
-controller retain Rust 1.85. Hamlib source integration remains planned in
-ADR 0004; the local VAD feature does not implement remote-base control.
+controller retain Rust 1.85. The matched released cohort is Radio alpha10,
+USBRadioPlus alpha32, and controller alpha22. Hamlib control is released under
+ADR 0004; its future streaming/audio-source speech integration and adaptive
+I/Q path remain planned. Local VAD does not complete those remote-audio paths.
 
 The USBRadioPlus hardware cutover uses one channel implementation backed by
 the dynamic PortAudio/ALSA and GPIO adapters, with no `res_usbradio` imports or
@@ -273,14 +280,17 @@ radio-port audio engine <─ RadioPlusAdvanced exchange ─> USBRadioPlus / hard
 
 ```text
 audio input → local receive worker
-              squelch / CTCSS-DCS decode / deemphasis / receive DSP
-                └─ local receive inbound PCM ring ────────────────┐
-link packet → per-peer jitter / decode → peer inbound PCM ring ───┤
+              squelch / RF decode / Earshot speech metadata / receive DSP
+              local graph: LUFS AGC / fixed Peak Limiter / I + true-peak meters
+                └─ tagged local PCM ring (squelch delay / VAD reserve) ─┐
+link packet → jitter / decode → peer ring → per-peer link graph ───────┤
+                                           (AGC / Peak / output meters)
 file/speech/Morse/tone worker ──streaming PCM──> telemetry playout ring ──┤
 link distributor → DTMF generator → local-only signaling PCM ring ──────┤
                                                                 ▼
                       transmit worker ← DAC / adapter output demand
-                      ├─ native-rate PCM mix / transmit processing
+                      ├─ native-rate PCM mix / voice_telemetry graph
+                      │  (AGC / fixed Peak Limiter / I + true-peak meters)
                       ├─ pre-access-tone peer-routable program-audio loopback ring
                       │  └─ link distributor → per-link egress queues
                       │     └─ serial codec encode / send outside audio workers

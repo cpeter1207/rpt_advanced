@@ -101,10 +101,12 @@ current processed samples; transmit consumes them through the same local
 receive inbound-ring interface and fills the supplied output buffer. Configure
 that local ring for unity-rate pass-through with no adaptive drift correction
 or unnecessary unity-ratio resampler. In shared-clock mode, its target reserve
-is exactly zero plus the configured squelch-delay value. With both values at
-zero, it adds no local-ring delay; it still retains the sample-associated
-COS/CTCSS gate. This does not claim zero hardware, device, DSP/filter, or
-codec latency, nor remove those algorithms' required history or framing.
+equals the configured squelch delay with VAD Off. Only that Off/zero-delay
+case adds no local-ring delay. Active VAD retains at least 160 ms in the same
+ring, as specified by [ADR 0043](0043-shared-loudness-and-receive-vad.md).
+Sample-associated RF and speech admission still gate the delayed audio. This
+does not claim zero hardware, device, DSP/filter, or codec latency, nor remove
+those algorithms' required history or framing.
 
 This fast path keeps the receive and transmit DSP owners separate and runs
 only on adapter output demand, not an independent timer. A paired call uses
@@ -158,8 +160,9 @@ older queued samples. Each worker has its own hazard protection and RF-event
 publisher under ADR 0026.
 
 The local receive inbound ring is the squelch-delay line under ADR 0025. In
-shared-clock mode its target reserve is exactly the configured squelch delay;
-in independent-clock mode that delay supplements the ring's normal reserve.
+shared-clock mode its target reserve is the configured squelch delay with VAD
+Off, or `max(squelch_delay_ms, 160 ms)` with VAD active. Independent-clock
+recovery remains with that existing ring; VAD does not add another converter.
 The transmit worker gates each rendered local sample using its
 sample-associated configured COS/CTCSS qualification. It must not apply the
 latest receiver state to buffered audio. Thus, delayed samples after a receiver
@@ -250,7 +253,11 @@ timestamps are not presented as simultaneous observations. A full queue drops
 the new snapshot and increments an observable counter rather than blocking an
 audio callback. CLI status includes the latest RX/TX peak, RMS, clipping count,
 and available local-ring occupancy, reserve, target, capacity, ratio, shortfall,
-and discard statistics.
+and discard statistics. Raw peak/RMS diagnostics remain. Shared processing
+statistics additionally expose mandatory integrated loudness and true peak
+with validity, sample counts, and meter epochs. Rolling AGC analysis and output
+meters advance with delivered samples and normally clocked idle silence,
+including PTT release, under ADR 0043; no extra hardware or clock owner is added.
 
 ## Consequences
 
@@ -270,8 +277,9 @@ and safe reload/unload with both workers active. No test may require either
 worker to lock, allocate, or wait for the other worker or control plane.
 
 Local-receive tests additionally prove that configured squelch delay increases
-only the local inbound-ring reserve, shared-clock target reserve equals that
-delay with no added delay at zero, sample-associated COS/CTCSS gating mutes
+only the local inbound-ring reserve, the future shared-clock target honors
+that effective delay, and only VAD Off permits no added ring delay at zero.
+Active VAD retains its 160 ms minimum. Sample-associated RF/speech gating mutes
 the delayed unqualified tail on both local and peer paths, and phase-shift,
 no-tone, and 55 Hz CTCSS-tail detection immediately removes required CTCSS
 qualification. Notch-mode tests additionally prove that a received tail tone

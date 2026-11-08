@@ -8,7 +8,8 @@ status. Superseded records remain and point to their replacement.
 implemented. Scoped implementation statuses distinguish current compositions
 from planned features and optional hardware paths.
 
-Status audit: 2026-10-17, against merged code and its tests. `Planned` means an
+Audio/release reconciliation: 2026-11-08, against Radio alpha10, SDK alpha32,
+and controller alpha22; the broader status audit was 2026-10-17. `Planned` means an
 accepted capability is not implemented. `Accepted (ongoing policy)` is a rule
 for current and future changes, not an unfinished feature. Software-contract
 completion does not imply hardware qualification, release, or deployment.
@@ -18,10 +19,10 @@ completion does not imply hardware qualification, release, or deployment.
 | [0001](0001-reload-without-asterisk-restart.md) | Implemented | Valid configuration reload replaces workers without restarting Asterisk. |
 | [0002](0002-lock-free-audio-paths.md) | Implemented for current audio compositions; ongoing constraint | Audio paths are lock-free. |
 | [0003](0003-shared-rate-adjusting-pcm-ring.md) | Implemented (current asynchronous composition; optional shared-clock path pending) | Clock recovery uses the shared rate-adjusting PCM ring. |
-| [0004](0004-hamlib-remote-base-boundary.md) | Partially implemented; shared SDK released | Hamlib owns rig control; audio uses an explicit source adapter. |
+| [0004](0004-hamlib-remote-base-boundary.md) | Control software released; remote-audio work and physical acceptance pending | Hamlib owns rig control; audio uses an explicit source adapter. |
 | [0005](0005-standalone-core-and-optional-asterisk-adapters.md) | Implemented | A shared lock-free core serves standalone operation and optional Asterisk adapters. |
 | [0006](0006-appliance-control-plane-ingress.md) | Planned; decision accepted | The appliance hosts its OIDC, proxy, and WAF ingress layer. |
-| [0007](0007-echolink-audio-peer-boundary.md) | Implemented on feature branch; final gates and broader live acceptance pending | EchoLink is a separate external-peer provider with local-only spoken human text. |
+| [0007](0007-echolink-audio-peer-boundary.md) | Implemented and released; broader live acceptance pending | EchoLink is a separate external-peer provider with local-only spoken human text. |
 | [0008](0008-transmitter-protection.md) | Implemented | Per-node watchdogs and source-specific kerchunk handling protect transmitters. |
 | [0009](0009-scheduled-actions-and-macros.md) | Implemented | Scheduled actions and macros are validated control-plane work. |
 | [0010](0010-configured-permanent-links-and-replacement-windows.md) | Implemented | Configuration owns permanent direct links and bounded local-time replacement windows. |
@@ -57,3 +58,4 @@ completion does not imply hardware qualification, release, or deployment.
 | [0040](0040-initial-alpha-compatibility-policy.md) | Accepted (2026-09-13); ongoing compatibility policy | Initial-alpha project interfaces do not require backward compatibility; remove compatibility-only code while rejecting mismatched artifacts safely. |
 | [0041](0041-fluent-localized-controller-telemetry.md) | Implemented | Built-in RF telemetry uses validated Fluent catalogs with independent text, speech, and Morse forms. |
 | [0042](0042-activity-scoped-ctcss-encode.md) | Implemented | Activity-scoped CTCSS transmit control is returned independently from PTT by the native radio callback. |
+| [0043](0043-shared-loudness-and-receive-vad.md) | Implemented, released, and installed; listening/RF qualification remains separate | Shared LUFS gain control, fixed limiting/output metering, and local Earshot speech qualification retain existing owners. |

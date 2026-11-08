@@ -39,6 +39,20 @@ ASL3 dialplan and IAX setup for incoming calls. Do not assign the same radio
 to both paths at once. The [installation guide](install.md) gives the commands
 for each path.
 
+## Shared loudness processing and local speech qualification
+
+Radio alpha10, USBRadioPlus alpha32, and controller alpha22 are released for
+Debian 13 amd64/arm64. The matched packages were installed on 524950 on
+2026-11-07. Local, link, and voice/telemetry graphs use configurable LUFS AGC
+settings, a fixed Peak Limiter tail, and mandatory integrated-loudness/true-peak
+output meters. Software defaults, node overrides, idle timing, and the local
+Earshot Off/Kerchunk/On modes are recorded in
+[ADR 0043](architecture/decisions/0043-shared-loudness-and-receive-vad.md).
+
+The recorded passive health interval verifies bounded operation, not listening,
+RF deviation, or model-specific hardware acceptance. Those checks and the
+future Hamlib streaming/audio-source integration remain separate work.
+
 ## Links and control
 
 Direct IAX2 links support transceive, monitor, and local-monitor modes. Local
