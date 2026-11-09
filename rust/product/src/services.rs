@@ -147,6 +147,30 @@ impl<P: rpt_advanced_core::link::PeerInput> rpt_advanced_core::link::PeerInput
     fn source_rate(&self) -> u32 {
         self.input.source_rate()
     }
+    fn receive_policy(&self) -> rpt_advanced_core::link::ReceivePolicy {
+        self.input.receive_policy()
+    }
+    fn source_timing_available(&self) -> bool {
+        self.processor.is_none() && self.input.source_timing_available()
+    }
+    fn render_timed_sample(&mut self) -> Option<rpt_advanced_core::link::TimedPeerSample> {
+        let mut sample = self.input.render_timed_sample()?;
+        if let Some(processor) = self.processor.as_mut() {
+            if !processor.process(std::slice::from_mut(&mut sample.sample)) {
+                return None;
+            }
+            // The existing graph contract does not locate retained output on
+            // its input timeline. Preserve PCM without inventing provenance.
+            sample.provenance = None;
+        }
+        if self.input.signals().dtmf_muted() {
+            sample.sample = 0.0;
+            if let Some(provenance) = sample.provenance.as_mut() {
+                provenance.muted = true;
+            }
+        }
+        Some(sample)
+    }
     fn signals(&self) -> &rpt_advanced_core::link::PeerSignals {
         self.input.signals()
     }

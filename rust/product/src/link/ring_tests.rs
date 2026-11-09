@@ -7,10 +7,46 @@ type MuteCallback =
     unsafe extern "C" fn(*mut ffi::rpcr3_ring, u64, *const MuteSpan, u32, *mut u32) -> i32;
 static MUTE_CALLBACK: OnceLock<MuteCallback> = OnceLock::new();
 thread_local! {
+    static TIMED_RESULT_MODE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     static PUSH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PUSH_SCRIPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PUSH_CANCEL: std::cell::Cell<Option<(*const std::sync::atomic::AtomicU64, u64, usize)>> = const { std::cell::Cell::new(None) };
     static GAP_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+unsafe extern "C" fn malformed_timed_sample(
+    _: *mut ffi::rpcr3_ring,
+    sample: *mut f32,
+    timing: *mut ffi::rpcr3_timed_sample_v1,
+) -> i32 {
+    // SAFETY: the consumer supplies complete writable stack records.
+    let (sample, timing) = unsafe { (&mut *sample, &mut *timing) };
+    *sample = 0.75;
+    match TIMED_RESULT_MODE.get() {
+        0 => return -3,
+        1 => timing.struct_size = 8,
+        2 => timing.reserved = 1,
+        _ => timing.source_fraction_billionths = 1_000_000_000,
+    }
+    0
+}
+
+#[test]
+fn timed_consumer_rejects_failed_or_malformed_provider_results() {
+    for mode in 0..4 {
+        TIMED_RESULT_MODE.set(mode);
+        // SAFETY: the copied table and original callbacks remain live until
+        // both endpoints drop at this iteration's end; no foreign state is used.
+        let (mut producer, mut consumer) = unsafe {
+            let mut api = *ffi::rpcr3_descriptor();
+            api.ring_consumer_render_sample_timed = Some(malformed_timed_sample);
+            InboundRing::from_descriptor(8000, InboundPolicy::Phone, Box::leak(Box::new(api)))
+        }
+        .unwrap();
+        assert_eq!(producer.write(&[0.25; 160]), Ok(160));
+        assert_eq!(consumer.render_timed_sample(), Err(RingError));
+        assert_eq!(consumer.observe().unwrap().available_samples, 160);
+    }
 }
 
 #[test]
@@ -149,6 +185,389 @@ fn ordinary_ring_accepts_pre_finite_prefix_but_echo_rejects_it_before_creation()
         assert_eq!(producer.write_tagged(&[0.25], 1, 0, &[]), Ok(1));
         assert!(InboundRing::from_descriptor(8000, InboundPolicy::Echo, pointer).is_err());
     }
+}
+
+#[test]
+fn finite_prefix_remains_readable_without_the_optional_timed_tail() {
+    // SAFETY: copied process-lifetime descriptor functions retain their original
+    // ABI. Only the readable prefix declaration is reduced for each case.
+    unsafe {
+        let original = *ffi::rpcr3_descriptor();
+        let timed = std::mem::offset_of!(ffi::rpcr3_descriptor, ring_consumer_render_sample_timed);
+        for size in [timed, timed + size_of::<usize>() - 1] {
+            let mut api = original;
+            api.struct_size = size as u32;
+            let pointer = Box::leak(Box::new(api));
+            let checked = checked_descriptor(pointer).unwrap();
+            assert!(
+                checked.ring_producer_finish.is_some(),
+                "complete finite prefix was discarded"
+            );
+            assert!(checked.ring_finish_status.is_some());
+            assert!(checked.ring_consumer_render_sample_timed.is_none());
+            assert!(InboundRing::from_descriptor(8000, InboundPolicy::Echo, pointer).is_ok());
+        }
+    }
+}
+
+#[test]
+fn timed_consumer_matches_actual_pcm_counts_and_retains_long_source_coordinates() {
+    for (generation, start) in [(0, 0), (7, u64::MAX - 1000)] {
+        let (mut producer, mut timed) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        let (mut reference_producer, mut reference) =
+            InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+        assert!(timed.timing_available());
+        assert_eq!(
+            producer.write_tagged(&[0.25; 640], generation, start, &[]),
+            Ok(640)
+        );
+        assert_eq!(
+            reference_producer.write_tagged(&[0.25; 640], generation, start, &[]),
+            Ok(640)
+        );
+        producer.finish().unwrap();
+        reference_producer.finish().unwrap();
+        let (mut positions, mut fractions, mut negative) = (0, false, false);
+        for _ in 0..4608 {
+            let actual = timed.render_timed_sample().unwrap();
+            let mut pcm = [0.0];
+            let real = reference.render(&mut pcm).unwrap();
+            let provenance = actual.provenance.unwrap();
+            assert_eq!(actual.sample.to_bits(), pcm[0].to_bits());
+            assert_eq!(provenance.real, real != 0);
+            if let Some(position) = provenance.position {
+                positions += 1;
+                assert_eq!(position.generation, generation);
+                assert!(position.fraction_billionths < 1_000_000_000);
+                fractions |= position.fraction_billionths != 0;
+                negative |= position.negative;
+                if start != 0 {
+                    assert!(position.frame > u64::MAX - 1100);
+                }
+            }
+        }
+        assert!(positions > 3000);
+        assert!(fractions);
+        assert_eq!(negative, start == 0);
+    }
+}
+
+#[test]
+fn timed_consumer_does_not_consume_an_untimed_prefix_or_relabel_untagged_pcm() {
+    // SAFETY: the complete copied finite prefix retains its original functions.
+    unsafe {
+        let mut api = *ffi::rpcr3_descriptor();
+        api.struct_size =
+            std::mem::offset_of!(ffi::rpcr3_descriptor, ring_consumer_render_sample_timed) as u32;
+        let (mut producer, mut consumer) =
+            InboundRing::from_descriptor(8000, InboundPolicy::Echo, Box::leak(Box::new(api)))
+                .unwrap();
+        assert_eq!(producer.write(&[0.25; 640]), Ok(640));
+        producer.finish().unwrap();
+        let before = consumer.observe().unwrap().available_samples;
+        assert!(!consumer.timing_available());
+        assert_eq!(consumer.render_timed_sample(), Err(RingError));
+        assert_eq!(consumer.observe().unwrap().available_samples, before);
+        let mut processed = crate::services::ProcessedPeer::new(consumer, None);
+        assert!(!processed.source_timing_available());
+        assert_eq!(PeerInput::render_timed_sample(&mut processed), None);
+        assert_eq!(processed.available(), before);
+        assert!(processed.render(&mut [0.0; 960]).unwrap() > 0);
+    }
+    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Echo).unwrap();
+    assert_eq!(producer.write(&[0.25; 640]), Ok(640));
+    producer.finish().unwrap();
+    for _ in 0..4000 {
+        assert_eq!(
+            consumer
+                .render_timed_sample()
+                .unwrap()
+                .provenance
+                .unwrap()
+                .position,
+            None
+        );
+    }
+}
+
+#[test]
+fn phone_tagged_prefix_preserves_crossing_future_and_lookback_mutes() {
+    for (start, end) in [(0, 320), (200, 320), (80, 240)] {
+        let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+        let spans = [MuteSpan { start, end }];
+        assert_eq!(producer.write_tagged(&[0.25; 320], 7, 0, &spans), Ok(160));
+        assert_eq!((spans[0].start, spans[0].end), (start, end));
+        assert_eq!(producer.write_tagged(&[0.25; 160], 7, 160, &spans), Ok(160));
+        for packet in 2..8 {
+            assert_eq!(
+                producer.write_tagged(&[0.25; 160], 7, packet * 160, &[]),
+                Ok(160)
+            );
+        }
+        let (mut heard_muted, mut heard_clear) = (false, false);
+        for _ in 0..3200 {
+            let sample = consumer.render_timed_sample().unwrap();
+            let timing = sample.provenance.unwrap();
+            let Some(position) = timing.position.filter(|position| !position.negative) else {
+                continue;
+            };
+            if position.frame >= start + 4 && position.frame + 4 < end {
+                heard_muted = true;
+                assert!(timing.muted);
+                assert_eq!(sample.sample, 0.0);
+            } else if position.frame > 32
+                && (position.frame + 4 < start || position.frame > end + 4)
+            {
+                heard_clear = true;
+                assert!(!timing.muted);
+                assert!(sample.sample.abs() > 0.1);
+            }
+        }
+        assert!((heard_muted, heard_clear) == (true, true));
+    }
+    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    for packet in 0..2 {
+        assert_eq!(
+            producer.write_tagged(&[0.25; 160], 7, packet * 160, &[]),
+            Ok(160)
+        );
+    }
+    let lookback = [MuteSpan { start: 0, end: 100 }];
+    assert_eq!(
+        producer.write_tagged(&[0.25; 320], 7, 320, &lookback),
+        Ok(160)
+    );
+    for packet in 3..8 {
+        assert_eq!(
+            producer.write_tagged(&[0.25; 160], 7, packet * 160, &[]),
+            Ok(160)
+        );
+    }
+    let mut heard = false;
+    for _ in 0..960 {
+        let sample = consumer.render_timed_sample().unwrap();
+        let timing = sample.provenance.unwrap();
+        if timing
+            .position
+            .is_some_and(|position| !position.negative && (32..80).contains(&position.frame))
+        {
+            heard = true;
+            assert!(timing.muted);
+            assert_eq!(sample.sample, 0.0);
+        }
+    }
+    assert!(heard);
+}
+
+#[test]
+fn phone_tagged_prefix_validates_the_original_offer_before_clipping() {
+    for (source_start, start, end, count) in [
+        (0, 200, 190, 1),
+        (0, 0, 321, 1),
+        (3000, 0, 100, 1),
+        (u64::MAX - 200, 0, 0, 0),
+        (0, 200, 320, 65),
+    ] {
+        let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+        let spans = vec![MuteSpan { start, end }; count];
+        assert_eq!(
+            producer.write_tagged(&[0.25; 320], 7, source_start, &spans),
+            Err(RingError)
+        );
+        assert_eq!(consumer.observe().unwrap().available_samples, 0);
+    }
+}
+
+#[test]
+fn phone_tagged_prefix_retries_after_zero_credit_without_advancing_source() {
+    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    for packet in 0..15 {
+        assert_eq!(
+            producer.write_tagged(&[0.25; 160], 7, packet * 160, &[]),
+            Ok(160)
+        );
+    }
+    let spans = [MuteSpan {
+        start: 2400,
+        end: 2720,
+    }];
+    assert_eq!(producer.write_tagged(&[0.25; 320], 7, 2400, &spans), Ok(0));
+    assert_eq!(consumer.observe().unwrap().available_samples, 2400);
+    assert!(consumer.render(&mut [0.0; 4096]).unwrap() > 0);
+    assert_eq!(
+        producer.write_tagged(&[0.25; 320], 7, 2400, &spans),
+        Ok(160)
+    );
+    assert_eq!(
+        producer.write_tagged(&[0.25; 160], 7, 2560, &spans),
+        Ok(160)
+    );
+    let mut heard = false;
+    for _ in 0..14_000 {
+        let sample = consumer.render_timed_sample().unwrap();
+        let timing = sample.provenance.unwrap();
+        if timing
+            .position
+            .is_some_and(|position| !position.negative && (2404..2716).contains(&position.frame))
+        {
+            heard = true;
+            assert!(timing.muted);
+            assert_eq!(sample.sample, 0.0);
+        }
+    }
+    assert!(heard);
+}
+
+#[test]
+fn timed_phone_prefix_gap_mute_and_reset_keep_actual_source_provenance() {
+    let (mut producer, mut consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    assert_eq!(producer.write_tagged(&[0.25; 320], 7, 0, &[]), Ok(160));
+    assert_eq!(producer.write_tagged(&[0.25; 160], 7, 160, &[]), Ok(160));
+    let mute = [MuteSpan {
+        start: 400,
+        end: 420,
+    }];
+    for start in [320, 480] {
+        let spans = if start == 320 { &mute[..] } else { &[] };
+        assert_eq!(
+            producer.write_tagged(&[0.25; 160], 7, start, spans),
+            Ok(160)
+        );
+    }
+    assert_eq!(producer.gap(8), Ok(8));
+    for packet in 0..6 {
+        assert_eq!(
+            producer.write_tagged(&[0.5; 160], 7, 648 + packet * 160, &[]),
+            Ok(160)
+        );
+    }
+    let (mut gap, mut plc, mut muted) = (false, false, false);
+    for _ in 0..10_000 {
+        let output = consumer.render_timed_sample().unwrap();
+        let source = output.provenance.unwrap();
+        if source.gap {
+            gap = true;
+            assert!(source.position.is_some());
+            plc |= source.plc && !source.real;
+        }
+        if source.muted {
+            muted = true;
+            assert_eq!(output.sample, 0.0);
+        }
+        if gap && plc && muted {
+            break;
+        }
+    }
+    assert!((gap, plc, muted) == (true, true, true));
+    producer.signals().set_dtmf_muted(true);
+    let output = consumer.render_timed_sample().unwrap();
+    assert_eq!(output.sample, 0.0);
+    assert!(output.provenance.unwrap().muted);
+    producer.signals().set_dtmf_muted(false);
+    consumer.reset().unwrap();
+    assert_eq!(
+        consumer
+            .render_timed_sample()
+            .unwrap()
+            .provenance
+            .unwrap()
+            .position,
+        None
+    );
+    for packet in 0..8 {
+        assert_eq!(
+            producer.write_tagged(&[0.75; 160], 8, 1000 + packet * 160, &[]),
+            Ok(160)
+        );
+    }
+    let mut mapped = 0;
+    for _ in 0..960 {
+        if let Some(position) = consumer
+            .render_timed_sample()
+            .unwrap()
+            .provenance
+            .unwrap()
+            .position
+        {
+            mapped += 1;
+            assert_eq!(position.generation, 8);
+        }
+    }
+    assert!(mapped > 0);
+}
+
+#[test]
+fn phone_ring_prepares_one_preroll_owner_and_bounded_source_prefixes() {
+    for rate in [0, 7999, 48001] {
+        assert!(InboundRing::open(rate, InboundPolicy::Phone).is_err());
+    }
+    for rate in [8000, 16000, 48000] {
+        let (mut producer, consumer) = InboundRing::open(rate, InboundPolicy::Phone).unwrap();
+        let observation = consumer.observe().unwrap();
+        assert_eq!(observation.reserve_samples, u64::from(rate) * 160 / 1000);
+        assert_eq!(observation.target_samples, observation.reserve_samples);
+        assert_eq!(observation.capacity_samples, u64::from(rate) * 300 / 1000);
+        let packet = rate as usize / 50;
+        let input = vec![0.25; packet + 1];
+        assert_eq!(producer.write(&input), Ok(packet));
+        assert_eq!(consumer.observe().unwrap().available_samples, packet as u64);
+        assert_eq!(producer.write(&input[packet..]), Ok(1));
+        assert_eq!(producer.gap(packet as u64 + 1), Ok(packet as u64));
+        assert_eq!(
+            consumer.observe().unwrap().available_samples,
+            (packet * 2 + 1) as u64
+        );
+    }
+}
+
+#[test]
+fn phone_policy_survives_processing_into_the_common_link_audio_gate() {
+    use crate::services::ProcessedPeer;
+    use rpt_advanced_core::{
+        audio::LinkAudioQueue,
+        controller::{ControllerSettings, CourtesySettings, NodeController},
+        link::{AudioPeer, LinkAudio, Mode, SourcePosition},
+    };
+    let (mut producer, consumer) = InboundRing::open(8000, InboundPolicy::Phone).unwrap();
+    for _ in 0..8 {
+        assert_eq!(producer.write(&[0.25; 160]), Ok(160));
+    }
+    let (outbound, _) = LinkAudioQueue::new(960, 64).unwrap().into_endpoints();
+    let peer = AudioPeer::new(
+        "200",
+        Mode::TRANSCEIVE,
+        ProcessedPeer::new(consumer, None),
+        outbound,
+        960,
+        0,
+    )
+    .unwrap();
+    let (mut links, _) = LinkAudio::new(vec![peer], 960).unwrap();
+    let (mut controller, _) = NodeController::new(
+        ControllerSettings {
+            hang_ms: 0,
+            ..ControllerSettings::default()
+        },
+        vec![],
+        vec![],
+        CourtesySettings::default(),
+    )
+    .unwrap();
+    let mut output = [0.0; 960];
+    links
+        .process(
+            &mut controller,
+            false,
+            &mut output,
+            SourcePosition::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        links.active_count(),
+        1,
+        "phone reserve must not wait for ordinary 260ms priming"
+    );
+    assert!(output.iter().any(|sample| sample.abs() > 0.1));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::Cell;
+use std::mem::size_of;
 thread_local! { static MODE: Cell<u8> = const { Cell::new(0) }; }
 static DESTROYED_FAILED_CONVERTER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -50,6 +51,42 @@ fn finite_egress_finishes_exact_source_budget_without_losing_fir_tail() {
                 .iter()
                 .all(|x| x.abs() < 0.00001)
         );
+    }
+}
+
+#[test]
+fn ordinary_egress_needs_only_the_complete_ordinary_abi2_prefix() {
+    // SAFETY: each aligned allocation contains the complete declared prefix;
+    // the copied provider functions remain process-owned until converter drop.
+    unsafe {
+        let original = *ffi::rptadv_samplerate_adapter_descriptor();
+        let bytes = std::mem::offset_of!(
+            ffi::rptadv_samplerate_adapter_descriptor,
+            converter_input_delay
+        );
+        let mut storage = vec![0_usize; bytes / size_of::<usize>()];
+        ptr::copy_nonoverlapping(
+            ptr::from_ref(&original).cast::<u8>(),
+            storage.as_mut_ptr().cast::<u8>(),
+            bytes,
+        );
+        let descriptor = storage
+            .as_mut_ptr()
+            .cast::<ffi::rptadv_samplerate_adapter_descriptor>();
+        ptr::addr_of_mut!((*descriptor).struct_size).write(bytes as u32);
+        for rate in [8000, 48000] {
+            let mut converter = Egress::from_descriptor(rate, 960, descriptor)
+                .expect("ordinary conversion must not require optional RF pacing");
+            let mut produced = converter.process(&[0.25; 960]).unwrap().len();
+            for _ in 0..16 {
+                let (tail, complete) = converter.finish().unwrap();
+                produced += tail.len();
+                if complete {
+                    break;
+                }
+            }
+            assert_eq!(produced, 960 * rate as usize / 48000);
+        }
     }
 }
 

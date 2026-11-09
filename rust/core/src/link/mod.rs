@@ -15,12 +15,13 @@ mod topology;
 
 pub use audio::{
     AudioPeer, DispatchProgress, GroupMemberSelection, GroupSelection, LinkAudio, LinkAudioStatus,
-    LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, SourcePosition,
+    LinkDispatcher, LocalMedia, LocalTextInput, PeerInput, SampleProvenance, SourceCoordinate,
+    SourcePosition, TimedPeerSample,
 };
 pub use echo_telemetry::EchoTelemetryPolicy;
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
 pub use identity::{EchoAlias, IdentityError, PeerAddress, PeerIdentity, ProtocolId};
-pub use peer::{Peer, ReceiveState};
+pub use peer::{Peer, ReceivePolicy, ReceiveState};
 pub use phone::{MailboxId, PhoneAccountId, PhoneCallId, PhoneSource};
 pub use protocol::{Protocol, Route};
 pub use signals::{PeerReply, PeerSignals};

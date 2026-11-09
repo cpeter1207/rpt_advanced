@@ -1,7 +1,7 @@
 [
   {
     "repository": "librptadvradio",
-    "sha": "804f05937a78948f700c2bd7fbb1e54994145029",
+    "sha": "581eec7bc938ea8642fc270d54a1f6255aa9544f",
     "packages": ["librptadvradio5", "librptadvradio-dev"]
   },
   {
@@ -45,12 +45,12 @@
   },
   {
     "repository": "rptadv-samplerate-adapter",
-    "sha": "55e09c0152afd44aa6cae164006186172bd06249",
+    "sha": "7c2081290fbaa6b23d8a46270b4a4797b7c94477",
     "packages": ["librptadv-samplerate-adapter2", "librptadv-samplerate-adapter-dev"]
   },
   {
     "repository": "rate_adjusting_pcm_ring",
-    "sha": "ec582ca7c9424963b8ab032d219b37acb0311f70",
+    "sha": "c8f32d5eb98f20f1be67230a43a76966ef8aa930",
     "packages": ["librate-adjusting-pcm-ring3", "librate-adjusting-pcm-ring3-dev"]
   },
   {

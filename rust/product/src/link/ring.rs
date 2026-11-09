@@ -1,6 +1,8 @@
 //! Checked binding to the released F32 ring; no conversion implementation lives here.
 use crate::abi as ffi;
-use rpt_advanced_core::link::{PeerInput, PeerSignals};
+use rpt_advanced_core::link::{
+    PeerInput, PeerSignals, ReceivePolicy, SampleProvenance, SourceCoordinate, TimedPeerSample,
+};
 use std::{
     ffi::CStr,
     mem::{offset_of, size_of},
@@ -20,6 +22,8 @@ pub struct RingError;
 pub enum InboundPolicy {
     /// Decoded network PCM uses G.711 PLC and the peer playout target.
     Peer,
+    /// Phone 8–48kHz PCM retains 160ms pre-roll in this existing inbound owner.
+    Phone,
     /// EchoLink selected-talker PCM, with explicit finite-burst drainage.
     Echo,
     /// Local RF uses silence on shortfall and only its captured squelch delay.
@@ -60,8 +64,11 @@ pub(crate) unsafe fn checked_descriptor(
     {
         return Err(RingError);
     }
+    let finite = offset_of!(ffi::rpcr3_descriptor, ring_consumer_render_sample_timed);
     let count = if length >= size_of::<ffi::rpcr3_descriptor>() {
         size_of::<ffi::rpcr3_descriptor>()
+    } else if length >= finite {
+        finite
     } else {
         prefix
     };
@@ -85,6 +92,7 @@ struct Shared {
     handle: NonNull<ffi::rpcr3_ring>,
     api: ffi::rpcr3_descriptor,
     input_rate: u32,
+    capacity_samples: u64,
     policy: InboundPolicy,
     finite: AtomicU64,
     signals: PeerSignals,
@@ -154,6 +162,7 @@ impl InboundRing {
         if input_rate == 0
             || (!media_rate && input_rate > 48000)
             || (media_rate && !(8000..=192000).contains(&input_rate))
+            || (matches!(policy, InboundPolicy::Phone) && input_rate < 8000)
         {
             return Err(RingError);
         }
@@ -193,6 +202,9 @@ impl InboundRing {
                     let capacity = (rate * 300 / 1000).max(512).max(target + 4096);
                     (reserve, target, capacity, 1)
                 }
+                InboundPolicy::Phone => {
+                    (rate * 160 / 1000, rate * 160 / 1000, rate * 300 / 1000, 1)
+                }
                 InboundPolicy::Local { squelch_delay_ms } => {
                     let delay = rate.checked_mul(squelch_delay_ms).ok_or(RingError)? / 1000;
                     (delay, delay, 14400, 0)
@@ -207,7 +219,11 @@ impl InboundRing {
                 output_rate_hz: 48000,
                 reserve_samples: reserve,
                 target_samples: target,
-                max_producer_samples: 4096,
+                max_producer_samples: if matches!(policy, InboundPolicy::Phone) {
+                    rate / 50
+                } else {
+                    4096
+                },
                 max_output_samples: 4096,
                 plc_mode,
             };
@@ -219,6 +235,7 @@ impl InboundRing {
                 handle: NonNull::new(handle).ok_or(RingError)?,
                 api,
                 input_rate,
+                capacity_samples: capacity,
                 policy,
                 finite: AtomicU64::new(0),
                 signals: PeerSignals::new(),
@@ -240,7 +257,8 @@ impl InboundProducer {
     pub fn signals(&self) -> &PeerSignals {
         &self.0.signals
     }
-    /// Publish a decoded F32 block once; return the accepted leading sample count.
+    /// Publish once and return the accepted leading count. Phone writes offer at
+    /// most 20ms; the producer retains and retries the complete unaccepted tail.
     pub fn write(&mut self, samples: &[f32]) -> Result<usize, RingError> {
         let mut accepted = 0;
         // SAFETY: this noncloneable endpoint is the only producer; the slice is live.
@@ -248,7 +266,7 @@ impl InboundProducer {
             (self.0.api.ring_producer_push.unwrap())(
                 self.0.handle.as_ptr(),
                 samples.as_ptr(),
-                samples.len() as u64,
+                self.0.producer_prefix(samples.len() as u64),
                 &mut accepted,
             )
         };
@@ -262,8 +280,10 @@ impl InboundProducer {
             Err(RingError)
         }
     }
-    /// Publish tags before their accepted PCM prefix. Retries retain original
-    /// source positions; a new generation requires a quiescent consumer reset.
+    /// Publish tags before their accepted PCM prefix. Phone offers validate the
+    /// complete original intervals, then forward only their offered prefix.
+    /// Retries retain original source positions and intervals with unaccepted PCM;
+    /// a new generation requires a quiescent consumer reset.
     pub fn write_tagged(
         &mut self,
         samples: &[f32],
@@ -272,12 +292,40 @@ impl InboundProducer {
         spans: &[MuteSpan],
     ) -> Result<usize, RingError> {
         let operation = self.0.api.ring_producer_push_tagged.ok_or(RingError)?;
+        let offered = self.0.producer_prefix(samples.len() as u64);
+        let mut prefix_spans =
+            [MuteSpan { start: 0, end: 0 }; ffi::RPCR3_MAXIMUM_MUTE_SPANS as usize];
+        let spans = if offered < samples.len() as u64 {
+            let original_end = start.checked_add(samples.len() as u64).ok_or(RingError)?;
+            let oldest = start.saturating_sub(self.0.capacity_samples);
+            if spans.len() > prefix_spans.len()
+                || spans.iter().any(|span| {
+                    span.start >= span.end || span.end > original_end || span.start < oldest
+                })
+            {
+                return Err(RingError);
+            }
+            let prefix_end = start + offered;
+            let mut count = 0;
+            for span in spans {
+                if span.start < prefix_end {
+                    prefix_spans[count] = MuteSpan {
+                        start: span.start,
+                        end: span.end.min(prefix_end),
+                    };
+                    count += 1;
+                }
+            }
+            &prefix_spans[..count]
+        } else {
+            spans
+        };
         let mut accepted = 0;
         let code = unsafe {
             operation(
                 self.0.handle.as_ptr(),
                 samples.as_ptr(),
-                samples.len() as u64,
+                offered,
                 generation,
                 start,
                 spans.as_ptr(),
@@ -316,7 +364,11 @@ impl InboundProducer {
         // SAFETY: this noncloneable endpoint is the only producer; the checked
         // descriptor retains this tail callback for the ring's whole lifetime.
         let code = unsafe {
-            (self.0.api.ring_producer_gap.unwrap())(self.0.handle.as_ptr(), samples, &mut accepted)
+            (self.0.api.ring_producer_gap.unwrap())(
+                self.0.handle.as_ptr(),
+                self.0.producer_prefix(samples),
+                &mut accepted,
+            )
         };
         if code == 0 {
             if accepted != 0 {
@@ -360,6 +412,18 @@ impl PeerInput for InboundConsumer {
     fn source_rate(&self) -> u32 {
         self.0.input_rate
     }
+    fn receive_policy(&self) -> ReceivePolicy {
+        match self.0.policy {
+            InboundPolicy::Phone => ReceivePolicy::Phone,
+            _ => ReceivePolicy::Peer,
+        }
+    }
+    fn source_timing_available(&self) -> bool {
+        self.timing_available()
+    }
+    fn render_timed_sample(&mut self) -> Option<TimedPeerSample> {
+        InboundConsumer::render_timed_sample(self).ok()
+    }
     fn signals(&self) -> &PeerSignals {
         &self.0.signals
     }
@@ -379,6 +443,63 @@ impl PeerInput for InboundConsumer {
     }
 }
 impl InboundConsumer {
+    /// Whether the copied readable descriptor includes the optional timed primitive.
+    pub fn timing_available(&self) -> bool {
+        self.0.api.ring_consumer_render_sample_timed.is_some()
+    }
+
+    /// Render one actual source-timed sample. Missing capability is an explicit
+    /// error without consumption; no source age or wall-clock value is invented.
+    pub fn render_timed_sample(&mut self) -> Result<TimedPeerSample, RingError> {
+        let render = self
+            .0
+            .api
+            .ring_consumer_render_sample_timed
+            .ok_or(RingError)?;
+        let mut sample = 0.0;
+        let mut timing = ffi::rpcr3_timed_sample_v1 {
+            struct_size: size_of::<ffi::rpcr3_timed_sample_v1>() as u32,
+            flags: 0,
+            generation: 0,
+            source_frame: 0,
+            source_fraction_billionths: 0,
+            reserved: 0,
+        };
+        // SAFETY: this unique consumer owns the shared PCM path; both complete
+        // outputs remain writable throughout the synchronous provider call.
+        let code = unsafe { render(self.0.handle.as_ptr(), &mut sample, &mut timing) };
+        if code != 0
+            || timing.struct_size < size_of::<ffi::rpcr3_timed_sample_v1>() as u32
+            || timing.reserved != 0
+            || timing.source_fraction_billionths >= 1_000_000_000
+        {
+            return Err(RingError);
+        }
+        let mut provenance = SampleProvenance {
+            position: (timing.flags & ffi::RPCR3_TIMED_POSITION_VALID != 0).then_some(
+                SourceCoordinate {
+                    generation: timing.generation,
+                    frame: timing.source_frame,
+                    fraction_billionths: timing.source_fraction_billionths,
+                    negative: timing.flags & ffi::RPCR3_TIMED_NEGATIVE != 0,
+                },
+            ),
+            real: timing.flags & ffi::RPCR3_TIMED_REAL != 0,
+            plc: timing.flags & ffi::RPCR3_TIMED_PLC != 0,
+            gap: timing.flags & ffi::RPCR3_TIMED_GAP != 0,
+            muted: timing.flags & ffi::RPCR3_TIMED_MUTED != 0,
+            zero_extension: timing.flags & ffi::RPCR3_TIMED_ZERO_EXTENSION != 0,
+        };
+        if self.0.signals.dtmf_muted() {
+            sample = 0.0;
+            provenance.muted = true;
+        }
+        Ok(TimedPeerSample {
+            sample,
+            provenance: Some(provenance),
+        })
+    }
+
     /// Render with the prepared immutable policy; the library classifies real PCM.
     pub fn render(&mut self, samples: &mut [f32]) -> Result<usize, RingError> {
         let mut real = 0;
@@ -433,6 +554,14 @@ impl InboundConsumer {
     }
 }
 impl Shared {
+    fn producer_prefix(&self, samples: u64) -> u64 {
+        if matches!(self.policy, InboundPolicy::Phone) {
+            samples.min(u64::from(self.input_rate) / 50)
+        } else {
+            samples
+        }
+    }
+
     fn finish_status(&self, token: u64) -> Result<FinishState, RingError> {
         let query = self.api.ring_finish_status.ok_or(RingError)?;
         let mut status = u32::MAX;

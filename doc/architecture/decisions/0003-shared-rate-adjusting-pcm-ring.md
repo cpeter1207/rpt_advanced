@@ -116,6 +116,23 @@ move together to ABI 3 so a mixed installation cannot call an incompatible
 function table. This migration changes neither native routing nor signaling,
 generation ownership, or callback pacing.
 
+## Prepared phone profile (accepted 2026-11-09; consumer integration unreleased)
+
+Phone ingress prepares 160 ms reserve and target in this same inbound ring,
+including its VAD pre-roll. It does not add a second delay queue. Capacity is
+300 ms, with a source-rate 20 ms maximum producer prefix and the existing
+4096-frame native render bound. Producers retain and retry only the unaccepted
+tail. The matching core receive policy uses this 160 ms target; ordinary peer
+and EchoLink priming retain 260 ms. Processing wrappers preserve that immutable
+policy when transferring the unique consumer into its audio generation.
+
+These ring values are separate from the proposed phone packet-jitter profile
+of 20/40/100 ms. They do not prove total 250/500 ms local age, which must include
+DSP, source mapping and physical presentation. Optional timed rendering retains
+the existing finite descriptor prefix. Unmapped or opaque post-DSP positions
+remain unknown, never assigned current source time. Provider-backed attachment
+and RF receive-opportunity scheduling remain separate work under ADR 0044.
+
 ## libswresample conversion (2026-09-28)
 
 The ring uses samplerate adapter ABI 2, backed by dynamically linked FFmpeg
