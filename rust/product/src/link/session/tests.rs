@@ -38,6 +38,7 @@ pub(crate) struct State {
     no_async_thread: bool,
     pub(crate) continuous_async: bool,
     pub(crate) observe_calls: usize,
+    pub(crate) echo_observation: Option<abi::rptadv_peer_observation_v1>,
     pub(crate) fail_observe: bool,
     pub(crate) bad_observe_size: bool,
     pub(crate) bad_observe_version: bool,
@@ -1376,6 +1377,9 @@ unsafe extern "C" fn observe_peer(
             // This fixture's legacy observer supplies no Echo metadata.
             ..std::mem::zeroed()
         };
+        if let Some(observation) = state.echo_observation {
+            *output = observation;
+        }
         if state.bad_observe_size {
             (*output).struct_size -= 1;
         }

@@ -74,6 +74,62 @@ fn host() -> Host {
 }
 
 #[test]
+fn dtmf_macro_host_pump_advances_without_civil_scheduling_and_new_input_cancels_due_work() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = Host::start(
+        document(
+            "usb",
+            "[dtmf_macro status]\ntrigger=*95\nprotected=no\ncommands=*70#,*73#\n",
+        ),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    for digit in "*95".chars() {
+        assert!(
+            host.runtime
+                .digit("1000", DigitEvent::Digit { digit, now_ms: 10 })
+                .is_none()
+        );
+    }
+    host.pump(RuntimeClock {
+        civil: None,
+        ..clock()
+    })
+    .unwrap();
+    let operations = host.take_operations();
+    assert!(
+        matches!(operations.as_slice(), [(local, DigitOutcome::Operation(operation))] if local == "1000" && operation.command.action == LinkAction::Status)
+    );
+    host.pump(RuntimeClock {
+        now_ms: 2009,
+        civil: None,
+        ..clock()
+    })
+    .unwrap();
+    assert!(host.take_operations().is_empty());
+    host.runtime.digit(
+        "1000",
+        DigitEvent::Digit {
+            digit: '*',
+            now_ms: 2010,
+        },
+    );
+    host.pump(RuntimeClock {
+        now_ms: 2010,
+        civil: None,
+        ..clock()
+    })
+    .unwrap();
+    assert!(host.take_operations().is_empty());
+    assert!(host.stop(2020));
+}
+
+#[test]
 fn echo_alias_routing_precedes_allstar_directory_lookup() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -171,6 +227,59 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
 }
 
 #[test]
+fn echo_disconnect_announces_and_releases_the_verified_peer() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = Host::start(
+        document(
+            "usb",
+            "[morse]\nspeed_wpm=100\n[echolink 1000]\nannouncement=callsign\n",
+        ),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let (echo, state) = crate::link::session::tests::source_peer();
+    state.lock().unwrap().continuous_async = true;
+    host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        named_peer_ready(host, "3002000")
+            && host
+                .runtime
+                .status(clock().now_ms)
+                .iter()
+                .all(|(_, status)| status.retiring.is_none())
+    });
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    assert!(render_queued_telemetry(&mut host, &mut owners));
+    let effect = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::Disconnect, "3002000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    host.immediate("1000", effect, clock()).unwrap();
+    assert!(render_queued_telemetry(&mut host, &mut owners));
+    pump_until(&mut host, |_| state.lock().unwrap().drops == 1);
+    assert!(host.peers.is_empty());
+    assert!(
+        host.status_text("1000")
+            .unwrap()
+            .contains("no active links")
+    );
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn echo_account_status_is_visible_without_active_links() {
     unsafe extern "C" fn failed_status(
         _: *mut c_void,
@@ -194,7 +303,62 @@ fn echo_account_status_is_visible_without_active_links() {
     let text = host.status_text("1000").unwrap();
     assert!(text.contains("no active links"), "{text}");
     assert!(text.contains("echo-account status-unavailable"), "{text}");
+    table.echo_account_status = None;
+    host.services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let text = host.status_text("1000").unwrap();
+    assert!(text.contains("no active links"), "{text}");
+    assert!(!text.contains("echo-account"), "{text}");
     assert!(host.stop(20));
+}
+
+#[test]
+fn echo_status_reports_provider_metadata_from_the_peer_owner() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let (echo, state) = crate::link::session::tests::source_peer();
+    let mut observation = abi::rptadv_peer_observation_v1 {
+        struct_size: std::mem::size_of::<abi::rptadv_peer_observation_v1>() as u32,
+        abi_version: abi::RPTADV_PEER_OBSERVATION_ABI_VERSION,
+        echo_valid: 1,
+        echo_state: 1,
+        echo_codec: 1,
+        echo_transport: 1,
+        echo_raw_receiving: 1,
+        echo_selected: 1,
+        echo_last_valid_age_ms: 42,
+        echo_heartbeat_due_ms: u64::MAX,
+        echo_liveness_due_ms: u64::MAX,
+        echo_ingress_bytes: 128,
+        ingress_capacity_packets: 64,
+        // SAFETY: the observation is a scalar-only ABI record with optional zero counters.
+        ..unsafe { std::mem::zeroed() }
+    };
+    observation.echo_cause_detail[..6].copy_from_slice(b"Active");
+    {
+        let mut state = state.lock().unwrap();
+        state.continuous_async = true;
+        state.echo_observation = Some(observation);
+    }
+    host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        host.status_text("1000")
+            .unwrap()
+            .contains("echo state=connected")
+    });
+    let status = host.status_text("1000").unwrap();
+    assert!(status.contains("cause=none detail=\"Active\""), "{status}");
+    assert!(
+        status.contains("codec=speex transport=proxy raw-receiving=1 selected=1"),
+        "{status}"
+    );
+    assert!(status.contains("last-valid-age=42ms"), "{status}");
+    assert!(status.contains("heartbeat-in=inactive"), "{status}");
+    assert!(status.contains("ingress-retained-bytes=128"), "{status}");
+    assert!(state.lock().unwrap().observe_calls > 0);
+    assert!(host.stop(20));
+    assert_eq!(state.lock().unwrap().drops, 1);
 }
 
 #[test]
@@ -2252,19 +2416,33 @@ fn failed_audio_preparation_and_attachment_preserve_start_and_reload_state() {
 
 #[test]
 fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     struct State {
         reject: AtomicBool,
-        prepared: AtomicUsize,
-        destroyed: AtomicUsize,
+        next: AtomicUsize,
+        prepared: Mutex<BTreeMap<usize, f64>>,
+        destroyed: Mutex<BTreeSet<usize>>,
+        processed: AtomicUsize,
     }
-    unsafe extern "C" fn process(_: *mut c_void, _: *mut f32, _: usize) -> i32 {
+    struct Processor {
+        state: *const State,
+        id: usize,
+    }
+    unsafe extern "C" fn process(context: *mut c_void, _: *mut f32, _: usize) -> i32 {
+        let processor = unsafe { &*context.cast::<Processor>() };
+        unsafe { &*processor.state }
+            .processed
+            .store(processor.id, Ordering::Release);
         0
     }
     unsafe extern "C" fn destroy(context: *mut c_void) {
-        unsafe { &*context.cast::<State>() }
-            .destroyed
-            .fetch_add(1, Ordering::Relaxed);
+        let processor = unsafe { Box::from_raw(context.cast::<Processor>()) };
+        let state = unsafe { &*processor.state };
+        let fresh = state.destroyed.lock().unwrap().insert(processor.id);
+        assert!(fresh, "each prepared processor is destroyed exactly once");
     }
     unsafe extern "C" fn prepare(
         context: *mut c_void,
@@ -2284,7 +2462,6 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
         }
         .unwrap();
         assert!(configuration.starts_with("[1000]\n[link]\n"));
-        assert!(configuration.contains("limiter_low_threshold_dbfs="));
         assert_eq!(
             unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) },
             b"1000"
@@ -2293,20 +2470,53 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
         if state.reject.load(Ordering::Relaxed) {
             return -1;
         }
-        state.prepared.fetch_add(1, Ordering::Relaxed);
+        let threshold = configuration
+            .lines()
+            .find_map(|line| line.strip_prefix("limiter_low_threshold_dbfs="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let id = state.next.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            state
+                .prepared
+                .lock()
+                .unwrap()
+                .insert(id, threshold)
+                .is_none()
+        );
         let output = unsafe { &mut *output };
-        output.context = context;
+        output.context = Box::into_raw(Box::new(Processor { state, id })).cast();
         output.process = Some(process);
         output.destroy = Some(destroy);
         0
+    }
+    fn only_live(state: &State, expected_threshold: f64) -> usize {
+        let prepared = state.prepared.lock().unwrap().clone();
+        let destroyed = state.destroyed.lock().unwrap().clone();
+        assert!(destroyed.iter().all(|id| prepared.contains_key(id)));
+        let live: Vec<_> = prepared
+            .iter()
+            .filter(|(id, _)| !destroyed.contains(id))
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "discarded candidates retire; one adopted processor remains live"
+        );
+        let (&id, &threshold) = live[0];
+        assert_eq!(threshold, expected_threshold);
+        id
     }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut state = Box::new(State {
         reject: AtomicBool::new(false),
-        prepared: AtomicUsize::new(0),
-        destroyed: AtomicUsize::new(0),
+        next: AtomicUsize::new(1),
+        prepared: Mutex::new(BTreeMap::new()),
+        destroyed: Mutex::new(BTreeSet::new()),
+        processed: AtomicUsize::new(0),
     });
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::from_mut(state.as_mut()).cast();
@@ -2319,14 +2529,20 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
         )
     };
     let mut host = Host::start(config(-10), media(), services, Instant::now(), clock()).unwrap();
-    assert_eq!(state.prepared.load(Ordering::Relaxed), 0);
+    assert!(state.prepared.lock().unwrap().is_empty());
     let _peer = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
-    assert_eq!(state.prepared.load(Ordering::Relaxed), 1);
+    let original = only_live(&state, -10.0);
+    pump_until(&mut host, |_| {
+        state.processed.load(Ordering::Acquire) == original
+    });
     let prior_document = host.runtime.document().clone();
     let prior_revision = host.runtime.revision();
+    let prior_generation = host.runtime.status(10)[0].1.active;
+    let prepared = state.prepared.lock().unwrap().clone();
+    let destroyed = state.destroyed.lock().unwrap().clone();
     state.reject.store(true, Ordering::Relaxed);
     assert_eq!(
         host.reload(config(-11), clock()),
@@ -2334,16 +2550,52 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
     );
     assert_eq!(host.runtime.document(), &prior_document);
     assert_eq!(host.runtime.revision(), prior_revision);
-    assert_eq!(state.destroyed.load(Ordering::Relaxed), 0);
+    assert_eq!(host.runtime.status(10)[0].1.active, prior_generation);
+    let after_prepared = state.prepared.lock().unwrap().clone();
+    let after_destroyed = state.destroyed.lock().unwrap().clone();
+    assert_eq!(after_prepared, prepared);
+    assert_eq!(after_destroyed, destroyed);
+    assert_eq!(only_live(&state, -10.0), original);
+    state.processed.store(0, Ordering::Release);
+    pump_until(&mut host, |_| {
+        state.processed.load(Ordering::Acquire) == original
+    });
     state.reject.store(false, Ordering::Relaxed);
-    host.reload(config(-11), clock()).unwrap();
+    let mut accepted = None;
+    pump_until(&mut host, |host| match host.reload(config(-11), clock()) {
+        Err(RuntimeError::Busy) => {
+            // Discarded candidates may still occupy dispatcher publication credit.
+            // Busy never changes the adopted configuration or processor.
+            assert_eq!(host.runtime.document(), &prior_document);
+            assert_eq!(host.runtime.revision(), prior_revision);
+            assert_eq!(host.runtime.status(10)[0].1.active, prior_generation);
+            assert_eq!(only_live(&state, -10.0), original);
+            false
+        }
+        result => {
+            accepted = Some(result);
+            true
+        }
+    });
+    accepted
+        .expect("bounded control pump observed a non-Busy result")
+        .unwrap();
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
-    assert_eq!(state.prepared.load(Ordering::Relaxed), 2);
-    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+    let replacement = only_live(&state, -11.0);
+    assert_ne!(replacement, original);
+    pump_until(&mut host, |_| {
+        state.processed.load(Ordering::Acquire) == replacement
+    });
+    assert!(state.destroyed.lock().unwrap().contains(&original));
     assert!(host.stop(20));
-    assert_eq!(state.destroyed.load(Ordering::Relaxed), 2);
+    let prepared: BTreeSet<_> = state.prepared.lock().unwrap().keys().copied().collect();
+    let destroyed = state.destroyed.lock().unwrap().clone();
+    assert_eq!(
+        prepared, destroyed,
+        "every successful preparation, including discarded candidates, retires at shutdown"
+    );
 }
 
 #[test]

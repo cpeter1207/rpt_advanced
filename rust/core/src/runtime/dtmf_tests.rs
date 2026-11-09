@@ -1,5 +1,151 @@
 use super::*;
 
+fn macro_commands(stream: &str, protected: bool) -> DtmfCommands {
+    let settings = crate::config::ResolvedDtmfMacroSettings {
+        name: "test".into(),
+        trigger: "*95".into(),
+        protected,
+        commands: stream.into(),
+    };
+    let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+    let map = DtmfCommandMap::standard();
+    let compiled =
+        crate::dtmf_macro::compile(&settings, limits, &map, "1000", &["*95".into()]).unwrap();
+    let mut commands = DtmfCommands::new(map);
+    commands.configure_macros(vec![compiled], limits).unwrap();
+    commands
+}
+
+#[test]
+fn dtmf_macro_runner_uses_monotonic_pauses_and_survives_real_unkey() {
+    let mut commands = macro_commands("*70#,,*73#", false);
+    assert!(feed_symbols(&mut commands, "*95").is_empty());
+    let first = commands.advance_macro(1).unwrap();
+    assert_eq!(first.command.action, LinkAction::Status);
+    commands.feed(DigitEvent::Unkey { now_ms: 2 });
+    assert!(commands.advance_macro(4000).is_none());
+    let second = commands.advance_macro(4001).unwrap();
+    assert_eq!(second.command.action, LinkAction::FullStatus);
+    assert!(commands.advance_macro(4002).is_none());
+    assert!(commands.macro_operation_current(&first, 4002));
+}
+
+#[test]
+fn dtmf_macro_runner_rechecks_source_grants_without_renewal() {
+    let mut commands = macro_commands("*70#,*804#", true);
+    feed_symbols(&mut commands, "*95");
+    assert!(commands.advance_macro(1).is_none());
+    commands.admin_until_ms = 1000;
+    feed_symbols(&mut commands, "*95");
+    let first = commands.advance_macro(1).unwrap();
+    assert_eq!(commands.admin_until_ms, 1000);
+    assert!(commands.macro_operation_current(&first, 999));
+    assert!(!commands.macro_operation_current(&first, 1000));
+    let mut other = commands.for_source();
+    feed_symbols(&mut other, "*95");
+    assert!(other.advance_macro(1).is_none());
+    assert!(commands.advance_macro(2001).is_none());
+    assert!(!commands.macro_operation_current(&first, 2001));
+    let mut public = macro_commands("*804#", false);
+    feed_symbols(&mut public, "*95");
+    assert!(public.advance_macro(1).is_none());
+}
+
+#[test]
+fn dtmf_macro_runner_self_revoke_never_uses_a_stored_lock_credential() {
+    let mut commands = macro_commands("*801#*804#", false);
+    commands.admin_until_ms = 1000;
+    feed_symbols(&mut commands, "*95");
+    assert!(commands.advance_macro(1).is_none());
+    assert_eq!(commands.admin_until_ms, 0);
+    assert!(commands.advance_macro(2).is_none());
+}
+
+#[test]
+fn dtmf_macro_runner_cancels_queued_work_and_bounds_actual_elapsed_time() {
+    for event in [
+        DigitEvent::Lost,
+        DigitEvent::Digit {
+            digit: '*',
+            now_ms: 2,
+        },
+    ] {
+        let mut commands = macro_commands("*70#,*73#", false);
+        feed_symbols(&mut commands, "*95");
+        let queued = commands.advance_macro(1).unwrap();
+        commands.feed(event);
+        assert!(!commands.macro_operation_current(&queued, 2));
+        assert!(commands.advance_macro(2001).is_none());
+    }
+    let mut commands = macro_commands("*70#,*73#", false);
+    feed_symbols(&mut commands, "*95");
+    assert!(commands.advance_macro(120002).is_none());
+}
+
+#[test]
+fn dtmf_macro_runner_preserves_the_human_remote_selection() {
+    let mut commands = macro_commands("*41000#*70#", false);
+    feed_symbols(&mut commands, "*95");
+    // Destination selection is separate from the human forwarding field.
+    commands.remote = "2000".into();
+    let operation = commands.advance_macro(1).unwrap();
+    assert_eq!(operation.command.action, LinkAction::Status);
+    assert_eq!(commands.remote, "2000");
+}
+
+#[test]
+fn dtmf_macro_remote_policy_change_revokes_old_queue_and_preserves_valid_triggers() {
+    let mut commands = macro_commands("*70#,*73#", false);
+    feed_symbols(&mut commands, "*95");
+    let queued = commands.advance_macro(1).unwrap();
+    commands
+        .configure_remote("6", crate::remote_base_command::RemoteDtmfAccess::Disabled)
+        .unwrap();
+    assert!(!commands.macro_operation_current(&queued, 2));
+    feed_symbols(&mut commands, "*95");
+    assert!(commands.advance_macro(1).is_some());
+}
+
+#[test]
+fn dtmf_macro_runner_and_dispatch_include_the_exact_duration_limit() {
+    let stream = format!("*70#{}*73#", ",".repeat(60));
+    let mut commands = macro_commands(&stream, false);
+    feed_symbols(&mut commands, "*95");
+    let queued = commands.advance_macro(1).unwrap();
+    assert!(commands.macro_operation_current(&queued, 120001));
+    let final_command = commands
+        .advance_macro(120001)
+        .expect("exact 120000 ms is within the configured limit");
+    assert_eq!(final_command.command.action, LinkAction::FullStatus);
+    assert!(commands.macro_operation_current(&final_command, 120001));
+    assert!(!commands.macro_operation_current(&final_command, 120002));
+    let mut late = macro_commands(&stream, false);
+    feed_symbols(&mut late, "*95");
+    late.advance_macro(1).unwrap();
+    assert!(late.advance_macro(120002).is_none());
+}
+
+#[test]
+fn dtmf_macro_complete_command_backstop_cannot_unlock_lock_or_start_capture() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    let mut commands = DtmfCommands::new(DtmfCommandMap::standard());
+    commands.configure_admin(&digest, &digest, 1000);
+    assert!(commands.complete_command("8001234", 1, false).is_none());
+    assert!(enter(&mut commands, "*804", 2).is_none());
+    assert!(enter(&mut commands, "*8001234#", 3).is_none());
+    assert!(commands.complete_command("8011234", 4, false).is_none());
+    assert!(commands.complete_command("82", 5, false).is_none());
+    assert!(enter(&mut commands, "*804", 6).is_some());
+    assert_eq!(
+        enter(&mut commands, "*70", 7).unwrap().command.action,
+        LinkAction::Status
+    );
+}
+
 #[test]
 fn remote_dtmf_enforces_source_authorization_and_keeps_typed_payloads() {
     use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};

@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "rpt-advanced-core"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "argon2",
  "fluent-bundle",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "rpt-advanced-standalone"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "bindgen",
  "crossbeam-queue",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "rptadv-asterisk-adapter"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "bindgen",
  "libloading",
@@ -586,21 +586,21 @@ dependencies = [
 
 [[package]]
 name = "rptadv-control-asterisk-adapter"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "rptadv-control-standalone-adapter"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "crossbeam-queue",
 ]
 
 [[package]]
 name = "rptadv-file-adapter"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "libc",
  "rpt-advanced-core",
@@ -622,18 +622,18 @@ dependencies = [
 
 [[package]]
 name = "rptadv-jitter-adapter"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "rptadv-jitter-client"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 
 [[package]]
 name = "rptadv-peer-support"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "libc",
  "libloading",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "rptadv-product"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "bindgen",
  "crossbeam-queue",
@@ -662,14 +662,14 @@ dependencies = [
 
 [[package]]
 name = "rptadv-resolver-adapter"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "bindgen",
 ]
 
 [[package]]
 name = "rptadv-speech-adapter"
-version = "0.1.0-alpha22"
+version = "0.1.0-alpha23"
 dependencies = [
  "libc",
  "rpt-advanced-core",

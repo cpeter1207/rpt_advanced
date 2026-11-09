@@ -1462,7 +1462,7 @@ fn lookup_valid<T>(
     None
 }
 
-fn command_keys() -> [&'static str; crate::command::ACTION_COUNT] {
+pub(super) fn command_keys() -> [&'static str; crate::command::ACTION_COUNT] {
     [
         "link_command_disconnect",
         "link_command_monitor",
@@ -1530,7 +1530,7 @@ fn valid_argon2id(value: &str) -> Option<String> {
     (hash.algorithm.as_str() == "argon2id").then(|| value.to_owned())
 }
 
-fn command_action(key: &str) -> Option<LinkAction> {
+pub(super) fn command_action(key: &str) -> Option<LinkAction> {
     Some(match key {
         "link_command_disconnect" => LinkAction::Disconnect,
         "link_command_monitor" => LinkAction::Monitor,

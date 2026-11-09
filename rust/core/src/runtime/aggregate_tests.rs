@@ -68,6 +68,77 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn dtmf_macro_reload_prepares_catalog_and_retires_already_queued_work() {
+    use crate::runtime::dtmf::{DigitEvent, DigitOutcome};
+    let document = ConfigDocument::parse(
+        "[1000]\n[dtmf_macro status]\ntrigger=*95\nprotected=no\ncommands=*41000#*70#,*73#\n",
+    )
+    .unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        document,
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    assert!(runtime.warnings().is_empty());
+    for digit in "*95".chars() {
+        assert!(
+            runtime
+                .digit(
+                    "1000",
+                    DigitEvent::Digit {
+                        digit,
+                        now_ms: 1000
+                    }
+                )
+                .is_none()
+        );
+    }
+    let queued = runtime.node("1000").unwrap().links().advance_macros(1000);
+    let [DigitOutcome::Operation(operation)] = queued.as_slice() else {
+        panic!("macro prepared before publication")
+    };
+    assert_eq!(operation.command.action, LinkAction::Status);
+    runtime
+        .reload(
+            ConfigDocument::parse("[1000]\n").unwrap(),
+            &Media,
+            adapter,
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+            RuntimeClock {
+                now_ms: 1001,
+                ..clock()
+            },
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .command(
+                "1000",
+                operation.clone(),
+                RuntimeClock {
+                    now_ms: 1002,
+                    ..clock()
+                },
+                false
+            )
+            .is_err()
+    );
+    assert!(
+        runtime
+            .node("1000")
+            .unwrap()
+            .links()
+            .advance_macros(3000)
+            .is_empty()
+    );
+    assert!(runtime.stop(3001));
+}
+
+#[test]
 fn legacy_event_selectors_share_admission_and_do_not_consume_calendar_or_macros() {
     for (media, expected, linked) in [
         ("message=Report\n", "Report", false),
@@ -3598,6 +3669,33 @@ fn link_notice_runtime(document: &str, reject_connect: Arc<AtomicBool>) -> Runti
         clock(),
     )
     .unwrap()
+}
+
+#[test]
+fn disabled_echo_announcements_do_not_queue_audio_or_suppress_ordinary_links() {
+    let mut runtime = link_notice_runtime(
+        "[1000]\n[echolink]\nannouncement=off\n",
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (_, mut tx) = runtime.node("1000").unwrap().register_audio().unwrap();
+    runtime
+        .queue_echo_link_event("1000", "3002000", "K0TEST", true)
+        .unwrap();
+    let mut output = [0.0; 12016];
+    tx.acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    assert!(output.iter().all(|sample| *sample == 0.0));
+    runtime.queue_link_event("1000", "2000", true).unwrap();
+    tx.acquire()
+        .unwrap()
+        .state()
+        .controller
+        .process_audio(false, false, &[], &mut output);
+    assert_eq!(output.iter().filter(|sample| **sample == 0.25).count(), 4);
+    assert!(runtime.stop(0));
 }
 
 #[test]

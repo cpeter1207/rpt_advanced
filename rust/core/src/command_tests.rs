@@ -1,5 +1,39 @@
 use super::{CommandMapError, CommandMapping, DtmfCommandMap, LinkAction};
 
+#[test]
+fn dtmf_macro_triggers_share_collection_and_cannot_shadow_any_command_family() {
+    for triggers in [
+        vec!["3"],
+        vec!["391"],
+        vec!["7"],
+        vec!["95", "951"],
+        vec!["95", "95"],
+        vec!["951", "95"],
+        vec![""],
+        vec!["*"],
+    ] {
+        assert!(
+            DtmfCommandMap::standard()
+                .with_macro_triggers(triggers.into_iter().map(str::to_owned).collect())
+                .is_err()
+        );
+    }
+    assert!(
+        DtmfCommandMap::standard()
+            .with_macro_triggers(vec!["9".repeat(64)])
+            .is_err()
+    );
+    let map = DtmfCommandMap::standard()
+        .with_macro_triggers(vec!["95".into()])
+        .unwrap();
+    let mut collector = map.collector();
+    assert!(collector.feed('*', 1).is_none());
+    assert!(collector.feed('9', 2).is_none());
+    assert_eq!(collector.feed('5', 3), Some("95".into()));
+    assert_eq!(map.parse("70").unwrap().action, LinkAction::Status);
+    assert!(map.parse("95").is_none());
+}
+
 fn remote_map(prefix: &str) -> DtmfCommandMap {
     let mut mappings = DtmfCommandMap::standard().mappings().to_vec();
     mappings

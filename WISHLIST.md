@@ -615,11 +615,25 @@ remain planned. Local-file decoding does not imply network stream support.
 
 ### Telephony integration
 
-**Status — 2026-10-16:** Planned. DTMF testing, regeneration, and addressed
-command forwarding are released in `rpt_advanced` v0.1.0-alpha11 with
+**Status — 2026-11-09:** Design approved; implementation in progress. DTMF testing,
+regeneration, and addressed command forwarding are released in `rpt_advanced` v0.1.0-alpha11 with
 `librptadvdtmf` v0.1.0-alpha.2; those are not open telephony requirements.
 The standalone AllStarLink IAX2 implementation is also released. Autopatch,
 reverse patch, paging, and SIP/VoIP-provider integration remain unimplemented.
+The [phone-patch and half-duplex design](docs/superpowers/specs/2026-11-09-phone-patch-and-half-duplex-design.md)
+records accepted requirements and proposed engineering details; it is not an
+implementation or hardware-acceptance record. Paging remains separate.
+The [native implementation plan](docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
+and [ADR 0044](doc/architecture/decisions/0044-phone-peers-and-rf-presentation-pacing.md)
+record prerequisite capabilities and task ordering.
+
+Prepared RF pacing and source-rate Earshot analysis are released in samplerate
+adapter `v0.2.0-alpha3` and Radio `v0.1.0-alpha.11`. Timed PCM provenance is
+released in ring `v3.0.0-alpha5`. Direct-trigger current-node DTMF streams are
+implemented in the controller candidate, with final native gates and manual
+acceptance still pending. Phone identities, mailbox authentication, provider
+sessions, call routing and the RF receive-check scheduler remain open; these
+prerequisites do not establish working autopatch or reverse patch.
 
 **Requirements**
 
@@ -633,12 +647,41 @@ reverse patch, paging, and SIP/VoIP-provider integration remain unimplemented.
 - Telephony connects to an external IAX or SIP service. The released native
   IAX2 implementation serves AllStarLink; telephony session behavior is not
   implied by that protocol implementation.
+- Implement SIP/IAX first using native Rust crates where practical. Google Voice
+  is optional when supported. Provider destination/cost policies, incoming-call
+  account limits and emergency-service setup remain with the provider.
+- Every incoming caller authenticates with a configured mailbox number and PIN,
+  associated with first name and callsign. Calls start with private control;
+  `*3` explicitly attaches transceive media to permitted local/remote nodes.
+- Public commands remain available to all authenticated callers; protected
+  commands retain node unlock. `*4` selects local/remote command destinations;
+  ordinary call digits go to the telephone.
+- Default outgoing autopatch isolates initiating-node peer audio in both
+  directions for the call. Per-call bypass always requires the node unlock
+  code. Configure local/all-peer playout and discontinuous Earshot-VAD audio.
+- Manual PTT is a configured alternative to VAD, never a temporary override.
+  Both obey a configurable five-second forced receive-check deadline, preferring
+  natural pauses, with warning tone, STE and measured radio switching allowances.
+- Target added local playout delay below 250 ms normally and at most 500 ms
+  transiently, with slight adaptive playout and necessary stale-frame discard.
+  Apply receive opportunities to half-duplex phone, link and remote-base use.
+- Configure conference limits; defaults are one node attachment per call and one
+  reverse-patch call per node.
+- Extend the implemented current-node DTMF-sequence macros to typed phone
+  sources and verified remote target capabilities. Keep configured triggers,
+  unlock requirements, explicit terminators, comma pauses and existing typed
+  link macros.
 
-**Material decisions needed before implementation**
+**Implementation readiness still required**
 
-- Telephony provider scope, outbound/inbound/reverse-patch access rules,
-  dialing restrictions, emergency-call policy, recording policy, and caller-ID
-  behavior.
+- Implementation plan, transport/media dependency selection, RF-pacing provider
+  capability and ADR amendments for the approved design.
+- Verified remote command-origin lifecycle and authorization isolation;
+  unmodified legacy AllStar shared command state does not establish per-call
+  protected-command isolation.
+- Automated SIP/IAX, routing/privacy, macro, pacing/deadline and lifecycle gates,
+  followed by real-provider and physical-radio/STE acceptance. Recording and
+  voicemail are outside this implementation scope.
 
 ### Generic audio-device control extraction
 

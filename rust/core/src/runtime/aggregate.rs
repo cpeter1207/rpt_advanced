@@ -256,7 +256,7 @@ impl<A: Send, C: Send> RuntimeNode<A, C> {
     /// Discard queued radio digits and invalidate the partial command after admission loss.
     pub fn discard_digits(&mut self) {
         self.control.digits.discard();
-        self.links.digit(super::dtmf::DigitEvent::Lost);
+        self.links.lost_digits();
     }
     /// Drain a bounded raw-event snapshot. The host applies each policy result
     /// before interpreting the next event, so remote selection cannot lag digits.
@@ -311,6 +311,8 @@ impl RuntimeDispatch {
 }
 
 struct Candidate<A: Send, C: Send> {
+    dtmf_macros: Vec<crate::dtmf_macro::CompiledDtmfMacro>,
+    dtmf_macro_limits: crate::dtmf_macro::DtmfMacroLimits,
     remote_commands: crate::remote_base_command::RemoteCommandConfiguration,
     name: String,
     settings: ResolvedNodeSettings,
@@ -640,6 +642,10 @@ impl<A: Send, C: Send> Runtime<A, C> {
             commands
                 .configure_remote(&remote_commands.prefix, remote_commands.access)
                 .map_err(|_| RuntimeError::Preparation)?;
+            let mut dtmf_macros =
+                crate::config::compile_macros(&document, &id, commands.command_map())?;
+            warnings.append(&mut dtmf_macros.warnings);
+            let dtmf_macro_limits = crate::config::macro_limits(&document, &id);
             let bounds = GenerationSettings {
                 node: name.into(),
                 device: settings.channel.clone(),
@@ -679,6 +685,8 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 messages,
             };
             candidates.push(Candidate {
+                dtmf_macros: dtmf_macros.value,
+                dtmf_macro_limits,
                 remote_commands,
                 name: name.into(),
                 settings,
@@ -854,6 +862,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                         candidate.remote_commands.access,
                     )
                     .expect("prevalidated remote command family");
+                old.links
+                    .configure_macros(candidate.dtmf_macros, candidate.dtmf_macro_limits)
+                    .expect("prevalidated macro namespace");
                 old.settings = candidate.settings;
                 old.bounds = candidate.bounds;
                 old.status = candidate.status;
@@ -875,6 +886,9 @@ impl<A: Send, C: Send> Runtime<A, C> {
                         candidate.remote_commands.access,
                     )
                     .expect("prevalidated remote command family");
+                links
+                    .configure_macros(candidate.dtmf_macros, candidate.dtmf_macro_limits)
+                    .expect("prevalidated macro namespace");
                 next.push(RuntimeNode {
                     name: candidate.name,
                     site: crate::site::SiteController::new(candidate.site),
@@ -1471,6 +1485,14 @@ impl<A: Send, C: Send> Runtime<A, C> {
         reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
         self.queue_link_rejection(local, peer, reply, Message::LoopRejected { node: peer })
+    }
+    /// Explain a stopped macro only to the issuing RF or exact peer endpoint.
+    pub fn queue_macro_stopped(
+        &mut self,
+        local: &str,
+        reply: Option<crate::link::PeerReply>,
+    ) -> Result<(), RuntimeError> {
+        self.queue_link_rejection(local, "", reply, Message::DtmfMacroStopped)
     }
     /// Explain an unsupported remote-command route to the issuing endpoint.
     pub fn queue_remote_command_unsupported(

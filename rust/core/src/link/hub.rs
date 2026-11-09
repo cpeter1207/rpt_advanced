@@ -514,6 +514,14 @@ impl LinkManager {
             generation: self.generation,
         })
     }
+    /// Whether this exact generation and dial serial still own the retained retry.
+    pub(crate) fn owns_retry(&self, attempt: &RetryAttempt) -> bool {
+        attempt.generation == self.generation
+            && self
+                .retries
+                .iter()
+                .any(|retry| retry.name == attempt.name && retry.attempt == Some(attempt.serial))
+    }
     /// Final generation, cancellation, pause, and loop gate before answered-peer publication.
     pub fn publish_retry(&mut self, attempt: &RetryAttempt) -> Result<(), AdmissionError> {
         if attempt.generation != self.generation {

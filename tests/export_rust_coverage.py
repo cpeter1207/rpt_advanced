@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 from collections import Counter
+from copy import deepcopy
 from itertools import pairwise
 from pathlib import Path
 
@@ -92,6 +93,38 @@ def measurement_keys(report):
     return keys
 
 
+def aggregate_keys(original, combined):
+    """Recover only uniquely supported aggregate identities, never output counters."""
+
+    def mapping(function):
+        return (
+            function["name"],
+            tuple(function["filenames"]),
+            tuple(tuple(region[:4] + region[5:]) for region in function["regions"]),
+        )
+
+    metadata = {}
+    for unit in combined["data"]:
+        for function in unit.get("functions", []):
+            if branches := function.get("branches"):
+                shape = tuple(tuple(branch[:4] + branch[6:]) for branch in branches)
+                metadata.setdefault(mapping(function), {})[shape] = branches
+    # LLVM can omit aggregate function branches while retaining their file spans.
+    # Supplement a private key-only view; raw aggregate and per-object data stay intact.
+    baseline = deepcopy(original)
+    for unit in baseline["data"]:
+        for function in unit.get("functions", []):
+            if not function.get("branches"):
+                candidates = metadata.get(mapping(function), {})
+                if len(candidates) > 1:
+                    raise ValueError(
+                        "ambiguous LLVM aggregate function branch metadata"
+                    )
+                if candidates:
+                    function["branches"] = next(iter(candidates.values()))
+    return measurement_keys(baseline)
+
+
 def reconcile(original, reports):
     """Retain all object records and reject a changed measurement denominator."""
     combined = {**original, "data": []}
@@ -99,7 +132,7 @@ def reconcile(original, reports):
         if any(report[key] != original[key] for key in ["type", "version"]):
             raise ValueError("LLVM report formats differ")
         combined["data"].extend(report["data"])
-    if measurement_keys(combined) != measurement_keys(original):
+    if measurement_keys(combined) != aggregate_keys(original, combined):
         raise ValueError("per-object coverage changed the measured line/branch keyset")
     return combined
 

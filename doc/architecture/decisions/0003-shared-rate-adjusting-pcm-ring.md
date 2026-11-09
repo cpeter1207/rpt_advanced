@@ -2,6 +2,11 @@
 
 Status: Implemented (current asynchronous composition; optional shared-clock path pending)
 
+Accepted amendment — 2026-11-09: [ADR 0044](0044-phone-peers-and-rf-presentation-pacing.md)
+permits explicitly prepared RF presentation pacing after inbound clock recovery.
+That planned operation uses the shared samplerate provider without another
+clock estimator; inbound source conversion/recovery remains exclusively here.
+
 ## Context
 
 Independent program-audio and radio-hardware clocks drift. Duplicate

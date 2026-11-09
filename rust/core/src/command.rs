@@ -98,6 +98,7 @@ pub struct Command {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DtmfCommandMap {
     mappings: Vec<CommandMapping>,
+    macro_triggers: Vec<String>,
 }
 
 /// A command-prefix validation failure.
@@ -127,7 +128,10 @@ impl DtmfCommandMap {
     /// Construct and validate an owned mapping table.
     pub fn new(mappings: Vec<CommandMapping>) -> Result<Self, CommandMapError> {
         Self::validate(&mappings)?;
-        Ok(Self { mappings })
+        Ok(Self {
+            mappings,
+            macro_triggers: Vec::new(),
+        })
     }
 
     /// Validate mappings using the legacy prefix-collision rule.
@@ -177,6 +181,34 @@ impl DtmfCommandMap {
         &self.mappings
     }
 
+    /// Add independently configured triggers without extending the typed action catalog.
+    pub fn with_macro_triggers(&self, triggers: Vec<String>) -> Result<Self, CommandMapError> {
+        for (index, trigger) in triggers.iter().enumerate() {
+            if trigger.is_empty()
+                || trigger.len() > 63
+                || !trigger
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b'A'..=b'D'))
+            {
+                return Err(CommandMapError::InvalidPrefix);
+            }
+            if self.mappings.iter().any(|mapping| {
+                !mapping.digits.is_empty()
+                    && (mapping.digits.starts_with(trigger) || trigger.starts_with(&mapping.digits))
+            }) || triggers
+                .iter()
+                .skip(index + 1)
+                .any(|other| other.starts_with(trigger) || trigger.starts_with(other))
+            {
+                return Err(CommandMapError::AmbiguousPrefix);
+            }
+        }
+        Ok(Self {
+            mappings: self.mappings.clone(),
+            macro_triggers: triggers,
+        })
+    }
+
     /// Parse a complete command without its initiating asterisk.
     pub fn parse(&self, digits: &str) -> Option<Command> {
         self.mappings
@@ -223,6 +255,7 @@ impl DtmfCommandMap {
     pub fn collector(&self) -> CommandCollector {
         CommandCollector {
             mappings: self.mappings.clone(),
+            macro_triggers: self.macro_triggers.clone(),
             digits: String::new(),
             last_ms: 0,
             active: false,
@@ -254,6 +287,7 @@ impl Default for DtmfCommandMap {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandCollector {
     mappings: Vec<CommandMapping>,
+    macro_triggers: Vec<String>,
     digits: String,
     last_ms: u64,
     active: bool,
@@ -285,10 +319,11 @@ impl CommandCollector {
             self.last_ms = now_ms;
             let map = DtmfCommandMap {
                 mappings: self.mappings.clone(),
+                macro_triggers: self.macro_triggers.clone(),
             };
             finish = map.parse(&self.digits).is_some_and(|command| {
                 command.node.is_empty() && !may_extend(&self.mappings, &self.digits)
-            });
+            }) || self.macro_triggers.contains(&self.digits);
         }
         if !finish {
             return None;

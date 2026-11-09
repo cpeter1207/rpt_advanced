@@ -3,12 +3,13 @@
 use crate::{
     audio::{DtmfDetector, DtmfError},
     command::{Command, CommandCollector, DtmfCommandMap, LinkAction},
+    dtmf_macro::{CompiledDtmfMacro, DtmfMacroLimits, MacroStep},
     remote_base_command::{RemoteCommand, RemoteDtmfAccess},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// One copied radio event; no borrowed callback memory crosses to control.
@@ -182,6 +183,35 @@ pub struct DigitOperation {
     /// Claimed source label for relayed commands; never an authorization identity.
     pub origin: Option<String>,
     pub(crate) admin_authorized: bool,
+    pub(super) macro_permit: Option<MacroPermit>,
+}
+
+/// Shared cancellation follows copied operations into ordinary dispatch queues.
+#[derive(Clone, Debug)]
+pub(super) struct MacroPermit {
+    active: Arc<AtomicBool>,
+    protected: bool,
+    deadline_ms: u64,
+}
+impl PartialEq for MacroPermit {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.active, &other.active)
+    }
+}
+impl Eq for MacroPermit {}
+impl MacroPermit {
+    pub(super) fn active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+    pub(super) fn current_at(&self, now_ms: u64) -> bool {
+        self.active() && now_ms <= self.deadline_ms
+    }
+}
+
+struct ActiveDtmfMacro {
+    definition: usize,
+    next: usize,
+    due_ms: u64,
 }
 
 /// Bounded local keypad capture; only actual receiver unkey completes it.
@@ -196,6 +226,11 @@ pub struct PadTestResult {
 /// Control-side interpretation; media and directory work stay outside collection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DigitOutcome {
+    /// Source-only failure notice; expansion and credential digits are never included.
+    MacroStopped {
+        /// Exact originating connection, absent only for the local RF source.
+        reply: Option<crate::link::PeerReply>,
+    },
     /// Complete operation or one digit for a selected remote.
     Operation(DigitOperation),
     /// Incomplete destination to select only if the directory recognizes it exactly.
@@ -216,6 +251,7 @@ impl DigitOperation {
             reply: None,
             origin: None,
             admin_authorized: false,
+            macro_permit: None,
         }
     }
 }
@@ -234,6 +270,11 @@ pub struct DtmfCommands {
     admin_timeout_ms: u64,
     admin_until_ms: u64,
     remote_access: RemoteDtmfAccess,
+    macros: Arc<Vec<CompiledDtmfMacro>>,
+    macro_limits: DtmfMacroLimits,
+    active_macro: Option<ActiveDtmfMacro>,
+    macro_permit: Option<MacroPermit>,
+    macro_stopped: bool,
 }
 impl DtmfCommands {
     /// Create independent collection and authorization state with the same resolved policy.
@@ -246,6 +287,8 @@ impl DtmfCommands {
             &self.admin_lock_hash,
             self.admin_timeout_ms,
         );
+        commands.macros = self.macros.clone();
+        commands.macro_limits = self.macro_limits;
         commands
     }
     /// Start with the resolved current command map.
@@ -264,6 +307,125 @@ impl DtmfCommands {
             admin_timeout_ms: 300_000,
             admin_until_ms: 0,
             remote_access: RemoteDtmfAccess::Disabled,
+            macros: Arc::new(Vec::new()),
+            macro_limits: DtmfMacroLimits::default(),
+            active_macro: None,
+            macro_permit: None,
+            macro_stopped: false,
+        }
+    }
+    /// Borrow the final remapped command namespace during candidate preparation.
+    pub(crate) fn command_map(&self) -> &DtmfCommandMap {
+        &self.map
+    }
+
+    /// Publish precompiled direct triggers on control; old queued invocations are revoked.
+    pub fn configure_macros(
+        &mut self,
+        macros: Vec<CompiledDtmfMacro>,
+        limits: DtmfMacroLimits,
+    ) -> Result<(), crate::command::CommandMapError> {
+        let triggers = macros
+            .iter()
+            .map(|definition| {
+                definition
+                    .trigger
+                    .strip_prefix('*')
+                    .map(str::to_owned)
+                    .ok_or(crate::command::CommandMapError::InvalidPrefix)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let map = self.map.with_macro_triggers(triggers)?;
+        self.cancel_macro();
+        self.map = map;
+        self.collector = self.map.collector();
+        self.macros = Arc::new(macros);
+        self.macro_limits = limits;
+        Ok(())
+    }
+
+    /// Explicitly cancel this source's expansion and every queued copy of its work.
+    pub fn cancel_macro(&mut self) {
+        self.active_macro = None;
+        if let Some(permit) = self.macro_permit.take() {
+            permit.active.store(false, Ordering::Release);
+        }
+    }
+    pub(super) fn take_macro_stopped(&mut self) -> Option<DigitOutcome> {
+        std::mem::take(&mut self.macro_stopped)
+            .then_some(DigitOutcome::MacroStopped { reply: None })
+    }
+
+    /// Recheck cancellation, elapsed bounds and the exact live source grant at dispatch.
+    pub(crate) fn macro_operation_current(
+        &mut self,
+        operation: &DigitOperation,
+        now_ms: u64,
+    ) -> bool {
+        operation.macro_permit.as_ref().is_none_or(|permit| {
+            self.macro_permit
+                .as_ref()
+                .is_some_and(|current| current == permit)
+                && permit.current_at(now_ms)
+                && (!permit.protected || self.admin_unlocked(now_ms))
+        })
+    }
+
+    fn admin_unlocked(&mut self, now_ms: u64) -> bool {
+        if now_ms >= self.admin_until_ms {
+            self.admin_until_ms = 0;
+        }
+        self.admin_until_ms != 0
+    }
+
+    /// Advance at most one complete command without sleeping the serialized control owner.
+    pub fn advance_macro(&mut self, now_ms: u64) -> Option<DigitOperation> {
+        let permit = self.macro_permit.clone()?;
+        if !permit.current_at(now_ms) {
+            self.macro_stopped = self.active_macro.is_some();
+            self.cancel_macro();
+            return None;
+        }
+        loop {
+            let active = self.active_macro.as_mut()?;
+            if now_ms < active.due_ms {
+                return None;
+            }
+            let definition = &self.macros[active.definition];
+            let protected = definition.protected;
+            let Some(step) = definition.steps.get(active.next).cloned() else {
+                self.active_macro = None;
+                return None;
+            };
+            active.next += 1;
+            match step {
+                MacroStep::SelectTarget(_) => continue, // Compiler permits only this node.
+                MacroStep::Pause(duration) => {
+                    active.due_ms = active.due_ms.saturating_add(duration);
+                    continue;
+                }
+                MacroStep::Command(text) => {
+                    active.due_ms = now_ms;
+                    if protected && !self.admin_unlocked(now_ms) {
+                        self.macro_stopped = true;
+                        self.cancel_macro();
+                        return None;
+                    }
+                    if self.map.mappings().iter().any(|mapping| {
+                        mapping.action == LinkAction::AdminLock && mapping.digits == text
+                    }) {
+                        self.admin_until_ms = 0;
+                        return None;
+                    }
+                    let Some(mut operation) = self.complete_command(&text, now_ms, false) else {
+                        self.macro_stopped = true;
+                        self.cancel_macro();
+                        return None;
+                    };
+                    operation.macro_permit = Some(permit);
+                    return Some(operation);
+                }
+            }
         }
     }
     /// Atomically install the enabled rig's family and mutation policy. An empty
@@ -285,7 +447,13 @@ impl DtmfCommands {
                 LinkAction::RemoteBase,
             ));
         }
-        let map = DtmfCommandMap::new(mappings)?;
+        let map = DtmfCommandMap::new(mappings)?.with_macro_triggers(
+            self.macros
+                .iter()
+                .map(|definition| definition.trigger[1..].into())
+                .collect(),
+        )?;
+        self.cancel_macro();
         self.collector = map.collector();
         self.map = map;
         self.remote_access = access;
@@ -294,6 +462,7 @@ impl DtmfCommands {
     /// Install hashed DTMF credentials on control; administration stays unavailable unless both
     /// credential digests are valid Argon2id PHC strings.
     pub fn configure_admin(&mut self, unlock_hash: &str, lock_hash: &str, timeout_ms: u64) {
+        self.cancel_macro();
         self.admin_unlock_hash.clear();
         self.admin_lock_hash.clear();
         if valid_hash(unlock_hash) && valid_hash(lock_hash) && timeout_ms > 0 {
@@ -316,6 +485,11 @@ impl DtmfCommands {
     }
     /// Interpret copied events on control. Call `Lost` also after control submission rejection.
     pub fn feed(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
+        if matches!(event, DigitEvent::Lost | DigitEvent::Digit { digit: '0'..='9' | 'A'..='D' | '*' | '#', .. })
+        {
+            self.cancel_macro();
+            self.macro_stopped = false;
+        }
         self.digit_deadline = match event {
             DigitEvent::Digit { digit, now_ms } if "0123456789ABCD*".contains(digit) => {
                 Some(now_ms.saturating_add(3000))
@@ -363,6 +537,7 @@ impl DtmfCommands {
                     reply: None,
                     origin: None,
                     admin_authorized: false,
+                    macro_permit: None,
                 })
             });
         }
@@ -392,7 +567,35 @@ impl DtmfCommands {
                     ))
                 });
         };
-        if let Some(remote) = self.map.parse_remote(&text) {
+        if let Some(index) = self
+            .macros
+            .iter()
+            .position(|definition| definition.trigger[1..] == text)
+        {
+            if !self.macros[index].protected || self.admin_unlocked(now_ms) {
+                self.active_macro = Some(ActiveDtmfMacro {
+                    definition: index,
+                    next: 0,
+                    due_ms: now_ms,
+                });
+                self.macro_permit = Some(MacroPermit {
+                    active: Arc::new(AtomicBool::new(true)),
+                    protected: self.macros[index].protected,
+                    deadline_ms: now_ms.saturating_add(self.macro_limits.max_duration_ms),
+                });
+            } else {
+                return Some(DigitOutcome::MacroStopped { reply: None });
+            }
+            return None;
+        }
+        self.complete_command(&text, now_ms, true)
+            .map(DigitOutcome::Operation)
+    }
+
+    /// Shared typed preparation; expansions cannot enter credential or interactive branches.
+    fn complete_command(&mut self, text: &str, now_ms: u64, human: bool) -> Option<DigitOperation> {
+        self.admin_unlocked(now_ms);
+        if let Some(remote) = self.map.parse_remote(text) {
             let authorized = self.admin_until_ms != 0;
             if !self.remote_authorized(remote.administrative(), authorized, now_ms) {
                 return None;
@@ -406,13 +609,13 @@ impl DtmfCommands {
             );
             operation.remote = Some(remote);
             operation.admin_authorized = authorized;
-            return Some(DigitOutcome::Operation(operation));
+            return Some(operation);
         }
-        let mut command = self.map.parse(&text)?;
+        let mut command = self.map.parse(text)?;
         if matches!(command.action, LinkAction::Message | LinkAction::SiteStatus) {
             // The command map already requires a nonempty argument for these actions.
             return crate::config::message_selector_valid(&command.node)
-                .then(|| DigitOutcome::Operation(DigitOperation::new(command, None)));
+                .then(|| DigitOperation::new(command, None));
         }
         let mut admin_authorized = false;
         if command.node.len() >= 64 {
@@ -420,7 +623,7 @@ impl DtmfCommands {
         }
         match command.action {
             LinkAction::PadTest => {
-                if !self.peer_source {
+                if human && !self.peer_source {
                     self.pad = Some(PadTestResult {
                         digits: String::with_capacity(127),
                         overflowed: false,
@@ -429,6 +632,9 @@ impl DtmfCommands {
                 return None;
             }
             LinkAction::AdminUnlock => {
+                if !human {
+                    return None;
+                }
                 self.admin_until_ms = if self.credentials_configured()
                     && verify_hash(&self.admin_unlock_hash, &command.node)
                 {
@@ -439,6 +645,9 @@ impl DtmfCommands {
                 return None;
             }
             LinkAction::AdminLock => {
+                if !human {
+                    return None;
+                }
                 if self.credentials_configured()
                     && verify_hash(&self.admin_lock_hash, &command.node)
                 {
@@ -460,22 +669,28 @@ impl DtmfCommands {
             }
             command.node = self.last_node.clone();
         }
-        if !command.node.is_empty() {
+        if human && !command.node.is_empty() {
             self.last_node.clone_from(&command.node);
         }
-        Some(DigitOutcome::Operation(DigitOperation {
+        Some(DigitOperation {
             command,
             digit: None,
             remote: None,
             reply: None,
             origin: None,
             admin_authorized,
-        }))
+            macro_permit: None,
+        })
     }
 
     /// Preserve commands, selected/remembered destinations, and live administrative grants.
     pub(super) fn retains_state(&self, now_ms: u64) -> bool {
         self.collector.active()
+            || self.active_macro.is_some()
+            || self
+                .macro_permit
+                .as_ref()
+                .is_some_and(|permit| Arc::strong_count(&permit.active) > 1)
             || !self.remote.is_empty()
             || !self.last_node.is_empty()
             || self.pad.is_some()
@@ -538,6 +753,12 @@ impl DtmfCommands {
 
     fn credentials_configured(&self) -> bool {
         !self.admin_unlock_hash.is_empty() && !self.admin_lock_hash.is_empty()
+    }
+}
+
+impl Drop for DtmfCommands {
+    fn drop(&mut self) {
+        self.cancel_macro();
     }
 }
 

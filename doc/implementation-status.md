@@ -77,6 +77,12 @@ until `#`. Optional DTMF regeneration plays eligible incoming link digits only
 on the local transmitter; it is off by default. See the
 [DTMF settings and commands](configuration.md#link-command-mappings).
 
+Direct-trigger [DTMF command macros](configuration.md#dtmf-command-macros)
+sequence explicitly terminated current-node commands and comma pauses for
+local RF and admitted IAX sources. Each step retains the invoking source's
+permissions and reply destination. Phone sessions and verified private remote
+macro targets remain under implementation.
+
 Local DTMF status replies use local RF. A linked peer's status request replies
 only to that peer after it unkeys. On the Asterisk path, the Asterisk CLI can
 show direct-link status and send an administrative DTMF command. The standalone

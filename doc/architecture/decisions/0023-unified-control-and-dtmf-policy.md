@@ -2,6 +2,12 @@
 
 Status: Partially implemented (DTMF slice released and operator-confirmed; broader interfaces pending)
 
+Accepted amendment — 2026-11-09: [ADR 0044](0044-phone-peers-and-rf-presentation-pacing.md)
+adds source-scoped direct-trigger DTMF macro sequences and private phone control.
+Explicit macro terminators/comma deadlines remain separate from human keypad
+collection. Call-private replies and verified remote origin lifecycle are required
+before command-only phone operation; these additions remain unimplemented.
+
 Reaffirmed 2026-09-17: this record's source-scoped telemetry routing is the
 required behavior. ADR 0025's earlier all-local restriction was an intermediate
 implementation and does not override this decision.
@@ -192,3 +198,20 @@ their existing owners. Idle cancellation does not consume a pending message or
 future schedule. Cancellation/failure never satisfies an ID or tail cooldown.
 Successful manual ID playback uses the normal selected/lower-priority
 satisfaction rules; successful manual tail playback advances its cooldown.
+
+## Direct-trigger control streams — 2026-11-09
+
+The ADR 0044 macro foundation compiles `[dtmf_macro]` streams against the
+effective command map before generation publication. Explicit terminators and
+monotonic comma deadlines remain separate from the interactive collector.
+Invalid definitions are unavailable with redacted warnings; valid inherited
+values and existing typed `[macro]` actions keep their normal behavior.
+
+Each invocation retains its exact source, generation, grant and private reply
+target through asynchronous connection lookup, dialing, retries and final
+attachment. Live input or source/generation retirement cancels unfinished work;
+an established attachment releases macro ownership. Retry cleanup checks the
+exact retry generation and serial so stale work cannot affect its replacement.
+No expansion supplies login/unlock credentials or borrows another source's
+grant. These current-node RF/IAX streams do not establish phone authentication
+or private remote-call interoperability.

@@ -11,6 +11,10 @@ use std::{
 static CONTEXTS: AtomicUsize = AtomicUsize::new(0);
 static ACCOUNTS: AtomicUsize = AtomicUsize::new(0);
 static PEERS: AtomicUsize = AtomicUsize::new(0);
+static PENDING_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+/// Observe real queued incoming claims without constructing host-private state.
+#[unsafe(no_mangle)]
+pub extern "C" fn fixture_pending_validations() -> usize { PENDING_VALIDATIONS.load(Ordering::Acquire) }
 static UPDATES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_CALLBACKS: std::sync::Mutex<Vec<(usize, abi::EventFn, usize)>> = std::sync::Mutex::new(Vec::new());
 static ACCOUNT_STATE: AtomicUsize = AtomicUsize::new(2);
@@ -89,6 +93,7 @@ pub unsafe extern "C" fn fixture_expire(peer: *mut abi::Qso) {
     unsafe { peer.cast::<u8>().write(0) };
 }
 unsafe extern "C" fn validate(peer: *const abi::Qso, output: *mut abi::PeerInfo) -> abi::Status {
+    PENDING_VALIDATIONS.fetch_add(1, Ordering::AcqRel);
     if unsafe { *peer.cast::<u8>() } == 0 {
         return abi::Status::Closed;
     }

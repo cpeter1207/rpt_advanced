@@ -1422,6 +1422,12 @@ impl Host {
                         .into_iter()
                         .map(|operation| (local.clone(), operation)),
                 );
+                self.operations.extend(
+                    node.links()
+                        .advance_macros(clock.now_ms)
+                        .into_iter()
+                        .map(|operation| (local.clone(), operation)),
+                );
                 let messages = node.links().due_topology(clock.now_ms);
                 for (remote, text) in messages {
                     let _ = self.text(&local, &remote, &text, false);

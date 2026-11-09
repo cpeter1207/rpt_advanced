@@ -49,6 +49,7 @@ const REQUIRED_IDS: &[&str] = &[
     "time-announcement",
     "loop-rejected",
     "remote-command-unsupported",
+    "dtmf-macro-stopped",
     "echo-peer-identity",
     "priority-group-selected",
     "priority-group-unavailable",
@@ -67,6 +68,8 @@ const REQUIRED_IDS: &[&str] = &[
 /// A typed built-in RF message request; callers cannot select arbitrary Fluent IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
+    /// Explain a denied or expired source-owned command expansion without its digits.
+    DtmfMacroStopped,
     /// No keypad symbols were received during a local pad test.
     PadTestEmpty,
     /// Report discarded symbols before reading back the retained prefix.
@@ -743,6 +746,7 @@ impl MessageCatalog {
 impl Message<'_> {
     fn id(&self) -> &'static str {
         match self {
+            Self::DtmfMacroStopped => "dtmf-macro-stopped",
             Self::PadTestEmpty => "pad-test-empty",
             Self::PadTestOverflow => "pad-test-overflow",
             Self::DtmfSymbol { .. } => "dtmf-symbol",
@@ -781,6 +785,7 @@ impl Message<'_> {
         let mut args = FluentArgs::new();
         match self {
             Self::NoLinks
+            | Self::DtmfMacroStopped
             | Self::LastKeyedNone
             | Self::Greeting { .. }
             | Self::RepeaterTimeoutCleared
