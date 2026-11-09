@@ -1642,12 +1642,23 @@ fn host_audio_owner_publishes_one_configured_group_winner_to_status() {
 
 #[test]
 fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
+    fn reload_after_busy(host: &mut Host, document: ConfigDocument) -> Result<(), RuntimeError> {
+        let mut outcome = None;
+        pump_until(host, |host| match host.reload(document.clone(), clock()) {
+            Err(RuntimeError::Busy) => false,
+            result => {
+                outcome = Some(result);
+                true
+            }
+        });
+        outcome.expect("reload produced a non-Busy result")
+    }
+
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut host = host();
-    host.reload(document("usb2", "link_lookup_method=dns\n"), clock())
-        .unwrap();
+    reload_after_busy(&mut host, document("usb2", "link_lookup_method=dns\n")).unwrap();
     pump_until(&mut host, |host| {
         host.runtime
             .status(10)
@@ -1660,13 +1671,16 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
     );
     let revision = host.runtime.revision();
     crate::fixture::RADIO_OPEN_RESULT.store(1, std::sync::atomic::Ordering::Release);
-    assert!(
-        host.reload(document("usb3", "link_lookup_method=file\n"), clock())
-            .is_err()
+    assert_eq!(
+        reload_after_busy(&mut host, document("usb3", "link_lookup_method=file\n")),
+        Err(RuntimeError::Device)
+    );
+    assert_eq!(
+        crate::fixture::RADIO_OPEN_RESULT.load(std::sync::atomic::Ordering::Acquire),
+        0
     );
     assert_eq!(host.runtime.revision(), revision);
-    host.reload(document("usb2", "link_lookup_method=file\n"), clock())
-        .unwrap();
+    reload_after_busy(&mut host, document("usb2", "link_lookup_method=file\n")).unwrap();
     pump_until(&mut host, |host| {
         host.runtime
             .status(10)
@@ -1677,9 +1691,9 @@ fn reload_handoff_rolls_back_failed_open_and_releases_removed_devices() {
         host.lookup("1000", "2000", None).unwrap(),
         "radio@fixture/2000"
     );
-    host.reload(
+    reload_after_busy(
+        &mut host,
         ConfigDocument::parse("[general]\nenabled=no\n").unwrap(),
-        clock(),
     )
     .unwrap();
     assert!(host.runtime.node_names().is_empty());
