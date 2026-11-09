@@ -92,6 +92,16 @@ fn phone_diagnostics_cannot_succeed_in_the_radio_telemetry_queue() {
     assert!(signals.authenticate_phone());
     let reply = signals.reply_target();
     let before = messages.lock().unwrap().clone();
+    assert!(matches!(
+        runtime.prepare_phone_status(
+            "1000",
+            LinkAction::Status,
+            None,
+            clock(),
+            &crate::link::PeerSignals::new().reply_target(),
+        ),
+        Err(RuntimeError::Rejected)
+    ));
     assert_eq!(
         runtime.queue_macro_stopped("1000", Some(reply.clone())),
         Err(RuntimeError::Rejected)

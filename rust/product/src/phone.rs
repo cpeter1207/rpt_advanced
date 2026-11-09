@@ -163,6 +163,8 @@ impl PhoneCalls {
             return Err(Error::Admission);
         }
         call.mailbox = Some(mailbox);
+        #[cfg(test)]
+        tests::before_authenticate();
         if !call.signals.authenticate_phone() {
             return Err(Error::Admission);
         }

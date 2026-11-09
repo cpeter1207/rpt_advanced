@@ -103,3 +103,87 @@ fn phone_reload_and_unload_retire_the_actual_call_generation() {
     assert!(host.stop(20));
     assert!(reply.ended());
 }
+
+#[test]
+fn private_prompt_queue_requires_the_exact_live_token_and_never_uses_radio_media() {
+    struct Prompt;
+    impl rpt_advanced_core::audio::PcmStreamReader for Prompt {
+        fn render(&mut self, output: &mut [f32]) -> rpt_advanced_core::audio::PcmRead {
+            let count = output.len().min(8);
+            output[..count].fill(0.25);
+            rpt_advanced_core::audio::PcmRead::FinalSamples(count)
+        }
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    let foreign = rpt_advanced_core::link::PeerSignals::for_phone(source.clone()).reply_target();
+    assert!(matches!(
+        host.immediate(
+            "1000",
+            LinkEffect::Telemetry(LinkAction::Status, Some(foreign.clone())),
+            clock()
+        ),
+        Err(RuntimeError::Rejected)
+    ));
+    assert!(
+        host.queue_phone_reply(&source, &foreign, Box::new(Prompt))
+            .is_err()
+    );
+    assert!(host.take_phone_reply(&source, &reply).unwrap().is_none());
+    for _ in 0..16 {
+        host.queue_phone_reply(&source, &reply, Box::new(Prompt))
+            .unwrap();
+    }
+    assert!(
+        host.queue_phone_reply(&source, &reply, Box::new(Prompt))
+            .is_err()
+    );
+    let mut prepared = host.take_phone_reply(&source, &reply).unwrap().unwrap();
+    let mut output = [0.0; 16];
+    assert_eq!(prepared.render(false, &mut output), 8);
+    assert_eq!(&output[..8], &[0.25; 8]);
+    assert_eq!(&output[8..], &[0.0; 8]);
+    assert!(host.peers.is_empty());
+    assert!(state.lock().unwrap().audio.is_empty());
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    assert!(host.retire_phone(&source));
+    assert!(!prepared.current());
+    assert!(host.take_phone_reply(&source, &reply).is_err());
+    assert!(
+        host.queue_phone_reply(&source, &reply, Box::new(Prompt))
+            .is_err()
+    );
+    assert!(host.stop(20));
+}
+
+#[test]
+fn removed_node_reload_retires_its_pending_private_call_before_reclaiming_the_node() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let (phone, state) = crate::link::session::tests::phone_peer();
+    let call = phone.identity().call_id().unwrap();
+    host.incoming_peer(phone, "127.0.0.1", clock()).unwrap();
+    let source = host.phone_source(call).unwrap().clone();
+    let reply = host.phone_reply(&source).unwrap();
+    host.reload(
+        ConfigDocument::parse("[general]\nenabled=no\n").unwrap(),
+        clock(),
+    )
+    .unwrap();
+    assert!(host.runtime.node("1000").is_none());
+    assert!(reply.ended());
+    assert!(host.phone_source(call).is_none());
+    assert_eq!(state.lock().unwrap().drops, 1);
+    assert!(state.lock().unwrap().bound_radio.is_none());
+    pump_until(&mut host, |host| host.runtime.status(20).is_empty());
+    assert!(host.stop(20));
+}

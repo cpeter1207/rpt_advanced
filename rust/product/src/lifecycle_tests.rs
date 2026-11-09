@@ -810,6 +810,8 @@ fn incoming_preauthorization_never_adopts_a_foreign_or_already_owned_peer() {
 
 #[test]
 fn public_phone_admission_borrows_real_metadata_then_transfers_only_the_exact_call() {
+    use std::sync::atomic::AtomicUsize;
+    static METADATA_MODE: AtomicUsize = AtomicUsize::new(0);
     unsafe extern "C" fn phone_info(
         context: *mut c_void,
         peer: *const c_void,
@@ -829,6 +831,23 @@ fn public_phone_admission_borrows_real_metadata_then_transfers_only_the_exact_ca
             data: b"provider".as_ptr(),
             length: 8,
         };
+        match METADATA_MODE.load(Ordering::Acquire) {
+            1 => {
+                output.protocol = 1;
+                output.capabilities = 12;
+                output.remote = abi::rptadv_peer_bytes_v1 {
+                    data: b"2000".as_ptr(),
+                    length: 4,
+                };
+            }
+            2 => {
+                output.local = abi::rptadv_peer_bytes_v1 {
+                    data: b"2000".as_ptr(),
+                    length: 4,
+                };
+            }
+            _ => {}
+        }
         0
     }
     let _serial = crate::fixture::LIFECYCLE
@@ -888,12 +907,34 @@ fn public_phone_admission_borrows_real_metadata_then_transfers_only_the_exact_ca
         data: b"aabbccddeeff00112233445566778899".as_ptr(),
         length: 32,
     };
+    for mode in 1..=2 {
+        METADATA_MODE.store(mode, Ordering::Release);
+        let foreign = crate::fixture::peer();
+        let prior = crate::fixture::PEER_DROPS.load(Ordering::Acquire);
+        assert_eq!(
+            unsafe { descriptor().authorize_incoming.unwrap()(&request, foreign) },
+            -1
+        );
+        assert_eq!(crate::fixture::PEER_DROPS.load(Ordering::Acquire), prior);
+        assert_eq!(
+            unsafe { descriptor().incoming.unwrap()(&request, foreign) },
+            -1
+        );
+        assert_eq!(
+            crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+            prior + 1
+        );
+    }
+    METADATA_MODE.store(0, Ordering::Release);
     assert_eq!(unsafe { descriptor().incoming.unwrap()(&request, peer) }, 0);
-    assert_eq!(crate::fixture::PEER_DROPS.load(Ordering::Acquire), before);
+    assert_eq!(
+        crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+        before + 2
+    );
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
     assert_eq!(
         crate::fixture::PEER_DROPS.load(Ordering::Acquire),
-        before + 1
+        before + 3
     );
 }
 

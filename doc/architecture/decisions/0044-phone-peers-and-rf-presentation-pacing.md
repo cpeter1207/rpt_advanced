@@ -87,8 +87,19 @@ Private status preparation reuses the existing status formatter and producer
 PCM stream. A bounded per-call queue feeds the existing `Playback` renderer,
 independently of `NodeController`, RF demand, and public peer fanout. Its source
 fence runs before and after rendering. Other private report families fail
-explicitly pending their prepared-stream routes. Provider egress, PIN verification,
-telephone grammar/configuration/allowlists, explicit `*3` media attachment,
+explicitly pending their prepared-stream routes. Phone tokens cannot enter the
+ordinary radio telemetry queue, including stopped-macro and route diagnostics;
+those paths return an explicit rejection until they have a private sink.
+Ordinary phone commands and macros retain the exact call token through lookup,
+dial, initial permanent retries and final publication. Ending the call revokes
+unfinished work; completed node-link commands keep their existing recovery rules.
+
+The inert telephone grammar emits typed routing, literal-digit and manual-key
+requests. It implements `*3`, `*4`, one-symbol `**` quoting and the existing
+collection bounds; syntax alone grants no authority or RF attachment. Its
+caller must retain the verified source and private reply on every dispatch.
+Provider egress, PIN verification,
+grammar integration/configuration/allowlists, explicit `*3` media attachment,
 per-handle DSP ownership, and negotiated remote lifecycle remain dependent work;
 this foundation does not enable a usable phone provider or claim complete Task 3.
 

@@ -10,6 +10,67 @@ mod media;
 #[path = "../../../peer-support/tests/support/host_accounts.rs"]
 mod accounts;
 
+#[path = "../../../peer-support/tests/support/peer_metadata.rs"]
+mod peer_metadata;
+
+#[test]
+fn peer_metadata_writes_only_the_supported_caller_prefix_for_both_protocols() {
+    crate::fixture::reset();
+    let fixture = support::Fixture::new("network");
+    let iax = PeerIo::dial(c"radio@host/200", c"100", 8, || true).unwrap();
+    let handles = [
+        into_raw(iax, "1000", "2000"),
+        Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast(),
+    ];
+    for (index, handle) in handles.into_iter().enumerate() {
+        peer_metadata::check(
+            std::mem::offset_of!(ffi::rptadv_peer_info_v1, provider_account),
+            size_of::<ffi::rptadv_peer_info_v1>(),
+            |output| unsafe {
+                let output = output.cast::<ffi::rptadv_peer_info_v1>();
+                let result = peer_info(ptr::null_mut(), handle, output);
+                if result == 0 {
+                    let info = &*output;
+                    assert_eq!(info.protocol, index as u32 + 1);
+                    assert_eq!(
+                        (
+                            info.capabilities,
+                            info.account_generation,
+                            info.qso_generation
+                        ),
+                        if index == 0 { (12, 0, 0) } else { (23, 4, 9) }
+                    );
+                    assert_eq!(
+                        text(info.remote.data.cast(), info.remote.length),
+                        Some(if index == 0 { "2000" } else { "4294967295" })
+                    );
+                    if info.struct_size as usize == size_of::<ffi::rptadv_peer_info_v1>() {
+                        assert!(info.provider_account.data.is_null());
+                        assert_eq!(info.provider_account.length, 0);
+                    }
+                }
+                result
+            },
+        );
+        assert_eq!(
+            unsafe { peer_info(ptr::null_mut(), handle, ptr::null_mut()) },
+            -1
+        );
+        if index == 0 {
+            assert_eq!(unsafe { peer_set_deadline(ptr::null_mut(), handle, 1) }, -1);
+        }
+        unsafe { peer_destroy(ptr::null_mut(), handle) };
+    }
+    let mut info: ffi::rptadv_peer_info_v1 = unsafe { std::mem::zeroed() };
+    info.struct_size = size_of::<ffi::rptadv_peer_info_v1>() as u32;
+    info.abi_version = 1;
+    assert_eq!(
+        unsafe { peer_info(ptr::null_mut(), ptr::null(), &mut info) },
+        -1
+    );
+    crate::fixture::host(|state| state.clean());
+}
+
 #[test]
 fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
     accounts::check(HostServicesOwner::new());
@@ -22,8 +83,21 @@ fn echo_media_and_registration_dispatch_preserves_the_provider_contract() {
 
 #[test]
 fn echo_binding_rejects_a_quiesced_radio_reservation() {
+    crate::fixture::reset();
     let fixture = support::Fixture::new("network");
     let peer = Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast();
+    let mut live = ptr::null_mut();
+    assert_eq!(
+        unsafe { radio_open(ptr::null_mut(), c"usb".as_ptr(), 3, 8, &mut live) },
+        0
+    );
+    assert_eq!(unsafe { peer_bind_radio(ptr::null_mut(), peer, live) }, 0);
+    assert_eq!(
+        unsafe { radio_metadata_bind(ptr::null_mut(), live, None) },
+        0
+    );
+    assert_eq!(crate::fixture::host(|state| state.channels), 1);
+    unsafe { radio_destroy(ptr::null_mut(), live) };
     let mut reservation = ReservedRadio {
         metadata: None,
         radio: None,
@@ -40,6 +114,7 @@ fn echo_binding_rejects_a_quiesced_radio_reservation() {
         -1
     );
     unsafe { peer_destroy(ptr::null_mut(), peer) };
+    crate::fixture::host(|state| state.clean());
 }
 
 #[test]

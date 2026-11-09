@@ -3292,6 +3292,19 @@ fn fatal_io_and_full_events_end_ingress_but_advisory_failure_does_not() {
 
 #[test]
 fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_peer() {
+    let (phone, state) = phone_peer();
+    let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
+        .unwrap()
+        .into_endpoints();
+    assert!(matches!(
+        PeerSession::prepare(phone, outbound, "1000", "2000", true),
+        Err(Error::Admission)
+    ));
+    let state = state.lock().unwrap();
+    assert_eq!(state.drops, 1);
+    assert!(state.texts.is_empty());
+    assert!(state.bound_radio.is_none());
+    drop(state);
     for (local, remote, rate, fail) in [
         ("1000", "invalid", 48000, false),
         ("", "2000", 48000, false),

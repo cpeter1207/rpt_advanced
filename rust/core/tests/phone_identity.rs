@@ -14,6 +14,12 @@ fn phone_identity_has_no_public_node_or_operator_alias() {
     assert_eq!(phone.operator_alias(), None);
     assert_eq!(phone.wire_identity(), wire);
     assert_eq!(call.to_string(), wire);
+    assert_eq!(
+        PeerIdentity::parse(ProtocolId::AllStarLink, "2000")
+            .unwrap()
+            .call_id(),
+        None
+    );
     assert!(PeerIdentity::from_operator(wire).is_err());
     for invalid in [
         "",
@@ -51,11 +57,13 @@ fn phone_source_keeps_provider_call_and_actual_ingress_generations_distinct() {
             .is_err()
         );
     }
-    for invalid in ["", "provider secret", "provider/other"] {
+    for invalid in ["", "provider secret", "provider/other", &"a".repeat(65)] {
         assert!(PhoneAccountId::new(invalid).is_err());
     }
     assert_eq!(MailboxId::new("00123").unwrap().as_str(), "00123");
-    assert!(MailboxId::new("W1XYZ").is_err());
+    for invalid in ["", "W1XYZ", &"1".repeat(33)] {
+        assert!(MailboxId::new(invalid).is_err());
+    }
     let signals = PeerSignals::for_phone(source.clone());
     let reply = signals.reply_target();
     assert_eq!(reply.phone_source(), Some(&source));

@@ -7,6 +7,58 @@ use rpt_advanced_core::{
 };
 use std::{ffi::c_void, mem::size_of, ptr};
 
+thread_local! {
+    static BEFORE_AUTHENTICATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// One-shot scheduling checkpoint; the real shared owner performs retirement.
+pub(super) fn before_authenticate() {
+    let callback = BEFORE_AUTHENTICATE.with_borrow_mut(Option::take);
+    if let Some(callback) = callback {
+        callback();
+    }
+}
+
+#[test]
+fn concurrent_owner_retirement_wins_between_admission_and_authentication_publish() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let source = calls.admit(peer(false)).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let owner_reply = reply.clone();
+    let (retire, request) = std::sync::mpsc::channel();
+    let (completed, completion) = std::sync::mpsc::channel();
+    let owner = std::thread::spawn(move || {
+        request.recv().unwrap();
+        owner_reply.retire();
+        completed.send(()).unwrap();
+    });
+    BEFORE_AUTHENTICATE.with_borrow_mut(|callback| {
+        *callback = Some(Box::new(move || {
+            retire.send(()).unwrap();
+            completion
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        }));
+    });
+    assert!(!reply.ended());
+    assert_eq!(
+        calls.authenticate(&source, &reply, MailboxId::new("100").unwrap()),
+        Err(Error::Admission)
+    );
+    owner.join().unwrap();
+    assert!(reply.ended());
+    assert!(!reply.phone_authenticated());
+    assert!(calls.queue_reply(&source, &reply, media()).is_err());
+    assert!(calls.take_reply(&source, &reply).is_err());
+    assert_eq!(calls.retire(&source), Some(reply));
+    assert!(calls.is_empty());
+}
+
 fn peer(second: bool) -> PeerIo {
     unsafe extern "C" fn info(
         context: *mut c_void,

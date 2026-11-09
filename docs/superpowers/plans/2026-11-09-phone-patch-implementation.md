@@ -164,6 +164,15 @@ Focused commands: `cargo test --locked -p rpt-advanced-core dtmf_macro`, existin
 
 ### Task 3: Typed private phone source and command-only reply path
 
+Native foundation checkpoint: typed call/source and compatible C metadata,
+command-only ownership, private status streams, exact retirement fences and
+the pure telephone grammar are implemented. The combined macro/phone source
+has native core and targeted regression evidence; integrated production
+coverage and full hosted gates are still required. PIN verification, other
+private report families, provider ownership, audio attachment/DSP and remote
+capability negotiation remain dependent work. This checkpoint is not complete
+phone support or complete Task 3.
+
 **Files:** `rust/core/src/link/identity.rs`, `runtime/links.rs`, `runtime/dtmf.rs`,
 `rust/product/include/rptadv_product.h`, `services.rs`, `link/session.rs`, host
 services/attachments, standalone/Asterisk adapters, ADRs 0023/0026/0037/0038.
@@ -198,7 +207,7 @@ test-only provider fixtures and transport ADR.
 canonical source PCM to Task 3. Existing per-call ingress/egress own packet
 order, jitter, codec state, prepared packets and bounded deadlines.
 
-- [ ] Resolve and build a disposable native dependency probe before selection:
+- [x] Resolve and build a disposable native dependency probe before selection:
   candidate `rsipstack 0.8.2` signaling plus `sdp/rtp/rtcp/webrtc-srtp 0.17.3`
   leaf crates. Inspect actual licenses/MSRV/transitives; preserve Rust 1.85 claims
   until the graph proves them. Choose a supported compatible graph or a separately

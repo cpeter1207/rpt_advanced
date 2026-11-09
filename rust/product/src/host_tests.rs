@@ -2602,8 +2602,10 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
 
 #[test]
 fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     static FAIL: AtomicBool = AtomicBool::new(false);
+    static OPEN_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    static DESTROYS: AtomicUsize = AtomicUsize::new(0);
     unsafe extern "C" fn open(
         context: *mut c_void,
         name: *const std::ffi::c_char,
@@ -2611,6 +2613,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
         maximum: usize,
         output: *mut *mut c_void,
     ) -> i32 {
+        OPEN_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
         if FAIL.load(Ordering::Acquire) {
             unsafe {
                 output.write(std::ptr::null_mut());
@@ -2624,13 +2627,20 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
             }
         }
     }
+    unsafe extern "C" fn destroy(context: *mut c_void, handle: *mut c_void) {
+        DESTROYS.fetch_add(1, Ordering::AcqRel);
+        unsafe { (*crate::fixture::host_descriptor()).radio_destroy.unwrap()(context, handle) };
+    }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     FAIL.store(false, Ordering::Release);
+    OPEN_ATTEMPTS.store(0, Ordering::Release);
+    DESTROYS.store(0, Ordering::Release);
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::without_provenance_mut(1);
     table.radio_open = Some(open);
+    table.radio_destroy = Some(destroy);
     let services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
     let mut host = Host::start(
         document("usb", ""),
@@ -2647,11 +2657,46 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
             .iter()
             .all(|(_, status)| status.retiring.is_none())
     });
+    // Take the real callback owners off the worker before controlling the two
+    // distinct outcomes: a protected-owner rejection, then failed restoration.
+    let lease = host.leases[0].1.clone();
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    let held = owners.1.acquire().unwrap();
+    let active = host.runtime.status(10)[0].1.active;
+    assert_eq!(active, Some(held.id()));
+    assert_eq!(host.runtime.status(10)[0].1.protected_owners, 1);
+    let previous = host.runtime.document().clone();
+    let revision = host.runtime.revision();
+    let resources = || {
+        (
+            OPEN_ATTEMPTS.load(Ordering::Acquire),
+            DESTROYS.load(Ordering::Acquire),
+        )
+    };
+    let before = resources();
+    assert_eq!(before, (1, 1));
     FAIL.store(true, Ordering::Release);
+    assert_eq!(
+        host.reload(document("unavailable", ""), clock()),
+        Err(RuntimeError::Busy)
+    );
+    assert_eq!(host.runtime.status(10)[0].1.active, active);
+    assert_eq!(host.runtime.document(), &previous);
+    assert_eq!(host.runtime.revision(), revision);
+    assert!(!host.runtime.reload_pending());
+    assert_eq!(resources(), before);
+    drop(held);
+    lease.lock().unwrap().owners = Some(owners);
+    assert_eq!(host.runtime.status(10)[0].1.protected_owners, 0);
     assert!(matches!(
         host.reload(document("unavailable", ""), clock()),
         Err(RuntimeError::Restore)
     ));
+    assert_eq!(host.runtime.document(), &previous);
+    assert_eq!(host.runtime.revision(), revision);
+    assert!(!host.runtime.reload_pending());
+    assert_eq!(resources(), (3, 1));
     assert!(host.runtime.status(10)[0].1.active.is_none());
     assert!(!host.status_text("1000").unwrap().contains("local-rx:"));
     // A late peer acknowledgment cannot reactivate a failed radio generation.
@@ -2678,6 +2723,7 @@ fn failed_device_restoration_leaves_inactive_generations_safe_to_pump_and_stop()
     host.pump(clock()).unwrap();
     assert!(host.stop(20));
     assert_eq!(state.lock().unwrap().drops, 1);
+    assert_eq!(resources(), (3, 1));
 }
 
 #[test]

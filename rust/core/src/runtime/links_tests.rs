@@ -223,6 +223,14 @@ fn phone_commands_keep_exact_private_source_and_retire_without_link_admission() 
     let reply = signals.reply_target();
     let mut links = links();
     assert!(links.phone_digit(&source, '*', 1, reply.clone()).is_none());
+    let mut unverified = operation(LinkAction::Status, "");
+    unverified.reply = Some(reply.clone());
+    unverified.origin = Some(call.to_string());
+    let mut host = NodeHost::new(generation(1));
+    assert!(matches!(
+        links.command(unverified, host.control().work().unwrap(), 1, false),
+        Err(AdmissionError::Denied)
+    ));
     assert!(signals.authenticate_phone());
     assert!(
         links
@@ -256,6 +264,15 @@ fn phone_commands_keep_exact_private_source_and_retire_without_link_admission() 
         links.command(operation, host.control().work().unwrap(), 3, false),
         Err(AdmissionError::Stale)
     ));
+    let fresh = crate::link::PeerSignals::for_phone(replacement.clone());
+    assert!(fresh.authenticate_phone());
+    links.close();
+    assert!(
+        links
+            .phone_digit(&replacement, '*', 4, fresh.reply_target())
+            .is_none()
+    );
+    assert!(links.manager().snapshot().is_empty());
 }
 
 #[test]

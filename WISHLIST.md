@@ -631,8 +631,11 @@ Prepared RF pacing and source-rate Earshot analysis are released in samplerate
 adapter `v0.2.0-alpha3` and Radio `v0.1.0-alpha.11`. Timed PCM provenance is
 released in ring `v3.0.0-alpha5`. Direct-trigger current-node DTMF streams are
 implemented in the controller candidate, with final native gates and manual
-acceptance still pending. Phone identities, mailbox authentication, provider
-sessions, call routing and the RF receive-check scheduler remain open; these
+acceptance still pending. The alpha24 candidate adds typed private call
+identities, bounded reply ownership, call-retirement fences and an inert digit
+grammar. Mailbox PIN verification, provider sessions, grammar/configuration
+integration, audio attachment/routing and the RF receive-check scheduler remain
+open; these
 prerequisites do not establish working autopatch or reverse patch.
 
 **Requirements**

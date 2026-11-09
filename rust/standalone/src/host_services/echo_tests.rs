@@ -10,6 +10,66 @@ mod media;
 #[path = "../../../peer-support/tests/support/host_accounts.rs"]
 mod accounts;
 
+#[path = "../../../peer-support/tests/support/peer_metadata.rs"]
+mod peer_metadata;
+
+#[test]
+fn peer_metadata_writes_only_the_supported_caller_prefix_for_both_protocols() {
+    let owner = HostServicesOwner::new(Vec::new(), None, SecretsFile::parse("").unwrap()).unwrap();
+    let fixture = support::Fixture::new("network");
+    let handles = [
+        owner.peer_handle(
+            crate::iax::tests::peer_for_host_callback(0, false, false),
+            "1000",
+            "2000",
+        ),
+        Box::into_raw(Box::new(PeerHandle::Echo(fixture.peer()))).cast(),
+    ];
+    let context = owner.descriptor().context;
+    for (index, handle) in handles.into_iter().enumerate() {
+        peer_metadata::check(
+            std::mem::offset_of!(host_abi::rptadv_peer_info_v1, provider_account),
+            size_of::<host_abi::rptadv_peer_info_v1>(),
+            |output| unsafe {
+                let output = output.cast::<host_abi::rptadv_peer_info_v1>();
+                let result = peer_info(context, handle, output);
+                if result == 0 {
+                    let info = &*output;
+                    assert_eq!(info.protocol, index as u32 + 1);
+                    assert_eq!(
+                        (
+                            info.capabilities,
+                            info.account_generation,
+                            info.qso_generation
+                        ),
+                        if index == 0 { (12, 0, 0) } else { (23, 4, 9) }
+                    );
+                    assert_eq!(
+                        std::str::from_utf8(std::slice::from_raw_parts(
+                            info.remote.data,
+                            info.remote.length
+                        ))
+                        .unwrap(),
+                        if index == 0 { "2000" } else { "4294967295" }
+                    );
+                    if info.struct_size as usize == size_of::<host_abi::rptadv_peer_info_v1>() {
+                        assert!(info.provider_account.data.is_null());
+                        assert_eq!(info.provider_account.length, 0);
+                    }
+                }
+                result
+            },
+        );
+        assert_eq!(unsafe { peer_info(context, handle, ptr::null_mut()) }, -1);
+        let mut info: host_abi::rptadv_peer_info_v1 = unsafe { std::mem::zeroed() };
+        info.struct_size = size_of::<host_abi::rptadv_peer_info_v1>() as u32;
+        info.abi_version = 1;
+        assert_eq!(unsafe { peer_info(ptr::null_mut(), handle, &mut info) }, -1);
+        assert_eq!(unsafe { peer_info(context, ptr::null(), &mut info) }, -1);
+        owner.destroy_peer(handle);
+    }
+}
+
 #[test]
 fn echo_accounts_prepare_before_activation_and_dial_from_the_stable_context() {
     accounts::check(
