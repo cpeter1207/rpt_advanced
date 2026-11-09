@@ -1223,12 +1223,32 @@ mod tests {
                 providers,
             )
             .unwrap();
-            process
-                .reload("[524950]\nnode_enabled=no\n[echolink 524950]\nenabled=no\n")
-                .unwrap();
             let library =
                 unsafe { libloading::Library::new(directory.join("librptadv_echolink.so.1")) }
                     .unwrap();
+            let validations = unsafe {
+                library.get::<unsafe extern "C" fn() -> usize>(b"fixture_pending_validations\0")
+            }
+            .unwrap();
+            let peers =
+                unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_peers\0") }
+                    .unwrap();
+            // Activation queues a real incoming QSO. Let its control callback
+            // claim and return the declined peer before disabling that account.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while unsafe { validations() == 0 || peers() != 0 } {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "incoming QSO did not drain: validations={}, peers={}",
+                    unsafe { validations() },
+                    unsafe { peers() },
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(unsafe { validations() }, 1);
+            process
+                .reload("[524950]\nnode_enabled=no\n[echolink 524950]\nenabled=no\n")
+                .unwrap();
             let fail = unsafe {
                 library.get::<unsafe extern "C" fn(u32)>(b"fixture_disabled_stop_failure\0")
             }
