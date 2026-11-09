@@ -1,6 +1,6 @@
 # ADR 0004: Hamlib remote-base boundary
 
-Status: Control software released; remote-audio integration and model-specific qualification pending (reconciled 2026-11-08)
+Status: Control software released; audio/streaming/IQ owner-deferred; model-specific qualification pending (2026-11-09)
 
 ## Context
 
@@ -19,8 +19,9 @@ than a numeric Hamlib model ID. Additional radios use additional nodes.
 
 Remote-base configuration uses inheritable `[remote_base]` and
 `[remote_base node]` sections. `hamlib_model` is a canonical model name,
-`audio_source` selects `cm119`, `alsa`, or `hamlib_stream`, and
-`hamlib_option_*` supplies named backend options. Audio selection makes a best
+`audio_source` selects `cm119` or `alsa` in released software; `hamlib_stream`
+remains a reserved design category under the deferral below. `hamlib_option_*`
+supplies named backend options. The intended audio selection makes a best
 effort to use CM119 for conventional radios, Linux-supported onboard USB audio
 when available, and a supported streaming API when the radio provides one.
 COS, CTCSS, and DCS remain USBRadioPlus DSP or hardware-signaling
@@ -57,10 +58,10 @@ radio duplex capability.
 
 AM and single-sideband speech squelch will reuse the shared radio's Earshot
 VAD with 16 kHz analysis. The local receiver implementation supports Off,
-Kerchunk filter and On; connecting future Hamlib sources remains planned.
-A configurable fixed SSB passband in the shared FFmpeg graph is
-the universal fallback; capable I/Q sources may add adaptive
-pre-demodulation selection. If speech detection is unavailable, fall back to
+Kerchunk filter and On; connecting future Hamlib sources is owner-deferred
+with the remote-media pass below. That deferred design uses a configurable
+fixed SSB passband in the shared FFmpeg graph as the universal fallback;
+capable I/Q sources may add adaptive pre-demodulation selection. If speech detection is unavailable, fall back to
 conventional noise squelch; if that is unavailable, leave receive open.
 
 Remote-base control is available to authenticated REST users and authorized
@@ -127,9 +128,34 @@ not qualify a Hamlib rig: physical-radio acceptance remains model-specific.
 
 Current audio paths are CM119 and general PortAudio/ALSA. Streaming-radio
 audio, Hamlib-source AM/SSB speech integration, and adaptive I/Q selection
-remain planned. Local Earshot speech qualification is released under
+are owner-deferred under the decision below. Local Earshot speech
+qualification is released under
 [ADR 0043](0043-shared-loudness-and-receive-vad.md). REST and
 the full CLI follow ADR 0023; this work does not implement those interfaces.
+
+## Owner deferral (2026-11-09)
+
+The owner deferred the requested Hamlib audio/streaming/IQ implementation
+until upstream support is no longer experimental. As of this decision,
+[Hamlib 4.7.2](https://github.com/Hamlib/Hamlib/releases/tag/4.7.2) is the stable
+release and lacks the audio/IQ sample-stream API. The
+[upstream development streaming design](https://github.com/Hamlib/Hamlib/blob/dba524fef82627a9a481de08d7600a9b589b1644/HAMLIB_STREAMING.md)
+explicitly labels its implementation experimental and permits wire-protocol
+changes. Revisit when Hamlib publishes non-experimental streaming support;
+review the released API, real backend capabilities, packaging, and automated
+acceptance before resuming implementation.
+
+The retained requirement is one common local processing path for streamed PCM,
+demodulated I/Q, CM119, and every other PortAudio-supported sound device.
+Source selection/demodulation supplies canonical 48 kHz programme PCM to the
+existing receive path, including squelch/Earshot, shared FFmpeg processing,
+tagged delay ring, LUFS AGC, Peak Limiter, and output meters. Preserve the
+existing transmit/PTT and lifecycle owners too.
+
+The remote-media pass, including Hamlib-source AM/SSB speech integration and
+adaptive I/Q selection, remains unimplemented. Model-specific physical-radio
+acceptance is separately deferred until test hardware is available. Released
+control software and CM119/PortAudio audio remain available.
 
 ## Consequences
 

@@ -19,7 +19,7 @@ completion does not imply hardware qualification, release, or deployment.
 | [0001](0001-reload-without-asterisk-restart.md) | Implemented | Valid configuration reload replaces workers without restarting Asterisk. |
 | [0002](0002-lock-free-audio-paths.md) | Implemented for current audio compositions; ongoing constraint | Audio paths are lock-free. |
 | [0003](0003-shared-rate-adjusting-pcm-ring.md) | Implemented (current asynchronous composition; optional shared-clock path pending) | Clock recovery uses the shared rate-adjusting PCM ring. |
-| [0004](0004-hamlib-remote-base-boundary.md) | Control software released; remote-audio work and physical acceptance pending | Hamlib owns rig control; audio uses an explicit source adapter. |
+| [0004](0004-hamlib-remote-base-boundary.md) | Control released; audio/streaming/IQ owner-deferred (2026-11-09); physical acceptance pending | Hamlib owns rig control; media awaits non-experimental upstream support. |
 | [0005](0005-standalone-core-and-optional-asterisk-adapters.md) | Implemented | A shared lock-free core serves standalone operation and optional Asterisk adapters. |
 | [0006](0006-appliance-control-plane-ingress.md) | Planned; decision accepted | The appliance hosts its OIDC, proxy, and WAF ingress layer. |
 | [0007](0007-echolink-audio-peer-boundary.md) | Implemented and released; broader live acceptance pending | EchoLink is a separate external-peer provider with local-only spoken human text. |
