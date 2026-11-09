@@ -2416,19 +2416,33 @@ fn failed_audio_preparation_and_attachment_preserve_start_and_reload_state() {
 
 #[test]
 fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     struct State {
         reject: AtomicBool,
-        prepared: AtomicUsize,
-        destroyed: AtomicUsize,
+        next: AtomicUsize,
+        prepared: Mutex<BTreeMap<usize, f64>>,
+        destroyed: Mutex<BTreeSet<usize>>,
+        processed: AtomicUsize,
     }
-    unsafe extern "C" fn process(_: *mut c_void, _: *mut f32, _: usize) -> i32 {
+    struct Processor {
+        state: *const State,
+        id: usize,
+    }
+    unsafe extern "C" fn process(context: *mut c_void, _: *mut f32, _: usize) -> i32 {
+        let processor = unsafe { &*context.cast::<Processor>() };
+        unsafe { &*processor.state }
+            .processed
+            .store(processor.id, Ordering::Release);
         0
     }
     unsafe extern "C" fn destroy(context: *mut c_void) {
-        unsafe { &*context.cast::<State>() }
-            .destroyed
-            .fetch_add(1, Ordering::Relaxed);
+        let processor = unsafe { Box::from_raw(context.cast::<Processor>()) };
+        let state = unsafe { &*processor.state };
+        let fresh = state.destroyed.lock().unwrap().insert(processor.id);
+        assert!(fresh, "each prepared processor is destroyed exactly once");
     }
     unsafe extern "C" fn prepare(
         context: *mut c_void,
@@ -2448,7 +2462,6 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
         }
         .unwrap();
         assert!(configuration.starts_with("[1000]\n[link]\n"));
-        assert!(configuration.contains("limiter_low_threshold_dbfs="));
         assert_eq!(
             unsafe { std::slice::from_raw_parts(local.cast::<u8>(), local_length) },
             b"1000"
@@ -2457,20 +2470,53 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
         if state.reject.load(Ordering::Relaxed) {
             return -1;
         }
-        state.prepared.fetch_add(1, Ordering::Relaxed);
+        let threshold = configuration
+            .lines()
+            .find_map(|line| line.strip_prefix("limiter_low_threshold_dbfs="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let id = state.next.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            state
+                .prepared
+                .lock()
+                .unwrap()
+                .insert(id, threshold)
+                .is_none()
+        );
         let output = unsafe { &mut *output };
-        output.context = context;
+        output.context = Box::into_raw(Box::new(Processor { state, id })).cast();
         output.process = Some(process);
         output.destroy = Some(destroy);
         0
+    }
+    fn only_live(state: &State, expected_threshold: f64) -> usize {
+        let prepared = state.prepared.lock().unwrap().clone();
+        let destroyed = state.destroyed.lock().unwrap().clone();
+        assert!(destroyed.iter().all(|id| prepared.contains_key(id)));
+        let live: Vec<_> = prepared
+            .iter()
+            .filter(|(id, _)| !destroyed.contains(id))
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "discarded candidates retire; one adopted processor remains live"
+        );
+        let (&id, &threshold) = live[0];
+        assert_eq!(threshold, expected_threshold);
+        id
     }
     let _serial = crate::fixture::LIFECYCLE
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut state = Box::new(State {
         reject: AtomicBool::new(false),
-        prepared: AtomicUsize::new(0),
-        destroyed: AtomicUsize::new(0),
+        next: AtomicUsize::new(1),
+        prepared: Mutex::new(BTreeMap::new()),
+        destroyed: Mutex::new(BTreeSet::new()),
+        processed: AtomicUsize::new(0),
     });
     let mut table = unsafe { crate::fixture::host_descriptor().read() };
     table.context = ptr::from_mut(state.as_mut()).cast();
@@ -2483,14 +2529,20 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
         )
     };
     let mut host = Host::start(config(-10), media(), services, Instant::now(), clock()).unwrap();
-    assert_eq!(state.prepared.load(Ordering::Relaxed), 0);
+    assert!(state.prepared.lock().unwrap().is_empty());
     let _peer = attach(&mut host, "2000", LinkAction::Transceive, Mode::TRANSCEIVE);
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
-    assert_eq!(state.prepared.load(Ordering::Relaxed), 1);
+    let original = only_live(&state, -10.0);
+    pump_until(&mut host, |_| {
+        state.processed.load(Ordering::Acquire) == original
+    });
     let prior_document = host.runtime.document().clone();
     let prior_revision = host.runtime.revision();
+    let prior_generation = host.runtime.status(10)[0].1.active;
+    let prepared = state.prepared.lock().unwrap().clone();
+    let destroyed = state.destroyed.lock().unwrap().clone();
     state.reject.store(true, Ordering::Relaxed);
     assert_eq!(
         host.reload(config(-11), clock()),
@@ -2498,16 +2550,52 @@ fn peer_processing_preparation_and_retirement_follow_the_audio_generation() {
     );
     assert_eq!(host.runtime.document(), &prior_document);
     assert_eq!(host.runtime.revision(), prior_revision);
-    assert_eq!(state.destroyed.load(Ordering::Relaxed), 0);
+    assert_eq!(host.runtime.status(10)[0].1.active, prior_generation);
+    let after_prepared = state.prepared.lock().unwrap().clone();
+    let after_destroyed = state.destroyed.lock().unwrap().clone();
+    assert_eq!(after_prepared, prepared);
+    assert_eq!(after_destroyed, destroyed);
+    assert_eq!(only_live(&state, -10.0), original);
+    state.processed.store(0, Ordering::Release);
+    pump_until(&mut host, |_| {
+        state.processed.load(Ordering::Acquire) == original
+    });
     state.reject.store(false, Ordering::Relaxed);
-    host.reload(config(-11), clock()).unwrap();
+    let mut accepted = None;
+    pump_until(&mut host, |host| match host.reload(config(-11), clock()) {
+        Err(RuntimeError::Busy) => {
+            // Discarded candidates may still occupy dispatcher publication credit.
+            // Busy never changes the adopted configuration or processor.
+            assert_eq!(host.runtime.document(), &prior_document);
+            assert_eq!(host.runtime.revision(), prior_revision);
+            assert_eq!(host.runtime.status(10)[0].1.active, prior_generation);
+            assert_eq!(only_live(&state, -10.0), original);
+            false
+        }
+        result => {
+            accepted = Some(result);
+            true
+        }
+    });
+    accepted
+        .expect("bounded control pump observed a non-Busy result")
+        .unwrap();
     pump_until(&mut host, |host| {
         host.runtime.status(10)[0].1.retiring.is_none()
     });
-    assert_eq!(state.prepared.load(Ordering::Relaxed), 2);
-    assert_eq!(state.destroyed.load(Ordering::Relaxed), 1);
+    let replacement = only_live(&state, -11.0);
+    assert_ne!(replacement, original);
+    pump_until(&mut host, |_| {
+        state.processed.load(Ordering::Acquire) == replacement
+    });
+    assert!(state.destroyed.lock().unwrap().contains(&original));
     assert!(host.stop(20));
-    assert_eq!(state.destroyed.load(Ordering::Relaxed), 2);
+    let prepared: BTreeSet<_> = state.prepared.lock().unwrap().keys().copied().collect();
+    let destroyed = state.destroyed.lock().unwrap().clone();
+    assert_eq!(
+        prepared, destroyed,
+        "every successful preparation, including discarded candidates, retires at shutdown"
+    );
 }
 
 #[test]
