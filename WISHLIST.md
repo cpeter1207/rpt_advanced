@@ -368,15 +368,23 @@ code-derived OpenAPI documentation remain pending under ADRs 0016 and 0023.
 
 ### Mode- and frequency-agile remote base
 
-**Status: Control software released; physical acceptance and remote-audio
-capabilities pending.** Shared Hamlib and parallel control, RF limits,
-independent signaling, remote-base DTMF, memories, and scanning are released
+**Status: Control software released; audio/streaming/IQ owner-deferred
+(2026-11-09); physical acceptance pending.** Shared Hamlib and parallel
+control, RF limits, independent signaling, remote-base DTMF, memories, and scanning are released
 with their providers, SDK alpha32, and controller alpha22 after the full native
 gates. The cohort is installed on 524950, but that USB-radio installation does
-not qualify a Hamlib rig. Model-specific physical-radio acceptance, future
-Hamlib-source AM/SSB speech integration, adaptive I/Q processing, and
-streaming-radio audio remain open under ADR 0004. Local receiver speech
-qualification is already implemented under ADR 0043.
+not qualify a Hamlib rig. The owner deferred the remote-media implementation
+pass until Hamlib publishes non-experimental audio/IQ streaming support.
+Hamlib-source AM/SSB speech integration, adaptive I/Q processing, and streaming
+radio audio remain unimplemented under [ADR 0004](doc/architecture/decisions/0004-hamlib-remote-base-boundary.md).
+Physical-radio acceptance is separately deferred until test hardware is
+available. Local receiver speech qualification is released under ADR 0043.
+
+The revisit condition is upstream non-experimental support, followed by review
+of the released API, backend capabilities, packaging, and automated acceptance.
+The future media path must reuse the same local processing as CM119 and other
+PortAudio-supported receivers; I/Q selection/demodulation precedes that PCM
+boundary. Existing control software and CM119/PortAudio audio remain available.
 
 **Requirements**
 
@@ -426,13 +434,16 @@ qualification is already implemented under ADR 0043.
   fallback policy when speech detection is unavailable; current local VAD
   processing errors close receive admission.
 - Remote-base configuration uses inheritable `[remote_base]` and
-  `[remote_base node]` sections. `hamlib_model` is a canonical model name,
-  `audio_source` selects `cm119`, `alsa`, or `hamlib_stream`, and
-  `hamlib_option_*` passes named backend options.
+  `[remote_base node]` sections. `hamlib_model` is a canonical model name.
+  Released `audio_source` choices are `cm119` and `alsa`; `hamlib_stream` is a
+  reserved design category under the owner deferral. `hamlib_option_*` passes
+  named backend options.
 - Speech squelch reuses the shared radio's Earshot VAD with 16 kHz analysis.
   The local receiver supports Off, Kerchunk filter and On; integration with
-  future Hamlib audio sources remains planned. A configurable fixed SSB passband in the shared FFmpeg graph is the universal
-  fallback; capable I/Q sources may add adaptive pre-demodulation selection.
+  future Hamlib audio sources is owner-deferred with the remote-media pass.
+  A configurable fixed SSB passband in the shared FFmpeg graph remains the
+  intended fallback; capable I/Q sources may add adaptive pre-demodulation
+  selection when that work resumes.
 - Every supported remote-base operating function is available through DTMF.
   The remappable `*6` family extends familiar ASL remote commands while
   preserving existing link commands and `*722`.

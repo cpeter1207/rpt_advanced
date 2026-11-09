@@ -104,8 +104,11 @@ native request ABI 4, and controller host-services ABI 10 form a matched
 cohort. Only the radio crate requires Rust >=1.87; USBRadioPlus and the
 controller retain Rust 1.85. The matched released cohort is Radio alpha10,
 USBRadioPlus alpha32, and controller alpha22. Hamlib control is released under
-ADR 0004; its future streaming/audio-source speech integration and adaptive
-I/Q path remain planned. Local VAD does not complete those remote-audio paths.
+[ADR 0004](decisions/0004-hamlib-remote-base-boundary.md). Its audio/streaming/IQ
+implementation pass is owner-deferred until Hamlib publishes non-experimental
+streaming support (2026-11-09). Future sources must reuse the same local
+processing path as CM119 and other PortAudio-supported devices. Physical-radio
+acceptance remains separately deferred.
 
 The USBRadioPlus hardware cutover uses one channel implementation backed by
 the dynamic PortAudio/ALSA and GPIO adapters, with no `res_usbradio` imports or

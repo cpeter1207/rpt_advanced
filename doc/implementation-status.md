@@ -50,8 +50,11 @@ Earshot Off/Kerchunk/On modes are recorded in
 [ADR 0043](architecture/decisions/0043-shared-loudness-and-receive-vad.md).
 
 The recorded passive health interval verifies bounded operation, not listening,
-RF deviation, or model-specific hardware acceptance. Those checks and the
-future Hamlib streaming/audio-source integration remain separate work.
+RF deviation, or model-specific hardware acceptance. Those checks remain open.
+The Hamlib audio/streaming/IQ implementation pass is owner-deferred until
+non-experimental upstream streaming support is published; physical acceptance
+is separately deferred until test hardware is available. See
+[ADR 0004](architecture/decisions/0004-hamlib-remote-base-boundary.md).
 
 ## Links and control
 
