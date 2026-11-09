@@ -825,6 +825,304 @@ fn pad_test_dispatch_queues_local_telemetry() {
 }
 
 #[test]
+fn dtmf_macro_stopped_dispatch_queues_only_the_existing_source_reply() {
+    use rpt_advanced_core::runtime::dtmf::DigitOutcome;
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    assert_eq!(unsafe { start(&active_configuration("")) }, 0);
+    let (engine, call) = selected().unwrap();
+    assert!(
+        engine
+            .execute_digit("1000".into(), DigitOutcome::MacroStopped { reply: None })
+            .is_ok()
+    );
+    assert!(
+        engine
+            .execute_digit("missing".into(), DigitOutcome::MacroStopped { reply: None })
+            .is_err()
+    );
+    drop(call);
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+}
+
+#[test]
+fn dtmf_macro_pending_dial_checks_cancellation_before_dial_and_after_answer() {
+    use rpt_advanced_core::runtime::dtmf::DigitEvent;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    static DIALS: AtomicUsize = AtomicUsize::new(0);
+    static CANCEL_DURING: AtomicBool = AtomicBool::new(false);
+    static RELOAD_DURING: AtomicBool = AtomicBool::new(false);
+    static STILL_CURRENT: AtomicBool = AtomicBool::new(false);
+    unsafe extern "C" fn dial(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: usize,
+        current: abi::rptadv_current_v1,
+        context: *mut c_void,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        DIALS.fetch_add(1, Ordering::AcqRel);
+        if CANCEL_DURING.load(Ordering::Acquire) {
+            let (engine, _call) = selected().unwrap();
+            engine
+                .run(|host| {
+                    host.runtime.digit(
+                        "1000",
+                        DigitEvent::Digit {
+                            digit: '*',
+                            now_ms: 2,
+                        },
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+        if RELOAD_DURING.load(Ordering::Acquire) {
+            let (engine, _call) = selected().unwrap();
+            engine
+                .reload_configuration(document(&active_configuration("")).unwrap())
+                .unwrap();
+            while !engine.poll_reload_configuration().unwrap() {
+                std::thread::yield_now();
+            }
+        }
+        STILL_CURRENT.store(
+            current.is_some_and(|callback| unsafe { callback(context) } != 0),
+            Ordering::Release,
+        );
+        // A provider may answer despite cancellation; final publication must still reject it.
+        unsafe { *output = crate::fixture::peer() };
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for phase in ["before_dial", "during_dial", "during_reload", "ordinary"] {
+        assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+        DIALS.store(0, Ordering::Release);
+        STILL_CURRENT.store(false, Ordering::Release);
+        CANCEL_DURING.store(
+            matches!(phase, "during_dial" | "ordinary"),
+            Ordering::Release,
+        );
+        RELOAD_DURING.store(phase == "during_reload", Ordering::Release);
+        SKIP_TICKER_THREAD.store(true, Ordering::Release);
+        let source = active_configuration(
+            "[dtmf_macro connect]\ntrigger=*95\nprotected=no\ncommands=*33000#\n",
+        );
+        let mut table = unsafe { crate::fixture::host_descriptor().read() };
+        table.peer_dial = Some(dial);
+        assert_eq!(
+            unsafe {
+                descriptor().start.unwrap()(
+                    &table,
+                    crate::fixture::control_descriptor(),
+                    rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                    rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                    source.as_ptr().cast(),
+                    source.len(),
+                )
+            },
+            0
+        );
+        let (engine, call) = selected().unwrap();
+        let effect = if phase == "ordinary" {
+            engine
+                .operation("1000", operation(LinkAction::Transceive, "3000"))
+                .unwrap()
+        } else {
+            dtmf_macro_connect(&engine)
+        };
+        let LinkEffect::Connect(attempt) = effect else {
+            panic!("pending connect")
+        };
+        if phase == "before_dial" {
+            engine
+                .run(|host| {
+                    host.runtime.digit(
+                        "1000",
+                        DigitEvent::Digit {
+                            digit: '*',
+                            now_ms: 2,
+                        },
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let before = crate::fixture::PEER_DROPS.load(Ordering::Acquire);
+        let result = engine.dial(
+            "1000".into(),
+            Dial::Connect(attempt),
+            engine.revision.load(Ordering::Acquire),
+        );
+        let attached = engine
+            .run(|host| {
+                Ok(host
+                    .runtime
+                    .node("1000")
+                    .unwrap()
+                    .links()
+                    .manager()
+                    .snapshot()
+                    .iter()
+                    .any(|peer| peer.name == "3000"))
+            })
+            .unwrap();
+        assert_eq!(attached, phase == "ordinary", "{phase}");
+        assert_eq!(result.is_ok(), phase == "ordinary", "{phase}");
+        assert_eq!(
+            DIALS.load(Ordering::Acquire),
+            usize::from(phase != "before_dial")
+        );
+        if matches!(phase, "during_dial" | "during_reload") {
+            assert!(!STILL_CURRENT.load(Ordering::Acquire));
+            assert_eq!(
+                crate::fixture::PEER_DROPS.load(Ordering::Acquire),
+                before + 1
+            );
+        }
+        if phase == "ordinary" {
+            assert!(STILL_CURRENT.load(Ordering::Acquire));
+        }
+        drop(call);
+        assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    }
+}
+
+fn dtmf_macro_connect(engine: &Arc<Engine>) -> LinkEffect {
+    use rpt_advanced_core::runtime::dtmf::{DigitEvent, DigitOutcome};
+    let clock = engine.clock();
+    engine
+        .run(move |host| {
+            for digit in "*95".chars() {
+                host.runtime.digit(
+                    "1000",
+                    DigitEvent::Digit {
+                        digit,
+                        now_ms: clock.now_ms,
+                    },
+                );
+            }
+            let node = host.runtime.node("1000").unwrap();
+            let DigitOutcome::Operation(operation) =
+                node.links().advance_macros(clock.now_ms).remove(0)
+            else {
+                panic!("macro connect")
+            };
+            host.runtime.command("1000", operation, clock, false)
+        })
+        .unwrap()
+}
+
+#[test]
+fn dtmf_macro_stop_during_directory_lookup_prevents_provider_dial() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    type PendingStop = (Arc<Engine>, u64, mpsc::SyncSender<()>);
+    static STOP_LOOKUP: Mutex<Option<PendingStop>> = Mutex::new(None);
+    static STOP_OBSERVED: AtomicBool = AtomicBool::new(false);
+    static DIALS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn record(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: *const std::ffi::c_char,
+        _: usize,
+        sink: abi::rptadv_text_sink_v1,
+        context: *mut c_void,
+    ) -> i32 {
+        let pending = STOP_LOOKUP
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let Some((engine, revision, request)) = pending else {
+            return -1;
+        };
+        if request.send(()).is_err() {
+            return -1;
+        }
+        // Stop closes admission before waiting for this command's held Call.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while engine.current(revision) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let stopped = !engine.current(revision);
+        STOP_OBSERVED.store(stopped, Ordering::Release);
+        let Some(sink) = sink.filter(|_| stopped) else {
+            return -1;
+        };
+        let destination = "radio@fixture/3000,127.0.0.1";
+        unsafe { sink(context, destination.as_ptr().cast(), destination.len()) };
+        0
+    }
+    unsafe extern "C" fn dial(
+        _: *mut c_void,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: *const std::ffi::c_char,
+        _: usize,
+        _: usize,
+        _: abi::rptadv_current_v1,
+        _: *mut c_void,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        DIALS.fetch_add(1, Ordering::AcqRel);
+        unsafe { *output = crate::fixture::peer() };
+        0
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    STOP_OBSERVED.store(false, Ordering::Release);
+    DIALS.store(0, Ordering::Release);
+    SKIP_TICKER_THREAD.store(true, Ordering::Release);
+    let source = active_configuration(
+        "link_lookup_method=file\nlink_static_directory_file=fixture\n\
+         [dtmf_macro connect]\ntrigger=*95\nprotected=no\ncommands=*33000#\n",
+    );
+    let mut table = unsafe { crate::fixture::host_descriptor().read() };
+    table.directory_record = Some(record);
+    table.peer_dial = Some(dial);
+    assert_eq!(
+        unsafe {
+            descriptor().start.unwrap()(
+                &table,
+                crate::fixture::control_descriptor(),
+                rptadv_file_adapter::rptadv_file_adapter_descriptor().cast(),
+                rptadv_speech_adapter::rptadv_speech_adapter_descriptor().cast(),
+                source.as_ptr().cast(),
+                source.len(),
+            )
+        },
+        0
+    );
+    let (engine, call) = selected().unwrap();
+    let LinkEffect::Connect(attempt) = dtmf_macro_connect(&engine) else {
+        panic!("pending macro connection")
+    };
+    let revision = engine.revision.load(Ordering::Acquire);
+    let (request, receive) = mpsc::sync_channel(1);
+    *STOP_LOOKUP.lock().unwrap() = Some((Arc::clone(&engine), revision, request));
+    let stop = std::thread::spawn(move || {
+        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        unsafe { descriptor().stop.unwrap()() }
+    });
+    let result = engine.dial("1000".into(), Dial::Connect(attempt), revision);
+    drop(call);
+    assert_eq!(stop.join().unwrap(), 0);
+    assert!(STOP_OBSERVED.load(Ordering::Acquire));
+    assert_eq!(result, Err(RuntimeError::Rejected));
+    assert_eq!(DIALS.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn remote_candidate_dispatch_ignores_denied_command_but_keeps_accepted_effect() {
     use rpt_advanced_core::runtime::dtmf::DigitOutcome;
     let _serial = crate::fixture::LIFECYCLE

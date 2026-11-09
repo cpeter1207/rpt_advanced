@@ -1,6 +1,7 @@
 //! Owned configuration parsing, schema validation, and inherited settings.
 
 mod document;
+mod dtmf_macros;
 mod echolink;
 mod messages;
 mod parse;
@@ -27,6 +28,8 @@ mod scope_tests;
 mod tests;
 
 pub use document::{ConfigDocument, ConfigEntry};
+pub use dtmf_macros::{ResolvedDtmfMacroSettings, resolve_dtmf_macros};
+pub(crate) use dtmf_macros::{compile_macros, macro_limits};
 pub use echolink::{EchoLinkAnnouncement, EchoLinkSettings, EchoLinkTelemetry, EchoLinkTransport};
 pub(crate) use messages::selector_valid as message_selector_valid;
 pub use messages::{BindingSource, ResolvedMessageSettings};
@@ -70,7 +73,9 @@ impl ConfigWarning {
             section: section.to_owned(),
             key: key.to_owned(),
             // URLs may carry private query parameters; never echo them in diagnostics.
-            value: if matches!(key, "directory_password" | "proxy_password") {
+            value: if key == "commands" && section.starts_with("dtmf_macro ") {
+                "<redacted command stream>".to_owned()
+            } else if matches!(key, "directory_password" | "proxy_password") {
                 "<redacted secret>".to_owned()
             } else if matches!(key, "statpost_url" | "iax_registration_url") {
                 "<redacted URL>".to_owned()
@@ -78,7 +83,14 @@ impl ConfigWarning {
                 value.to_owned()
             },
             message: message.to_owned(),
-            fallback: fallback.to_owned(),
+            fallback: if key == "commands"
+                && section.starts_with("dtmf_macro ")
+                && fallback != "macro unavailable"
+            {
+                "<redacted command stream>".to_owned()
+            } else {
+                fallback.to_owned()
+            },
         }
     }
 }

@@ -1,6 +1,7 @@
 # ADR 0044: Private phone peers and bounded RF presentation pacing
 
-Status: Accepted by owner 2026-11-09; implementation pending.
+Status: Accepted by owner 2026-11-09; prerequisites and macro foundation
+implemented, phone/RF integration pending.
 
 ## Context
 
@@ -60,10 +61,18 @@ estimator, audio worker, mixer, or DSP engine. EQ/dynamics/limiting remain share
 FFmpeg graphs. Transport/control and generation reclamation keep their existing
 owners under ADRs 0023/0026/0037/0038.
 
-Source-timed ring rendering, common source-rate Earshot analysis, prepared pacing
-and structured radio-off feedback are prerequisites, not currently available
-capabilities to assume. Callback allocation, stale-media revocation, private
-routing, RF deadline/age bounds and reload/unload need automated evidence.
+Prepared pacing is released in samplerate adapter `v0.2.0-alpha3`; common
+source-rate Earshot analysis is released in Radio `v0.1.0-alpha.11`.
+Source-timed ring rendering is implemented in the ABI3 alpha5 candidate; its
+native package gates remain pending. Consumers must check each optional
+descriptor tail and use the released versioned libraries. These capabilities
+do not by themselves implement structured radio-off feedback or the RF
+presentation scheduler.
+
+The current-node RF/IAX macro foundation has source-owned cancellation,
+asynchronous attachment fencing and explicit command boundaries. Phone-private
+authentication, routing, RF deadline/age bounds and their integrated
+reload/unload behavior still need implementation and automated evidence.
 Actual provider/NAT and physical switching/STE/listening acceptance remain
 separate. The [implementation plan](../../../docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
 records task ordering; this ADR does not claim completion or authorize deployment.

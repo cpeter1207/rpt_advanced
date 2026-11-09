@@ -3,6 +3,20 @@ use super::messages::{CatalogError, Message, MessageCatalog, MessageForms};
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
 #[test]
+fn dtmf_macro_stopped_reply_has_bounded_localized_forms_and_translation_fallback() {
+    let catalog = MessageCatalog::from_sources(
+        "fr-CA",
+        ENGLISH,
+        Some("dtmf-macro-stopped =\n    .tts = Sequence arretee\n"),
+    )
+    .unwrap();
+    let forms = catalog.format(&Message::DtmfMacroStopped).unwrap();
+    assert_eq!(forms.tts, "Sequence arretee");
+    assert_eq!(forms.morse, "MACRO STOPPED");
+    assert!(forms.text.len() <= 127);
+}
+
+#[test]
 fn incoming_text_attributes_the_sender_without_expanding_the_body() {
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
     for (source, expected) in [

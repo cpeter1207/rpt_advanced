@@ -36,6 +36,7 @@ enum KnownScope {
     Template,
     Message,
     Macro,
+    DtmfMacro,
     Event,
     Permanent,
     Schedule,
@@ -70,6 +71,7 @@ impl KnownScope {
             ScopeKind::TemplateGlobal | ScopeKind::TemplateNode => Self::Template,
             ScopeKind::MessageGlobal | ScopeKind::MessageNode => Self::Message,
             ScopeKind::MacroGlobal | ScopeKind::MacroNode => Self::Macro,
+            ScopeKind::DtmfMacroGlobal | ScopeKind::DtmfMacroNode => Self::DtmfMacro,
             ScopeKind::EventNode => Self::Event,
             ScopeKind::PermanentNode => Self::Permanent,
             ScopeKind::ScheduleNode => Self::Schedule,
@@ -225,6 +227,12 @@ impl Schema {
         validate_templates_and_macros(document)?;
         validate_events(document)?;
         validate_links(document)?;
+        for node in document.nodes() {
+            warnings.extend(
+                super::dtmf_macros::resolve_dtmf_macros(document, &super::NodeId::new(node)?)?
+                    .warnings,
+            );
+        }
         super::echolink::validate_all(document)?;
         let mut site_outputs = BTreeSet::new();
         for node in document.nodes() {
@@ -284,6 +292,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 | "link_command_cancel_message"
                 | "parrot_enabled"
                 | "dtmf_admin_unlock_hash"
+                | "dtmf_macro_pause_ms"
+                | "dtmf_macro_max_symbols"
+                | "dtmf_macro_max_duration_ms"
                 | "dtmf_admin_lock_hash"
                 | "dtmf_admin_timeout_ms"
                 | "squelch_delay_ms"
@@ -390,6 +401,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
                 || key_known(KnownScope::Announcement, key) && key != "interval_ms"
         }
         KnownScope::Macro => matches!(key, "action" | "target_node"),
+        KnownScope::DtmfMacro => matches!(key, "trigger" | "protected" | "commands"),
         KnownScope::Tail => {
             matches!(key, "delay_ms" | "tone_sequence" | "level_db")
                 || super::messages::content_key(key)
@@ -418,6 +430,15 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if matches!(key, "dtmf_macro_pause_ms" | "dtmf_macro_max_duration_ms") {
+        return parse::unsigned(value, 1, 120_000).is_some();
+    }
+    if key == "dtmf_macro_max_symbols" {
+        return parse::unsigned(value, 1, 4096).is_some();
+    }
+    if matches!(kind, ScopeKind::DtmfMacroGlobal | ScopeKind::DtmfMacroNode) {
+        return super::dtmf_macros::value_valid(key, value);
+    }
     if matches!(
         kind,
         ScopeKind::ProcessingDefault
@@ -629,7 +650,11 @@ fn default_value(kind: ScopeKind, key: &str) -> String {
         (ScopeKind::General | ScopeKind::Node, "dtmf_regeneration_duration_ms") => "200",
         (ScopeKind::General | ScopeKind::Node, "dtmf_regeneration_gap_ms") => "50",
         (ScopeKind::General | ScopeKind::Node, "dtmf_regeneration_level_dbfs") => "-12",
+        (ScopeKind::DtmfMacroGlobal | ScopeKind::DtmfMacroNode, "protected") => "yes",
         (ScopeKind::General | ScopeKind::Node, "dtmf_admin_timeout_ms") => "300000",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_macro_pause_ms") => "2000",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_macro_max_symbols") => "4096",
+        (ScopeKind::General | ScopeKind::Node, "dtmf_macro_max_duration_ms") => "120000",
         (ScopeKind::General | ScopeKind::Node, "transmit_hang_ms") => "0",
         (ScopeKind::General | ScopeKind::Node, "ctcss_encode_on_input") => "no",
         (ScopeKind::General | ScopeKind::Node, "ctcss_hang_ms") => "0",
@@ -756,6 +781,7 @@ fn effective_fallback(document: &ConfigDocument, scope: Scope<'_>, key: &str) ->
         ScopeKind::SpeechNode => candidates.push(("speech".to_owned(), key)),
         ScopeKind::TimeNode => candidates.push(("time".to_owned(), key)),
         ScopeKind::MacroNode => candidates.push((format!("macro {label}"), key)),
+        ScopeKind::DtmfMacroNode => candidates.push((format!("dtmf_macro {label}"), key)),
         ScopeKind::MessageNode => {
             candidates.push((format!("message {label}"), key));
             add_media_defaults(&mut candidates, key, node);

@@ -1,3 +1,12 @@
+rpt-advanced (0.1.0~alpha23-1) unstable; urgency=medium
+
+  * Add direct-trigger, source-owned DTMF command streams with comma pauses.
+  * Fence delayed commands and connection retries against source replacement.
+  * Reconcile current-object LLVM coverage metadata without dropping decisions.
+  * Record approved phone-patch architecture and remaining integration work.
+
+ -- Chris Peterson <cpeter1207@users.noreply.github.com>  Mon, 09 Nov 2026 13:45:00 -0600
+
 rpt-advanced (0.1.0~alpha22-1) unstable; urgency=medium
 
   * Preserve VAD speech onset in the existing local receive ring.

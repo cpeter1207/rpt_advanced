@@ -110,10 +110,10 @@ impl Dial {
             Self::Retry(work) => work.mode(),
         }
     }
-    fn current(&self) -> bool {
+    fn current(&self, now_ms: u64) -> bool {
         match self {
-            Self::Connect(work) => work.current(),
-            Self::Retry(work) => work.current(),
+            Self::Connect(work) => work.current_at(now_ms),
+            Self::Retry(work) => work.current_at(now_ms),
         }
     }
 }
@@ -151,6 +151,11 @@ impl Engine {
     ) -> Result<LinkEffect, RuntimeError> {
         use rpt_advanced_core::runtime::dtmf::DigitOutcome;
         match outcome {
+            DigitOutcome::MacroStopped { reply } => {
+                let local = local.to_owned();
+                self.run(move |host| host.runtime.queue_macro_stopped(&local, reply))?;
+                Ok(LinkEffect::None)
+            }
             DigitOutcome::Operation(operation) => self.operation(local, operation),
             DigitOutcome::RemoteCandidate(operation) => {
                 self.operation(local, operation).or(Ok(LinkEffect::None))
@@ -250,14 +255,21 @@ impl Engine {
         let name = local.clone();
         let remote = attempt.remote().to_owned();
         let destination_remote = remote.clone();
-        let destination = self.run(move |host| host.lookup(&name, &destination_remote, None));
-        let io = destination.ok().and_then(|destination| {
-            self.services
-                .dial(&destination, &local, crate::host::MAXIMUM_FRAMES, || {
-                    self.current(revision) && attempt.current()
-                })
-                .ok()
-        });
+        let destination = if self.current(revision) && attempt.current(self.elapsed_ms()) {
+            self.run(move |host| host.lookup(&name, &destination_remote, None))
+        } else {
+            Err(RuntimeError::Rejected)
+        };
+        let io = destination
+            .ok()
+            .filter(|_| self.current(revision) && attempt.current(self.elapsed_ms()))
+            .and_then(|destination| {
+                self.services
+                    .dial(&destination, &local, crate::host::MAXIMUM_FRAMES, || {
+                        self.current(revision) && attempt.current(self.elapsed_ms())
+                    })
+                    .ok()
+            });
         let engine = Arc::clone(self);
         self.run_inner(true, move |host| {
             let clock = engine.clock();

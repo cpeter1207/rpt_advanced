@@ -615,7 +615,7 @@ remain planned. Local-file decoding does not imply network stream support.
 
 ### Telephony integration
 
-**Status — 2026-11-09:** Planned; design approved. DTMF testing,
+**Status — 2026-11-09:** Design approved; implementation in progress. DTMF testing,
 regeneration, and addressed command forwarding are released in `rpt_advanced` v0.1.0-alpha11 with
 `librptadvdtmf` v0.1.0-alpha.2; those are not open telephony requirements.
 The standalone AllStarLink IAX2 implementation is also released. Autopatch,
@@ -626,6 +626,14 @@ implementation or hardware-acceptance record. Paging remains separate.
 The [native implementation plan](docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
 and [ADR 0044](doc/architecture/decisions/0044-phone-peers-and-rf-presentation-pacing.md)
 record prerequisite capabilities and task ordering.
+
+Prepared RF pacing and source-rate Earshot analysis are released in samplerate
+adapter `v0.2.0-alpha3` and Radio `v0.1.0-alpha.11`. Timed PCM provenance is in
+the ring ABI3 alpha5 candidate. Direct-trigger current-node DTMF streams are
+implemented in the controller candidate, with final native gates and manual
+acceptance still pending. Phone identities, mailbox authentication, provider
+sessions, call routing and the RF receive-check scheduler remain open; these
+prerequisites do not establish working autopatch or reverse patch.
 
 **Requirements**
 
@@ -659,8 +667,10 @@ record prerequisite capabilities and task ordering.
   Apply receive opportunities to half-duplex phone, link and remote-base use.
 - Configure conference limits; defaults are one node attachment per call and one
   reverse-patch call per node.
-- Add direct DTMF-sequence macros with configured trigger, unlock requirement,
-  termination characters and comma pauses; preserve existing typed link macros.
+- Extend the implemented current-node DTMF-sequence macros to typed phone
+  sources and verified remote target capabilities. Keep configured triggers,
+  unlock requirements, explicit terminators, comma pauses and existing typed
+  link macros.
 
 **Implementation readiness still required**
 

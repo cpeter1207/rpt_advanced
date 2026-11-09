@@ -17,6 +17,7 @@ use crate::{
 
 /// Owned dial request. Carry this across external lookup/media/dial and return it for publication.
 pub struct ConnectAttempt {
+    macro_source: Option<DigitOperation>,
     remote: String,
     mode: Mode,
     permanent: bool,
@@ -27,6 +28,7 @@ pub struct ConnectAttempt {
 
 /// Retry work retains a host-generation permit until external dial cleanup completes.
 pub struct RetryWork {
+    macro_source: Option<DigitOperation>,
     attempt: RetryAttempt,
     work: GenerationWork,
 }
@@ -41,7 +43,11 @@ impl RetryWork {
     }
     /// Revalidate before each external operation.
     pub fn current(&self) -> bool {
-        self.work.is_current()
+        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), None)
+    }
+    /// Revalidate an initial macro retry's source deadline before external dialing.
+    pub fn current_at(&self, now_ms: u64) -> bool {
+        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), Some(now_ms))
     }
 }
 impl ConnectAttempt {
@@ -59,8 +65,21 @@ impl ConnectAttempt {
     }
     /// Recheck this after each external blocking preparation step.
     pub fn current(&self) -> bool {
-        self.work.is_current()
+        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), None)
     }
+    /// Recheck source cancellation and the inclusive elapsed bound before external work.
+    pub fn current_at(&self, now_ms: u64) -> bool {
+        self.work.is_current() && macro_source_current(self.macro_source.as_ref(), Some(now_ms))
+    }
+}
+
+fn macro_source_current(source: Option<&DigitOperation>, now_ms: Option<u64>) -> bool {
+    source.is_none_or(|source| {
+        source.reply.as_ref().is_none_or(|reply| !reply.ended())
+            && source.macro_permit.as_ref().is_none_or(|permit| {
+                now_ms.map_or_else(|| permit.active(), |now| permit.current_at(now))
+            })
+    })
 }
 
 /// Adapter-facing consequence of one serialized existing link command.
@@ -112,6 +131,7 @@ pub struct NodeLinkControl {
     policy: AccessPolicy,
     commands: DtmfCommands,
     peer_commands: Vec<(String, PeerReply, DtmfCommands)>,
+    macro_retries: Vec<(String, DigitOperation)>,
     digit_sequence: i32,
     schedule: Option<LinkScheduler>,
     groups: Vec<ConfiguredGroup>,
@@ -188,6 +208,7 @@ impl NodeLinkControl {
             policy,
             commands: DtmfCommands::new(commands),
             peer_commands: Vec::new(),
+            macro_retries: Vec::new(),
             digit_sequence: 0,
             schedule,
             groups,
@@ -203,6 +224,9 @@ impl NodeLinkControl {
         commands: DtmfCommandMap,
         schedule: Option<LinkScheduler>,
     ) {
+        for (remote, _) in self.macro_retries.drain(..) {
+            self.manager.cancel_retry(&remote);
+        }
         self.groups = configured_groups(schedule.as_ref(), &self.groups);
         self.manager.invalidate_generation();
         self.policy = policy;
@@ -228,9 +252,99 @@ impl NodeLinkControl {
         }
         Ok(())
     }
+    /// Install the generation's prepared catalog; per-source runners share immutable definitions.
+    pub fn configure_macros(
+        &mut self,
+        macros: Vec<crate::dtmf_macro::CompiledDtmfMacro>,
+        limits: crate::dtmf_macro::DtmfMacroLimits,
+    ) -> Result<(), crate::command::CommandMapError> {
+        self.commands.configure_macros(macros, limits)?;
+        self.peer_commands.clear();
+        Ok(())
+    }
+
+    /// Advance each admitted source once, after all new live input has been consumed.
+    pub fn advance_macros(&mut self, now_ms: u64) -> Vec<DigitOutcome> {
+        self.retain_peer_commands(now_ms);
+        let mut outcomes = self
+            .commands
+            .advance_macro(now_ms)
+            .map(DigitOutcome::Operation)
+            .into_iter()
+            .collect::<Vec<_>>();
+        outcomes.extend(self.commands.take_macro_stopped());
+        outcomes.extend(
+            self.peer_commands
+                .iter_mut()
+                .filter_map(|(origin, reply, commands)| {
+                    commands.advance_macro(now_ms).map(|operation| {
+                        Self::source_outcome(
+                            DigitOutcome::Operation(operation),
+                            origin,
+                            reply.clone(),
+                        )
+                    })
+                }),
+        );
+        outcomes.extend(
+            self.peer_commands
+                .iter_mut()
+                .filter_map(|(origin, reply, commands)| {
+                    commands
+                        .take_macro_stopped()
+                        .map(|outcome| Self::source_outcome(outcome, origin, reply.clone()))
+                }),
+        );
+        outcomes
+    }
+
+    fn macro_operation_current(&mut self, operation: &DigitOperation, now_ms: u64) -> bool {
+        if operation.macro_permit.is_none() {
+            return true;
+        }
+        let commands = if let Some(reply) = &operation.reply {
+            self.peer_commands
+                .iter_mut()
+                .find(|(name, source, _)| {
+                    Some(name.as_str()) == operation.origin.as_deref() && source == reply
+                })
+                .map(|(_, _, commands)| commands)
+        } else {
+            Some(&mut self.commands)
+        };
+        commands.is_some_and(|commands| commands.macro_operation_current(operation, now_ms))
+    }
+
+    fn prune_macro_retries(&mut self, now_ms: u64) {
+        if self.macro_retries.is_empty() {
+            return;
+        }
+        let pending = self
+            .manager
+            .snapshot()
+            .into_iter()
+            .filter(|peer| peer.retrying)
+            .map(|peer| peer.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        for (remote, source) in std::mem::take(&mut self.macro_retries) {
+            if !pending.contains(&remote) {
+                continue;
+            }
+            if macro_source_current(Some(&source), Some(now_ms))
+                && self.macro_operation_current(&source, now_ms)
+            {
+                self.macro_retries.push((remote, source));
+            } else {
+                self.manager.cancel_retry(&remote);
+            }
+        }
+    }
     /// Recheck the exact collector without extending its administrative grant.
     pub(crate) fn remote_authorized(&mut self, operation: &DigitOperation, now_ms: u64) -> bool {
-        if !self.admitting || operation.reply.as_ref().is_some_and(PeerReply::ended) {
+        if !self.admitting
+            || operation.reply.as_ref().is_some_and(PeerReply::ended)
+            || !self.macro_operation_current(operation, now_ms)
+        {
             return false;
         }
         let Some(request) = operation.remote else {
@@ -460,6 +574,13 @@ impl NodeLinkControl {
     pub fn digit(&mut self, event: DigitEvent) -> Option<DigitOutcome> {
         self.commands.feed(event)
     }
+    /// Submission loss revokes every source's queued expansion and partial command.
+    pub fn lost_digits(&mut self) {
+        self.commands.feed(DigitEvent::Lost);
+        for (_, _, commands) in &mut self.peer_commands {
+            commands.feed(DigitEvent::Lost);
+        }
+    }
     /// Interpret a peer digit only while its direct connection and current policy allow it.
     pub fn peer_digit(
         &mut self,
@@ -513,6 +634,9 @@ impl NodeLinkControl {
     }
     /// Attach source identity only to outcomes that carry a command.
     fn source_outcome(mut outcome: DigitOutcome, origin: &str, reply: PeerReply) -> DigitOutcome {
+        if let DigitOutcome::MacroStopped { reply: target } = &mut outcome {
+            *target = Some(reply.clone());
+        }
         if let DigitOutcome::Operation(operation) | DigitOutcome::RemoteCandidate(operation) =
             &mut outcome
         {
@@ -566,10 +690,14 @@ impl NodeLinkControl {
         now_ms: u64,
         directory_verified: bool,
     ) -> Result<LinkEffect, AdmissionError> {
+        self.prune_macro_retries(now_ms);
         if !self.admitting || !work.is_current() {
             return Err(AdmissionError::Stale);
         }
         if operation.reply.as_ref().is_some_and(PeerReply::ended) {
+            return Err(AdmissionError::Stale);
+        }
+        if !self.macro_operation_current(&operation, now_ms) {
             return Err(AdmissionError::Stale);
         }
         let remote = if matches!(
@@ -649,6 +777,7 @@ impl NodeLinkControl {
                     return Err(AdmissionError::Loop);
                 }
                 LinkEffect::Connect(ConnectAttempt {
+                    macro_source: operation.macro_permit.as_ref().map(|_| operation.clone()),
                     remote,
                     mode,
                     permanent,
@@ -852,7 +981,11 @@ impl NodeLinkControl {
         });
         let mut topology_blocked = false;
         let result = if !self.admitting
-            || !attempt.work.is_current()
+            || !attempt.current_at(now_ms)
+            || attempt
+                .macro_source
+                .as_ref()
+                .is_some_and(|source| !self.macro_operation_current(source, now_ms))
             || !scheduled_current
             || !calendar_valid
         {
@@ -897,6 +1030,16 @@ impl NodeLinkControl {
                 topology_blocked || (result.is_ok() && (answered || attempt.permanent)),
             );
         }
+        if result == Ok(true) {
+            self.macro_retries
+                .retain(|(remote, _)| remote != &attempt.remote);
+        } else if topology_blocked || (result == Ok(false) && attempt.permanent) {
+            if let Some(source) = attempt.macro_source {
+                self.macro_retries
+                    .retain(|(remote, _)| remote != &attempt.remote);
+                self.macro_retries.push((attempt.remote, source));
+            }
+        }
         result
     }
     /// Reserve one due hub-recovery dial outside the serialized control owner.
@@ -904,9 +1047,16 @@ impl NodeLinkControl {
         if !self.admitting || !work.is_current() {
             return None;
         }
-        self.manager
-            .take_retry(now_ms)
-            .map(|attempt| RetryWork { attempt, work })
+        self.prune_macro_retries(now_ms);
+        self.manager.take_retry(now_ms).map(|attempt| RetryWork {
+            macro_source: self
+                .macro_retries
+                .iter()
+                .find(|(remote, _)| remote == attempt.name())
+                .map(|(_, source)| source.clone()),
+            attempt,
+            work,
+        })
     }
     /// Publish only a still-current retry; the adapter installs its prepared resources on true.
     pub fn finish_retry(
@@ -915,8 +1065,15 @@ impl NodeLinkControl {
         answered: bool,
         now_ms: u64,
     ) -> Result<bool, AdmissionError> {
+        let owns_attempt = self.manager.owns_retry(&retry.attempt);
+        let source_valid = retry.current_at(now_ms)
+            && retry
+                .macro_source
+                .as_ref()
+                .is_none_or(|source| self.macro_operation_current(source, now_ms));
         let attempt = retry.attempt;
-        let result = if !self.admitting || !retry.work.is_current() {
+        let remote = attempt.name().to_owned();
+        let result = if !self.admitting || !owns_attempt || !source_valid {
             Err(AdmissionError::Stale)
         } else if !self.policy.allows(attempt.name(), true) {
             Err(AdmissionError::Denied)
@@ -927,6 +1084,16 @@ impl NodeLinkControl {
         };
         self.manager
             .finish_retry(attempt, matches!(result, Ok(true)), now_ms);
+        if owns_attempt && (result == Ok(true) || !source_valid) {
+            if let Some(source) = &retry.macro_source {
+                self.macro_retries.retain(|(name, current)| {
+                    name != &remote || current.macro_permit != source.macro_permit
+                });
+            }
+            if !source_valid && retry.macro_source.is_some() {
+                self.manager.cancel_retry(&remote);
+            }
+        }
         result
     }
     /// Refresh windows from captured time/activity before selecting or revalidating link work.
@@ -980,6 +1147,7 @@ impl NodeLinkControl {
             return Some(LinkEffect::Detach(vec![remote]));
         }
         Some(LinkEffect::Connect(ConnectAttempt {
+            macro_source: None,
             remote: reservation.remote().into(),
             mode: Mode::TRANSCEIVE,
             permanent: true,
@@ -1007,6 +1175,10 @@ impl NodeLinkControl {
     /// Gate old dials and return every external identity to stop/drain before host reclamation.
     pub fn close(&mut self) -> Vec<String> {
         self.admitting = false;
+        self.commands.cancel_macro();
+        for (_, _, commands) in &mut self.peer_commands {
+            commands.cancel_macro();
+        }
         self.manager.close()
     }
 }

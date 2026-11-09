@@ -625,3 +625,8 @@ remote-empty =
         [memories] MEM
        *[scans] SCAN
         }
+
+dtmf-macro-stopped =
+    .text = Command macro stopped
+    .tts = Command macro stopped
+    .morse = MACRO STOPPED

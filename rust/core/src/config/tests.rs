@@ -7,6 +7,129 @@ use super::{
 use std::collections::BTreeMap;
 
 #[test]
+fn dtmf_macro_sections_preserve_command_terminators_without_unknown_warnings() {
+    let document = ConfigDocument::parse(
+        "[1000]\n[dtmf_macro status]\ntrigger=*95\nprotected=no\ncommands=*70#,, *73# ; comment\n\
+         [dtmf_macro 1000 status]\nprotected=yes\n[macro resume]\naction=reconnect_all\n",
+    )
+    .unwrap();
+    let result = Schema::validate(&document).unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(
+        document.lookup("commands", &["dtmf_macro status"]),
+        Some("*70#,, *73#")
+    );
+}
+
+#[test]
+fn dtmf_macro_diagnostics_never_repeat_rejected_command_streams() {
+    let document = ConfigDocument::parse(
+        "[1000]\n[dtmf_macro bad]\ntrigger=*95\ncommands=*800123456#\nunknown=private\n",
+    )
+    .unwrap();
+    let result = Schema::validate(&document).unwrap();
+    assert!(result.warnings.iter().all(|warning| {
+        !warning.value.contains("123456") && !warning.fallback.contains("123456")
+    }));
+    assert!(result.warnings.iter().any(|warning| {
+        warning.key == "commands" && warning.value == "<redacted command stream>"
+    }));
+}
+
+#[test]
+fn dtmf_macro_inheritance_retains_valid_ancestor_values_and_separate_typed_actions() {
+    let document = ConfigDocument::parse("[general]\ndtmf_macro_pause_ms=50\n[1000]\ndtmf_macro_pause_ms=invalid\n[dtmf_macro status]\ntrigger=*95\nprotected=no\ncommands=*70#,*73#\n[dtmf_macro 1000 status]\ntrigger=invalid\nprotected=invalid\n[macro typed]\naction=reconnect_all\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let resolved = super::resolve_dtmf_macros(&document, &node).unwrap();
+    assert_eq!(resolved.value.len(), 1);
+    assert_eq!(resolved.value[0].trigger, "*95");
+    assert!(!resolved.value[0].protected);
+    assert_eq!(super::macro_limits(&document, &node).pause_ms, 50);
+    assert!(super::ResolvedMacroSettings::resolve(&document, Some(&node), "typed").is_ok());
+    let warnings = Schema::validate(&document).unwrap().warnings;
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.key == "trigger" && warning.fallback == "*95")
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.key == "protected" && warning.fallback == "no")
+    );
+}
+
+#[test]
+fn dtmf_macro_catalog_warns_for_unavailable_definitions_without_rejecting_safe_config() {
+    let document = ConfigDocument::parse("[1000]\n[2000]\n[dtmf_macro absent]\n[dtmf_macro missing_commands]\ntrigger=*94\n[dtmf_macro missing_trigger]\ncommands=*70#\n[dtmf_macro bad]\ntrigger=*96\ncommands=*800123456#\n[dtmf_macro syntax]\ntrigger=*97\ncommands=*70\n[dtmf_macro 2000 other]\ntrigger=*98\ncommands=*70#\n[dtmf_macro good]\ntrigger=*95\ncommands=*70#\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let compiled = super::compile_macros(
+        &document,
+        &node,
+        &crate::command::DtmfCommandMap::standard(),
+    )
+    .unwrap();
+    assert_eq!(compiled.value.len(), 1);
+    assert_eq!(compiled.value[0].trigger, "*95");
+    assert!(compiled.value[0].protected);
+    assert!(
+        compiled.warnings.iter().all(
+            |warning| !warning.value.contains("123456") && !warning.fallback.contains("123456")
+        )
+    );
+    assert!(Schema::validate(&document).is_ok());
+    for text in ["[1000]\n[dtmf_macro]\n", "[1000]\n[dtmf_macro  1000 bad]\n"] {
+        let document = ConfigDocument::parse(text).unwrap();
+        assert!(super::resolve_dtmf_macros(&document, &node).is_err());
+    }
+    assert!(!super::dtmf_macros::value_valid("unknown", "yes"));
+}
+
+#[test]
+fn dtmf_macro_limits_and_remappings_retain_inherited_safe_values() {
+    let document = ConfigDocument::parse("[general]\ndtmf_macro_pause_ms=50\ndtmf_macro_max_symbols=20\ndtmf_macro_max_duration_ms=4000\n[1000]\ndtmf_macro_max_symbols=0\ndtmf_macro_max_duration_ms=999999\nlink_command_status=!\n[dtmf_macro status]\ntrigger=*95\ncommands=*70#,*73#\n").unwrap();
+    let node = NodeId::new("1000").unwrap();
+    let settings = ResolvedNodeSettings::resolve(&document, &node)
+        .unwrap()
+        .value;
+    let compiled =
+        super::compile_macros(&document, &node, &settings.command_map().unwrap()).unwrap();
+    assert_eq!(compiled.value.len(), 1);
+    let limits = super::macro_limits(&document, &node);
+    assert_eq!(
+        (limits.pause_ms, limits.max_symbols, limits.max_duration_ms),
+        (50, 20, 4000)
+    );
+    for trigger in ["*", "*x", &format!("*{}", "9".repeat(64))] {
+        let invalid = ConfigDocument::parse(&format!(
+            "[1000]\n[dtmf_macro status]\ntrigger={trigger}\ncommands=*70#\n"
+        ))
+        .unwrap();
+        assert!(
+            super::compile_macros(&invalid, &node, &crate::command::DtmfCommandMap::standard())
+                .unwrap()
+                .value
+                .is_empty()
+        );
+    }
+    let conflict = ConfigDocument::parse(
+        "[1000]\nlink_command_status=3\n[dtmf_macro status]\ntrigger=*95\ncommands=*70#\n",
+    )
+    .unwrap();
+    assert!(ResolvedNodeSettings::resolve(&conflict, &node).is_err());
+    let inherited_empty = ConfigDocument::parse("[1000]\n[dtmf_macro status]\ntrigger=*95\ncommands=*70#\n[dtmf_macro 1000 status]\ncommands=\n").unwrap();
+    let warnings = Schema::validate(&inherited_empty).unwrap().warnings;
+    assert!(warnings.iter().any(|warning| warning.key == "commands"
+        && warning.value == "<redacted command stream>"
+        && warning.fallback == "<redacted command stream>"));
+    let warning = super::ConfigWarning::new(1, "other", "commands", "status", "invalid", "default");
+    assert_eq!(
+        (warning.value.as_str(), warning.fallback.as_str()),
+        ("status", "default")
+    );
+}
+
+#[test]
 fn cancel_message_prefix_inherits_remaps_and_rejects_conflicts() {
     let document = ConfigDocument::parse("[general]\nlink_command_cancel_message=93\n[1000]\n[2000]\nlink_command_cancel_message=94\n").unwrap();
     assert!(Schema::validate(&document).unwrap().warnings.is_empty());

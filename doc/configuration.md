@@ -52,7 +52,7 @@ brackets. Media-set names are case-sensitive and cannot contain spaces or square
 Remote node numbers are decimal and limited to 63 digits. Scoped headers use
 one space between components. `general`,
 `identifier`, `announcement`, `courtesy`, `speech`, `morse`, `time`, `template`,
-`macro`, `event`, `permanent`, `schedule`, `message`, `tail`, `sensor`, `input`,
+`macro`, `dtmf_macro`, `event`, `permanent`, `schedule`, `message`, `tail`, `sensor`, `input`,
 `output`, `alarm`, `fan`, and `echolink` are reserved section names. Scoped identifier,
 announcement, courtesy, speech, Morse, time, template, macro, event, permanent, and schedule
 headers must name an existing node where their syntax includes a node name, which may be
@@ -78,6 +78,9 @@ clears an inherited value.
 | `dtmf_admin_unlock_hash` | empty | Argon2id hash of the code used after `*800` to unlock admin DTMF commands. Both admin hashes must be set to enable them. |
 | `dtmf_admin_lock_hash` | empty | Argon2id hash of the code used after `*801` to lock admin DTMF commands. Do not put a plain code here. |
 | `dtmf_admin_timeout_ms` | 300000 | Lock admin DTMF after this many milliseconds without a successful admin command; must be positive. |
+| `dtmf_macro_pause_ms` | 2000 | Duration of each comma in a DTMF macro, in whole milliseconds; 1–120000. |
+| `dtmf_macro_max_symbols` | 4096 | Maximum macro stream length, including stars, terminators, and commas; 1–4096. |
+| `dtmf_macro_max_duration_ms` | 120000 | Maximum total pause time and actual elapsed macro duration, in whole milliseconds; 1–120000. |
 | `squelch_delay_ms` | 0 | Delay local receive audio by this many milliseconds. Active VAD raises the effective reserve to at least 160 ms; a larger configured value is preserved. Raw RF unkey drops the buffered tail. With VAD Off, zero adds no delay. |
 | `status_snapshot_interval_ms` | 50 | Update RX/TX meters and receive-buffer statistics this often, in milliseconds; must be positive. |
 | `transmit_hang_ms` | 0 | Hold PTT this many milliseconds after ordinary program audio or telemetry ends. Identifiers and announcements use a fixed 50 ms natural release tail instead. |
@@ -589,6 +592,49 @@ generated tones are not sent to linked peers or recorded by parrot.
 `dtmf_regeneration_level_dbfs` sets the combined peak of the two equal-level
 tones. Transmitter processing and hardware gain still affect the final level;
 speech gain and telemetry ducking do not control these tones.
+
+### DTMF command macros
+
+Define a direct DTMF shortcut with `[dtmf_macro label]`. A
+`[dtmf_macro node label]` section overrides that definition for one node;
+omitted or invalid values inherit the valid shared setting. These definitions
+are separate from the scheduled single-action `[macro]` sections below.
+
+```ini
+[dtmf_macro status_time]
+trigger = *95
+protected = no
+commands = *70#,*722#
+```
+
+Enter `*95` to request link status, wait two seconds, and request the time.
+`trigger` includes its leading star. It must be distinct from other macro
+triggers and configured command prefixes. `protected` defaults to `yes` and
+requires the invoking source's existing administrative unlock. Setting it to
+`no` allows invocation without an unlock; each expanded command still uses
+the normal permissions of that same source.
+
+Every expanded command must start with `*` and end with an explicit `#`.
+Commas add pauses only between complete commands; consecutive commas add
+their durations. The human command timeout does not finish a partial macro
+command. Nested macros, administrative login/unlock credentials, and keypad
+test capture are unavailable in expansions. Obtain grants interactively.
+The bare configured lock command may revoke only the invoking source's grant;
+later protected steps then stop. Diagnostics omit the command stream.
+
+This implementation accepts commands for the current node from local RF or
+an admitted IAX command source. An expansion may explicitly select that same
+node with `*4<node>#`; remote and other hosted destinations remain unavailable
+until their command namespace and private source capability are verified.
+Ordinary interactive `*4` forwarding continues to work as described above.
+
+The serialized control owner advances pauses without blocking audio. Each
+step rechecks its source, configuration generation, and permissions. Live
+digits, lost digit events, source retirement, and configuration reload cancel
+pending steps. Local RF unkey alone does not cancel an expansion. A connection
+attempt remains cancelable until it is attached; an already completed command
+is not undone when a later step is canceled. Set the three `dtmf_macro_*`
+limits in `[general]` or a node section to reduce the default bounds.
 
 ## Time settings
 

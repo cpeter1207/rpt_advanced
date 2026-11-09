@@ -39,6 +39,8 @@ pub(crate) enum ScopeKind {
     MessageNode,
     MacroGlobal,
     MacroNode,
+    DtmfMacroGlobal,
+    DtmfMacroNode,
     EventNode,
     PermanentNode,
     ScheduleNode,
@@ -185,13 +187,21 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         ["message", node, label] => Scope::named(ScopeKind::MessageNode, Some(node), label),
         ["macro", label] => Scope::named(ScopeKind::MacroGlobal, None, label),
         ["macro", node, label] => Scope::named(ScopeKind::MacroNode, Some(node), label),
+        ["dtmf_macro", label] => Scope::named(ScopeKind::DtmfMacroGlobal, None, label),
+        ["dtmf_macro", node, label] => Scope::named(ScopeKind::DtmfMacroNode, Some(node), label),
         ["event", node, label] => Scope::named(ScopeKind::EventNode, Some(node), label),
         ["permanent", node, label] => Scope::named(ScopeKind::PermanentNode, Some(node), label),
         ["schedule", node, label] => Scope::named(ScopeKind::ScheduleNode, Some(node), label),
         [known]
             if matches!(
                 *known,
-                "template" | "message" | "macro" | "event" | "permanent" | "schedule"
+                "template"
+                    | "message"
+                    | "macro"
+                    | "dtmf_macro"
+                    | "event"
+                    | "permanent"
+                    | "schedule"
             ) =>
         {
             return Err(());
@@ -216,6 +226,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
                     | "template"
                     | "message"
                     | "macro"
+                    | "dtmf_macro"
                     | "event"
                     | "permanent"
                     | "schedule"
@@ -242,6 +253,8 @@ pub(crate) const fn is_named(kind: ScopeKind) -> bool {
             | ScopeKind::MessageNode
             | ScopeKind::MacroGlobal
             | ScopeKind::MacroNode
+            | ScopeKind::DtmfMacroGlobal
+            | ScopeKind::DtmfMacroNode
             | ScopeKind::EventNode
             | ScopeKind::PermanentNode
             | ScopeKind::ScheduleNode
@@ -270,6 +283,7 @@ pub(crate) const fn is_node_scoped(kind: ScopeKind) -> bool {
             | ScopeKind::TemplateNode
             | ScopeKind::MessageNode
             | ScopeKind::MacroNode
+            | ScopeKind::DtmfMacroNode
             | ScopeKind::EventNode
             | ScopeKind::PermanentNode
             | ScopeKind::ScheduleNode

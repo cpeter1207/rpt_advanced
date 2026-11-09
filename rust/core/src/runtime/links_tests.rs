@@ -36,6 +36,629 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn dtmf_macro_dispatch_retains_exact_source_and_rejects_canceled_queued_operations() {
+    let mut links = links();
+    let definition = crate::config::ResolvedDtmfMacroSettings {
+        name: "status".into(),
+        trigger: "*95".into(),
+        protected: false,
+        commands: "*70#,*73#".into(),
+    };
+    let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+    let compiled = crate::dtmf_macro::compile(
+        &definition,
+        limits,
+        &DtmfCommandMap::standard(),
+        "524950",
+        &["*95".into()],
+    )
+    .unwrap();
+    links.configure_macros(vec![compiled], limits).unwrap();
+    links.accept("2000", true).unwrap();
+    links.accept("3000", true).unwrap();
+    let first = crate::link::PeerSignals::new();
+    let second = crate::link::PeerSignals::new();
+    for (remote, signals) in [("2000", &first), ("3000", &second)] {
+        for digit in "*95".chars() {
+            assert!(
+                links
+                    .peer_digit(remote, digit, 1, signals.reply_target())
+                    .is_none()
+            );
+        }
+    }
+    let operations = links.advance_macros(1);
+    assert_eq!(operations.len(), 2);
+    let [DigitOutcome::Operation(a), DigitOutcome::Operation(b)] = operations.as_slice() else {
+        panic!("source-tagged operations")
+    };
+    assert_eq!(a.origin.as_deref(), Some("2000"));
+    assert_eq!(a.reply, Some(first.reply_target()));
+    assert_eq!(b.reply, Some(second.reply_target()));
+    let mut host = NodeHost::new(generation(1));
+    let mut foreign = a.clone();
+    foreign.origin = Some("3000".into());
+    foreign.reply = Some(second.reply_target());
+    assert!(matches!(
+        links.command(foreign, host.control().work().unwrap(), 2, false),
+        Err(AdmissionError::Stale)
+    ));
+    links.peer_digit("2000", '*', 2, first.reply_target());
+    assert!(matches!(
+        links.command(a.clone(), host.control().work().unwrap(), 2, false),
+        Err(AdmissionError::Stale)
+    ));
+    assert!(matches!(
+        links.command(b.clone(), host.control().work().unwrap(), 2, false),
+        Ok(LinkEffect::Telemetry(LinkAction::Status, Some(_)))
+    ));
+    second.end();
+    assert!(links.advance_macros(2001).is_empty());
+    assert!(matches!(
+        links.command(b.clone(), host.control().work().unwrap(), 2001, false),
+        Err(AdmissionError::Stale)
+    ));
+}
+
+#[test]
+fn dtmf_macro_submission_loss_revokes_all_sources_without_clearing_human_selection() {
+    let mut links = links();
+    let definition = crate::config::ResolvedDtmfMacroSettings {
+        name: "status".into(),
+        trigger: "*95".into(),
+        protected: false,
+        commands: "*70#,*73#".into(),
+    };
+    let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+    let compiled = crate::dtmf_macro::compile(
+        &definition,
+        limits,
+        &DtmfCommandMap::standard(),
+        "524950",
+        &[],
+    )
+    .unwrap();
+    links.configure_macros(vec![compiled], limits).unwrap();
+    links.accept("2000", true).unwrap();
+    let signals = crate::link::PeerSignals::new();
+    for digit in "*95".chars() {
+        links.peer_digit("2000", digit, 1, signals.reply_target());
+    }
+    let queued = links.advance_macros(1);
+    links.lost_digits();
+    assert!(links.advance_macros(2001).is_empty());
+    let DigitOutcome::Operation(operation) = &queued[0] else {
+        panic!("queued")
+    };
+    let mut host = NodeHost::new(generation(1));
+    assert!(matches!(
+        links.command(operation.clone(), host.control().work().unwrap(), 2, false),
+        Err(AdmissionError::Stale)
+    ));
+}
+
+#[test]
+fn dtmf_macro_pending_connect_cannot_outlive_its_source_or_generation() {
+    for cancellation in ["input", "source_end", "reload"] {
+        let mut links = links();
+        let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+        let definition = crate::config::ResolvedDtmfMacroSettings {
+            name: "connect".into(),
+            trigger: "*95".into(),
+            protected: false,
+            commands: "*33000#".into(),
+        };
+        let compiled = crate::dtmf_macro::compile(
+            &definition,
+            limits,
+            &DtmfCommandMap::standard(),
+            "524950",
+            &[],
+        )
+        .unwrap();
+        links.configure_macros(vec![compiled], limits).unwrap();
+        links.accept("2000", true).unwrap();
+        let source = crate::link::PeerSignals::new();
+        for digit in "*95".chars() {
+            links.peer_digit("2000", digit, 1, source.reply_target());
+        }
+        let DigitOutcome::Operation(operation) = links.advance_macros(1).remove(0) else {
+            panic!("connect expansion")
+        };
+        let mut host = NodeHost::new(generation(1));
+        let LinkEffect::Connect(attempt) = links
+            .command(operation, host.control().work().unwrap(), 1, false)
+            .unwrap()
+        else {
+            panic!("pending dial")
+        };
+        assert!(attempt.current());
+        match cancellation {
+            "input" => {
+                links.peer_digit("2000", '*', 2, source.reply_target());
+            }
+            "source_end" => source.end(),
+            "reload" => links.reconfigure(
+                AccessPolicy::new("", "").unwrap(),
+                DtmfCommandMap::standard(),
+                None,
+            ),
+            _ => unreachable!(),
+        }
+        assert!(
+            !attempt.current(),
+            "pending external dial must stop: {cancellation}"
+        );
+        assert!(matches!(
+            links.finish_connect_at(attempt, true, 3, None, |_| None),
+            Err(AdmissionError::Stale)
+        ));
+        assert!(
+            !links
+                .manager()
+                .snapshot()
+                .iter()
+                .any(|peer| peer.name == "3000")
+        );
+    }
+}
+
+#[test]
+fn dtmf_macro_cancel_after_connection_publication_keeps_the_completed_link() {
+    let mut links = links();
+    let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+    let definition = crate::config::ResolvedDtmfMacroSettings {
+        name: "connect".into(),
+        trigger: "*95".into(),
+        protected: false,
+        commands: "*8133000#".into(),
+    };
+    let compiled = crate::dtmf_macro::compile(
+        &definition,
+        limits,
+        &DtmfCommandMap::standard(),
+        "524950",
+        &[],
+    )
+    .unwrap();
+    links.configure_macros(vec![compiled], limits).unwrap();
+    for digit in "*95".chars() {
+        links.digit(DigitEvent::Digit { digit, now_ms: 1 });
+    }
+    let DigitOutcome::Operation(operation) = links.advance_macros(1).remove(0) else {
+        panic!("connect expansion")
+    };
+    let mut host = NodeHost::new(generation(1));
+    let LinkEffect::Connect(attempt) = links
+        .command(operation, host.control().work().unwrap(), 1, false)
+        .unwrap()
+    else {
+        panic!("pending dial")
+    };
+    assert_eq!(
+        links.finish_connect_at(attempt, true, 2, None, |_| None),
+        Ok(true)
+    );
+    links.digit(DigitEvent::Digit {
+        digit: '*',
+        now_ms: 3,
+    });
+    assert!(
+        links
+            .manager()
+            .snapshot()
+            .iter()
+            .any(|peer| peer.name == "3000")
+    );
+    links.ended("3000");
+    links.reclaimed("3000", 4);
+    let retry = links
+        .take_retry(10000, host.control().work().unwrap())
+        .expect("completed permanent connection has normal recovery intent");
+    assert!(retry.current());
+    assert_eq!(links.finish_retry(retry, true, 10001), Ok(true));
+}
+
+#[test]
+fn dtmf_macro_failed_permanent_connect_keeps_source_ownership_through_initial_retries() {
+    for before_retry in [true, false] {
+        let mut links = links();
+        let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+        let definition = crate::config::ResolvedDtmfMacroSettings {
+            name: "connect".into(),
+            trigger: "*95".into(),
+            protected: false,
+            commands: "*8133000#".into(),
+        };
+        let compiled = crate::dtmf_macro::compile(
+            &definition,
+            limits,
+            &DtmfCommandMap::standard(),
+            "524950",
+            &[],
+        )
+        .unwrap();
+        links.configure_macros(vec![compiled], limits).unwrap();
+        for digit in "*95".chars() {
+            links.digit(DigitEvent::Digit { digit, now_ms: 1 });
+        }
+        let DigitOutcome::Operation(operation) = links.advance_macros(1).remove(0) else {
+            panic!("permanent expansion")
+        };
+        let mut host = NodeHost::new(generation(1));
+        let LinkEffect::Connect(attempt) = links
+            .command(operation, host.control().work().unwrap(), 1, false)
+            .unwrap()
+        else {
+            panic!("pending dial")
+        };
+        assert_eq!(
+            links.finish_connect_at(attempt, false, 2, None, |_| None),
+            Ok(false)
+        );
+        if before_retry {
+            links.digit(DigitEvent::Digit {
+                digit: '*',
+                now_ms: 3,
+            });
+            assert!(
+                links
+                    .take_retry(10000, host.control().work().unwrap())
+                    .is_none()
+            );
+        } else {
+            let retry = links
+                .take_retry(10000, host.control().work().unwrap())
+                .expect("initial retry still belongs to the source");
+            assert!(retry.current());
+            links.digit(DigitEvent::Digit {
+                digit: '*',
+                now_ms: 10001,
+            });
+            assert!(!retry.current());
+            assert!(matches!(
+                links.finish_retry(retry, true, 10002),
+                Err(AdmissionError::Stale)
+            ));
+        }
+        assert!(
+            !links
+                .manager()
+                .snapshot()
+                .iter()
+                .any(|peer| peer.name == "3000" && !peer.retrying && !peer.ended)
+        );
+    }
+}
+
+fn initial_retry(
+    links: &mut NodeLinkControl,
+    host: &mut NodeHost<(), ()>,
+    macro_source: bool,
+    now_ms: u64,
+) -> RetryWork {
+    let command = if macro_source {
+        for digit in "*95".chars() {
+            links.digit(DigitEvent::Digit { digit, now_ms });
+        }
+        let DigitOutcome::Operation(command) = links.advance_macros(now_ms).remove(0) else {
+            panic!("macro connection")
+        };
+        command
+    } else {
+        operation(LinkAction::PermanentTransceive, "3000")
+    };
+    let LinkEffect::Connect(attempt) = links
+        .command(command, host.control().work().unwrap(), now_ms, false)
+        .unwrap()
+    else {
+        panic!("initial connection")
+    };
+    assert_eq!(
+        links.finish_connect_at(attempt, false, now_ms + 1, None, |_| None),
+        Ok(false)
+    );
+    links
+        .take_retry(now_ms + 2, host.control().work().unwrap())
+        .expect("owned in-flight retry")
+}
+
+fn stale_retry_preserves_replacement(old_macro: bool) {
+    for new_macro in [true, false] {
+        for reload in [false, true] {
+            let mut links = links();
+            let mut host = NodeHost::new(generation(1));
+            let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+            let definition = crate::config::ResolvedDtmfMacroSettings {
+                name: "connect".into(),
+                trigger: "*95".into(),
+                protected: false,
+                commands: "*8133000#".into(),
+            };
+            let compiled = crate::dtmf_macro::compile(
+                &definition,
+                limits,
+                &DtmfCommandMap::standard(),
+                "524950",
+                &[],
+            )
+            .unwrap();
+            links
+                .configure_macros(vec![compiled.clone()], limits)
+                .unwrap();
+            let old = initial_retry(&mut links, &mut host, old_macro, 1);
+            if reload {
+                links.reconfigure(
+                    AccessPolicy::new("", "").unwrap(),
+                    DtmfCommandMap::standard(),
+                    None,
+                );
+                links.configure_macros(vec![compiled], limits).unwrap();
+            } else {
+                links.digit(DigitEvent::Digit {
+                    digit: '*',
+                    now_ms: 10,
+                });
+            }
+            if reload || !old_macro {
+                host.control().publish(generation(2), 11).unwrap();
+            }
+            links
+                .command(
+                    operation(LinkAction::DisconnectPermanent, "3000"),
+                    host.control().work().unwrap(),
+                    12,
+                    false,
+                )
+                .unwrap();
+            let new = initial_retry(&mut links, &mut host, new_macro, 20);
+            assert_eq!(
+                links.finish_retry(old, false, 30),
+                Err(AdmissionError::Stale)
+            );
+            assert!(
+                links
+                    .manager()
+                    .snapshot()
+                    .iter()
+                    .any(|peer| peer.name == "3000" && peer.retrying),
+                "old completion removed replacement: macro={new_macro}, reload={reload}"
+            );
+            assert_eq!(links.finish_retry(new, false, 31), Ok(false));
+            links.digit(DigitEvent::Digit {
+                digit: '*',
+                now_ms: 32,
+            });
+            let next = links.take_retry(2000, host.control().work().unwrap());
+            if new_macro {
+                assert!(
+                    next.is_none(),
+                    "old completion stripped replacement source fencing: reload={reload}"
+                );
+            } else {
+                let current = next.expect("ordinary replacement retains recovery intent");
+                assert!(current.current());
+                assert_eq!(links.finish_retry(current, true, 2001), Ok(true));
+            }
+        }
+    }
+}
+
+#[test]
+fn dtmf_macro_old_macro_retry_completion_preserves_the_replacement_owner() {
+    stale_retry_preserves_replacement(true);
+}
+
+#[test]
+fn dtmf_macro_old_ordinary_retry_completion_cannot_strip_a_new_macro_owner() {
+    stale_retry_preserves_replacement(false);
+}
+
+fn install_macro_cases(links: &mut NodeLinkControl, definitions: &[(&str, &str, bool)]) {
+    let definitions = definitions
+        .iter()
+        .map(
+            |(trigger, commands, protected)| crate::config::ResolvedDtmfMacroSettings {
+                name: trigger[1..].into(),
+                trigger: (*trigger).into(),
+                protected: *protected,
+                commands: (*commands).into(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let triggers = definitions
+        .iter()
+        .map(|definition| definition.trigger.clone())
+        .collect::<Vec<_>>();
+    let limits = crate::dtmf_macro::DtmfMacroLimits::default();
+    let compiled = definitions
+        .iter()
+        .map(|definition| {
+            crate::dtmf_macro::compile(
+                definition,
+                limits,
+                links.commands.command_map(),
+                "524950",
+                &triggers,
+            )
+            .unwrap()
+        })
+        .collect();
+    links.configure_macros(compiled, limits).unwrap();
+}
+
+#[test]
+fn dtmf_macro_parallel_retry_cleanup_preserves_other_sources_and_private_denials() {
+    let mut links = links();
+    install_macro_cases(
+        &mut links,
+        &[
+            ("*95", "*8133000#", false),
+            ("*96", "*8134000#", false),
+            ("*97", "*70#", true),
+        ],
+    );
+    let mut host = NodeHost::new(generation(1));
+    let first = crate::link::PeerSignals::new();
+    let second = crate::link::PeerSignals::new();
+    for (remote, trigger, source) in [("2000", "*95", &first), ("2500", "*96", &second)] {
+        links.accept(remote, true).unwrap();
+        for digit in trigger.chars() {
+            links.peer_digit(remote, digit, 1, source.reply_target());
+        }
+    }
+    for outcome in links.advance_macros(1) {
+        let DigitOutcome::Operation(operation) = outcome else {
+            panic!("parallel macro")
+        };
+        let LinkEffect::Connect(attempt) = links
+            .command(operation, host.control().work().unwrap(), 1, false)
+            .unwrap()
+        else {
+            panic!("permanent dial")
+        };
+        assert_eq!(
+            links.finish_connect_at(attempt, false, 2, None, |_| None),
+            Ok(false)
+        );
+    }
+    let first_retry = links.take_retry(3, host.control().work().unwrap()).unwrap();
+    let second_retry = links.take_retry(3, host.control().work().unwrap()).unwrap();
+    assert_eq!(first_retry.remote(), "3000");
+    assert_eq!(second_retry.remote(), "4000");
+    assert_eq!(links.finish_retry(second_retry, true, 4), Ok(true));
+    assert!(
+        links
+            .manager()
+            .snapshot()
+            .iter()
+            .any(|peer| peer.name == "3000" && peer.retrying)
+    );
+    links
+        .command(
+            operation(LinkAction::DisconnectPermanent, "3000"),
+            host.control().work().unwrap(),
+            5,
+            false,
+        )
+        .unwrap();
+    links
+        .command(
+            operation(LinkAction::Status, ""),
+            host.control().work().unwrap(),
+            6,
+            false,
+        )
+        .unwrap();
+    let mut denied = None;
+    for digit in "*97".chars() {
+        denied = links
+            .peer_digit("2000", digit, 7, first.reply_target())
+            .or(denied);
+    }
+    assert!(
+        matches!(denied, Some(DigitOutcome::MacroStopped { reply: Some(reply) }) if reply == first.reply_target())
+    );
+    assert!(
+        links
+            .take_retry(2000, host.control().work().unwrap())
+            .is_none()
+    );
+    assert!(
+        links
+            .manager()
+            .snapshot()
+            .iter()
+            .any(|peer| peer.name == "4000" && !peer.retrying)
+    );
+}
+
+#[test]
+fn dtmf_macro_queued_peer_reply_survives_collector_idle_reclamation_after_stream_completion() {
+    let mut links = links();
+    install_macro_cases(&mut links, &[("*95", "*70#", false)]);
+    links.accept("2000", true).unwrap();
+    let source = crate::link::PeerSignals::new();
+    for digit in "*95".chars() {
+        links.peer_digit("2000", digit, 1, source.reply_target());
+    }
+    let DigitOutcome::Operation(operation) = links.advance_macros(1).remove(0) else {
+        panic!("queued reply")
+    };
+    assert!(links.advance_macros(2).is_empty());
+    assert!(links.advance_macros(3).is_empty());
+    let mut host = NodeHost::new(generation(1));
+    assert!(matches!(
+        links.command(operation, host.control().work().unwrap(), 4, false),
+        Ok(LinkEffect::Telemetry(LinkAction::Status, Some(_)))
+    ));
+}
+
+#[test]
+fn dtmf_macro_protected_pending_connections_recheck_expired_grants() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    let digest = Argon2::default()
+        .hash_password(b"1234", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+        .unwrap()
+        .to_string();
+    for answer in [true, false] {
+        let mut links = links();
+        links.configure_admin(&digest, &digest, 100);
+        install_macro_cases(&mut links, &[("*95", "*8133000#", true)]);
+        let mut host = NodeHost::new(generation(1));
+        for digit in "*8001234#*95".chars() {
+            links.digit(DigitEvent::Digit { digit, now_ms: 1 });
+        }
+        let DigitOutcome::Operation(operation) = links.advance_macros(1).remove(0) else {
+            panic!("unlocked macro")
+        };
+        let LinkEffect::Connect(attempt) = links
+            .command(operation, host.control().work().unwrap(), 1, false)
+            .unwrap()
+        else {
+            panic!("pending dial")
+        };
+        if answer {
+            assert_eq!(
+                links.finish_connect_at(attempt, true, 101, None, |_| None),
+                Err(AdmissionError::Stale)
+            );
+        } else {
+            assert_eq!(
+                links.finish_connect_at(attempt, false, 2, None, |_| None),
+                Ok(false)
+            );
+            assert!(
+                links
+                    .take_retry(101, host.control().work().unwrap())
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn dtmf_macro_remote_base_work_is_rejected_after_source_cancellation() {
+    let mut links = links();
+    links
+        .configure_remote("6", crate::remote_base_command::RemoteDtmfAccess::Open)
+        .unwrap();
+    install_macro_cases(&mut links, &[("*95", "*651#", false)]);
+    for digit in "*95".chars() {
+        links.digit(DigitEvent::Digit { digit, now_ms: 1 });
+    }
+    let DigitOutcome::Operation(operation) = links.advance_macros(1).remove(0) else {
+        panic!("typed rig query")
+    };
+    assert!(links.remote_authorized(&operation, 1));
+    links.digit(DigitEvent::Digit {
+        digit: '*',
+        now_ms: 2,
+    });
+    assert!(!links.remote_authorized(&operation, 2));
+}
+
+#[test]
 fn remote_dtmf_dispatch_retains_origin_and_rechecks_the_grant() {
     use crate::remote_base_command::{RemoteCommand, RemoteDtmfAccess};
     let mut host = NodeHost::new(generation(1));
@@ -953,6 +1576,7 @@ fn slow_connect_revalidates_generation_and_new_loop_before_publication() {
         panic!("dial")
     };
     control.publish(generation(2), 1).unwrap();
+    assert!(!attempt.current());
     assert_eq!(
         links.finish_connect_at(attempt, true, 2, None, |_| None),
         Err(AdmissionError::Stale)

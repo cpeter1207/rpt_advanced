@@ -12,6 +12,7 @@ pub mod composition;
 pub mod config;
 pub mod control;
 pub mod controller;
+pub mod dtmf_macro;
 pub mod link;
 pub mod media;
 pub mod messages;

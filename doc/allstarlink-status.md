@@ -88,7 +88,9 @@ the mode and is not forwarded. Unkeying or pausing keeps the destination selecte
 Incoming commands still follow the receiving node's access and admin rules. See
 [link command mappings](configuration.md#link-command-mappings) before using
 custom DTMF codes. Assign an ID's `dtmf_id` to make it manually selectable.
-DTMF macros and autopatch are not provided.
+Direct-trigger [DTMF command macros](configuration.md#dtmf-command-macros)
+support explicitly terminated current-node commands and comma pauses.
+Autopatch and reverse patch remain under implementation.
 
 The `*82` keypad test needs no admin unlock. It captures all 16 symbols,
 including `*`, `#`, and `A` through `D`, until the local receiver unkeys. Captured

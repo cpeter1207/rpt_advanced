@@ -74,6 +74,62 @@ fn host() -> Host {
 }
 
 #[test]
+fn dtmf_macro_host_pump_advances_without_civil_scheduling_and_new_input_cancels_due_work() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = Host::start(
+        document(
+            "usb",
+            "[dtmf_macro status]\ntrigger=*95\nprotected=no\ncommands=*70#,*73#\n",
+        ),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    for digit in "*95".chars() {
+        assert!(
+            host.runtime
+                .digit("1000", DigitEvent::Digit { digit, now_ms: 10 })
+                .is_none()
+        );
+    }
+    host.pump(RuntimeClock {
+        civil: None,
+        ..clock()
+    })
+    .unwrap();
+    let operations = host.take_operations();
+    assert!(
+        matches!(operations.as_slice(), [(local, DigitOutcome::Operation(operation))] if local == "1000" && operation.command.action == LinkAction::Status)
+    );
+    host.pump(RuntimeClock {
+        now_ms: 2009,
+        civil: None,
+        ..clock()
+    })
+    .unwrap();
+    assert!(host.take_operations().is_empty());
+    host.runtime.digit(
+        "1000",
+        DigitEvent::Digit {
+            digit: '*',
+            now_ms: 2010,
+        },
+    );
+    host.pump(RuntimeClock {
+        now_ms: 2010,
+        civil: None,
+        ..clock()
+    })
+    .unwrap();
+    assert!(host.take_operations().is_empty());
+    assert!(host.stop(2020));
+}
+
+#[test]
 fn echo_alias_routing_precedes_allstar_directory_lookup() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -171,6 +227,59 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
 }
 
 #[test]
+fn echo_disconnect_announces_and_releases_the_verified_peer() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = Host::start(
+        document(
+            "usb",
+            "[morse]\nspeed_wpm=100\n[echolink 1000]\nannouncement=callsign\n",
+        ),
+        media(),
+        services(),
+        Instant::now(),
+        clock(),
+    )
+    .unwrap();
+    let (echo, state) = crate::link::session::tests::source_peer();
+    state.lock().unwrap().continuous_async = true;
+    host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        named_peer_ready(host, "3002000")
+            && host
+                .runtime
+                .status(clock().now_ms)
+                .iter()
+                .all(|(_, status)| status.retiring.is_none())
+    });
+    let lease = Arc::clone(&host.leases[0].1);
+    assert!(lease.lock().unwrap().quiesce());
+    let mut owners = lease.lock().unwrap().owners.take().unwrap();
+    assert!(render_queued_telemetry(&mut host, &mut owners));
+    let effect = host
+        .runtime
+        .command(
+            "1000",
+            operation(LinkAction::Disconnect, "3002000"),
+            clock(),
+            false,
+        )
+        .unwrap();
+    host.immediate("1000", effect, clock()).unwrap();
+    assert!(render_queued_telemetry(&mut host, &mut owners));
+    pump_until(&mut host, |_| state.lock().unwrap().drops == 1);
+    assert!(host.peers.is_empty());
+    assert!(
+        host.status_text("1000")
+            .unwrap()
+            .contains("no active links")
+    );
+    lease.lock().unwrap().owners = Some(owners);
+    assert!(host.stop(20));
+}
+
+#[test]
 fn echo_account_status_is_visible_without_active_links() {
     unsafe extern "C" fn failed_status(
         _: *mut c_void,
@@ -194,7 +303,62 @@ fn echo_account_status_is_visible_without_active_links() {
     let text = host.status_text("1000").unwrap();
     assert!(text.contains("no active links"), "{text}");
     assert!(text.contains("echo-account status-unavailable"), "{text}");
+    table.echo_account_status = None;
+    host.services = unsafe { HostServices::open(Box::leak(Box::new(table))) }.unwrap();
+    let text = host.status_text("1000").unwrap();
+    assert!(text.contains("no active links"), "{text}");
+    assert!(!text.contains("echo-account"), "{text}");
     assert!(host.stop(20));
+}
+
+#[test]
+fn echo_status_reports_provider_metadata_from_the_peer_owner() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut host = host();
+    let (echo, state) = crate::link::session::tests::source_peer();
+    let mut observation = abi::rptadv_peer_observation_v1 {
+        struct_size: std::mem::size_of::<abi::rptadv_peer_observation_v1>() as u32,
+        abi_version: abi::RPTADV_PEER_OBSERVATION_ABI_VERSION,
+        echo_valid: 1,
+        echo_state: 1,
+        echo_codec: 1,
+        echo_transport: 1,
+        echo_raw_receiving: 1,
+        echo_selected: 1,
+        echo_last_valid_age_ms: 42,
+        echo_heartbeat_due_ms: u64::MAX,
+        echo_liveness_due_ms: u64::MAX,
+        echo_ingress_bytes: 128,
+        ingress_capacity_packets: 64,
+        // SAFETY: the observation is a scalar-only ABI record with optional zero counters.
+        ..unsafe { std::mem::zeroed() }
+    };
+    observation.echo_cause_detail[..6].copy_from_slice(b"Active");
+    {
+        let mut state = state.lock().unwrap();
+        state.continuous_async = true;
+        state.echo_observation = Some(observation);
+    }
+    host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
+    pump_until(&mut host, |host| {
+        host.status_text("1000")
+            .unwrap()
+            .contains("echo state=connected")
+    });
+    let status = host.status_text("1000").unwrap();
+    assert!(status.contains("cause=none detail=\"Active\""), "{status}");
+    assert!(
+        status.contains("codec=speex transport=proxy raw-receiving=1 selected=1"),
+        "{status}"
+    );
+    assert!(status.contains("last-valid-age=42ms"), "{status}");
+    assert!(status.contains("heartbeat-in=inactive"), "{status}");
+    assert!(status.contains("ingress-retained-bytes=128"), "{status}");
+    assert!(state.lock().unwrap().observe_calls > 0);
+    assert!(host.stop(20));
+    assert_eq!(state.lock().unwrap().drops, 1);
 }
 
 #[test]

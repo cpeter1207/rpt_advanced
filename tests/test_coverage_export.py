@@ -182,6 +182,61 @@ class CoverageExportTests(unittest.TestCase):
         self.assertEqual(combined["type"], original["type"])
         self.assertEqual(original["data"][0]["files"][0]["segments"][0][2], 0)
 
+    def test_missing_aggregate_function_branches_use_exact_object_metadata(self):
+        original = report(0)
+        original["data"][0]["functions"][0]["branches"] = []
+        before = deepcopy(original)
+        first, second = report(1, 1, 0), report(2, 0, 1)
+        combined = reconcile(original, [first, second])
+        self.assertEqual(combined["data"], first["data"] + second["data"])
+        self.assertEqual(original, before)
+
+    def test_missing_aggregate_metadata_cannot_hide_an_integration_line(self):
+        original = report(0)
+        original["data"][0]["functions"][0]["branches"] = []
+        integration = {
+            "filename": "/workspace/rust/product/src/link/session.rs",
+            "segments": [
+                [892, 1, 0, True, True, False],
+                [893, 1, 0, False, False, False],
+            ],
+            "branches": [],
+        }
+        original["data"][0]["files"].append(integration)
+        complete = report(1, 1, 1)
+        complete["data"][0]["files"].append(deepcopy(integration))
+        self.assertEqual(reconcile(original, [complete])["data"], complete["data"])
+        with self.assertRaisesRegex(ValueError, "measured line/branch keyset"):
+            reconcile(original, [report(1, 1, 1)])
+
+    def test_missing_aggregate_metadata_requires_unique_structural_support(self):
+        original = report(0)
+        original["data"][0]["functions"][0]["branches"] = []
+        for mutation in [
+            "missing_function",
+            "missing_source",
+            "different_source",
+            "ambiguous",
+        ]:
+            with self.subTest(mutation=mutation):
+                baseline = deepcopy(original)
+                complete = report(1, 1, 1)
+                candidates = [complete]
+                if mutation == "missing_function":
+                    baseline["data"][0]["functions"] = []
+                elif mutation == "missing_source":
+                    baseline["data"][0]["functions"][0]["regions"] = []
+                elif mutation == "different_source":
+                    complete["data"][0]["functions"][0]["regions"][0][1] = 2
+                else:
+                    sibling = deepcopy(complete)
+                    sibling["data"][0]["functions"][0]["branches"].append(
+                        [1, 1, 1, 2, 0, 0, 0, 0, 4]
+                    )
+                    candidates.append(sibling)
+                with self.assertRaises(ValueError):
+                    reconcile(baseline, candidates)
+
     def test_missing_or_added_measured_keys_are_rejected(self):
         changed = report(1)
         changed["data"][0]["files"][0]["branches"] = []
