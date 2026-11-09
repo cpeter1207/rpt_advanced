@@ -115,9 +115,12 @@ Source-timed ring rendering is released in ring `v3.0.0-alpha5`. All three
 providers passed their full native Debian 13 gates; their signed APT indexes
 and both architectures' runtime/dev package hashes match the release assets.
 Consumers must check each optional descriptor tail and use the released
-versioned libraries. These capabilities
-do not by themselves implement structured radio-off feedback or the RF
-presentation scheduler.
+versioned libraries. SDK `v0.1.0-alpha33` adds structured output feedback;
+its signed packages and native installation checks are verified. Builds using
+the alpha33 descriptor headers require matching alpha33 build/runtime floors:
+the existing complete-record check safely rejects the smaller alpha32 table.
+Controller feedback consumption, phase/age qualification and the RF
+presentation scheduler remain separate work.
 
 The current-node RF/IAX macro foundation has source-owned cancellation,
 asynchronous attachment fencing and explicit command boundaries. Phone-private

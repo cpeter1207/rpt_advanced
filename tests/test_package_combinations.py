@@ -76,9 +76,9 @@ def test_either_host_installs_the_dynamically_loaded_echolink_runtime() -> None:
 def test_radio_product_dependency_does_not_require_the_asterisk_integration() -> None:
     stanzas = package_stanzas()
     source = (ROOT / "debian/control").read_text().split("\n\n", 1)[0]
-    assert "libusbradioplus-product-dev (>= 0.1.0~alpha32-1)" in source
+    assert "libusbradioplus-product-dev (>= 0.1.0~alpha33-1)" in source
     standalone = depends(stanzas["rpt-advanced"])
-    assert "libusbradioplus-product1 (>= 0.1.0~alpha32-1)" in standalone
+    assert "libusbradioplus-product1 (>= 0.1.0~alpha33-1)" in standalone
     assert "usbradioplus" not in standalone.replace("libusbradioplus-product1", "")
     for package in ("app-rpt-advanced", "librptadv-product2"):
         assert "usbradioplus" not in depends(stanzas[package]).replace(
@@ -86,10 +86,10 @@ def test_radio_product_dependency_does_not_require_the_asterisk_integration() ->
         )
         assert "librptadv-resolver-adapter1" not in depends(stanzas[package])
         assert "librptadv-jitter-adapter1" not in depends(stanzas[package])
-    assert "libusbradioplus-product1 (>= 0.1.0~alpha32-1)" in depends(
+    assert "libusbradioplus-product1 (>= 0.1.0~alpha33-1)" in depends(
         stanzas["librptadv-product2"]
     )
-    assert "libusbradioplus-product-dev (>= 0.1.0~alpha32-1)" in depends(
+    assert "libusbradioplus-product-dev (>= 0.1.0~alpha33-1)" in depends(
         stanzas["librptadv-product-dev"]
     )
 
