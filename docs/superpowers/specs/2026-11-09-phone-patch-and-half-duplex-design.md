@@ -1,6 +1,6 @@
 # Phone patch, DTMF macros, and half-duplex receive opportunities
 
-Date: 2026-11-09. Status: proposed design for owner review; unimplemented.
+Date: 2026-11-09. Status: design approved by owner 2026-11-09; unimplemented.
 
 This document records the user's phone-patch requirements and subsequent
 decisions. Engineering proposals are identified separately. It does not change
@@ -358,8 +358,9 @@ No automated fixture alone proves those outcomes. Deployment and release require
 their own authorized, verified handoffs.
 
 Builder decisions remaining include concrete crate/codec profiles, scoped
-configuration names, safe prepared pacing bounds and ABI evolution. Proposed
-defaults and the legacy-remote authorization limitation above need owner review;
+configuration names, safe prepared pacing bounds and ABI evolution. The owner
+approved the proposed defaults and legacy-remote authorization limitation on
+2026-11-09;
 there are no unresolved mailbox, provider-dial-policy or conference-limit choices.
 
 ## Sources and applicability

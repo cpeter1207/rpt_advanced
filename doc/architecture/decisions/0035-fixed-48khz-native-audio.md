@@ -2,6 +2,11 @@
 
 Status: Implemented (fixed native rate; shared-clock option remains under ADR 0027)
 
+Accepted amendment — 2026-11-09: [ADR 0044](0044-phone-peers-and-rf-presentation-pacing.md)
+permits planned manual RF presentation scaling without changing the 48 kHz
+hardware clock. The prohibition on duplicate inbound conversion/drift correction
+remains; the explicitly negotiated pacing capability has no clock estimator.
+
 ## Context
 
 CM119 audio, RNNoise, USBRadioPlus native processing, and rpt_advanced use

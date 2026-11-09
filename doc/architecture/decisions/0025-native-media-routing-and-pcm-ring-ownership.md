@@ -2,6 +2,11 @@
 
 Status: Implemented (telemetry streaming and local DTMF PCM routing; optional shared-clock work pending)
 
+Accepted amendment — 2026-11-09: [ADR 0044](0044-phone-peers-and-rf-presentation-pacing.md)
+adds planned RF-only programme presentation pacing on the existing TX owner.
+Fresh network fanout, final PCM/telemetry/signaling and inbound ring ownership
+remain distinct. This amendment records approval, not implementation.
+
 Amended 2026-10-01: every telemetry source, including Morse and tone sequences,
 is produced outside the transmit worker and streamed through the telemetry PCM
 ring. Speech, files, Morse, and tone sequences use this implemented producer

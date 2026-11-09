@@ -615,7 +615,7 @@ remain planned. Local-file decoding does not imply network stream support.
 
 ### Telephony integration
 
-**Status — 2026-11-09:** Planned; design review pending. DTMF testing,
+**Status — 2026-11-09:** Planned; design approved. DTMF testing,
 regeneration, and addressed command forwarding are released in `rpt_advanced` v0.1.0-alpha11 with
 `librptadvdtmf` v0.1.0-alpha.2; those are not open telephony requirements.
 The standalone AllStarLink IAX2 implementation is also released. Autopatch,
@@ -623,6 +623,9 @@ reverse patch, paging, and SIP/VoIP-provider integration remain unimplemented.
 The [phone-patch and half-duplex design](docs/superpowers/specs/2026-11-09-phone-patch-and-half-duplex-design.md)
 records accepted requirements and proposed engineering details; it is not an
 implementation or hardware-acceptance record. Paging remains separate.
+The [native implementation plan](docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
+and [ADR 0044](doc/architecture/decisions/0044-phone-peers-and-rf-presentation-pacing.md)
+record prerequisite capabilities and task ordering.
 
 **Requirements**
 
@@ -661,8 +664,8 @@ implementation or hardware-acceptance record. Paging remains separate.
 
 **Implementation readiness still required**
 
-- Owner review of the complete design and proposed defaults, transport/media
-  dependency selection, RF-pacing provider capability and ADR amendments.
+- Implementation plan, transport/media dependency selection, RF-pacing provider
+  capability and ADR amendments for the approved design.
 - Verified remote command-origin lifecycle and authorization isolation;
   unmodified legacy AllStar shared command state does not establish per-call
   protected-command isolation.
