@@ -181,6 +181,18 @@ impl DtmfCommandMap {
         &self.mappings
     }
 
+    /// Whether a candidate overlaps an enabled command or macro in either direction.
+    pub fn prefix_conflicts(&self, digits: &str) -> bool {
+        self.mappings
+            .iter()
+            .map(|mapping| mapping.digits.as_str())
+            .chain(self.macro_triggers.iter().map(String::as_str))
+            .any(|existing| {
+                !existing.is_empty()
+                    && (existing.starts_with(digits) || digits.starts_with(existing))
+            })
+    }
+
     /// Add independently configured triggers without extending the typed action catalog.
     pub fn with_macro_triggers(&self, triggers: Vec<String>) -> Result<Self, CommandMapError> {
         for (index, trigger) in triggers.iter().enumerate() {
