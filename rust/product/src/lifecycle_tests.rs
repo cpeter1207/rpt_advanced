@@ -214,6 +214,10 @@ fn scheduler_health_reports_live_cycle_failure_but_not_generation_retirement() {
     assert_eq!(unsafe { start(&active_configuration("")) }, 0);
     clear_scheduler_notices();
     let (engine, call) = selected().unwrap();
+    engine.pump_observed(engine.clock(), false);
+    let mut healthy_status = String::new();
+    engine.health.status(&mut healthy_status);
+    let healthy_notices = scheduler_notices();
     crate::fixture::CONTROL_REVISION.store(
         ptr::from_ref(&engine.revision).cast_mut(),
         Ordering::Release,
@@ -237,6 +241,11 @@ fn scheduler_health_reports_live_cycle_failure_but_not_generation_retirement() {
     let failed_notices = scheduler_notices();
     drop(call);
     assert_eq!(unsafe { descriptor().stop.unwrap()() }, 0);
+    assert!(
+        healthy_status.contains("submission_failures=0 cycle_failures=0"),
+        "{healthy_status}"
+    );
+    assert!(healthy_notices.is_empty(), "{healthy_notices:?}");
     assert!(
         retired_status.contains("submission_failures=0 cycle_failures=0"),
         "{retired_status}"

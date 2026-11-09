@@ -63,9 +63,11 @@ owners under ADRs 0023/0026/0037/0038.
 
 Prepared pacing is released in samplerate adapter `v0.2.0-alpha3`; common
 source-rate Earshot analysis is released in Radio `v0.1.0-alpha.11`.
-Source-timed ring rendering is implemented in the ABI3 alpha5 candidate; its
-native package gates remain pending. Consumers must check each optional
-descriptor tail and use the released versioned libraries. These capabilities
+Source-timed ring rendering is released in ring `v3.0.0-alpha5`. All three
+providers passed their full native Debian 13 gates; their signed APT indexes
+and both architectures' runtime/dev package hashes match the release assets.
+Consumers must check each optional descriptor tail and use the released
+versioned libraries. These capabilities
 do not by themselves implement structured radio-off feedback or the RF
 presentation scheduler.
 

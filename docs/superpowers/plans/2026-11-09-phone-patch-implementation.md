@@ -60,6 +60,12 @@ approval record. The samplerate dependency pin is
 contains unrelated changes and must be preserved. Ring, radio and SDK likewise
 need explicit released-cohort pins before consumer promotion.
 
+Native prerequisite checkpoint, 2026-11-09: samplerate `v0.2.0-alpha3`, Radio
+`v0.1.0-alpha.11`, and ring `v3.0.0-alpha5` are merged, fully gated and
+released. Signed APT indexes and both architectures' runtime/dev bytes match
+their release assets. Controller consumption and RF feedback/scheduling remain
+separate work; no live station acceptance is implied by these provider releases.
+
 Tasks 1 and 2 can proceed independently. Tasks 3/4 establish phone identity and
 transport. Task 5 depends on the prepared media capabilities, Task 6 on typed
 call/control sources, and Task 7 integrates them. Task 8 governs publication and
@@ -89,23 +95,23 @@ Expose a prepared shared Earshot analysis handle for source-rate mono PCM with
 instantaneous voice positions separate from admission hang. Detector conversion
 is analysis-only; programme conversion remains in its inbound ring.
 
-- [ ] Amend ownership ADRs before code: intentional RF presentation scaling is
+- [x] Amend ownership ADRs before code: intentional RF presentation scaling is
   distinct from inbound source conversion/clock recovery; final DSP stays shared.
-- [ ] Add failing samplerate tests for `1/1.02` acceptance on pacing handles,
+- [x] Add failing samplerate tests for `1/1.02` acceptance on pacing handles,
   rejection on ordinary handles, bounds/NaN/count errors and null output on setup
   failure; retain existing backend-injection cases and descriptor prefix checks.
-- [ ] Implement the optional constructor with prepared bounded storage. Warm
+- [x] Implement the optional constructor with prepared bounded storage. Warm
   the complete ratio range and scrub stale history on reset without allocation.
-- [ ] Prove actual input/output counts, direction, partition invariance, rapid
+- [x] Prove actual input/output counts, direction, partition invariance, rapid
   ratio changes and live source-position behavior against real SWR. Extend the
   existing C allocation guard to pacing and reset, not just Rust mocks.
-- [ ] Add failing timed-ring and shared-classifier tests, then implement the
+- [x] Add failing timed-ring and shared-classifier tests, then implement the
   sized capabilities. Test source gaps, partial acceptance, discontinuity/reset,
   source-rate conversion and raw-voice versus hangtime independently.
 - [ ] Add phone latency policy to both `InboundPolicy` and
   `ReceiveState::should_render`; preserve ordinary 260 ms peer targets. Tests must
   show the phone path does not inherit those targets or stack another delay ring.
-- [ ] Run targeted native provider tests, then formatting/lint/static/docs and
+- [x] Run targeted native provider tests, then formatting/lint/static/docs and
   versioned ABI/package/install checks before provider PRs. Commit each provider
   with its developer documentation; promote only released dynamic dependencies.
 
@@ -197,6 +203,13 @@ order, jitter, codec state, prepared packets and bounded deadlines.
   leaf crates. Inspect actual licenses/MSRV/transitives; preserve Rust 1.85 claims
   until the graph proves them. Choose a supported compatible graph or a separately
   verified toolchain/image prerequisite, never an untested manifest assumption.
+
+  Probe result: the Rust 1.85-compatible graph uses `rsipstack 0.8.2`,
+  `sdp 0.8.0`, `rtp/rtcp 0.13.0`, `webrtc-srtp 0.15.0` and
+  `webrtc-util 0.11.0`. Newer leaf crates failed native compilation and were
+  rejected. Independent SIPp scenarios prove the probe's outgoing setup,
+  digest registration, cancellation and rejection/cleanup; production provider
+  composition, incoming calls, media and security profiles remain pending.
 - [ ] Write failing independent-provider REGISTER/digest, INVITE/ACK, answer,
   CANCEL/BYE, reject/timeout and resource-cleanup scenarios. Implement signaling
   outside callbacks, retaining separate transport/media/control boundaries.

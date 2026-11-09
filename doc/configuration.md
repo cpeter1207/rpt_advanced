@@ -79,7 +79,7 @@ clears an inherited value.
 | `dtmf_admin_lock_hash` | empty | Argon2id hash of the code used after `*801` to lock admin DTMF commands. Do not put a plain code here. |
 | `dtmf_admin_timeout_ms` | 300000 | Lock admin DTMF after this many milliseconds without a successful admin command; must be positive. |
 | `dtmf_macro_pause_ms` | 2000 | Duration of each comma in a DTMF macro, in whole milliseconds; 1–120000. |
-| `dtmf_macro_max_symbols` | 4096 | Maximum macro stream length, including stars, terminators, and commas; 1–4096. |
+| `dtmf_macro_max_symbols` | 4096 | Maximum non-whitespace macro stream length, including stars, terminators, and commas; 1–4096. |
 | `dtmf_macro_max_duration_ms` | 120000 | Maximum total pause time and actual elapsed macro duration, in whole milliseconds; 1–120000. |
 | `squelch_delay_ms` | 0 | Delay local receive audio by this many milliseconds. Active VAD raises the effective reserve to at least 160 ms; a larger configured value is preserved. Raw RF unkey drops the buffered tail. With VAD Off, zero adds no delay. |
 | `status_snapshot_interval_ms` | 50 | Update RX/TX meters and receive-buffer statistics this often, in milliseconds; must be positive. |
@@ -617,7 +617,8 @@ the normal permissions of that same source.
 Every expanded command must start with `*` and end with an explicit `#`.
 Commas add pauses only between complete commands; consecutive commas add
 their durations. The human command timeout does not finish a partial macro
-command. Nested macros, administrative login/unlock credentials, and keypad
+command. Leading or trailing commas are invalid. Nested macros,
+administrative login/unlock credentials, and keypad
 test capture are unavailable in expansions. Obtain grants interactively.
 The bare configured lock command may revoke only the invoking source's grant;
 later protected steps then stop. Diagnostics omit the command stream.
