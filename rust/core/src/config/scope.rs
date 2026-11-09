@@ -41,6 +41,7 @@ pub(crate) enum ScopeKind {
     MacroNode,
     DtmfMacroGlobal,
     DtmfMacroNode,
+    Mailbox,
     EventNode,
     PermanentNode,
     ScheduleNode,
@@ -189,6 +190,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
         ["macro", node, label] => Scope::named(ScopeKind::MacroNode, Some(node), label),
         ["dtmf_macro", label] => Scope::named(ScopeKind::DtmfMacroGlobal, None, label),
         ["dtmf_macro", node, label] => Scope::named(ScopeKind::DtmfMacroNode, Some(node), label),
+        ["mailbox", label] => Scope::named(ScopeKind::Mailbox, None, label),
         ["event", node, label] => Scope::named(ScopeKind::EventNode, Some(node), label),
         ["permanent", node, label] => Scope::named(ScopeKind::PermanentNode, Some(node), label),
         ["schedule", node, label] => Scope::named(ScopeKind::ScheduleNode, Some(node), label),
@@ -199,6 +201,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
                     | "message"
                     | "macro"
                     | "dtmf_macro"
+                    | "mailbox"
                     | "event"
                     | "permanent"
                     | "schedule"
@@ -227,6 +230,7 @@ pub(crate) fn parse_scope(name: &str) -> Result<Scope<'_>, ()> {
                     | "message"
                     | "macro"
                     | "dtmf_macro"
+                    | "mailbox"
                     | "event"
                     | "permanent"
                     | "schedule"
@@ -255,6 +259,7 @@ pub(crate) const fn is_named(kind: ScopeKind) -> bool {
             | ScopeKind::MacroNode
             | ScopeKind::DtmfMacroGlobal
             | ScopeKind::DtmfMacroNode
+            | ScopeKind::Mailbox
             | ScopeKind::EventNode
             | ScopeKind::PermanentNode
             | ScopeKind::ScheduleNode

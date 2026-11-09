@@ -37,6 +37,7 @@ enum KnownScope {
     Message,
     Macro,
     DtmfMacro,
+    Mailbox,
     Event,
     Permanent,
     Schedule,
@@ -72,6 +73,7 @@ impl KnownScope {
             ScopeKind::MessageGlobal | ScopeKind::MessageNode => Self::Message,
             ScopeKind::MacroGlobal | ScopeKind::MacroNode => Self::Macro,
             ScopeKind::DtmfMacroGlobal | ScopeKind::DtmfMacroNode => Self::DtmfMacro,
+            ScopeKind::Mailbox => Self::Mailbox,
             ScopeKind::EventNode => Self::Event,
             ScopeKind::PermanentNode => Self::Permanent,
             ScopeKind::ScheduleNode => Self::Schedule,
@@ -234,6 +236,7 @@ impl Schema {
             );
         }
         super::echolink::validate_all(document)?;
+        warnings.extend(super::phone_mailboxes::resolve_phone_mailboxes(document).warnings);
         let mut site_outputs = BTreeSet::new();
         for node in document.nodes() {
             let site = super::site::resolve_definitions(document, &super::NodeId::new(node)?)?;
@@ -402,6 +405,7 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
         }
         KnownScope::Macro => matches!(key, "action" | "target_node"),
         KnownScope::DtmfMacro => matches!(key, "trigger" | "protected" | "commands"),
+        KnownScope::Mailbox => matches!(key, "first_name" | "callsign" | "pin_hash"),
         KnownScope::Tail => {
             matches!(key, "delay_ms" | "tone_sequence" | "level_db")
                 || super::messages::content_key(key)
@@ -430,6 +434,9 @@ fn key_known(kind: KnownScope, key: &str) -> bool {
 }
 
 fn value_valid(kind: ScopeKind, key: &str, value: &str) -> bool {
+    if kind == ScopeKind::Mailbox {
+        return super::phone_mailboxes::value_valid(key, value);
+    }
     if matches!(key, "dtmf_macro_pause_ms" | "dtmf_macro_max_duration_ms") {
         return parse::unsigned(value, 1, 120_000).is_some();
     }

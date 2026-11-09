@@ -1452,6 +1452,39 @@ impl<A: Send, C: Send> Runtime<A, C> {
             &spoken,
         )
     }
+    /// Prepare credential-free authentication wording for a live private Phone token.
+    /// The caller must retain its exact call owner and queue this stream only to
+    /// that call. Login deliberately needs no prior mailbox authentication.
+    pub fn prepare_private_phone_prompt(
+        &mut self,
+        local: &str,
+        prompt: crate::messages::PhoneAuthenticationPrompt,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || reply.ended() {
+            return Err(RuntimeError::Rejected);
+        }
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        let forms = node
+            .control
+            .catalog
+            .format(&crate::messages::Message::PhoneAuthentication { prompt })
+            .map_err(|_| RuntimeError::Preparation)?;
+        prepare::status_stream(
+            node.control
+                .media_session
+                .as_mut()
+                .ok_or(RuntimeError::Preparation)?
+                .as_mut(),
+            &node.status,
+            &forms.morse,
+            &forms.tts,
+        )
+    }
     fn status_forms(
         &self,
         local: &str,

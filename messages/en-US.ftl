@@ -630,3 +630,20 @@ dtmf-macro-stopped =
     .text = Command macro stopped
     .tts = Command macro stopped
     .morse = MACRO STOPPED
+
+phone-authentication =
+    .text = { $state ->
+        [login] Enter mailbox number and PIN
+        [authenticated] Mailbox authenticated. Protected commands still require node unlock
+       *[retry] Login unsuccessful. Try again
+        }
+    .tts = { $state ->
+        [login] Enter your mailbox number and PIN
+        [authenticated] Mailbox authenticated. Protected commands still require node unlock
+       *[retry] Login unsuccessful. Try again
+        }
+    .morse = { $state ->
+        [login] MAILBOX AND PIN
+        [authenticated] LOGIN OK UNLOCK SEPARATE
+       *[retry] LOGIN FAILED RETRY
+        }

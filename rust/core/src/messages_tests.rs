@@ -3,6 +3,27 @@ use super::messages::{CatalogError, Message, MessageCatalog, MessageForms};
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
 #[test]
+fn private_phone_authentication_forms_have_no_credential_arguments() {
+    use super::messages::PhoneAuthenticationPrompt as Prompt;
+    let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();
+    for (prompt, expected) in [
+        (Prompt::Login, "MAILBOX AND PIN"),
+        (Prompt::Retry, "LOGIN FAILED RETRY"),
+        (Prompt::Authenticated, "LOGIN OK UNLOCK SEPARATE"),
+    ] {
+        let forms = catalog
+            .format(&Message::PhoneAuthentication { prompt })
+            .unwrap();
+        assert_eq!(forms.morse, expected);
+        assert!(
+            [forms.text, forms.tts, forms.morse]
+                .iter()
+                .all(|form| form.len() <= 127)
+        );
+    }
+}
+
+#[test]
 fn dtmf_macro_stopped_reply_has_bounded_localized_forms_and_translation_fallback() {
     let catalog = MessageCatalog::from_sources(
         "fr-CA",

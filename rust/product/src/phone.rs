@@ -2,7 +2,8 @@
 use crate::{Error, services::PeerIo};
 use rpt_advanced_core::{
     audio::{PcmStreamReader, Playback, PlaybackOutcome},
-    link::{MailboxId, PeerReply, PeerSignals, PhoneCallId, PhoneSource},
+    config::PhoneMailbox,
+    link::{PeerReply, PeerSignals, PhoneCallId, PhoneSource},
 };
 use std::{
     collections::VecDeque,
@@ -62,8 +63,21 @@ struct Call {
     _io: PeerIo,
     source: PhoneSource,
     signals: PeerSignals,
-    mailbox: Option<MailboxId>,
+    mailbox: Option<PhoneMailbox>,
+    attempts: u8,
+    login_deadline_ms: u64,
     replies: VecDeque<PrivatePhoneReply>,
+}
+
+/// Credential-free result of one exact call's login attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneLogin {
+    /// Mailbox/PIN verified; ordinary command access remains separate from unlock.
+    Authenticated,
+    /// Generic denial; neither mailbox existence nor entered digits are disclosed.
+    Retry,
+    /// Third failure or 60-second admission deadline revoked this call.
+    Closed,
 }
 impl Drop for Call {
     fn drop(&mut self) {
@@ -95,7 +109,7 @@ impl PhoneCalls {
     }
     /// Adopt a validated private handle without starting any ASL/radio media session.
     /// A duplicate is rejected rather than replacing another live call implicitly.
-    pub fn admit(&mut self, io: PeerIo) -> Result<PhoneSource, Error> {
+    pub fn admit(&mut self, io: PeerIo, now_ms: u64) -> Result<PhoneSource, Error> {
         let call = io.identity().call_id().ok_or(Error::Admission)?;
         let account = io.phone_account().ok_or(Error::Admission)?.clone();
         if self.calls.len() == self.maximum_calls
@@ -124,6 +138,8 @@ impl PhoneCalls {
             source: source.clone(),
             signals: PeerSignals::for_phone(source.clone()),
             mailbox: None,
+            attempts: 0,
+            login_deadline_ms: now_ms.saturating_add(60_000),
             replies,
         });
         Ok(source)
@@ -142,6 +158,15 @@ impl PhoneCalls {
             .find(|item| &item.source == source)
             .map(|item| item.signals.reply_target())
     }
+    /// Original configured local binding of this exact live call, not a destination grant.
+    pub fn local(&self, source: &PhoneSource, reply: &PeerReply) -> Option<&str> {
+        self.calls
+            .iter()
+            .find(|call| {
+                &call.source == source && call.signals.reply_target() == *reply && !reply.ended()
+            })
+            .map(|call| call._io.local())
+    }
     fn current(&mut self, source: &PhoneSource, reply: &PeerReply) -> Result<&mut Call, Error> {
         self.calls
             .iter_mut()
@@ -150,25 +175,71 @@ impl PhoneCalls {
             })
             .ok_or(Error::Admission)
     }
-    /// Publish a mailbox only after the caller has verified its PIN. This method
-    /// does not verify credentials or grant any node-administration authority.
+    /// Verify a configured mailbox/PIN on serialized control. Three failures or
+    /// 60 seconds from admission revoke the call; new input never renews that
+    /// deadline. Provider credentials and successful login grant no node unlock.
     pub fn authenticate(
         &mut self,
         source: &PhoneSource,
         reply: &PeerReply,
-        mailbox: MailboxId,
-    ) -> Result<(), Error> {
+        mailboxes: &[PhoneMailbox],
+        mailbox: &str,
+        pin: &str,
+        now_ms: u64,
+    ) -> Result<PhoneLogin, Error> {
         let call = self.current(source, reply)?;
         if call.mailbox.is_some() {
             return Err(Error::Admission);
         }
-        call.mailbox = Some(mailbox);
+        if now_ms >= call.login_deadline_ms {
+            call.signals.end();
+            return Ok(PhoneLogin::Closed);
+        }
+        call.attempts += 1;
+        let record = mailboxes
+            .iter()
+            .find(|record| record.id.as_str() == mailbox)
+            .filter(|record| record.verify_pin(pin));
+        let Some(record) = record else {
+            if call.attempts >= 3 {
+                call.signals.end();
+                return Ok(PhoneLogin::Closed);
+            }
+            return Ok(PhoneLogin::Retry);
+        };
         #[cfg(test)]
         tests::before_authenticate();
         if !call.signals.authenticate_phone() {
             return Err(Error::Admission);
         }
-        Ok(())
+        call.mailbox = Some(record.clone());
+        Ok(PhoneLogin::Authenticated)
+    }
+    /// The configured profile is visible only for the same authenticated call.
+    pub fn mailbox(&self, source: &PhoneSource, reply: &PeerReply) -> Option<&PhoneMailbox> {
+        self.calls
+            .iter()
+            .find(|call| {
+                &call.source == source
+                    && call.signals.reply_target() == *reply
+                    && reply.phone_authenticated()
+            })
+            .and_then(|call| call.mailbox.as_ref())
+    }
+    /// Retire abandoned login resources without requiring another caller digit.
+    pub fn expire_authentication(&mut self, now_ms: u64) -> Vec<PeerReply> {
+        let mut retired = Vec::new();
+        self.calls.retain(|call| {
+            if call.mailbox.is_none() && (now_ms >= call.login_deadline_ms || call.signals.ended())
+            {
+                call.signals.end();
+                retired.push(call.signals.reply_target());
+                false
+            } else {
+                true
+            }
+        });
+        retired
     }
     /// Queue one already-prepared stream only to its exact call, including login prompts.
     pub fn queue_reply(

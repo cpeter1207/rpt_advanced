@@ -3,7 +3,7 @@ use super::*;
 use crate::{abi, services::HostServices};
 use rpt_advanced_core::{
     audio::{PcmRead, PcmStreamReader, PlaybackOutcome},
-    link::MailboxId,
+    config::{ConfigDocument, PhoneMailbox, resolve_phone_mailboxes},
 };
 use std::{ffi::c_void, mem::size_of, ptr};
 
@@ -27,7 +27,7 @@ fn concurrent_owner_retirement_wins_between_admission_and_authentication_publish
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut calls = PhoneCalls::new(1, 1).unwrap();
-    let source = calls.admit(peer(false)).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
     let reply = calls.reply(&source).unwrap();
     let owner_reply = reply.clone();
     let (retire, request) = std::sync::mpsc::channel();
@@ -47,7 +47,7 @@ fn concurrent_owner_retirement_wins_between_admission_and_authentication_publish
     });
     assert!(!reply.ended());
     assert_eq!(
-        calls.authenticate(&source, &reply, MailboxId::new("100").unwrap()),
+        calls.authenticate(&source, &reply, &records(), "100", "1234", 0),
         Err(Error::Admission)
     );
     owner.join().unwrap();
@@ -57,6 +57,13 @@ fn concurrent_owner_retirement_wins_between_admission_and_authentication_publish
     assert!(calls.take_reply(&source, &reply).is_err());
     assert_eq!(calls.retire(&source), Some(reply));
     assert!(calls.is_empty());
+}
+
+fn records() -> Vec<PhoneMailbox> {
+    resolve_phone_mailboxes(
+        &ConfigDocument::parse(include_str!("tests/fixtures/phone_mailbox.conf")).unwrap(),
+    )
+    .value
 }
 
 fn peer(second: bool) -> PeerIo {
@@ -103,6 +110,123 @@ fn media() -> Box<dyn PcmStreamReader> {
 }
 
 #[test]
+fn unconfigured_mailbox_cannot_authenticate_a_provider_admitted_call() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut calls = PhoneCalls::new(1, 1).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    let result = calls.authenticate(&source, &reply, &[], "999", "1234", 0);
+    assert_eq!(
+        result.unwrap(),
+        PhoneLogin::Retry,
+        "provider admission is not a mailbox/PIN verifier"
+    );
+    assert!(!reply.phone_authenticated());
+}
+
+#[test]
+fn mailbox_login_bounds_attempts_and_does_not_transfer_profiles_to_other_calls() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let records = records();
+    let mut calls = PhoneCalls::new(2, 2).unwrap();
+    let first = calls.admit(peer(false), 100).unwrap();
+    let second = calls.admit(peer(true), 100).unwrap();
+    let reply = calls.reply(&first).unwrap();
+    let other = calls.reply(&second).unwrap();
+    assert_eq!(calls.local(&first, &reply), Some("1000"));
+    assert!(calls.local(&first, &other).is_none());
+    assert!(
+        calls
+            .authenticate(&first, &other, &records, "100", "1234", 100)
+            .is_err()
+    );
+    for (mailbox, pin, expected) in [
+        ("100", "9999", PhoneLogin::Retry),
+        ("unknown", "1234", PhoneLogin::Retry),
+        ("100", "1234#", PhoneLogin::Closed),
+    ] {
+        assert_eq!(
+            calls
+                .authenticate(&first, &reply, &records, mailbox, pin, 101)
+                .unwrap(),
+            expected
+        );
+    }
+    assert!(reply.ended());
+    assert!(
+        calls
+            .authenticate(&first, &reply, &records, "100", "1234", 102)
+            .is_err()
+    );
+    assert!(!other.phone_authenticated());
+    assert_eq!(
+        calls
+            .authenticate(&second, &other, &records, "100", "1234", 59_999)
+            .unwrap(),
+        PhoneLogin::Authenticated
+    );
+    let profile = calls.mailbox(&second, &other).unwrap();
+    assert_eq!(
+        (&*profile.first_name, &*profile.callsign),
+        ("Chris", "KG0BP")
+    );
+    assert!(calls.mailbox(&first, &other).is_none());
+    assert_eq!(calls.expire_authentication(60_100), [reply]);
+    assert!(
+        other.phone_authenticated(),
+        "login timeout does not end an authenticated call"
+    );
+}
+
+#[test]
+fn mailbox_login_deadline_is_inclusive_and_replacement_never_inherits_attempts_or_identity() {
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let records = records();
+    let mut calls = PhoneCalls::new(1, 2).unwrap();
+    let source = calls.admit(peer(false), 100).unwrap();
+    let reply = calls.reply(&source).unwrap();
+    assert_eq!(
+        calls
+            .authenticate(&source, &reply, &records, "100", "1234", 60_100)
+            .unwrap(),
+        PhoneLogin::Closed
+    );
+    calls.retire(&source).unwrap();
+    let fresh = calls.admit(peer(false), 60_100).unwrap();
+    assert_ne!(source.ingress(), fresh.ingress());
+    let new_reply = calls.reply(&fresh).unwrap();
+    assert!(
+        calls
+            .authenticate(&fresh, &reply, &records, "100", "1234", 60_101)
+            .is_err()
+    );
+    assert_eq!(
+        calls
+            .authenticate(&fresh, &new_reply, &records, "100", "1234", 60_101)
+            .unwrap(),
+        PhoneLogin::Authenticated
+    );
+    assert!(calls.expire_authentication(u64::MAX).is_empty());
+    calls.retire(&fresh).unwrap();
+    let abandoned = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&abandoned).unwrap();
+    assert!(calls.expire_authentication(59_999).is_empty());
+    reply.retire();
+    assert!(calls.local(&abandoned, &reply).is_none());
+    assert_eq!(calls.expire_authentication(59_999), [reply.clone()]);
+    let abandoned = calls.admit(peer(false), 0).unwrap();
+    let reply = calls.reply(&abandoned).unwrap();
+    assert_eq!(calls.expire_authentication(60_000), [reply.clone()]);
+    assert!(reply.ended() && calls.is_empty());
+}
+
+#[test]
 fn private_call_reply_queue_is_exact_bounded_and_revoked_on_retirement() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()
@@ -110,14 +234,14 @@ fn private_call_reply_queue_is_exact_bounded_and_revoked_on_retirement() {
     assert!(PhoneCalls::new(0, 1).is_err());
     assert!(PhoneCalls::new(1, 0).is_err());
     let mut calls = PhoneCalls::new(2, 2).unwrap();
-    let first = calls.admit(peer(false)).unwrap();
+    let first = calls.admit(peer(false), 0).unwrap();
     assert!(
-        calls.admit(peer(false)).is_err(),
+        calls.admit(peer(false), 0).is_err(),
         "a duplicate cannot replace its call"
     );
-    let second = calls.admit(peer(true)).unwrap();
+    let second = calls.admit(peer(true), 0).unwrap();
     assert!(
-        calls.admit(peer(true)).is_err(),
+        calls.admit(peer(true), 0).is_err(),
         "transport capacity is bounded"
     );
     let reply = calls.reply(&first).unwrap();
@@ -125,16 +249,16 @@ fn private_call_reply_queue_is_exact_bounded_and_revoked_on_retirement() {
     assert!(!reply.phone_authenticated());
     assert!(
         calls
-            .authenticate(&first, &other, MailboxId::new("100").unwrap())
+            .authenticate(&first, &other, &records(), "100", "1234", 0)
             .is_err()
     );
     calls
-        .authenticate(&first, &reply, MailboxId::new("100").unwrap())
+        .authenticate(&first, &reply, &records(), "100", "1234", 0)
         .unwrap();
     assert!(reply.phone_authenticated());
     assert!(
         calls
-            .authenticate(&first, &reply, MailboxId::new("101").unwrap())
+            .authenticate(&first, &reply, &records(), "101", "1234", 0)
             .is_err(),
         "mailbox changes cannot inherit a live source grant"
     );
@@ -155,11 +279,11 @@ fn private_call_reply_queue_is_exact_bounded_and_revoked_on_retirement() {
     assert!(calls.queue_reply(&first, &reply, media()).is_err());
     assert!(
         calls
-            .authenticate(&first, &reply, MailboxId::new("100").unwrap())
+            .authenticate(&first, &reply, &records(), "100", "1234", 0)
             .is_err()
     );
     assert!(calls.retire(&first).is_none());
-    let replaced = calls.admit(peer(false)).unwrap();
+    let replaced = calls.admit(peer(false), 0).unwrap();
     assert_ne!(replaced.ingress(), first.ingress());
     assert!(calls.queue_reply(&replaced, &reply, media()).is_err());
     let fresh = calls.reply(&replaced).unwrap();
@@ -183,7 +307,7 @@ fn dropping_the_call_owner_revokes_retained_private_replies() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let mut calls = PhoneCalls::new(1, 1).unwrap();
-    let source = calls.admit(peer(false)).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
     let reply = calls.reply(&source).unwrap();
     drop(calls);
     assert!(reply.ended());
@@ -213,7 +337,7 @@ fn retirement_during_private_render_revokes_the_copied_pcm_before_delivery() {
         }
     }
     let mut calls = PhoneCalls::new(1, 1).unwrap();
-    let source = calls.admit(peer(false)).unwrap();
+    let source = calls.admit(peer(false), 0).unwrap();
     let reply = calls.reply(&source).unwrap();
     calls
         .queue_reply(&source, &reply, Box::new(Retire(reply.clone())))

@@ -22,8 +22,8 @@ use rpt_advanced_core::{
     },
     link::{
         AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, LocalTextInput,
-        MailboxId, Mode, PeerIdentity, PeerReply, PhoneCallId, PhoneSource, ProtocolId,
-        TextAudience, TextOrigin,
+        Mode, PeerIdentity, PeerReply, PhoneCallId, PhoneSource, ProtocolId, TextAudience,
+        TextOrigin,
     },
     media::SpeechSource,
     runtime::{
@@ -40,6 +40,8 @@ use std::{
     time::Instant,
 };
 
+#[path = "host_phone_auth.rs"]
+mod phone_auth;
 #[path = "host_remote.rs"]
 mod remote;
 
@@ -742,11 +744,23 @@ impl Host {
             self.runtime
                 .settings(&local)
                 .ok_or(RuntimeError::MissingNode)?;
-            return self
+            let source = self
                 .phone_calls
-                .admit(io)
-                .map(|_| ())
-                .map_err(|_| RuntimeError::Rejected);
+                .admit(io, clock.now_ms)
+                .map_err(|_| RuntimeError::Rejected)?;
+            let reply = self
+                .phone_calls
+                .reply(&source)
+                .ok_or(RuntimeError::Rejected)?;
+            if let Err(error) = self.prepare_login_prompt(
+                &source,
+                &reply,
+                rpt_advanced_core::messages::PhoneAuthenticationPrompt::Login,
+            ) {
+                self.retire_phone(&source);
+                return Err(error);
+            }
+            return Ok(());
         }
         let remote = io
             .identity()
@@ -1344,6 +1358,9 @@ impl Host {
     }
     /// Drain control snapshots and complete old-generation redirect handshakes.
     pub fn pump(&mut self, clock: RuntimeClock) -> Result<(), RuntimeError> {
+        for reply in self.phone_calls.expire_authentication(clock.now_ms) {
+            self.retire_phone_source(&reply);
+        }
         if let Err(error) = self.advance_reload(clock) {
             self.reload_failure = Some(error);
             self.reload_text = None;
@@ -1636,17 +1653,6 @@ impl Host {
     /// Retain the exact private return path before dispatching source-tagged work.
     pub fn phone_reply(&self, source: &PhoneSource) -> Option<PeerReply> {
         self.phone_calls.reply(source)
-    }
-    /// Publish a mailbox after a separate PIN verifier succeeds. Login alone never unlocks a node.
-    pub fn authenticate_phone(
-        &mut self,
-        source: &PhoneSource,
-        reply: &PeerReply,
-        mailbox: MailboxId,
-    ) -> Result<(), RuntimeError> {
-        self.phone_calls
-            .authenticate(source, reply, mailbox)
-            .map_err(|_| RuntimeError::Rejected)
     }
     /// Queue a prepared prompt directly to one private call without entering radio media.
     pub fn queue_phone_reply(
