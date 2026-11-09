@@ -68,6 +68,51 @@ impl NativeMediaPreparer for Media {
 struct CapturingMedia(Arc<Mutex<Vec<String>>>);
 
 #[test]
+fn phone_diagnostics_cannot_succeed_in_the_radio_telemetry_queue() {
+    use crate::link::{PhoneAccountId, PhoneSource};
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &CapturingMedia(messages.clone()),
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = crate::link::PeerSignals::for_phone(source);
+    assert!(signals.authenticate_phone());
+    let reply = signals.reply_target();
+    let before = messages.lock().unwrap().clone();
+    assert_eq!(
+        runtime.queue_macro_stopped("1000", Some(reply.clone())),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.queue_loop_rejected("1000", "2000", Some(reply.clone())),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.queue_remote_command_unsupported("1000", "2000", Some(reply.clone())),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(
+        runtime.queue_status("1000", LinkAction::Status, None, clock(), Some(reply)),
+        Err(RuntimeError::Rejected)
+    );
+    assert_eq!(*messages.lock().unwrap(), before);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn dtmf_macro_reload_prepares_catalog_and_retires_already_queued_work() {
     use crate::runtime::dtmf::{DigitEvent, DigitOutcome};
     let document = ConfigDocument::parse(

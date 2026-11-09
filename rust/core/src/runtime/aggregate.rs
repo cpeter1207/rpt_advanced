@@ -44,6 +44,13 @@ fn queue_status_media(
     reply: Option<crate::link::PeerReply>,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<(), RuntimeError> {
+    if reply
+        .as_ref()
+        .is_some_and(|reply| reply.phone_source().is_some())
+    {
+        // Phone calls have no RF peer slot; only their explicit private outbox can deliver.
+        return Err(RuntimeError::Rejected);
+    }
     let station = station.as_mut().ok_or(RuntimeError::Preparation)?;
     let mut prepared =
         prepare::streamed_status(station.as_mut(), settings, morse, speech)?.reply_to(reply);
