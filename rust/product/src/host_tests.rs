@@ -3,6 +3,8 @@ use super::*;
 mod egress_load;
 #[path = "native_maintenance_host_tests.rs"]
 mod native_maintenance;
+#[path = "host_phone_tests.rs"]
+mod phone;
 #[path = "host_remote_tests.rs"]
 mod remote;
 #[path = "site_host_tests.rs"]
@@ -172,7 +174,7 @@ fn incoming_echo_uses_its_validated_qso_and_protocol_qualified_link_key() {
     let mut host = host();
     let (echo, state) = crate::link::session::tests::source_peer();
     state.lock().unwrap().continuous_async = true;
-    assert_eq!(echo.identity().node(), "2000");
+    assert_eq!(echo.identity().node(), Some("2000"));
     host.incoming_peer(echo, "192.0.2.2", clock()).unwrap();
     pump_until(&mut host, |host| {
         named_peer_ready(host, "3002000")

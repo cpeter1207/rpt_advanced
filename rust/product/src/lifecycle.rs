@@ -788,21 +788,27 @@ unsafe fn incoming_identity(
         return Err(RuntimeError::Rejected);
     }
     let request = unsafe { &*request };
+    let protocol = match request.protocol {
+        1 => rpt_advanced_core::link::ProtocolId::AllStarLink,
+        2 => rpt_advanced_core::link::ProtocolId::EchoLink,
+        3 => rpt_advanced_core::link::ProtocolId::Phone,
+        _ => return Err(RuntimeError::Rejected),
+    };
+    let phone = protocol == rpt_advanced_core::link::ProtocolId::Phone;
     if request.abi_version != 1
-        || request.local.length > 32
+        || request.local.length > if phone { 63 } else { 32 }
         || request.remote.length > 32
         || request.source.length > 64
     {
         return Err(RuntimeError::Rejected);
     }
-    let protocol = match request.protocol {
-        1 => rpt_advanced_core::link::ProtocolId::AllStarLink,
-        2 => rpt_advanced_core::link::ProtocolId::EchoLink,
-        _ => return Err(RuntimeError::Rejected),
-    };
+    let local = unsafe { input(request.local.data.cast(), request.local.length) }?.to_owned();
+    if phone && rpt_advanced_core::config::NodeId::new(local.as_str()).is_err() {
+        return Err(RuntimeError::Rejected);
+    }
     Ok((
         protocol,
-        unsafe { input(request.local.data.cast(), request.local.length) }?.to_owned(),
+        local,
         unsafe { input(request.remote.data.cast(), request.remote.length) }?.to_owned(),
         unsafe { input(request.source.data.cast(), request.source.length) }?.to_owned(),
     ))
@@ -983,6 +989,22 @@ unsafe extern "C" fn rptadv_product_authorize_incoming(
     catch_unwind(AssertUnwindSafe(|| -> Result<(), RuntimeError> {
         let (engine, _call) = selected()?;
         let (protocol, local, remote, source) = unsafe { incoming_identity(request) }?;
+        if protocol == rpt_advanced_core::link::ProtocolId::Phone {
+            let metadata = unsafe { engine.services.inspect_peer(peer) }
+                .map_err(|_| RuntimeError::Rejected)?;
+            if metadata.identity().protocol() != protocol
+                || metadata.identity().wire_identity() != remote
+                || metadata.local() != local
+            {
+                return Err(RuntimeError::Rejected);
+            }
+            return engine.run(move |host| {
+                host.runtime
+                    .settings(&local)
+                    .map(|_| ())
+                    .ok_or(RuntimeError::MissingNode)
+            });
+        }
         // Echo admission must inspect the live provider QSO. A null/pre-answer
         // authorization path is available only for conventional IAX channels.
         if protocol != rpt_advanced_core::link::ProtocolId::AllStarLink || !peer.is_null() {
@@ -1010,7 +1032,7 @@ unsafe extern "C" fn rptadv_product_incoming(
         let peer = unsafe { engine.services.peer(peer) }.map_err(|_| RuntimeError::Rejected)?;
         consumed.set(true);
         if peer.identity().protocol() != protocol
-            || peer.identity().node() != remote
+            || peer.identity().wire_identity() != remote
             || peer.local() != local
         {
             return Err(RuntimeError::Rejected);

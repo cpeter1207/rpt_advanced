@@ -4,6 +4,7 @@ mod echo_telemetry;
 mod hub;
 mod identity;
 mod peer;
+mod phone;
 mod protocol;
 mod signals;
 mod text;
@@ -18,8 +19,9 @@ pub use audio::{
 };
 pub use echo_telemetry::EchoTelemetryPolicy;
 pub use hub::{AdmissionError, LinkManager, LinkStatus, Mode, RetryAttempt};
-pub use identity::{EchoAlias, IdentityError, PeerIdentity, ProtocolId};
+pub use identity::{EchoAlias, IdentityError, PeerAddress, PeerIdentity, ProtocolId};
 pub use peer::{Peer, ReceiveState};
+pub use phone::{MailboxId, PhoneAccountId, PhoneCallId, PhoneSource};
 pub use protocol::{Protocol, Route};
 pub use signals::{PeerReply, PeerSignals};
 pub use text::{ClassifiedText, HumanMessage, TextAudience, TextOrigin, classify_asl};

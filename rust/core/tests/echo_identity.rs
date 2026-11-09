@@ -426,9 +426,9 @@ fn protocol_identity_does_not_collide() {
     let echo = PeerIdentity::parse(ProtocolId::EchoLink, "123456").unwrap();
     assert_ne!(asl, echo);
     assert_eq!(echo.protocol(), ProtocolId::EchoLink);
-    assert_eq!(echo.node(), "123456");
-    assert_eq!(echo.operator_alias(), "3123456");
-    assert_eq!(asl.operator_alias(), "123456");
+    assert_eq!(echo.node(), Some("123456"));
+    assert_eq!(echo.operator_alias().as_deref(), Some("3123456"));
+    assert_eq!(asl.operator_alias().as_deref(), Some("123456"));
     assert_eq!(PeerIdentity::from_operator("30123456"), Ok(echo.clone()));
     assert_eq!(PeerIdentity::from_operator("123456"), Ok(asl));
     assert_eq!(

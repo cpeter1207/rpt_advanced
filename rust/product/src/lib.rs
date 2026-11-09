@@ -14,6 +14,7 @@ pub mod host;
 pub mod lifecycle;
 pub mod link;
 pub mod media;
+pub mod phone;
 mod radio_control;
 mod remote_reply;
 mod scheduler_health;

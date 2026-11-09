@@ -1,7 +1,7 @@
 //! Protocol-qualified peers; operator dial aliases are not their real identities.
 use std::fmt;
 
-/// Protocol namespace for a direct peer's real node number.
+/// Protocol namespace for a direct peer's real address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
 pub enum ProtocolId {
@@ -9,6 +9,8 @@ pub enum ProtocolId {
     AllStarLink = 1,
     /// EchoLink account/QSO.
     EchoLink = 2,
+    /// Private telephone call, without a public node/dial alias.
+    Phone = 3,
 }
 
 /// An invalid real identity or reserved operator alias.
@@ -25,19 +27,29 @@ impl std::error::Error for IdentityError {}
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PeerIdentity {
     protocol: ProtocolId,
-    node: String,
+    address: PeerAddress,
+}
+
+/// A public protocol node or a private opaque call; these namespaces never alias.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PeerAddress {
+    /// Canonical decimal protocol node number.
+    Node(String),
+    /// Locally assigned opaque phone call token.
+    PhoneCall(super::PhoneCallId),
 }
 impl PeerIdentity {
     /// Parse a real protocol identity, never a prefixed operator dial alias.
     pub fn parse(protocol: ProtocolId, node: &str) -> Result<Self, IdentityError> {
-        if !super::decimal_identity(node) {
+        if protocol != ProtocolId::Phone && !super::decimal_identity(node) {
             return Err(IdentityError);
         }
-        let node = match protocol {
-            ProtocolId::AllStarLink => node.to_owned(),
-            ProtocolId::EchoLink => positive_id(node)?.to_string(),
+        let address = match protocol {
+            ProtocolId::AllStarLink => PeerAddress::Node(node.to_owned()),
+            ProtocolId::EchoLink => PeerAddress::Node(positive_id(node)?.to_string()),
+            ProtocolId::Phone => PeerAddress::PhoneCall(node.parse()?),
         };
-        Ok(Self { protocol, node })
+        Ok(Self { protocol, address })
     }
     /// Resolve the reserved EchoLink dial range before any AllStar directory lookup.
     pub fn from_operator(alias: &str) -> Result<Self, IdentityError> {
@@ -50,21 +62,44 @@ impl PeerIdentity {
     /// Canonical control/configuration key before duplicate, access or retry
     /// comparisons. AllStar spellings are retained; Echo aliases are reversible.
     pub fn canonical_operator(alias: &str) -> Result<String, IdentityError> {
-        Self::from_operator(alias).map(|identity| identity.operator_alias())
+        Self::from_operator(alias)
+            .and_then(|identity| identity.operator_alias().ok_or(IdentityError))
     }
     /// The protocol namespace, independent of numeric collisions.
     pub fn protocol(&self) -> ProtocolId {
         self.protocol
     }
-    /// Real canonical decimal identity, without the operator prefix.
-    pub fn node(&self) -> &str {
-        &self.node
+    /// Typed address; a phone is never represented as a numeric node.
+    pub fn address(&self) -> &PeerAddress {
+        &self.address
+    }
+    /// Real decimal identity when this protocol has a node namespace.
+    pub fn node(&self) -> Option<&str> {
+        match &self.address {
+            PeerAddress::Node(node) => Some(node),
+            PeerAddress::PhoneCall(_) => None,
+        }
+    }
+    /// Opaque call identity, absent for public protocol nodes.
+    pub fn call_id(&self) -> Option<super::PhoneCallId> {
+        match self.address {
+            PeerAddress::PhoneCall(call) => Some(call),
+            PeerAddress::Node(_) => None,
+        }
+    }
+    /// Canonical copied provider metadata spelling, never an authorization identity.
+    pub fn wire_identity(&self) -> String {
+        match &self.address {
+            PeerAddress::Node(node) => node.clone(),
+            PeerAddress::PhoneCall(call) => call.to_string(),
+        }
     }
     /// Canonical dial spelling; all aliases for one EchoLink ID normalize here.
-    pub fn operator_alias(&self) -> String {
-        match self.protocol {
-            ProtocolId::AllStarLink => self.node.clone(),
-            ProtocolId::EchoLink => format!("3{:0>6}", self.node),
+    pub fn operator_alias(&self) -> Option<String> {
+        match (self.protocol, &self.address) {
+            (ProtocolId::AllStarLink, PeerAddress::Node(node)) => Some(node.clone()),
+            (ProtocolId::EchoLink, PeerAddress::Node(node)) => Some(format!("3{node:0>6}")),
+            _ => None,
         }
     }
 }

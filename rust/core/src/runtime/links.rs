@@ -594,6 +594,32 @@ impl NodeLinkControl {
         }
         self.source_digit(remote, digit, now_ms, reply)
     }
+    /// Collect only an admitted private call's selected-node commands. No link
+    /// membership or RF attachment is created, and idle phone digits never regenerate.
+    /// The caller checks phone/destination selection permissions before this entry.
+    pub fn phone_digit(
+        &mut self,
+        source: &crate::link::PhoneSource,
+        digit: char,
+        now_ms: u64,
+        reply: PeerReply,
+    ) -> Option<DigitOutcome> {
+        if !self.admitting
+            || !reply.phone_authenticated()
+            || reply.phone_source() != Some(source)
+            || !crate::link::valid_digit(digit)
+        {
+            return None;
+        }
+        self.source_digit(&source.call_id().to_string(), digit, now_ms, reply)
+            .filter(|outcome| !matches!(outcome, DigitOutcome::Regenerate(_)))
+    }
+    /// Retire an actual private ingress before reclaiming its collectors and grants.
+    /// Already queued work retains this ended token and fails its dispatch fence.
+    pub fn retire_source(&mut self, reply: &PeerReply) {
+        reply.retire();
+        self.peer_commands.retain(|(_, source, _)| source != reply);
+    }
     fn source_digit(
         &mut self,
         origin: &str,
@@ -699,6 +725,19 @@ impl NodeLinkControl {
         }
         if !self.macro_operation_current(&operation, now_ms) {
             return Err(AdmissionError::Stale);
+        }
+        if let Some((reply, source)) = operation
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.phone_source().map(|source| (reply, source)))
+        {
+            if !reply.phone_authenticated()
+                || operation.origin.as_deref() != Some(source.call_id().to_string().as_str())
+                || operation.command.action == LinkAction::Command
+            {
+                // Legacy D envelopes provide neither private replies nor per-call retirement.
+                return Err(AdmissionError::Denied);
+            }
         }
         let remote = if matches!(
             operation.command.action,

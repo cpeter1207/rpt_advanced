@@ -457,7 +457,7 @@ impl MessageCatalog {
             let mut args = message.args();
             for (key, value) in &fields {
                 if crate::link::PeerIdentity::from_operator(value).is_ok_and(|id| {
-                    id.protocol() == crate::link::ProtocolId::EchoLink && id.node() == node
+                    id.protocol() == crate::link::ProtocolId::EchoLink && id.node() == Some(node)
                 }) {
                     args.set(*key, identity.attribute(attribute));
                 }

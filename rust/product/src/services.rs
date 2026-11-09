@@ -4,7 +4,7 @@ use crate::{
     Error, abi,
     directory::{Backend, BackendError, DirectoryResolver},
 };
-use rpt_advanced_core::link::{PeerIdentity, ProtocolId};
+use rpt_advanced_core::link::{PeerIdentity, PhoneAccountId, ProtocolId};
 use rpt_advanced_core::schedule::{CivilTime, Weekday};
 use std::{
     ffi::{CStr, c_void},
@@ -663,11 +663,30 @@ impl HostServices {
     /// `handle` must be a unique live peer created by this same services table.
     pub unsafe fn peer(&self, handle: *mut c_void) -> Result<PeerIo, Error> {
         let handle = NonNull::new(handle).ok_or(Error::Admission)?;
+        let metadata = unsafe { self.inspect_peer(handle.as_ptr()) }?;
+        Ok(PeerIo {
+            services: *self,
+            handle,
+            identity: metadata.identity,
+            local: metadata.local,
+            callsign: metadata.callsign,
+            capabilities: metadata.capabilities,
+            account_generation: metadata.account_generation,
+            qso_generation: metadata.qso_generation,
+            provider_account: metadata.provider_account,
+        })
+    }
+    /// Copy admission metadata while borrowing a pending peer; never adopt or destroy it.
+    ///
+    /// # Safety
+    /// `handle` is a live peer from this table, exclusively borrowed during the callback.
+    pub unsafe fn inspect_peer(&self, handle: *const c_void) -> Result<PeerMetadata, Error> {
+        let handle = NonNull::new(handle.cast_mut()).ok_or(Error::Admission)?;
         let mut raw: abi::rptadv_peer_info_v1 = unsafe { std::mem::zeroed() };
         raw.struct_size = size_of_val(&raw) as u32;
         raw.abi_version = 1;
         if unsafe { self.0.peer_info.unwrap()(self.0.context, handle.as_ptr(), &mut raw) } != 0
-            || raw.struct_size < size_of_val(&raw) as u32
+            || raw.struct_size < offset_of!(abi::rptadv_peer_info_v1, provider_account) as u32
             || raw.abi_version != 1
         {
             return Err(Error::Admission);
@@ -675,6 +694,7 @@ impl HostServices {
         let protocol = match raw.protocol {
             1 => ProtocolId::AllStarLink,
             2 => ProtocolId::EchoLink,
+            3 => ProtocolId::Phone,
             _ => return Err(Error::Admission),
         };
         let bytes = |span: abi::rptadv_peer_bytes_v1, maximum: usize| {
@@ -692,13 +712,41 @@ impl HostServices {
         };
         let remote = bytes(raw.remote, 32)?;
         let identity = PeerIdentity::parse(protocol, &remote).map_err(|_| Error::Admission)?;
-        let local = bytes(raw.local, 32)?;
+        let local = bytes(
+            raw.local,
+            if protocol == ProtocolId::Phone {
+                63
+            } else {
+                32
+            },
+        )?;
+        let local_valid = if protocol == ProtocolId::Phone {
+            rpt_advanced_core::config::NodeId::new(local.as_str()).is_ok()
+        } else {
+            !local.is_empty() && local.bytes().all(|byte| byte.is_ascii_digit())
+        };
         let callsign = bytes(raw.callsign, 64)?;
         let capabilities = raw.capabilities;
-        if identity.node() != remote
-            || local.is_empty()
-            || !local.bytes().all(|b| b.is_ascii_digit())
-            || capabilities & !31 != 0
+        let provider_account = if protocol == ProtocolId::Phone {
+            if raw.struct_size < size_of_val(&raw) as u32 {
+                return Err(Error::Admission);
+            }
+            Some(
+                PhoneAccountId::new(&bytes(raw.provider_account, 64)?)
+                    .map_err(|_| Error::Admission)?,
+            )
+        } else {
+            None
+        };
+        if identity.wire_identity() != remote
+            || !local_valid
+            || capabilities & !63 != 0
+            || (protocol != ProtocolId::Phone && capabilities & 32 != 0)
+            || (protocol == ProtocolId::Phone
+                && (capabilities & 32 == 0
+                    || capabilities & !35 != 0
+                    || raw.account_generation == 0
+                    || raw.qso_generation == 0))
             || (capabilities & 1 != 0 && !self.peer_step_available())
             || (capabilities & 2 != 0
                 && (capabilities & 1 == 0 || self.0.peer_prepare_audio.is_none()))
@@ -722,15 +770,14 @@ impl HostServices {
         {
             return Err(Error::Admission);
         }
-        Ok(PeerIo {
-            services: *self,
-            handle,
+        Ok(PeerMetadata {
             identity,
             local,
             callsign,
             capabilities,
             account_generation: raw.account_generation,
             qso_generation: raw.qso_generation,
+            provider_account,
         })
     }
     /// Dial one peer while the supplied generation remains current.
@@ -1010,6 +1057,27 @@ impl Drop for Radio {
     }
 }
 
+/// Immutable admission metadata copied without adopting a provider's pending handle.
+pub struct PeerMetadata {
+    identity: PeerIdentity,
+    local: String,
+    callsign: String,
+    capabilities: u32,
+    account_generation: u64,
+    qso_generation: u64,
+    provider_account: Option<PhoneAccountId>,
+}
+impl PeerMetadata {
+    /// Real protocol-qualified address, without trusting a request's claimed origin.
+    pub fn identity(&self) -> &PeerIdentity {
+        &self.identity
+    }
+    /// Provider-bound local controller target.
+    pub fn local(&self) -> &str {
+        &self.local
+    }
+}
+
 /// Unique peer media/control handle operated by one reader.
 pub struct PeerIo {
     services: HostServices,
@@ -1020,6 +1088,7 @@ pub struct PeerIo {
     capabilities: u32,
     account_generation: u64,
     qso_generation: u64,
+    provider_account: Option<PhoneAccountId>,
 }
 // SAFETY: the handle is uniquely moved to one owner thread.
 unsafe impl Send for PeerIo {}
@@ -1039,6 +1108,10 @@ impl PeerIo {
     /// Admission generations copied from the provider-bound pending QSO.
     pub fn generations(&self) -> (u64, u64) {
         (self.account_generation, self.qso_generation)
+    }
+    /// Copied local provider account; absent for conventional node peers.
+    pub fn phone_account(&self) -> Option<&PhoneAccountId> {
+        self.provider_account.as_ref()
     }
     /// Human-text routing support belongs to this connection, not the host table.
     pub fn can_forward_text(&self) -> bool {

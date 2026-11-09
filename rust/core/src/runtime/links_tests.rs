@@ -36,6 +36,95 @@ fn links() -> NodeLinkControl {
 }
 
 #[test]
+fn phone_commands_keep_exact_private_source_and_retire_without_link_admission() {
+    use crate::link::{PhoneAccountId, PhoneSource};
+    let account = PhoneAccountId::new("provider").unwrap();
+    let call = "aabbccddeeff00112233445566778899".parse().unwrap();
+    let source = PhoneSource::new(account.clone(), 3, call, 4, 5).unwrap();
+    let replacement = PhoneSource::new(account, 3, call, 5, 6).unwrap();
+    let signals = crate::link::PeerSignals::for_phone(source.clone());
+    let reply = signals.reply_target();
+    let mut links = links();
+    assert!(links.phone_digit(&source, '*', 1, reply.clone()).is_none());
+    assert!(signals.authenticate_phone());
+    assert!(
+        links
+            .phone_digit(&replacement, '*', 1, reply.clone())
+            .is_none()
+    );
+    assert!(
+        links.phone_digit(&source, '5', 1, reply.clone()).is_none(),
+        "command-only calls cannot regenerate RF digits"
+    );
+    let mut outcome = None;
+    for digit in "*70#".chars() {
+        outcome = links
+            .phone_digit(&source, digit, 2, reply.clone())
+            .or(outcome);
+    }
+    let Some(DigitOutcome::Operation(operation)) = outcome else {
+        panic!("private status operation")
+    };
+    assert_eq!(operation.reply, Some(reply.clone()));
+    assert_eq!(operation.origin.as_deref(), Some(call.to_string().as_str()));
+    assert!(links.manager().snapshot().is_empty());
+    assert!(links.phone_digit(&source, '*', 2, reply.clone()).is_none());
+    assert!(!links.peer_commands.is_empty());
+    signals.end();
+    links.retire_source(&reply);
+    assert!(links.peer_commands.is_empty());
+    assert!(links.phone_digit(&source, '*', 3, reply).is_none());
+    let mut host = NodeHost::new(generation(1));
+    assert!(matches!(
+        links.command(operation, host.control().work().unwrap(), 3, false),
+        Err(AdmissionError::Stale)
+    ));
+}
+
+#[test]
+fn mailbox_login_never_unlocks_administration_or_enables_legacy_private_forwarding() {
+    use crate::link::{PhoneAccountId, PhoneSource};
+    let source = PhoneSource::new(
+        PhoneAccountId::new("provider").unwrap(),
+        1,
+        "aabbccddeeff00112233445566778899".parse().unwrap(),
+        2,
+        3,
+    )
+    .unwrap();
+    let signals = crate::link::PeerSignals::for_phone(source.clone());
+    assert!(signals.authenticate_phone());
+    let reply = signals.reply_target();
+    let mut links = links();
+    for digit in "*804".chars() {
+        assert!(
+            links
+                .phone_digit(&source, digit, 1, reply.clone())
+                .is_none(),
+            "mailbox authentication is not an admin grant"
+        );
+    }
+    let mut request = operation(LinkAction::Command, "2000");
+    request.reply = Some(reply.clone());
+    request.origin = Some(source.call_id().to_string());
+    let mut host = NodeHost::new(generation(1));
+    assert!(matches!(
+        links.command(request.clone(), host.control().work().unwrap(), 2, true),
+        Err(AdmissionError::Denied)
+    ));
+    request.command.action = LinkAction::Status;
+    request.origin = None;
+    assert!(
+        matches!(
+            links.command(request, host.control().work().unwrap(), 2, false),
+            Err(AdmissionError::Denied)
+        ),
+        "a private call cannot fall back to trusted local origin"
+    );
+    assert!(links.phone_digit(&source, '!', 3, reply).is_none());
+}
+
+#[test]
 fn dtmf_macro_dispatch_retains_exact_source_and_rejects_canceled_queued_operations() {
     let mut links = links();
     let definition = crate::config::ResolvedDtmfMacroSettings {

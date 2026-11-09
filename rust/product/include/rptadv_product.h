@@ -49,6 +49,8 @@ struct UrpAstSiteSnapshot;
 #define RPTADV_PEER_ALLSTARLINK 1U
 /** EchoLink's full real node number, without the operator's leading 3. */
 #define RPTADV_PEER_ECHOLINK 2U
+/** Private opaque telephone call; never a public/dialable node identity. */
+#define RPTADV_PEER_PHONE 3U
 /** This peer supports the complete serial-owner group. */
 #define RPTADV_PEER_ASYNC 1U
 /** This peer supports complete source-timed prepared egress. */
@@ -59,6 +61,9 @@ struct UrpAstSiteSnapshot;
 #define RPTADV_PEER_REMOTE_COMMANDS 8U
 /** This peer uses accepted-prefix source reads and explicit finite drainage. */
 #define RPTADV_PEER_SOURCE_MEDIA 16U
+/** Call-addressed control/reply lifetime, independent of RF attachment.
+ * This does not advertise remote call-origin or legacy-D isolation support. */
+#define RPTADV_PEER_PRIVATE_CALL 32U
 
 /** Borrowed immutable bytes. Null is valid only with zero length. */
 struct rptadv_peer_bytes_v1 {
@@ -69,23 +74,33 @@ struct rptadv_peer_bytes_v1 {
 /** Copy before returning to other work. EchoLink metadata is freshly validated
  * against its owning account/QSO and directory during pending admission. */
 struct rptadv_peer_info_v1 {
-    uint32_t struct_size;        /**< Complete caller-provided size. */
+    uint32_t struct_size;        /**< Caller capacity on entry; bytes copied on return. */
     uint32_t abi_version;        /**< Exactly 1. */
-    uint32_t protocol;           /**< RPTADV_PEER_ALLSTARLINK or ECHOLINK. */
+    uint32_t protocol;           /**< ALLSTARLINK, ECHOLINK, or private PHONE. */
     uint32_t capabilities;       /**< Operations supported by this handle, not the host table. */
-    uint64_t account_generation; /**< Echo account generation; zero for channel-backed IAX. */
-    uint64_t qso_generation;     /**< Echo QSO generation; zero for channel-backed IAX. */
-    struct rptadv_peer_bytes_v1 remote;   /**< Canonical real decimal node ID. */
+    uint64_t account_generation; /**< Echo/phone account lifetime; zero for channel-backed IAX. */
+    uint64_t qso_generation; /**< Echo QSO or phone call lifetime; zero for channel-backed IAX. */
+    struct rptadv_peer_bytes_v1
+        remote; /**< Decimal node, or canonical 32-lowercase-hex phone token. */
     struct rptadv_peer_bytes_v1 callsign; /**< Validated Echo identity; may be empty for IAX. */
-    struct rptadv_peer_bytes_v1 local;    /**< Owning controller node. */
+    struct rptadv_peer_bytes_v1
+        local; /**< Owning controller binding: Phone NodeId <=63 bytes; node wire ID <=32. */
+    /** Compatible optional tail. PHONE requires this complete span, nonzero generations,
+     * and PRIVATE_CALL; other protocols retain the existing prefix contract.
+     * This is a configured local account label, never provider credentials or a mailbox. */
+    struct rptadv_peer_bytes_v1 provider_account;
 };
+/** Complete original node-peer prefix; callbacks copy at most the caller's capacity. */
+#define RPTADV_PEER_INFO_PREFIX_SIZE offsetof(struct rptadv_peer_info_v1, provider_account)
+/** Minimum complete metadata size required for a private telephone call. */
+#define RPTADV_PEER_INFO_PHONE_SIZE sizeof(struct rptadv_peer_info_v1)
 
 /** Incoming request bound to one protocol, local account and observed endpoint.
  * EchoLink requires a provider-owned pending peer, never a caller-supplied proof flag. */
 struct rptadv_incoming_peer_v1 {
     uint32_t struct_size;               /**< Complete readable size. */
     uint32_t abi_version;               /**< Exactly 1. */
-    uint32_t protocol;                  /**< RPTADV_PEER_ALLSTARLINK or ECHOLINK. */
+    uint32_t protocol;                  /**< ALLSTARLINK, ECHOLINK, or private PHONE. */
     struct rptadv_peer_bytes_v1 local;  /**< Owning controller node. */
     struct rptadv_peer_bytes_v1 remote; /**< Complete real remote ID, not a dial alias. */
     struct rptadv_peer_bytes_v1 source; /**< Observed numeric network source. */
@@ -460,7 +475,9 @@ struct rptadv_host_services_v10 {
     void (*scheduler_notice)(void *context, const char *text, size_t length);
 
     /** Copy this handle's immutable identity and capabilities before media starts.
-     * Failure does not transfer ownership or retain the caller's result buffer. */
+     * Copy no more than the caller's capacity, accepting at least INFO_PREFIX_SIZE.
+     * PHONE requires INFO_PHONE_SIZE plus PRIVATE_CALL. Failure never transfers
+     * ownership or retains the caller's result buffer. */
     int (*peer_info)(void *context, const void *peer, struct rptadv_peer_info_v1 *out);
     /** Optional accepted-prefix source group, selected by this peer capability.
      * Unaccepted PCM/gap suffixes remain with the provider. Completion is 0 while

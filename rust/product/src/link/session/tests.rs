@@ -536,7 +536,7 @@ fn first_human_text_waits_for_station_binding_without_retiring_later_events() {
             message
                 .represented_source
                 .as_ref()
-                .map(|identity| identity.node()),
+                .and_then(|identity| identity.node()),
             expected
         );
         if let Some(identity) = &message.represented_source {
@@ -1400,13 +1400,16 @@ pub(crate) fn peer_with_egress(
     async_enabled: bool,
     egress: bool,
 ) -> (PeerIo, Shared) {
-    make_peer(rate_hz, async_enabled, egress, false, true)
+    make_peer(rate_hz, async_enabled, egress, false, true, false)
 }
 pub(crate) fn source_peer() -> (PeerIo, Shared) {
-    make_peer(8000, true, true, true, true)
+    make_peer(8000, true, true, true, true, false)
+}
+pub(crate) fn phone_peer() -> (PeerIo, Shared) {
+    make_peer(8000, false, false, false, false, true)
 }
 pub(crate) fn peer_without_text(rate_hz: u32) -> (PeerIo, Shared) {
-    make_peer(rate_hz, false, false, false, false)
+    make_peer(rate_hz, false, false, false, false, false)
 }
 fn make_peer(
     rate_hz: u32,
@@ -1414,10 +1417,13 @@ fn make_peer(
     egress: bool,
     source: bool,
     forward_text: bool,
+    phone: bool,
 ) -> (PeerIo, Shared) {
     let state = Arc::new(Mutex::new(State {
         rate: rate_hz,
-        capabilities: if source {
+        capabilities: if phone {
+            32
+        } else if source {
             23
         } else {
             8 | (u32::from(forward_text) << 2) | u32::from(async_enabled) | (u32::from(egress) << 1)
@@ -1470,6 +1476,19 @@ unsafe extern "C" fn peer_info(
         .capabilities;
     unsafe {
         (*output).capabilities = capabilities;
+        if capabilities & 32 != 0 {
+            (*output).protocol = 3;
+            (*output).account_generation = 1;
+            (*output).qso_generation = 2;
+            (*output).remote = abi::rptadv_peer_bytes_v1 {
+                data: b"aabbccddeeff00112233445566778899".as_ptr(),
+                length: 32,
+            };
+            (*output).provider_account = abi::rptadv_peer_bytes_v1 {
+                data: b"provider".as_ptr(),
+                length: 8,
+            };
+        }
         if capabilities & 16 != 0 {
             (*output).protocol = 2;
             (*output).account_generation = 1;
@@ -3288,7 +3307,7 @@ fn preparation_rejects_invalid_identity_rate_and_negotiation_without_leaking_pee
         assert!(PeerSession::prepare(io, outbound, local, remote, true).is_err());
         assert_eq!(state.lock().unwrap().drops, 1);
     }
-    let (io, state) = make_peer(16000, true, true, true, true);
+    let (io, state) = make_peer(16000, true, true, true, true, false);
     let (_, outbound) = rpt_advanced_core::audio::LinkAudioQueue::new(960, 64)
         .unwrap()
         .into_endpoints();

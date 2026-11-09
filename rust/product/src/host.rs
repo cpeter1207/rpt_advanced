@@ -10,6 +10,7 @@ use crate::{
         NativeMediaPreparer,
         text::{TextExecutor, TextReader},
     },
+    phone::{PhoneCalls, PrivatePhoneReply},
     services::{HostServices, PeerIo, ProcessedPeer},
     status_post::{PostConfig, StatusPostService},
     worker::{Audio, AudioOwners, LocalRingUpdate, PrepareFailure, RadioWorker},
@@ -21,7 +22,8 @@ use rpt_advanced_core::{
     },
     link::{
         AudioPeer, GroupMemberSelection, HumanMessage, LinkAudio, LinkAudioStatus, LocalTextInput,
-        Mode, PeerIdentity, ProtocolId, TextAudience, TextOrigin,
+        MailboxId, Mode, PeerIdentity, PeerReply, PhoneCallId, PhoneSource, ProtocolId,
+        TextAudience, TextOrigin,
     },
     media::SpeechSource,
     runtime::{
@@ -224,6 +226,7 @@ pub struct Host {
     media_workers: Vec<(String, MediaWorker)>,
     peer_io: PeerIoWorker,
     peers: Vec<PeerOwner>,
+    phone_calls: PhoneCalls,
     operations: Vec<(String, DigitOutcome)>,
     status_post: StatusPostService,
     site_acquisition: crate::site::acquisition::Acquisition,
@@ -431,6 +434,7 @@ impl Host {
         epoch: Instant,
         clock: RuntimeClock,
     ) -> Result<Self, RuntimeError> {
+        let phone_calls = PhoneCalls::new(128, 16).map_err(|_| RuntimeError::Preparation)?;
         let mut text = TextExecutor::new(document.nodes().len().max(1), media.clone())
             .map_err(|_| RuntimeError::Preparation)?;
         let peer_io = PeerIoWorker::start(epoch).map_err(|_| RuntimeError::Device)?;
@@ -481,6 +485,7 @@ impl Host {
             media_workers,
             peer_io,
             peers: Vec::new(),
+            phone_calls,
             operations: Vec::new(),
             status_post: StatusPostService::default(),
             site_acquisition: Default::default(),
@@ -667,6 +672,7 @@ impl Host {
             self.commit_sites()?;
         }
         self.activated_revision = self.runtime.revision();
+        self.retire_phones();
         self.activate_dispatchers(clock.now_ms);
         self.configure_status_posts(clock.now_ms);
         self.attach_workers();
@@ -700,7 +706,10 @@ impl Host {
         let identity = PeerIdentity::from_operator(remote).map_err(|_| RuntimeError::Rejected)?;
         if identity.protocol() == ProtocolId::EchoLink {
             return if source.is_none() {
-                Ok(format!("EchoLink/{}", identity.node()))
+                Ok(format!(
+                    "EchoLink/{}",
+                    identity.node().ok_or(RuntimeError::Rejected)?
+                ))
             } else {
                 Err(RuntimeError::Rejected)
             };
@@ -729,7 +738,20 @@ impl Host {
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
         let local = io.local().to_owned();
-        let remote = io.identity().operator_alias();
+        if io.identity().protocol() == ProtocolId::Phone {
+            self.runtime
+                .settings(&local)
+                .ok_or(RuntimeError::MissingNode)?;
+            return self
+                .phone_calls
+                .admit(io)
+                .map(|_| ())
+                .map_err(|_| RuntimeError::Rejected);
+        }
+        let remote = io
+            .identity()
+            .operator_alias()
+            .ok_or(RuntimeError::Rejected)?;
         if io.identity().protocol() == ProtocolId::AllStarLink {
             self.lookup(&local, &remote, Some(source))?;
         }
@@ -749,6 +771,11 @@ impl Host {
         mut io: PeerIo,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        // Telephone media needs explicit authenticated *3 policy and per-node rings.
+        // Pending private calls must never enter this numeric-node/ASL path.
+        if io.identity().protocol() == ProtocolId::Phone {
+            return Err(RuntimeError::Rejected);
+        }
         self.peers
             .try_reserve(1)
             .map_err(|_| RuntimeError::Preparation)?;
@@ -1090,6 +1117,41 @@ impl Host {
         effect: LinkEffect,
         clock: RuntimeClock,
     ) -> Result<(), RuntimeError> {
+        if let LinkEffect::Telemetry(action, Some(reply)) = &effect {
+            if let Some(source) = reply.phone_source() {
+                if self.phone_calls.reply(source).as_ref() != Some(reply) {
+                    return Err(RuntimeError::Rejected);
+                }
+                let last = self
+                    .runtime
+                    .node(local)
+                    .and_then(|node| node.status(clock.now_ms).active)
+                    .and_then(|generation| self.runtime.adapter_control_mut(local, generation))
+                    .and_then(|control| control.status.last_keyed().map(str::to_owned));
+                let stream = self.runtime.prepare_phone_status(
+                    local,
+                    *action,
+                    last.as_deref(),
+                    clock,
+                    reply,
+                )?;
+                return self
+                    .phone_calls
+                    .queue_reply(source, reply, stream)
+                    .map_err(|_| RuntimeError::Rejected);
+            }
+        }
+        let private_reply = match &effect {
+            LinkEffect::Message { reply, .. } | LinkEffect::SiteStatus { reply, .. } => {
+                reply.as_ref()
+            }
+            LinkEffect::RemoteBase(operation) => operation.reply.as_ref(),
+            _ => None,
+        };
+        if private_reply.is_some_and(|reply| reply.phone_source().is_some()) {
+            // Additional private report families need their own prepared stream route.
+            return Err(RuntimeError::Rejected);
+        }
         match effect {
             LinkEffect::Connect(_) => Err(RuntimeError::Rejected),
             LinkEffect::Detach(remotes) => {
@@ -1530,6 +1592,7 @@ impl Host {
     }
     /// Gate audio, stop media distribution, quiesce peers, then acknowledge exact generations.
     pub fn stop(&mut self, now_ms: u64) -> bool {
+        self.retire_phones();
         self.remote_pending.clear();
         if self.site_shutdown(now_ms) != Ok(true) {
             return false;
@@ -1564,6 +1627,67 @@ impl Host {
 
     pub(crate) fn take_status_posts(&mut self) -> StatusPostService {
         std::mem::take(&mut self.status_post)
+    }
+
+    /// Actual private source of a currently owned call; never a public topology entry.
+    pub fn phone_source(&self, call: PhoneCallId) -> Option<&PhoneSource> {
+        self.phone_calls.source(call)
+    }
+    /// Retain the exact private return path before dispatching source-tagged work.
+    pub fn phone_reply(&self, source: &PhoneSource) -> Option<PeerReply> {
+        self.phone_calls.reply(source)
+    }
+    /// Publish a mailbox after a separate PIN verifier succeeds. Login alone never unlocks a node.
+    pub fn authenticate_phone(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        mailbox: MailboxId,
+    ) -> Result<(), RuntimeError> {
+        self.phone_calls
+            .authenticate(source, reply, mailbox)
+            .map_err(|_| RuntimeError::Rejected)
+    }
+    /// Queue a prepared prompt directly to one private call without entering radio media.
+    pub fn queue_phone_reply(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+        stream: Box<dyn rpt_advanced_core::audio::PcmStreamReader>,
+    ) -> Result<(), RuntimeError> {
+        self.phone_calls
+            .queue_reply(source, reply, stream)
+            .map_err(|_| RuntimeError::Rejected)
+    }
+    /// Transfer private PCM to its future serial phone egress owner.
+    pub fn take_phone_reply(
+        &mut self,
+        source: &PhoneSource,
+        reply: &PeerReply,
+    ) -> Result<Option<PrivatePhoneReply>, RuntimeError> {
+        self.phone_calls
+            .take_reply(source, reply)
+            .map_err(|_| RuntimeError::Rejected)
+    }
+    /// Revoke the call and every hosted node's source collector/grant before reclamation.
+    pub fn retire_phone(&mut self, source: &PhoneSource) -> bool {
+        let Some(reply) = self.phone_calls.retire(source) else {
+            return false;
+        };
+        self.retire_phone_source(&reply);
+        true
+    }
+    fn retire_phone_source(&mut self, reply: &PeerReply) {
+        for (local, _) in self.runtime.status(0) {
+            if let Some(node) = self.runtime.node(&local) {
+                node.links().retire_source(reply);
+            }
+        }
+    }
+    fn retire_phones(&mut self) {
+        for reply in self.phone_calls.retire_all() {
+            self.retire_phone_source(&reply);
+        }
     }
 }
 fn prune_leases(leases: &mut Vec<(String, Arc<Mutex<Lease>>)>) {

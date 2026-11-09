@@ -1,7 +1,7 @@
 # ADR 0044: Private phone peers and bounded RF presentation pacing
 
-Status: Accepted by owner 2026-11-09; prerequisites and macro foundation
-implemented, phone/RF integration pending.
+Status: Accepted by owner 2026-11-09; media prerequisites released. Macro and
+private-call foundations implemented; phone/RF integration pending.
 
 ## Context
 
@@ -54,6 +54,43 @@ No login/unlock credentials occur in expansions; self-revoke clears only the
 executing source. Existing typed link macros remain separate.
 
 ## Consequences and verification
+
+The first private-source slice admits a typed `PeerAddress::PhoneCall` and keeps
+provider account, mailbox, call token, provider/call generations, and actual
+product-assigned ingress distinct. Numeric node and operator-alias getters now
+return `Option`; current Rust callers explicitly handle the node case. A phone
+never receives a public ASL node alias. Ordinary ASL/Echo identities and wire
+behavior are retained.
+
+The existing sized `rptadv_peer_info_v1` record has one compatible provider-account
+span tail. Its original 80-byte prefix remains valid for node peers. Phone
+admission requires all 96 bytes, protocol 3, explicit private-call capability 32,
+and nonzero account/call generations. Both current hosts copy only the caller's
+declared capacity. Borrowed inspection does not adopt a pending handle.
+Phone local bindings use the configured `NodeId` semantics and 63-byte bound,
+including named nodes; ASL/Echo retain their existing decimal/wire constraints.
+No host table slot, descriptor revision, or SONAME changes: old products reject unknown
+phone protocol/capabilities, and new products reject incomplete phone metadata.
+This additive record extension does not authorize mixing an incompatible SDK
+cohort elsewhere.
+
+The product's bounded private call owner retains its handle without directory
+lookup, ASL handshake/topology, radio binding, or a radio-peer slot. Calls start
+unauthenticated. A trusted serialized PIN verifier must separately publish the
+mailbox result; that result never grants node administration. Selected-node
+collection retains the exact private reply token and actual source, suppresses
+idle RF regeneration, and rejects legacy remote forwarding without the required
+private-origin/reply/lifecycle profile. Retiring the source ends queued replies
+and source-owned grants/collectors; committed reload and stop retire all calls.
+
+Private status preparation reuses the existing status formatter and producer
+PCM stream. A bounded per-call queue feeds the existing `Playback` renderer,
+independently of `NodeController`, RF demand, and public peer fanout. Its source
+fence runs before and after rendering. Other private report families fail
+explicitly pending their prepared-stream routes. Provider egress, PIN verification,
+telephone grammar/configuration/allowlists, explicit `*3` media attachment,
+per-handle DSP ownership, and negotiated remote lifecycle remain dependent work;
+this foundation does not enable a usable phone provider or claim complete Task 3.
 
 ADRs 0003/0025/0035 retain exclusive inbound conversion/clock recovery while
 allowing this narrowly scoped RF presentation operation. There is no new drift

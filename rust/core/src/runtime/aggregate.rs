@@ -1399,9 +1399,62 @@ impl<A: Send, C: Send> Runtime<A, C> {
         clock: RuntimeClock,
         reply: Option<crate::link::PeerReply>,
     ) -> Result<(), RuntimeError> {
+        let (text, spoken) = self.status_forms(local, action, last_keyed, clock)?;
         let node = self
             .nodes
             .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        queue_status_media(
+            &mut node.control.telemetry,
+            &mut node.control.media_session,
+            &node.status,
+            &text,
+            &spoken,
+            reply,
+            None,
+        )
+    }
+    /// Prepare the same status producer for an authenticated call's private sink.
+    /// No controller telemetry queue, radio demand, or peer audio attachment is touched.
+    pub fn prepare_phone_status(
+        &mut self,
+        local: &str,
+        action: LinkAction,
+        last_keyed: Option<&str>,
+        clock: RuntimeClock,
+        reply: &crate::link::PeerReply,
+    ) -> Result<Box<dyn crate::audio::PcmStreamReader>, RuntimeError> {
+        if reply.phone_source().is_none() || !reply.phone_authenticated() {
+            return Err(RuntimeError::Rejected);
+        }
+        let (text, spoken) = self.status_forms(local, action, last_keyed, clock)?;
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|node| node.name == local)
+            .ok_or(RuntimeError::MissingNode)?;
+        prepare::status_stream(
+            node.control
+                .media_session
+                .as_mut()
+                .ok_or(RuntimeError::Preparation)?
+                .as_mut(),
+            &node.status,
+            &text,
+            &spoken,
+        )
+    }
+    fn status_forms(
+        &self,
+        local: &str,
+        action: LinkAction,
+        last_keyed: Option<&str>,
+        clock: RuntimeClock,
+    ) -> Result<(String, String), RuntimeError> {
+        let node = self
+            .nodes
+            .iter()
             .find(|node| node.name == local)
             .ok_or(RuntimeError::MissingNode)?;
         let (text, spoken) = match action {
@@ -1441,15 +1494,7 @@ impl<A: Send, C: Send> Runtime<A, C> {
                 (forms.morse, spoken)
             }
         };
-        queue_status_media(
-            &mut node.control.telemetry,
-            &mut node.control.media_session,
-            &node.status,
-            &text,
-            &spoken,
-            reply,
-            None,
-        )
+        Ok((text, spoken))
     }
     /// Queue one bounded pad report on the local transmitter after receiver unkey.
     pub fn queue_pad_test(
