@@ -9,7 +9,8 @@ and the affected configuration and test documentation in the same change.
 [ADR 0044](decisions/0044-phone-peers-and-rf-presentation-pacing.md) records the
 2026-11-09 approved phone-patch, source-private control/macro and RF presentation
 pacing extension. Typed private call identities, sized metadata and bounded
-call-private reply ownership form an unreleased foundation; provider-backed
+call-private reply ownership, mailbox verification and timed audio consumption
+form an unreleased foundation; provider-backed
 phone control/media and RF pacing remain pending. The existing deployed ownership
 described below is unchanged.
 

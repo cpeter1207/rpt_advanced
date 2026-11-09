@@ -76,8 +76,11 @@ cohort elsewhere.
 
 The product's bounded private call owner retains its handle without directory
 lookup, ASL handshake/topology, radio binding, or a radio-peer slot. Calls start
-unauthenticated. A trusted serialized PIN verifier must separately publish the
-mailbox result; that result never grants node administration. Selected-node
+unauthenticated. The serialized verifier checks the configured salted Argon2id
+hash before publishing the mailbox profile. Invalid records remain unavailable;
+three failed attempts or the absolute 60-second admission deadline retire the
+call. Hashes and PINs are redacted from diagnostics. Login never grants node
+administration. Selected-node
 collection retains the exact private reply token and actual source, suppresses
 idle RF regeneration, and rejects legacy remote forwarding without the required
 private-origin/reply/lifecycle profile. Retiring the source ends queued replies
@@ -98,7 +101,7 @@ The inert telephone grammar emits typed routing, literal-digit and manual-key
 requests. It implements `*3`, `*4`, one-symbol `**` quoting and the existing
 collection bounds; syntax alone grants no authority or RF attachment. Its
 caller must retain the verified source and private reply on every dispatch.
-Provider egress, PIN verification,
+Provider egress, the private digit/media worker,
 grammar integration/configuration/allowlists, explicit `*3` media attachment,
 per-handle DSP ownership, and negotiated remote lifecycle remain dependent work;
 this foundation does not enable a usable phone provider or claim complete Task 3.
@@ -115,17 +118,25 @@ Source-timed ring rendering is released in ring `v3.0.0-alpha5`. All three
 providers passed their full native Debian 13 gates; their signed APT indexes
 and both architectures' runtime/dev package hashes match the release assets.
 Consumers must check each optional descriptor tail and use the released
-versioned libraries. SDK `v0.1.0-alpha33` adds structured output feedback;
+versioned libraries. The consumer now preserves timed source coordinates and
+real/PLC/gap/muted/zero-extension classifications through the existing ring;
+opaque DSP output explicitly loses exact provenance. Phone policy uses the
+same ring with a 160 ms reserve/target, 300 ms capacity and 20 ms producer
+prefix, without inheriting the ordinary peer's 260 ms target. This policy alone
+does not qualify complete source age or enable phone audio attachment.
+SDK `v0.1.0-alpha33` adds structured output feedback;
 its signed packages and native installation checks are verified. Builds using
 the alpha33 descriptor headers require matching alpha33 build/runtime floors:
 the existing complete-record check safely rejects the smaller alpha32 table.
 Controller feedback consumption, phase/age qualification and the RF
 presentation scheduler remain separate work.
 
-The current-node RF/IAX macro foundation has source-owned cancellation,
-asynchronous attachment fencing and explicit command boundaries. Phone-private
-authentication, routing, RF deadline/age bounds and their integrated
-reload/unload behavior still need implementation and automated evidence.
+The released current-node RF/IAX macro foundation has source-owned cancellation,
+asynchronous attachment fencing and explicit command boundaries. IAX
+`v0.1.0-alpha10` adds outgoing provider account fields and verified call lifecycle;
+controller composition, registration and incoming provider accounts remain open.
+Phone routing, RF deadline/age bounds and their integrated reload/unload behavior
+still need implementation and automated evidence.
 Actual provider/NAT and physical switching/STE/listening acceptance remain
 separate. The [implementation plan](../../../docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
 records task ordering; this ADR does not claim completion or authorize deployment.

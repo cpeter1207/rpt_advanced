@@ -630,13 +630,15 @@ record prerequisite capabilities and task ordering.
 Prepared RF pacing and source-rate Earshot analysis are released in samplerate
 adapter `v0.2.0-alpha3` and Radio `v0.1.0-alpha.11`. Timed PCM provenance is
 released in ring `v3.0.0-alpha5`. Direct-trigger current-node DTMF streams are
-implemented in the controller candidate, with final native gates and manual
-acceptance still pending. The alpha24 candidate adds typed private call
-identities, bounded reply ownership, call-retirement fences and an inert digit
-grammar. Mailbox PIN verification, provider sessions, grammar/configuration
+released in controller `v0.1.0-alpha23`. The alpha24 candidate adds typed private
+call identities, bounded reply ownership, call-retirement fences, salted mailbox
+PIN verification with private prompts, an inert digit grammar, and a phone
+latency policy with optional timed ring provenance. The released SDK alpha33
+provides structured radio feedback; IAX alpha10 provides outgoing account calls.
+Provider composition, the private digit/media worker, grammar/configuration
 integration, audio attachment/routing and the RF receive-check scheduler remain
-open; these
-prerequisites do not establish working autopatch or reverse patch.
+open. These prerequisites do not establish working autopatch or reverse patch;
+real-provider and physical-radio acceptance remain separate.
 
 **Requirements**
 

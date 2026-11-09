@@ -84,8 +84,10 @@ permissions and reply destination. Phone sessions and verified private remote
 macro targets remain under implementation.
 
 The alpha24 candidate contains private call identities and reply ownership,
-plus an inert telephone digit grammar. It does not enable SIP/IAX provider
-accounts, verify mailbox PINs, attach call audio or schedule RF receive windows.
+salted mailbox PIN verification with bounded attempts and private prompts, an
+inert telephone digit grammar, and a phone latency policy with optional timed
+ring provenance. It does not enable SIP/IAX provider accounts, run the private
+digit/media worker, attach call audio or schedule RF receive windows.
 Those integration steps remain under implementation in
 [ADR 0044](architecture/decisions/0044-phone-peers-and-rf-presentation-pacing.md).
 

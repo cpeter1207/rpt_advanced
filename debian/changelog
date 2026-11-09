@@ -5,7 +5,9 @@ rpt-advanced (0.1.0~alpha24-1) unstable; urgency=medium
   * Fence pending phone commands and initial retries against call retirement.
   * Reject unsupported private replies before radio telemetry preparation.
   * Require the released SDK33 cohort for its generated native descriptor layout.
-  * Keep provider, PIN verification, attachment, and RF-window integration pending.
+  * Verify salted mailbox PINs with bounded attempts and private login prompts.
+  * Add phone latency policy and consume optional timed ring provenance safely.
+  * Keep provider, digit-worker, attachment, and RF-window integration pending.
 
  -- Chris Peterson <cpeter1207@users.noreply.github.com>  Mon, 09 Nov 2026 21:39:56 +0000
 

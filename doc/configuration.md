@@ -53,7 +53,7 @@ Remote node numbers are decimal and limited to 63 digits. Scoped headers use
 one space between components. `general`,
 `identifier`, `announcement`, `courtesy`, `speech`, `morse`, `time`, `template`,
 `macro`, `dtmf_macro`, `event`, `permanent`, `schedule`, `message`, `tail`, `sensor`, `input`,
-`output`, `alarm`, `fan`, and `echolink` are reserved section names. Scoped identifier,
+`output`, `alarm`, `fan`, `echolink`, and `mailbox` are reserved section names. Scoped identifier,
 announcement, courtesy, speech, Morse, time, template, macro, event, permanent, and schedule
 headers must name an existing node where their syntax includes a node name, which may be
 declared later in the file.
@@ -61,6 +61,24 @@ Repeated ordinary section headings combine their settings. Repeating a named
 template, macro, event, permanent link, or schedule heading is an error. In the
 same section, the last value for a setting wins. An empty media path or text
 clears an inherited value.
+
+## Phone mailbox records
+
+The phone foundation recognizes global `[mailbox number]` records. Numbers
+contain 1–32 decimal digits; leading zeros are significant. Each record requires
+`first_name` (1–64 bytes), `callsign` (1–16 ASCII letters, digits, `/` or `-`), and
+`pin_hash`. Store a salted Argon2id PHC string in `pin_hash`, with version 19,
+a salt of at least 16 bytes and a 32-byte digest. Supported parameters are
+`m=19456` through `65536` KiB, `t=2` through `5`, and `p=1` through `4`.
+The PIN itself must contain 4–32 decimal digits. There is no plaintext PIN
+setting. An incomplete or invalid record produces a warning and remains
+unavailable; it never falls back to an empty password.
+
+Mailbox verification does not unlock node commands. The call owner limits login
+to three failed attempts and an absolute 60-second admission deadline. These
+records prepare authentication only: provider-backed login, phone audio
+attachments and RF receive windows remain under implementation in
+[ADR 0044](architecture/decisions/0044-phone-peers-and-rf-presentation-pacing.md).
 
 ## Node settings
 
