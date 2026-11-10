@@ -537,6 +537,10 @@ struct rptadv_host_services_v10 {
     /** Observe activation without I/O: zero is ready, one is opening, negative
      * is the first failure. Remote compositions require this complete tail. */
     int (*radio_ready)(void *context, void *radio);
+    /** Optional stopped-only feedback binding before radio_activate. The host copies
+     * the sized port and retains its serial TX callback/context through radio
+     * destruction. Absent capability is distinct from successful binding. */
+    int (*radio_feedback_bind)(void *context, void *radio, const struct UrpRadioFeedbackPort *port);
 };
 
 /** Exact revision of a typed site control request. */

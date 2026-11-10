@@ -140,3 +140,15 @@ still need implementation and automated evidence.
 Actual provider/NAT and physical switching/STE/listening acceptance remain
 separate. The [implementation plan](../../../docs/superpowers/plans/2026-11-09-phone-patch-implementation.md)
 records task ordering; this ADR does not claim completion or authorize deployment.
+
+Host ABI 10 now has an optional `radio_feedback_bind` tail, preserving the
+complete 400-byte predecessor prefix. This is needed because `radio_activate`
+accepts the established separate RX/TX functions and contexts; its function
+signature and the existing metadata callback cannot carry an additional sized
+SDK port. Both hosts copy the stopped-only `UrpRadioFeedbackPort` and forward
+it through the existing native station or acknowledged `RPFB` channel option
+before startup. A partial table is rejected, and an absent tail remains an
+explicitly unavailable capability. Binding does not turn requested or serviced
+PTT into physical readback, add a hardware owner, or enable RF receive windows.
+The callback/context remains owned through checked radio retirement, including
+failed activation. DirectCallbacks remains ABI 6; no SONAME change is required.

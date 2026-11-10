@@ -128,6 +128,7 @@ impl HostServicesOwner {
             radio_quiesce: Some(crate::radio_host::radio_quiesce),
             radio_remote_submit: Some(crate::radio_host::radio_remote_submit),
             radio_ready: Some(crate::radio_host::radio_ready),
+            radio_feedback_bind: Some(crate::radio_host::radio_feedback_bind),
         });
         Ok(Self {
             context,

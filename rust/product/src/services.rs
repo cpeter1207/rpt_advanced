@@ -399,6 +399,7 @@ impl HostServices {
         let metadata_tail = offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind);
         let remote_tail = offset_of!(abi::rptadv_host_services_v10, radio_service);
         let ready_tail = offset_of!(abi::rptadv_host_services_v10, radio_ready);
+        let feedback_tail = offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind);
         if size < table_size
             && ![
                 required,
@@ -407,6 +408,7 @@ impl HostServices {
                 metadata_tail,
                 remote_tail,
                 ready_tail,
+                feedback_tail,
             ]
             .contains(&size)
         {
@@ -1047,6 +1049,23 @@ impl Radio {
         // SAFETY: the unique radio lease serializes this pre-activation call.
         let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), metadata) };
         (code == 0).then_some(()).ok_or(Error::Operation)
+    }
+    /// Bind the released SDK's stopped-only serial TX feedback port.
+    /// False means the host lacks this optional capability; no binding occurred.
+    ///
+    /// # Safety
+    /// The callback code and context must remain valid through synchronous radio
+    /// destruction. The host serializes feedback with the transmit endpoint.
+    pub unsafe fn bind_feedback(
+        &mut self,
+        port: &abi::UrpRadioFeedbackPort,
+    ) -> Result<bool, Error> {
+        let Some(bind) = self.services.0.radio_feedback_bind else {
+            return Ok(false);
+        };
+        // SAFETY: this unique radio lends its complete port on serialized control.
+        let code = unsafe { bind(self.services.0.context, self.handle.as_ptr(), port) };
+        (code == 0).then_some(true).ok_or(Error::Operation)
     }
     /// Attach both stable endpoints and start the channel.
     ///
