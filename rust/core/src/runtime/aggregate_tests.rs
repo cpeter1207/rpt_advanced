@@ -968,7 +968,7 @@ fn composition_runtime_command_waits_for_source_unkey_and_uses_configured_audien
             local_media: Default::default(),
         },
     );
-    assert!(audio.iter().any(|sample| *sample == 0.25));
+    assert!(audio.contains(&0.25));
     assert!(replies.iter().all(|sample| sample.sample == 0.0));
     let other = crate::link::PeerSignals::new();
     peer.end();

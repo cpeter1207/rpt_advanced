@@ -147,7 +147,7 @@ unsafe extern "C" fn failed_create_with_converter(
     _: u32,
     converter: *mut *mut ffi::rptadv_samplerate_converter,
 ) -> i32 {
-    unsafe { *converter = 1_usize as *mut ffi::rptadv_samplerate_converter };
+    unsafe { *converter = std::ptr::dangling_mut::<ffi::rptadv_samplerate_converter>() };
     -1
 }
 unsafe extern "C" fn destroy_failed_converter(converter: *mut ffi::rptadv_samplerate_converter) {

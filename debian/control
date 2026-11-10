@@ -2,7 +2,7 @@ Source: rpt-advanced
 Section: hamradio
 Priority: optional
 Maintainer: Chris Peterson <cpeter1207@users.noreply.github.com>
-Build-Depends: debhelper-compat (= 13), cargo (>= 1.85), rustc (>= 1.85),
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.88), rustc (>= 1.88),
  libclang-dev, libspeexdsp-dev, libgpiod-dev (>= 2.2), libsensors-dev, pkg-config, dh-sequence-asterisk <!standalone>,
  librate-adjusting-pcm-ring3-dev (>= 3.0.0~alpha5),
  librptadv-samplerate-adapter-dev (>= 0.2.0~alpha3),

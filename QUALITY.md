@@ -46,8 +46,13 @@ environmental or timing assumptions.
 `make check` runs the Rust workspace tests. `make rust-check` runs Rustfmt,
 Clippy with warnings denied, Rustdoc with warnings denied, and the workspace
 tests. `make rust-coverage` reports production Rust coverage on Debian 13 amd64
-using `nightly-2025-02-20` with LLVM branch instrumentation, `llvm-tools-preview`,
-and `cargo-llvm-cov`. Normal builds and tests use the Rust 1.85 MSRV toolchain.
+using `nightly-2025-06-24` with LLVM branch instrumentation, `llvm-tools-preview`,
+and `cargo-llvm-cov`. Normal builds and tests use pinned Rust 1.88.0. Source
+builds require Cargo and rustc 1.88 or newer. The RPT quality image installs
+genuine compiler packages from signed Debian trixie-backports to satisfy the
+package build dependencies, while Rustup supplies the pinned build compiler.
+Both compilers pass an optimized atomic trait-object regression required by
+the SIP signaling dependency. Other shared providers retain their own MSRVs.
 The only production C checks cover the
 metadata shim and C-compatible public adapter headers; no C controller archive
 or legacy controller headers are packaged.
