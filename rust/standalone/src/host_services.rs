@@ -2780,7 +2780,7 @@ mod tests {
         }
         let context = host.descriptor().context;
         let handle = host.peer_handle(inbound, "1000", "2000");
-        let mut token = 1_usize as *mut c_void;
+        let mut token = std::ptr::dangling_mut::<c_void>();
         assert_eq!(
             unsafe {
                 super::peer_step_attach(

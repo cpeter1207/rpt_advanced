@@ -1050,7 +1050,7 @@ unsafe extern "C" fn open_test_file(
     output: *mut ffi::rptadv_media_stream,
 ) -> i32 {
     unsafe {
-        (*output).handle = 1_usize as *mut c_void;
+        (*output).handle = std::ptr::dangling_mut::<c_void>();
         (*output).sample_rate_hz = 48000;
     }
     0
@@ -1107,7 +1107,7 @@ fn context(
     >,
 ) -> Arc<Context> {
     Arc::new(Context {
-        handle: std::ptr::NonNull::new(1_usize as *mut c_void).unwrap(),
+        handle: std::ptr::NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         destroy: destroy_test_context,
         read_stream: read_test_file,
         close_stream: close_test_stream,

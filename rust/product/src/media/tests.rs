@@ -81,7 +81,7 @@ fn finite_speech_stream_retains_context_and_returns_source_pcm_incrementally() {
     let mut preparer =
         NativeMediaPreparer::new(Path::new("unused"), Path::new("unused"), 30000).unwrap();
     preparer.speech = Arc::new(Context {
-        handle: NonNull::new(1usize as *mut c_void).unwrap(),
+        handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         destroy,
         read_stream: read,
         close_stream: close,
@@ -288,7 +288,7 @@ fn second_provider_creation_failure_destroys_only_the_first_owned_context() {
             c"file-only"
         );
         unsafe {
-            *output = 1_usize as *mut c_void;
+            *output = std::ptr::dangling_mut::<c_void>();
         }
         0
     }
@@ -514,7 +514,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     }
     unsafe extern "C" fn destroy(_: *mut c_void) {}
     let context = Context {
-        handle: NonNull::new(1_usize as *mut c_void).unwrap(),
+        handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         destroy,
         read_stream: eof,
         close_stream: close,
@@ -536,7 +536,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         assert_eq!(
             context.collect_stream(&token, |output| {
                 unsafe {
-                    (*output).handle = 1_usize as *mut c_void;
+                    (*output).handle = std::ptr::dangling_mut::<c_void>();
                     (*output).sample_rate_hz = 48000;
                 }
                 code
@@ -552,7 +552,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     assert_eq!(
         context.collect_stream(&token, |output| {
             unsafe {
-                (*output).handle = 1_usize as *mut c_void;
+                (*output).handle = std::ptr::dangling_mut::<c_void>();
             }
             0
         }),
@@ -562,7 +562,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     assert_eq!(
         context.collect_stream(&token, |output| {
             unsafe {
-                (*output).handle = 1_usize as *mut c_void;
+                (*output).handle = std::ptr::dangling_mut::<c_void>();
                 (*output).sample_rate_hz = 48000;
             }
             0
@@ -576,7 +576,7 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
     assert_eq!(
         bad_context.collect_stream(&token, |output| {
             unsafe {
-                (*output).handle = 1_usize as *mut c_void;
+                (*output).handle = std::ptr::dangling_mut::<c_void>();
                 (*output).sample_rate_hz = 48000;
             }
             0

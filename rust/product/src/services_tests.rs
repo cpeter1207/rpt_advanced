@@ -1269,7 +1269,7 @@ fn peer_callbacks_dispatch_valid_events_and_reject_invalid_or_failed_operations(
     let mut peer = services.dial("remote", "1000", 8, || true).unwrap();
     let mut events = Vec::new();
     peer.read(|event| match event {
-        PeerInput::Text(text) => events.push(format!("text:{:?}", text)),
+        PeerInput::Text(text) => events.push(format!("text:{text:?}")),
         PeerInput::Digit(digit) => events.push(format!("digit:{digit}")),
         PeerInput::Audio(audio) => events.push(format!("audio:{audio:?}")),
         PeerInput::Gap(samples) => events.push(format!("gap:{samples}")),

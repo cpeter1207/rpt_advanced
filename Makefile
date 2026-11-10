@@ -124,7 +124,7 @@ check: rust-build loader-check jitter-ring-check radio-interlock-check site-gpio
 rust-check: rust-quality check
 
 # Missing branch instrumentation is a failure, never an implicit coverage pass.
-COVERAGE_TOOLCHAIN ?= nightly-2025-02-20
+COVERAGE_TOOLCHAIN ?= nightly-2025-06-24
 rust-coverage: | build
 	mkdir -p build/coverage
 	python3 tests/test_coverage_export.py

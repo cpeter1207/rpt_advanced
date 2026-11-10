@@ -185,12 +185,15 @@ fn missing_and_malformed_public_metadata_never_retains_a_channel() {
         assert_eq!(callback(ptr::null_mut(), ptr::null()), -1);
         assert_eq!(callback(ptr::null_mut(), c"1000".as_ptr()), -1);
         assert_eq!(
-            callback(1_usize as *mut ffi::ast_channel, c"1000".as_ptr()),
+            callback(
+                std::ptr::dangling_mut::<ffi::ast_channel>(),
+                c"1000".as_ptr()
+            ),
             -1
         );
         assert!(IncomingIdentity::inspect(ptr::null_mut(), c"1000").is_err());
         for local in [c"", c"\xff"] {
-            assert!(IncomingIdentity::inspect(1_usize as *mut c_void, local).is_err());
+            assert!(IncomingIdentity::inspect(std::ptr::dangling_mut::<c_void>(), local).is_err());
         }
         for failure in 8..=17 {
             STATE.with(|s| {
@@ -199,14 +202,14 @@ fn missing_and_malformed_public_metadata_never_retains_a_channel() {
                     ..State::default()
                 }
             });
-            let identity = IncomingIdentity::inspect(1_usize as *mut c_void, c"1000");
+            let identity = IncomingIdentity::inspect(std::ptr::dangling_mut::<c_void>(), c"1000");
             if failure <= 13 {
                 assert!(identity.is_err());
             } else {
                 assert!(
                     identity
                         .unwrap()
-                        .handoff(1_usize as *mut c_void, 960)
+                        .handoff(std::ptr::dangling_mut::<c_void>(), 960)
                         .is_err()
                 );
             }
@@ -223,7 +226,11 @@ fn missing_and_malformed_public_metadata_never_retains_a_channel() {
         };
         assert!(identity.handoff(ptr::null_mut(), 960).is_err());
         identity.remote.push('\0');
-        assert!(identity.handoff(1_usize as *mut c_void, 960).is_err());
+        assert!(
+            identity
+                .handoff(std::ptr::dangling_mut::<c_void>(), 960)
+                .is_err()
+        );
     }
 }
 
@@ -232,7 +239,12 @@ fn loaded_product_does_not_receive_a_failed_channel_handoff() {
     crate::lifecycle::tests::with_running(|| {
         crate::link::directory::tests::valid_record();
         assert_eq!(
-            unsafe { callback(1_usize as *mut ffi::ast_channel, c"missing".as_ptr()) },
+            unsafe {
+                callback(
+                    std::ptr::dangling_mut::<ffi::ast_channel>(),
+                    c"missing".as_ptr(),
+                )
+            },
             -1
         );
         STATE.with(|state| {
@@ -247,7 +259,12 @@ fn loaded_product_does_not_receive_a_failed_channel_handoff() {
         });
         // SAFETY: fixture recognizes the borrowed dialplan channel sentinel.
         assert_eq!(
-            unsafe { callback(1_usize as *mut ffi::ast_channel, c"1000".as_ptr()) },
+            unsafe {
+                callback(
+                    std::ptr::dangling_mut::<ffi::ast_channel>(),
+                    c"1000".as_ptr(),
+                )
+            },
             -1
         );
     });
@@ -258,8 +275,9 @@ fn incoming_wire_codec_is_converted_to_same_rate_linear() {
     reset();
     STATE.with(|s| *s.borrow_mut() = State::default());
     host(|s| s.native = 1);
-    let identity = unsafe { IncomingIdentity::inspect(1_usize as *mut c_void, c"1000") }.unwrap();
-    let peer = unsafe { identity.handoff(1_usize as *mut c_void, 960) }.unwrap();
+    let identity =
+        unsafe { IncomingIdentity::inspect(std::ptr::dangling_mut::<c_void>(), c"1000") }.unwrap();
+    let peer = unsafe { identity.handoff(std::ptr::dangling_mut::<c_void>(), 960) }.unwrap();
     assert_eq!(peer.rate(), 16000);
     drop(peer);
     host(|s| s.clean());
@@ -273,7 +291,12 @@ fn admission_return_code_releases_declined_peer_but_never_reclaims_transferred_p
             STATE.with(|state| *state.borrow_mut() = State::default());
             crate::lifecycle::tests::incoming_result(result);
             assert_eq!(
-                unsafe { callback(1_usize as *mut ffi::ast_channel, c"1000".as_ptr()) },
+                unsafe {
+                    callback(
+                        std::ptr::dangling_mut::<ffi::ast_channel>(),
+                        c"1000".as_ptr(),
+                    )
+                },
                 if result == 0 { 0 } else { -1 }
             );
             host(|state| state.clean());
@@ -290,7 +313,8 @@ fn copied_identity_and_every_handoff_failure_preserve_exact_channel_ownership() 
                 ..State::default()
             }
         });
-        let identity = unsafe { IncomingIdentity::inspect(1_usize as *mut c_void, c"1000") };
+        let identity =
+            unsafe { IncomingIdentity::inspect(std::ptr::dangling_mut::<c_void>(), c"1000") };
         if matches!(failure, 1 | 2 | 3 | 7) {
             assert!(matches!(identity, Err(Error::Admission)));
             continue;
@@ -300,7 +324,7 @@ fn copied_identity_and_every_handoff_failure_preserve_exact_channel_ownership() 
             (&*identity.local, &*identity.remote, &*identity.address),
             ("1000", "2000", "192.0.2.1")
         );
-        let result = unsafe { identity.handoff(1_usize as *mut c_void, 960) };
+        let result = unsafe { identity.handoff(std::ptr::dangling_mut::<c_void>(), 960) };
         assert_eq!(result.is_ok(), failure == 0);
         drop(result);
         host(|s| s.clean());
