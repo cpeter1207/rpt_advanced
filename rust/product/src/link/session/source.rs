@@ -53,20 +53,20 @@ pub(super) struct SourceIngress {
     pending_mute: Option<MuteSpan>,
 }
 
-fn span(spans: &mut [MuteSpan; 64], count: &mut usize, start: u64, end: u64) -> Result<(), Error> {
+// PeerIo admits at most 4096 samples, divided into 64-sample partitions.
+// Each pass appends at most 64 ranges; merging can only reduce that count.
+fn span(spans: &mut [MuteSpan; 64], count: &mut usize, start: u64, end: u64) {
     if start >= end {
-        return Ok(());
+        return;
     }
     if *count != 0 && start <= spans[*count - 1].end {
         let previous = &mut spans[*count - 1];
         previous.start = previous.start.min(start);
         previous.end = previous.end.max(end);
     } else {
-        let output = spans.get_mut(*count).ok_or(Error::InvalidFrame)?;
-        *output = MuteSpan { start, end };
+        spans[*count] = MuteSpan { start, end };
         *count += 1;
     }
-    Ok(())
 }
 
 impl SourceIngress {
@@ -129,7 +129,7 @@ impl SourceIngress {
                     *command_muted = muting && digit != '#';
                     emit(digit);
                 },
-                |_| {},
+                std::mem::drop,
             )
             .map_err(|_| Error::InvalidFrame)
     }
@@ -195,7 +195,7 @@ impl SourceIngress {
                         &mut self.span_count,
                         first.unwrap_or(start),
                         end,
-                    )?;
+                    );
                 }
                 if !block.concealed {
                     self.command_muted = muted && digit != Some('#');
@@ -224,7 +224,7 @@ impl SourceIngress {
                 &mut count,
                 interval.start,
                 interval.end.min(end),
-            )?;
+            );
         }
         let accepted = inbound
             .write_tagged(
@@ -325,21 +325,14 @@ mod tests {
         assert_eq!(first, Some(100));
         let mut spans = [EMPTY; 64];
         let mut count = 0;
-        assert_eq!(span(&mut spans, &mut count, 10, 10), Ok(()));
-        assert_eq!(span(&mut spans, &mut count, 10, 9), Ok(()));
+        span(&mut spans, &mut count, 10, 10);
+        span(&mut spans, &mut count, 10, 9);
         assert_eq!(count, 0);
         for index in 0..64 {
-            assert_eq!(
-                span(&mut spans, &mut count, index * 2, index * 2 + 1),
-                Ok(())
-            );
+            span(&mut spans, &mut count, index * 2, index * 2 + 1);
         }
         assert_eq!(count, 64);
-        assert_eq!(
-            span(&mut spans, &mut count, 128, 129),
-            Err(Error::InvalidFrame)
-        );
-        assert_eq!(count, 64);
+        assert_eq!((spans[63].start, spans[63].end), (126, 127));
     }
 
     #[test]

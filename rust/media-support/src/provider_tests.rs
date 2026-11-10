@@ -170,6 +170,30 @@ fn abi_rejects_invalid_creation_and_stream_arguments() {
 
 #[test]
 #[cfg(speech_adapter)]
+fn speech_with_a_valid_model_config_reports_unavailable_executable() {
+    let directory =
+        std::env::temp_dir().join(format!("rptadv-missing-piper-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let model = directory.join("voice.onnx");
+    std::fs::write(
+        directory.join("voice.onnx.json"),
+        br#"{"audio":{"sample_rate":22050}}"#,
+    )
+    .unwrap();
+    let preparation = Preparation::new(Config {
+        piper: directory.join("missing-piper"),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    });
+    assert!(matches!(
+        preparation.open_speech("Identifier", &model, 100, -6, &|| false),
+        Err(MediaError::Unavailable)
+    ));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[cfg(speech_adapter)]
 fn abi_rejects_invalid_speech_streams() {
     let mut context = std::ptr::null_mut();
     let mut config = raw_config();

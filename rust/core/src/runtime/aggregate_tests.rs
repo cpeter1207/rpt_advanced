@@ -2711,6 +2711,39 @@ fn partial_start_closes_previously_opened_devices_and_bad_media_keeps_live_revis
 }
 
 #[test]
+fn reload_rejects_a_newer_installed_schedule_without_replacing_live_devices() {
+    use crate::{access::AccessPolicy, runtime::link_schedule::LinkScheduler};
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = Runtime::start(
+        ConfigDocument::parse("[1000]\n").unwrap(),
+        &Media,
+        adapter,
+        |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+        clock(),
+    )
+    .unwrap();
+    runtime.node("1000").unwrap().links().reconfigure(
+        AccessPolicy::new("", "").unwrap(),
+        crate::command::DtmfCommandMap::default(),
+        Some(LinkScheduler::new(2, Vec::new(), Vec::new(), None).unwrap()),
+    );
+    let before = log.lock().unwrap().clone();
+    assert_eq!(
+        runtime.reload(
+            ConfigDocument::parse("[1000]\n").unwrap(),
+            &Media,
+            adapter,
+            |_, _| Ok(Box::new(Device(log.clone())) as Box<dyn DeviceHandoff>),
+            clock(),
+        ),
+        Err(RuntimeError::Preparation)
+    );
+    assert_eq!(runtime.revision(), 1);
+    assert_eq!(*log.lock().unwrap(), before);
+    assert!(runtime.stop(0));
+}
+
+#[test]
 fn no_window_permanent_links_work_without_wall_clock_and_window_reload_requires_it() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let device = |_: &str, _: &ResolvedNodeSettings| {

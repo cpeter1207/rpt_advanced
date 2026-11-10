@@ -705,12 +705,17 @@ impl ResolvedEventSettings {
                     } else {
                         "{media}"
                     };
-                Some(super::ResolvedMessageSettings::from_scopes(
-                    document,
-                    node,
-                    std::slice::from_ref(&section),
-                    default_content,
-                )?)
+                // Speech/Morse resolution can only repeat the schema validation
+                // already passed by this same immutable document at entry.
+                Some(
+                    super::ResolvedMessageSettings::from_scopes(
+                        document,
+                        node,
+                        std::slice::from_ref(&section),
+                        default_content,
+                    )
+                    .expect("immutable document already passed schema validation"),
+                )
             } else {
                 None
             },

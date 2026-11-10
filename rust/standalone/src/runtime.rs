@@ -958,6 +958,26 @@ mod tests {
     }
 
     #[test]
+    fn provider_composition_propagates_product_start_failure() {
+        use crate::providers::{ProviderSet, tests};
+        let mut providers = ProviderSet::load().unwrap();
+        let inspection = crate::providers::ProductInspection::open().unwrap();
+        let mut product = *inspection.api();
+        product.start = Some(fail_start);
+        tests::replace_descriptor(&mut providers, "librptadv_product.so.2", product);
+        assert!(matches!(
+            ProductRuntime::start_with_providers(
+                std::path::Path::new("rpt_advanced.conf"),
+                "[general]\n",
+                Vec::new(),
+                SecretsFile::parse("").unwrap(),
+                providers,
+            ),
+            Err(RuntimeError::Start)
+        ));
+    }
+
+    #[test]
     fn provider_startup_reports_manifest_and_resolver_initialization_failures() {
         use crate::providers::{ProviderError, ProviderSet, tests};
         unsafe extern "C" fn reject_create(_: *mut *mut std::ffi::c_void) -> i32 {

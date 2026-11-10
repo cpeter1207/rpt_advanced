@@ -40,7 +40,7 @@
   },
   {
     "repository": "rptadv-ffmpeg-adapter",
-    "sha": "6d221ffbcffa890f6de6a4fe51ac6bef78a44b0a",
+    "sha": "b3accbe01ed5c864a6b569ae0cbd52313f65a43d",
     "packages": ["librptadv-ffmpeg-adapter1", "librptadv-ffmpeg-adapter-dev"]
   },
   {

@@ -512,6 +512,15 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         unsafe { *count = capacity + 1 };
         0
     }
+    unsafe extern "C" fn failed_read(
+        _: *mut c_void,
+        _: *const ffi::rptadv_media_cancellation,
+        _: *mut f32,
+        _: usize,
+        _: *mut usize,
+    ) -> i32 {
+        -4
+    }
     unsafe extern "C" fn destroy(_: *mut c_void) {}
     let context = Context {
         handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
@@ -595,6 +604,21 @@ fn malformed_and_failed_outputs_release_handles_once_and_keep_error_meaning() {
         );
     }
     assert_eq!(RELEASES.load(Ordering::Relaxed), 12);
+    let failed_context = Context {
+        read_stream: failed_read,
+        ..bad_context
+    };
+    assert_eq!(
+        failed_context.collect_stream(&token, |output| {
+            unsafe {
+                (*output).handle = std::ptr::dangling_mut::<c_void>();
+                (*output).sample_rate_hz = 48000;
+            }
+            0
+        }),
+        Err(MediaError::ProcessFailed)
+    );
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 13);
 }
 
 #[test]

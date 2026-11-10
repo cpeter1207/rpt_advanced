@@ -17,6 +17,19 @@ fn macro_commands(stream: &str, protected: bool) -> DtmfCommands {
 }
 
 #[test]
+fn remote_family_collision_keeps_the_existing_macro_callable() {
+    let mut commands = macro_commands("*70#", false);
+    assert!(
+        commands
+            .configure_remote("9", crate::remote_base_command::RemoteDtmfAccess::Open)
+            .is_err()
+    );
+    assert!(feed_symbols(&mut commands, "*95").is_empty());
+    let operation = commands.advance_macro(1).unwrap();
+    assert_eq!(operation.command.action, LinkAction::Status);
+}
+
+#[test]
 fn dtmf_macro_runner_uses_monotonic_pauses_and_survives_real_unkey() {
     let mut commands = macro_commands("*70#,,*73#", false);
     assert!(feed_symbols(&mut commands, "*95").is_empty());

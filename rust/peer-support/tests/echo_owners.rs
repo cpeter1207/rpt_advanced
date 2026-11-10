@@ -5,6 +5,61 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod support;
 
 #[test]
+fn provider_prepare_and_attach_failures_publish_no_owner_or_callback() {
+    use rptadv_peer_support::echolink::host::Error;
+    let fixture = support::Fixture::new("network");
+    let library = unsafe { libloading::Library::new(&fixture.0) }.unwrap();
+    let fault =
+        unsafe { library.get::<unsafe extern "C" fn(usize)>(b"fixture_record_fault\0") }.unwrap();
+    let accounts =
+        unsafe { library.get::<unsafe extern "C" fn() -> usize>(b"fixture_accounts\0") }.unwrap();
+    let provider = unsafe { Provider::load(&fixture.0, &abi::RuntimeConfig::default()) }.unwrap();
+    let config = abi::AccountConfig {
+        enabled: 1,
+        local_node: abi::ByteSpan {
+            data: b"524950".as_ptr(),
+            length: 6,
+        },
+        ..Default::default()
+    };
+    let secrets = abi::AccountSecrets {
+        struct_size: std::mem::size_of::<abi::AccountSecrets>() as u32,
+        abi_version: 1,
+        directory_password: abi::ByteSpan::default(),
+        proxy_password: abi::ByteSpan::default(),
+    };
+    unsafe { fault(64) };
+    assert!(matches!(
+        unsafe { provider.prepare(&config, &secrets) },
+        Err(Error::Status(abi::Status::Failed))
+    ));
+    assert_eq!(unsafe { accounts() }, 0);
+    unsafe { fault(0) };
+    let account = unsafe { provider.prepare(&config, &secrets) }.unwrap();
+    let peer = account.dial(u32::MAX).unwrap();
+    let calls = AtomicUsize::new(0);
+    unsafe extern "C" fn step(context: *mut std::ffi::c_void) -> i32 {
+        unsafe { &*context.cast::<AtomicUsize>() }.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+    unsafe { fault(65) };
+    assert!(matches!(
+        unsafe { peer.attach(Some(step), std::ptr::from_ref(&calls).cast_mut().cast()) },
+        Err(Error::Status(abi::Status::Failed))
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(unsafe { accounts() }, 1);
+    unsafe { fault(0) };
+    let registration =
+        unsafe { peer.attach(Some(step), std::ptr::from_ref(&calls).cast_mut().cast()) }.unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    drop(registration);
+    drop(peer);
+    drop(account);
+    assert_eq!(unsafe { accounts() }, 0);
+}
+
+#[test]
 fn malformed_foreign_identity_and_account_observations_do_not_publish_owned_peers() {
     use rptadv_peer_support::echolink::host::Error;
     let fixture = support::Fixture::new("network");

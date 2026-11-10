@@ -47,6 +47,7 @@ pub(crate) struct State {
     encode_position: u64,
     encode_unit: Option<usize>,
     encode_full: bool,
+    encode_failure: bool,
     encode_pending: Vec<f32>,
     encode_tail: usize,
     tail_remaining: usize,
@@ -1609,6 +1610,9 @@ unsafe extern "C" fn prepare_audio(
 ) -> i32 {
     let mut state = unsafe { state(peer) }.lock().unwrap();
     state.encoded_calls += usize::from(count != 0);
+    if state.encode_failure {
+        return -1;
+    }
     if state.encode_full {
         unsafe {
             *result = abi::rptadv_codec_encode_result_v1 {
@@ -1741,6 +1745,17 @@ fn outbound_codec_tail_retry_keeps_packets_and_timestamp_before_unkey() {
         [2000, 2020, 2020, 2020, 2040, 2060]
     );
     assert!(state.prepared.last().unwrap().0.is_empty());
+}
+
+#[test]
+fn outbound_provider_encode_failure_does_not_send_untranslated_pcm() {
+    let (mut session, _control, state, mut output) = timed_session();
+    state.lock().unwrap().encode_failure = true;
+    output.write(timed_span(0, 0), &[0.25; 960]);
+    assert!(matches!(session.step(0), Err(Error::Translation)));
+    let state = state.lock().unwrap();
+    assert_eq!(state.encoded_calls, 1);
+    assert!(state.prepared.is_empty());
 }
 
 #[test]

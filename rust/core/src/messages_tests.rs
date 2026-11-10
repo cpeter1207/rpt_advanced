@@ -3,6 +3,22 @@ use super::messages::{CatalogError, Message, MessageCatalog, MessageForms};
 const ENGLISH: &str = include_str!("../../../messages/en-US.ftl");
 
 #[test]
+fn compound_duration_rejects_an_oversized_runtime_catalog_branch() {
+    use crate::schedule::{CivilTime, Weekday};
+    let source = ENGLISH.replace(
+        "*[more] { $head }, { $tail }",
+        &format!("*[more] {}", "E".repeat(512)),
+    );
+    let catalog = MessageCatalog::from_sources("en-US", &source, None).unwrap();
+    let local = CivilTime::new(2026, 11, 9, Weekday::Monday, 12, 0).unwrap();
+    assert!(catalog.format_duration(61, local).is_ok());
+    assert_eq!(
+        catalog.format_duration(3661, local),
+        Err(CatalogError::OutputTooLong)
+    );
+}
+
+#[test]
 fn private_phone_authentication_forms_have_no_credential_arguments() {
     use super::messages::PhoneAuthenticationPrompt as Prompt;
     let catalog = MessageCatalog::from_sources("en-US", ENGLISH, None).unwrap();

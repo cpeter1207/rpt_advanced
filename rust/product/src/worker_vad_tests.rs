@@ -88,6 +88,42 @@ fn replace_local_provider(worker: &mut RadioWorker, api: ffi::rpcr3_descriptor) 
 }
 
 #[test]
+fn tagged_provider_write_failure_cancels_receive_admission() {
+    unsafe extern "C" fn reject(
+        _: *mut ffi::rpcr3_ring,
+        _: *const f32,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: *const ffi::rpcr3_mute_span,
+        _: u32,
+        accepted: *mut u64,
+    ) -> i32 {
+        unsafe { *accepted = 0 };
+        -1
+    }
+    let _serial = crate::fixture::LIFECYCLE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (_runtime, mut worker) = setup();
+    // SAFETY: replace one operation while retaining the released allocation/render lifecycle.
+    let mut api = unsafe { *ffi::rpcr3_descriptor() };
+    api.ring_producer_push_tagged = Some(reject);
+    replace_local_provider(&mut worker, api);
+    let capture = metadata(0, 960, true, true, 1, Some(959), 1);
+    assert_eq!(deliver(&worker, &capture, &mut [0.25; 960]), 0);
+    assert_eq!(
+        worker.handoff.write_failed_samples.load(Ordering::Acquire),
+        960
+    );
+    assert_eq!(worker.handoff.admission.load(Ordering::Acquire), 0);
+    let mut output = [9.0; 960];
+    assert_eq!(tx(&worker, &mut output), (0, 0));
+    assert_eq!(output, [0.0; 960]);
+    drop(worker.stop());
+}
+
+#[test]
 fn released_tagged_local_constructor_retains_the_vad_reserve() {
     let _serial = crate::fixture::LIFECYCLE
         .lock()

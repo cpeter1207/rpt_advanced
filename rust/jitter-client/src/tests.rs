@@ -27,6 +27,33 @@ fn protocol_payload_budget_is_preserved_and_invalid_bounds_fail_before_creation(
 }
 
 #[test]
+fn native_get_failure_returns_no_packet_and_retains_the_context_until_drop() {
+    unsafe extern "C" fn rejected(
+        _: *mut c_void,
+        _: u64,
+        _: u32,
+        _: *mut u8,
+        _: usize,
+        _: *mut RawDecision,
+    ) -> i32 {
+        -1
+    }
+    let mut api = descriptor();
+    api.get = Some(rejected);
+    let mut jitter = unsafe { Jitter::new(ptr::from_ref(&api).cast()) }.unwrap();
+    let destroyed = unsafe { &*jitter.context.as_ptr().cast::<State>() }
+        .destroyed
+        .clone();
+    assert!(matches!(
+        jitter.get(80_000_000, 160, &mut [0; MAX_PAYLOAD]),
+        Err(Error::OperationFailed)
+    ));
+    assert_eq!(destroyed.load(Ordering::SeqCst), 0);
+    drop(jitter);
+    assert_eq!(destroyed.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn invalid_source_clock_and_loss_units_fail_before_context_creation() {
     let descriptor = descriptor();
     for (rate, loss_unit) in [(44100, 160), (8000, 0), (8000, 4001)] {
