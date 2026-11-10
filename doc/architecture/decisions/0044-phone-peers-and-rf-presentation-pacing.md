@@ -131,6 +131,15 @@ the existing complete-record check safely rejects the smaller alpha32 table.
 Controller feedback consumption, phase/age qualification and the RF
 presentation scheduler remain separate work.
 
+The shared jitter client's prepared phone constructor selects an 8 kHz, 20 ms
+packet profile with 20/40/100 ms delay bounds through the existing jitter ABI 1.
+Ordinary peers retain 160/180/500 ms. The dependency-free Rust wrapper retains
+an explicit Rust 1.85 minimum independently of RPT's Rust 1.88 toolchain; callers
+select its new immutable source revision. It uses the released DSO's existing
+descriptor and lifecycle, retaining the current SONAME/package contracts. The
+inbound ring continues to own source-clock recovery. Source-age/RF qualification
+still depends on the original-time, DSP, retirement and physical-feedback contracts.
+
 The released current-node RF/IAX macro foundation has source-owned cancellation,
 asynchronous attachment fencing and explicit command boundaries. IAX
 `v0.1.0-alpha10` adds outgoing provider account fields and verified call lifecycle;

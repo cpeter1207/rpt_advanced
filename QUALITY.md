@@ -53,6 +53,8 @@ genuine compiler packages from signed Debian trixie-backports to satisfy the
 package build dependencies, while Rustup supplies the pinned build compiler.
 Both compilers pass an optimized atomic trait-object regression required by
 the SIP signaling dependency. Other shared providers retain their own MSRVs.
+The dependency-free `rptadv-jitter-client` wrapper explicitly retains Rust 1.85
+so separately released protocol providers can continue to reuse it.
 The only production C checks cover the
 metadata shim and C-compatible public adapter headers; no C controller archive
 or legacy controller headers are packaged.
