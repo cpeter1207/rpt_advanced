@@ -1911,6 +1911,7 @@ fn egress_host_contract_and_asterisk_pcm() {
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_metadata_bind),
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_service),
         std::mem::offset_of!(abi::rptadv_host_services_v10, radio_ready),
+        std::mem::offset_of!(abi::rptadv_host_services_v10, radio_feedback_bind),
         std::mem::size_of_val(&table),
     ];
     for length in boundary..=std::mem::size_of_val(&table) {
