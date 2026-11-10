@@ -190,7 +190,10 @@ impl ActiveRadio {
                 .native_feedback_bind
                 .map_or(-7, |bind| unsafe { bind(handle.as_ptr(), &port) });
             if status != 0 {
-                return Err(RadioActivationError::Product(status));
+                return Err(RadioActivationError::Retained {
+                    status,
+                    active: Box::new(active),
+                });
             }
         }
         // SAFETY: successful create returns this stopped, uniquely owned station.
@@ -631,6 +634,10 @@ pub(crate) mod tests {
 
     #[test]
     fn native_feedback_binding_precedes_start_and_failure_reclaims_the_stopped_owner() {
+        thread_local! { static QUIESCENT: Cell<bool> = const { Cell::new(false) }; }
+        unsafe extern "C" fn quiesce(_: *mut c_void) -> i32 {
+            i32::from(!QUIESCENT.get())
+        }
         unsafe extern "C" fn publish(_: *mut c_void, _: *const abi::UrpRadioFeedback) {}
         unsafe extern "C" fn bind(_: *mut c_void, port: *const abi::UrpRadioFeedbackPort) -> i32 {
             CALLS.with(|calls| calls.borrow_mut().push("feedback"));
@@ -646,6 +653,7 @@ pub(crate) mod tests {
                 abi::UrpAstProviderManifest,
                 abi::UrpNativeStationConfig,
             ) = unsafe { std::mem::zeroed() };
+            api.struct_size = std::mem::size_of_val(&api) as u32;
             api.native_create = Some(create);
             api.native_start = Some(start);
             api.native_stop = Some(stop);
@@ -653,6 +661,7 @@ pub(crate) mod tests {
             api.native_site_bind = Some(site_bind);
             api.native_site_publish = Some(site_publish);
             api.native_site_snapshot = Some(site_snapshot);
+            api.native_quiesce = Some(quiesce);
             api.native_feedback_bind = if mode == 0 { None } else { Some(bind) };
             providers.abi_version = 1;
             config.receive_output_gain_db = -8;
@@ -675,13 +684,26 @@ pub(crate) mod tests {
                     publish: Some(publish),
                 }),
             };
-            let result = ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
+            let mut result =
+                ActiveRadio::open_with_api(&api, &providers, &config, 73, 128, callbacks);
             if mode == 2 {
                 assert!(result.is_ok());
             } else {
-                assert!(
-                    matches!(result, Err(RadioActivationError::Product(status)) if status == if mode == 0 { -7 } else { -6 })
-                );
+                let Err(RadioActivationError::Retained { status, active }) = &mut result else {
+                    panic!("create retained callbacks; a failed bind must retain their owner");
+                };
+                assert_eq!(*status, if mode == 0 { -7 } else { -6 });
+                let expected: &[&str] = if mode == 0 {
+                    &["create"]
+                } else {
+                    &["create", "feedback"]
+                };
+                CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
+                QUIESCENT.set(false);
+                assert_eq!(active.quiesce(), 1);
+                CALLS.with(|calls| assert_eq!(&*calls.borrow(), expected));
+                QUIESCENT.set(true);
+                assert_eq!(active.quiesce(), 0);
             }
             drop(result);
             let expected: &[&str] = match mode {
