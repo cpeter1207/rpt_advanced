@@ -5,6 +5,46 @@ use std::sync::{
 };
 
 #[test]
+fn phone_packet_profile_uses_bounded_low_latency_without_changing_ordinary_peers() {
+    assert!(matches!(
+        unsafe { Jitter::phone(ptr::null()) },
+        Err(Error::InvalidDescriptor)
+    ));
+    let descriptor = descriptor();
+    for (phone, expected) in [(true, (160, 320, 800)), (false, (1280, 1440, 4000))] {
+        let jitter = unsafe {
+            if phone {
+                Jitter::phone(ptr::from_ref(&descriptor).cast())
+            } else {
+                Jitter::new_at_rate(ptr::from_ref(&descriptor).cast(), 8000, 160, 160)
+            }
+        }
+        .unwrap();
+        let config = unsafe { &*jitter.context.as_ptr().cast::<State>() }.config;
+        assert_eq!(
+            (
+                config.minimum_delay,
+                config.initial_delay,
+                config.maximum_delay
+            ),
+            expected
+        );
+        assert_eq!(
+            (
+                config.clock_rate_hz,
+                config.concealment_span,
+                jitter.release_span()
+            ),
+            (8000, 160, 160)
+        );
+        assert_eq!(
+            (config.maximum_packets, config.maximum_payload_bytes),
+            (64, 160)
+        );
+    }
+}
+
+#[test]
 fn protocol_payload_budget_is_preserved_and_invalid_bounds_fail_before_creation() {
     let descriptor = descriptor();
     for maximum in [0, 65_528, usize::MAX] {

@@ -162,6 +162,15 @@ pub struct Jitter {
 unsafe impl Send for Jitter {}
 
 impl Jitter {
+    /// Prepare the phone-specific 8 kHz, 20 ms packet profile (20/40/100 ms).
+    /// This is packet jitter only; the existing inbound ring owns clock recovery.
+    ///
+    /// # Safety
+    /// The descriptor must be readable for its declared size and its DSO must
+    /// remain loaded until this exclusive context is destroyed.
+    pub unsafe fn phone(descriptor: *const c_void) -> Result<Self, Error> {
+        unsafe { Self::with_delays(descriptor, 8000, 160, 160, [20, 40, 100]) }
+    }
     /// Validate a readable descriptor and create the approved 160/180/500ms context.
     ///
     /// # Safety
@@ -182,6 +191,25 @@ impl Jitter {
         rate: u32,
         loss_unit: u32,
         maximum_payload_bytes: usize,
+    ) -> Result<Self, Error> {
+        unsafe {
+            Self::with_delays(
+                descriptor,
+                rate,
+                loss_unit,
+                maximum_payload_bytes,
+                [160, 180, 500],
+            )
+        }
+    }
+
+    /// Prepare either fixed policy through the same validated descriptor/lifecycle.
+    unsafe fn with_delays(
+        descriptor: *const c_void,
+        rate: u32,
+        loss_unit: u32,
+        maximum_payload_bytes: usize,
+        delays_ms: [u32; 3],
     ) -> Result<Self, Error> {
         if !matches!(rate, 8000 | 16000 | 48000)
             || loss_unit == 0
@@ -218,9 +246,9 @@ impl Jitter {
             struct_size: size_of::<Config>() as u32,
             abi_version: 1,
             clock_rate_hz: rate,
-            minimum_delay: rate * 160 / 1000,
-            initial_delay: rate * 180 / 1000,
-            maximum_delay: rate / 2,
+            minimum_delay: rate * delays_ms[0] / 1000,
+            initial_delay: rate * delays_ms[1] / 1000,
+            maximum_delay: rate * delays_ms[2] / 1000,
             adjustment_step: rate / 100,
             concealment_span: loss_unit,
             maximum_packets: 64,

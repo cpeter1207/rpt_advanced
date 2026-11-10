@@ -2,5 +2,5 @@
 name = "rptadv-jitter-client"
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+rust-version = "1.85"
 version.workspace = true
