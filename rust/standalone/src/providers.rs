@@ -1633,6 +1633,52 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn runtime_consumers_reject_header_only_control_file_and_speech_tables() {
+        for (index, library) in [
+            (1, "librptadv_control_standalone_adapter.so.1"),
+            (2, "librptadv_file_adapter.so.1"),
+            (3, "librptadv_speech_adapter.so.1"),
+        ] {
+            let mut providers = super::ProviderSet::load().unwrap();
+            providers.validate_runtime().unwrap();
+            if index == 1 {
+                let prefix = ControlDescriptor {
+                    abi_version: 1,
+                    struct_size: std::mem::size_of::<ControlDescriptor>(),
+                    capability: c"rptadv.control".as_ptr(),
+                };
+                assert!(super::valid_descriptor(
+                    std::ptr::from_ref(&prefix).cast(),
+                    super::PROVIDERS[index],
+                ));
+                replace_descriptor(&mut providers, library, prefix);
+            } else {
+                let mut capability = [0; 16];
+                let expected = super::PROVIDERS[index].capability;
+                capability[..expected.len()].copy_from_slice(expected);
+                let prefix = InlineDescriptor {
+                    struct_size: std::mem::size_of::<InlineDescriptor>() as u32,
+                    abi_version: 2,
+                    capability,
+                };
+                assert!(super::valid_descriptor(
+                    std::ptr::from_ref(&prefix).cast(),
+                    super::PROVIDERS[index],
+                ));
+                replace_descriptor(&mut providers, library, prefix);
+            }
+            let providers = Box::leak(Box::new(providers));
+            for result in [
+                providers.validate_runtime().err(),
+                providers.product_runtime_descriptors().err(),
+            ] {
+                assert_eq!(result, Some(ProviderError::IncompleteDescriptor(library)));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn runtime_validation_reports_each_incomplete_provider_table() {
         let mut providers = super::ProviderSet::load().unwrap();
         let valid_product = *providers

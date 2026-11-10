@@ -92,7 +92,7 @@ fn truncated_config_is_rejected_before_full_config_access() {
                 abi_version: ABI_VERSION,
             });
     }
-    let mut context = 1_usize as *mut c_void;
+    let mut context = std::ptr::dangling_mut::<c_void>();
     assert_eq!(
         // SAFETY: the allocation contains exactly the readable ABI prefix.
         unsafe { create(truncated.as_ptr().cast(), &mut context) },
@@ -103,7 +103,7 @@ fn truncated_config_is_rejected_before_full_config_access() {
 
 #[test]
 fn abi_rejects_invalid_creation_and_stream_arguments() {
-    let mut context = 1_usize as *mut c_void;
+    let mut context = std::ptr::dangling_mut::<c_void>();
     assert_eq!(unsafe { create(std::ptr::null(), &mut context) }, -1);
     assert!(context.is_null());
     assert_eq!(unsafe { create(&raw_config(), std::ptr::null_mut()) }, -1);
@@ -166,6 +166,30 @@ fn abi_rejects_invalid_creation_and_stream_arguments() {
         destroy(context);
         destroy(std::ptr::null_mut());
     }
+}
+
+#[test]
+#[cfg(speech_adapter)]
+fn speech_with_a_valid_model_config_reports_unavailable_executable() {
+    let directory =
+        std::env::temp_dir().join(format!("rptadv-missing-piper-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let model = directory.join("voice.onnx");
+    std::fs::write(
+        directory.join("voice.onnx.json"),
+        br#"{"audio":{"sample_rate":22050}}"#,
+    )
+    .unwrap();
+    let preparation = Preparation::new(Config {
+        piper: directory.join("missing-piper"),
+        process_timeout: Duration::from_secs(1),
+        child_reaper: None,
+    });
+    assert!(matches!(
+        preparation.open_speech("Identifier", &model, 100, -6, &|| false),
+        Err(MediaError::Unavailable)
+    ));
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -391,7 +415,7 @@ fn cancellation_after_stream_open_discards_the_owned_handle() {
         is_cancelled: cancel_on_second_call,
     };
     let mut output = RawStream {
-        handle: 1_usize as *mut c_void,
+        handle: std::ptr::dangling_mut::<c_void>(),
         sample_rate_hz: 1,
     };
     let (owner, cancellation) = unsafe {

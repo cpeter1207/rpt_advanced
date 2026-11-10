@@ -1142,7 +1142,7 @@ mod tests {
         let document = "[1000]\nradio_channel=vhf\n";
         let host = RadioHostContext::new(resolve_radio_nodes(document).unwrap(), None);
         let context = std::ptr::from_ref(&host).cast_mut().cast::<c_void>();
-        let mut handle = 1_usize as *mut c_void;
+        let mut handle = std::ptr::dangling_mut::<c_void>();
 
         assert_eq!(
             unsafe { radio_open(context, std::ptr::null(), 0, 960, &mut handle) },
@@ -1216,12 +1216,16 @@ mod tests {
         );
         assert_eq!(
             unsafe {
-                super::peer_bind_radio(context, 1_usize as *mut c_void, std::ptr::null_mut())
+                super::peer_bind_radio(
+                    context,
+                    std::ptr::dangling_mut::<c_void>(),
+                    std::ptr::null_mut(),
+                )
             },
             -1
         );
         assert_eq!(
-            unsafe { super::peer_bind_radio(context, 1_usize as *mut c_void, handle) },
+            unsafe { super::peer_bind_radio(context, std::ptr::dangling_mut::<c_void>(), handle) },
             -1
         );
         unsafe { radio_destroy(context, handle) };
@@ -1499,7 +1503,7 @@ mod tests {
             unsafe {
                 super::peer_bind_radio(
                     std::ptr::null_mut(),
-                    1_usize as *mut std::ffi::c_void,
+                    std::ptr::dangling_mut::<std::ffi::c_void>(),
                     std::ptr::from_mut(&mut handle).cast(),
                 )
             },

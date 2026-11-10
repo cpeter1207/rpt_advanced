@@ -201,7 +201,7 @@ impl LinkScheduler {
                 .iter()
                 .any(|route| route.local.is_empty() || route.local == route.remote)
             || windows.iter().any(|window| {
-                let invalid = window.routes.is_empty()
+                window.routes.is_empty()
                     || window.replaced.is_empty()
                     || window
                         .routes
@@ -253,8 +253,7 @@ impl LinkScheduler {
                                 .replaced
                                 .iter()
                                 .any(|index| routes[*index].group_label != first.group_label)
-                        });
-                invalid
+                        })
             })
         {
             return Err(SchedulerError::Invalid);

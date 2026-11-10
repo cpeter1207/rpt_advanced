@@ -217,6 +217,10 @@ unsafe extern "C" fn attach(
     context: *mut c_void,
     out: *mut *mut abi::Registration,
 ) -> abi::Status {
+    if RECORD_FAULT.load(Ordering::Acquire) == 65 {
+        unsafe { out.write(ptr::null_mut()) };
+        return abi::Status::Failed;
+    }
     let step = step.unwrap();
     unsafe { step(context) };
     unsafe {
@@ -385,6 +389,10 @@ unsafe extern "C" fn prepare(
     _: *const abi::AccountSecrets,
     out: *mut *mut abi::Account,
 ) -> abi::Status {
+    if RECORD_FAULT.load(Ordering::Acquire) == 64 {
+        unsafe { out.write(ptr::null_mut()) };
+        return abi::Status::Failed;
+    }
     ACCOUNTS.fetch_add(1, Ordering::SeqCst);
     unsafe { out.write(Box::into_raw(Box::new((*config).node_number)).cast()) };
     abi::Status::Ok

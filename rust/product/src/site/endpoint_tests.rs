@@ -95,6 +95,12 @@ unsafe extern "C" fn gpio_read(_: *mut c_void, o: *mut abi::rptadv_gpiod_observa
 unsafe extern "C" fn hwmon_read(_: *mut c_void, o: *mut abi::rptadv_hwmon_observation_v1) -> i32 {
     let o = unsafe { &mut *o };
     let p = PROBE.lock().unwrap();
+    if let Some((size, version, quality, code)) = p.reply {
+        o.struct_size = size;
+        o.abi_version = version;
+        o.quality = quality;
+        return code;
+    }
     if p.failure {
         return 1;
     }
@@ -351,20 +357,28 @@ fn site_endpoint_rejects_bad_observation_records_and_success_without_context() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     *PROBE.lock().unwrap() = Probe::default();
     let direction = Direction::Input { active_high: true };
-    let mut endpoint =
-        Endpoint::open(backends(), &settings(SiteBackend::Gpiod), direction).unwrap();
-    let size = size_of::<abi::rptadv_gpiod_observation_v1>() as u32;
-    for (record, expected) in [
-        ((size - 1, 1, 1, 0), ReadingQuality::Fault),
-        ((size, 2, 1, 0), ReadingQuality::Fault),
-        ((size, 1, 0, 0), ReadingQuality::Unavailable),
-        ((size, 1, 2, 0), ReadingQuality::Fault),
-        ((size, 1, 1, 2), ReadingQuality::Unavailable),
+    for (backend, size) in [
+        (
+            SiteBackend::Gpiod,
+            size_of::<abi::rptadv_gpiod_observation_v1>() as u32,
+        ),
+        (
+            SiteBackend::Hwmon,
+            size_of::<abi::rptadv_hwmon_observation_v1>() as u32,
+        ),
     ] {
-        PROBE.lock().unwrap().reply = Some(record);
-        assert_eq!(endpoint.read(), Err(expected), "{record:?}");
+        let mut endpoint = Endpoint::open(backends(), &settings(backend), direction).unwrap();
+        for (record, expected) in [
+            ((size - 1, 1, 1, 0), ReadingQuality::Fault),
+            ((size, 2, 1, 0), ReadingQuality::Fault),
+            ((size, 1, 0, 0), ReadingQuality::Unavailable),
+            ((size, 1, 2, 0), ReadingQuality::Fault),
+            ((size, 1, 1, 2), ReadingQuality::Unavailable),
+        ] {
+            PROBE.lock().unwrap().reply = Some(record);
+            assert_eq!(endpoint.read(), Err(expected), "{backend:?}: {record:?}");
+        }
     }
-    drop(endpoint);
     unsafe extern "C" fn empty_open(
         _: *const abi::rptadv_gpiod_endpoint_v1,
         _: *mut *mut c_void,

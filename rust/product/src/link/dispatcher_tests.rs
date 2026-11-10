@@ -274,6 +274,25 @@ fn egress_shutdown_releases_dispatches_still_in_the_publication_queue() {
 }
 
 #[test]
+fn regeneration_preparation_rejects_invalid_work_bounds_before_publication() {
+    use crate::link::ring::{InboundPolicy, InboundRing};
+    use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;
+    let mut worker = MediaWorker::start().unwrap();
+    for maximum in [0, 4097] {
+        let (_, dispatcher, _) = fixture(1);
+        let (writer, _reader) = InboundRing::open(48000, InboundPolicy::Media).unwrap();
+        assert!(matches!(
+            worker.prepare(
+                dispatcher,
+                vec![PeerWake::default()],
+                Some((ResolvedDtmfRegenerationSettings::default(), writer, maximum)),
+            ),
+            Err(Error::InvalidFrame)
+        ));
+    }
+}
+
+#[test]
 fn regeneration_backpressure_does_not_block_fanout_and_retires_with_generation() {
     use crate::link::ring::{InboundPolicy, InboundRing};
     use rpt_advanced_core::config::ResolvedDtmfRegenerationSettings;

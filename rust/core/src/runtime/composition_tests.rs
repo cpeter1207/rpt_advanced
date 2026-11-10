@@ -68,6 +68,19 @@ fn composition_catalog_contract_is_checked_before_admission() {
 }
 
 #[test]
+fn literal_preparation_rejects_speech_beyond_the_telemetry_bound() {
+    // A valid, bounded literal expands when speech spells an alphanumeric
+    // identity, so admission succeeds but preparation must retain its bound.
+    let recipe = recipe(&format!("[message root]\ncontent={}\n", "A1".repeat(33)));
+    assert_eq!(
+        recipe
+            .prepare(&MessageCatalog::load("en-US").unwrap(), &snapshot())
+            .err(),
+        Some(CompositionError::TooLarge)
+    );
+}
+
+#[test]
 fn composition_catalog_contract_requires_a_usable_complete_morse_form() {
     let recipe = recipe("[message root]\ncontent=ID\n");
     for invalid in [String::new(), "你好".into(), "E".repeat(128), "E\0".into()] {

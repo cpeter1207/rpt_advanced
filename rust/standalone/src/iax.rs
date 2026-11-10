@@ -690,7 +690,7 @@ pub(crate) mod tests {
         DIAL_CALL_NUMBER.with(|value| value.set(u32::from(options.local_call_number)));
         let result = DIAL_RESULT.with(Cell::get) as i32;
         if result == 0 && !DIAL_NULL_HANDLE.with(Cell::get) {
-            unsafe { output.write(1_usize as *mut c_void) };
+            unsafe { output.write(std::ptr::dangling_mut::<c_void>()) };
         }
         result
     }
@@ -756,7 +756,7 @@ pub(crate) mod tests {
         _: *const ServerOptions,
         output: *mut *mut c_void,
     ) -> i32 {
-        unsafe { output.write(1_usize as *mut c_void) };
+        unsafe { output.write(std::ptr::dangling_mut::<c_void>()) };
         0
     }
     unsafe extern "C" fn failed_server_bind(_: *const ServerOptions, _: *mut *mut c_void) -> i32 {
@@ -802,7 +802,7 @@ pub(crate) mod tests {
         _: usize,
         output: *mut *mut c_void,
     ) -> i32 {
-        unsafe { output.write(1_usize as *mut c_void) };
+        unsafe { output.write(std::ptr::dangling_mut::<c_void>()) };
         0
     }
     unsafe extern "C" fn test_close_catalog(_: *mut c_void) {}
@@ -810,7 +810,7 @@ pub(crate) mod tests {
         IaxClient(Arc::new(IaxOwner {
             library: None,
             api,
-            catalog: NonNull::new(1_usize as *mut c_void).unwrap(),
+            catalog: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         }))
     }
     unsafe extern "C" fn prepare_audio(
@@ -924,7 +924,7 @@ pub(crate) mod tests {
         IaxPeer {
             _owner: fixture_client(api),
             api,
-            handle: NonNull::new(1_usize as *mut c_void).unwrap(),
+            handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         }
     }
 
@@ -1150,7 +1150,7 @@ pub(crate) mod tests {
         let mut server = IaxServer {
             _owner: fixture_client(descriptor()),
             api: server_descriptor(),
-            handle: NonNull::new(1_usize as *mut c_void).unwrap(),
+            handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         };
         SERVER_POLL_RESULT.with(|value| value.set(1));
         unsafe {
@@ -1201,7 +1201,7 @@ pub(crate) mod tests {
         let mut peer = IaxPeer {
             _owner: fixture_client(api),
             api,
-            handle: NonNull::new(1_usize as *mut c_void).unwrap(),
+            handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         };
         assert_eq!(peer.sample_rate_hz(), 8000);
         assert_eq!(peer.elapsed_ms(), 1234);
@@ -1303,7 +1303,7 @@ pub(crate) mod tests {
             Err(IaxError::Operation)
         ));
         let client = fixture_client(descriptor());
-        let peer = unsafe { client.adopt_inbound(1_usize as *mut c_void) }.unwrap();
+        let peer = unsafe { client.adopt_inbound(std::ptr::dangling_mut::<c_void>()) }.unwrap();
         assert_eq!(peer.sample_rate_hz(), 8000);
     }
 
@@ -1325,7 +1325,7 @@ pub(crate) mod tests {
         let mut peer = IaxPeer {
             _owner: fixture_client(api),
             api,
-            handle: NonNull::new(1_usize as *mut c_void).unwrap(),
+            handle: NonNull::new(std::ptr::dangling_mut::<c_void>()).unwrap(),
         };
         assert_eq!(peer.poll(&mut [], &mut []), Err(IaxError::Operation));
     }

@@ -276,10 +276,21 @@ mod tests {
             "incompatible native radio session template"
         );
         radio.abi_version = 5;
-        request.device_identifier_length = 1;
-        assert_eq!(
-            unsafe { NativeRadioConfiguration::copy_from(&request) }.unwrap_err(),
-            "missing native request text"
-        );
+        for field in 0..6 {
+            let mut invalid = request;
+            match field {
+                0 => invalid.device_identifier_length = 1,
+                1 => invalid.usb_serial_length = 1,
+                2 => invalid.receive_graph_length = 1,
+                3 => invalid.transmit_graph_length = 1,
+                4 => invalid.processing_configuration_length = 1,
+                _ => invalid.processing_node_length = 1,
+            }
+            assert_eq!(
+                unsafe { NativeRadioConfiguration::copy_from(&invalid) }.unwrap_err(),
+                "missing native request text",
+                "field {field}"
+            );
+        }
     }
 }
